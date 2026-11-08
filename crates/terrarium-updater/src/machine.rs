@@ -131,7 +131,10 @@ pub fn status_argv() -> Vec<String> {
 
 pub fn hot_argv(command: &str, args: &[&str]) -> Vec<String> {
     ["python3", "/usr/local/lib/terrarium-hot-swap.py", command]
-        .into_iter().chain(args.iter().copied()).map(str::to_owned).collect()
+        .into_iter()
+        .chain(args.iter().copied())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The updater: one run at a time.
@@ -472,10 +475,17 @@ impl Updater {
         // Explicit rollback always replaces the container: retained runners
         // must never replay against a journal rewound after admitted writes.
         if kind == RunKind::Update
-            && prepared.spec["changed_env_keys"].as_array().is_none_or(|a| a.is_empty())
-            && self.step("hot-swap-eligibility", self.engine.can_hot_swap(&cur, &to),
-                |yes| format!("runtime base and runner epoch compatible: {yes}"))
-                .await.map_err(failed)?
+            && prepared.spec["changed_env_keys"]
+                .as_array()
+                .is_none_or(|a| a.is_empty())
+            && self
+                .step(
+                    "hot-swap-eligibility",
+                    self.engine.can_hot_swap(&cur, &to),
+                    |yes| format!("runtime base and runner epoch compatible: {yes}"),
+                )
+                .await
+                .map_err(failed)?
         {
             return self.hot_swap(&cur, &to).await;
         }
@@ -538,73 +548,140 @@ impl Updater {
 
     async fn hot_swap(&self, cur: &Container, to: &Image) -> Result<Outcome, (Outcome, Fail)> {
         let failed = |f: Fail| (Outcome::Failed, f);
-        let old = self.exec_ok(&cur.id, hot_argv("probe", &[])).await
+        let old = self
+            .exec_ok(&cur.id, hot_argv("probe", &[]))
+            .await
             .map_err(|e| failed(Fail(e)))?;
         let identity = serde_json::to_string(to).map_err(|e| failed(Fail(e.to_string())))?;
-        let release = self.step("stage", async {
-            let out = self.engine.run_once(cur, to, hot_argv("stage", &[&identity])).await?;
-            if out.code != 0 { return Err(out.reason()); }
-            Ok(out.stdout.trim().to_owned())
-        }, Clone::clone).await.map_err(failed)?;
-        self.step("pause-daemon", self.exec_ok(&cur.id, hot_argv("pause", &[])), Clone::clone)
-            .await.map_err(failed)?;
+        let release = self
+            .step(
+                "stage",
+                async {
+                    let out = self
+                        .engine
+                        .run_once(cur, to, hot_argv("stage", &[&identity]))
+                        .await?;
+                    if out.code != 0 {
+                        return Err(out.reason());
+                    }
+                    Ok(out.stdout.trim().to_owned())
+                },
+                Clone::clone,
+            )
+            .await
+            .map_err(failed)?;
+        self.step(
+            "pause-daemon",
+            self.exec_ok(&cur.id, hot_argv("pause", &[])),
+            Clone::clone,
+        )
+        .await
+        .map_err(failed)?;
 
         // No daemon is running here. Hold/replay runners keep their processes,
         // while the snapshot includes every completed pre-upgrade write.
-        let backup = self.step("backup", async {
-            let mut argv = backup_argv();
-            argv[0] = "/opt/terrarium/bundled/bin/terrariumd".into();
-            let out = self.engine.run_once(cur, &cur.image, argv).await?;
-            if out.code != 0 { return Err(out.reason()); }
-            let path = backup_path(&out.stdout)?;
-            let snapshot = self.engine.run_once(cur, &cur.image, hot_argv("snapshot", &[&path])).await?;
-            if snapshot.code != 0 { return Err(snapshot.reason()); }
-            Ok(path)
-        }, Clone::clone).await;
+        let backup = self
+            .step(
+                "backup",
+                async {
+                    let mut argv = backup_argv();
+                    argv[0] = "/opt/terrarium/bundled/bin/terrariumd".into();
+                    let out = self.engine.run_once(cur, &cur.image, argv).await?;
+                    if out.code != 0 {
+                        return Err(out.reason());
+                    }
+                    let path = backup_path(&out.stdout)?;
+                    let snapshot = self
+                        .engine
+                        .run_once(cur, &cur.image, hot_argv("snapshot", &[&path]))
+                        .await?;
+                    if snapshot.code != 0 {
+                        return Err(snapshot.reason());
+                    }
+                    Ok(path)
+                },
+                Clone::clone,
+            )
+            .await;
         let backup = match backup {
             Ok(path) => path,
             Err(f) => {
                 // No new code or migrations have run. Resume the original release.
                 let recovery = async {
-                    self.exec_ok(&cur.id, hot_argv("start", &[old.trim()])).await?;
+                    self.exec_ok(&cur.id, hot_argv("start", &[old.trim()]))
+                        .await?;
                     self.wait_hot_healthy(&cur.id).await?;
                     self.exec_ok(&cur.id, hot_argv("commit", &[])).await
-                }.await;
-                return Err((if recovery.is_ok() { Outcome::Failed } else { Outcome::RollbackFailed }, f));
+                }
+                .await;
+                return Err((
+                    if recovery.is_ok() {
+                        Outcome::Failed
+                    } else {
+                        Outcome::RollbackFailed
+                    },
+                    f,
+                ));
             }
         };
         self.with_run(|r| r.backup = Some(backup.clone()));
         let attempt = async {
-            self.step("start-daemon", self.exec_ok(&cur.id, hot_argv("start", &[&release])), Clone::clone).await?;
-            self.step("health", self.wait_hot_healthy(&cur.id), Clone::clone).await?;
-            self.store.set_previous(&Previous { image: cur.image.clone(), backup: Some(backup.clone()) })
-                .map_err(Fail)?;
-            self.store.set_image(&to.reference).map_err(Fail)?;
+            self.step(
+                "start-daemon",
+                self.exec_ok(&cur.id, hot_argv("start", &[&release])),
+                Clone::clone,
+            )
+            .await?;
+            self.step("health", self.wait_hot_healthy(&cur.id), Clone::clone)
+                .await?;
+            self.store
+                .set_previous(&Previous {
+                    image: cur.image.clone(),
+                    backup: Some(backup.clone()),
+                })
+                .map_err(|e| Fail(e.to_string()))?;
+            self.store.set_image(&to.reference).map_err(|e| Fail(e.to_string()))?;
             Ok::<_, Fail>(())
-        }.await;
+        }
+        .await;
         match attempt {
             Ok(()) => {
                 // Commit may have removed probation even if Docker loses the
                 // response. Never rewind the journal after attempting admission.
-                self.step("commit", self.exec_ok(&cur.id, hot_argv("commit", &[])), Clone::clone)
-                    .await.map_err(failed)?;
+                self.step(
+                    "commit",
+                    self.exec_ok(&cur.id, hot_argv("commit", &[])),
+                    Clone::clone,
+                )
+                .await
+                .map_err(failed)?;
                 Ok(Outcome::Succeeded)
-            },
+            }
             Err(f) => {
                 let recovery = async {
                     self.exec_ok(&cur.id, hot_argv("pause", &[])).await?;
                     // Keep the live runners' open files and logs intact.
-                    let out = self.engine.run_once(cur, &cur.image, hot_argv("restore-database", &[&backup])).await?;
-                    if out.code != 0 { return Err(out.reason()); }
-                    self.exec_ok(&cur.id, hot_argv("start", &[old.trim()])).await?;
+                    let out = self
+                        .engine
+                        .run_once(cur, &cur.image, hot_argv("restore-database", &[&backup]))
+                        .await?;
+                    if out.code != 0 {
+                        return Err(out.reason());
+                    }
+                    self.exec_ok(&cur.id, hot_argv("start", &[old.trim()]))
+                        .await?;
                     self.wait_hot_healthy(&cur.id).await?;
-                    self.store.set_image(&cur.image.reference)?;
+                    self.store.set_image(&cur.image.reference).map_err(|e| e.to_string())?;
                     self.exec_ok(&cur.id, hot_argv("commit", &[])).await?;
                     Ok::<_, String>(())
-                }.await;
+                }
+                .await;
                 match recovery {
                     Ok(()) => Err((Outcome::RolledBack, f)),
-                    Err(e) => Err((Outcome::RollbackFailed, Fail(format!("{}; recovery: {e}; runners remain held", f.0)))),
+                    Err(e) => Err((
+                        Outcome::RollbackFailed,
+                        Fail(format!("{}; recovery: {e}; runners remain held", f.0)),
+                    )),
                 }
             }
         }
@@ -617,8 +694,12 @@ impl Updater {
         loop {
             if matches!(self.engine.health(id).await?, Health::Healthy)
                 && self.exec_ok(id, status_argv()).await.is_ok()
-            { return Ok("new daemon healthy; RPC admission still held".into()); }
-            if tokio::time::Instant::now() >= deadline { return Err("hot-swap health timeout".into()); }
+            {
+                return Ok("new daemon healthy; RPC admission still held".into());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("hot-swap health timeout".into());
+            }
             tokio::time::sleep(self.cfg.health_poll).await;
         }
     }

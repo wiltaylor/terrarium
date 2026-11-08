@@ -150,10 +150,22 @@ impl Engine for Fake {
                 let failed = self.call(format!("hot:{cmd}"));
                 if cmd == "start" && !failed {
                     let mut s = self.0.lock().unwrap();
-                    let image = if argv[3] == "b".repeat(64) { s.staged.clone().unwrap() } else { old_image() };
+                    let image = if argv[3] == "b".repeat(64) {
+                        s.staged.clone().unwrap()
+                    } else {
+                        old_image()
+                    };
                     s.containers.get_mut("terrarium").unwrap().image = image;
                 }
-                return Ok(ExecOut { code: i64::from(failed), stdout: if cmd == "probe" { "a".repeat(64) } else { String::new() }, stderr: "control failed".into() });
+                return Ok(ExecOut {
+                    code: i64::from(failed),
+                    stdout: if cmd == "probe" {
+                        "a".repeat(64)
+                    } else {
+                        String::new()
+                    },
+                    stderr: "control failed".into(),
+                });
             }
             let what = match (argv[0].as_str(), argv.get(3).map(String::as_str)) {
                 ("terrarium", Some("drain")) => "drain".to_owned(),
@@ -224,12 +236,25 @@ impl Engine for Fake {
             if argv[0] == "python3" {
                 let command = &argv[2];
                 self.call(format!("hot:{command}"));
-                if command == "stage" { self.0.lock().unwrap().staged = Some(image.clone()); }
-                return Ok(ExecOut { stdout: if command == "stage" { "b".repeat(64) } else { String::new() }, ..Default::default() });
+                if command == "stage" {
+                    self.0.lock().unwrap().staged = Some(image.clone());
+                }
+                return Ok(ExecOut {
+                    stdout: if command == "stage" {
+                        "b".repeat(64)
+                    } else {
+                        String::new()
+                    },
+                    ..Default::default()
+                });
             }
             if argv[0] == "/opt/terrarium/bundled/bin/terrariumd" && argv[2] == "create" {
                 let failed = self.call("offline-backup".into());
-                return Ok(ExecOut { code: i64::from(failed), stdout: format!(r#"{{"path":"{BACKUP}"}}"#), ..Default::default() });
+                return Ok(ExecOut {
+                    code: i64::from(failed),
+                    stdout: format!(r#"{{"path":"{BACKUP}"}}"#),
+                    ..Default::default()
+                });
             }
             let failed = self.call(format!("restore {} {}", image.reference, argv[3]));
             Ok(ExecOut {
@@ -342,13 +367,26 @@ fn rig() -> Rig {
 async fn hot_swap_keeps_container_and_commits_only_after_health() {
     let r = rig();
     r.fake.0.lock().unwrap().hot = true;
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Succeeded, "{run:#?}");
     let calls = r.fake.calls();
-    assert!(!calls.iter().any(|c| c.starts_with("drain") || c.starts_with("remove") || c.starts_with("stop")));
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("drain") || c.starts_with("remove") || c.starts_with("stop"))
+    );
     assert_eq!(calls.last().unwrap(), "hot:commit");
-    assert!(calls.iter().position(|c| c == "hot:pause").unwrap() < calls.iter().position(|c| c == "offline-backup").unwrap());
-    let rollback = r.updater.run_now(RunKind::Rollback, "previous", "operator").await;
+    assert!(
+        calls.iter().position(|c| c == "hot:pause").unwrap()
+            < calls.iter().position(|c| c == "offline-backup").unwrap()
+    );
+    let rollback = r
+        .updater
+        .run_now(RunKind::Rollback, "previous", "operator")
+        .await;
     assert_eq!(rollback.outcome, Outcome::Succeeded, "{rollback:#?}");
     assert!(r.fake.calls().iter().any(|c| c == "stop c0"));
 }
@@ -358,13 +396,22 @@ async fn hot_swap_failed_health_restores_before_old_release_admission() {
     let r = rig();
     r.fake.0.lock().unwrap().hot = true;
     r.fake.fail(&format!("health:{}", new_ref()));
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
     assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
     let calls = r.fake.calls();
     assert_eq!(calls.iter().filter(|c| *c == "hot:pause").count(), 2);
     assert_eq!(calls.iter().filter(|c| *c == "hot:commit").count(), 1);
-    assert!(calls.iter().position(|c| c == "hot:restore-database").unwrap() < calls.iter().position(|c| c == "hot:commit").unwrap());
+    assert!(
+        calls
+            .iter()
+            .position(|c| c == "hot:restore-database")
+            .unwrap()
+            < calls.iter().position(|c| c == "hot:commit").unwrap()
+    );
 }
 
 #[tokio::test]
@@ -372,7 +419,10 @@ async fn ambiguous_commit_never_rewinds_the_journal() {
     let r = rig();
     r.fake.0.lock().unwrap().hot = true;
     r.fake.fail("hot:commit");
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Failed);
     assert!(!r.fake.calls().iter().any(|c| c == "hot:restore-database"));
 }

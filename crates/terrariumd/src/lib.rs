@@ -199,9 +199,9 @@ pub async fn start_with_usage(
     log_definitions(&defs, &errors, &cfg.config_dir);
 
     let state: Shared = Arc::new(AppState {
-        agent_calls: crate::agent_rpc::CallGate::with_probation(
-            Some(cfg.state_dir.join("releases/probation")),
-        ),
+        agent_calls: crate::agent_rpc::CallGate::with_probation(Some(
+            cfg.state_dir.join("releases/probation"),
+        )),
         started: Instant::now(),
         started_at: chrono::Utc::now(),
         db: Db::new(conn, EventHub::default()),
@@ -244,6 +244,98 @@ pub async fn start_with_usage(
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");
     }
+    // A probation daemon serves reads/health before activating background
+    // effects that could escape the database snapshot (jobs, webhooks, etc.).
+    let mut tasks = Vec::new();
+    if state.agent_calls.in_probation() {
+        let activation_state = state.clone();
+        tasks.push(tokio::spawn(async move {
+            activation_state.agent_calls.wait_for_commit().await;
+            match activate(activation_state, defs, errors).await {
+                Ok(handles) => {
+                    let _owned = ActivationTasks(handles);
+                    std::future::pending::<()>().await;
+                }
+                Err(e) => error!(error = %e, "post-commit daemon activation failed"),
+            }
+        }));
+    } else {
+        tasks.extend(activate(state.clone(), defs, errors).await?);
+    }
+
+    tasks.push(api::serve_unix(state.clone(), &cfg.socket).await?);
+    let mut tcp_addr = None;
+    match (cfg.token.as_deref().filter(|t| !t.is_empty()), &cfg.listen) {
+        (Some(token), Some(listen)) => {
+            let (task, addr) = api::serve_tcp(state.clone(), listen, token.to_owned()).await?;
+            tasks.push(task);
+            state.webhooks.add_own_port(addr.port());
+            tcp_addr = Some(addr);
+        }
+        (None, Some(listen)) => warn!(
+            "TERRARIUM_TOKEN is not set: the TCP listener ({listen}) stays off; only the Unix socket serves"
+        ),
+        _ => {}
+    }
+    let mut artifact_addr = None;
+    if let Some(addr) = Some(state.artifact_listen.as_str()).filter(|a| !a.is_empty()) {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("cannot bind the artifact origin {addr}"))?;
+        let local = listener.local_addr()?;
+        info!(addr = %local, "artifact origin listening on TCP");
+        let app = api::artifact_router(state.clone());
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                error!("artifact origin failed: {e}");
+            }
+        }));
+        state.webhooks.add_own_port(local.port());
+        artifact_addr = Some(local);
+    }
+    // The git proxy (issue #11): before the first checkout, so a checkout
+    // of a proxied repo gets its proxy URL.
+    let mut git_proxy_addr = None;
+    if let Some(addr) = cfg.web.git_proxy_listen.as_deref() {
+        if state.agent_calls.in_probation() {
+            let proxy_state = state.clone();
+            let addr = addr.to_owned();
+            tasks.push(tokio::spawn(async move {
+                proxy_state.agent_calls.wait_for_commit().await;
+                match git_proxy::serve(proxy_state, &addr).await {
+                    Ok((task, _)) => {
+                        let _owned = ActivationTasks(vec![task]);
+                        std::future::pending::<()>().await;
+                    }
+                    Err(e) => error!(error = %e, "post-commit git proxy failed"),
+                }
+            }));
+        } else {
+            let (task, local) = git_proxy::serve(state.clone(), addr).await?;
+            tasks.push(task);
+            git_proxy_addr = Some(local);
+        }
+    }
+    Ok(Daemon {
+        state,
+        socket: cfg.socket,
+        tcp_addr,
+        artifact_addr,
+        git_proxy_addr,
+        tasks,
+    })
+}
+
+
+// Aborting probation activation also stops the services it owns.
+struct ActivationTasks(Vec<JoinHandle<()>>);
+impl Drop for ActivationTasks {
+    fn drop(&mut self) {
+        for task in &self.0 { task.abort(); }
+    }
+}
+
+async fn activate(state: Shared, defs: Definitions, errors: Vec<String>) -> anyhow::Result<Vec<JoinHandle<()>>> {
     // The secret store (PLAN §16b): the master key, then the move of the
     // old credential files.
     state
@@ -300,44 +392,6 @@ pub async fn start_with_usage(
         .await
         .map_err(|e| anyhow::anyhow!("reconcile failed: {e}"))?;
 
-    tasks.push(api::serve_unix(state.clone(), &cfg.socket).await?);
-    let mut tcp_addr = None;
-    match (cfg.token.as_deref().filter(|t| !t.is_empty()), &cfg.listen) {
-        (Some(token), Some(listen)) => {
-            let (task, addr) = api::serve_tcp(state.clone(), listen, token.to_owned()).await?;
-            tasks.push(task);
-            state.webhooks.add_own_port(addr.port());
-            tcp_addr = Some(addr);
-        }
-        (None, Some(listen)) => warn!(
-            "TERRARIUM_TOKEN is not set: the TCP listener ({listen}) stays off; only the Unix socket serves"
-        ),
-        _ => {}
-    }
-    let mut artifact_addr = None;
-    if let Some(addr) = Some(state.artifact_listen.as_str()).filter(|a| !a.is_empty()) {
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .with_context(|| format!("cannot bind the artifact origin {addr}"))?;
-        let local = listener.local_addr()?;
-        info!(addr = %local, "artifact origin listening on TCP");
-        let app = api::artifact_router(state.clone());
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
-                error!("artifact origin failed: {e}");
-            }
-        }));
-        state.webhooks.add_own_port(local.port());
-        artifact_addr = Some(local);
-    }
-    // The git proxy (issue #11): before the first checkout, so a checkout
-    // of a proxied repo gets its proxy URL.
-    let mut git_proxy_addr = None;
-    if let Some(addr) = cfg.web.git_proxy_listen.as_deref() {
-        let (task, local) = git_proxy::serve(state.clone(), addr).await?;
-        tasks.push(task);
-        git_proxy_addr = Some(local);
-    }
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
@@ -358,14 +412,7 @@ pub async fn start_with_usage(
     // The agents bound to cards: park, unpark, and end (TER-74).
     tasks.push(bound::spawn(&state));
     tasks.extend(start_usage(&state).await);
-    Ok(Daemon {
-        state,
-        socket: cfg.socket,
-        tcp_addr,
-        artifact_addr,
-        git_proxy_addr,
-        tasks,
-    })
+    Ok(tasks)
 }
 
 /// Log a warning for each repo with `push_deny` whose checkouts go

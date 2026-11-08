@@ -66,6 +66,18 @@ jobs:
           exit "$rc"
       - run: just ci::scripts-test
       - run: just ci::dashboard-check
+      # A real protocol-1 executable, including TER-260 hold/replay. Keep this
+      # pinned until the supported N-1 boundary changes. A protocol break must
+      # bump io.terrarium.runner-compat-epoch in docker/Dockerfile.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 97858951d7636766896332751f0fad02306b79d5
+          path: .compat/runner-n-1
+      - name: Old runner against current daemon, commit and rollback
+        run: |
+          cargo build --locked --manifest-path .compat/runner-n-1/Cargo.toml -p terrarium-runner --target-dir target/runner-n-1
+          cargo build --locked -p terrarium
+          TERRARIUM_TEST_OLD_RUNNER="$PWD/target/runner-n-1/debug/terrarium-runner" cargo test -p terrariumd --test it runner_process::agent_rpc_
 
   # ── Version ───────────────────────────────────────────────────────────────
   # Trailer-gated: a release only happens when HEAD carries a publish trailer.

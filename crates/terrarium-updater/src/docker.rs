@@ -195,7 +195,9 @@ impl Docker {
         if img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1"
             && c["State"]["Running"] == true
         {
-            let active = self.exec(id, crate::machine::hot_argv("active", &[])).await?;
+            let active = self
+                .exec(id, crate::machine::hot_argv("active", &[]))
+                .await?;
             if active.code == 0 {
                 image = serde_json::from_str(&active.stdout)
                     .map_err(|e| format!("invalid active release identity: {e}"))?;
@@ -524,10 +526,20 @@ impl Engine for Docker {
     fn can_hot_swap<'a>(&'a self, cur: &'a Container, to: &'a Image) -> BoxFut<'a, Res<bool>> {
         Box::pin(async move {
             let physical = cur.spec["container"]["Image"].as_str().unwrap_or_default();
-            let Some(old) = self.inspect_image(physical).await? else { return Ok(false) };
-            let Some(new) = self.inspect_image(&to.id).await? else { return Ok(false) };
-            if !hot_swap_compatible(&old, &new) { return Ok(false); }
-            Ok(self.exec(&cur.id, crate::machine::hot_argv("probe", &[])).await?.code == 0)
+            let Some(old) = self.inspect_image(physical).await? else {
+                return Ok(false);
+            };
+            let Some(new) = self.inspect_image(&to.id).await? else {
+                return Ok(false);
+            };
+            if !hot_swap_compatible(&old, &new) {
+                return Ok(false);
+            }
+            Ok(self
+                .exec(&cur.id, crate::machine::hot_argv("probe", &[]))
+                .await?
+                .code
+                == 0)
         })
     }
     fn target(&self) -> BoxFut<'_, Res<Container>> {
@@ -787,12 +799,28 @@ pub fn hot_swap_compatible(old: &Value, new: &Value) -> bool {
         || b["io.terrarium.hot-swap-layout"] != "1"
         || a["io.terrarium.runner-compat-epoch"].as_str().is_none()
         || a["io.terrarium.runner-compat-epoch"] != b["io.terrarium.runner-compat-epoch"]
-    { return false; }
-    for key in ["Env", "Entrypoint", "Cmd", "User", "WorkingDir", "Healthcheck"] {
-        if old["Config"][key] != new["Config"][key] { return false; }
+    {
+        return false;
     }
-    match (old["RootFS"]["Layers"].as_array(), new["RootFS"]["Layers"].as_array()) {
-        (Some(a), Some(b)) if a.len() > 1 && a.len() == b.len() => a[..a.len()-1] == b[..b.len()-1],
+    for key in [
+        "Env",
+        "Entrypoint",
+        "Cmd",
+        "User",
+        "WorkingDir",
+        "Healthcheck",
+    ] {
+        if old["Config"][key] != new["Config"][key] {
+            return false;
+        }
+    }
+    match (
+        old["RootFS"]["Layers"].as_array(),
+        new["RootFS"]["Layers"].as_array(),
+    ) {
+        (Some(a), Some(b)) if a.len() > 1 && a.len() == b.len() => {
+            a[..a.len() - 1] == b[..b.len() - 1]
+        }
         _ => false,
     }
 }

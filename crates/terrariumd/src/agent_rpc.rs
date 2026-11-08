@@ -48,14 +48,23 @@ impl Default for CallGate {
 
 impl CallGate {
     pub fn with_probation(path: Option<std::path::PathBuf>) -> Self {
-        Self { probation: path, ..Self::default() }
+        Self {
+            probation: path,
+            ..Self::default()
+        }
     }
 
-    fn in_probation(&self) -> bool {
+    pub fn in_probation(&self) -> bool {
         self.probation.as_ref().is_some_and(|p| {
             // Fail closed on permission and other IO errors, not just presence.
             !matches!(std::fs::metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
         })
+    }
+
+    pub async fn wait_for_commit(&self) {
+        while self.in_probation() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     fn key(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {

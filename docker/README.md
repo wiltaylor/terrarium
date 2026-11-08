@@ -46,7 +46,46 @@ the entrypoint stops the runners (see below) and the container exits.
 The entrypoint supervises only `terrariumd` with no subcommand. Other
 commands (for example `bash`, or `terrariumd sandbox-dry-run`) run once.
 
-## The shutdown sequence
+## Binary-only upgrades
+
+The image has one final release-payload layer. All preceding RootFS layer
+digests, the runtime image configuration and `io.terrarium.runner-compat-epoch`
+must match for a hot swap. Missing metadata, a changed runtime base, deployment
+environment changes, or a protocol break selects the drained container path.
+The first upgrade from an image without this supervisor therefore replaces
+the container, putting pre-TER-260 runners onto hold/replay-capable binaries.
+
+The updater verifies and pulls by digest before staging the immutable payload
+under `/state/releases/<content-hash>`. `current` is an atomic symlink. Besides
+the daemon, runner and CLI, the payload includes packaged defaults, harness
+pins and host distribution files so a binary upgrade cannot silently retain
+old release assets. Docker's physical container image does not change. The
+updater reports the selected payload's `image.json` instead.
+
+The supervisor pauses only its own daemon child, with graceful RPC drain, and
+keeps the runners alive. The updater takes the full backup for explicit
+rollback and a separate offline SQLite snapshot for automatic rollback. It
+then selects the new payload and starts the daemon in probation. Health and
+reads work, but agent RPCs retry, HTTP writes return `503` with `Retry-After`,
+and background work is not activated until commit. On failed health it stops
+the probation daemon, restores only the database, selects the old payload,
+checks health and releases admission. Live runner logs and sockets stay intact.
+An ambiguous commit response never causes a database rewind.
+
+An explicit rollback after successful commit uses container replacement and
+the full backup, because admitted writes may already have external effects.
+Release binaries are not part of application backups. The selected release
+survives a restart of the same container, while a new container boots its own
+bundled release. The updater process itself stays on its bundled binary until
+its container is replaced.
+
+Interrupted control operations fail closed. A surviving `upgrade-pause` in the
+runtime dir or `/state/releases/probation` requires recovery, not another blind
+update. Do not remove probation after restoring an old database unless the
+new daemon was stopped before any call was admitted. The control helper is
+private to the updater and supervisor, not exposed to agents.
+
+## Container shutdown sequence
 
 `docker compose down` and `docker stop` send SIGTERM to tini. tini sends it
 to the entrypoint only (no `-g`). Then the entrypoint:

@@ -743,29 +743,60 @@ async fn hot_swap_probation(rollback: bool) {
     let backup = state.join("test-backup");
     let control = |command: &str| {
         let out = std::process::Command::new("python3")
-            .arg(&helper).arg(command).arg(&backup)
-            .env("TERRARIUM_STATE_DIR", &state).output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            .arg(&helper)
+            .arg(command)
+            .arg(&backup)
+            .env("TERRARIUM_STATE_DIR", &state)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     control("snapshot");
     td.boot().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!calls.is_finished(), "healthy probation must not admit held calls");
+    let (health, _) = td.req_as(None, Method::GET, "/api/health", None).await;
+    assert_eq!(health, 200, "health reads remain available during probation");
+    let write = json!({"name": "probation-dashboard"});
+    let (status, response) = td.req_as(None, Method::POST, "/api/projects", Some(write.clone())).await;
+    assert_eq!(status, 503);
+    assert_eq!(response["error"], "upgrade_probation");
+    let (status, _) = td.req_as(None, Method::GET, "/api/projects/probation-dashboard", None).await;
+    assert_eq!(status, 404, "refused dashboard write has no effect to lose");
+    assert!(
+        !calls.is_finished(),
+        "healthy probation must not admit held calls"
+    );
     if rollback {
         let conn = rusqlite::Connection::open(state.join("terrarium.db")).unwrap();
-        conn.execute_batch("CREATE TABLE hot_swap_test_migration(value TEXT)").unwrap();
+        conn.execute_batch("CREATE TABLE hot_swap_test_migration(value TEXT)")
+            .unwrap();
         drop(conn);
         terrariumd::agent_rpc::drain(&td.daemon.as_ref().unwrap().state, Duration::from_secs(2))
-            .await.unwrap();
+            .await
+            .unwrap();
         td.shutdown();
         control("restore-database");
         td.boot().await;
         let conn = rusqlite::Connection::open(state.join("terrarium.db")).unwrap();
-        assert!(conn.prepare("SELECT * FROM hot_swap_test_migration").is_err());
-        assert!(!calls.is_finished(), "restored daemon still awaits health commit");
+        assert!(
+            conn.prepare("SELECT * FROM hot_swap_test_migration")
+                .is_err()
+        );
+        assert!(
+            !calls.is_finished(),
+            "restored daemon still awaits health commit"
+        );
     }
     std::fs::remove_file(&probation).unwrap();
     timeout(WAIT, calls).await.unwrap().unwrap();
+    let (status, _) = td.req_as(None, Method::POST, "/api/projects", Some(write)).await;
+    assert_eq!(status, 201, "dashboard retry succeeds after commit");
+    let (status, _) = td.req_as(None, Method::GET, "/api/projects/probation-dashboard", None).await;
+    assert_eq!(status, 200);
     assert_eq!(
         td.runner_pid(&bob),
         Some(pid),
