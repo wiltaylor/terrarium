@@ -3,7 +3,7 @@
 //! events, and audit (PLAN §15.5, docs/api.md §29).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use base64::Engine;
 use common::TestDaemon;

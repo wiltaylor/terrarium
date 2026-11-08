@@ -1692,6 +1692,7 @@ fn apply_project(
                     t,
                     &def.name,
                     &ProjectPatch {
+                        human_comment_notifications: None,
                         description: Some(description),
                         card_prefix: prefix,
                         idle_alert: None,

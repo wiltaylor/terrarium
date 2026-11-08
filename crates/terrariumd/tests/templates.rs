@@ -3,7 +3,7 @@
 //! daemons have no config repo: `template_files.rs` tests the files.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::{TestDaemon, write};
 use serde_json::{Value, json};
