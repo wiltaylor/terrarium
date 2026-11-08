@@ -495,6 +495,10 @@ export interface SpawnPolicy {
   max_lifetime?: string;
   /** The ephemeral agents may spawn too, one level (sysadmin or the operator). */
   may_spawn_children?: boolean;
+  /** May bind agents to cards or threads. Default false. */
+  bound?: boolean;
+  /** Bound-agent lifetime cap. Absent: 30d. At most 30d. */
+  max_bound_lifetime?: string;
 }
 
 /** The outcome of a finished ephemeral agent. */
@@ -1742,6 +1746,7 @@ export interface Card {
   id: string;
   project: string;
   column: string;
+  column_role?: ColumnRole | null;
   position: number;
   title: string;
   body: string;

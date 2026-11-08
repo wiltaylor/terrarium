@@ -42,6 +42,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Import a GitHub issue using its daemon-verified author
+    Issue {
+        #[command(subcommand)]
+        command: IssueCmd,
+    },
     /// Reserve host CPU, memory and device IO capacity
     Reserve {
         #[command(subcommand)]
@@ -374,6 +379,16 @@ pub enum Command {
             num_args = 1..
         )]
         argv: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IssueCmd {
+    /// Import an issue from a configured repository (idempotent)
+    Import {
+        number: u64,
+        #[arg(long)]
+        repo: String,
     },
 }
 
@@ -1523,9 +1538,8 @@ pub struct CardNewArgs {
     /// The ETA: a duration such as 45m, 2h30m, or 1d, or an RFC 3339 time
     #[arg(long, value_name = "DURATION|TIME")]
     pub eta: Option<String>,
-    /// The GitHub login of the issue author, for a GitHub card (label
-    /// `github` or a `GitHub #<n>:` title). An author off the project's
-    /// `github_authors` list holds the card for the operator
+    /// Legacy author assertion, ignored by the gate. Use the daemon's GitHub
+    /// issue import endpoint for a verified author
     #[arg(long, value_name = "LOGIN")]
     pub github_author: Option<String>,
     /// Link the new card to this Inbox thread, which tracks it (you must
@@ -2471,6 +2485,9 @@ pub enum ReserveCmd {
         queue: bool,
         #[arg(long, requires = "queue")]
         queue_timeout: Option<String>,
+        /// GPU claims JSON: [{"uuid":"GPU-...","exclusive":true}] or vram_bytes for shared
+        #[arg(long)]
+        gpus: Option<String>,
     },
     /// Extend an active reservation
     Extend {
@@ -2671,6 +2688,9 @@ pub enum ThreadCmd {
         /// (repeat for more)
         #[arg(long = "card", value_name = "PROJECT:CARD")]
         cards: Vec<String>,
+        /// Wait for this monitor to be green too
+        #[arg(long, value_name = "PROJECT:MONITOR")]
+        monitor: Option<String>,
     },
     /// List the threads: the open ones (an agent: its own)
     Ls {

@@ -240,6 +240,10 @@ pub fn cards_turn(
 ) -> String {
     let mut text = if reason == threads::WAKE_BLOCKED {
         "A card that this thread tracks went to blocked.".to_owned()
+    } else if reason == "monitor_red" {
+        "The monitor that this thread tracks turned red after the work was ready.".to_owned()
+    } else if reason == "monitor_green" {
+        "The linked cards are ready and the monitor that this thread tracks is green.".to_owned()
     } else {
         "All cards that this thread tracks are in review or later.".to_owned()
     };
@@ -279,7 +283,7 @@ pub fn cards_turn(
             "\n- {hidden} more linked card(s) in projects that you cannot read"
         ));
     }
-    if reason == threads::WAKE_BLOCKED {
+    if reason == threads::WAKE_BLOCKED || reason == "monitor_red" {
         text.push_str(&format!(
             "\n\nTell the operator in the thread what is stuck and what happens next \
              (`terrarium thread post {thread} -m -`). Ask your report-to lead by mail when you \
@@ -315,6 +319,16 @@ fn missed_turn(thread: &str) -> String {
         &format!(
             "The thread changed while you were stopped. Read it with `terrarium thread show \
              {thread}`."
+        ),
+    )
+}
+
+/// Re-read live state rather than relying on the resumed session's history.
+pub fn restart_turn(thread: &str) -> String {
+    render(
+        thread,
+        &format!(
+            "Before acting after this restart, run `terrarium thread show {thread}`. Read the current messages, overall response, questions, tracking state and linked cards. Run `terrarium card show <card>` in each linked card's project that you may read. Use this current state, not only the earlier session history."
         ),
     )
 }

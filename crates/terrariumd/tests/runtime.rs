@@ -1618,6 +1618,30 @@ async fn agent_rpc_drain_retries_long_polls_without_journaling_them() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runner_whoami_reads_role_changes_without_restart() {
+    let td = Td::start_with(false).await;
+    let bob = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{bob}/start"), None).await;
+    td.wait_status(&bob, "idle").await;
+    let sock = td.runner_socket(&bob);
+    for roles in [json!([]), json!(["project_admin"]), json!([])] {
+        let (status, body) = td
+            .req(
+                Method::PUT,
+                &format!("/api/agents/{bob}/roles"),
+                Some(roles.clone()),
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let answer = rpc(&sock, "whoami", json!({})).await;
+        assert_eq!(answer["result"]["roles"], roles, "{answer}");
+        assert_eq!(answer["result"]["agent"], bob);
+        assert_eq!(answer["result"]["name"], "bob");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_rpc_write_answers_survive_restart_without_duplicate_mail() {
     use sha2::{Digest, Sha256};
     let mut td = Td::start_with(false).await;

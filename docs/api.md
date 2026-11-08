@@ -4017,8 +4017,24 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
-| `POST /api/threads/{id}/track` | no body, or `{"cards"}`: at most 50 cards to link first (TER-146) | The attached agent: `200` the thread, `tracking`, with `tracking_at` and `cards`. `409` with an open question; `404` or `422` for a card (below), and nothing changes |
+| `POST /api/threads/{id}/track` | no body, or `{"cards"?, "monitor"?}`: at most 50 cards to link first (TER-146), optional monitor `project:name` (TER-149) | The attached agent: `200` the thread, `tracking`, with `tracking_at`, `cards` and optional `monitor`. `409` with an open question; invalid links roll back the whole write |
 | `POST /api/threads/{id}/cards` | `{"card"}`: `<project>:<card>` or `<card>` | `200` the thread with `cards`, also when the card was linked already. `404` without the read right on the thread, for a card that does not exist or is not in the named project, and without the read right on the card's project; `422` for an archived card; `409` on a closed thread |
+
+**Ops tracking** (TER-149, D6). `terrarium thread track <id> --monitor <project>:<monitor>`
+links an existing monitor in a project the attached agent can read. Omitting the
+option keeps the link. Readiness waits for all live cards to reach review or
+later and the monitor's latest result to be `ok`. A monitor-only thread waits
+for `ok`. A green transition wakes the agent when the cards are ready. A `crit`
+transition after readiness wakes it again. Repeated results and warn/unknown
+flaps do not wake completed threads. Red re-arms the green wake. Adding
+unfinished cards or moving cards back before review clears completion.
+Linking an already green monitor on a later track call checks readiness too.
+Unreadable monitor links return `404`, and a missing link rolls back the write.
+These use the existing tracking wake path, including held wakes while
+waiting on an operator question, and create no operator notices. The monitor
+reference is hidden from readers who cannot read its project. Held monitor
+wakes are coalesced by reason in latest-transition order, so the last delivered
+monitor state is the latest one.
 
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
 A thread opened with a `template` and no `agent` gets its agent at the
@@ -4570,8 +4586,8 @@ supply:
 - `assignee` follows the assign rules.
 - `eta_at` follows the ETA rule (§8.2). The daemon sets it last, after the
   assignment.
-- `github_author` is the GitHub login of the issue author of a GitHub card,
-  for the GitHub author gate (below).
+- `github_author` is a legacy caller assertion, ignored by the author gate.
+  Use the issue import endpoint below for a daemon-verified author.
 - `inbox_thread` is an Inbox thread that tracks the new card (TER-146,
   §6.13 "Linked cards"). The caller must read the thread: else `404`, and
   no card is made.
@@ -4582,7 +4598,7 @@ is a card with the label `github` (any case), or a title that starts with
 `GitHub #<n>:` (any case). A held card is a GitHub card with the label
 `hold`.
 
-- **Create.** An agent makes a GitHub card, and its `github_author` is
+- **Create.** An agent makes a GitHub card, and its daemon-verified author is
   missing or not on the list (the case does not matter, and a leading `@`
   is dropped). The card is held. It goes to the blocked column with the
   labels `github` and `hold` and a move comment that says why, whatever
@@ -4615,16 +4631,27 @@ is a card with the label `github` (any case), or a title that starts with
   from any column, in the same write. Any other answer leaves the
   card held. The operator can also edit or move the card directly.
 
-The gap: `github_author` is what the creating agent says. The daemon does
-not read the issue, so an agent that gives a false author, or that makes
-the card with neither the label nor the title, gets past the gate. The
-gate enforces the rule against mistakes, not against a hostile agent.
+Agent-supplied `github_author` never bypasses the gate. A card with neither
+the GitHub label nor title cannot be recognized as GitHub work.
 A card that a schedule `card` action (§19) opens as the operator is not
 gated. The action never finds a held card: `close` does not move it and
 `open` does not comment on it, whatever its `trigger:<key>` label.
-A daemon-side issue sync that takes the author from the signed GitHub
-webhook closes the gap (TER-124). The ingest listener (§20) must then be
-reachable from GitHub.
+**Import an issue** (TER-124): `POST /api/projects/{name}/github-issues/import`
+with `{"repo":"configured-repo-name","number":123}` returns `200` and the
+card. Requires project write access. The daemon fetches the issue from
+`api.github.com` using the configured repository's token credential, if any.
+Only canonical github.com HTTPS and SSH repository URLs are accepted, redirects
+are refused, and pull requests are rejected. No card is created on fetch failure.
+An SSH credential or unavailable token does not prevent anonymous public issue
+fetches. An inaccessible issue without a token reports that a private repo
+needs a granted token (GitHub also returns 404 for missing issues).
+The API's author, title and body supply the card. Control characters are removed
+from titles and the issue title is capped at 200 characters. An agent's import
+starts in backlog only when its verified author is on the project's list.
+With no author list configured every agent import is held. Repeated imports return the
+same card, including archived or held cards. A daemon-owned import identity
+records its canonical URL. Adding a URL link manually cannot forge an import.
+The CLI equivalent is `terrarium issue import 123 --repo configured-repo-name`.
 
 **Active cards** (`GET /api/cards`, TER-43, for the dashboard home). The
 cards that are not archived in the columns `columns` (a comma list,
@@ -5085,10 +5112,10 @@ A page:
   `ready_for_review`, `reviewed`) and `reviewer` (an agent name). Another
   status is `422 invalid`.
 - `links` are the links of the current revision. `target` is
-  `project/path` for a page, the card ID, `project/MEM-n`, `project/ART-n`,
-  or `project/<version>`. The daemon reads `[[path]]`, `[[path|label]]`,
-  `[[TER-42]]`, `[[MEM-17]]`, `[[v0.3.0]]` (a name that starts with `v` and
-  a digit, or the name of a version with no page of that path),
+  `project/path` for a page, the card ID, `project/MEM-n`, or `project/ART-n`.
+  The daemon reads `[[path]]`, `[[path|label]]`,
+  `[[TER-42]]`, `[[MEM-17]]`, `[[v0.3.0]]` (a page link to `project/v0.3.0`,
+  not a version link),
   `[[project:other/reports/x]]`, `artifact:ART-9` in a Markdown link or
   image, and a fenced block `` ```artifact ART-11``` ``.
 
@@ -6321,6 +6348,54 @@ an agent. Agent host reservations span that agent's targets on the host.
 Host grants return 409 naming existing sessions that must end first:
 phase 1 does not reparent live scopes. Agent and target reservations cannot
 overlap on a host because they use different slice hierarchies.
+
+**GPU reservations.** The same POST accepts an optional `gpus` array. Each
+claim names a stable NVIDIA `uuid`, not a device index. For example:
+
+```json
+{"target":"p-gpu","gpus":[{"uuid":"GPU-abcd1234","exclusive":true}],"until":"30m"}
+```
+
+For cooperative sharing, use `{"uuid":"GPU-abcd1234","vram_bytes":1073741824}`.
+`exclusive` defaults to false. A shared claim requires positive `vram_bytes`
+no larger than physical VRAM. `amounts` may be omitted for GPU-only requests.
+The top-level `exclusive` remains the CPU affinity option, independent of each
+GPU claim's `exclusive`. The CLI accepts the array through `reserve new --gpus
+'[...]'`. No MIG partitions are created.
+
+Exclusive GPUs require a managed **ephemeral Docker target**. Native host,
+SSH and vmlab exclusive GPU requests are refused, never granted as unenforced
+exclusive access. Shared claims are supported for native host targets and
+managed ephemeral Docker targets. Docker reservations belong to the target,
+not individual agents. SSH and vmlab GPU reservations are unsupported.
+
+**Containers get no GPU by default**, including images that set
+`NVIDIA_VISIBLE_DEVICES=all`. Managed container creation overrides that variable
+with `void` without a GPU reservation, or the reserved UUID allowlist with one,
+and passes the same devices through Docker's `--gpus` option. A GPU reservation
+cannot change a running container's exposure. Stop it first and recreate it
+on the next `up`. Permanent and unmanaged Docker targets cannot reserve GPUs.
+An exclusive grant is refused while incompatible non-native sessions or
+containers are active. Active holders of disjoint devices can run concurrently.
+Native host execution remains available and does not generate GPU-session mail.
+
+A zero host reservation percentage disables GPU admission. A positive
+percentage enables whole-device exclusive allocations and shared accounting
+against physical VRAM, without fractionally partitioning devices. Exclusive
+and shared claims cannot overlap on the same device. Shared claims cannot
+overcommit its recorded VRAM. The usual FIFO and cleanup accounting apply.
+Capacity responses include `gpus` inventory (`uuid`, `name`, `memory_bytes`,
+`used_bytes`) and `used.gpus` entries with `reservation`, `holder`, and `claim`.
+
+Shared GPU memory limits are cooperative, not hard limits. The host samples
+NVIDIA compute-process VRAM and attributes it through PID cgroups to the
+container or native holder's systemd scopes. Overages send warning mail to
+the holder and project leads, once until a below-share sample rearms the
+warning. Overages never kill processes. Graphics-process usage and missing
+PID attribution are not inferred from whole-device totals. GPU samples are
+cached for 30 seconds. Inventory is refreshed for every host connection;
+missing reserved devices keep reconciliation closed. Ordinary reservation
+expiry and explicit retraction still perform their normal session cleanup.
 
 Insufficient capacity returns 409 with the current allocations. With
 `queue: true`, the request waits in a durable FIFO queue, without backfill.
@@ -8270,6 +8345,14 @@ test: true}`. Each test writes the audit row `schedule.test`
 A project has one board rules file, `rules.wcl` (TER-162, TER-166). A
 rule reacts to an event of the log and runs verbs on the board. The
 daemon stores and checks the file here; the engine (§19.9) runs it.
+
+If stored text no longer parses under the current schema, GET rules
+preserves the text and hash, returns empty `rules`, and adds
+`problems: [{line, column, message}]`. The engine emits a project event
+`rules.invalid` with the stored hash and problems when it loads that
+revision. Its own rules do not run, but the built-in pack still runs in
+rules mode. A cached revision does not emit again until reloaded (for
+example after a daemon restart).
 
 The file is WCL. The daemon ships its schema
 (`crates/terrarium-core/src/rules.schema.wcl`, `GET /api/rules/schema`)
@@ -11760,7 +11843,7 @@ they do not get the low priority.
 | `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, name?, aliases?, heavy_jobs, running, projects, updated_by?, updated_at?}]}`: each host with a cap, a running job, or aliases. `name` is the host-agent name when the key is a host agent. `heavy_jobs` is `null` without a cap. Visibility is scoped as described below |
 | `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
 | `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
-| `PUT /api/job-hosts/{host}/aliases` | a sysadmin, the operator  | `{aliases: [address]}` (at most 32): the addresses of the host agent `{host}` (name or ID). Replaces the list; `[]` takes all away. 404 for no host agent, 409 when another host agent has the alias. The answer is the list above |
+| `PUT /api/job-hosts/{host}/aliases` | a sysadmin, the operator  | `{aliases: [address]}` (at most 32): the addresses of the host agent `{host}` (name or ID). Replaces the list; `[]` takes all away. 404 for no host agent, 409 when another host agent has the alias or its pinned key, 422 for invalid aliases (including a host-agent name, case-insensitive). The answer is the list above |
 
 The audit row `job.host_cap` keeps the old and the new cap. A job keeps
 the host it started on (`host` in the job).

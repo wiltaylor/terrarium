@@ -29,6 +29,7 @@ async fn database() -> Db {
 
 fn request(holder: &str, cpu: u64, queue: bool) -> Request {
     Request {
+        gpus: vec![],
         host: "host".into(),
         project: "p".into(),
         holder: Holder::Target(holder.into()),
@@ -42,6 +43,33 @@ fn request(holder: &str, cpu: u64, queue: bool) -> Request {
         duration_ms: 1_200_000,
         queue_ms: queue.then_some(2_000_000),
     }
+}
+
+#[tokio::test]
+async fn gpu_exclusive_shared_fifo_and_cleanup_accounting() {
+    let db = database().await;
+    db.write("operator", |t| {
+        t.execute("UPDATE hosts SET capabilities=json_set(capabilities,'$.gpus',json(?1)) WHERE name='host'", [r#"[{"uuid":"GPU-abcd","name":"test","memory_bytes":8192,"used_bytes":0}]"#])?;
+        let gpu = |holder: &str, exclusive: bool, vram: u64, queue: bool| {
+            let mut req = request(holder, 0, queue);
+            req.gpus = vec![terrarium_core::resources::GpuClaim { uuid: "GPU-abcd".into(), exclusive, vram_bytes: vram }];
+            req
+        };
+        assert!(r::request(t, gpu("bad", false, 0, false), 0).is_err());
+        assert!(r::request(t, gpu("big", false, 8193, true), 0).is_err());
+        let a = r::request(t, gpu("a", false, 4096, false), 0)?;
+        let b = r::request(t, gpu("b", false, 4096, false), 0)?;
+        assert!(r::request(t, gpu("c", false, 1, false), 0).is_err());
+        assert!(r::request(t, gpu("c", true, 0, false), 0).is_err());
+        let queued = r::request(t, gpu("c", true, 0, true), 0)?;
+        assert_eq!(queued.state, State::Queued);
+        for id in [&a.id, &b.id] { r::end(t, id, false)?; }
+        assert!(r::advance(t, "host", 1)?.is_none());
+        for id in [&a.id, &b.id] { r::finish_end(t, id)?; }
+        assert_eq!(r::advance(t, "host", 2)?.unwrap().id, queued.id);
+        assert!(r::request(t, gpu("d", false, 1, false), 2).is_err());
+        Ok(())
+    }).await.unwrap();
 }
 
 #[tokio::test]

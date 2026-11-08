@@ -75,6 +75,7 @@ fn flow_line(v: &Value) -> String {
 
 fn print_ls(ctx: &Ctx, v: &Value) {
     ctx.line(flow_line(v));
+    print_problems(ctx, &v["problems"]);
     let rows: Vec<Value> = v["rules"]
         .as_array()
         .into_iter()
@@ -127,6 +128,17 @@ fn print_findings(ctx: &Ctx, findings: &Value) {
             field(f, "code"),
             field(f, "column"),
             field(f, "message")
+        ));
+    }
+}
+
+fn print_problems(ctx: &Ctx, problems: &Value) {
+    for p in problems.as_array().into_iter().flatten() {
+        ctx.line(format!(
+            "rules.wcl:{}:{}: {}",
+            field(p, "line"),
+            field(p, "column"),
+            field(p, "message")
         ));
     }
 }
@@ -207,9 +219,12 @@ pub async fn rule(ctx: &Ctx, cmd: &RuleCmd) -> anyhow::Result<()> {
                 if file.is_some() {
                     c.line("check: the file is good");
                 }
+                print_problems(c, &v["problems"]);
                 print_findings(c, &v["findings"]);
             })?;
-            if v["findings"].as_array().is_some_and(|f| !f.is_empty()) {
+            if v["findings"].as_array().is_some_and(|f| !f.is_empty())
+                || v["problems"].as_array().is_some_and(|p| !p.is_empty())
+            {
                 return Err(exit_one());
             }
             Ok(())
