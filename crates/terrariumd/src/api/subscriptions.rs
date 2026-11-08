@@ -107,6 +107,8 @@ impl From<QuotaSample> for WindowView {
 /// A subscription as the API shows it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SubscriptionView {
+    pub session_period: SessionPeriod,
+    pub sessions: Vec<crate::store::session_refs::SubscriptionSession>,
     #[serde(flatten)]
     pub sub: Subscription,
     /// The name for people: `label` when the operator set one, else the
@@ -185,16 +187,48 @@ pub struct AgentOn {
     pub project: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionPeriod {
+    pub since: String,
+    pub until: String,
+}
+
+fn session_period(windows: &[WindowView], now: chrono::DateTime<chrono::Utc>) -> SessionPeriod {
+    use chrono::{Datelike, TimeZone};
+    // Prefer the longest active plan window, not its short burst limit.
+    let window = windows.iter().filter_map(|w| {
+        let duration = match w.window.as_str() {
+            "7d" => chrono::Duration::days(7),
+            "30d" => chrono::Duration::days(30),
+            "5h" => chrono::Duration::hours(5),
+            _ => return None,
+        };
+        let end = chrono::DateTime::parse_from_rfc3339(w.resets_at.as_deref()?).ok()?.with_timezone(&chrono::Utc);
+        let start = end - duration;
+        (start <= now && now < end).then_some((duration, start, end))
+    }).max_by_key(|(duration, _, _)| *duration);
+    let (since, until) = if let Some((_, start, end)) = window {
+        (start, end)
+    } else {
+        let start = chrono::Utc.with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0).single().expect("valid month start");
+        let end = start + chrono::Months::new(1);
+        (start, end)
+    };
+    SessionPeriod { since: since.to_rfc3339(), until: until.to_rfc3339() }
+}
+
 fn view(
     c: &rusqlite::Connection,
     sub: Subscription,
     state_dir: &std::path::Path,
     streams: &crate::stream_limit::StreamGate,
 ) -> ApiResult<SubscriptionView> {
-    let windows = subs::latest_windows(c, &sub.name)?
+    let windows: Vec<WindowView> = subs::latest_windows(c, &sub.name)?
         .into_iter()
         .map(WindowView::from)
         .collect();
+    let session_period = session_period(&windows, chrono::Utc::now());
+    let sessions = crate::store::session_refs::on_subscription(c, &sub.name, &session_period.since, &session_period.until)?;
     let label = subs::label(c, &sub.name)?;
     let display_name = subs::display_name(c, &sub)?;
     let cause = crate::usage_limit::cause(&sub.name);
@@ -221,6 +255,8 @@ fn view(
         .map(|(id, name, project)| AgentOn { id, name, project })
         .collect();
     Ok(SubscriptionView {
+        session_period,
+        sessions,
         display_name,
         label,
         default: subs::is_default(c, &sub.name)?,

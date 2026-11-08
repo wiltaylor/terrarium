@@ -48,6 +48,50 @@ const SELECT: &str = "SELECT s.id, s.agent_id, s.harness_session_id, s.current, 
      LEFT JOIN agents a ON a.id = s.agent_id
      LEFT JOIN agents_removed r ON r.id = s.agent_id";
 
+/// Sessions attributed by usage, including removed ephemeral agents, or by
+/// the live agent when no usage has been collected yet.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SubscriptionSession {
+    #[serde(flatten)]
+    pub session: SessionRef,
+    pub model: Option<String>,
+    pub card: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+}
+
+pub fn on_subscription(
+    conn: &Connection,
+    subscription: &str,
+    since: &str,
+    until: &str,
+) -> ApiResult<Vec<SubscriptionSession>> {
+    let mut stmt = conn.prepare(&format!(
+        "{SELECT}
+         WHERE julianday(s.started_at) >= julianday(?2)
+           AND julianday(s.started_at) < julianday(?3)
+           AND (EXISTS (SELECT 1 FROM usage_samples u
+                WHERE u.agent = s.agent_id
+                  AND u.session IN (s.id, s.harness_session_id) AND u.subscription = ?1)
+             OR (a.subscription = ?1 AND NOT EXISTS (SELECT 1 FROM usage_samples u
+                WHERE u.agent = s.agent_id AND u.session IN (s.id, s.harness_session_id))))
+         ORDER BY julianday(s.started_at) DESC, s.id DESC"
+    ))?;
+    let sessions = stmt.query_map(params![subscription, since, until], row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    sessions.into_iter().map(|s| {
+        let (model, card, input_tokens, output_tokens) = conn.query_row(
+            "SELECT max(model), max(card_id), sum(input_tokens), sum(output_tokens)
+             FROM usage_samples WHERE agent = ?1 AND session IN (?2, ?3)
+               AND subscription = ?4 AND julianday(at) >= julianday(?5)
+               AND julianday(at) < julianday(?6)",
+            params![s.session.agent_id, s.session.id, s.harness_session_id, subscription, since, until],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        Ok(SubscriptionSession { session: s.session, model, card, input_tokens, output_tokens })
+    }).collect()
+}
+
 fn row(r: &Row<'_>) -> rusqlite::Result<SessionRow> {
     Ok(SessionRow {
         session: SessionRef {
@@ -431,6 +475,29 @@ mod tests {
             between
         );
         assert_eq!(link(&c, at(&a, T3)).unwrap().unwrap().id, resumed);
+    }
+
+    #[test]
+    fn subscription_sessions_include_removed_workers_only_in_period() {
+        let c = db();
+        let persistent = agent(&c, "p", "lead");
+        let worker = agent(&c, "p", "card-worker");
+        c.execute("UPDATE agents SET subscription = 'sub'", []).unwrap();
+        let old = session(&c, &persistent, "2026-09-30T23:59:59Z", None);
+        let live = session(&c, &persistent, "2026-10-01T00:00:00Z", None);
+        let ephemeral = session(&c, &worker, "2026-10-02T00:00:00Z", None);
+        c.execute("UPDATE sessions SET harness_session_id = 'harness-id', harness = 'claude' WHERE id = ?1", [&ephemeral]).unwrap();
+        c.execute("INSERT INTO usage_samples (agent, project, subscription, model, input_tokens, output_tokens, cache_read, cache_write, message_id, session, at, card_id)
+            VALUES (?1, 'p', 'sub', 'model', 12, 3, 0, 0, 'msg', 'harness-id', '2026-10-02T00:01:00Z', 'TER-244')", [&worker]).unwrap();
+        c.execute("INSERT INTO agents_removed (id, project, name, removed_at) VALUES (?1, 'p', 'card-worker', '2026-10-03T00:00:00Z')", [&worker]).unwrap();
+        c.execute("DELETE FROM agents WHERE id = ?1", [&worker]).unwrap();
+        let sessions = on_subscription(&c, "sub", "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z").unwrap();
+        assert_eq!(sessions.iter().map(|s| &s.session.id).collect::<Vec<_>>(), vec![&ephemeral, &live]);
+        assert!(!sessions.iter().any(|s| s.session.id == old));
+        assert!(sessions[0].session.removed);
+        assert_eq!(sessions[0].input_tokens, Some(12));
+        assert_eq!(sessions[0].card.as_deref(), Some("TER-244"));
+        assert!(on_subscription(&c, "other", "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z").unwrap().is_empty());
     }
 
     #[test]
