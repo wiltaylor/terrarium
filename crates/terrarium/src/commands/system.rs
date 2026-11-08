@@ -1227,6 +1227,29 @@ fn print_subscription(ctx: &Ctx, v: &Value) {
     }
     let agents = v["agents"].as_array().map_or(0, Vec::len);
     ctx.line(format!("  agents: {agents}"));
+    if let Some(period) = v.get("session_period") {
+        ctx.line(format!(
+            "  sessions: {} – {}",
+            field(period, "since"),
+            field(period, "until")
+        ));
+    }
+    if let Some(sessions) = v["sessions"].as_array() {
+        for s in sessions {
+            ctx.line(format!(
+                "    {}/{} {} {} {} {} {} in / {} out ({})",
+                field(s, "project"),
+                field(s, "agent"),
+                field(s, "harness"),
+                field(s, "model"),
+                field(s, "card"),
+                field(s, "started_at"),
+                field(s, "input_tokens"),
+                field(s, "output_tokens"),
+                field(s, "id")
+            ));
+        }
+    }
 }
 
 /// The subscriptions as a table. `DEFAULT` is `*` on the default account
