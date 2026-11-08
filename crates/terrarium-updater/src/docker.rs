@@ -198,9 +198,16 @@ impl Docker {
             let active = self
                 .exec(id, crate::machine::hot_argv("active", &[]))
                 .await?;
-            if active.code == 0 {
-                image = serde_json::from_str(&active.stdout)
-                    .map_err(|e| format!("invalid active release identity: {e}"))?;
+            if active.code != 0 {
+                return Err(format!(
+                    "cannot read active release identity: {}",
+                    active.reason()
+                ));
+            }
+            if let Some(selected) = serde_json::from_str::<Option<Image>>(&active.stdout)
+                .map_err(|e| format!("invalid active release identity: {e}"))?
+            {
+                image = selected;
             }
         }
         Ok(Container {

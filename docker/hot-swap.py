@@ -73,13 +73,20 @@ def main(argv):
         # Docker restart of this same container preserves the selected release.
         initialized = run / "upgrade-initialized"
         if not initialized.exists():
-            select(root, stage(root))
+            release = stage(root)
+            # The same payload can occur in a different runtime image. A new
+            # container's identity comes from Docker until its first hot swap.
+            (release / "image.json").unlink(missing_ok=True)
+            select(root, release)
             (root / "probation").unlink(missing_ok=True)
             initialized.touch()
     elif command == "stage":
         print(stage(root, json.loads(argv[1])).name)
     elif command == "active":
-        print((root / "current" / "image.json").read_text())
+        try:
+            print((root / "current" / "image.json").read_text())
+        except FileNotFoundError:
+            print("null")
     elif command == "probe":
         if (run / "upgrade-pause").exists() or (root / "probation").exists():
             raise RuntimeError("unfinished upgrade requires recovery before another update")

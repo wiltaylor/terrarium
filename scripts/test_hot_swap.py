@@ -45,8 +45,10 @@ class HotSwapTests(unittest.TestCase):
         HOT.main(["init"])
         self.assertEqual((releases / "current").resolve(), other)
         (self.run / "upgrade-initialized").unlink()
+        (releases / ("a" * 64) / "image.json").write_text('{"reference":"stale-base"}')
         HOT.main(["init"])
         self.assertEqual((releases / "current").resolve().name, "a" * 64)
+        self.assertFalse((releases / "current/image.json").exists())
 
     def test_database_rollback_preserves_runner_files_and_probation(self):
         HOT.main(["init"])
