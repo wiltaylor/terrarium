@@ -1473,7 +1473,7 @@ async fn queued(
         .await?;
     let redactor = state.db.redactor().get();
     let view = crate::secrets::redact::view_of(&actor);
-    let items: Vec<QueuedView> = turns
+    let mut items: Vec<QueuedView> = turns
         .into_iter()
         .map(|t| {
             let text = redactor.redact_string_as(t.text, &view).0;
@@ -1486,6 +1486,17 @@ async fn queued(
             }
         })
         .collect();
+    let live = state.supervisor.list_pending(agent_id(&a)).await.map_err(supervisor_error)?;
+    for turn in live {
+        let text = redactor.redact_string_as(turn.text, &view).0;
+        items.push(QueuedView {
+            id: i64::try_from(turn.id).map_err(|_| ApiError::internal("delivery ID exceeds API range"))?,
+            source: turn.source,
+            body: untagged(&text).to_owned(),
+            text,
+            created_at: String::new(),
+        });
+    }
     Ok(Json(json!({"items": items})))
 }
 
@@ -1502,15 +1513,26 @@ async fn remove_queued(
 ) -> ApiResult<StatusCode> {
     let a = load(&state, &actor, id).await?;
     if let Some(s) = q.source.as_deref()
-        && s != QUEUE_STORE
+        && ![QUEUE_STORE, "supervisor", "runner"].contains(&s)
     {
         return Err(ApiError::invalid(format!(
-            "unknown queue `{s}`: give `store` (the source of the turn in the list)"
+            "unknown queue `{s}`: give the source of the turn in the list"
         )));
     }
     policy::admin_project(&actor, &a.agent.project, "removing a queued turn")?;
     let lock = state.lifecycle.turn_lock(agent_id(&a));
     let _held = lock.lock().await;
+    if let Some(source @ ("runner" | "supervisor")) = q.source.as_deref() {
+        let delivery = u64::try_from(turn).map_err(|_| ApiError::invalid("invalid delivery ID"))?;
+        if !state.supervisor.cancel_pending(agent_id(&a), source, delivery).await.map_err(supervisor_error)? {
+            return Err(ApiError::not_found("turn no longer waits for the agent"));
+        }
+        let (key, project, source) = (a.agent.id.to_string(), a.agent.project.clone(), source.to_owned());
+        state.db.write(actor.label(), move |t| {
+            t.audit("agent.queued.remove", &key, Some(&project), json!({"turn": turn, "source": source}))
+        }).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let (key, project) = (a.agent.id.to_string(), a.agent.project.clone());
     let removed = state
         .db

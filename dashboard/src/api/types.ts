@@ -17,7 +17,7 @@ export const AGENT_STATUSES = [
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
 /** The queue of a queued turn. */
-export type QueuedSource = "store";
+export type QueuedSource = "store" | "supervisor" | "runner";
 
 /** One turn that waits in the store for its agent's wake (`GET /api/agents/{id}/queued`, TER-54). */
 export interface QueuedTurn {

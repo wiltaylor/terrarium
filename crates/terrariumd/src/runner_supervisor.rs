@@ -982,7 +982,7 @@ struct Slot {
     /// queued turns of a wake, PLAN §18). They go out at the first idle,
     /// after the recap turn. A stop before then keeps them for the next
     /// launch.
-    turns: Vec<String>,
+    turns: Vec<crate::supervisor::PendingTurn>,
     /// The harness version that the last launch resolved; `None` when the
     /// harness came from `PATH`.
     harness_version: Option<String>,
@@ -1926,7 +1926,7 @@ impl RunnerSupervisor {
         slot.start_reason = Some(plan.reason);
         slot.recap = plan.recap;
         if let Some(then) = plan.then {
-            slot.turns.insert(0, then);
+            slot.turns.insert(0, then.into());
         }
         slot.reset_gate = false;
     }
@@ -2774,7 +2774,7 @@ impl RunnerSupervisor {
             };
             let deliveries: Vec<_> = turns
                 .into_iter()
-                .map(|text| runner.type_turn(text))
+                .map(|turn| runner.type_turn(turn.text))
                 .collect();
             if let Some(delivery) = recap
                 && let Err(e) = delivery.wait().await
@@ -2823,7 +2823,7 @@ impl RunnerSupervisor {
             let c = slot.compacting.take()?;
             // The prompt of the actor that asked goes first.
             if let Some(then) = &c.then {
-                slot.turns.insert(0, then.turn(&end));
+                slot.turns.insert(0, then.turn(&end).into());
             }
             end.work = !slot.turns.is_empty() || slot.recap.is_some() || !slot.pointer.is_empty();
             (c.done, slot.runner.clone())
@@ -4165,6 +4165,42 @@ impl RunnerSupervisor {
 }
 
 impl Supervisor for RunnerSupervisor {
+    fn list_pending(&self, agent: AgentId) -> BoxFuture<'_, Result<Vec<crate::supervisor::PendingTurn>, SupervisorError>> {
+        Box::pin(async move {
+            let (mut turns, runner) = {
+                let slots = lock(&self.inner.slots);
+                let Some(slot) = slots.get(&agent) else { return Ok(Vec::new()); };
+                (slot.turns.clone(), slot.runner.clone())
+            };
+            if let Some(runner) = runner {
+                let mut running: Vec<_> = runner.list_pending().await.map_err(other)?.into_iter()
+                    .map(|t| crate::supervisor::PendingTurn { id: t.id, text: t.text, source: "runner" }).collect();
+                running.append(&mut turns);
+                turns = running;
+            }
+            Ok(turns)
+        })
+    }
+
+    fn cancel_pending(&self, agent: AgentId, source: &str, id: u64) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+        let source = source.to_owned();
+        Box::pin(async move {
+            let runner = {
+                let mut slots = lock(&self.inner.slots);
+                let Some(slot) = slots.get_mut(&agent) else { return Ok(false); };
+                if source == "supervisor" {
+                    let Some(index) = slot.turns.iter().position(|t| t.id == id) else { return Ok(false); };
+                    slot.turns.remove(index);
+                    return Ok(true);
+                }
+                slot.runner.clone()
+            };
+            match runner {
+                Some(runner) if source == "runner" => runner.cancel_pending(id).await.map_err(other),
+                _ => Ok(false),
+            }
+        })
+    }
     fn harness_versions(&self, refresh: bool) -> BoxFuture<'_, HarnessReport> {
         Box::pin(async move {
             let mut harnesses = Vec::new();
@@ -4361,7 +4397,7 @@ impl Supervisor for RunnerSupervisor {
                     .get_mut(&agent)
                     .filter(|s| !s.reached_idle || s.compacting.is_some() || s.reset_gate)
                 {
-                    slot.turns.push(text);
+                    slot.turns.push(text.into());
                     return Ok(());
                 }
                 // The stream limit (`crate::stream_limit`): with no free
@@ -4370,7 +4406,7 @@ impl Supervisor for RunnerSupervisor {
                 if let Some(slot) = slots.get_mut(&agent) {
                     let sub = slot.agent.subscription.clone();
                     if !self.stream_take(agent, sub.as_deref()) {
-                        slot.turns.push(text);
+                        slot.turns.push(text.into());
                         return Ok(());
                     }
                     slot.turns_in_flight += 1;
@@ -4796,7 +4832,7 @@ impl Supervisor for RunnerSupervisor {
                     };
                     let runner = slots.get(&agent).and_then(|s| s.runner.clone());
                     if let Some(slot) = slots.get_mut(&agent).filter(|_| runner.is_some()) {
-                        slot.turns.extend(held.waiting.iter().cloned());
+                        slot.turns.extend(held.waiting.iter().cloned().map(crate::supervisor::PendingTurn::from));
                     }
                     (held, runner)
                 };

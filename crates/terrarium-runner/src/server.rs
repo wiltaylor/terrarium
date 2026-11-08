@@ -526,6 +526,11 @@ impl Conn {
                 }
                 Err(e) => Err(e),
             },
+            "list_pending" => to_value(&runner.list_pending()),
+            "cancel_pending" => match p.get("delivery").and_then(Value::as_u64) {
+                Some(delivery) => Ok(json!(runner.cancel_pending(delivery))),
+                None => Err(RpcError::new("invalid_params", "delivery must be an unsigned integer")),
+            },
             "status" => Ok(json!({ "status": runner.status() })),
             "screen" => to_value(&WireSnapshot::from(&runner.screen())),
             "write" => match params::<WriteParams>(p)
