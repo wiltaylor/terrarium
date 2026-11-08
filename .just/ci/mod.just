@@ -68,9 +68,10 @@ lint: require-cargo
 install-nextest: require-cargo
 	#!/usr/bin/env bash
 	set -euo pipefail
-	if [ "$(cargo nextest --version 2>/dev/null || true)" != 'cargo-nextest 0.9.103' ]; then
-		cargo install cargo-nextest --version 0.9.103 --locked
-	fi
+	case "$(cargo nextest --version 2>/dev/null || true)" in
+		'cargo-nextest 0.9.103 ('*) ;;
+		*) cargo install cargo-nextest --version 0.9.103 --locked ;;
+	esac
 
 # Parallel unit/integration tests and separate doctests. RESULTS_DIR retains rust.json.
 [group('ci')]
