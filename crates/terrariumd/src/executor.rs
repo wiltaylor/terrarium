@@ -2398,7 +2398,7 @@ async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> A
     .await?;
     let mut rt = runtime_of(state, &def.name).await?;
     rt.recreate_required = false;
-    rt.docker_settings = Some(targets::DockerSettings::of(def));
+    rt.docker_settings = (!def.ephemeral).then(|| targets::DockerSettings::of(def));
     store_runtime(state, &def.name, rt).await?;
     Ok(())
 }
@@ -2852,6 +2852,10 @@ pub async fn lifecycle(
             if let Some(a) = attached {
                 let mut rt = targets::get(t, &name)?.runtime;
                 rt.attached = a;
+                if st == "absent" {
+                    rt.docker_settings = None;
+                    rt.recreate_required = false;
+                }
                 targets::set_runtime(t, &name, &rt)?;
             }
             Ok(())
