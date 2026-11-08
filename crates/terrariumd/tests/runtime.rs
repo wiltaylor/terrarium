@@ -5,7 +5,7 @@
 //! RPC tunnel, and long-poll.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -738,6 +738,109 @@ async fn delete_moves_the_agent_dir_to_the_trash() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn project_inbox_mail_reaches_lead_as_a_turn() {
+    let td = Td::start().await;
+    td.agent("source", "worker", json!({})).await;
+    let id = td
+        .agent("destination", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    // A project inbox event must wake its stopped lead automatically.
+    let (status, m) = td
+        .req(
+            Method::POST,
+            "/api/mail",
+            Some(
+                json!({"to": "project:destination", "subject": "release", "body": "deploy notes"}),
+            ),
+            Some("source/worker"),
+        )
+        .await;
+    assert_eq!(status, 201);
+    assert_eq!(m["state"], "queued");
+    let mid = m["id"].as_str().unwrap();
+    let want = format!(
+        "[Mailbox:source/worker] Subject: release (thread {}, message {mid})\n> deploy notes",
+        m["thread_id"].as_str().unwrap()
+    );
+    td.wait_events(&id, "turn_start", |es| {
+        es.iter().any(|e| e["data"]["prompt"] == want)
+    })
+    .await;
+    td.wait_status(&id, "idle").await;
+    assert_eq!(td.get(&format!("/api/mail/{mid}")).await["read_by"], id);
+    // A live event must route to the same lead without rewriting the inbox address.
+    let (status, live) = td
+        .req(
+            Method::POST,
+            "/api/projects/destination/inbox",
+            Some(json!({"body": "live notes"})),
+            Some("source/worker"),
+        )
+        .await;
+    assert_eq!(status, 201);
+    let live_id = live["id"].as_str().unwrap();
+    td.wait_events(&id, "turn_start", |es| {
+        es.iter().any(|e| {
+            e["data"]["prompt"]
+                .as_str()
+                .is_some_and(|p| p.contains(live_id) && p.contains("> live notes"))
+        })
+    })
+    .await;
+    assert_eq!(live["to"], "project:destination");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_project_mail_survives_restart_and_wakes_stopped_lead() {
+    let mut td = Td::start().await;
+    td.agent("source", "worker", json!({})).await;
+    let id = td
+        .agent("destination", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    // Pause the stopped lead so the live event cannot deliver the message.
+    td.post(&format!("/api/agents/{id}/pause"), None).await;
+    assert_eq!(td.status(&id).await, "stopped");
+    let (status, mail) = td
+        .req(
+            Method::POST,
+            "/api/mail",
+            Some(json!({"to": "project:destination", "body": "queued release"})),
+            Some("source/worker"),
+        )
+        .await;
+    assert_eq!(status, 201);
+    assert_eq!(mail["state"], "queued");
+    let key = id.clone();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(move |c| {
+            assert_eq!(terrariumd::store::agents::queued_count(c, &key)?, 1);
+            assert!(terrariumd::store::agents::with_queued_work(c)?.contains(&key));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // Discard the supervisor's in-memory live pointer, then wake from stored work.
+    td.restart_daemon().await;
+    assert_eq!(td.status(&id).await, "stopped");
+    td.post(&format!("/api/agents/{id}/unpause"), None).await;
+    let mid = mail["id"].as_str().unwrap();
+    td.wait_events(&id, "turn_start", |es| {
+        es.iter().any(|e| {
+            e["data"]["prompt"]
+                .as_str()
+                .is_some_and(|p| p.contains(mid) && p.contains("> queued release"))
+        })
+    })
+    .await;
+    td.wait_status(&id, "idle").await;
+    assert_eq!(td.get(&format!("/api/mail/{mid}")).await["read_by"], id);
+}
+
+#[tokio::test]
 async fn mail_and_cards_push_a_pointer() {
     let td = Td::start().await;
     let id = td.agent("demo", "bob", json!({})).await;
@@ -906,11 +1009,8 @@ async fn local_repos_bind_into_the_sandbox_of_their_project_only() {
         );
         let line = a.join(" ");
         assert!(!line.contains(&outside.display().to_string()), "{line}");
-        assert_eq!(spec.env["GIT_AUTHOR_NAME"], agent.name);
-        assert_eq!(
-            spec.env["GIT_COMMITTER_EMAIL"],
-            format!("{}.{}@terrarium.invalid", agent.name, agent.project)
-        );
+        assert_eq!(spec.env["GIT_AUTHOR_NAME"], "Terrarium");
+        assert_eq!(spec.env["GIT_COMMITTER_EMAIL"], "terrarium@localhost");
     }
 }
 
@@ -1113,6 +1213,17 @@ async fn board_changes_nudge_the_project_leads() {
     let olead = td
         .agent("other", "olead", json!({"roles": ["project_admin"]}))
         .await;
+    // Isolate the rate-limited nudge turns from immediate human-comment
+    // mail, which would otherwise be the second turn before the interval.
+    let (status, body) = td
+        .req(
+            Method::PATCH,
+            "/api/projects/demo",
+            Some(json!({"human_comment_notifications": false})),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
     for id in [&lead, &bob, &olead] {
         td.post(&format!("/api/agents/{id}/start"), None).await;
     }

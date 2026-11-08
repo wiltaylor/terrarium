@@ -7,7 +7,7 @@
 //! only the linked cards whose project it reads.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use serde_json::{Value, json};

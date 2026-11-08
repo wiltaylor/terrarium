@@ -10,6 +10,7 @@ pub mod config;
 pub mod db;
 pub mod events;
 pub mod fleet;
+pub mod groups;
 pub mod inspect;
 pub mod jobs;
 pub mod knowledge;
@@ -52,6 +53,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Reserve { command } => reservations::run(ctx, command).await,
         Command::Daemon { command } => system::daemon(ctx, command).await,
         Command::Whoami => system::whoami(ctx).await,
+        Command::Group { command } => groups::group(ctx, command).await,
         Command::Login {
             password_stdin,
             insecure_http,

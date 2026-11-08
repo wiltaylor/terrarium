@@ -3,7 +3,7 @@
 //! of a file edited by hand, and the older `prompts/` personas.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

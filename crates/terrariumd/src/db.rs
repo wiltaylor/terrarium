@@ -2488,7 +2488,51 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (owner, href)
     );
     "#,
-    // 94: host resource budgets and durable FIFO reservations (TER-249).
+    // 94: Board groups (TER-180). Self-contained, append after concurrent migrations.
+    r#"
+    ALTER TABLE cards ADD COLUMN kind TEXT NOT NULL DEFAULT 'card'
+        CHECK(kind IN ('card', 'group'));
+    CREATE TABLE card_groups (
+        card TEXT PRIMARY KEY REFERENCES cards(id) ON DELETE CASCADE,
+        project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        key TEXT NOT NULL,
+        rule TEXT NOT NULL,
+        done_when TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT '',
+        eta_jobs INTEGER NOT NULL DEFAULT 0,
+        close_at TEXT,
+        closed_at TEXT,
+        UNIQUE(project, key)
+    );
+    CREATE TABLE group_members (
+        group_card TEXT NOT NULL REFERENCES card_groups(card) ON DELETE CASCADE,
+        card TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        PRIMARY KEY(group_card, card)
+    );
+    CREATE INDEX group_members_card ON group_members(card);
+    CREATE TABLE group_steps (
+        group_card TEXT NOT NULL REFERENCES card_groups(card) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending', 'running', 'done', 'failed')),
+        text TEXT NOT NULL DEFAULT '',
+        eta_at TEXT,
+        PRIMARY KEY(group_card, name)
+    );
+    "#,
+    // 95: Operator preferences (TER-253). Self-contained migration.
+    r#"
+    CREATE TABLE operator_preferences (
+        owner TEXT PRIMARY KEY,
+        default_agent TEXT REFERENCES agents(id) ON DELETE SET NULL
+    );
+    "#,
+    // 96: built-in human card comment delivery (TER-254).
+    r#"
+    ALTER TABLE projects ADD COLUMN human_comment_notifications INTEGER NOT NULL DEFAULT 1;
+    "#,
+    // 97: host resource budgets and durable FIFO reservations (TER-249).
     // Self-contained: move to the end if another branch takes this number.
     r#"
     CREATE TABLE resource_budgets (

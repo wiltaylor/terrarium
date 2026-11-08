@@ -6,7 +6,9 @@
 // `board_flow = "code"` (the default) the daemon runs the same flow in
 // code and this pack does not run.
 //
-// The pack does what the coded flow does (jobs.rs, api/jobs.rs, bound.rs),
+// Version cuts are rules-only: they require board_flow = "rules" (or
+// explicitly copying the rule into rules.wcl). There is no coded version cut.
+// Otherwise the pack does what the coded flow does (jobs.rs, api/jobs.rs, bound.rs),
 // with the same labels, comments, moves, and mails. One change: a red
 // merge group gets a fix card first and splits only after three fix cards
 // (the operator's rule of 2026-11-07, MEM-84). The texts of the job queue
@@ -21,6 +23,15 @@
 
 // ------------------------------------------------------------ the queue
 
+rule "version-cut" {
+  description = "Freeze accepted cards for a version and mail the lead at 6 cards or 4 hours. Git and release numbering stay with the lead."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to_role" { eq = "accepted" }
+  version_cut { min_cards = 6 max_wait_minutes = 240 }
+}
+
 rule "merge-queued" {
   description = "A new merge job: the label and the queue comment on each card. No move."
   on = ["job"]
@@ -30,6 +41,10 @@ rule "merge-queued" {
   when "data.origin" { eq = "queue" }
   card_label { add = ["validation:queued"] }
   card_comment { text = "{{job.queue_comment}}" }
+  group_open { key = "{{job.group_key}}" title = "Merge {{job.id}} (full suite)" column = "@review" done_when = "@accepted" eta = "jobs" }
+  group_add { key = "{{job.group_key}}" }
+  group_status { key = "{{job.group_key}}" step = "queued" state = "done" }
+  group_status { key = "{{job.group_key}}" step = "merged (full suite passed)" state = "pending" }
 }
 
 rule "job-started" {
@@ -41,6 +56,22 @@ rule "job-started" {
     remove = ["validation:queued"]
     add = ["validation:running"]
   }
+}
+
+rule "merge-group-started" {
+  on = ["job"]
+  max_per_hour = 600
+  when "data.change" { eq = "started" }
+  when "data.kind" { eq = "merge" }
+  group_status { key = "{{job.group_key}}" step = "merged (full suite passed)" state = "running" }
+}
+
+rule "merge-group-failed" {
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.kind" { eq = "merge" }
+  when "data.verdict" { one_of = ["red", "conflict", "error", "cancelled"] }
+  group_status { key = "{{job.group_key}}" step = "merged (full suite passed)" state = "failed" }
 }
 
 rule "job-requeued" {
@@ -80,6 +111,8 @@ rule "merge-pass" {
     comment = "{{job.end_comment}}"
   }
   card_assign { who = "none" }
+  group_status { key = "{{job.group_key}}" step = "merged (full suite passed)" state = "done" }
+  group_close { key = "{{job.group_key}}" all_done = true comment = "All members merged (full suite passed)." }
 }
 
 rule "job-rerun-error" {

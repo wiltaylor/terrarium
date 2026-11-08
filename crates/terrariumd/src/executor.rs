@@ -1539,6 +1539,7 @@ pub(crate) fn track_resource_run(
     });
     let (tx, events) = mpsc::channel(16);
     tokio::spawn(async move {
+        let mut sent_end = false;
         while let Some(mut event) = run.events.recv().await {
             let ended = matches!(event, Ev::End(_));
             if let Ev::End(end) = &mut event {
@@ -1552,6 +1553,7 @@ pub(crate) fn track_resource_run(
                 break;
             }
             if ended {
+                sent_end = true;
                 break;
             }
         }
@@ -1559,6 +1561,9 @@ pub(crate) fn track_resource_run(
             "lost",
             "the internal command ended without an end",
         ));
+        if !sent_end && let Some(end) = session.end() {
+            let _ = tx.send(Ev::End(end)).await;
+        }
         control_task.abort();
         if let Some(executor) = weak.upgrade() {
             executor.table().remove(&session.id);
@@ -1834,6 +1839,15 @@ async fn start_exec_secrets(
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
     let mut cmd = cmd;
     cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
+    // VMLab's exec protocol cannot carry an environment.
+    if def.kind != TargetKind::Vmlab
+        && let Some(a) = actor.agent()
+    {
+        let p = crate::git_identity::provenance(state, &a.id).await?;
+        p.identity.env(&mut cmd.env);
+        cmd.env.insert("TERRARIUM_GIT_TRAILERS".into(), p.trailers);
+        cmd.env.remove("TERRARIUM_GIT_TRAILERS_FILE");
+    }
     let resources = state.executor.resource_lock.lock().await;
     let (run, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
@@ -4601,6 +4615,16 @@ else
   forget
   action=cloned
 fi
+if [ -n "${TERRARIUM_COMMIT_HOOK:-}" ] && [ "$action" != not_updated ]; then
+  [ ! -L "$dest/.git" ] && [ ! -L "$dest/.git/hooks" ] || exit 2
+  mkdir -p "$dest/.git/hooks"
+  hook_tmp=$(mktemp "$dest/.git/hooks/.terrarium-commit.XXXXXX")
+  printf '%s' "$TERRARIUM_COMMIT_HOOK" > "$hook_tmp"
+  chmod 755 "$hook_tmp"
+  mv -f "$hook_tmp" "$dest/.git/hooks/prepare-commit-msg"
+  G -C "$dest" config user.name "$TERRARIUM_COMMIT_NAME"
+  G -C "$dest" config user.email "$TERRARIUM_COMMIT_EMAIL"
+fi
 head=$(G -C "$dest" rev-parse -q --verify HEAD || true)
 cur=$(G -C "$dest" symbolic-ref --short -q HEAD || true)
 printf 'TERRARIUM_CHECKOUT\taction=%s\thead=%s\tbranch=%s\tpath=%s\tnote=%s\n' "$action" "$head" "$cur" "$dest" "$note"
@@ -4710,6 +4734,14 @@ pub async fn checkout_on_target(
         ));
     }
     let mut cmd = checkout_cmd(url, dest, branch, depth, secret)?;
+    if let Some(a) = actor.agent() {
+        let p = crate::git_identity::provenance(state, &a.id).await?;
+        cmd.env.insert("TERRARIUM_COMMIT_HOOK".into(), p.hook());
+        cmd.env
+            .insert("TERRARIUM_COMMIT_NAME".into(), p.identity.name);
+        cmd.env
+            .insert("TERRARIUM_COMMIT_EMAIL".into(), p.identity.email);
+    }
     if let Some(k) = git_known_hosts(state) {
         cmd.env.insert("TERRARIUM_GIT_KNOWN_HOSTS".into(), k);
     }

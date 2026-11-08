@@ -4,7 +4,7 @@
 //! scan, the packaged defaults, and a sync of two instances.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

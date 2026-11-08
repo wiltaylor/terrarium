@@ -1,7 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-mod common;
-
-use common::TestDaemon;
+use crate::common::TestDaemon;
 use serde_json::json;
 use std::time::Duration;
 use terrarium_core::{

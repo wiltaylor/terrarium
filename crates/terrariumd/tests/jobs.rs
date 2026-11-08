@@ -13,7 +13,7 @@
 //! two boards of one scenario field by field.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1101,6 +1101,14 @@ async fn the_config_is_checked_and_audited() {
     .await
     .err(403, "forbidden");
     // Bad values.
+    for pattern in ["", " \t"] {
+        td.put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "failure_patterns": [pattern]}),
+        )
+        .await
+        .err(422, "invalid");
+    }
     td.put(
         "/api/projects/p/delivery",
         json!({"target": "p-box", "slots": 0}),
@@ -2030,7 +2038,13 @@ test -f OK"#;
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     dirs.sort();
-    assert_eq!(dirs, ["slot-1", "slot-2"]);
+    assert_eq!(dirs, ["logs", "slot-1", "slot-2"]);
+    // Logs belong to jobs, not slots, and survive later slot checkouts.
+    for job in &jobs {
+        let id = job["id"].as_str().unwrap();
+        let attempt = job["attempt"].as_i64().unwrap();
+        assert!(wd.join(format!("p/logs/{id}-{attempt}.log")).is_file());
+    }
 
     let job = merge_with_recipe(
         &lab,
@@ -2040,6 +2054,47 @@ test -f OK"#;
     .await;
     assert_eq!(job["state"], "passed", "{job:#}");
     assert_eq!(job["slot"], 0, "{job:#}");
+}
+
+#[tokio::test]
+async fn a_failed_job_keeps_the_full_log_and_puts_early_panics_on_the_card() {
+    let lab = lab(1).await;
+    let recipe = r#"printf 'test early_failure ... FAILED\n'
+printf "thread 'early_failure' panicked at test.rs:1:2:\nexpected value\n" >&2
+i=0; while [ "$i" -lt 2000 ]; do printf 'unrelated build noise\n'; i=$((i + 1)); done
+exit 101"#;
+    let job = merge_with_recipe(&lab, "ter-log-failure", recipe).await;
+    assert_eq!(job["state"], "failed", "{job:#}");
+    assert_eq!(job["exit_code"], 101, "{job:#}");
+    let id = job["id"].as_str().unwrap();
+    let attempt = job["attempt"].as_i64().unwrap();
+    let log = lab
+        ._dirs
+        .path()
+        .join(format!("jobs/p/logs/{id}-{attempt}.log"));
+    let full = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(full.matches("unrelated build noise").count(), 2000);
+    assert!(full.contains("expected value"));
+    let shown = lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+    let tail = shown["tail"].as_str().unwrap();
+    assert!(tail.contains(&log.display().to_string()), "{tail}");
+    assert!(tail.contains("Full log on target p-box:"), "{tail}");
+    let card = lab
+        .until_card(job["card"].as_str().unwrap(), "failure block", |c| {
+            c["body"]
+                .as_str()
+                .is_some_and(|body| body.starts_with("Validation failed:"))
+        })
+        .await;
+    let body = card["body"].as_str().unwrap();
+    for expected in [
+        "test early_failure ... FAILED",
+        "panicked at test.rs:1:2",
+        "expected value",
+        "Full log on target p-box:",
+    ] {
+        assert!(body.contains(expected), "missing {expected}: {body}");
+    }
 }
 
 /// Queue a merge of a new card on `branch` with `recipe`, wait for the
@@ -2124,7 +2179,8 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
 
 /// TER-103: the target holds no credential and no push repo. The recipe
 /// of a merge finds no `.ssh` or `.push` dir beside its clone, no git
-/// credential env, and no remote in its clone. It deletes the job ref in
+/// credential env, and no remote in its clone. `TERRARIUM_GIT_REF` is a
+/// public build stamp, not a credential. It deletes the job ref in
 /// its clone, and the merge still pushes the recorded commit: the push
 /// runs from the daemon's repo.
 #[tokio::test]
@@ -2133,7 +2189,7 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
     let before = git(&lab.origin, &["rev-parse", "next"]);
     let recipe = "test -f OK \
          && ! ls -a .. | grep -E '[.](ssh|push)$' \
-         && ! env | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
+         && ! env | grep -v '^TERRARIUM_GIT_REF=' | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
          && test -z \"$(git remote)\" \
          && test \"$(git rev-parse refs/job/merge)\" = \"$(git rev-parse HEAD)\" \
          && git update-ref -d refs/job/merge \
@@ -2147,12 +2203,77 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
         git(&lab.origin, &["log", "-1", "--format=%s", "next"]),
         "Merge ter-m3 onto next"
     );
-    // The daemon removed its repo of the job.
+    // The daemon keeps its repository, but removes the job's bundle.
     let state_jobs = lab.td.daemon.as_ref().unwrap().state.state_dir.join("jobs");
     let left: Vec<_> = std::fs::read_dir(state_jobs.join("p"))
         .map(|d| d.flatten().map(|e| e.file_name()).collect())
         .unwrap_or_default();
-    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(left, [std::ffi::OsString::from("repos")]);
+    let cached = state_jobs.join("p/repos/app.git");
+    assert_eq!(git(&cached, &["rev-parse", &next]), next);
+    git(&cached, &["update-ref", "refs/test/retained", &next]);
+    lab.branch("ter-m4", "next", &[("SECOND", "yes\n")]);
+    let card = lab.card("ter-m4", "ter-m4").await;
+    lab.td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await
+        .ok();
+    let second = lab
+        .until_idle()
+        .await
+        .into_iter()
+        .find(|j| j["card"] == card.as_str())
+        .unwrap();
+    assert_eq!(second["state"], "passed", "{second:#}");
+    assert_eq!(git(&cached, &["rev-parse", "refs/test/retained"]), next);
+    assert_eq!(
+        git(&cached, &["rev-parse", "refs/job/merge"]),
+        second["head"].as_str().unwrap()
+    );
+    let repos: Vec<_> = std::fs::read_dir(state_jobs.join("p/repos"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(repos, [std::ffi::OsString::from("app.git")]);
+}
+
+/// A crash can leave a lock or broken ref in the daemon's persistent
+/// cache. The next job rebuilds it, fetches, and merges successfully.
+#[tokio::test]
+async fn the_next_job_recovers_a_damaged_daemon_repo() {
+    let lab = lab(2).await;
+    let first = merge_with_recipe(&lab, "ter-cache", "test -f OK").await;
+    assert_eq!(first["state"], "passed", "{first:#}");
+    let cached = lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .state_dir
+        .join("jobs/p/repos/app.git");
+    for (i, damage) in ["index.lock", "refs/job/broken"].iter().enumerate() {
+        std::fs::write(cached.join(damage), "interrupted").unwrap();
+        let branch = format!("ter-recover-{i}");
+        lab.branch(&branch, "next", &[(&branch, "new\n")]);
+        let card = lab.card(&branch, &branch).await;
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .await
+            .ok();
+        let job = lab
+            .until_idle()
+            .await
+            .into_iter()
+            .find(|j| j["card"] == card.as_str())
+            .unwrap();
+        assert_eq!(job["state"], "passed", "{damage}: {job:#}");
+        assert!(!cached.join(damage).exists());
+        assert_eq!(
+            git(&cached, &["rev-parse", "refs/job/merge"]),
+            job["head"].as_str().unwrap()
+        );
+    }
 }
 
 /// TER-159: merges have their own lane. With 1 slot, a validate job queued
@@ -2316,7 +2437,7 @@ async fn docker_lab_flow(
     assert_eq!(r.status, 201, "{}", r.body);
     let child_file = bins.path().join("children");
     let recipe = format!(
-        "trap '' TERM; sleep 300 & echo $! >> '{}'; wait",
+        "printf 'test interrupted ... FAILED\\npanic output before kill\\n'; trap '' TERM; sleep 300 & echo $! >> '{}'; wait",
         child_file.display()
     );
     let work_dir = bins.path().join("jobs");
@@ -2374,6 +2495,8 @@ async fn a_job_timeout_ends_every_process_of_the_recipe() {
     let tail = j["tail"].as_str().unwrap_or("");
     assert!(tail.contains("timeout"), "{j}");
     assert!(tail.contains("killed on the target"), "{j}");
+    assert!(tail.contains("test interrupted ... FAILED"), "{j}");
+    assert!(tail.contains("panic output before kill"), "{j}");
     // The rerun times out the same way.
     let jobs = lab.until_idle().await;
     assert_eq!(jobs.len(), 2, "{jobs:?}");
@@ -2421,6 +2544,23 @@ async fn a_cancel_ends_every_process_before_the_next_job_starts() {
         while alive(p) {
             assert!(start.elapsed() < DEADLINE, "the child {p} outlived its job");
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    // Cancellation keeps its state but receives the final retained output
+    // once the killed recipe has drained and the separate log read ends.
+    for id in ids {
+        let start = Instant::now();
+        loop {
+            let j = lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+            assert_eq!(j["state"], "cancelled");
+            let tail = j["tail"].as_str().unwrap_or("");
+            if tail.contains("panic output before kill") {
+                assert!(tail.contains("test interrupted ... FAILED"), "{j}");
+                assert!(tail.contains("Full log on target p-dbox:"), "{j}");
+                break;
+            }
+            assert!(start.elapsed() < DEADLINE, "cancelled log missing: {j}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 }
@@ -3017,11 +3157,24 @@ async fn flow_scenario(flow: &'static str) -> Value {
     let sha = regex::Regex::new(r"\b[0-9a-f]{7,40}\b").unwrap();
     let time = regex::Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})")
         .unwrap();
+    // Rules allocate group headers from the card sequence. Compare the
+    // original work cards by scenario identity, not their sequence gaps.
+    let work_cards = [&first, &a, &b, &c, &d, &e, &f1, &f2, &f3];
+    let card_id = regex::Regex::new(r"\bP-\d+\b").unwrap();
     let neutral = |text: &str| -> String {
         let t = text.replace(&dir, "<DIR>");
         let t = time.replace_all(&t, "<TIME>");
         let t = ulid.replace_all(&t, "<ID>");
-        sha.replace_all(&t, "<SHA>").into_owned()
+        let t = sha.replace_all(&t, "<SHA>");
+        card_id
+            .replace_all(&t, |caps: &regex::Captures<'_>| {
+                work_cards
+                    .iter()
+                    .position(|id| id.as_str() == &caps[0])
+                    .map(|i| format!("<CARD-{i}>"))
+                    .unwrap_or_else(|| caps[0].to_owned())
+            })
+            .into_owned()
     };
     let mut board = lab.td.get("/api/projects/p/board").await.ok().clone();
     // The split halves can finish in either order: in rules mode a
@@ -3030,6 +3183,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
     // order, but retain its positions relative to every other card.
     // In particular, neither card may overtake the earlier green merge.
     let board_cards = board["cards"].as_array_mut().unwrap();
+    board_cards.retain(|card| card["kind"] != "group");
     let cohort: Vec<usize> = board_cards
         .iter()
         .enumerate()
@@ -3040,7 +3194,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
     for &i in &cohort {
         assert_eq!(board_cards[i]["column"], "accepted");
     }
-    if board_cards[cohort[0]]["id"].as_str() > board_cards[cohort[1]]["id"].as_str() {
+    if board_cards[cohort[0]]["id"] != f1 {
         board_cards.swap(cohort[0], cohort[1]);
     }
     let accepted: Vec<&str> = board_cards
@@ -3067,7 +3221,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
             .map(|c| neutral(c["body"].as_str().unwrap_or("")))
             .collect();
         cards.push(json!({
-            "id": id, "column": card["column"], "position": position, "labels": l,
+            "id": neutral(id), "column": card["column"], "position": position, "labels": l,
             "assignee": card["assignee_name"], "body": neutral(card["body"].as_str().unwrap_or("")),
             "comments": notes,
         }));
@@ -3077,7 +3231,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
         .await
         .iter()
         .map(|j| {
-            json!({"card": j["card"], "kind": j["kind"], "state": j["state"],
+            json!({"card": neutral(j["card"].as_str().unwrap()), "kind": j["kind"], "state": j["state"],
                    "outcome": j["outcome"], "attempt": j["attempt"],
                    "split_path": j["split_path"]})
         })
