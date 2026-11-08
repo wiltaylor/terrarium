@@ -84,7 +84,7 @@ async fn list(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Vec<B
 async fn add(
     State(state): State<Shared>,
     actor: Actor,
-    ApiJson(body): ApiJson<Bookmark>,
+    ApiJson(body): ApiJson<SaveBookmark>,
 ) -> ApiResult<Json<Vec<Bookmark>>> {
     policy::operator_only(&actor, "bookmarks")?;
     let href = normalize(&body.href)?;
@@ -95,11 +95,30 @@ async fn add(
         ));
     }
     let owner = actor.address();
+    let previous = body.previous_href.as_deref().map(normalize).transpose()?;
     Ok(Json(state.db.write(actor.label(), move |t| {
-        t.execute("INSERT INTO bookmarks(owner, href, title) VALUES (?1, ?2, ?3) ON CONFLICT(owner, href) DO UPDATE SET title = excluded.title", params![owner, href, title])?;
+        if let Some(previous) = previous {
+            let duplicate: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM bookmarks WHERE owner = ?1 AND href = ?2 AND href != ?3)", params![owner, href, previous], |r| r.get(0))?;
+            if duplicate {
+                return Err(ApiError::invalid("This URL is already bookmarked"));
+            }
+            let changed = t.execute("UPDATE bookmarks SET href = ?2, title = ?3 WHERE owner = ?1 AND href = ?4", params![owner, href, title, previous])?;
+            if changed == 0 {
+                return Err(ApiError::invalid("The bookmark no longer exists"));
+            }
+        } else {
+            t.execute("INSERT INTO bookmarks(owner, href, title) VALUES (?1, ?2, ?3) ON CONFLICT(owner, href) DO UPDATE SET title = excluded.title", params![owner, href, title])?;
+        }
         t.audit("bookmark.add", &href, None, json!({"owner": owner}))?;
         list_rows(t, &owner)
     }).await?))
+}
+
+#[derive(Deserialize)]
+struct SaveBookmark {
+    title: String,
+    href: String,
+    previous_href: Option<String>,
 }
 
 #[derive(Deserialize)]

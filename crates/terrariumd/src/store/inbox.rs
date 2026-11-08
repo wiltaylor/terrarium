@@ -603,15 +603,11 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
 /// The item of an Inbox thread: open while it waits for the operator or
 /// has an open question (its questions are no items of their own); urgent
 /// or critical by its open questions.
-fn thread_item(conn: &Connection, th: Thread) -> ApiResult<InboxItem> {
+fn thread_item(th: Thread, urgency: (bool, bool)) -> InboxItem {
     let open = th.status == ThreadStatus::WaitingOperator
         || (th.status != ThreadStatus::Closed && th.open_questions.unwrap_or(0) > 0);
-    let (urgent, critical) = if open {
-        threads::urgency(conn, &th.id)?
-    } else {
-        (false, false)
-    };
-    Ok(InboxItem {
+    let (urgent, critical) = if open { urgency } else { (false, false) };
+    InboxItem {
         id: th.item_id(),
         kind: InboxKind::Thread,
         open,
@@ -624,14 +620,16 @@ fn thread_item(conn: &Connection, th: Thread) -> ApiResult<InboxItem> {
         system: None,
         watch: None,
         thread: Some(th),
-    })
+    }
 }
 
 /// The thread items of the filter.
 fn thread_items(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
     let mut out = Vec::new();
+    let urgency = threads::inbox_urgency(conn)?;
     for th in threads::list_all(conn, f.status.done())? {
-        let item = thread_item(conn, th)?;
+        let flags = urgency.get(&th.id).copied().unwrap_or_default();
+        let item = thread_item(th, flags);
         if ((item.open && f.status.open()) || (!item.open && f.status.done()))
             && in_project(f, &item)
         {
@@ -753,11 +751,7 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
         kind: None,
         project: project.map(str::to_owned),
     };
-    let mail = mail::operator_mail(conn, true, KIND_MAX * 5)?
-        .into_iter()
-        .map(|m| mail_item(m, true))
-        .filter(|i| in_project(&f, i))
-        .count();
+    let mail = mail::operator_mail_count(conn, project)?;
     let mut system = 0;
     for thread in mail::guard_threads(conn)? {
         if in_project(&f, &system_item(conn, &thread)?) {
@@ -769,10 +763,7 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
         .map(watch_item)
         .filter(|i| i.open && in_project(&f, i))
         .count();
-    let thread_rows = thread_items(conn, &f)?;
-    let thread = thread_rows.len();
-    let thread_urgent = thread_rows.iter().filter(|i| i.urgent).count();
-    let thread_critical = thread_rows.iter().filter(|i| i.critical).count();
+    let (thread, thread_urgent, thread_critical) = threads::inbox_counts(conn, project)?;
     Ok(Counts {
         open: question + notice + mail + system + thread,
         urgent: q.urgent + b.urgent + r.urgent + n.urgent + thread_urgent,

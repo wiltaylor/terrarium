@@ -10,7 +10,7 @@ import type { Board, Card, Column } from "../../api/types";
 import { cardsIn } from "../../stores/board";
 import { columnTitle, overLimit } from "./columns";
 import { alsoIn, isPlain, type Lane, laneCells, NO_VERSION_LANE } from "./lanes";
-import { groupSections } from "./groups";
+import { groupDetailsColumn, groupSections } from "./groups";
 
 export interface LaneDrag {
   draggable: boolean;
@@ -103,7 +103,7 @@ export function LanesBoard(props: {
             <Show when={section.group}>{(group) => (
               <header class="board-group-head">
                 <strong>{group().title}</strong>
-                <Show when={group().column === p.col.name}>
+                <Show when={groupDetailsColumn(group(), p.lane.cards.filter((c) => props.visible(c)), props.board.columns.map((c) => c.name)) === p.col.name}>
                   <span>{group().done}/{group().total}</span>
                   <progress aria-label={`${group().title} progress`} value={group().done} max={Math.max(1, group().total)} />
                   <Show when={group().eta_at}>{(eta) => <time dateTime={eta()}>ETA {new Date(eta()).toLocaleString()}</time>}</Show>

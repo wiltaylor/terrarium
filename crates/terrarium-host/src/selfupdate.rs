@@ -412,7 +412,7 @@ pub async fn smoke_test(path: &Path, want: &str, timeout: Duration) -> Result<()
 /// The version in the output of `terrarium-host --version`: the word after
 /// the program name on the first line. It reads both the two-line output
 /// (`terrarium-host 0.5.0+c7ac041`, then `built <time>`) and the one-line
-/// output of 0.5.0 and older (`terrarium-host 0.5.0+c7ac041 (built <time>)`).
+/// output of releases before TER-195 (`terrarium-host 0.5.0+c7ac041 (built <time>)`).
 /// A first line of one word is the version.
 fn reported_version(text: &str) -> &str {
     let mut words = text.lines().next().unwrap_or_default().split_whitespace();
