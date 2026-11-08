@@ -3281,6 +3281,10 @@ async fn a_failed_wake_is_an_error_and_stops_the_wakes() {
 async fn a_compaction_holds_turns_until_its_end_hook() {
     use terrarium_core::config::{CompactMaxAge, IdleStop};
     let td = Td::start().await;
+    let gate_dir = tempfile::tempdir().unwrap();
+    let gate = gate_dir.path().join("compact.end");
+    td.adapter
+        .set_env("FAKE_TUI_COMPACT_GATE", gate.to_str().unwrap());
     td.adapter.set_env("FAKE_TUI_DELAY_MS", "600");
     let id = td.agent("demo", "comp", json!({})).await;
     td.post(&format!("/api/agents/{id}/start"), None).await;
@@ -3294,8 +3298,7 @@ async fn a_compaction_holds_turns_until_its_end_hook() {
     td.wait_status(&id, "idle").await;
 
     td.post(&format!("/api/agents/{id}/compact"), None).await;
-    // From the status events, not one read: under load the 600 ms
-    // compaction ended before the read (TER-117).
+    // The gate keeps compaction open even if sending the next turn is slow.
     td.wait_events(&id, "status", |e| {
         e.iter()
             .any(|s| s["data"]["status"] == "working" && s["data"]["reason"] == "compacting")
@@ -3306,6 +3309,12 @@ async fn a_compaction_holds_turns_until_its_end_hook() {
         Some(json!({"text": "second"})),
     )
     .await;
+    // send has returned, so the supervisor has accepted the held turn.
+    // Give an incorrectly delivered turn time to emit its start hook.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(td.events(&id, "turn_start").await.len(), 1);
+    assert!(td.events(&id, "compact_finished").await.is_empty());
+    std::fs::write(&gate, "go").unwrap();
     let done = td
         .wait_events(&id, "agent.compacted", |e| !e.is_empty())
         .await;
