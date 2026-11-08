@@ -674,7 +674,14 @@ fn render(
             }
         }
     }
-    let (eta_at, eta_set_at, eta_set_by, eta_set_by_name) = if review && job.is_none() {
+    if worker_eta.is_none() {
+        worker_start = row.eta_set_at.clone();
+        eta_calibrated = None;
+    }
+    let queued = job
+        .as_ref()
+        .is_some_and(|j| j.state == super::jobs::JobState::Queued);
+    let (eta_at, eta_set_at, eta_set_by, eta_set_by_name) = if review && (job.is_none() || queued) {
         (
             review_eta.as_ref().map(|v| v.0.clone()),
             review_eta.map(|v| v.1),
