@@ -96,7 +96,7 @@ async fn setup_flow(flow: &str) -> (TestDaemon, String) {
             json!({"columns": [
                 {"name": "backlog"}, {"name": "ready"},
                 {"name": "in_progress", "role": "working"}, {"name": "validating"},
-                {"name": "review"}, {"name": "accepted"},
+                {"name": "review"}, {"name": "merge_queue"}, {"name": "accepted"},
                 {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
         )
         .await;
@@ -424,6 +424,36 @@ async fn round_trip_pi() {
 #[tokio::test]
 async fn round_trip_claude_rules() {
     round_trip("claude", "rules").await;
+}
+
+both_flows!(forward_moves_stay_parked_and_returns_wake);
+/// Forward delivery moves never send a return turn. Review and merge
+/// failures still wake the same agent in both board flows.
+async fn forward_moves_stay_parked_and_returns_wake(flow: &str) {
+    let (td, lead) = setup_flow(flow).await;
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    for destination in ["ready", "blocked"] {
+        mv(&td, &c, "review", None).await;
+        parked(&td, &eph).await;
+        let before = return_turns(&td, &eph, &c).len();
+        for to in ["merge_queue", "accepted"] {
+            mv(&td, &c, to, None).await;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let sp = spawn_row(&td, &eph).await;
+            assert!(sp["parked_at"].is_string(), "{sp}");
+            assert!(sp["unpark_queued_at"].is_null(), "{sp}");
+            assert_eq!(agent(&td, &eph).await["status"], "stopped");
+            assert_eq!(return_turns(&td, &eph, &c).len(), before);
+        }
+        mv(&td, &c, destination, Some("Review or merge failed.")).await;
+        td.wait_status(&eph, "idle").await;
+        until("the failure return turn", || async {
+            return_turns(&td, &eph, &c).len() == before + 1
+        })
+        .await;
+    }
 }
 
 both_flows!(done_and_archive_close);

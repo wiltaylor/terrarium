@@ -34,6 +34,28 @@ function mount() {
 const button = (root: ParentNode, text: string) => [...root.querySelectorAll("button")].find((b) => b.textContent?.trim() === text);
 
 describe("RulesPage", () => {
+  // Runs first: the mock is shared, and the next test migrates the project.
+  it("Apply sends the plan's hash: a change of rules.wcl after the plan is a conflict", async () => {
+    const el = mount();
+    await tick();
+    button(el, "Plan the migration")!.click();
+    await tick();
+    expect(el.querySelector("[aria-label='Migration plan']")).not.toBeNull();
+    // rules.wcl changes after the plan (another user, the CLI).
+    await api.rules.disable("terrarium", "job-cancelled");
+    const spy = vi.spyOn(api.rules, "migrate");
+    button(el, "Apply")!.click();
+    await tick();
+    button(el, "Switch to rules")!.click();
+    await tick(10);
+    expect(spy).toHaveBeenCalledWith("terrarium", true, "");
+    spy.mockRestore();
+    expect(document.body.textContent).toMatch(/changed: read them again/);
+    expect((await api.rules.effective("terrarium")).board_flow).toBe("code");
+    // Back to the seed for the next test: no rules.wcl.
+    await api.rules.enable("terrarium", "job-cancelled");
+  });
+
   it("plans the migration, applies it after a confirm, then lists the pack with its switches", async () => {
     const el = mount();
     await tick();
@@ -80,4 +102,5 @@ describe("RulesPage", () => {
     await tick();
     expect(el.querySelector("table[aria-label=Rules] pre")?.textContent).toMatch(/^rule "/);
   });
+
 });

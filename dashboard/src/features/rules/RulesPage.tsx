@@ -11,7 +11,7 @@ import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui
 import type { EffectiveRules, RuleRun, RulesMigration, RuleFinding } from "../../api/types";
 import { api } from "../../stores";
 import { ago } from "../../lib/format";
-import { changeText, findingText, flowText, offerMigration, ruleRows, runTone, stepsText } from "./model";
+import { changeText, findingText, flowText, offerMigration, ruleRows, runTone, stepsText, toggleText } from "./model";
 
 export default function RulesPage() {
   const params = useParams<{ project: string }>();
@@ -70,7 +70,7 @@ export default function RulesPage() {
     guard(`toggle:${name}`, async () => {
       try {
         const r = await (el.checked ? api.rules.enable(project(), name) : api.rules.disable(project(), name));
-        setNotice(r.changed ? `${name} is ${r.enabled ? "on" : "off"}: rules.wcl changed.` : `${name} was ${r.enabled ? "on" : "off"} already.`);
+        setNotice(toggleText(name, r));
         await load();
       } catch (e) {
         el.checked = !el.checked;
@@ -81,7 +81,8 @@ export default function RulesPage() {
   const planMigration = () => guard("plan", async () => void setPlan(await api.rules.migrate(project(), false)));
   const applyMigration = () =>
     guard("apply", async () => {
-      const r = await api.rules.migrate(project(), true);
+      // Store what the plan showed: a change of rules.wcl since then is 409.
+      const r = await api.rules.migrate(project(), true, plan()?.hash ?? "");
       setPlan(null);
       setNotice(`${project()} runs board_flow rules${r.changed ? ": rules.wcl has the overrides" : ""}.`);
       await load();

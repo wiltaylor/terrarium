@@ -532,11 +532,6 @@ export interface Api {
   };
 
   /**
-   * Test runs (docs/api.md, test runs): standard test result files (JUnit XML, TRX, CTRF, libtest JSON, Vitest and
-   * Jest JSON, TAP) that the daemon parses. `id` is the run ULID. Errors: `422 invalid` for a file that does not
-   * parse, `413 too_large` over 20 MiB.
-   */
-  /**
    * The board rules of a project (docs/api.md §19.8, §19.9, §19.12, TER-171). Read: whoever reads the project.
    * `enable`, `disable`, and `migrate` with `apply`: the operator, a project admin, or a sysadmin.
    */
@@ -551,10 +546,18 @@ export interface Api {
     enable(project: string, rule: string): Promise<RuleToggle>;
     /** Switch a rule off; a pack rule gets `rule "<name>" { enabled = false }` in rules.wcl. */
     disable(project: string, rule: string): Promise<RuleToggle>;
-    /** Map the pack to the board; with `apply`, store rules.wcl and switch the project to `board_flow = rules`. */
-    migrate(project: string, apply?: boolean): Promise<RulesMigration>;
+    /**
+     * Map the pack to the board; with `apply`, store rules.wcl and switch the project to `board_flow = rules`.
+     * `baseHash`: the `hash` of the plan that the user saw (`""`: none), so a change since then is `409`.
+     */
+    migrate(project: string, apply?: boolean, baseHash?: string): Promise<RulesMigration>;
   };
 
+  /**
+   * Test runs (docs/api.md, test runs): standard test result files (JUnit XML, TRX, CTRF, libtest JSON, Vitest and
+   * Jest JSON, TAP) that the daemon parses. `id` is the run ULID. Errors: `422 invalid` for a file that does not
+   * parse, `413 too_large` over 20 MiB.
+   */
   testRuns: {
     /** Newest first. `card`, `label` (`version:1.4.0`), `name`, and `status` filter. */
     list(project: string, q?: TestRunListQuery): Promise<Page<TestRunSummary>>;
@@ -1324,7 +1327,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       runs: (project, q = {}) => get(`${p(project)}/rules/runs`, { ...q }),
       enable: (project, rule) => post(`${p(project)}/rules/${seg(rule)}/enable`),
       disable: (project, rule) => post(`${p(project)}/rules/${seg(rule)}/disable`),
-      migrate: (project, apply = false) => post(`${p(project)}/rules/migrate`, { apply }),
+      migrate: (project, apply = false, baseHash) =>
+        post(`${p(project)}/rules/migrate`, baseHash === undefined ? { apply } : { apply, base_hash: baseHash }),
     },
 
     testRuns: {
