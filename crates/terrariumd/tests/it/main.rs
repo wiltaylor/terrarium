@@ -4,6 +4,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 mod ter221_latency;
+mod workspace_sync;
 
 mod reservations;
 mod reservations_api;

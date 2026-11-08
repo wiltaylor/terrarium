@@ -480,7 +480,7 @@ async fn update(
                 rt.recreate_required = false;
                 targets::set_runtime(t, &name, &rt)?;
             }
-            let r = targets::update_with_live_limits(t, &name, &patch, live)?;
+            let r = targets::update_with_live_limits(t, &name, &patch, live, changed)?;
             t.audit("target.update", &name, r.def.project.as_deref(), patch)?;
             Ok(r)
         })

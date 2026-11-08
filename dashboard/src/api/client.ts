@@ -424,7 +424,7 @@ export interface Api {
   };
 
   board: {
-    get(project: string): Promise<Board>;
+    get(project: string, q?: { done?: boolean; cursor?: string; limit?: number }): Promise<Board>;
     update(project: string, columns: ColumnEdit[]): Promise<Board>;
   };
 
@@ -1230,7 +1230,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
     },
 
     board: {
-      get: (project) => get(`${p(project)}/board`),
+      get: (project, q) => get(`${p(project)}/board`, q),
       update: (project, columns) => patch(`${p(project)}/board`, { columns }),
     },
 

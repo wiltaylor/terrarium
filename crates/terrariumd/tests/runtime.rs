@@ -1490,6 +1490,112 @@ async fn daemon_restart_relaunches_with_resume() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_drain_retries_long_polls_without_journaling_them() {
+    use terrarium_runner::RequestHandler;
+    let td = Td::start_with(false).await;
+    let bob = td.agent("demo", "bob", json!({})).await;
+    let state = &td.daemon.as_ref().unwrap().state;
+    let handler = terrariumd::agent_rpc::AgentRpc::new(Arc::downgrade(state));
+    let ctx = serde_json::from_value(json!({"agent":bob, "name":"bob", "project":"demo",
+        "harness":"claude", "status":"idle"}))
+    .unwrap();
+    let pending = handler.handle(
+        &ctx,
+        "http",
+        json!({"method":"GET", "path":"/api/mail",
+        "query":{"wait":30}, "request_id":"long-poll"}),
+    );
+    tokio::pin!(pending);
+    tokio::select! {
+        result = &mut pending => panic!("long poll answered early: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+    }
+    let (drained, answer) = tokio::join!(
+        terrariumd::agent_rpc::drain(state, Duration::from_secs(2)),
+        pending
+    );
+    drained.unwrap();
+    assert_eq!(answer.unwrap_err().code, "retry");
+    let refused = handler
+        .handle(
+            &ctx,
+            "http",
+            json!({"method":"POST", "path":"/api/mail",
+        "body":{"to":"demo/bob", "body":"not admitted"}, "request_id":"held"}),
+        )
+        .await;
+    assert_eq!(refused.unwrap_err().code, "retry");
+    let count: i64 = state
+        .db
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM agent_rpc_answers", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_write_answers_survive_restart_without_duplicate_mail() {
+    use sha2::{Digest, Sha256};
+    let mut td = Td::start_with(false).await;
+    let bob = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{bob}/start"), None).await;
+    td.wait_status(&bob, "idle").await;
+    let sock = td.runner_socket(&bob);
+    let params = json!({"method":"POST", "path":"/api/mail", "request_id":"replay-mail",
+        "body":{"to":"demo/bob", "body":"exactly one copy"}});
+    let (a, b) = tokio::join!(
+        rpc(&sock, "http", params.clone()),
+        rpc(&sock, "http", params.clone())
+    );
+    assert_eq!(a["result"]["status"], 201, "{a}");
+    assert_eq!(a, b);
+    let mut changed = params.clone();
+    changed["body"]["body"] = json!("different");
+    assert_eq!(
+        rpc(&sock, "http", changed).await["error"]["code"],
+        "invalid_params"
+    );
+    td.restart_daemon().await;
+    td.wait_status(&bob, "idle").await;
+    assert_eq!(rpc(&sock, "http", params).await, a);
+    let mail = rpc(&sock, "http", json!({"method":"GET", "path":"/api/mail"})).await;
+    assert_eq!(
+        mail["result"]["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["body"] == "exactly one copy")
+            .count(),
+        1
+    );
+
+    // Simulate a crash after admitting a write but before persisting its answer.
+    let pending = json!({"method":"POST", "path":"/api/mail", "request_id":"unresolved",
+        "body":{"to":"demo/bob", "body":"must not run"}});
+    let hash: String = Sha256::digest(serde_json::to_vec(&pending).unwrap())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let key = bob.clone();
+    td.daemon.as_ref().unwrap().state.db.write("test", move |t| {
+        t.execute("INSERT INTO agent_rpc_answers(agent, request_id, fingerprint) VALUES (?1, 'unresolved', ?2)", rusqlite::params![key, hash])?;
+        Ok(())
+    }).await.unwrap();
+    td.restart_daemon().await;
+    td.wait_status(&bob, "idle").await;
+    let answer = rpc(&sock, "http", pending).await;
+    assert_eq!(answer["error"]["code"], "indeterminate", "{answer}");
+    let mail = rpc(&sock, "http", json!({"method":"GET", "path":"/api/mail"})).await;
+    assert!(
+        !mail["result"]["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["body"] == "must not run")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_rpc_tunnel_and_long_poll() {
     let td = Td::start_with(false).await;
     let bob = td.agent("demo", "bob", json!({})).await;
@@ -3281,6 +3387,10 @@ async fn a_failed_wake_is_an_error_and_stops_the_wakes() {
 async fn a_compaction_holds_turns_until_its_end_hook() {
     use terrarium_core::config::{CompactMaxAge, IdleStop};
     let td = Td::start().await;
+    let gate_dir = tempfile::tempdir().unwrap();
+    let gate = gate_dir.path().join("compact.end");
+    td.adapter
+        .set_env("FAKE_TUI_COMPACT_GATE", gate.to_str().unwrap());
     td.adapter.set_env("FAKE_TUI_DELAY_MS", "600");
     let id = td.agent("demo", "comp", json!({})).await;
     td.post(&format!("/api/agents/{id}/start"), None).await;
@@ -3294,8 +3404,7 @@ async fn a_compaction_holds_turns_until_its_end_hook() {
     td.wait_status(&id, "idle").await;
 
     td.post(&format!("/api/agents/{id}/compact"), None).await;
-    // From the status events, not one read: under load the 600 ms
-    // compaction ended before the read (TER-117).
+    // The gate keeps compaction open even if sending the next turn is slow.
     td.wait_events(&id, "status", |e| {
         e.iter()
             .any(|s| s["data"]["status"] == "working" && s["data"]["reason"] == "compacting")
@@ -3306,6 +3415,12 @@ async fn a_compaction_holds_turns_until_its_end_hook() {
         Some(json!({"text": "second"})),
     )
     .await;
+    // send has returned, so the supervisor has accepted the held turn.
+    // Give an incorrectly delivered turn time to emit its start hook.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(td.events(&id, "turn_start").await.len(), 1);
+    assert!(td.events(&id, "compact_finished").await.is_empty());
+    std::fs::write(&gate, "go").unwrap();
     let done = td
         .wait_events(&id, "agent.compacted", |e| !e.is_empty())
         .await;

@@ -94,6 +94,7 @@ pub const NEXT_CURSOR: &str = "x-next-cursor";
 
 /// Shared daemon state.
 pub struct AppState {
+    pub agent_calls: crate::agent_rpc::CallGate,
     pub started: Instant,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub db: Db,
@@ -917,6 +918,7 @@ mod tests {
         crate::db::migrate(&mut conn).unwrap();
         let hub = crate::events::EventHub::default();
         Arc::new(AppState {
+            agent_calls: Default::default(),
             started: Instant::now(),
             started_at: chrono::Utc::now(),
             db: Db::new(conn, hub),

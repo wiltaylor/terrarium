@@ -480,6 +480,10 @@ async fn fixed_docker_limits_update_live_and_failed_ack_keeps_defaults() {
     state
         .db
         .write("system", |tx| {
+            let row = terrariumd::store::targets::get(tx, "p-box")?;
+            let mut runtime = row.runtime;
+            runtime.docker_settings = Some(terrariumd::store::targets::DockerSettings::of(&row.def));
+            terrariumd::store::targets::set_runtime(tx, "p-box", &runtime)?;
             terrariumd::store::targets::set_state(tx, "p-box", "running", None)
         })
         .await
@@ -493,6 +497,16 @@ async fn fixed_docker_limits_update_live_and_failed_ack_keeps_defaults() {
     let calls = std::fs::read_to_string(td.dir.path().join("docker.calls")).unwrap();
     assert!(calls.contains("update"));
     assert!(calls.contains("--cpus=1"));
+    let acknowledged = state
+        .db
+        .read(|c| terrariumd::store::targets::get(c, "p-box"))
+        .await
+        .unwrap();
+    assert!(!acknowledged.runtime.recreate_required);
+    assert_eq!(
+        acknowledged.runtime.docker_settings,
+        Some(terrariumd::store::targets::DockerSettings::of(&acknowledged.def))
+    );
     std::fs::write(td.dir.path().join("docker.fail"), "fail").unwrap();
     let refused = td
         .patch("/api/targets/p-box", json!({"limits":{"cpu":2}}))
@@ -507,6 +521,36 @@ async fn fixed_docker_limits_update_live_and_failed_ack_keeps_defaults() {
         saved.def.limits.unwrap().resolve().unwrap().cpu_millis,
         Some(1000)
     );
+    assert_eq!(saved.runtime, acknowledged.runtime);
+    client.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn unacknowledged_limits_do_not_advance_the_container_baseline() {
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let (baseline, updated) = state
+        .db
+        .write("system", |tx| {
+            let row = terrariumd::store::targets::get(tx, "p-box")?;
+            let baseline = terrariumd::store::targets::DockerSettings::of(&row.def);
+            let mut runtime = row.runtime;
+            runtime.docker_settings = Some(baseline.clone());
+            terrariumd::store::targets::set_runtime(tx, "p-box", &runtime)?;
+            let updated = terrariumd::store::targets::update_with_live_limits(
+                tx,
+                "p-box",
+                &json!({"limits":{"cpu":1}}),
+                true,
+                false,
+            )?;
+            Ok((baseline, updated))
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated.runtime.docker_settings, Some(baseline));
+    assert!(updated.runtime.recreate_required);
     client.abort();
     server.abort();
 }

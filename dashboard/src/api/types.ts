@@ -1632,8 +1632,8 @@ export interface ThreadEventData {
 // ----- Board (§13, docs/api.md §8) -----
 
 /** The role of a column (docs/api.md §8.1): `working` is where `card claim` moves a card; a move to `blocked` needs a comment. */
-export type ColumnRole = "working" | "blocked";
-export const COLUMN_ROLES: ColumnRole[] = ["working", "blocked"];
+export type ColumnRole = "working" | "blocked" | "validating" | "review" | "merge_queue" | "accepted";
+export const COLUMN_ROLES: ColumnRole[] = ["working", "blocked", "validating", "review", "merge_queue", "accepted"];
 
 export interface Column {
   name: string;
@@ -1818,11 +1818,18 @@ export interface ActiveCard extends Card {
   blocked_reason?: string;
 }
 
+/** List-only card. Fetch cards.get(id) before displaying or editing details. */
+export type CardSummary = Omit<Card, "body" | "comments" | "links"> & {
+  comment_count?: number;
+  last_comment_at?: string | null;
+};
+
 export interface Board {
   project: string;
   card_prefix?: string;
   columns: Column[];
-  cards: Card[];
+  cards: CardSummary[];
+  next_cursor?: string | null;
 }
 
 export interface NewCard {

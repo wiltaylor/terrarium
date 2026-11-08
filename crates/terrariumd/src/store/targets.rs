@@ -188,6 +188,9 @@ fn need(kind: &str, field: &str, present: bool) -> ApiResult<()> {
 /// Check a definition against the rules of its kind (PLAN §19).
 pub fn validate(def: &TargetDef) -> ApiResult<()> {
     check_name("target", &def.name)?;
+    if def.sync_workspace && def.kind != TargetKind::Ssh {
+        return Err(ApiError::invalid("sync_workspace requires an ssh target"));
+    }
     if let Some(p) = &def.project {
         check_name("project", p)?;
     }
@@ -564,7 +567,7 @@ fn refuse_file(r: &TargetRow) -> ApiResult<()> {
 /// Apply a JSON merge patch to an API target: `null` removes a field.
 /// `name` cannot change.
 pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow> {
-    update_with_live_limits(t, name, patch, false)
+    update_with_live_limits(t, name, patch, false, false)
 }
 
 /// Only the API executor may opt into limits it has acknowledged on the host.
@@ -573,6 +576,7 @@ pub fn update_with_live_limits(
     name: &str,
     patch: &Value,
     live: bool,
+    acknowledged: bool,
 ) -> ApiResult<TargetRow> {
     let (def, admin) = prepare_update(t, name, patch, live)?;
     let current = get(t, name)?;
@@ -582,7 +586,7 @@ pub fn update_with_live_limits(
         && (def.image != current.def.image || def.limits != current.def.limits)
     {
         let mut rt = current.runtime.clone();
-        if live && let Some(baseline) = &mut rt.docker_settings {
+        if acknowledged && let Some(baseline) = &mut rt.docker_settings {
             baseline.limits = DockerSettings::of(&def).limits;
         }
         rt.recreate_required = rt

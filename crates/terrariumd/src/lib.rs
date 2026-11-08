@@ -200,6 +200,7 @@ pub async fn start_with_usage(
     log_definitions(&defs, &errors, &cfg.config_dir);
 
     let state: Shared = Arc::new(AppState {
+        agent_calls: Default::default(),
         started: Instant::now(),
         started_at: chrono::Utc::now(),
         db: Db::new(conn, EventHub::default()),

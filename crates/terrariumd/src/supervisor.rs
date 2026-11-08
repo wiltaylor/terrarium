@@ -523,6 +523,10 @@ pub trait Supervisor: Send + Sync + 'static {
             .join(&agent.project)
             .join(&agent.name)
     }
+    /// Hold new agent calls on connected runners before draining writes.
+    fn hold_agent_calls(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
     /// The daemon shuts down. Keep the stored status. A harness in a
     /// runner process keeps running, and the next daemon start connects to
     /// it again. An in-process harness ends, and the next daemon start
@@ -609,6 +613,7 @@ mod fake {
         state: Option<std::sync::Weak<crate::api::AppState>>,
         /// `stop` returns only after the store shows `stopped`.
         settle_stops: bool,
+        stop_gates: HashMap<AgentId, (oneshot::Sender<()>, oneshot::Receiver<()>)>,
         /// Harnesses that the fake cannot compact, on top of the ones with
         /// no `compact_command`.
         no_compact: HashSet<HarnessId>,
@@ -630,6 +635,15 @@ mod fake {
     }
 
     impl InMemorySupervisor {
+        /// Hold the next stop of `agent` until released. The receiver fires
+        /// when stop has entered, before it changes the harness or status.
+        pub fn gate_stop(&self, agent: AgentId) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered, entering) = oneshot::channel();
+            let (release, gate) = oneshot::channel();
+            self.lock().stop_gates.insert(agent, (entered, gate));
+            (entering, release)
+        }
+
         pub fn new(delay: Duration) -> Self {
             let (tx, _) = broadcast::channel(1024);
             Self {
@@ -1142,6 +1156,11 @@ mod fake {
 
         fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
             Box::pin(async move {
+                let gate = self.lock().stop_gates.remove(&agent);
+                if let Some((entered, gate)) = gate {
+                    let _ = entered.send(());
+                    let _ = gate.await;
+                }
                 if !self.current(agent).is_some_and(|(s, _)| s.is_live()) {
                     return Err(SupervisorError::NotRunning(agent));
                 }
