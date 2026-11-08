@@ -29,6 +29,7 @@ pub async fn detect_with(
     let display = crate::display::detect(display, docker.present, vmlab.present);
     limits.docker = docker.present;
     HostCapabilities {
+        capacity: detect_capacity(Path::new("/proc")),
         docker,
         vmlab,
         shell: detect_shell(),
@@ -38,6 +39,33 @@ pub async fn detect_with(
         // The caller sets it from its work_dir (`crate::workspace::available`).
         no_workspaces: false,
     }
+}
+
+/// Read host logical CPUs and physical memory, not the process affinity or
+/// current free memory. A missing source means unknown capacity.
+pub fn detect_capacity(proc_root: &Path) -> Option<terrarium_core::resources::HostCapacity> {
+    let stat = std::fs::read_to_string(proc_root.join("stat")).ok()?;
+    let mut cpu_ids: Vec<u32> = stat.lines().filter_map(|line| {
+        line.split_whitespace().next()?.strip_prefix("cpu")?.parse().ok()
+    }).collect();
+    cpu_ids.sort_unstable();
+    cpu_ids.dedup();
+    if cpu_ids.is_empty() {
+        return None;
+    }
+    let mem = std::fs::read_to_string(proc_root.join("meminfo")).ok()?;
+    let memory_bytes = mem.lines().find_map(|line| {
+        let mut words = line.split_whitespace();
+        if words.next()? != "MemTotal:" {
+            return None;
+        }
+        let kb = words.next()?.parse::<u64>().ok()?;
+        if words.next()? != "kB" {
+            return None;
+        }
+        kb.checked_mul(1024).filter(|n| *n > 0)
+    })?;
+    Some(terrarium_core::resources::HostCapacity { cpu_ids, memory_bytes })
 }
 
 /// `$SHELL` when it exists, else `/bin/sh`.

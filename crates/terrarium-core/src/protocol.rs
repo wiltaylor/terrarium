@@ -154,6 +154,10 @@ pub struct ToolCapability {
 /// (docs/host-protocol.md). [`Capabilities`] is the flat summary of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HostCapabilities {
+    /// Physical host capacity for reservation accounting. Absent on older
+    /// agents: reservations must fail closed rather than guess a budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<crate::resources::HostCapacity>,
     #[serde(default)]
     pub docker: ToolCapability,
     #[serde(default)]

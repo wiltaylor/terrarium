@@ -1308,6 +1308,7 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             capabilities: HostCapabilities {
+                capacity: None,
                 docker: ToolCapability {
                     present: true,
                     version: Some("29.8.0".into()),
