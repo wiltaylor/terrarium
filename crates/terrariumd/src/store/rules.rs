@@ -64,6 +64,9 @@ pub struct Rules {
     pub source: Option<String>,
     /// The rules as read, in the order of the file.
     pub rules: Vec<Rule>,
+    /// Diagnostics when a stored file no longer passes the current schema.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub problems: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +82,7 @@ impl Rules {
             hash: None,
             source: None,
             rules: Vec::new(),
+            problems: Vec::new(),
             updated_by: None,
             updated_at: None,
         }
@@ -102,12 +106,14 @@ pub fn context(conn: &Connection, project: &str) -> ApiResult<Context> {
 /// A `422 invalid` with each problem of the file in `details.problems`
 /// (`line`, `column`, `message`).
 fn file_error(e: &FileError) -> ApiError {
-    let problems: Vec<_> = e
-        .problems
+    ApiError::invalid(e.to_string()).with_details(json!({"problems": problems(e)}))
+}
+
+pub fn problems(e: &FileError) -> Vec<serde_json::Value> {
+    e.problems
         .iter()
         .map(|p| json!({"line": p.line, "column": p.column, "message": p.message}))
-        .collect();
-    ApiError::invalid(e.to_string()).with_details(json!({"problems": problems}))
+        .collect()
 }
 
 /// Parse `text` as a rules file named `file` on a blocking thread, outside
@@ -140,10 +146,10 @@ pub async fn with_rules(mut r: Rules) -> ApiResult<Rules> {
         columns: None,
         max_rules: usize::MAX,
     };
-    r.rules = parse_off(r.text.clone(), rules_file::FILE_NAME.to_owned(), ctx)
-        .await?
-        .map(|s| s.rules)
-        .unwrap_or_default();
+    match parse_off(r.text.clone(), rules_file::FILE_NAME.to_owned(), ctx).await? {
+        Ok(s) => r.rules = s.rules,
+        Err(e) => r.problems = problems(&e),
+    }
     Ok(r)
 }
 
@@ -195,6 +201,7 @@ pub fn get(conn: &Connection, project: &str) -> ApiResult<Rules> {
         hash: Some(r.hash),
         source: Some(r.source),
         rules: Vec::new(),
+        problems: Vec::new(),
         updated_by: Some(r.updated_by),
         updated_at: Some(r.updated_at),
     })
