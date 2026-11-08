@@ -261,7 +261,9 @@ async fn idle_stop_claim_expires_when_a_daemon_disconnects_after_claiming() {
     drop(r);
     let r = env.connect(None).await;
     timeout(wait(), r.type_turn("after lost claim reply".into()).wait())
-        .await.expect("claim expired").expect("delivered");
+        .await
+        .expect("claim expired")
+        .expect("delivered");
     r.kill().await.expect("kill");
     r.wait().await;
 }

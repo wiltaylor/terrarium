@@ -69,7 +69,10 @@ pub trait RunnerHandle: Send + Sync + 'static {
 
 impl RunnerHandle for Runner {
     fn release_idle_stop(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { Runner::release_idle_stop(self); Ok(()) })
+        Box::pin(async move {
+            Runner::release_idle_stop(self);
+            Ok(())
+        })
     }
     fn claim_idle_stop(&self) -> BoxFuture<'_, Result<bool>> {
         Box::pin(async move { Ok(Runner::claim_idle_stop(self)) })

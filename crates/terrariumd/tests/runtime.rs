@@ -512,13 +512,28 @@ async fn idle_stop_queues_a_turn_during_the_graceful_stop() {
     td.wait_status(&id, "idle").await;
     let agent = id.parse().unwrap();
     let runner = td.sup.runner(agent).unwrap();
-    td.daemon.as_ref().unwrap().state.lifecycle.expect_stop(agent, "idle");
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .lifecycle
+        .expect_stop(agent, "idle");
     td.sup.stop_idle(agent).await.unwrap();
-    let result = td.post(&format!("/api/agents/{id}/send"), Some(json!({"text": "after idle stop"}))).await;
+    let result = td
+        .post(
+            &format!("/api/agents/{id}/send"),
+            Some(json!({"text": "after idle stop"})),
+        )
+        .await;
     assert_eq!(result["queued"], true, "{result}");
     // Finish the split exit keys only after the API has persisted the turn.
     runner.write(b"\r").await.unwrap();
-    td.wait_events(&id, "turn_start", |events| events.iter().any(|e| e["data"]["prompt"] == "[User] after idle stop")).await;
+    td.wait_events(&id, "turn_start", |events| {
+        events
+            .iter()
+            .any(|e| e["data"]["prompt"] == "[User] after idle stop")
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

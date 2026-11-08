@@ -4055,16 +4055,20 @@ impl RunnerSupervisor {
                 let claimed = r.claim_idle_stop().await;
                 if !matches!(claimed, Ok(true)) {
                     if let Err(e) = &claimed {
-                        if matches!(e, terrarium_runner::RunnerError::Control(e) if e.code == "method_not_found") {
+                        if matches!(e, terrarium_runner::RunnerError::Control(e) if e.code == "method_not_found")
+                        {
                             if let Some(slot) = lock(&self.inner.slots).get_mut(&agent)
-                                && !slot.idle_stop_warned {
+                                && !slot.idle_stop_warned
+                            {
                                 slot.idle_stop_warned = true;
                                 warn!(agent = %agent, "runner too old for atomic idle stops; restart it to enable idle stops");
                             }
                         } else {
                             // The claim may have applied before its reply
                             // was lost. Release it, with expiry as a fallback.
-                            let _ = tokio::time::timeout(Duration::from_secs(5), r.release_idle_stop()).await;
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(5), r.release_idle_stop())
+                                    .await;
                         }
                     }
                     if let Some(slot) = lock(&self.inner.slots).get_mut(&agent) {
@@ -5125,22 +5129,68 @@ mod tests {
     }
 
     impl RunnerHandle for ClaimRunner {
-        fn agent(&self) -> AgentId { self.id }
-        fn socket_path(&self) -> &Path { Path::new("unused") }
-        fn events_path(&self) -> &Path { Path::new("unused") }
-        fn status(&self) -> AgentStatus { AgentStatus::Idle }
-        fn watch_status(&self) -> watch::Receiver<AgentStatus> { watch::channel(AgentStatus::Idle).1 }
-        fn subscribe_events(&self) -> broadcast::Receiver<terrarium_core::EventRecord> { broadcast::channel(1).1 }
-        fn screen(&self) -> BoxFuture<'_, terrarium_runner::Result<terrarium_runner::ScreenSnapshot>> { panic!("unused") }
-        fn attach(&self) -> BoxFuture<'_, terrarium_runner::Result<(terrarium_runner::ScreenSnapshot, terrarium_runner::AttachStream)>> { panic!("unused") }
-        fn write<'a>(&'a self, _: &'a [u8]) -> BoxFuture<'a, terrarium_runner::Result<()>> { panic!("unused") }
-        fn write_person<'a>(&'a self, _: &'a [u8]) -> BoxFuture<'a, terrarium_runner::Result<()>> { panic!("unused") }
-        fn resize(&self, _: u16, _: u16) -> BoxFuture<'_, terrarium_runner::Result<()>> { panic!("unused") }
-        fn answer<'a>(&'a self, _: &'a str, _: &'a terrarium_core::Answer) -> BoxFuture<'a, terrarium_runner::Result<()>> { panic!("unused") }
-        fn answer_keys<'a>(&'a self, _: &'a str) -> BoxFuture<'a, terrarium_runner::Result<()>> { panic!("unused") }
-        fn interrupt(&self) -> BoxFuture<'_, terrarium_runner::Result<bool>> { panic!("unused") }
-        fn kill(&self) -> BoxFuture<'_, terrarium_runner::Result<()>> { panic!("unused") }
-        fn wait(&self) -> BoxFuture<'_, terrarium_runner::ExitStatus> { panic!("unused") }
+        fn agent(&self) -> AgentId {
+            self.id
+        }
+        fn socket_path(&self) -> &Path {
+            Path::new("unused")
+        }
+        fn events_path(&self) -> &Path {
+            Path::new("unused")
+        }
+        fn status(&self) -> AgentStatus {
+            AgentStatus::Idle
+        }
+        fn watch_status(&self) -> watch::Receiver<AgentStatus> {
+            watch::channel(AgentStatus::Idle).1
+        }
+        fn subscribe_events(&self) -> broadcast::Receiver<terrarium_core::EventRecord> {
+            broadcast::channel(1).1
+        }
+        fn screen(
+            &self,
+        ) -> BoxFuture<'_, terrarium_runner::Result<terrarium_runner::ScreenSnapshot>> {
+            panic!("unused")
+        }
+        fn attach(
+            &self,
+        ) -> BoxFuture<
+            '_,
+            terrarium_runner::Result<(
+                terrarium_runner::ScreenSnapshot,
+                terrarium_runner::AttachStream,
+            )>,
+        > {
+            panic!("unused")
+        }
+        fn write<'a>(&'a self, _: &'a [u8]) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn write_person<'a>(&'a self, _: &'a [u8]) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn resize(&self, _: u16, _: u16) -> BoxFuture<'_, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn answer<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a terrarium_core::Answer,
+        ) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn answer_keys<'a>(&'a self, _: &'a str) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn interrupt(&self) -> BoxFuture<'_, terrarium_runner::Result<bool>> {
+            panic!("unused")
+        }
+        fn kill(&self) -> BoxFuture<'_, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn wait(&self) -> BoxFuture<'_, terrarium_runner::ExitStatus> {
+            panic!("unused")
+        }
         fn type_turn(&self, text: String) -> terrarium_runner::Delivery {
             assert!(!self.claimed.load(Ordering::SeqCst));
             lock(&self.typed).push(text);
@@ -5153,11 +5203,18 @@ mod tests {
                 self.claimed.store(self.lost, Ordering::SeqCst);
                 self.entered.notify_one();
                 self.reply.notified().await;
-                if self.lost { Err(terrarium_runner::RunnerError::Disconnected) } else { Ok(false) }
+                if self.lost {
+                    Err(terrarium_runner::RunnerError::Disconnected)
+                } else {
+                    Ok(false)
+                }
             })
         }
         fn release_idle_stop(&self) -> BoxFuture<'_, terrarium_runner::Result<()>> {
-            Box::pin(async move { self.claimed.store(false, Ordering::SeqCst); Ok(()) })
+            Box::pin(async move {
+                self.claimed.store(false, Ordering::SeqCst);
+                Ok(())
+            })
         }
     }
 
@@ -5166,23 +5223,39 @@ mod tests {
         for lost in [false, true] {
             let tmp = tempfile::tempdir().unwrap();
             let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
-                tmp.path().join("state"), tmp.path().join("run"), tmp.path().join("prompts"),
-                SandboxConfig::default(), HashMap::new(),
+                tmp.path().join("state"),
+                tmp.path().join("run"),
+                tmp.path().join("prompts"),
+                SandboxConfig::default(),
+                HashMap::new(),
             ));
             let agent: Agent = serde_json::from_value(serde_json::json!({
                 "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
             })).unwrap();
             let id = agent.id;
-            let runner = Arc::new(ClaimRunner { id, entered: tokio::sync::Notify::new(), reply: tokio::sync::Notify::new(), lost, claimed: AtomicBool::new(false), typed: Mutex::default() });
+            let runner = Arc::new(ClaimRunner {
+                id,
+                entered: tokio::sync::Notify::new(),
+                reply: tokio::sync::Notify::new(),
+                lost,
+                claimed: AtomicBool::new(false),
+                typed: Mutex::default(),
+            });
             let mut slot = Slot::new(agent);
             slot.runner = Some(runner.clone());
             slot.seen = AgentStatus::Idle;
             slot.reached_idle = true;
             lock(&sup.inner.slots).insert(id, slot);
-            let stop = tokio::spawn({ let sup = sup.clone(); async move { sup.stop_idle(id).await } });
+            let stop = tokio::spawn({
+                let sup = sup.clone();
+                async move { sup.stop_idle(id).await }
+            });
             runner.entered.notified().await;
             // NotRunning is the API's durable-queue signal, not a 400.
-            assert!(matches!(sup.send_turn(id, "queued turn".into()).await, Err(SupervisorError::NotRunning(_))));
+            assert!(matches!(
+                sup.send_turn(id, "queued turn".into()).await,
+                Err(SupervisorError::NotRunning(_))
+            ));
             runner.reply.notify_one();
             assert!(stop.await.unwrap().is_err());
             sup.send_turn(id, "queued turn".into()).await.unwrap();

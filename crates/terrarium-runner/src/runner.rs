@@ -638,7 +638,10 @@ impl Runner {
     /// seconds. New turns may queue, but cannot dispatch while held.
     pub fn claim_idle_stop(&self) -> bool {
         let mut state = lock(&self.inner.state);
-        if state.idle_stop_until.is_some_and(|until| Instant::now() < until) {
+        if state
+            .idle_stop_until
+            .is_some_and(|until| Instant::now() < until)
+        {
             return true;
         }
         if state.exited
@@ -1248,7 +1251,9 @@ impl Inner {
 
             if state.in_flight.is_none()
                 && !state.stop_requested
-                && state.idle_stop_until.is_none_or(|until| Instant::now() >= until)
+                && state
+                    .idle_stop_until
+                    .is_none_or(|until| Instant::now() >= until)
                 && state.status == AgentStatus::Idle
                 && ready
                 && let Some(mut turn) = state.queue.pop_front()
