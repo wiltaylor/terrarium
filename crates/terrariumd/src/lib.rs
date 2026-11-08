@@ -50,6 +50,7 @@ pub mod question_guard;
 pub mod quota_notices;
 pub mod quota_policy;
 pub mod repo_browse;
+pub mod research_helpers;
 pub mod reservations;
 pub mod reset;
 pub mod review_dispatcher;
