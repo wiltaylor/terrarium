@@ -8,6 +8,12 @@ use futures_util::TryStreamExt;
 use rusqlite::params;
 use terrarium_core::config::TargetDef;
 
+const PYTHON_PROBE: &str = "command -v python3 >/dev/null || printf missing-python3";
+
+fn measurement(stdout: &[u8]) -> Option<u64> {
+    std::str::from_utf8(stdout).ok()?.trim().parse().ok()
+}
+
 /// Serialize starts with cleanup, including checkouts (not exec sessions).
 pub async fn lock(agent: &str) -> tokio::sync::OwnedMutexGuard<()> {
     use std::collections::HashMap;
@@ -283,18 +289,30 @@ pub async fn prepare(
     }
     // Probe separately: a missing interpreter is a legacy target, whereas a
     // failed ownership check must still fail closed.
-    let probe = start_cmd(state, def, &RemoteCmd {
-        argv: vec!["sh".into(), "-c".into(), "command -v python3 >/dev/null || printf missing-python3".into()],
-        timeout_secs: Some(30),
-        ..RemoteCmd::default()
-    })?.collect(4096).await;
+    let probe = start_cmd(
+        state,
+        def,
+        &RemoteCmd {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                PYTHON_PROBE.into(),
+            ],
+            timeout_secs: Some(30),
+            ..RemoteCmd::default()
+        },
+    )?
+    .collect(4096)
+    .await;
     if probe.end().success() && probe.stdout == b"missing-python3" {
         tracing::warn!(agent = %a.id, target = %def.name,
             "python3 unavailable; owned root preparation and automatic cleanup disabled for this operation");
         return Ok(None);
     }
     if !probe.end().success() {
-        return Err(ApiError::invalid("cannot check target python3 availability"));
+        return Err(ApiError::invalid(
+            "cannot check target python3 availability",
+        ));
     }
     let path = root(base(def), &a.project, &a.name)?;
     if dest.is_some_and(|d| !inside(&path, d)) {
@@ -439,12 +457,9 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             refusal(state, &id, &project, &target, &measured.stderr_tail()).await?;
             continue;
         }
-        let size = match String::from_utf8_lossy(&measured.stdout)
-            .trim()
-            .parse::<u64>()
-        {
-            Ok(size) => size,
-            Err(_) => {
+        let size = match measurement(&measured.stdout) {
+            Some(size) => size,
+            None => {
                 refusal(state, &id, &project, &target, "target measurement returned no size").await?;
                 tracing::warn!(%id, %target, "target cleanup deferred: measurement returned no size");
                 continue;
@@ -559,6 +574,37 @@ pub fn spawn(state: Shared) -> tokio::task::JoinHandle<()> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn missing_python_probe_preserves_legacy_execution() {
+        let empty = tempfile::tempdir().unwrap();
+        let out = Command::new("/bin/sh")
+            .args(["-c", PYTHON_PROBE])
+            .env("PATH", empty.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"missing-python3");
+        let out = Command::new("/bin/sh")
+            .args(["-c", PYTHON_PROBE])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn measurements_reject_noise_and_commands_have_finite_bounds() {
+        assert_eq!(measurement(b"123\n"), Some(123));
+        assert_eq!(measurement(b"0"), Some(0));
+        for bad in [b"".as_slice(), b"banner\n123", b"-1", b"18446744073709551616", b"\xff"] {
+            assert_eq!(measurement(bad), None);
+        }
+        for mode in ["prepare", "measure", "delete"] {
+            let cmd = command(mode, "/src/terrarium", "p", "a", "id", "").unwrap();
+            assert_eq!(cmd.timeout_secs, Some(if mode == "prepare" { 120 } else { 900 }));
+        }
+    }
 
     #[test]
     fn location_ignores_unrelated_edits() {
