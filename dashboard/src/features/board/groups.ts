@@ -11,6 +11,9 @@ export function groupSections(cards: readonly Card[], column: string): GroupSect
   const groups = new Map<string, GroupSection>();
   for (const card of cards.filter((c) => c.column === column)) {
     const group = card.group?.closed_at ? undefined : card.group;
+    // A populated group's home card is metadata, not a member of this
+    // column. Only ordinary members can keep its header here.
+    if (card.kind === "group" && group && group.members.length > 0) continue;
     if (!group) {
       sections.push({ cards: [card] });
       continue;

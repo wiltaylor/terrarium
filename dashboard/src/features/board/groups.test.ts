@@ -19,6 +19,30 @@ describe("board groups", () => {
   });
 
   it("shows the home header even before members are added", () => {
-    expect(groupSections([card("P-3", "review", "group")], "review")).toEqual([{ group, cards: [] }]);
+    const empty = { ...group, members: [], total: 0, done: 0 };
+    const home = { ...card("P-3", "review", "group"), group: empty };
+    expect(groupSections([home], "review")).toEqual([{ group: empty, cards: [] }]);
+  });
+
+  it("removes the home header when the last member leaves its column", () => {
+    const home = card("P-3", "review", "group");
+    const first = card("P-1", "ready");
+    const last = card("P-2", "review");
+    expect(groupSections([home, first, last], "review")).toEqual([{ group, cards: [last] }]);
+
+    const moved = { ...last, column: "ready" };
+    expect(groupSections([home, first, moved], "review")).toEqual([]);
+    expect(groupSections([home, first, moved], "ready")).toEqual([{ group, cards: [moved, first] }]);
+    // LanesBoard supplies a column-local, visibility-filtered list.
+    expect(groupSections([home], "review")).toEqual([]);
+  });
+
+  it("removes a non-home header when its members move back home", () => {
+    const home = card("P-3", "review", "group");
+    const cards = [home, card("P-1", "ready"), card("P-2", "ready")];
+    expect(groupSections(cards, "ready")).toHaveLength(1);
+    const moved = cards.map((c) => ({ ...c, column: "review" }));
+    expect(groupSections(moved, "ready")).toEqual([]);
+    expect(groupSections(moved, "review")[0]!.cards.map((c) => c.id)).toEqual(["P-2", "P-1"]);
   });
 });
