@@ -3251,7 +3251,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate_with(&mut conn, MIGRATIONS).unwrap();
         conn.execute(
-            "INSERT INTO projects (name, created_at) VALUES ('preserved', ?1)",
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('preserved', ?1, ?1)",
             [now()],
         )
         .unwrap();
