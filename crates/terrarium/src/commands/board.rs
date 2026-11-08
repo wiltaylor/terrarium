@@ -556,10 +556,7 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
             }
             let k = ctx
                 .api
-                .post(
-                    &format!("{}/comments", card_path(id)),
-                    Some(request),
-                )
+                .post(&format!("{}/comments", card_path(id)), Some(request))
                 .await?;
             ctx.emit(&k, |c, k| {
                 c.line(format!("commented on {}", field(k, "id")))

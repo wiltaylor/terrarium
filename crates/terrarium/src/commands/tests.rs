@@ -2955,7 +2955,15 @@ async fn host_show_prints_the_usage_record() {
 async fn card_comment_takes_m_like_card_move() {
     ok(
         true,
-        &["card", "comment", "TER-1", "--reply-to", "C1", "-m", "checked"],
+        &[
+            "card",
+            "comment",
+            "TER-1",
+            "--reply-to",
+            "C1",
+            "-m",
+            "checked",
+        ],
         vec![(201, json!({"id": "TER-1"}))],
         vec![(
             Post,
