@@ -4219,7 +4219,9 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
     )).unwrap();
     let _h = lab.host("lab1").await;
     let state = lab.state();
-    terrariumd::reservations::reconcile_host(&state, "lab1").await.unwrap();
+    terrariumd::reservations::reconcile_host(&state, "lab1")
+        .await
+        .unwrap();
     lab.target(json!({"name":"dbox", "kind":"docker", "host":"lab1", "image":"alpine:3.20"}))
         .await;
     std::fs::create_dir_all(state.work_dir.join("terra/worker")).unwrap();

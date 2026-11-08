@@ -1917,7 +1917,9 @@ async fn steps(
         .collect();
     let mut env = recipe_env(job, x.dir, &head, base);
     let tunnel = if let Some(key) = injected.iter().find(|i| i.env == "DOCKER_CI_KEY") {
-        let reset = injected.iter().find(|i| i.env == "DOCKER_CI_RESET_KEY")
+        let reset = injected
+            .iter()
+            .find(|i| i.env == "DOCKER_CI_RESET_KEY")
             .ok_or_else(|| ApiError::invalid("Docker tunnel requires DOCKER_CI_RESET_KEY"))?;
         crate::docker_tunnel::reset(x.state, &reset.value).await?;
         let tunnel =
@@ -2118,7 +2120,9 @@ fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
         }
     }
     if !delivery.merge_secrets.is_empty() && delivery.merge_secrets.len() != 2 {
-        return Err(ApiError::invalid("Docker tunnel requires both DOCKER_CI_KEY and DOCKER_CI_RESET_KEY"));
+        return Err(ApiError::invalid(
+            "Docker tunnel requires both DOCKER_CI_KEY and DOCKER_CI_RESET_KEY",
+        ));
     }
     let refs = secrets::run_env::parse_refs(&delivery.merge_secrets)?;
     if refs.len() != delivery.merge_secrets.len() {
@@ -3019,7 +3023,10 @@ mod tests {
         delivery
             .merge_secrets
             .insert("DOCKER_CI_KEY".into(), "@secret:vm.private_key".into());
-        delivery.merge_secrets.insert("DOCKER_CI_RESET_KEY".into(), "@secret:reset.private_key".into());
+        delivery.merge_secrets.insert(
+            "DOCKER_CI_RESET_KEY".into(),
+            "@secret:reset.private_key".into(),
+        );
         assert!(check_merge_refs(&delivery).is_ok());
     }
 
