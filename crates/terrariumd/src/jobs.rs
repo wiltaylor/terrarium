@@ -3810,7 +3810,12 @@ mod tests {
         .unwrap();
         reopened
             .read(|c| {
-                assert_eq!(jobs::canonical_key(c, "failed.invalid")?, "192.0.2.3");
+                let key: String = c.query_row(
+                    "SELECT host_key FROM job_host_keys WHERE hostname = 'failed.invalid'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(key, "192.0.2.3");
                 Ok(())
             })
             .await
