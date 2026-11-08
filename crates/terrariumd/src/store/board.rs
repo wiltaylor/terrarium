@@ -804,6 +804,7 @@ pub fn board_summary(
     let mut stmt = conn.prepare(
         "SELECT json_object(
           'id', c.id, 'kind', c.kind, 'project', c.project, 'column', k.name,
+          '_column_role', k.role,
           'position', c.position, 'title', c.title, 'labels', json(c.labels),
           'assignee', c.assignee, 'assignee_name', coalesce(a.project || '/' || a.name, ar.project || '/' || ar.name, c.assignee),
           'assignee_status', a.status, 'agent', s.id,
@@ -848,6 +849,36 @@ pub fn board_summary(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut cards: Vec<Value> = raw.iter().map(|s| json_col(s)).collect();
+    let mut estimates = super::card_history::ReviewEstimates::default();
+    for card in &mut cards {
+        let role = card
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("board summary is not an object"))?
+            .remove("_column_role");
+        let review = role.as_ref().and_then(Value::as_str) == Some(REVIEW)
+            || (role.as_ref().is_none_or(Value::is_null) && card["column"] == REVIEW);
+        if review {
+            let id = card["id"]
+                .as_str()
+                .ok_or_else(|| ApiError::internal("board summary has no card id"))?;
+            let job = super::jobs::card_job(conn, id)?;
+            if job.is_none()
+                || job
+                    .as_ref()
+                    .is_some_and(|j| j.state == super::jobs::JobState::Queued)
+            {
+                let eta = if job.is_none() {
+                    estimates.eta(conn, project, id)?
+                } else {
+                    None
+                };
+                card["eta_at"] = json!(eta.as_ref().map(|v| &v.0));
+                card["eta_set_at"] = json!(eta.as_ref().map(|v| &v.1));
+                card["eta_set_by"] = Value::Null;
+                card["eta_set_by_name"] = Value::Null;
+            }
+        }
+    }
     // Preserve the card API's absent-when-unset optional metadata contract.
     for card in &mut cards {
         if let Some(fields) = card.as_object_mut() {
