@@ -16,7 +16,18 @@ const EXCLUDES: &[&str] = &[
     ".netrc",
     ".npmrc",
     ".pypirc",
-    "id_*",
+    "id_rsa",
+    "id_rsa.pub",
+    "id_ed25519",
+    "id_ed25519.pub",
+    "id_ed25519_sk",
+    "id_ed25519_sk.pub",
+    "id_ecdsa",
+    "id_ecdsa.pub",
+    "id_ecdsa_sk",
+    "id_ecdsa_sk.pub",
+    "id_dsa",
+    "id_dsa.pub",
     "*.pem",
     ".ssh",
 ];
@@ -151,15 +162,41 @@ pub(super) struct Sync {
 }
 
 async fn rsync(source: &str, destination: &str, shell: Option<&str>) -> ApiResult<()> {
+    rsync_basis(source, destination, shell, None, false)
+        .await
+        .map(|_| ())
+}
+
+async fn rsync_basis(
+    source: &str,
+    destination: &str,
+    shell: Option<&str>,
+    basis: Option<&Path>,
+    skip_links: bool,
+) -> ApiResult<String> {
     let mut cmd = tokio::process::Command::new("rsync");
     cmd.args([
         "-a",
         "--no-owner",
         "--no-group",
+        "--chmod=ugo-s",
+        "--no-specials",
+        "--no-devices",
         "--delete",
         "--checksum",
         "--protect-args",
+        "--stats",
     ]);
+    // Delta encoding is useful across SSH, not for the local copies.
+    if shell.is_some() {
+        cmd.arg("--no-whole-file");
+    }
+    if skip_links {
+        cmd.arg("--no-links");
+    }
+    if let Some(basis) = basis {
+        cmd.arg("--copy-dest").arg(basis);
+    }
     for name in EXCLUDES {
         cmd.arg(format!("--exclude={name}"));
     }
@@ -184,7 +221,7 @@ async fn rsync(source: &str, destination: &str, shell: Option<&str>) -> ApiResul
             rsync_reason(output.status.code())
         )));
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 pub(super) async fn prepare(
@@ -282,15 +319,34 @@ pub(super) async fn prepare(
 }
 
 impl Sync {
+    async fn download(&self, stage: &Path) -> ApiResult<String> {
+        let basis =
+            tempfile::tempdir().map_err(|e| ApiError::invalid(format!("sync basis: {e}")))?;
+        // rsync must never resolve live-workspace symlinks as basis paths.
+        // Seed a private, symlink-free copy. No other process can replace its
+        // directories during the remote transfer, and no hard links are used.
+        rsync_basis(
+            &format!("{}/", self.root.display()),
+            &format!("{}/", basis.path().display()),
+            None,
+            None,
+            true,
+        )
+        .await?;
+        rsync_basis(
+            &self.remote,
+            &format!("{}/", stage.display()),
+            Some(&self.shell),
+            Some(basis.path()),
+            false,
+        )
+        .await
+    }
+
     async fn pull(&self) -> ApiResult<()> {
         let stage =
             tempfile::tempdir().map_err(|e| ApiError::invalid(format!("sync staging: {e}")))?;
-        rsync(
-            &self.remote,
-            &format!("{}/", stage.path().display()),
-            Some(&self.shell),
-        )
-        .await?;
+        self.download(stage.path()).await?;
         let now = scan(&self.root).await?;
         let changed = changed_paths(&self.before, &now);
         if !changed.is_empty() {
@@ -319,7 +375,7 @@ pub(super) fn finish_with(sess: &Arc<ExecSession>, sync: Option<Sync>) {
     tokio::spawn(async move {
         if let Some(end) = rx.recv().await {
             // A killed/lost process may still be writing. Leave its output remote.
-            let end = if matches!(
+            let mut end = if matches!(
                 end,
                 End::Cp { .. }
                     | End::Exit {
@@ -343,6 +399,26 @@ pub(super) fn finish_with(sess: &Arc<ExecSession>, sync: Option<Sync>) {
                 end
             };
             if let Some(sess) = sess.upgrade() {
+                // Serialize handoff with finish(): events received during the pull
+                // must not hide a pull error that left output remote.
+                let mut sender = sess.sync_end.lock().unwrap_or_else(|e| e.into_inner());
+                sender.take();
+                while let Ok(pending) = rx.try_recv() {
+                    end = match end {
+                        End::Error { code, message }
+                            if code == "sync_conflict" || code == "sync_failed" =>
+                        {
+                            End::error(
+                                &code,
+                                format!(
+                                    "{message}; pending session end: {}",
+                                    serde_json::to_string(&pending).unwrap_or_default()
+                                ),
+                            )
+                        }
+                        _ => pending,
+                    };
+                }
                 sess.finish_synced(end);
             }
         }
@@ -363,6 +439,10 @@ mod tests {
         ".pypirc",
         "id_ed25519",
         "id_rsa.pub",
+        "id_ed25519_sk",
+        "id_ed25519_sk.pub",
+        "id_ecdsa_sk",
+        "id_ecdsa_sk.pub",
         "certificate.pem",
         ".terrarium-git-trailers",
     ];
@@ -379,6 +459,7 @@ mod tests {
         std::fs::write(root.path().join("nested/.ssh/config"), "secret").unwrap();
         assert_eq!(snapshot(root.path()).unwrap().len(), 1);
         assert!(!excluded(std::ffi::OsStr::new("environment.rs")));
+        assert!(!excluded(std::ffi::OsStr::new("id_parser.rs")));
         assert_eq!(rsync_reason(Some(23)), "partial transfer");
         assert_eq!(
             rsync_reason(Some(255)),
@@ -497,6 +578,34 @@ mod tests {
             _key: None,
             _lock: workspace_lock(local.path()).try_lock_owned().unwrap(),
         };
+        let (revoked, _ctl) = ExecSession::new("revoked", None, "exec", 1024);
+        finish_with(&revoked, Some(sync));
+        revoked.finish(End::Exit {
+            code: Some(0),
+            signal: None,
+            reason: "exited".into(),
+        });
+        // Let the receiver start its asynchronous pull before revoking.
+        tokio::task::yield_now().await;
+        let end = End::error("lease_revoked", "lease revoked");
+        revoked.finish(end.clone());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !revoked.is_done() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(revoked.end(), Some(end));
+
+        let sync = Sync {
+            root: local.path().to_owned(),
+            remote: format!("{}/", remote.path().display()),
+            shell: "ssh".into(),
+            before: snapshot(local.path()).unwrap(),
+            _key: None,
+            _lock: workspace_lock(local.path()).try_lock_owned().unwrap(),
+        };
         std::fs::write(local.path().join("result"), "harness").unwrap();
         let (session, _ctl) = ExecSession::new("fixture", None, "push", 1024);
         finish_with(&session, Some(sync));
@@ -504,6 +613,8 @@ mod tests {
             bytes: 0,
             sha256: String::new(),
         });
+        tokio::task::yield_now().await;
+        session.finish(End::error("lease_revoked", "lease revoked"));
         tokio::time::timeout(Duration::from_secs(10), async {
             while !session.is_done() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -511,7 +622,9 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(matches!(session.end(), Some(End::Error { code, .. }) if code == "sync_conflict"));
+        assert!(
+            matches!(session.end(), Some(End::Error { code, message }) if code == "sync_conflict" && message.contains("lease_revoked") && message.contains("remote output retained"))
+        );
         assert_eq!(
             std::fs::read_to_string(local.path().join("result")).unwrap(),
             "harness"
@@ -647,6 +760,12 @@ mod tests {
             _lock: workspace_lock(&local).try_lock_owned().unwrap(),
         };
         sync.pull().await.unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let stats = sync.download(stage.path()).await.unwrap();
+        assert!(
+            stats.contains("Number of regular files transferred: 0"),
+            "{stats}"
+        );
         for name in SECRET_NAMES {
             assert_eq!(
                 std::fs::read_to_string(local.join(name)).unwrap(),

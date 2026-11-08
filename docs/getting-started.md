@@ -484,9 +484,9 @@ urgent or critical. The Inbox has four kinds of items:
 - **Questions.** A lead agent (a project lead or the system lead) asks you
   for a decision with `terrarium question ask`. A worker cannot ask you:
   it asks its lead.
-- **Notices.** A lead tells you something that needs no decision, for
-  example a milestone, a finished deploy, or a risk, with
-  `terrarium notify`.
+- **Notices.** A lead answers you, reports one done per request you made,
+  or reports a real problem (security, data loss, outage, spent budget) with
+  `terrarium notify`. Milestones, deploys, and progress do not get notices.
 - **Mail to you.** Each mail to `operator` stays here until you
   acknowledge it.
 - **System.** A thread that the loop guard paused, and the messages that
@@ -1866,6 +1866,17 @@ updater has it.
    It logs changed key names, never values. Missing mounts, unreadable files,
    or failed Compose interpolation stop the update before the swap. Automatic
    recovery after a failed swap uses the original container environment.
+   Shell-only variables used to start a source checkout are not retained:
+   put deployment settings in `.env` or a Compose env file. Compose runs with
+   HOME and a fixed PATH, plus the updater's deployment path and image overrides,
+   not the updater's old service environment.
+   Explicit rollback uses the recorded old container spec and backup without
+   resolving Compose again, so a broken `.env` does not prevent rollback.
+   For switches made before container specs were recorded, rollback falls back
+   to the currently inspected container spec, so it cannot restore historical
+   environment settings. Automatic recovery after a failed update always uses
+   the spec inspected before that update. The recorded spec contains environment values and is stored
+   in the updater state directory with owner-only file permissions.
 
    **Existing server installs: one-time updater migration.** This is a deploy
    step for the deployment owner, not a self-update. Schedule a maintenance

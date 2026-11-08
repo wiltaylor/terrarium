@@ -470,6 +470,7 @@ pub fn exec_limits(
         .host_support(caps.limits.as_ref())
         .map_err(|r| ApiError::conflict(terrarium_core::limits::refusal(&r)))?;
     Ok(Some(ExecLimits {
+        reservation: None,
         target: def.name.clone(),
         holder: holder.unwrap_or("operator").to_owned(),
         limits,
@@ -1245,6 +1246,10 @@ async fn pull_via_cat(
 
 /// The executor state: the host registry and the exec sessions.
 pub struct Executor {
+    /// Serialize reservation enforcement and cleanup across API calls/timers.
+    resource_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    resource_verbs: Mutex<HashMap<String, usize>>,
+    resource_pending: Mutex<HashMap<String, String>>,
     pub hosts: Arc<HostRegistry>,
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
     pub max_per_agent: usize,
@@ -1259,6 +1264,9 @@ impl Default for Executor {
     fn default() -> Self {
         Self {
             hosts: Arc::default(),
+            resource_locks: Mutex::default(),
+            resource_verbs: Mutex::default(),
+            resource_pending: Mutex::default(),
             sessions: Mutex::default(),
             max_per_agent: MAX_SESSIONS_PER_AGENT,
             ssh_bin: std::env::var("TERRARIUM_SSH").unwrap_or_else(|_| "ssh".into()),
@@ -1269,7 +1277,115 @@ impl Default for Executor {
     }
 }
 
+struct ResourceVerb {
+    executor: Arc<Executor>,
+    host: String,
+}
+
+impl Drop for ResourceVerb {
+    fn drop(&mut self) {
+        let mut verbs = self
+            .executor
+            .resource_verbs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = verbs.get_mut(&self.host) {
+            *count -= 1;
+            if *count == 0 {
+                verbs.remove(&self.host);
+            }
+        }
+    }
+}
+
 impl Executor {
+    pub fn resource_lock(&self, host: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.resource_lock_key(format!("host:{host}"))
+    }
+
+    fn resource_lock_key(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
+        self.resource_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_default()
+            .clone()
+    }
+
+    pub fn target_resource_lock(&self, def: &TargetDef) -> Arc<tokio::sync::Mutex<()>> {
+        match def.host.as_deref() {
+            Some(host) => self.resource_lock(host),
+            None => self.resource_lock_key(format!("target:{}", def.name)),
+        }
+    }
+
+    pub fn resource_verb_idle(&self, host: &str) -> ApiResult<()> {
+        if let Some(count) = self
+            .resource_verbs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(host)
+        {
+            return Err(ApiError::resource_busy(format!(
+                "{count} lifecycle verbs in progress on host `{host}`; retry the resource change"
+            )));
+        }
+        Ok(())
+    }
+
+    fn begin_resource_verb(self: &Arc<Self>, def: &TargetDef) -> ApiResult<ResourceVerb> {
+        let host = host_of(def)?.to_owned();
+        *self
+            .resource_verbs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(host.clone())
+            .or_default() += 1;
+        Ok(ResourceVerb {
+            executor: self.clone(),
+            host,
+        })
+    }
+
+    pub fn set_resource_pending(&self, host: &str, pending: bool) {
+        let mut hosts = self
+            .resource_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if pending {
+            hosts.insert(host.to_owned(), ulid::Ulid::new().to_string());
+        } else {
+            hosts.remove(host);
+        }
+    }
+
+    pub fn resource_pending(&self, host: &str) -> bool {
+        self.resource_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(host)
+    }
+
+    pub fn resource_epoch(&self, host: &str) -> Option<String> {
+        self.resource_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(host)
+            .cloned()
+    }
+
+    pub fn finish_resource_reconcile(&self, host: &str, epoch: Option<&str>) -> bool {
+        let mut pending = self
+            .resource_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if pending.get(host).map(String::as_str) != epoch {
+            return false;
+        }
+        pending.remove(host);
+        true
+    }
+
     fn table(&self) -> MutexGuard<'_, HashMap<String, Arc<ExecSession>>> {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -1304,7 +1420,7 @@ impl Executor {
             .values()
             .filter(|s| {
                 let idle = s.idle();
-                (s.is_done() && idle > DONE_IDLE) || idle > LIVE_IDLE
+                (s.is_done() && idle > DONE_IDLE) || (s.kind != "internal" && idle > LIVE_IDLE)
             })
             .map(|s| s.id.clone())
             .collect();
@@ -1377,6 +1493,69 @@ impl Executor {
         self.table().len()
     }
 
+    pub fn resource_sessions(&self, targets: &[String], holder: Option<&str>) -> Vec<String> {
+        self.table()
+            .values()
+            .filter(|s| {
+                targets.contains(&s.target)
+                    && holder.is_none_or(|a| s.owner.as_deref() == Some(a))
+                    && !s.is_done()
+            })
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    pub async fn end_resource_sessions(
+        &self,
+        targets: &[String],
+        holder: Option<&str>,
+    ) -> Vec<Value> {
+        let sessions: Vec<_> = self
+            .table()
+            .values()
+            .filter(|s| {
+                targets.contains(&s.target)
+                    && holder.is_none_or(|a| s.owner.as_deref() == Some(a))
+                    && !s.is_done()
+            })
+            .cloned()
+            .collect();
+        let mut checks = tokio::task::JoinSet::new();
+        for s in sessions {
+            let report = s
+                .kill_report
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            s.finish(End::error(
+                "reservation_ended",
+                "your resource reservation on this host ended",
+            ));
+            s.kill();
+            checks.spawn(async move {
+                let result = match report {
+                    Some(report) => crate::run_kill::report(report).await,
+                    None => None,
+                };
+                let confirmed = result.as_ref().is_some_and(|r| {
+                    r.get("error").is_none()
+                        && r["pid"].is_u64()
+                        && r["left"].as_array().is_some_and(Vec::is_empty)
+                });
+                (!confirmed).then(|| json!({"session":s.id,"target":s.target,"report":result}))
+            });
+        }
+        let mut unconfirmed = Vec::new();
+        while let Some(result) = checks.join_next().await {
+            match result {
+                Ok(Some(detail)) => unconfirmed.push(detail),
+                Err(e) => unconfirmed.push(json!({"error":e.to_string()})),
+                _ => {}
+            }
+        }
+        unconfirmed
+    }
+
     /// End the live sessions of `agent` on `target`: each ends with the
     /// error `code` and `message`, and its run is killed. For a lease that
     /// ended (`lease_revoked`). Returns the number of sessions.
@@ -1429,7 +1608,145 @@ pub(crate) fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
 
 /// Start a command on a target.
 pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
+    let lock = state.executor.target_resource_lock(def);
+    if let Ok(_resources) = lock.clone().try_lock_owned() {
+        let run = start_cmd_locked(state, def, cmd)?;
+        return track_resource_run(state, def, cmd, run, None);
+    }
+    // This entry point is synchronous (also used by process-tree wrappers).
+    // Wait asynchronously rather than blocking the runtime or rejecting a
+    // command merely because a short admission write is in flight.
+    let (tx, events) = mpsc::channel(16);
+    let (ctl, mut controls) = mpsc::unbounded_channel();
+    let state = state.clone();
+    let def = def.clone();
+    let cmd = cmd.clone();
+    tokio::spawn(async move {
+        let guard = tokio::select! {
+            _ = tx.closed() => return,
+            result = tokio::time::timeout(Duration::from_millis(500), lock.lock_owned()) => {
+                match result {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        let _ = tx.send(Ev::End(End::error("resource_busy", "host admission is busy; retry the command"))).await;
+                        return;
+                    }
+                }
+            }
+        };
+        let run = start_cmd_locked(&state, &def, &cmd)
+            .and_then(|run| track_resource_run(&state, &def, &cmd, run, None));
+        drop(guard);
+        let mut run = match run {
+            Ok(run) => run,
+            Err(error) => {
+                let code = serde_json::to_value(error.code).unwrap_or_default();
+                let _ = tx
+                    .send(Ev::End(End::error(
+                        code.as_str().unwrap_or("internal"),
+                        error.message,
+                    )))
+                    .await;
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                _ = tx.closed() => { let _ = run.ctl.send(Control::Kill); break; }
+                control = controls.recv() => match control {
+                    Some(control) => { let _ = run.ctl.send(control); }
+                    None => { let _ = run.ctl.send(Control::Kill); break; }
+                },
+                event = run.events.recv() => match event {
+                    Some(event) => {
+                        let ended = matches!(event, Ev::End(_));
+                        if tx.send(event).await.is_err() || ended { break; }
+                    }
+                    None => break,
+                },
+            }
+        }
+    });
+    Ok(Running { events, ctl })
+}
+
+/// Internal jobs and probes must participate in reservation admission and
+/// cleanup too. Forward their output without retaining unredacted bytes in
+/// the public session buffer.
+pub(crate) fn track_resource_run(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+    mut run: Running,
+    report: Option<crate::run_kill::Report>,
+) -> ApiResult<Running> {
+    let owner = state.db.read_now(|conn| {
+        Ok(cmd
+            .holder
+            .as_deref()
+            .and_then(|holder| crate::store::agents::find(conn, holder, None).ok())
+            .map(|a| a.agent.id.to_string()))
+    })?;
+    let (session, mut controls) = ExecSession::new(&def.name, owner, "internal", 1);
+    session.set_kill_report(report);
+    state.executor.insert(session.clone());
+    let weak = Arc::downgrade(&state.executor);
+    let ctl = run.ctl.clone();
+    let forward_ctl = ctl.clone();
+    let control_task = tokio::spawn(async move {
+        while let Some(control) = controls.recv().await {
+            if forward_ctl.send(control).is_err() {
+                break;
+            }
+        }
+    });
+    let (tx, events) = mpsc::channel(16);
+    tokio::spawn(async move {
+        let mut sent_end = false;
+        while let Some(mut event) = run.events.recv().await {
+            let ended = matches!(event, Ev::End(_));
+            if let Ev::End(end) = &mut event {
+                session.finish(end.clone());
+                if let Some(recorded) = session.end() {
+                    *end = recorded;
+                }
+            }
+            if tx.send(event).await.is_err() {
+                let _ = run.ctl.send(Control::Kill);
+                break;
+            }
+            if ended {
+                sent_end = true;
+                break;
+            }
+        }
+        session.finish(End::error(
+            "lost",
+            "the internal command ended without an end",
+        ));
+        if !sent_end && let Some(end) = session.end() {
+            let _ = tx.send(Ev::End(end)).await;
+        }
+        control_task.abort();
+        if let Some(executor) = weak.upgrade() {
+            executor.table().remove(&session.id);
+        }
+    });
+    Ok(Running { events, ctl })
+}
+
+/// The caller holds resource_lock through session registration.
+pub(crate) fn start_cmd_locked(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+) -> ApiResult<Running> {
     no_exec(def)?;
+    // SSH takes a separate execution path, but must not bypass a host's
+    // exclusive reservation policy.
+    if def.kind == TargetKind::Ssh {
+        crate::reservations::exec_budget(state, def, cmd.holder.as_deref())?;
+    }
     let ex = &state.executor;
     match def.kind {
         TargetKind::Ssh => {
@@ -1473,7 +1790,11 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
         _ => {
             let host = host_of(def)?;
             let caps = ex.hosts.capabilities(host);
-            let limits = exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?;
+            let limits = match crate::reservations::exec_budget(state, def, cmd.holder.as_deref())?
+            {
+                Some(limits) => Some(limits),
+                None => exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?,
+            };
             let shell = caps.and_then(|c| c.shell);
             let make = host_frame(def, shell.as_deref(), cmd, limits)?;
             Ok(pump_host(ex.hosts.open(host, make)?))
@@ -1482,6 +1803,27 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
 }
 
 /// Run a host-agent verb to its end.
+/// Only the run-kill guard calls this for its generated cleanup commands.
+/// Cleanup must work while reservations block new user commands, and must
+/// not enter the very slice being stopped.
+pub(crate) fn start_resource_cleanup(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+) -> ApiResult<Running> {
+    if !matches!(def.kind, TargetKind::Host | TargetKind::Docker) {
+        return start_cmd(state, def, cmd);
+    }
+    let host = host_of(def)?;
+    let shell = state
+        .executor
+        .hosts
+        .capabilities(host)
+        .and_then(|c| c.shell);
+    let make = host_frame(def, shell.as_deref(), cmd, None)?;
+    Ok(pump_host(state.executor.hosts.open(host, make)?))
+}
+
 async fn verb(
     state: &Shared,
     def: &TargetDef,
@@ -1513,7 +1855,7 @@ fn verb_failed(what: &str, c: &Collected) -> ApiError {
     }))
 }
 
-async fn verb_ok(
+pub(crate) async fn verb_ok(
     state: &Shared,
     def: &TargetDef,
     what: &str,
@@ -1677,7 +2019,8 @@ async fn start_exec_secrets(
         cmd.agent.as_deref().or(cmd.holder.as_deref()),
     )
     .await?;
-    let (run, report) = crate::run_kill::start(state, &def, &cmd)?;
+    let resources = state.executor.target_resource_lock(&def).lock_owned().await;
+    let (run, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
     let view = match actor {
         Actor::Agent(a) => terrarium_core::redact::View::Scope(a.project.clone()),
@@ -1697,6 +2040,7 @@ async fn start_exec_secrets(
     workspace_sync::finish_with(&sess, sync);
     tokio::spawn(attach(run, sess.clone(), ctl, false, false));
     state.executor.insert(sess.clone());
+    drop(resources);
     let mut detail = json!({"session": sess.id, "kind": targets::kind_str(row.def.kind),
            "command": cmd_text(&cmd), "cwd": cmd.cwd, "pty": cmd.pty.is_some(),
            "env": cmd.env.keys().collect::<Vec<_>>()});
@@ -1764,7 +2108,8 @@ pub async fn start_tool_exec(
     cmd.shell = false;
     cmd.pty = None;
     cmd.holder = holder_of(actor);
-    let (running, report) = crate::run_kill::start(state, &def, &cmd)?;
+    let resources = state.executor.target_resource_lock(&def).lock_owned().await;
+    let (running, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     let (sess, ctl) = ExecSession::new(
         name,
         actor.agent().map(|a| a.id.clone()),
@@ -1776,6 +2121,7 @@ pub async fn start_tool_exec(
     let daemon = state.db.redactor().get();
     tokio::spawn(attach_tool(running, sess.clone(), ctl, run, daemon));
     state.executor.insert(sess.clone());
+    drop(resources);
     Ok(sess)
 }
 
@@ -2486,6 +2832,7 @@ async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> A
     let mut labels = BTreeMap::new();
     labels.insert("terrarium.target".to_owned(), def.name.clone());
     let limits = docker_limits(state, def)?;
+    let reservation = crate::reservations::docker_budget(state, def)?;
     verb_ok(state, def, "docker.run", move |session| {
         DaemonFrame::DockerRun(DockerRun {
             session,
@@ -2507,6 +2854,7 @@ async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> A
             pty: None,
             timeout_secs: Some(VERB_TIMEOUT),
             limits,
+            reservation,
         })
     })
     .await?;
@@ -2540,6 +2888,10 @@ fn docker_limits(state: &Shared, def: &TargetDef) -> ApiResult<Option<Limits>> {
 }
 
 async fn docker_start(state: &Shared, def: &TargetDef) -> ApiResult<()> {
+    {
+        let _admission = state.executor.target_resource_lock(def).lock_owned().await;
+        crate::reservations::before_docker_start(state, def).await?;
+    }
     let container = container_name(def);
     verb_ok(state, def, "docker.start", move |session| {
         DaemonFrame::DockerStart(DockerStart {
@@ -2722,6 +3074,21 @@ pub async fn lifecycle(
     if is_instance_kind(def) && !opts.inner {
         // Boxed: an instance verb runs `lifecycle` on the instance's lab dir.
         return Box::pin(instance_lifecycle(state, def, verb_kind, opts)).await;
+    }
+    // Publish a short-lived intent under the host admission lock. Resource
+    // changes refuse this host while a verb runs, without holding a mutex
+    // across image pulls or blocking work on any other host.
+    let _resource_verb = if def.kind == TargetKind::Docker {
+        let _admission = state.executor.target_resource_lock(def).lock_owned().await;
+        if verb_kind == V::Up {
+            crate::reservations::lifecycle_admission(state, def)?;
+        }
+        Some(state.executor.begin_resource_verb(def)?)
+    } else {
+        None
+    };
+    if verb_kind == V::Up && def.kind != TargetKind::Docker {
+        crate::reservations::lifecycle_admission(state, def)?;
     }
     let mut add_snapshot = None;
     let mut result = None;

@@ -20,6 +20,7 @@ pub mod pipelines;
 pub mod projects;
 pub mod questions;
 pub mod remote;
+pub mod reservations;
 pub mod rules;
 pub mod schedules;
 pub mod screen;
@@ -49,6 +50,7 @@ use crate::transport::encode;
 
 pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
     match cmd {
+        Command::Reserve { command } => reservations::run(ctx, command).await,
         Command::Daemon { command } => system::daemon(ctx, command).await,
         Command::Whoami => system::whoami(ctx).await,
         Command::Group { command } => groups::group(ctx, command).await,

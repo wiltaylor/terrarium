@@ -48,6 +48,7 @@ pub mod question_guard;
 pub mod quota_notices;
 pub mod quota_policy;
 pub mod repo_browse;
+pub mod reservations;
 pub mod reset;
 pub mod rules_engine;
 pub mod rules_verbs;
@@ -339,6 +340,7 @@ pub async fn start_with_usage(
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
+    tasks.push(reservations::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
     // The board rule engine (TER-168): runs the outbox rows that the last
     // daemon left pending, then the new events.

@@ -1004,8 +1004,12 @@ async fn step(
     input: Option<Vec<u8>>,
 ) -> ApiResult<Collected> {
     let pidfile = crate::run_kill::job_pidfile(job);
-    let (running, report) = crate::run_kill::start_named(state, def, cmd, pidfile)?;
+    let admission = state.executor.target_resource_lock(def).lock_owned().await;
+    let (running, report) =
+        crate::run_kill::start_named_locked(state, def, cmd, pidfile, &admission)?;
+    let running = crate::executor::track_resource_run(state, def, cmd, running, report.clone())?;
     set_control(job, Some(running.ctl.clone()));
+    drop(admission);
     // A kill between the check in [`StepCtx::run`] and set_control found
     // the old control or none: kill this step now.
     if killed(job) {

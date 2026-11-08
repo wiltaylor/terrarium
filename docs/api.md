@@ -6254,10 +6254,15 @@ the state of one of its lab instances, is `running`), `PATCH` changes only
 conflict`, with `details: {state, fields}`. Bring the target down first. A
 field with its current value is no change. `terrarium admin target edit`
 sends this `PATCH`. Exception: the `limits` of a `host` target change at
-any time ("Resource limits", below).
+any time, and supported Docker `limits` change live after host acknowledgement
+("Resource limits", below).
 
-For a permanent managed Docker target, changing `image` or `limits` sets
-`runtime.recreate_required` and returns `recreate_note`. The next `up` of
+For a permanent managed Docker target, changing `image` sets
+`runtime.recreate_required` and returns `recreate_note`. Supported limit edits
+on running or stopped containers use `docker update` without recreation.
+Only a successful host acknowledgement advances the saved limits baseline.
+A failed acknowledgement keeps both the stored defaults and baseline unchanged.
+An offline or older host refuses the live edit. The next `up` of
 an existing stopped container starts it with its old settings and a clear
 `recreate_note` warning. Editing both image and limits back to the container's
 original settings clears the pending flag, without discarding any data.
@@ -6286,6 +6291,86 @@ File sync, at start and on `POST /api/reload`: a file target is made or
 updated and becomes `file`. An API target with the same name becomes
 `file`. When the file is gone, the target is deleted. The API refuses to
 change a file target (`409 file_managed`).
+
+**Host reservations (phase 1).** Hosts advertise physical logical CPU IDs,
+memory bytes and reservation support. `GET /api/hosts/{host}/capacity`
+returns physical, reservable and charged capacity. An operator or sysadmin
+configures `PUT /api/hosts/{host}/capacity` with `percentage` (0–100) and
+an optional `io` map. The default percentage is zero. IO is an operator-set
+budget, not measured disk throughput. Map keys are canonical block-device
+numbers such as `8:0`; values contain `read_bps`, `write_bps`, `read_iops`
+and `write_iops` (nonnegative integers).
+
+The `used` object includes charged `cpu_millis`, `memory_bytes`, the summed
+per-device `io` map, and sorted `exclusive_cores` CPU IDs. Queued and terminal
+reservations are excluded. Admission locks are per host agent. Docker lifecycle
+verbs publish an in-progress intent, then release admission while pulling or
+creating a container. Verbs may overlap on the same host. Resource changes on
+that host return `409 resource_busy` until all verbs finish, except a grant
+with `queue: true`, which enters the FIFO. Metadata-only target patches remain
+allowed. Expiry cleanup retries afterward. Commands wait up to 500 ms for a
+short admission write before reporting `resource_busy`. Other hosts remain independent.
+
+`POST /api/hosts/{host}/reservations` accepts `target`, optional `agent`,
+`amounts`, `until`, optional `reason`, `exclusive`, `queue` and
+`queue_timeout`. `amounts` contains `cpu_millis` (1000 is one logical core),
+`memory_bytes`, and `io`. `until` uses the lease time syntax. Without
+`agent`, the reservation belongs to the target. Authorization follows target
+leasing. Docker has one container budget and cannot reserve separately for
+an agent. Agent host reservations span that agent's targets on the host.
+Host grants return 409 naming existing sessions that must end first:
+phase 1 does not reparent live scopes. Agent and target reservations cannot
+overlap on a host because they use different slice hierarchies.
+
+Insufficient capacity returns 409 with the current allocations. With
+`queue: true`, the request waits in a durable FIFO queue, without backfill.
+`queue_timeout` defaults to one hour. Starting and ending reservations keep
+capacity charged until enforcement or cleanup finishes. `GET
+/api/hosts/{host}/reservations` lists visible reservations; `GET
+/api/reservations/{id}` reads one. `PATCH /api/reservations/{id}` with
+`until` extends it, `DELETE` retracts it, and `POST
+/api/reservations/{id}/cancel` cancels a queued request. CLI equivalents are
+`reserve new`, `reserve extend`, `reserve retract`, `reserve ls` and
+`reserve cancel`. `wait reservation <id>` registers a durable wait: admission
+resolves it, and cancellation, expiry or queue timeout fails it. Resolution
+is mailed to the waiting agent.
+
+Warnings at 15 and 5 minutes remaining are audited and sent as mail and
+runner pointers. Ending a reservation ends registered sessions with
+`reservation_ended`. Host cleanup stops its own slice before releasing
+capacity. Docker cleanup waits a bounded interval for process-tree cleanup;
+an unconfirmed result emits a warning and audit record naming the sessions.
+Fixed supported limits are restored before capacity is released.
+Docker treats zero CPU/memory and empty affinity updates as no change.
+For an absent fixed default, release therefore sets the effective
+"unlimited" managed default explicitly: all host CPU IDs, a CPU quota equal
+to the host's logical CPU count, and physical host memory. Swap follows the
+target's configured allowance. These values come from the online host's
+capability report at release, not a cached reservation size. A missing or
+stale report leaves capacity charged and emits a cleanup warning rather
+than guessing. This default does not give a container memory beyond its
+host's physical capacity.
+
+Exclusive CPU reservations allocate disjoint whole logical CPUs and leave
+at least one CPU for shared work. Isolation covers Terrarium-managed host
+scopes and Docker containers, not unrelated host services. Shared scopes
+inherit the complement on `terrarium.slice`; exclusive scopes use a sibling
+`terrariumreserved` hierarchy. Docker uses cpusets. Existing host sessions
+must end before an exclusive grant. Vmlab, SSH and unmanaged Docker paths
+are refused while exclusivity is active. Nonexclusive reservations provide
+accounted CPU quotas and memory/IO caps, not dedicated CPU affinity.
+
+**Reservation device IO restrictions.** A Docker reservation's per-device
+bandwidth and IOPS limits are create-time settings. A live change returns
+`409 conflict`, explaining that the limit takes effect at the next up.
+Phase 1 accepts device-IO reservations only on ephemeral Docker targets
+created for the reservation. Permanent Docker targets return `409 conflict`:
+the limits cannot be cleared without recreating the container. Terrarium
+does not recreate a container or write its cgroup files to bypass this rule.
+At expiry, permanent targets stay running. If restoring their supported
+fixed limits fails, the reservation stays in cleanup and its capacity stays
+charged until restoration succeeds. Ephemeral reservation containers may
+be stopped during cleanup.
 
 **Resource limits.** `limits` keeps one agent from taking all of a
 machine. A `host` target and a `docker` target with `image` take it. Every
@@ -6332,11 +6417,12 @@ Rules:
   once.
 - **A `docker` target: one budget for the container.** The container is
   one for all holders (§17.8), so they share the limits. Docker sets them
-  when Terrarium runs the container (`up`). A change of `limits` while the
-  container runs is `409 conflict`, as for every field. While a container of
-  a permanent managed target is `stopped`, a change of `limits` requires
-  explicit `recreate` (above), rather than starting with old limits. An
-  ephemeral target gets a new container at each `up`.
+  when Terrarium runs the container (`up`). API `PATCH` updates supported
+  fixed limits through `docker update` on running or stopped containers,
+  without recreation. Defaults are saved only after acknowledgement. An
+  active reservation continues to override edited defaults until it ends.
+  An offline or older host without live-update support refuses the edit.
+  An ephemeral target gets a new container at each `up`.
 - **A `host` target is always `running`** while its host agent is online.
   Its `limits` change at any time with `PATCH`. A new session sets the new
   limits on the holder's slice, so the processes of the holder that run

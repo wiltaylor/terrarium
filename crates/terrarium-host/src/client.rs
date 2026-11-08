@@ -871,6 +871,25 @@ impl Client {
                 need(docker_ok, "docker").and_then(|_| docker::plan_exec(&r, db)),
                 tx,
             ),
+            F::ResourceApply(r) => {
+                let plan = if let Some(container) = &r.container {
+                    need(docker_ok, "docker")
+                        .and_then(|_| docker::plan_update(container, &r.limits, db))
+                } else {
+                    r.limits
+                        .host_support(o.capabilities.limits.as_ref())
+                        .map_err(BuildError::bad)
+                        .and_then(|_| {
+                            crate::limits::reservation_plan(&r.target, &r.holder, &r.limits)
+                        })
+                };
+                self.start(r.session, plan, tx);
+            }
+            F::ResourceStop(r) => self.start(
+                r.session,
+                crate::limits::reservation_stop_plan(&r.target, &r.holder),
+                tx,
+            ),
             F::DockerStart(r) => self.start(
                 r.session,
                 need(docker_ok, "docker").and_then(|_| docker::plan_start(&r, db)),
@@ -1243,12 +1262,18 @@ impl Client {
             .host_support(self.opts.capabilities.limits.as_ref())
             .map_err(refuse)?;
         let slice = crate::limits::slice_name(&l.target, &l.holder);
-        crate::limits::apply_slice(&slice, &l.limits)
-            .await
-            .map_err(|e| BuildError {
-                code: ErrorCode::SpawnFailed,
-                message: format!("cannot set the resource limits on {slice}: {e}"),
-            })?;
+        let applied = if let Some(reservation) = &l.reservation {
+            reservation
+                .host_support(self.opts.capabilities.limits.as_ref())
+                .map_err(refuse)?;
+            crate::limits::apply_reservation(&l.target, &l.holder, reservation).await
+        } else {
+            crate::limits::apply_slice(&slice, &l.limits).await
+        };
+        applied.map_err(|e| BuildError {
+            code: ErrorCode::SpawnFailed,
+            message: format!("cannot set the resource limits on {slice}: {e}"),
+        })?;
         #[allow(clippy::cast_possible_truncation)]
         let scope = crate::limits::scope_name(&self.opts.name, session, random_u64() as u32);
         tracing::info!(session, %slice, %scope, limits = %l.limits.summary(), "limited session");
