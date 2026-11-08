@@ -15,6 +15,9 @@ use crate::sandbox::SandboxMode;
     about
 )]
 pub struct Settings {
+    /// Updater drain wait, also the cap for graceful agent RPC draining.
+    #[arg(long, env = "TERRARIUM_UPDATE_DRAIN_WAIT", default_value_t = 600)]
+    pub update_drain_wait: u64,
     /// The Unix socket for the operator CLI. No token is needed on it.
     #[arg(long, env = paths::ENV_SOCKET, default_value_os_t = paths::api_socket())]
     pub socket: PathBuf,
