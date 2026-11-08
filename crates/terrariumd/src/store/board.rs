@@ -1892,7 +1892,7 @@ pub(crate) fn create_card_with_author(
     let held_for = match actor {
         Actor::Agent(a) => {
             let list = github_gate::authors(t, project)?;
-            (!list.is_empty()
+            ((!list.is_empty() || verified_author.is_some())
                 && github_gate::is_github(&title, &new.labels)
                 && !github_gate::allowed(&list, verified_author))
             .then(|| a.clone())

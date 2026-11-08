@@ -4626,10 +4626,16 @@ card. Requires project write access. The daemon fetches the issue from
 `api.github.com` using the configured repository's token credential, if any.
 Only canonical github.com HTTPS and SSH repository URLs are accepted, redirects
 are refused, and pull requests are rejected. No card is created on fetch failure.
-The API's author, title and body supply the card, which starts in backlog or
-is held by the project's configured author gate. Repeated imports return the
+An SSH credential or unavailable token does not prevent anonymous public issue
+fetches. An inaccessible issue without a token reports that a private repo
+needs a granted token (GitHub also returns 404 for missing issues).
+The API's author, title and body supply the card. Control characters are removed
+from titles and the issue title is capped at 200 characters. An agent's import
+starts in backlog only when its verified author is on the project's list.
+With no author list configured every agent import is held. Repeated imports return the
 same card, including archived or held cards. A daemon-owned import identity
 records its canonical URL. Adding a URL link manually cannot forge an import.
+The CLI equivalent is `terrarium issue import 123 --repo configured-repo-name`.
 
 **Active cards** (`GET /api/cards`, TER-43, for the dashboard home). The
 cards that are not archived in the columns `columns` (a comma list,

@@ -50,6 +50,14 @@ use crate::transport::encode;
 
 pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
     match cmd {
+        Command::Issue { command: crate::cli::IssueCmd::Import { number, repo } } => {
+            let project = ctx.project_or(None).await?;
+            let card = ctx.api.post(
+                &format!("/api/projects/{}/github-issues/import", encode(&project)),
+                Some(serde_json::json!({"repo": repo, "number": number})),
+            ).await?;
+            ctx.emit(&card, board::print_card)
+        }
         Command::Reserve { command } => reservations::run(ctx, command).await,
         Command::Daemon { command } => system::daemon(ctx, command).await,
         Command::Whoami => system::whoami(ctx).await,

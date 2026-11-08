@@ -17,6 +17,15 @@ use crate::transport::{ApiRequest, Method};
 const ME: &str = "01AGENTAGENTAGENTAGENTAGEN";
 
 #[tokio::test]
+async fn issue_import_uses_the_daemon_endpoint() {
+    let run = exec(true, &["issue", "import", "7", "--repo", "terrarium"],
+        vec![(200, json!({"id":"TER-1", "title":"GitHub #7: x", "column":"backlog"}))], None).await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].path, "/api/projects/terra/github-issues/import");
+    assert_eq!(run.reqs[0].body, Some(json!({"repo":"terrarium", "number":7})));
+}
+
+#[tokio::test]
 async fn reservation_commands_send_amounts_and_queue_options() {
     let run = exec(
         true,

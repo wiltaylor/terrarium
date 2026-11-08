@@ -42,6 +42,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Import a GitHub issue using its daemon-verified author
+    Issue {
+        #[command(subcommand)]
+        command: IssueCmd,
+    },
     /// Reserve host CPU, memory and device IO capacity
     Reserve {
         #[command(subcommand)]
@@ -374,6 +379,16 @@ pub enum Command {
             num_args = 1..
         )]
         argv: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IssueCmd {
+    /// Import an issue from a configured repository (idempotent)
+    Import {
+        number: u64,
+        #[arg(long)]
+        repo: String,
     },
 }
 

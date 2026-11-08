@@ -80,12 +80,9 @@ pub async fn import(
         .get(url)
         .header("User-Agent", "terrarium")
         .header("Accept", "application/vnd.github+json");
-    if let Some(name) = &repo.credential {
-        let Secret::Token { token, .. } = secrets::load(state, repo.owner(), name).await? else {
-            return Err(ApiError::invalid(
-                "GitHub issue import needs a token credential",
-            ));
-        };
+    if let Some(name) = &repo.credential
+        && let Ok(Secret::Token { token, .. }) = secrets::load(state, repo.owner(), name).await
+    {
         request = request.bearer_auth(token.as_str());
     }
     let issue = fetch_issue(request, number).await?;
@@ -98,11 +95,17 @@ pub async fn import(
 }
 
 async fn fetch_issue(request: reqwest::RequestBuilder, number: u64) -> ApiResult<Issue> {
+    let authenticated = request.try_clone().and_then(|r| r.build().ok())
+        .is_some_and(|r| r.headers().contains_key(reqwest::header::AUTHORIZATION));
     let mut response = request
         .send()
         .await
         .map_err(|_| ApiError::new(Code::Unavailable, "GitHub issue fetch failed"))?;
     if !response.status().is_success() {
+        if !authenticated && matches!(response.status().as_u16(), 401 | 403 | 404) {
+            return Err(ApiError::new(Code::Unavailable,
+                "GitHub issue unavailable without a token. For a private repository, configure a granted token credential; public issues may be missing or rate-limited."));
+        }
         return Err(ApiError::new(
             Code::Unavailable,
             format!("GitHub issue fetch returned {}", response.status()),
@@ -159,7 +162,8 @@ pub(crate) fn import_verified(
         actor,
         project,
         board::NewCard {
-            title: Some(format!("GitHub #{}: {}", issue.number, issue.title)),
+            title: Some(format!("GitHub #{}: {}", issue.number,
+                issue.title.chars().filter(|c| !c.is_control()).take(200).collect::<String>())),
             body: Some(format!(
                 "{url}\nAuthor: {}\n\n{}",
                 issue.user.login,
@@ -198,7 +202,10 @@ mod tests {
         use axum::{Router, routing::get};
         let valid = r#"{"number":7,"title":"x","body":null,"user":{"login":"eve"}}"#;
         let app = Router::new()
-            .route("/ok", get(move || async move { valid }))
+            .route("/ok", get(move |headers: axum::http::HeaderMap| async move {
+                assert!(!headers.contains_key("authorization"));
+                valid
+            }))
             .route("/bad", get(|| async { "not json" }))
             .route(
                 "/pr",
@@ -292,6 +299,22 @@ mod tests {
             import_verified(&mut t, &actor, "p", "repo", "o/r", issue(2, "wiltaylor")).unwrap();
         assert_eq!(again.id, held.id);
         assert_eq!(again.column, "blocked");
+        projects::set_github_authors(&mut t, "p", &[]).unwrap();
+        let unconfigured = import_verified(&mut t, &actor, "p", "repo", "o/r", issue(3, "wiltaylor")).unwrap();
+        assert_eq!(unconfigured.column, "blocked");
+        assert!(unconfigured.labels.contains(&"hold".into()));
+        let forged = board::create_card(&mut t, &actor, "p", board::NewCard {
+            title: Some("ordinary".into()), ..Default::default()
+        }).unwrap();
+        board::add_link(&mut t, &actor, &forged.id, &board::NewLink {
+            kind: "url".into(), reference: "https://github.com/o/r/issues/4".into()
+        }).unwrap();
+        let mut malicious = issue(4, "wiltaylor");
+        malicious.title = format!("bad\n\r\u{1b}{}", "x".repeat(1000));
+        let imported = import_verified(&mut t, &actor, "p", "repo", "o/r", malicious).unwrap();
+        assert_ne!(imported.id, forged.id);
+        assert!(!imported.title.chars().any(char::is_control));
+        assert!(imported.title.chars().count() <= 230);
         assert!(
             board::add_link(
                 &mut t,

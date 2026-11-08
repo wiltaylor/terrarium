@@ -152,7 +152,7 @@ pub fn question_text(card: &str, project: &str, author: Option<&str>) -> String 
 pub fn hold_comment(project: &str, author: Option<&str>) -> String {
     let who = match author.map(str::trim).filter(|a| !a.is_empty()) {
         Some(a) => format!("GitHub author `{a}` is not on"),
-        None => "No GitHub author given; it must be on".to_owned(),
+        None => "No daemon-verified GitHub author; it must be on".to_owned(),
     };
     format!(
         "Held by the GitHub author gate: {who} the github_authors list of project {project}. \
