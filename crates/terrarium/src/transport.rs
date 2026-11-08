@@ -225,10 +225,15 @@ impl RunnerTunnelTransport {
             let mut reader = BufReader::new(read);
             loop {
                 let mut reply = String::new();
-                let n = reader
-                    .read_line(&mut reply)
-                    .await
-                    .context("cannot read from the runner")?;
+                let read = reader.read_line(&mut reply);
+                let n = if let Some(until) = retry_until {
+                    tokio::time::timeout_at(until, read)
+                        .await
+                        .context("the agent RPC tunnel is down: restart exceeded 15 minutes")?
+                } else {
+                    read.await
+                }
+                .context("cannot read from the runner")?;
                 if n == 0 {
                     anyhow::bail!("the runner closed the socket before it answered");
                 }

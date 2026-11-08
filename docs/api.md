@@ -11579,7 +11579,8 @@ line of the end. `failure_block` is the `Validation failed:` block for
 `red`, `conflict`, and `error`, else `null`. The verdict says what the run
 found, not what the queue does next: the rerun and the split stay as
 above.
-# Agent calls during daemon restarts
+
+## Agent calls during daemon restarts
 
 The agent CLI assigns a stable `request_id` to each tunneled HTTP call. The
 runner holds new calls after a daemon `hold` control frame and resumes them
@@ -11605,7 +11606,8 @@ Legacy callers without request IDs are drained but cannot safely replay.
 An unresolved (`started`, NULL answer) journal entry after a crash or the drain
 cap yields `indeterminate`, never another execution. The error includes the
 request ID and HTTP method and says "the call may or may not have happened;
-check before you retry". A non-NULL answer marks `done`. Each indeterminate outcome is logged and
+check before you retry". A non-NULL answer marks `done`. Each indeterminate
+outcome is logged and
 audited. External effects and the answer journal are not one transaction:
 this policy prevents duplicate execution, but cannot promise a successful
 answer for an interrupted external write. Journal records have no automatic

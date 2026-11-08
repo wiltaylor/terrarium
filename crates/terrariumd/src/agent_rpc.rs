@@ -77,7 +77,16 @@ pub async fn drain(state: &Arc<AppState>, limit: Duration) -> crate::error::ApiR
     let start = tokio::time::Instant::now();
     state.agent_calls.draining.send_replace(true);
     state.supervisor.hold_agent_calls().await;
-    let drained = state.agent_calls.active.write();
+    drain_active(&state.agent_calls, &state.db, start, limit).await
+}
+
+async fn drain_active(
+    gate: &CallGate,
+    db: &crate::db::Db,
+    start: tokio::time::Instant,
+    limit: Duration,
+) -> crate::error::ApiResult<()> {
+    let drained = gate.active.write();
     tokio::pin!(drained);
     if tokio::time::timeout_at(start + Duration::from_secs(30).min(limit), &mut drained)
         .await
@@ -86,43 +95,37 @@ pub async fn drain(state: &Arc<AppState>, limit: Duration) -> crate::error::ApiR
         return Ok(());
     }
     tracing::warn!("deferring daemon restart for admitted agent writes");
-    state
-        .db
-        .write("system", |t| {
-            t.audit("agent_rpc.drain_deferred", "daemon", None, json!({}))
-        })
-        .await?;
+    db.write("system", |t| {
+        t.audit("agent_rpc.drain_deferred", "daemon", None, json!({}))
+    })
+    .await?;
     if tokio::time::timeout_at(start + limit, &mut drained)
         .await
         .is_err()
     {
         // The NULL entries remain durable. The next daemon refuses to execute
         // them, even if their side effect happened before this process exited.
-        state
-            .db
-            .write("system", |t| {
-                let rows: Vec<(String, String)> = t
-                    .prepare(
-                        "SELECT agent, request_id FROM agent_rpc_answers WHERE answer IS NULL",
-                    )?
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<Result<_, _>>()?;
-                for (agent, id) in rows {
-                    tracing::warn!(
-                        agent,
-                        request_id = id,
-                        "agent write indeterminate at drain cap"
-                    );
-                    t.audit(
-                        "agent_rpc.indeterminate",
-                        &id,
-                        None,
-                        json!({"agent": agent, "reason": "drain_cap"}),
-                    )?;
-                }
-                Ok(())
-            })
-            .await?;
+        db.write("system", |t| {
+            let rows: Vec<(String, String)> = t
+                .prepare("SELECT agent, request_id FROM agent_rpc_answers WHERE answer IS NULL")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            for (agent, id) in rows {
+                tracing::warn!(
+                    agent,
+                    request_id = id,
+                    "agent write indeterminate at drain cap"
+                );
+                t.audit(
+                    "agent_rpc.indeterminate",
+                    &id,
+                    None,
+                    json!({"agent": agent, "reason": "drain_cap"}),
+                )?;
+            }
+            Ok(())
+        })
+        .await?;
     }
     Ok(())
 }
@@ -397,6 +400,102 @@ mod tests {
         let mut conn = rusqlite::Connection::open(path).unwrap();
         crate::db::migrate(&mut conn).unwrap();
         crate::db::Db::new(conn, crate::events::EventHub::default())
+    }
+
+    #[tokio::test]
+    async fn drain_cap_keeps_started_writes_indeterminate_and_audits_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crash_db(&dir.path().join("cap.sqlite"));
+        let gate = Arc::new(CallGate::default());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task = {
+            let gate = gate.clone();
+            let db = db.clone();
+            let started = started.clone();
+            tokio::spawn(async move {
+                let _admitted = gate.active.read().await;
+                journaled(
+                    &db,
+                    &crash_context(),
+                    "cap".into(),
+                    &crash_params(),
+                    async {
+                        started.notify_one();
+                        std::future::pending::<Result<Value, RpcError>>().await
+                    },
+                )
+                .await
+            })
+        };
+        started.notified().await;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            drain_active(
+                &gate,
+                &db,
+                tokio::time::Instant::now(),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!task.is_finished());
+        task.abort();
+        let _ = task.await;
+        let unfinished: i64 = db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM agent_rpc_answers WHERE answer IS NULL",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(unfinished, 1);
+        let audits: i64 = db.read(|c| Ok(c.query_row("SELECT count(*) FROM audit WHERE action IN ('agent_rpc.drain_deferred', 'agent_rpc.indeterminate')", [], |r| r.get(0))?)).await.unwrap();
+        assert_eq!(audits, 2);
+    }
+
+    #[tokio::test]
+    async fn drain_waits_until_the_write_answer_is_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crash_db(&dir.path().join("drain.sqlite"));
+        let gate = CallGate::default();
+        let admitted = gate.active.read().await;
+        let draining = drain_active(
+            &gate,
+            &db,
+            tokio::time::Instant::now(),
+            Duration::from_secs(5),
+        );
+        tokio::pin!(draining);
+        tokio::select! {
+            r = &mut draining => panic!("drained with an admitted write: {r:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        let answer = journaled(
+            &db,
+            &crash_context(),
+            "finished".into(),
+            &crash_params(),
+            async { Ok(json!("done")) },
+        )
+        .await
+        .unwrap();
+        drop(admitted);
+        draining.await.unwrap();
+        let replay = journaled(
+            &db,
+            &crash_context(),
+            "finished".into(),
+            &crash_params(),
+            async { panic!("must use durable answer") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay, answer);
     }
 
     // Invoked in its own OS process by the test below. There is no production

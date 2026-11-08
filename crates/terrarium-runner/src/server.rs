@@ -256,6 +256,11 @@ impl Hub {
         let replay = method == "http" && params["request_id"].is_string();
         let mut deadline = None;
         loop {
+            if deadline.is_some_and(|until| tokio::time::Instant::now() >= until) {
+                return Err(unavailable(
+                    "the agent RPC tunnel is down: restart queue expired",
+                ));
+            }
             let ready = rx.borrow().clone().filter(|l| !l.held);
             let link = if ready.is_some() {
                 ready
