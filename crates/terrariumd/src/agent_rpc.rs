@@ -616,8 +616,9 @@ mod tests {
                 t.execute_batch("CREATE TABLE crash_effect(value INTEGER); INSERT INTO crash_effect VALUES (1);")?;
                 Ok(())
             }).await.unwrap();
-            println!("effect durable");
-            std::io::stdout().flush().unwrap();
+            // Keep readiness off libtest's stdout: with one test thread its
+            // `test ...` prefix shares a line with the effect's output.
+            writeln!(std::io::stderr(), "effect durable").unwrap();
             std::future::pending::<Result<Value, RpcError>>().await
         }).await;
     }
@@ -632,13 +633,16 @@ mod tests {
                 "--exact",
                 "agent_rpc::tests::journal_crash_child",
                 "--nocapture",
+                // Exercise the libtest mode that prefixes stdout without a newline.
+                "--test-threads=1",
             ])
             .env("TER_260_CRASH_DB", &path)
-            .stdout(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let line = lines

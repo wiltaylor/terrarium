@@ -728,7 +728,7 @@ fn render(
 
 pub fn get_card(conn: &Connection, id: &str) -> ApiResult<Card> {
     let row = find_row(conn, id)?;
-    render(conn, row, &mut Default::default())
+    render(conn, row, &mut super::card_history::ReviewEstimates::for_card(id))
 }
 
 pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
@@ -1643,8 +1643,13 @@ fn check_move(
             .with_details(json!({"blocked_by": open})));
         }
     }
+    let helpers = if to.name.eq_ignore_ascii_case("research") {
+        crate::research_helpers::running(t, &card.project)?
+    } else {
+        0
+    };
     if let Some(limit) = to.wip_limit
-        && active_count(t, to.id)? >= limit
+        && active_count(t, to.id)? + helpers >= limit
     {
         return Err(ApiError::new(
             Code::WipLimit,
@@ -1841,6 +1846,18 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
     let new = to.as_ref().map(Address::key);
     if new == card.assignee {
         return get_card(t, &card.id);
+    }
+    if new.is_some() && card.assignee.is_none() && card.column.eq_ignore_ascii_case("research") {
+        let column = column(t, &card.project, &card.column)?;
+        if let Some(limit) = column.wip_limit
+            && active_count(t, column.id)? + crate::research_helpers::running(t, &card.project)?
+                > limit
+        {
+            return Err(ApiError::new(
+                Code::WipLimit,
+                "research helpers occupy the remaining research capacity",
+            ));
+        }
     }
     t.execute(
         "UPDATE cards SET assignee = ?2, idle_since = NULL, updated_at = ?3 WHERE id = ?1",
