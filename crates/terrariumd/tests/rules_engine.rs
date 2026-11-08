@@ -161,7 +161,7 @@ async fn stored_rules_schema_failure_is_visible() {
         })
         .await
         .unwrap();
-    let body = td.get("/api/projects/broken/rules").await.ok();
+    let body = td.get("/api/projects/broken/rules").await.ok().clone();
     assert_eq!(body["hash"], "old-schema");
     assert_eq!(body["rules"], json!([]));
     let problems = body["problems"].as_array().unwrap();
