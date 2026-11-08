@@ -293,7 +293,6 @@ async fn board_summary_keeps_tile_and_eta_metadata() {
         "group",
         "assignee",
         "assignee_name",
-        "assignee_status",
         "agent",
         "agent_name",
         "depends_on",
@@ -318,6 +317,14 @@ async fn board_summary_keeps_tile_and_eta_metadata() {
             summary.get(field),
             full.ok().get(field),
             "tile field {field}"
+        );
+    }
+    // Live agent status can change between the two requests. Both responses
+    // must still include its string value rather than omit the tile field.
+    for card in [summary, full.ok()] {
+        assert!(
+            card.get("assignee_status").is_some_and(Value::is_string),
+            "tile field assignee_status must be a string"
         );
     }
     assert_eq!(summary["created_by_name"], "proj/lead");
