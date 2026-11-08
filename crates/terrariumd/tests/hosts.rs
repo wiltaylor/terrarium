@@ -4041,10 +4041,7 @@ async fn docker_pending_edits_can_be_undone_after_recreate_refusal() {
     )
     .unwrap();
     lab.td
-        .patch(
-            "/api/targets/dbox",
-            json!({"image": "alpine:latest"}),
-        )
+        .patch("/api/targets/dbox", json!({"image": "alpine:latest"}))
         .await
         .ok();
     lab.td
@@ -4194,7 +4191,10 @@ async fn docker_legacy_edit_captures_inspect_not_the_stale_definition() {
         .err(409, "conflict");
     let unchanged = lab.td.get("/api/targets/dbox").await.ok().clone();
     assert_eq!(unchanged["image"], "alpine:3.21");
-    assert_eq!(unchanged["runtime"]["docker_settings"], edited["runtime"]["docker_settings"]);
+    assert_eq!(
+        unchanged["runtime"]["docker_settings"],
+        edited["runtime"]["docker_settings"]
+    );
     assert_eq!(unchanged["runtime"]["recreate_required"], true);
     assert!(!lab.log().contains("docker rm"));
 }

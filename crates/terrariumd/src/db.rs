@@ -3388,7 +3388,10 @@ mod tests {
     #[test]
     fn migrations_create_tables_and_are_idempotent() {
         let mut conn = Connection::open_in_memory().unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count());
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count()
+        );
         assert_eq!(migrate(&mut conn).unwrap(), 0);
         for table in [
             "projects",
@@ -3486,7 +3489,10 @@ mod tests {
                VALUES ('R1', 'V1', 'operator', 'approved', 't');",
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 79);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 79
+        );
         let n: i64 = conn
             .query_row(
                 "SELECT (SELECT count(*) FROM versions WHERE status = 'released')
@@ -3533,7 +3539,10 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - at);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - at
+        );
         let rows: Vec<(String, String, Option<String>)> = conn
             .prepare("SELECT grantee, level, env FROM secret_grants ORDER BY grantee")
             .unwrap()
@@ -3655,7 +3664,10 @@ mod tests {
                VALUES ('E1', 'A1', 't', 'turn_end', '{}');",
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 1);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 1
+        );
         let (seq, kind): (i64, String) = conn
             .query_row("SELECT seq, kind FROM events WHERE id = 'E1'", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -3677,7 +3689,10 @@ mod tests {
                VALUES ('M1', 'T1', 'operator', 'operator', 'A1', 'agent', 'hi', 'read', 't', 'M0');",
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 5);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 5
+        );
         let (body, state, reply): (String, String, String) = conn
             .query_row(
                 "SELECT body, state, in_reply_to FROM messages WHERE id = 'M1'",
@@ -3718,7 +3733,10 @@ mod tests {
                VALUES ('A1', 'a', 'p', 'claude', '/w', 't', 't');",
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 6);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 6
+        );
         let seq: i64 = conn
             .query_row("SELECT runner_seq FROM agents WHERE id = 'A1'", [], |r| {
                 r.get(0)
@@ -3739,7 +3757,10 @@ mod tests {
                VALUES ('A1', 'p', 'm1', 't');",
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 7);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 7
+        );
         let card: Option<String> = conn
             .query_row("SELECT card_id FROM usage_samples", [], |r| r.get(0))
             .unwrap();
@@ -3790,7 +3811,10 @@ mod tests {
                VALUES ('s', '5h', 1.0, 't');",
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 8);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 8
+        );
         let source = |sql: &str| -> String { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
         assert_eq!(
             source("SELECT source FROM projects WHERE name = 'p'"),
@@ -3872,7 +3896,10 @@ mod tests {
              INSERT INTO sessions (id, agent_id, current, started_at) VALUES ('S1', 'A1', 1, 't');",
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 23);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 23
+        );
         let status: String = conn
             .query_row("SELECT status FROM agents WHERE id = 'A1'", [], |r| {
                 r.get(0)
@@ -3932,7 +3959,10 @@ mod tests {
                ('E6', 'A2', 'T2', 'turn_start', '{}', 'u2');",
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 33);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 33
+        );
         type Row = (
             String,
             Option<String>,
@@ -4042,7 +4072,10 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 28);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 28
+        );
         let kind: String = conn
             .query_row("SELECT kind FROM waits WHERE id = 'W1'", [], |r| r.get(0))
             .unwrap();
@@ -4088,7 +4121,10 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 29);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 29
+        );
         let (kind, status): (String, String) = conn
             .query_row(
                 "SELECT kind, status FROM questions WHERE id = 'Q1'",
@@ -4146,7 +4182,10 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 31);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 31
+        );
         let priority = |id: &str| -> String {
             conn.query_row("SELECT priority FROM questions WHERE id = ?1", [id], |r| {
                 r.get(0)
@@ -4198,7 +4237,10 @@ mod tests {
             .is_err(),
             "the old CHECK refuses vnc"
         );
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 23);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 23
+        );
         let (kind, source): (String, String) = conn
             .query_row(
                 "SELECT kind, source FROM targets WHERE name = 'box'",
@@ -4247,7 +4289,10 @@ mod tests {
             .is_err(),
             "the old CHECK refuses agent"
         );
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - 30);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - 30
+        );
         let origin: String = conn
             .query_row("SELECT origin FROM deliveries WHERE hash = 'h1'", [], |r| {
                 r.get(0)
@@ -4851,7 +4896,10 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() + named_count() - n);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            MIGRATIONS.len() + named_count() - n
+        );
         let name: String = conn
             .query_row("SELECT name FROM spawns WHERE id = 'E1'", [], |r| r.get(0))
             .unwrap();
