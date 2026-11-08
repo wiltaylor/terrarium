@@ -17,8 +17,11 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def docker(*args, check=True):
-    return subprocess.run(["docker", *args], check=check, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run(["docker", *args], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode:
+        raise AssertionError(f"docker {args}: {result.stdout}\n{result.stderr}")
+    return result
 
 
 class ContainerHotSwap(unittest.TestCase):
@@ -91,7 +94,7 @@ raise SystemExit(42)
                        "ter-261-good", "/usr/local/lib/terrarium-hot-swap.py", "stage", "{}")
                 switch = "from pathlib import Path; r=Path('/state/releases'); (r/'current').unlink(); (r/'current').symlink_to('b'*64); (r/'probation').touch()"
                 docker("exec", name, "python3", "-c", switch)
-                docker("run", "--rm", "--volumes-from", name, "ter-261-old", "terrariumd", "backup", "list", "--json")
+                docker("run", "--rm", "--volumes-from", name, "ter-261-old", "terrariumd", "backup", "ls", "--json")
                 check = "from pathlib import Path; r=Path('/state/releases'); assert (r/'probation').exists(); assert (r/'current').resolve().name=='b'*64"
                 docker("exec", name, "python3", "-c", check)
                 # Even an accidental second default service command cannot
