@@ -189,7 +189,7 @@ async fn a_stopped_lane_does_not_block_new_plans_or_other_lanes() {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        // This event arrives after more than RUN_BATCH rows are stuck.
+        // This event arrives after more than the old batch limit is stuck.
         ping(&td, "fast", &fast, 42).await;
         while comments(&td, &fast).await.len() != 2 {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -928,6 +928,41 @@ const OFF: &str = r#"rule "note" {
   card_comment { text = "note {{event.data.n}}" }
 }
 "#;
+
+#[tokio::test]
+async fn a_running_lane_reloads_live_rules_between_rows() {
+    for change in ["disable", "remove"] {
+        let td = TestDaemon::start().await;
+        td.project("off").await;
+        put_rules(&td, "off", ON_OFF).await;
+        let card = new_card(&td, "off", json!({"title": change})).await;
+        settle(&td).await;
+        let id = card.clone();
+        state(&td).db.write("system", move |t| {
+            // Change the rule during the first row, after the lane has
+            // started. All ten rows are already planned in one batch.
+            let update = if change == "disable" {
+                format!("UPDATE project_rules SET text = '{}', hash = 'disabled' WHERE project = 'off';", OFF)
+            } else {
+                "DELETE FROM project_rules WHERE project = 'off';".to_owned()
+            };
+            t.execute_batch(&format!(
+                "CREATE TRIGGER change_rule AFTER INSERT ON card_comments
+                 BEGIN {update} END;"
+            ))?;
+            for n in 0..10 {
+                t.emit(EventDraft::new("test.ping", "queued", json!({"n": n}))
+                    .project("off").card(id.clone()))?;
+            }
+            Ok(())
+        }).await.unwrap();
+        settle(&td).await;
+        assert_eq!(comments(&td, &card).await.len(), 1, "{change}: later rows must not act");
+        let rows = runs(&td, "off").await;
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows.iter().filter(|r| r["state"] == "skipped").count(), 9);
+    }
+}
 
 /// A planned run of a rule that is disabled (or gone) before the run
 /// starts does not act.

@@ -18,10 +18,10 @@
 //!   `max_per_hour` times in an hour (default [`DEFAULT_MAX_PER_HOUR`]),
 //!   and at most [`MAX_PER_CARD_PER_HOUR`] times for one card. A guard
 //!   writes a `skipped` row with the reason.
-//! - **Per-card order.** [`run_pending`] runs the pending rows in event
+//! - **Per-card order.** [`pass`] runs the pending rows in event
 //!   order, then rule order. The rows of one card (its lane) run one after
 //!   another; other lanes run beside them. A row that cannot be recorded
-//!   stops its lane until the next pass. A row of a rule that is disabled
+//!   stops its lane until a bounded retry. A row of a rule that is disabled
 //!   or gone since the plan is skipped when it has not started.
 //! - **Conditions on the current state** (`if_card`, `if_job`) and the
 //!   column check (each column that the rule names is still on the board)
@@ -74,8 +74,8 @@ use crate::store::{board, jobs, rules};
 
 /// The most events that one [`plan_pass`] reads.
 pub const BATCH: usize = 500;
-/// The most pending rows that a lane reads at once.
-pub const RUN_BATCH: usize = 200;
+/// The most lane rows (including their effects) running concurrently.
+const MAX_LANES: usize = 200;
 /// The runs of one rule in an hour without `max_per_hour`.
 pub const DEFAULT_MAX_PER_HOUR: u32 = 30;
 /// The most runs of one rule for one card in an hour.
@@ -654,20 +654,78 @@ pub fn live_rules(projects: &[ProjectRules]) -> HashSet<(String, String)> {
         .collect()
 }
 
-/// Run pending lanes independently, with no cross-lane batch barrier.
-/// Returns false once drained (failed lanes are left for the next pass).
-pub async fn run_pending(state: &Shared, live: Arc<HashSet<(String, String)>>) -> ApiResult<bool> {
-    let mut lanes = Lanes::default();
-    lanes.start(state, live, state.db.read(pending_lanes).await?);
-    while !lanes.tasks.is_empty() {
-        lanes.join().await;
-    }
-    Ok(false)
+fn pending_lanes(c: &Connection) -> ApiResult<Vec<String>> {
+    let mut st = c.prepare("SELECT lane FROM rule_runs WHERE state = 'pending'
+        GROUP BY lane ORDER BY min(event_seq), lane")?;
+    Ok(st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
 }
 
-fn pending_lanes(c: &Connection) -> ApiResult<Vec<String>> {
-    let mut st = c.prepare("SELECT DISTINCT lane FROM rule_runs WHERE state = 'pending'")?;
-    Ok(st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+    use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    async fn a_gated_lane_does_not_hold_other_rows_and_tasks_are_bounded() {
+        let gate = Arc::new(Semaphore::new(0));
+        let mut lanes = Lanes::default();
+        lanes.start(vec!["slow".into()], |_| {
+            let gate = gate.clone();
+            async move {
+                let _permit = gate.acquire().await;
+                Ok(())
+            }
+        });
+        // More than the former global batch completes while slow is held.
+        for n in 0..=MAX_LANES {
+            lanes.start(vec![format!("fast-{n}")], |_| async { Ok(()) });
+            assert!(tokio::time::timeout(Duration::from_secs(5), lanes.join()).await.is_ok());
+            assert_eq!(lanes.active.len(), 1);
+            assert!(lanes.active.values().any(|lane| lane == "slow"));
+        }
+        lanes.start((0..MAX_LANES * 2).map(|n| format!("held-{n}")).collect(), |_| {
+            let gate = gate.clone();
+            async move {
+                let _permit = gate.acquire().await;
+                Ok(())
+            }
+        });
+        assert_eq!(lanes.tasks.len(), MAX_LANES);
+        gate.add_permits(MAX_LANES);
+        while !lanes.tasks.is_empty() {
+            lanes.join().await;
+        }
+        assert!(lanes.active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stopped_lane_retries_while_another_lane_remains_active() {
+        let mut lanes = Lanes::default();
+        lanes.start(vec!["failed".into()], |_| async {
+            Err(ApiError::internal("recording failed"))
+        });
+        lanes.join().await;
+        assert!(lanes.stopped.contains_key("failed"));
+        lanes.start(vec!["slow".into()], |_| std::future::pending());
+        lanes.start(vec!["failed".into()], |_| async {
+            panic!("a recording error must not hot-loop")
+        });
+        assert_eq!(lanes.active.len(), 1);
+
+        // Keep the same scheduler and active lane throughout the retry
+        // interval, with a continuous stream of unrelated completions.
+        let retry = lanes.stopped["failed"];
+        while tokio::time::Instant::now() < retry {
+            lanes.start(vec!["traffic".into()], |_| async { Ok(()) });
+            lanes.join().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lanes.start(vec!["failed".into()], |_| async { Ok(()) });
+        assert!(!lanes.stopped.contains_key("failed"));
+        assert!(lanes.active.values().any(|lane| lane == "failed"));
+        assert!(tokio::time::timeout(Duration::from_secs(5), lanes.join()).await.is_ok());
+        assert_eq!(lanes.active.len(), 1, "the slow lane is still running");
+    }
 }
 
 /// One owner per lane, including while its committed effects are running.
@@ -676,26 +734,27 @@ fn pending_lanes(c: &Connection) -> ApiResult<Vec<String>> {
 struct Lanes {
     tasks: JoinSet<ApiResult<()>>,
     active: HashMap<Id, String>,
-    stopped: HashSet<String>,
+    stopped: HashMap<String, tokio::time::Instant>,
 }
 
 impl Lanes {
-    fn start(
+    fn start<F, Fut>(
         &mut self,
-        state: &Shared,
-        live: Arc<HashSet<(String, String)>>,
         pending: Vec<String>,
-    ) {
+        run: F,
+    ) where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = ApiResult<()>> + Send + 'static,
+    {
+        self.stopped.retain(|_, retry| *retry > tokio::time::Instant::now());
         for lane in pending {
-            if self.stopped.contains(&lane) || self.active.values().any(|l| l == &lane) {
+            if self.tasks.len() >= MAX_LANES {
+                break;
+            }
+            if self.stopped.contains_key(&lane) || self.active.values().any(|l| l == &lane) {
                 continue;
             }
-            let st = state.clone();
-            let live = live.clone();
-            let name = lane.clone();
-            let task = self
-                .tasks
-                .spawn(async move { run_lane(&st, &name, &live).await });
+            let task = self.tasks.spawn(run(lane.clone()));
             self.active.insert(task.id(), lane);
         }
     }
@@ -704,6 +763,16 @@ impl Lanes {
         let Some(result) = self.tasks.join_next_with_id().await else {
             return;
         };
+        self.finished(result);
+    }
+
+    fn reap(&mut self) {
+        while let Some(result) = self.tasks.try_join_next_with_id() {
+            self.finished(result);
+        }
+    }
+
+    fn finished(&mut self, result: Result<(Id, ApiResult<()>), tokio::task::JoinError>) {
         let (id, error) = match result {
             Ok((id, result)) => (id, result.err().map(|e| e.to_string())),
             Err(e) => (e.id(), Some(e.to_string())),
@@ -711,35 +780,31 @@ impl Lanes {
         if let Some(lane) = self.active.remove(&id)
             && let Some(error) = error
         {
-            warn!(%lane, "a rule lane stopped; it waits for the next pass: {error}");
-            self.stopped.insert(lane);
+            warn!(%lane, "a rule lane stopped; it waits for a retry: {error}");
+            self.stopped.insert(lane, tokio::time::Instant::now() + TICK);
         }
     }
 }
 
-async fn run_lane(state: &Shared, lane: &str, live: &HashSet<(String, String)>) -> ApiResult<()> {
-    loop {
+/// Yield ownership after every row, including its effects. The next row
+/// is dispatched only after the planner reloads the enabled rule set.
+async fn run_next(state: &Shared, lane: &str, live: &HashSet<(String, String)>) -> ApiResult<()> {
         let lane = lane.to_owned();
-        let ids: Vec<String> = state
+        let id: Option<String> = state
             .db
             .read(move |c| {
                 let mut st = c.prepare(
                     "SELECT id FROM rule_runs WHERE state = 'pending' AND lane = ?1
-                 ORDER BY event_seq, ord, id LIMIT ?2",
+                 ORDER BY event_seq, ord, id LIMIT 1",
                 )?;
-                Ok(st
-                    .query_map(params![lane, RUN_BATCH as i64], |r| r.get(0))?
-                    .collect::<Result<_, _>>()?)
+                Ok(st.query_row([lane], |r| r.get(0)).optional()?)
             })
             .await?;
-        if ids.is_empty() {
-            return Ok(());
-        }
-        for id in ids {
+        if let Some(id) = id {
             // A recording error stops this lane before any later row.
             run_one(state, &id, live).await?;
         }
-    }
+        Ok(())
 }
 /// What one write of a run did.
 enum Step {
@@ -1439,17 +1504,24 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
                 return;
             }
         };
-        lanes.start(state, live, pending);
+        lanes.reap();
+        lanes.start(pending, |lane| {
+            let state = state.clone();
+            let live = live.clone();
+            async move { run_next(&state, &lane, &live).await }
+        });
         if more {
             continue;
         }
-        if lanes.tasks.is_empty() {
+        if lanes.tasks.is_empty() && lanes.stopped.is_empty() {
             return;
         }
+        let wake = lanes.stopped.values().copied().min()
+            .unwrap_or_else(|| tokio::time::Instant::now() + TICK);
         tokio::select! {
-            () = lanes.join() => {}
+            () = lanes.join(), if !lanes.tasks.is_empty() => {}
             _ = rx.recv() => {}
-            () = tokio::time::sleep(TICK) => {}
+            () = tokio::time::sleep_until(wake) => {}
         }
     }
 }
