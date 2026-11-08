@@ -1399,7 +1399,10 @@ async fn fire_hourly(
                 written += count;
                 fired.insert(key, now.format("%Y-%m-%dT%H").to_string());
             }
-            Err(e) => warn!("the rule engine cannot check the hourly timer of project {}: {e}", p.project),
+            Err(e) => warn!(
+                "the rule engine cannot check the hourly timer of project {}: {e}",
+                p.project
+            ),
         }
     }
     written

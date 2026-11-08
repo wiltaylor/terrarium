@@ -1222,7 +1222,9 @@ async fn default_triage_notifies_leads_on_backlog_and_hourly() {
         .await
         .unwrap();
     for project in &mut projects {
-        std::sync::Arc::make_mut(&mut project.set).rules.retain(|r| r.name == "triage-hourly");
+        std::sync::Arc::make_mut(&mut project.set)
+            .rules
+            .retain(|r| r.name == "triage-hourly");
     }
     let now = chrono::Utc::now() + chrono::Duration::hours(2);
     let mut fired = std::collections::HashMap::new();
@@ -1245,14 +1247,24 @@ async fn default_triage_notifies_leads_on_backlog_and_hourly() {
             entered_tx.send(()).unwrap();
             release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     });
     entered_rx.await.unwrap();
-    let cached = tokio::time::timeout(Duration::from_millis(500),
-        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, now)).await;
+    let cached = tokio::time::timeout(
+        Duration::from_millis(500),
+        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, now),
+    )
+    .await;
     release_tx.send(()).unwrap();
     blocker.await.unwrap();
-    assert_eq!(cached.expect("cached hourly tick must not access DB").unwrap(), 0);
+    assert_eq!(
+        cached
+            .expect("cached hourly tick must not access DB")
+            .unwrap(),
+        0
+    );
     // A restart (empty in-memory timer state) must not resend this hour.
     fired.clear();
     assert_eq!(
@@ -1262,9 +1274,22 @@ async fn default_triage_notifies_leads_on_backlog_and_hourly() {
         0
     );
     settle(&td).await;
-    assert_eq!(hourly_count().await, baseline + 1, "restart does not resend");
-    assert_eq!(rules_engine::fire_timers(&state(&td).db, &projects, &mut fired,
-        now + chrono::Duration::hours(1)).await.unwrap(), 1);
+    assert_eq!(
+        hourly_count().await,
+        baseline + 1,
+        "restart does not resend"
+    );
+    assert_eq!(
+        rules_engine::fire_timers(
+            &state(&td).db,
+            &projects,
+            &mut fired,
+            now + chrono::Duration::hours(1)
+        )
+        .await
+        .unwrap(),
+        1
+    );
     settle(&td).await;
     assert_eq!(hourly_count().await, baseline + 2, "next hour sends once");
 }
