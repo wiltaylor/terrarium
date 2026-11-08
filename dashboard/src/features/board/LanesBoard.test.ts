@@ -7,7 +7,7 @@ import { LanesBoard } from "./LanesBoard";
 
 it("moves the full progress block with members instead of leaving it at home", () => {
   const group: BoardGroup = { id: "P-3", key: "batch", title: "Batch", column: "review", status: "Running", done: 1, total: 2, members: ["P-1", "P-2"], eta_at: "2026-11-09T12:00:00Z", closed_at: null, steps: [{ name: "Build", state: "running", text: "Compiling", eta_at: null }] };
-  const card = (id: string, column: string, kind = "card") => ({ id, column, kind, group, position: 0, labels: [] } as Card);
+  const card = (id: string, column: string, kind: "card" | "group" = "card") => ({ id, column, kind, group, position: 0, labels: [] } as Card);
   const [cards, setCards] = createSignal([card("P-3", "review", "group"), card("P-1", "review"), card("P-2", "done")]);
   const columns = ["ready", "review", "done"].map((name) => ({ name, title: name }));
   const el = document.createElement("div");
