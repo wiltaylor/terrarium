@@ -484,9 +484,9 @@ urgent or critical. The Inbox has four kinds of items:
 - **Questions.** A lead agent (a project lead or the system lead) asks you
   for a decision with `terrarium question ask`. A worker cannot ask you:
   it asks its lead.
-- **Notices.** A lead tells you something that needs no decision, for
-  example a milestone, a finished deploy, or a risk, with
-  `terrarium notify`.
+- **Notices.** A lead answers you, reports one done per request you made,
+  or reports a real problem (security, data loss, outage, spent budget) with
+  `terrarium notify`. Milestones, deploys, and progress do not get notices.
 - **Mail to you.** Each mail to `operator` stays here until you
   acknowledge it.
 - **System.** A thread that the loop guard paused, and the messages that
