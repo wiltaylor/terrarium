@@ -57,17 +57,24 @@ fn mail_body(project: Option<&str>, name: &str, to: &str) -> Value {
 async fn operator_schedule_comments_are_system_authored() {
     let td = TestDaemon::start().await;
     setup(&td).await;
-    let s = td.post("/api/schedules", json!({
-        "name": "card-note", "project": "terra",
-        "spec": {"kind": "interval", "every": "1h"},
-        "action": {"type": "card", "op": "open", "key": "note",
-                   "title": "Scheduled card", "body": "scheduled note"}
-    })).await.ok().clone();
+    let s = td
+        .post(
+            "/api/schedules",
+            json!({
+                "name": "card-note", "project": "terra",
+                "spec": {"kind": "interval", "every": "1h"},
+                "action": {"type": "card", "op": "open", "key": "note",
+                           "title": "Scheduled card", "body": "scheduled note"}
+            }),
+        )
+        .await
+        .ok()
+        .clone();
     let sid = id(&s);
     for trigger in ["manual", "cron"] {
-        terrariumd::api::schedules::run_schedule(
-            &state(&td), &sid, trigger, "operator".into()
-        ).await.unwrap();
+        terrariumd::api::schedules::run_schedule(&state(&td), &sid, trigger, "operator".into())
+            .await
+            .unwrap();
     }
     let cards = td.get("/api/projects/terra/cards").await;
     let cid = id(&cards.ok()[0]);

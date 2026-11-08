@@ -2059,9 +2059,8 @@ pub(crate) fn release_hold(t: &mut Tx<'_>, id: &str, question: &str) -> ApiResul
             "operator" => "the operator".to_owned(),
             _ => actor_display(t)?,
         };
-        let comment = format!(
-            "Released by {by} (the answer to hold question {question}): the card is work."
-        );
+        let comment =
+            format!("Released by {by} (the answer to hold question {question}): the card is work.");
         apply_move(t, &Actor::Operator, &row, &backlog, None, Some(&comment))?;
     }
     Ok(())

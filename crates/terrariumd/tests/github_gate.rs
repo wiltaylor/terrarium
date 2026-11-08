@@ -257,15 +257,32 @@ async fn only_the_operator_releases_a_held_card() {
 async fn sysadmin_hold_release_names_the_answering_agent() {
     let td = setup().await;
     allow(&td, &["wiltaylor"]).await;
-    let c = make(&td, "proj/w1", json!({"title": "GitHub #8: release", "github_author": "eve"})).await;
+    let c = make(
+        &td,
+        "proj/w1",
+        json!({"title": "GitHub #8: release", "github_author": "eve"}),
+    )
+    .await;
     let id = c["id"].as_str().unwrap();
     let q = hold_question(&td, id).await;
-    td.post_as("ops/sys", &format!("/api/questions/{}/answer", q["id"].as_str().unwrap()), json!({"option": 0})).await.ok();
+    td.post_as(
+        "ops/sys",
+        &format!("/api/questions/{}/answer", q["id"].as_str().unwrap()),
+        json!({"option": 0}),
+    )
+    .await
+    .ok();
     let c = card(&td, id).await;
     assert_eq!(c["column"], "backlog");
-    assert!(c["comments"].as_array().unwrap().iter().any(|c| {
-        c["body"].as_str().unwrap().starts_with("Released by ops/sys (")
-    }), "{c:#}");
+    assert!(
+        c["comments"].as_array().unwrap().iter().any(|c| {
+            c["body"]
+                .as_str()
+                .unwrap()
+                .starts_with("Released by ops/sys (")
+        }),
+        "{c:#}"
+    );
 }
 
 #[tokio::test]

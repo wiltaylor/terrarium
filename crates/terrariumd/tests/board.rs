@@ -797,10 +797,16 @@ async fn daemon_blocked_move_mails_operator() {
     let db = td.daemon.as_ref().unwrap().state.db.clone();
     db.write("system", move |t| {
         terrariumd::store::board::move_card(
-            t, &terrariumd::actor::Actor::Operator, &id, "blocked", None,
-            Some("automatic failure")
+            t,
+            &terrariumd::actor::Actor::Operator,
+            &id,
+            "blocked",
+            None,
+            Some("automatic failure"),
         )
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let mail = td.get("/api/mail?to=operator").await;
     let mail = mail.ok().as_array().unwrap();
     assert_eq!(mail.len(), 1);
