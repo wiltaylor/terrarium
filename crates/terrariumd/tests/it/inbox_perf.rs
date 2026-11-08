@@ -1,8 +1,6 @@
 //! Reproducible Inbox load at approximately today's counts and ten times that.
 #![allow(clippy::unwrap_used)]
-mod common;
-
-use common::TestDaemon;
+use crate::common::TestDaemon;
 use rusqlite::params;
 use std::time::{Duration, Instant};
 
@@ -76,5 +74,9 @@ async fn inbox_live_and_tenfold_load() {
             println!("scale={scale} POST {action} median={:?} max={:?}", times[2], times[4]);
             assert!(times[2] < Duration::from_secs(2), "{action}: {times:?}");
         }
+        let counts = td.get("/api/inbox/counts?project=p").await.ok();
+        assert_eq!(counts["mail"], 257 * scale);
+        assert_eq!(counts["thread"], 100 * scale);
+        assert_eq!(counts["open"], (257 + 100 + 30) * scale - 10);
     }
 }

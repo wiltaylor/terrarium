@@ -67,9 +67,25 @@ describe("Inbox load (TER-302)", () => {
         await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBeGreaterThan(0), 10000);
         const elapsed = performance.now() - start;
         console.log(`Inbox render scale=${scale}: ${elapsed.toFixed(1)}ms, cards=${el.querySelectorAll("article").length}`);
-        expect(elapsed).toBeLessThan(10000);
+        expect(elapsed).toBeLessThan(2000);
+        expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBe(40);
+        const more = [...el.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Load more"))!;
+        more.click();
+        expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBe(80);
+        const reply = el.querySelector("textarea")!;
+        reply.value = "Keep my draft";
+        reply.dispatchEvent(new Event("input", { bubbles: true }));
+        [...el.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click();
+        await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+        expect(el.querySelector("textarea")).toBe(reply);
+        expect(reply.value).toBe("Keep my draft");
+        // Reaching an old item explicitly may render more. Stub browser scrolling in jsdom.
+        vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => 0);
+        const deep = mount(`/inbox?item=${encodeURIComponent(rows[0].id)}`);
+        await waitFor(() => expect(deep.querySelectorAll("article[aria-label^='Mail ']").length).toBe(rows.length), 10000);
       } finally {
         spy.mockRestore();
+        vi.restoreAllMocks();
       }
     });
   }

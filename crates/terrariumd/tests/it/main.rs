@@ -182,3 +182,4 @@ mod waits;
 mod webhooks;
 #[path = "../wiki.rs"]
 mod wiki;
+mod inbox_perf;
