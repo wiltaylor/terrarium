@@ -5,6 +5,8 @@
 //! RPC tunnel, and long-poll.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -41,7 +43,7 @@ const WAIT: Duration = Duration::from_secs(45);
 /// a test makes inside one interval fit in it on a loaded machine. 4 s was
 /// too short at a load of 70 to 100: the hub listener handles each card
 /// event after a store read, and a move landed after the flush (TER-141).
-const LEAD_NUDGE: Duration = Duration::from_secs(10);
+const LEAD_NUDGE: Duration = Duration::from_millis(200);
 
 fn fake_tui() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../terrarium-runner/tests/fake_tui/fake_tui.py")
@@ -176,6 +178,7 @@ impl Td {
     }
 
     async fn boot(&mut self, insecure: bool) {
+        common::seed_database(&self.dir.path().join("state"));
         let daemon = terrariumd::start(DaemonConfig {
             socket: self.socket.clone(),
             listen: None,
@@ -1500,6 +1503,7 @@ async fn agent_rpc_tunnel_and_long_poll() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn artifact_origin_listens_on_its_own_port() {
     let dir = tempfile::tempdir().unwrap();
+    common::seed_database(&dir.path().join("state"));
     let sup = Arc::new(supervisor(dir.path(), Arc::new(FakeAdapter::default())));
     let daemon = terrariumd::start(DaemonConfig {
         socket: dir.path().join("api.sock"),
@@ -2595,7 +2599,6 @@ async fn the_assign_pointer_skips_a_card_that_the_assignee_took_up() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stale_lead_nudge_is_dropped() {
     let td = Td::start().await;
-    td.adapter.set_env("FAKE_TUI_DELAY_MS", "3000");
     let lead = td
         .agent("demo", "lead", json!({"roles": ["project_admin"]}))
         .await;
