@@ -75,6 +75,9 @@ fn list(items: &[String]) -> String {
 
 fn card_fields(c: &CardCondition) -> Vec<(String, String)> {
     let mut out = Vec::new();
+    if let Some(prefix) = &c.group_key_prefix {
+        out.push(("group_key_prefix".to_owned(), quote(prefix)));
+    }
     for (k, v) in [
         ("column", &c.column),
         ("not_column", &c.not_column),
@@ -371,7 +374,10 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
         // completion anchor. Omit the whole lifecycle on older boards,
         // not just group_open, leaving the existing delivery flow intact.
         if a.verb.starts_with("group.")
-            && a.args.get("key").and_then(Value::as_str) == Some("{{job.group_key}}")
+            && matches!(
+                a.args.get("key").and_then(Value::as_str),
+                Some("{{job.group_key}}" | "{{group.key}}")
+            )
             && (!resolves(columns, "@review") || !resolves(columns, "@accepted"))
         {
             reasons
