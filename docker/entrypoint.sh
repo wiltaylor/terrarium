@@ -131,7 +131,7 @@ trap 'on_stop INT' INT
 # SIGUSR1 pauses only our daemon child. Unlike a container stop, it does not
 # stop runners or impose the five-second container shutdown timeout.
 on_upgrade_pause() {
-	if [ -f "$RUN_DIR/upgrade-pause" ] && [ -n "$daemon_pid" ]; then
+	if { [ -f "$RUN_DIR/upgrade-pause" ] || [ -f "$RUN_DIR/upgrade-resume" ]; } && [ -n "$daemon_pid" ]; then
 		kill -TERM "$daemon_pid" 2>/dev/null
 	fi
 }

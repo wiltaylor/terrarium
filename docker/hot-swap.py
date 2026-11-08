@@ -170,6 +170,10 @@ def main(argv):
         if (run / "upgrade-pause").exists() or (run / "upgrade-paused").exists():
             (run / "upgrade-resume").touch()
         (run / "upgrade-pause").unlink(missing_ok=True)
+        if (run / "upgrade-resume").exists():
+            # The original signal may have been handled after pause cleanup,
+            # without stopping the child. Explicitly deliver the restart request.
+            os.kill(int((run / "upgrade-supervisor.pid").read_text()), signal.SIGUSR1)
         wait_for(lambda: not (run / "upgrade-paused").exists()
                  and not (run / "upgrade-resume").exists(), argv[1] if len(argv) > 1 else None)
         record(root, phase="aborted")

@@ -193,7 +193,7 @@ class HotSwapTests(unittest.TestCase):
         with patch.object(HOT, "wait_for", side_effect=TimeoutError):
             with self.assertRaises(TimeoutError):
                 HOT.main(["pause"])
-        HOT.main(["cancel-pause"])
+        HOT.main(["cancel-pause", "5"])
         wait(lambda: len(log.read_text().splitlines()) == 3)
         self.assertIsNone(process.poll())
         self.assertFalse((self.run / "upgrade-pause").exists())
