@@ -386,6 +386,7 @@ async fn update(
     Path(name): Path<String>,
     ApiJson(patch): ApiJson<Value>,
 ) -> ApiResult<Json<TargetView>> {
+    let _resources = state.executor.resource_lock.lock().await;
     let current = load(&state, &actor, name.clone()).await?;
     policy::define_target(&actor, current.def.project.as_deref())?;
     if let Some(p) = patch.get("project")
@@ -396,14 +397,35 @@ async fn update(
     if let Some(address) = patch.get("address").and_then(Value::as_str) {
         crate::jobs::prepare_hosts(&state.db, Some(address.to_owned())).await?;
     }
+    let live = current.def.kind == TargetKind::Docker && patch.get("limits").is_some();
+    let changed = if live {
+        let n = name.clone();
+        let p = patch.clone();
+        let (def, _) = state.db.write(actor.label(), move |t| targets::prepare_update(t, &n, &p, true)).await?;
+        if def.limits != current.def.limits && matches!(current.state.as_str(), "running" | "stopped") {
+            crate::reservations::update_docker_defaults(&state, &def).await?;
+            true
+        } else { false }
+    } else { false };
+    let expected = current.clone();
     let r = state
         .db
         .write(actor.label(), move |t| {
-            let r = targets::update(t, &name, &patch)?;
+            if targets::get(t, &name)? != expected {
+                return Err(ApiError::conflict("target changed during limits update; retry"));
+            }
+            let r = targets::update_with_live_limits(t, &name, &patch, live)?;
             t.audit("target.update", &name, r.def.project.as_deref(), patch)?;
             Ok(r)
         })
-        .await?;
+        .await;
+    if r.is_err() && changed {
+        // A concurrent file reload or credential change can invalidate the
+        // prepared write. Restore the persisted defaults before returning.
+        let latest = load(&state, &actor, current.def.name.clone()).await?;
+        crate::reservations::update_docker_defaults(&state, &latest.def).await?;
+    }
+    let r = r?;
     Ok(Json(
         with_credential(&state, view(&state, &actor, r, &[])).await?,
     ))

@@ -527,6 +527,23 @@ fn refuse_file(r: &TargetRow) -> ApiResult<()> {
 /// Apply a JSON merge patch to an API target: `null` removes a field.
 /// `name` cannot change.
 pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow> {
+    update_with_live_limits(t, name, patch, false)
+}
+
+/// Only the API executor may opt into limits it has acknowledged on the host.
+pub fn update_with_live_limits(t: &mut Tx<'_>, name: &str, patch: &Value, live: bool) -> ApiResult<TargetRow> {
+    let (def, admin) = prepare_update(t, name, patch, live)?;
+    t.execute(
+        "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5,
+                            credential_admin = ?6
+         WHERE name = ?1",
+        params![name, def.project, kind_str(def.kind), def_json(&def)?, now(), admin],
+    )?;
+    get(t, name)
+}
+
+/// Validate without changing stored defaults before host acknowledgement.
+pub fn prepare_update(t: &Tx<'_>, name: &str, patch: &Value, live: bool) -> ApiResult<(TargetDef, bool)> {
     let current = get(t, name)?;
     refuse_file(&current)?;
     let Some(p) = patch.as_object() else {
@@ -547,7 +564,7 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
             .collect();
         // A `host` target is always `running` while its host agent is
         // online. Its limits apply to each new session, so they change.
-        if current.def.kind == TargetKind::Host {
+        if current.def.kind == TargetKind::Host || (live && current.def.kind == TargetKind::Docker) {
             changed.retain(|k| *k != "limits");
         }
         changed.sort_unstable();
@@ -564,7 +581,7 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
             .with_details(json!({"state": "running", "fields": changed})));
         }
     }
-    if p.contains_key("limits") {
+    if !live && p.contains_key("limits") {
         refuse_docker_limits(&current, p.get("limits"), o.get("limits"))?;
     }
     for (k, val) in p {
@@ -591,20 +608,7 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
     let was = credential_admin(t, name)?;
     let admin = admin_after_write(t, &def, Some((&current.def, was)))?;
     check_global_credential(t, &def, admin)?;
-    t.execute(
-        "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5,
-                            credential_admin = ?6
-         WHERE name = ?1",
-        params![
-            name,
-            def.project,
-            kind_str(def.kind),
-            def_json(&def)?,
-            now(),
-            admin
-        ],
-    )?;
-    get(t, name)
+    Ok((def, admin))
 }
 
 /// RFC 7396 merge of one object into another: `null` removes a key.

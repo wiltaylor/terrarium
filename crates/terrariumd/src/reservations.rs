@@ -389,6 +389,27 @@ pub fn lifecycle_admission(state: &Shared, def: &TargetDef) -> ApiResult<()> {
 }
 
 /// A permanent stopped container does not run create-time flags again.
+/// Apply supported defaults without replacing an active reservation budget.
+pub async fn update_docker_defaults(state: &Shared, def: &TargetDef) -> ApiResult<()> {
+    let caps = def.host.as_deref().and_then(|h| state.executor.hosts.capabilities(h))
+        .ok_or_else(|| ApiError::conflict("Docker host is offline; cannot update live limits"))?;
+    if !caps.reservations { return Err(ApiError::conflict("host is missing live resource update support")); }
+    let mut limits = docker_budget(state, def)?.unwrap_or(RuntimeLimits {
+        limits: def.limits.as_ref().map(|l| l.resolve()).transpose().map_err(ApiError::invalid)?.unwrap_or_default(),
+        ..Default::default()
+    });
+    limits.limits.docker_support(caps.limits.as_ref()).map_err(ApiError::conflict)?;
+    // Active create-time IO is unchanged by a supported-field update.
+    limits.io.clear();
+    let target = def.name.clone();
+    let container = Some(executor::container_name(def));
+    executor::verb_ok(state, def, "update Docker defaults", move |session| DaemonFrame::ResourceApply(ResourceApply {
+        session, target, holder: String::new(), container, limits,
+    })).await?;
+    Ok(())
+}
+
+/// A permanent stopped container does not run create-time flags again.
 /// Supported limits are always refreshed before start, including defaults
 /// left behind by a reservation whose cleanup had to stop the container.
 pub async fn before_docker_start(state: &Shared, def: &TargetDef) -> ApiResult<()> {

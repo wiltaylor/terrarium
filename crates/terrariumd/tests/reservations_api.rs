@@ -19,6 +19,11 @@ async fn setup() -> (TestDaemon, tokio::task::JoinHandle<()>, tokio::task::JoinH
     let registered = td.post("/api/hosts", json!({"name":"h"})).await;
     let token = registered.ok()["token"].as_str().unwrap();
     let mut options = ClientOptions::new(format!("ws://{addr}/hosts/connect"), token, "h");
+    use std::os::unix::fs::PermissionsExt;
+    let docker = td.dir.path().join("reservation-docker");
+    std::fs::write(&docker, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/docker.calls'\n[ ! -f '{}/docker.fail' ] || exit 1\n[ \"$1\" = update ] || exit 2\n", td.dir.path().display(), td.dir.path().display())).unwrap();
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    options.docker_bin = docker.to_string_lossy().into_owned();
     options.capabilities = HostCapabilities {
         reservations: true,
         capacity: Some(HostCapacity { cpu_ids: vec![0, 1, 2, 3], memory_bytes: 8 << 30 }),
@@ -35,6 +40,23 @@ async fn setup() -> (TestDaemon, tokio::task::JoinHandle<()>, tokio::task::JoinH
     }
     td.put("/api/hosts/h/capacity", json!({"percentage":50})).await.ok();
     (td, server, client)
+}
+
+#[tokio::test]
+async fn fixed_docker_limits_update_live_and_failed_ack_keeps_defaults() {
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    state.db.write("system", |tx| terrariumd::store::targets::set_state(tx, "p-box", "running", None)).await.unwrap();
+    td.patch("/api/targets/p-box", json!({"limits":{"cpu":1,"memory":"64M"}})).await.ok();
+    let calls = std::fs::read_to_string(td.dir.path().join("docker.calls")).unwrap();
+    assert!(calls.contains("update"));
+    assert!(calls.contains("--cpus 1"));
+    std::fs::write(td.dir.path().join("docker.fail"), "fail").unwrap();
+    let refused = td.patch("/api/targets/p-box", json!({"limits":{"cpu":2}})).await;
+    assert!(!refused.status.is_success());
+    let saved = state.db.read(|c| terrariumd::store::targets::get(c, "p-box")).await.unwrap();
+    assert_eq!(saved.def.limits.unwrap().resolve().unwrap().cpu_millis, Some(1000));
+    client.abort(); server.abort();
 }
 
 #[tokio::test]
