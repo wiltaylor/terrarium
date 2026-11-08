@@ -4,7 +4,7 @@
 //! mails the leads (or the operator). Another `blocked` reason mails nobody.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 
