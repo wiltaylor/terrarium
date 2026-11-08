@@ -3165,15 +3165,12 @@ pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
 }
 
 fn migrate_embedded<E: rust_embed::RustEmbed>(conn: &mut Connection) -> anyhow::Result<usize> {
-    let mut names: Vec<_> = E::iter()
-        .filter(|name| name.ends_with(".sql"))
-        .collect();
+    let mut names: Vec<_> = E::iter().filter(|name| name.ends_with(".sql")).collect();
     names.sort();
     let files: Vec<_> = names
         .iter()
         .map(|name| {
-            let file = E::get(name)
-                .with_context(|| format!("missing migration {name}"))?;
+            let file = E::get(name).with_context(|| format!("missing migration {name}"))?;
             let sql = String::from_utf8(file.data.into_owned())?;
             Ok((name.as_ref(), sql))
         })
@@ -3252,7 +3249,11 @@ mod tests {
 
     #[test]
     fn legacy_migration_list_is_frozen() {
-        assert_eq!(MIGRATIONS.len(), 94, "add named SQL files, not legacy migrations");
+        assert_eq!(
+            MIGRATIONS.len(),
+            94,
+            "add named SQL files, not legacy migrations"
+        );
     }
 
     #[test]
@@ -3263,9 +3264,14 @@ mod tests {
 
         let mut conn = Connection::open_in_memory().unwrap();
         assert_eq!(migrate_embedded::<Fixture>(&mut conn).unwrap(), 1);
-        assert!(conn.table_exists(None, "embedded_migration_fixture").unwrap());
+        assert!(
+            conn.table_exists(None, "embedded_migration_fixture")
+                .unwrap()
+        );
         assert_eq!(migrate_embedded::<Fixture>(&mut conn).unwrap(), 0);
-        let name: String = conn.query_row("SELECT name FROM schema_migrations", [], |r| r.get(0)).unwrap();
+        let name: String = conn
+            .query_row("SELECT name FROM schema_migrations", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(name, "ter-284-embedded.sql");
     }
 
