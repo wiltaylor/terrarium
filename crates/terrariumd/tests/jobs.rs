@@ -3002,11 +3002,15 @@ async fn flow_scenario(flow: &'static str) -> Value {
         let t = time.replace_all(&t, "<TIME>");
         let t = ulid.replace_all(&t, "<ID>");
         let t = sha.replace_all(&t, "<SHA>");
-        card_id.replace_all(&t, |caps: &regex::Captures<'_>| {
-            work_cards.iter().position(|id| id.as_str() == &caps[0])
-                .map(|i| format!("<CARD-{i}>"))
-                .unwrap_or_else(|| caps[0].to_owned())
-        }).into_owned()
+        card_id
+            .replace_all(&t, |caps: &regex::Captures<'_>| {
+                work_cards
+                    .iter()
+                    .position(|id| id.as_str() == &caps[0])
+                    .map(|i| format!("<CARD-{i}>"))
+                    .unwrap_or_else(|| caps[0].to_owned())
+            })
+            .into_owned()
     };
     let mut board = lab.td.get("/api/projects/p/board").await.ok().clone();
     // The split halves can finish in either order: in rules mode a
