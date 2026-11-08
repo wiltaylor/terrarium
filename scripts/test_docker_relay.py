@@ -8,12 +8,73 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 RELAY = Path(__file__).resolve().parents[1] / "crates/terrariumd/src/docker_relay.py"
 
 
 class DockerRelayTests(unittest.TestCase):
+    def test_large_bidirectional_stream_with_slow_consumers(self):
+        with tempfile.TemporaryDirectory(prefix="ter-363-stream-") as root:
+            directory = Path(root, "job")
+            child = subprocess.Popen([sys.executable, "-u", str(RELAY), str(directory), "60"],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+            payload = bytes(range(256)) * 32768
+            received = bytearray()
+            errors = []
+            def send(value):
+                child.stdin.write(json.dumps(value) + "\n")
+                child.stdin.flush()
+            try:
+                self.assertEqual(json.loads(child.stdout.readline()), {"ready": True})
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(30)
+                    client.connect(str(directory / "docker.sock"))
+                    ident = json.loads(child.stdout.readline())["id"]
+                    def client_io():
+                        try:
+                            while len(received) < len(payload):
+                                data = client.recv(4096)
+                                if not data:
+                                    break
+                                received.extend(data)
+                        except Exception as error:
+                            errors.append(error)
+                    worker = threading.Thread(target=client_io)
+                    worker.start()
+                    sender = threading.Thread(target=client.sendall, args=(payload,))
+                    sender.start()
+                    # Echo each request frame only once the previous response
+                    # has been consumed. Eight MiB exceeds every pipe/socket
+                    # and channel buffer in the transport.
+                    total = 0
+                    pending = 0
+                    while total < len(payload) or pending:
+                        event = json.loads(child.stdout.readline())
+                        if "data" in event:
+                            data = base64.b64decode(event["data"])
+                            total += len(data)
+                            send({"id": ident, "ack": True})
+                            send({"id": ident, "data": event["data"]})
+                            pending += 1
+                        elif event.get("ack"):
+                            pending -= 1
+                    worker.join(timeout=30)
+                    sender.join(timeout=30)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(errors, [])
+                    self.assertEqual(bytes(received), payload)
+                send({"stop": True})
+                self.assertEqual(child.wait(timeout=5), 0, child.stderr.read())
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+                for stream in (child.stdin, child.stdout, child.stderr):
+                    stream.close()
+
     def test_socket_round_trip_and_teardown_on_stop_and_eof(self):
         for explicit_stop in (True, False):
             with tempfile.TemporaryDirectory(prefix="ter-363-relay-") as root:
