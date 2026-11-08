@@ -265,6 +265,16 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_UPDATE_IMAGE`, `TERRARIUM_UPDATE_DRAIN_WAIT`, `TERRARIUM_UPDATE_HEALTH_TIMEOUT`, `TERRARIUM_UPDATER_TARGET`, `TERRARIUM_UPDATER_STATE` | The updater only ([api.md](api.md) §34.2). |
 | `TERRARIUM_DOCKER_GID`, `TERRARIUM_UPDATER_IMAGE` | compose.yaml only: the group of `docker.sock` for the updater service, and its image (default: the image of the daemon). The daemon never gets `docker.sock`. |
 
+Agent checkouts made or refreshed by `repo checkout` install a
+`prepare-commit-msg` hook. It adds `Terrarium-Session` (the Terrarium session
+ULID), `Terrarium-Agent`, `Terrarium-Harness` (name and version),
+`Terrarium-Model`, and `Terrarium-Card` when there is a current card. Missing
+model or version telemetry is `unknown`. Existing release trailers stay intact.
+The sandbox reads live session metadata, and target execs supply their caller's
+current metadata. A target commit made outside an agent exec uses the checkout's
+snapshot. Refresh older checkouts to install the hook. These hooks are attribution
+helpers, not a security boundary. Merge jobs still disable checkout hooks.
+
 ### The directories
 
 Compose binds these directories of the repo into the container

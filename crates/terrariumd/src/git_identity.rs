@@ -248,4 +248,60 @@ mod tests {
         let parsed = git(d, &["show", "-s", "--format=%(trailers:only)"], &p);
         assert!(parsed.contains("Terrarium-Session: 01SESSION"), "{parsed}");
     }
+
+    #[test]
+    fn target_checkout_installs_identity_and_hook_without_running_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let origin = root.join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        let p = Provenance {
+            identity: Identity { name: "Target Bot".into(), email: "target@example.test".into() },
+            trailers: "Terrarium-Session: 01TARGET\nTerrarium-Agent: proj/worker\nTerrarium-Harness: codex unknown\nTerrarium-Model: unknown\n".into(),
+        };
+        git(&origin, &["init", "-q", "-b", "main"], &p);
+        git(
+            &origin,
+            &["commit", "-q", "--allow-empty", "-m", "init"],
+            &p,
+        );
+        let dest = root.join("dest");
+        let cmd = crate::executor::checkout_cmd(
+            &format!("file://{}", origin.display()),
+            dest.to_str().unwrap(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let run = || {
+            let out = Command::new(&cmd.argv[0])
+                .args(&cmd.argv[1..])
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap())
+                .env("HOME", root)
+                .env("TERRARIUM_COMMIT_HOOK", p.hook())
+                .env("TERRARIUM_COMMIT_NAME", &p.identity.name)
+                .env("TERRARIUM_COMMIT_EMAIL", &p.identity.email)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        };
+        run();
+        assert_eq!(git(&dest, &["config", "user.name"], &p), "Target Bot\n");
+        assert_eq!(
+            git(&dest, &["config", "user.email"], &p),
+            "target@example.test\n"
+        );
+        assert!(!dest.join(".git/COMMIT_EDITMSG").exists());
+        run(); // An update accepts the config written by the first clone.
+        git(
+            &dest,
+            &["commit", "-q", "--allow-empty", "-m", "feat: target"],
+            &p,
+        );
+        let parsed = git(&dest, &["show", "-s", "--format=%(trailers:only)"], &p);
+        assert!(parsed.contains("Terrarium-Session: 01TARGET"), "{parsed}");
+        assert!(parsed.contains("Terrarium-Model: unknown"), "{parsed}");
+    }
 }

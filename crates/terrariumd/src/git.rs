@@ -2600,20 +2600,27 @@ impl JobRepo {
             }
         }
         let identity = crate::git_identity::Identity::from_env();
-        let sha = self.local(&[
-            "-c",
-            &format!("user.name={}", identity.name),
-            "-c",
-            &format!("user.email={}", identity.email),
-            "commit-tree",
-            &tree,
-            "-p",
-            head,
-            "-p",
-            other,
-            "-m",
-            message,
-        ])?;
+        let mut runner = self.runner(false)?;
+        let mut env = std::collections::BTreeMap::new();
+        identity.env(&mut env);
+        runner.env.extend(env);
+        let sha = runner.quiet(
+            &self.c.dest,
+            &[
+                "-c",
+                &format!("user.name={}", identity.name),
+                "-c",
+                &format!("user.email={}", identity.email),
+                "commit-tree",
+                &tree,
+                "-p",
+                head,
+                "-p",
+                other,
+                "-m",
+                message,
+            ],
+        )?;
         Ok(MergeStep::Merged(sha.trim().to_owned()))
     }
 
@@ -3553,7 +3560,14 @@ mod tests {
         assert_eq!(parents.split_whitespace().count(), 3, "{parents}");
         assert_eq!(
             git_out(r.path(), &["log", "-1", "--format=%s %an", &m1]),
-            "Merge clean onto next terrarium"
+            "Merge clean onto next Terrarium"
+        );
+        assert_eq!(
+            git_out(
+                r.path(),
+                &["log", "-1", "--format=%an <%ae>%n%cn <%ce>", &m1]
+            ),
+            "Terrarium <terrarium@localhost>\nTerrarium <terrarium@localhost>"
         );
         let MergeStep::Merged(m2) = r
             .merge(&m1, "refs/remotes/job/c1", "Merge c1 onto next")

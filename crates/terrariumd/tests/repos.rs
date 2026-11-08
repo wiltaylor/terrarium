@@ -175,7 +175,11 @@ async fn agent_commits_have_bot_identity_and_current_terrarium_session() {
         .await
         .unwrap();
     terrariumd::git_identity::refresh(state, &id).await.unwrap();
-    agent_git(&dest, &["commit", "--amend", "--no-edit"], &env);
+    agent_git(
+        &dest,
+        &["commit", "--allow-empty", "--amend", "--no-edit"],
+        &env,
+    );
     let parsed = agent_git(&dest, &["show", "-s", "--format=%(trailers:only)"], &[]);
     assert!(
         parsed.contains(&format!("Terrarium-Session: {second}")),
@@ -184,6 +188,20 @@ async fn agent_commits_have_bot_identity_and_current_terrarium_session() {
     assert!(!parsed.contains(&first), "{parsed}");
     assert_eq!(parsed.matches("Terrarium-Session:").count(), 1);
     assert!(parsed.contains("pre-release: true"));
+
+    // Refresh replaces a planted link, never the file it names.
+    let victim = workspace.join("victim");
+    std::fs::write(&victim, "keep").unwrap();
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink(&victim, &file).unwrap();
+    terrariumd::git_identity::refresh(state, &id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    assert!(
+        !std::fs::symlink_metadata(&file)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[tokio::test]
