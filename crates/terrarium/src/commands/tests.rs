@@ -18,7 +18,29 @@ const ME: &str = "01AGENTAGENTAGENTAGENTAGEN";
 
 #[tokio::test]
 async fn reservation_commands_send_amounts_and_queue_options() {
-    let run = exec(true, &["reserve", "new", "--host", "h", "--target", "box", "--cpu", "2", "--memory", "4G", "--until", "1h", "--queue", "--queue-timeout", "30m"], vec![(201, json!({"id":"R1","state":"queued"}))], None).await;
+    let run = exec(
+        true,
+        &[
+            "reserve",
+            "new",
+            "--host",
+            "h",
+            "--target",
+            "box",
+            "--cpu",
+            "2",
+            "--memory",
+            "4G",
+            "--until",
+            "1h",
+            "--queue",
+            "--queue-timeout",
+            "30m",
+        ],
+        vec![(201, json!({"id":"R1","state":"queued"}))],
+        None,
+    )
+    .await;
     run.result.unwrap();
     assert_eq!(run.reqs[0].path, "/api/hosts/h/reservations");
     let b = run.reqs[0].body.as_ref().unwrap();
@@ -31,17 +53,39 @@ async fn reservation_commands_send_amounts_and_queue_options() {
 #[tokio::test]
 async fn reservation_commands_use_item_routes() {
     for (args, path, method) in [
-        (vec!["reserve", "extend", "R1", "--until", "2h"], "/api/reservations/R1", Method::Patch),
-        (vec!["reserve", "retract", "R1"], "/api/reservations/R1", Method::Delete),
-        (vec!["reserve", "cancel", "R1"], "/api/reservations/R1/cancel", Method::Post),
-        (vec!["reserve", "ls", "--host", "h"], "/api/hosts/h/reservations", Method::Get),
+        (
+            vec!["reserve", "extend", "R1", "--until", "2h"],
+            "/api/reservations/R1",
+            Method::Patch,
+        ),
+        (
+            vec!["reserve", "retract", "R1"],
+            "/api/reservations/R1",
+            Method::Delete,
+        ),
+        (
+            vec!["reserve", "cancel", "R1"],
+            "/api/reservations/R1/cancel",
+            Method::Post,
+        ),
+        (
+            vec!["reserve", "ls", "--host", "h"],
+            "/api/hosts/h/reservations",
+            Method::Get,
+        ),
     ] {
-        let run = exec(true, &args, vec![(200,json!({}))], None).await;
+        let run = exec(true, &args, vec![(200, json!({}))], None).await;
         run.result.unwrap();
         assert_eq!(run.reqs[0].path, path);
         assert_eq!(run.reqs[0].method, method);
     }
-    let run = exec(false, &["reserve", "capacity", "h", "--percentage", "50"], vec![(200,json!({})),(200,json!({"percentage":50}))], None).await;
+    let run = exec(
+        false,
+        &["reserve", "capacity", "h", "--percentage", "50"],
+        vec![(200, json!({})), (200, json!({"percentage":50}))],
+        None,
+    )
+    .await;
     run.result.unwrap();
     assert_eq!(run.reqs[0].body.as_ref().unwrap()["percentage"], 50);
     assert_eq!(run.reqs[1].method, Method::Get);

@@ -1260,12 +1260,22 @@ impl Default for Executor {
 
 impl Executor {
     pub fn set_resource_pending(&self, host: &str, pending: bool) {
-        let mut hosts = self.resource_pending.lock().unwrap_or_else(|e| e.into_inner());
-        if pending { hosts.insert(host.to_owned()); } else { hosts.remove(host); }
+        let mut hosts = self
+            .resource_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if pending {
+            hosts.insert(host.to_owned());
+        } else {
+            hosts.remove(host);
+        }
     }
 
     pub fn resource_pending(&self, host: &str) -> bool {
-        self.resource_pending.lock().unwrap_or_else(|e| e.into_inner()).contains(host)
+        self.resource_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(host)
     }
 
     fn table(&self) -> MutexGuard<'_, HashMap<String, Arc<ExecSession>>> {
@@ -1376,26 +1386,54 @@ impl Executor {
     }
 
     pub fn resource_sessions(&self, targets: &[String], holder: Option<&str>) -> Vec<String> {
-        self.table().values().filter(|s| targets.contains(&s.target)
-            && holder.is_none_or(|a| s.owner.as_deref() == Some(a)) && !s.is_done())
-            .map(|s| s.id.clone()).collect()
+        self.table()
+            .values()
+            .filter(|s| {
+                targets.contains(&s.target)
+                    && holder.is_none_or(|a| s.owner.as_deref() == Some(a))
+                    && !s.is_done()
+            })
+            .map(|s| s.id.clone())
+            .collect()
     }
 
-    pub async fn end_resource_sessions(&self, targets: &[String], holder: Option<&str>) -> Vec<Value> {
-        let sessions: Vec<_> = self.table().values().filter(|s| targets.contains(&s.target)
-            && holder.is_none_or(|a| s.owner.as_deref() == Some(a)) && !s.is_done()).cloned().collect();
+    pub async fn end_resource_sessions(
+        &self,
+        targets: &[String],
+        holder: Option<&str>,
+    ) -> Vec<Value> {
+        let sessions: Vec<_> = self
+            .table()
+            .values()
+            .filter(|s| {
+                targets.contains(&s.target)
+                    && holder.is_none_or(|a| s.owner.as_deref() == Some(a))
+                    && !s.is_done()
+            })
+            .cloned()
+            .collect();
         let mut checks = tokio::task::JoinSet::new();
         for s in sessions {
-            let report = s.kill_report.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            s.finish(End::error("reservation_ended", "your resource reservation on this host ended"));
+            let report = s
+                .kill_report
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            s.finish(End::error(
+                "reservation_ended",
+                "your resource reservation on this host ended",
+            ));
             s.kill();
             checks.spawn(async move {
                 let result = match report {
                     Some(report) => crate::run_kill::report(report).await,
                     None => None,
                 };
-                let confirmed = result.as_ref().is_some_and(|r| r.get("error").is_none()
-                    && r["pid"].is_u64() && r["left"].as_array().is_some_and(Vec::is_empty));
+                let confirmed = result.as_ref().is_some_and(|r| {
+                    r.get("error").is_none()
+                        && r["pid"].is_u64()
+                        && r["left"].as_array().is_some_and(Vec::is_empty)
+                });
                 (!confirmed).then(|| json!({"session":s.id,"target":s.target,"report":result}))
             });
         }
@@ -1462,13 +1500,18 @@ pub(crate) fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
 
 /// Start a command on a target.
 pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
-    let _resources = state.executor.resource_lock.try_lock()
-        .map_err(|_| ApiError::conflict("resource reservations are being updated; retry the command"))?;
+    let _resources = state.executor.resource_lock.try_lock().map_err(|_| {
+        ApiError::conflict("resource reservations are being updated; retry the command")
+    })?;
     start_cmd_locked(state, def, cmd)
 }
 
 /// The caller holds resource_lock through session registration.
-pub(crate) fn start_cmd_locked(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
+pub(crate) fn start_cmd_locked(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+) -> ApiResult<Running> {
     no_exec(def)?;
     // SSH takes a separate execution path, but must not bypass a host's
     // exclusive reservation policy.
@@ -1518,7 +1561,8 @@ pub(crate) fn start_cmd_locked(state: &Shared, def: &TargetDef, cmd: &RemoteCmd)
         _ => {
             let host = host_of(def)?;
             let caps = ex.hosts.capabilities(host);
-            let limits = match crate::reservations::exec_budget(state, def, cmd.holder.as_deref())? {
+            let limits = match crate::reservations::exec_budget(state, def, cmd.holder.as_deref())?
+            {
                 Some(limits) => Some(limits),
                 None => exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?,
             };
@@ -1533,12 +1577,20 @@ pub(crate) fn start_cmd_locked(state: &Shared, def: &TargetDef, cmd: &RemoteCmd)
 /// Only the run-kill guard calls this for its generated cleanup commands.
 /// Cleanup must work while reservations block new user commands, and must
 /// not enter the very slice being stopped.
-pub(crate) fn start_resource_cleanup(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
+pub(crate) fn start_resource_cleanup(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+) -> ApiResult<Running> {
     if !matches!(def.kind, TargetKind::Host | TargetKind::Docker) {
         return start_cmd(state, def, cmd);
     }
     let host = host_of(def)?;
-    let shell = state.executor.hosts.capabilities(host).and_then(|c| c.shell);
+    let shell = state
+        .executor
+        .hosts
+        .capabilities(host)
+        .and_then(|c| c.shell);
     let make = host_frame(def, shell.as_deref(), cmd, None)?;
     Ok(pump_host(state.executor.hosts.open(host, make)?))
 }
@@ -2594,7 +2646,9 @@ pub async fn lifecycle(
     // admission: a grant must not observe a stopped target while it starts.
     let _resources = if def.kind == TargetKind::Docker {
         Some(state.executor.resource_lock.lock().await)
-    } else { None };
+    } else {
+        None
+    };
     if verb_kind == V::Up {
         crate::reservations::lifecycle_admission(state, def)?;
     }

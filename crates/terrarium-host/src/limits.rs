@@ -227,43 +227,89 @@ pub async fn apply_slice(slice: &str, limits: &Limits) -> Result<(), String> {
 
 /// Complete slice settings for a reservation, including clearing device IO
 /// entries left by an earlier grant. Only numeric device IDs enter properties.
-pub fn reservation_properties(l: &terrarium_core::resources::RuntimeLimits) -> Result<Vec<String>, String> {
+pub fn reservation_properties(
+    l: &terrarium_core::resources::RuntimeLimits,
+) -> Result<Vec<String>, String> {
     l.validate()?;
     let mut p = properties(&l.limits);
     p.push(format!("AllowedCPUs={}", l.cpuset()));
-    for key in ["IOReadBandwidthMax", "IOWriteBandwidthMax", "IOReadIOPSMax", "IOWriteIOPSMax"] {
-        let entries: Vec<String> = l.io.iter().filter_map(|(device, io)| {
-            let value = match key {
-                "IOReadBandwidthMax" => io.read_bps, "IOWriteBandwidthMax" => io.write_bps,
-                "IOReadIOPSMax" => io.read_iops, _ => io.write_iops,
-            };
-            (value > 0).then(|| format!("/dev/block/{device} {value}"))
-        }).collect();
+    for key in [
+        "IOReadBandwidthMax",
+        "IOWriteBandwidthMax",
+        "IOReadIOPSMax",
+        "IOWriteIOPSMax",
+    ] {
+        let entries: Vec<String> =
+            l.io.iter()
+                .filter_map(|(device, io)| {
+                    let value = match key {
+                        "IOReadBandwidthMax" => io.read_bps,
+                        "IOWriteBandwidthMax" => io.write_bps,
+                        "IOReadIOPSMax" => io.read_iops,
+                        _ => io.write_iops,
+                    };
+                    (value > 0).then(|| format!("/dev/block/{device} {value}"))
+                })
+                .collect();
         p.push(format!("{key}={}", entries.join(" ")));
     }
     Ok(p)
 }
 
-pub fn reservation_plan(target: &str, holder: &str, l: &terrarium_core::resources::RuntimeLimits) -> Result<crate::verb::VerbPlan, crate::verb::BuildError> {
-    let mut args = vec!["--user".into(), "set-property".into(), "--runtime".into(), "--".into(), slice_name(target, holder)];
+pub fn reservation_plan(
+    target: &str,
+    holder: &str,
+    l: &terrarium_core::resources::RuntimeLimits,
+) -> Result<crate::verb::VerbPlan, crate::verb::BuildError> {
+    let mut args = vec![
+        "--user".into(),
+        "set-property".into(),
+        "--runtime".into(),
+        "--".into(),
+        slice_name(target, holder),
+    ];
     args.extend(reservation_properties(l).map_err(crate::verb::BuildError::bad)?);
     Ok(crate::verb::VerbPlan::plain(ExecPlan {
-        program: SYSTEMCTL.into(), args, env: user_bus_env(), timeout: Some(CALL_TIMEOUT), ..Default::default()
+        program: SYSTEMCTL.into(),
+        args,
+        env: user_bus_env(),
+        timeout: Some(CALL_TIMEOUT),
+        ..Default::default()
     }))
 }
 
-pub async fn apply_reservation(target: &str, holder: &str, l: &terrarium_core::resources::RuntimeLimits) -> Result<(), String> {
-    let mut args = vec!["--user".into(), "set-property".into(), "--runtime".into(), "--".into(), slice_name(target, holder)];
+pub async fn apply_reservation(
+    target: &str,
+    holder: &str,
+    l: &terrarium_core::resources::RuntimeLimits,
+) -> Result<(), String> {
+    let mut args = vec![
+        "--user".into(),
+        "set-property".into(),
+        "--runtime".into(),
+        "--".into(),
+        slice_name(target, holder),
+    ];
     args.extend(reservation_properties(l)?);
     call(SYSTEMCTL, &args).await.map(|_| ())
 }
 
 /// Kill every process in the scope. It does not wait.
-pub fn reservation_stop_plan(target: &str, holder: &str) -> Result<crate::verb::VerbPlan, crate::verb::BuildError> {
+pub fn reservation_stop_plan(
+    target: &str,
+    holder: &str,
+) -> Result<crate::verb::VerbPlan, crate::verb::BuildError> {
     Ok(crate::verb::VerbPlan::plain(ExecPlan {
         program: SYSTEMCTL.into(),
-        args: vec!["--user".into(), "stop".into(), "--".into(), slice_name(target, holder)],
-        env: user_bus_env(), timeout: Some(CALL_TIMEOUT), ..Default::default()
+        args: vec![
+            "--user".into(),
+            "stop".into(),
+            "--".into(),
+            slice_name(target, holder),
+        ],
+        env: user_bus_env(),
+        timeout: Some(CALL_TIMEOUT),
+        ..Default::default()
     }))
 }
 

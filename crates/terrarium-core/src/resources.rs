@@ -24,17 +24,25 @@ impl RuntimeLimits {
         if capacity.cpu_ids.is_empty() || capacity.memory_bytes == 0 {
             return Err("host capacity is incomplete".into());
         }
-        let cpu = u32::try_from(capacity.cpu_ids.len()).ok().and_then(|n| n.checked_mul(1000))
+        let cpu = u32::try_from(capacity.cpu_ids.len())
+            .ok()
+            .and_then(|n| n.checked_mul(1000))
             .ok_or("host CPU capacity overflow")?;
         self.limits.cpu_millis.get_or_insert(cpu);
-        self.limits.memory_bytes.get_or_insert(capacity.memory_bytes);
+        self.limits
+            .memory_bytes
+            .get_or_insert(capacity.memory_bytes);
         self.limits.io_weight.get_or_insert(100);
         self.cpus.get_or_insert_with(|| capacity.cpu_ids.clone());
         self.validate()
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        Amounts { io: self.io.clone(), ..Default::default() }.validate()?;
+        Amounts {
+            io: self.io.clone(),
+            ..Default::default()
+        }
+        .validate()?;
         if self.cpus.as_ref().is_some_and(Vec::is_empty) {
             return Err("CPU affinity cannot be empty".into());
         }
@@ -42,10 +50,16 @@ impl RuntimeLimits {
     }
 
     pub fn cpuset(&self) -> String {
-        self.cpus.as_ref().map(|v| v.iter().map(u32::to_string).collect::<Vec<_>>().join(",")).unwrap_or_default()
+        self.cpus
+            .as_ref()
+            .map(|v| v.iter().map(u32::to_string).collect::<Vec<_>>().join(","))
+            .unwrap_or_default()
     }
 
-    pub fn host_support(&self, cap: Option<&crate::limits::LimitsCapability>) -> Result<(), String> {
+    pub fn host_support(
+        &self,
+        cap: Option<&crate::limits::LimitsCapability>,
+    ) -> Result<(), String> {
         self.validate()?;
         self.limits.host_support(cap)?;
         let controllers = &cap.ok_or("missing resource limits capability")?.controllers;

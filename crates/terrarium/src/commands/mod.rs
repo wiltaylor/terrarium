@@ -19,6 +19,7 @@ pub mod pipelines;
 pub mod projects;
 pub mod questions;
 pub mod remote;
+pub mod reservations;
 pub mod rules;
 pub mod schedules;
 pub mod screen;
@@ -34,7 +35,6 @@ pub mod threads;
 pub mod tools;
 pub mod update;
 pub mod waits;
-pub mod reservations;
 
 #[cfg(test)]
 mod tests;

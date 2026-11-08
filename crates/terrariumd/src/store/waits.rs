@@ -773,7 +773,14 @@ pub fn check_reservation_waits(t: &mut Tx<'_>) -> ApiResult<()> {
             State::Active => WaitState::Resolved,
             _ => WaitState::Failed,
         };
-        finish(t, &w.id, result, json!({"reservation":r.id,"outcome":r.state,"until":r.until}), true, 0)?;
+        finish(
+            t,
+            &w.id,
+            result,
+            json!({"reservation":r.id,"outcome":r.state,"until":r.until}),
+            true,
+            0,
+        )?;
     }
     Ok(())
 }

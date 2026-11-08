@@ -2464,13 +2464,20 @@ pub enum ReserveCmd {
         queue_timeout: Option<String>,
     },
     /// Extend an active reservation
-    Extend { id: String, #[arg(long)] until: String },
+    Extend {
+        id: String,
+        #[arg(long)]
+        until: String,
+    },
     /// End a reservation and its holder's sessions on that host
     Retract { id: String },
     /// Cancel a queued reservation
     Cancel { id: String },
     /// List a host's reservations
-    Ls { #[arg(long)] host: String },
+    Ls {
+        #[arg(long)]
+        host: String,
+    },
     /// Read capacity, or configure its reservable percentage (sysadmin)
     Capacity {
         host: String,

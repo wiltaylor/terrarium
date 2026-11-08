@@ -401,18 +401,31 @@ async fn update(
     let changed = if live {
         let n = name.clone();
         let p = patch.clone();
-        let (def, _) = state.db.write(actor.label(), move |t| targets::prepare_update(t, &n, &p, true)).await?;
-        if def.limits != current.def.limits && matches!(current.state.as_str(), "running" | "stopped") {
+        let (def, _) = state
+            .db
+            .write(actor.label(), move |t| {
+                targets::prepare_update(t, &n, &p, true)
+            })
+            .await?;
+        if def.limits != current.def.limits
+            && matches!(current.state.as_str(), "running" | "stopped")
+        {
             crate::reservations::update_docker_defaults(&state, &def).await?;
             true
-        } else { false }
-    } else { false };
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     let expected = current.clone();
     let r = state
         .db
         .write(actor.label(), move |t| {
             if targets::get(t, &name)? != expected {
-                return Err(ApiError::conflict("target changed during limits update; retry"));
+                return Err(ApiError::conflict(
+                    "target changed during limits update; retry",
+                ));
             }
             let r = targets::update_with_live_limits(t, &name, &patch, live)?;
             t.audit("target.update", &name, r.def.project.as_deref(), patch)?;

@@ -203,11 +203,19 @@ pub fn limit_flags(l: &Limits) -> Vec<String> {
 /// this host, so Docker can use the kernel's /dev/block symlinks.
 pub fn reservation_flags(l: &terrarium_core::resources::RuntimeLimits) -> Vec<String> {
     let mut args = Vec::new();
-    if l.cpus.is_some() { args.push(format!("--cpuset-cpus={}", l.cpuset())); }
+    if l.cpus.is_some() {
+        args.push(format!("--cpuset-cpus={}", l.cpuset()));
+    }
     for (device, io) in &l.io {
-        for (flag, value) in [("read-bps", io.read_bps), ("write-bps", io.write_bps),
-            ("read-iops", io.read_iops), ("write-iops", io.write_iops)] {
-            if value > 0 { args.push(format!("--device-{flag}=/dev/block/{device}:{value}")); }
+        for (flag, value) in [
+            ("read-bps", io.read_bps),
+            ("write-bps", io.write_bps),
+            ("read-iops", io.read_iops),
+            ("write-iops", io.write_iops),
+        ] {
+            if value > 0 {
+                args.push(format!("--device-{flag}=/dev/block/{device}:{value}"));
+            }
         }
     }
     args
@@ -215,18 +223,30 @@ pub fn reservation_flags(l: &terrarium_core::resources::RuntimeLimits) -> Vec<St
 
 /// Docker update cannot apply per-device IO. Refuse it rather than silently
 /// dropping the fields or recreating a container with other agents' processes.
-pub fn plan_update(container: &str, l: &terrarium_core::resources::RuntimeLimits, bin: &str) -> Result<VerbPlan, BuildError> {
+pub fn plan_update(
+    container: &str,
+    l: &terrarium_core::resources::RuntimeLimits,
+    bin: &str,
+) -> Result<VerbPlan, BuildError> {
     l.validate().map_err(BuildError::bad)?;
     if !l.io.is_empty() {
-        return Err(BuildError::bad("device IO limits take effect at the next up; Docker cannot change them live"));
+        return Err(BuildError::bad(
+            "device IO limits take effect at the next up; Docker cannot change them live",
+        ));
     }
     if l.limits.cpu_millis.is_none() || l.limits.memory_bytes.is_none() || l.cpus.is_none() {
-        return Err(BuildError::bad("Docker live updates require explicit host-capacity defaults"));
+        return Err(BuildError::bad(
+            "Docker live updates require explicit host-capacity defaults",
+        ));
     }
     let mut a = vec![s("update")];
     a.extend(limit_flags(&l.limits));
-    if l.limits.pids.is_none() { a.push("--pids-limit=-1".into()); }
-    if l.limits.io_weight.is_none() { a.push(format!("--blkio-weight={}", blkio_weight(100))); }
+    if l.limits.pids.is_none() {
+        a.push("--pids-limit=-1".into());
+    }
+    if l.limits.io_weight.is_none() {
+        a.push(format!("--blkio-weight={}", blkio_weight(100)));
+    }
     a.push(format!("--cpuset-cpus={}", l.cpuset()));
     a.push(ident("container", container)?.to_owned());
     Ok(VerbPlan::plain(base(bin, a, Some(30))))

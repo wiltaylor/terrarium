@@ -195,7 +195,10 @@ async fn create(
     let mut new = match b.kind {
         WaitKind::Reservation => {
             let id = need(&b.reservation, "reservation", "reservation")?.to_owned();
-            let r = state.db.read(move |c| crate::store::reservations::get(c, &id)).await?;
+            let r = state
+                .db
+                .read(move |c| crate::store::reservations::get(c, &id))
+                .await?;
             policy::read_project(&actor, &r.project)?;
             NewWait {
                 agent: waiter_id.clone(),

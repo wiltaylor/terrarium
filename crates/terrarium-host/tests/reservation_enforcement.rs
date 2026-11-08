@@ -5,9 +5,20 @@ use terrarium_host::{docker, limits};
 
 fn budget() -> RuntimeLimits {
     RuntimeLimits {
-        limits: Limits { cpu_millis: Some(2000), memory_bytes: Some(1 << 30), ..Default::default() },
+        limits: Limits {
+            cpu_millis: Some(2000),
+            memory_bytes: Some(1 << 30),
+            ..Default::default()
+        },
         cpus: Some(vec![1, 3]),
-        io: BTreeMap::from([("8:0".into(), IoAmounts { read_bps: 1024, write_iops: 50, ..Default::default() })]),
+        io: BTreeMap::from([(
+            "8:0".into(),
+            IoAmounts {
+                read_bps: 1024,
+                write_iops: 50,
+                ..Default::default()
+            },
+        )]),
     }
 }
 
@@ -39,9 +50,23 @@ fn live_update_sets_supported_fields_without_recreating() {
 fn default_update_requires_explicit_host_capacity() {
     assert!(docker::plan_update("container", &RuntimeLimits::default(), "docker").is_err());
     let mut limits = RuntimeLimits::default();
-    limits.docker_defaults(&terrarium_core::resources::HostCapacity { cpu_ids:vec![0,1,2,3], memory_bytes:6 << 30 }).unwrap();
-    let args = docker::plan_update("container", &limits, "docker").unwrap().exec.args;
-    for flag in ["--cpus=4", "--memory=6442450944", "--memory-swap=6442450944", "--pids-limit=-1", "--cpuset-cpus=0,1,2,3"] {
+    limits
+        .docker_defaults(&terrarium_core::resources::HostCapacity {
+            cpu_ids: vec![0, 1, 2, 3],
+            memory_bytes: 6 << 30,
+        })
+        .unwrap();
+    let args = docker::plan_update("container", &limits, "docker")
+        .unwrap()
+        .exec
+        .args;
+    for flag in [
+        "--cpus=4",
+        "--memory=6442450944",
+        "--memory-swap=6442450944",
+        "--pids-limit=-1",
+        "--cpuset-cpus=0,1,2,3",
+    ] {
         assert!(args.contains(&flag.into()), "{flag}");
     }
 }
@@ -49,17 +74,31 @@ fn default_update_requires_explicit_host_capacity() {
 #[test]
 fn slice_device_limits_are_live_and_clear_absent_dimensions() {
     let p = limits::reservation_properties(&budget()).unwrap();
-    for prop in ["AllowedCPUs=1,3", "IOReadBandwidthMax=/dev/block/8:0 1024", "IOWriteBandwidthMax=", "IOReadIOPSMax=", "IOWriteIOPSMax=/dev/block/8:0 50"] {
+    for prop in [
+        "AllowedCPUs=1,3",
+        "IOReadBandwidthMax=/dev/block/8:0 1024",
+        "IOWriteBandwidthMax=",
+        "IOReadIOPSMax=",
+        "IOWriteIOPSMax=/dev/block/8:0 50",
+    ] {
         assert!(p.contains(&prop.into()), "{prop}");
     }
     let plan = limits::reservation_plan("target", "project/agent", &budget()).unwrap();
     assert_eq!(plan.exec.program, "systemctl");
-    assert!(plan.exec.args.contains(&"terrarium-target-project-agent.slice".into()));
+    assert!(
+        plan.exec
+            .args
+            .contains(&"terrarium-target-project-agent.slice".into())
+    );
 }
 
 #[test]
 fn affinity_and_io_require_controllers_and_safe_devices() {
-    let mut cap = LimitsCapability { systemd: true, controllers: vec!["cpu".into(), "memory".into()], ..Default::default() };
+    let mut cap = LimitsCapability {
+        systemd: true,
+        controllers: vec!["cpu".into(), "memory".into()],
+        ..Default::default()
+    };
     let mut b = budget();
     assert!(b.host_support(Some(&cap)).unwrap_err().contains("cpuset"));
     cap.controllers.push("cpuset".into());
@@ -77,7 +116,15 @@ fn affinity_and_io_require_controllers_and_safe_devices() {
 fn expiry_stops_only_the_holder_slice() {
     let p = limits::reservation_stop_plan("_reservation", "p/worker").unwrap();
     assert_eq!(p.exec.program, "systemctl");
-    assert_eq!(p.exec.args, vec!["--user", "stop", "--", "terrarium-_reservation-p-worker.slice"]);
+    assert_eq!(
+        p.exec.args,
+        vec![
+            "--user",
+            "stop",
+            "--",
+            "terrarium-_reservation-p-worker.slice"
+        ]
+    );
     let p = limits::reservation_stop_plan("box", "").unwrap();
     assert_eq!(p.exec.args.last().unwrap(), "terrarium-box.slice");
 }
@@ -85,6 +132,12 @@ fn expiry_stops_only_the_holder_slice() {
 #[test]
 fn exclusive_slices_are_not_children_of_the_shared_cpu_complement() {
     assert_eq!(limits::slice_name("", ""), "terrarium.slice");
-    assert_eq!(limits::slice_name("_exclusive/box", "p/worker"), "terrariumreserved-box-p-worker.slice");
-    assert_eq!(limits::slice_name("_exclusive/box", ""), "terrariumreserved-box.slice");
+    assert_eq!(
+        limits::slice_name("_exclusive/box", "p/worker"),
+        "terrariumreserved-box-p-worker.slice"
+    );
+    assert_eq!(
+        limits::slice_name("_exclusive/box", ""),
+        "terrariumreserved-box.slice"
+    );
 }

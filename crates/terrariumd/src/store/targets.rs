@@ -531,19 +531,36 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
 }
 
 /// Only the API executor may opt into limits it has acknowledged on the host.
-pub fn update_with_live_limits(t: &mut Tx<'_>, name: &str, patch: &Value, live: bool) -> ApiResult<TargetRow> {
+pub fn update_with_live_limits(
+    t: &mut Tx<'_>,
+    name: &str,
+    patch: &Value,
+    live: bool,
+) -> ApiResult<TargetRow> {
     let (def, admin) = prepare_update(t, name, patch, live)?;
     t.execute(
         "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5,
                             credential_admin = ?6
          WHERE name = ?1",
-        params![name, def.project, kind_str(def.kind), def_json(&def)?, now(), admin],
+        params![
+            name,
+            def.project,
+            kind_str(def.kind),
+            def_json(&def)?,
+            now(),
+            admin
+        ],
     )?;
     get(t, name)
 }
 
 /// Validate without changing stored defaults before host acknowledgement.
-pub fn prepare_update(t: &Tx<'_>, name: &str, patch: &Value, live: bool) -> ApiResult<(TargetDef, bool)> {
+pub fn prepare_update(
+    t: &Tx<'_>,
+    name: &str,
+    patch: &Value,
+    live: bool,
+) -> ApiResult<(TargetDef, bool)> {
     let current = get(t, name)?;
     refuse_file(&current)?;
     let Some(p) = patch.as_object() else {
@@ -564,7 +581,8 @@ pub fn prepare_update(t: &Tx<'_>, name: &str, patch: &Value, live: bool) -> ApiR
             .collect();
         // A `host` target is always `running` while its host agent is
         // online. Its limits apply to each new session, so they change.
-        if current.def.kind == TargetKind::Host || (live && current.def.kind == TargetKind::Docker) {
+        if current.def.kind == TargetKind::Host || (live && current.def.kind == TargetKind::Docker)
+        {
             changed.retain(|k| *k != "limits");
         }
         changed.sort_unstable();

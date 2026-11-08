@@ -282,7 +282,11 @@ fn start_named_inner(
     pidfile: String,
     locked: bool,
 ) -> ApiResult<(Running, Option<Report>)> {
-    let initial_start = if locked { crate::executor::start_cmd_locked } else { start_cmd };
+    let initial_start = if locked {
+        crate::executor::start_cmd_locked
+    } else {
+        start_cmd
+    };
     if !wraps(def, cmd) {
         return Ok((initial_start(state, def, cmd)?, None));
     }
