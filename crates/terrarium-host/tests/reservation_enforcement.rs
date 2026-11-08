@@ -5,6 +5,7 @@ use terrarium_host::{docker, limits};
 
 fn budget() -> RuntimeLimits {
     RuntimeLimits {
+        gpu_devices: vec![],
         limits: Limits {
             cpu_millis: Some(2000),
             memory_bytes: Some(1 << 30),

@@ -154,6 +154,11 @@ pub struct ToolCapability {
 /// (docs/host-protocol.md). [`Capabilities`] is the flat summary of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HostCapabilities {
+    /// GPU inventory and Docker allowlist support. Missing on older hosts.
+    #[serde(default)]
+    pub gpus: Vec<crate::resources::GpuDevice>,
+    #[serde(default)]
+    pub gpu_reservations: bool,
     /// Physical host capacity for reservation accounting. Absent on older
     /// agents: reservations must fail closed rather than guess a budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]

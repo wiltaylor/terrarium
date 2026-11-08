@@ -408,11 +408,10 @@ async fn update(
     let live = current.def.kind == TargetKind::Docker && patch.get("limits").is_some();
     let n = name.clone();
     let p = patch.clone();
+    let label = actor.label().to_owned();
     let (candidate, _) = state
         .db
-        .write(actor.label(), move |t| {
-            targets::prepare_update(t, &n, &p, live)
-        })
+        .read(move |t| targets::prepare_update(t, &label, &n, &p, live))
         .await?;
     let mut before = serde_json::to_value(&current.def)?;
     let mut after = serde_json::to_value(&candidate)?;
@@ -443,18 +442,11 @@ async fn update(
         None
     };
     let changed = if live {
-        let n = name.clone();
-        let p = patch.clone();
-        let (def, _) = state
-            .db
-            .write(actor.label(), move |t| {
-                targets::prepare_update(t, &n, &p, true)
-            })
-            .await?;
+        let def = &candidate;
         if def.limits != current.def.limits
             && matches!(current.state.as_str(), "running" | "stopped")
         {
-            crate::reservations::update_docker_defaults(&state, &def).await?;
+            crate::reservations::update_docker_defaults(&state, def).await?;
             true
         } else {
             false
