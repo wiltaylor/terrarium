@@ -2928,7 +2928,33 @@ export interface ToolCapability {
 }
 
 /** `terrarium_core::protocol::HostCapabilities` (docs/host-protocol.md, Handshake). */
+export interface ResourceAmounts {
+  cpu_millis: number;
+  memory_bytes: number;
+  io?: Record<string, { read_bps: number; write_bps: number; read_iops: number; write_iops: number }>;
+}
+export interface HostCapacityBudget {
+  host: string;
+  percentage: number;
+  physical: { cpu_ids: number[]; memory_bytes: number };
+  reservable: ResourceAmounts;
+  used: ResourceAmounts;
+}
+export interface Reservation {
+  id: string;
+  host: string;
+  holder: { kind: "agent" | "target"; id: string };
+  amounts: ResourceAmounts;
+  state: "queued" | "starting" | "active" | "ending" | "expired" | "retracted" | "cancelled" | "timed_out";
+  exclusive: boolean;
+  reason: string;
+  start: number | null;
+  until: number | null;
+  queue_until: number | null;
+}
 export interface HostCapabilities {
+  reservations?: boolean;
+  capacity?: { cpu_ids: number[]; memory_bytes: number };
   docker?: ToolCapability;
   vmlab?: ToolCapability;
   shell?: string;

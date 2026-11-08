@@ -4133,6 +4133,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     })(),
 
     hosts: {
+      capacity: (name) => reply(() => ({ host: name, percentage: 0, physical: { cpu_ids: [], memory_bytes: 0 }, reservable: { cpu_millis: 0, memory_bytes: 0 }, used: { cpu_millis: 0, memory_bytes: 0 } })),
+      reservations: () => reply(() => []),
       list: () => reply(() => w.hosts.map((h) => withMetrics(h))),
       create: (name, opts) =>
         reply(() => {

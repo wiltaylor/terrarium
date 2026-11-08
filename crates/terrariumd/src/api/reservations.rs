@@ -21,7 +21,13 @@ async fn capacity(State(state): State<Shared>, Path(host): Path<String>) -> ApiR
     Ok(Json(state.db.read(move |c| {
         hosts::get(c, &host)?;
         let (physical, budget, percentage) = store::capacity(c, &host)?;
-        Ok(json!({"host":host,"physical":physical,"reservable":budget,"percentage":percentage}))
+        let rows = store::list(c, &host)?;
+        let charged = rows.iter().filter(|r| matches!(r.state, store::State::Starting | store::State::Active | store::State::Ending));
+        let (cpu, memory) = charged.fold((0_u64, 0_u64), |(cpu, memory), r| (
+            cpu.saturating_add(r.amounts.cpu_millis), memory.saturating_add(r.amounts.memory_bytes)
+        ));
+        Ok(json!({"host":host,"physical":physical,"reservable":budget,"percentage":percentage,
+            "used":{"cpu_millis":cpu,"memory_bytes":memory}}))
     }).await?))
 }
 

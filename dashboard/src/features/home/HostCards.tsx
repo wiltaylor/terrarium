@@ -11,6 +11,7 @@ import { isMissingEndpoint } from "../../api/http";
 import { Empty } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { api } from "../../stores";
+import { HostReservations } from "./Reservations";
 import {
   CARD_MINUTES,
   clock,
@@ -134,6 +135,7 @@ function HostCard(props: { host: Host; samples: HostMetricsSample[]; now: number
         {(r) => <p class="muted small offline-reason">{r()}</p>}
       </Show>
 
+      <HostReservations host={props.host.name} supported={!!props.host.capabilities?.reservations} now={props.now} />
       <Show when={last()}>
         {(l) => (
           <>
