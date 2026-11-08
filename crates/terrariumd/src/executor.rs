@@ -2480,11 +2480,17 @@ pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
                 container: inspect_container,
                 timeout_secs: Some(60),
             })
-        }).await?;
-        let mounts = inspected.result.as_ref().and_then(|r| r["mounts"].as_array())
-            .ok_or_else(|| ApiError::conflict(
-                "recreate refused: host did not report container mounts; update the host agent",
-            ))?;
+        })
+        .await?;
+        let mounts = inspected
+            .result
+            .as_ref()
+            .and_then(|r| r["mounts"].as_array())
+            .ok_or_else(|| {
+                ApiError::conflict(
+                    "recreate refused: host did not report container mounts; update the host agent",
+                )
+            })?;
         if !mounts.is_empty() {
             return Err(ApiError::conflict(
                 "recreate refused: container has mounts; mount-preserving recreation is not supported",

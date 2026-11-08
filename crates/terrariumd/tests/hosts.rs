@@ -3905,13 +3905,15 @@ async fn docker_image_edit_needs_explicit_recreate_without_volume_deletion() {
         .td
         .patch("/api/targets/dbox", json!({"image": "alpine:3"}))
         .await
-        .ok().clone();
+        .ok()
+        .clone();
     assert!(unchanged["recreate_note"].is_null());
     let edited = lab
         .td
         .patch("/api/targets/dbox", json!({"image": "alpine:latest"}))
         .await
-        .ok().clone();
+        .ok()
+        .clone();
     assert!(
         edited["recreate_note"]
             .as_str()
@@ -3923,13 +3925,19 @@ async fn docker_image_edit_needs_explicit_recreate_without_volume_deletion() {
         .td
         .patch("/api/targets/dbox", json!({"keep": true}))
         .await
-        .ok().clone();
+        .ok()
+        .clone();
     assert_eq!(edited["runtime"]["recreate_required"], true);
     lab.td
         .post_empty("/api/targets/dbox/up")
         .await
         .err(409, "conflict");
-    let recreated = lab.td.post_empty("/api/targets/dbox/recreate").await.ok().clone();
+    let recreated = lab
+        .td
+        .post_empty("/api/targets/dbox/recreate")
+        .await
+        .ok()
+        .clone();
     assert_eq!(recreated["verb"], "recreate");
     assert_eq!(recreated["state"], "running");
     let log = lab.log();
@@ -3996,14 +4004,20 @@ async fn docker_recreate_requires_admin_and_refuses_live_sessions() {
 async fn docker_recreate_refuses_mounts_and_unknown_mount_metadata() {
     let lab = Lab::start().await;
     let _h = lab.host("lab1").await;
-    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3"})).await;
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3"}))
+        .await;
     lab.td.post_empty("/api/targets/dbox/up").await.ok();
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
-    for mounts in [json!([{"Type": "volume", "Name": "data", "Destination": "/data"}]),
-                   json!([{"Type": "bind", "Source": "/tmp/data", "Destination": "/data"}]),
-                   Value::Null] {
+    for mounts in [
+        json!([{"Type": "volume", "Name": "data", "Destination": "/data"}]),
+        json!([{"Type": "bind", "Source": "/tmp/data", "Destination": "/data"}]),
+        Value::Null,
+    ] {
         std::fs::write(lab.bins.path().join("docker.mounts"), mounts.to_string()).unwrap();
-        lab.td.post_empty("/api/targets/dbox/recreate").await.err(409, "conflict");
+        lab.td
+            .post_empty("/api/targets/dbox/recreate")
+            .await
+            .err(409, "conflict");
         assert!(!lab.log().contains("docker rm"));
         assert_eq!(lab.log().matches("docker run ").count(), 1);
     }
