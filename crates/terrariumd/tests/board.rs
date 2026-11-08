@@ -278,12 +278,22 @@ async fn board_summary_keeps_tile_and_eta_metadata() {
     {
         let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
         conn.execute("INSERT INTO card_groups(card, project, key, rule, done_when) VALUES (?1, 'proj', 'parity', 'fixture', 'done')", [&group]).unwrap();
-        conn.execute("INSERT INTO group_members(group_card, card, position) VALUES (?1, ?2, 0)", rusqlite::params![group, id]).unwrap();
+        conn.execute(
+            "INSERT INTO group_members(group_card, card, position) VALUES (?1, ?2, 0)",
+            rusqlite::params![group, id],
+        )
+        .unwrap();
         conn.execute("INSERT INTO jobs(id, project, card, kind, repo, branch, state, attempt, created_by, created_at) VALUES ('parity-job', 'proj', ?1, 'validate', 'app', 'ter-parity', 'queued', 1, 'operator', '2026-11-08T00:00:00Z')", [&id]).unwrap();
     }
-    td.post_as("proj/lead", "/api/projects/proj/test-runs", json!({
-        "content": "1..1\nok 1 - parity\n", "file_name": "parity.tap", "cards": [id]
-    })).await.ok();
+    td.post_as(
+        "proj/lead",
+        "/api/projects/proj/test-runs",
+        json!({
+            "content": "1..1\nok 1 - parity\n", "file_name": "parity.tap", "cards": [id]
+        }),
+    )
+    .await
+    .ok();
     let full = td.get(&format!("/api/cards/{id}")).await;
     let response = td.get("/api/projects/proj/board").await;
     let summary = response.ok()["cards"]
