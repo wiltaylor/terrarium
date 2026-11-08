@@ -197,6 +197,9 @@ pub struct Card {
     pub eta_set_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta_set_by_name: Option<String>,
+    /// Worker ETA calibration status. Absent for review and job estimates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_calibrated: Option<bool>,
     /// When the card last moved to `done`. A reopen clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<String>,
@@ -635,6 +638,48 @@ fn render(
     } else {
         None
     };
+    let mut eta_calibrated = None;
+    let mut worker_eta = row.eta_at.clone();
+    let mut worker_start = row.eta_set_at.clone();
+    if !row.archived
+        && job.is_none()
+        && (row.column_role.as_deref() == Some(WORKING)
+            || (row.column_role.is_none() && row.column == WORKING))
+    {
+        if worker_start.is_none() {
+            worker_start = conn
+                .query_row(
+                    "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
+                 AND json_extract(payload, '$.change') = 'moved' ORDER BY seq DESC LIMIT 1",
+                    [&row.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+        }
+        if let Some(start) = worker_start
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        {
+            let guess = row
+                .eta_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|at| (at - start).num_milliseconds() as f64);
+            let labels: Vec<String> = json_col(&row.labels);
+            let calibrated = estimates.worker_ms(conn, &row.project, &labels, guess)?;
+            eta_calibrated = Some(calibrated.is_some());
+            if let Some(ms) = calibrated
+                && let Some(at) =
+                    start.checked_add_signed(chrono::Duration::milliseconds(ms.round() as i64))
+            {
+                worker_eta = Some(at.to_rfc3339());
+            }
+        }
+    }
+    if worker_eta.is_none() {
+        worker_start = row.eta_set_at.clone();
+        eta_calibrated = None;
+    }
     let queued = job
         .as_ref()
         .is_some_and(|j| j.state == super::jobs::JobState::Queued);
@@ -646,7 +691,7 @@ fn render(
             None,
         )
     } else {
-        (row.eta_at, row.eta_set_at, row.eta_set_by, eta_set_by_name)
+        (worker_eta, worker_start, row.eta_set_by, eta_set_by_name)
     };
     Ok(Card {
         kind: row.kind,
@@ -681,6 +726,7 @@ fn render(
         eta_set_at,
         eta_set_by,
         eta_set_by_name,
+        eta_calibrated,
         done_at: row.done_at,
         idle_since: row.idle_since,
     })
@@ -811,6 +857,40 @@ pub fn board_summary(
             .remove("_column_role");
         let review = role.as_ref().and_then(Value::as_str) == Some(REVIEW)
             || (role.as_ref().is_none_or(Value::is_null) && card["column"] == REVIEW);
+        let working = role.as_ref().and_then(Value::as_str) == Some(WORKING)
+            || (role.as_ref().is_none_or(Value::is_null) && card["column"] == WORKING);
+        if working {
+            let id = card["id"]
+                .as_str()
+                .ok_or_else(|| ApiError::internal("board summary has no card id"))?;
+            if super::jobs::card_job(conn, id)?.is_none() {
+                let mut start = card["eta_set_at"].as_str().map(str::to_owned);
+                if start.is_none() {
+                    start = last_moved_at(conn, id)?;
+                }
+                if let Some(at) = start
+                    .as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                {
+                    let guess = card["eta_at"]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|end| (end - at).num_milliseconds() as f64);
+                    let labels: Vec<String> = serde_json::from_value(card["labels"].clone())?;
+                    let calibrated = estimates.worker_ms(conn, project, &labels, guess)?;
+                    if let Some(ms) = calibrated
+                        && let Some(end) =
+                            at.checked_add_signed(chrono::Duration::milliseconds(ms.round() as i64))
+                    {
+                        card["eta_at"] = json!(end.to_rfc3339());
+                    }
+                    if !card["eta_at"].is_null() {
+                        card["eta_set_at"] = json!(start);
+                        card["eta_calibrated"] = json!(calibrated.is_some());
+                    }
+                }
+            }
+        }
         if review {
             let id = card["id"]
                 .as_str()
@@ -2394,7 +2474,7 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
         t,
         &row,
         "eta",
-        json!({"eta_at": at, "previous": card.eta_at}),
+        json!({"eta_at": at, "previous": card.eta_at, "labels": json_col::<Vec<String>>(&card.labels)}),
     )?;
     get_card(t, &card.id)
 }

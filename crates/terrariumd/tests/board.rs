@@ -33,6 +33,88 @@ async fn card(td: &TestDaemon, agent: &str, body: Value) -> String {
 }
 
 #[tokio::test]
+async fn worker_eta_render_calibrates_but_preserves_raw_events() {
+    let td = setup().await;
+    let id = card(
+        &td,
+        "proj/lead",
+        json!({"title":"Work", "labels":["type:impl"]}),
+    )
+    .await;
+    let path = format!("/api/cards/{id}");
+    let raw = td
+        .patch(&path, json!({"column":"working", "eta_at":"1h"}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(raw["eta_calibrated"], false);
+    for i in 0..5 {
+        let sample = card(
+            &td,
+            "proj/lead",
+            json!({"title":format!("Sample {i}"), "labels":["type:impl"]}),
+        )
+        .await;
+        let p = format!("/api/cards/{sample}");
+        td.patch(&p, json!({"column":"working", "eta_at":"1h"}))
+            .await
+            .ok();
+        td.patch(&p, json!({"column":"ready"})).await.ok();
+        let db = td.daemon.as_ref().unwrap().state.db.clone();
+        db.write("system", move |t| {
+            let now = chrono::Utc::now();
+            t.execute("UPDATE events SET at = ?1, payload = json_set(payload, '$.eta_at', ?2) WHERE card = ?3 AND kind = 'card' AND json_extract(payload, '$.change') = 'eta'", rusqlite::params![(now - chrono::Duration::minutes(10)).to_rfc3339(), (now + chrono::Duration::minutes(50)).to_rfc3339(), sample])?;
+            Ok(())
+        }).await.unwrap();
+    }
+    let calibrated = td.get(&path).await.ok().clone();
+    assert_eq!(calibrated["eta_calibrated"], true);
+    let at = chrono::DateTime::parse_from_rfc3339(calibrated["eta_at"].as_str().unwrap()).unwrap();
+    let start =
+        chrono::DateTime::parse_from_rfc3339(calibrated["eta_set_at"].as_str().unwrap()).unwrap();
+    assert!((590..610).contains(&(at - start).num_seconds()));
+    let events = td
+        .get(&format!("/api/cards/{id}/events"))
+        .await
+        .ok()
+        .clone();
+    let eta = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["data"]["change"] == "eta")
+        .unwrap();
+    assert_eq!(eta["data"]["eta_at"], raw["eta_at"]);
+    let board = td.get("/api/projects/proj/board").await.ok().clone();
+    assert_eq!(
+        board["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()["eta_at"],
+        calibrated["eta_at"]
+    );
+    // No worker guess uses only same-type history, starting at column entry.
+    let no_guess = card(
+        &td,
+        "proj/lead",
+        json!({"title":"No guess", "labels":["type:impl"]}),
+    )
+    .await;
+    let inferred = td
+        .patch(
+            &format!("/api/cards/{no_guess}"),
+            json!({"column":"working"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(inferred["eta_calibrated"], true);
+    assert!(inferred["eta_at"].is_string());
+}
+
+#[tokio::test]
 async fn review_render_uses_history_but_preserves_open_job_eta() {
     use terrariumd::store::{
         board, card_history,
