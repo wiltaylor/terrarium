@@ -78,3 +78,10 @@ fn expiry_stops_only_the_holder_slice() {
     let p = limits::reservation_stop_plan("box", "").unwrap();
     assert_eq!(p.exec.args.last().unwrap(), "terrarium-box.slice");
 }
+
+#[test]
+fn exclusive_slices_are_not_children_of_the_shared_cpu_complement() {
+    assert_eq!(limits::slice_name("", ""), "terrarium.slice");
+    assert_eq!(limits::slice_name("_exclusive/box", "p/worker"), "terrariumreserved-box-p-worker.slice");
+    assert_eq!(limits::slice_name("_exclusive/box", ""), "terrariumreserved-box.slice");
+}

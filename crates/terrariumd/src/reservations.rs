@@ -48,6 +48,17 @@ fn budget(r: &Reservation) -> ApiResult<RuntimeLimits> {
 
 fn managed(r: &Reservation) -> bool { matches!(r.state, State::Starting | State::Active | State::Ending) }
 
+fn scope(r: &Reservation, target: &str) -> String {
+    if r.exclusive { format!("_exclusive/{target}") } else { target.to_owned() }
+}
+
+fn shared_cpus(physical: &[u32], rows: &[Reservation]) -> ApiResult<Option<Vec<u32>>> {
+    if !rows.iter().any(|r| managed(r) && r.exclusive) { return Ok(None); }
+    let cpus: Vec<_> = physical.iter().copied().filter(|cpu| !rows.iter().any(|r| managed(r) && r.exclusive && r.cores.contains(cpu))).collect();
+    if cpus.is_empty() { return Err(ApiError::conflict("no CPUs remain for shared managed workloads")); }
+    Ok(Some(cpus))
+}
+
 async fn row(state: &Shared, id: &str) -> ApiResult<Reservation> {
     let id = id.to_owned();
     state.db.read(move |c| store::get(c, &id)).await
@@ -76,6 +87,20 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
     let caps = state.executor.hosts.capabilities(&r.host).ok_or_else(|| ApiError::conflict("reservation host is offline"))?;
     if !caps.reservations { return Err(ApiError::conflict("host is missing the reservations capability; upgrade its host agent")); }
     let limits = budget(r)?;
+    let host = r.host.clone();
+    let reservations = state.db.read(move |c| store::list(c, &host)).await?;
+    if reservations.iter().any(|other| other.id != r.id && managed(other)
+        && matches!((&r.holder, &other.holder), (Holder::Agent(_), Holder::Target(_)) | (Holder::Target(_), Holder::Agent(_)))) {
+        return Err(ApiError::conflict("agent and target reservations cannot overlap on a host: their slice hierarchies differ"));
+    }
+    if r.exclusive {
+        RuntimeLimits { cpus: Some(vec![0]), ..Default::default() }.host_support(caps.limits.as_ref()).map_err(ApiError::conflict)?;
+        let incompatible: Vec<_> = rows.iter().filter(|t| t.state == "running" && !matches!(t.def.kind, TargetKind::Host | TargetKind::Docker)).map(|t| t.def.name.clone()).collect();
+        if !incompatible.is_empty() { return Err(ApiError::conflict("exclusive CPU cannot cover these running targets").with_details(json!({"targets":incompatible}))); }
+        let names: Vec<_> = rows.iter().filter(|t| t.def.kind == TargetKind::Host).map(|t| t.def.name.clone()).collect();
+        let sessions = state.executor.resource_sessions(&names, None);
+        if !sessions.is_empty() { return Err(ApiError::conflict("end existing host sessions before an exclusive grant; live scopes cannot be reparented").with_details(json!({"sessions":sessions}))); }
+    }
     match target.def.kind {
         TargetKind::Docker => {
             if target.def.image.is_none() { return Err(ApiError::invalid("Docker reservations need a managed image target")); }
@@ -146,15 +171,24 @@ async fn apply(state: &Shared, r: &Reservation, reset: bool) -> ApiResult<()> {
         Holder::Agent(id) => {
             let id = id.clone();
             let name = state.db.read(move |c| agents::display_name(c, &id)).await?.ok_or_else(|| ApiError::not_found("reservation agent was deleted"))?;
-            ("_reservation".to_owned(), name)
+            (scope(r, "_reservation"), name)
         }
-        Holder::Target(_) => (r.target.clone(), String::new()),
+        Holder::Target(_) => (scope(r, &r.target), String::new()),
     };
-    let limits = if reset {
+    let mut limits = if reset {
         RuntimeLimits { limits: if matches!(r.holder, Holder::Target(_)) && t.def.kind == TargetKind::Docker {
             t.def.limits.as_ref().map(|l| l.resolve()).transpose().map_err(ApiError::invalid)?.unwrap_or_default()
         } else { Limits::default() }, ..Default::default() }
     } else { budget(r)? };
+    if t.def.kind == TargetKind::Docker && (reset || !r.exclusive) {
+        let host = r.host.clone();
+        let omitted = reset.then(|| r.id.clone());
+        limits.cpus = state.db.read(move |c| {
+            let rows: Vec<_> = store::list(c, &host)?.into_iter().filter(|r| Some(&r.id) != omitted.as_ref()).collect();
+            if !rows.iter().any(|r| managed(r) && r.exclusive) { return Ok(None); }
+            shared_cpus(&store::capacity(c, &host)?.0.cpu_ids, &rows)
+        }).await?;
+    }
     if t.def.kind == TargetKind::Docker && t.state != "running" { return Ok(()); }
     let container = (t.def.kind == TargetKind::Docker).then(|| executor::container_name(&t.def));
     executor::verb_ok(state, &t.def, "reservation limits", move |session| DaemonFrame::ResourceApply(ResourceApply {
@@ -164,7 +198,11 @@ async fn apply(state: &Shared, r: &Reservation, reset: bool) -> ApiResult<()> {
 }
 
 async fn start(state: &Shared, r: &Reservation) -> ApiResult<Reservation> {
-    if let Err(e) = apply(state, r, false).await {
+    let applied = async {
+        if r.exclusive { isolate(state, &r.host, None).await?; }
+        apply(state, r, false).await
+    }.await;
+    if let Err(e) = applied {
         let id = r.id.clone();
         state.db.write("system", move |tx| store::end(tx, &id, false)).await?;
         // Keep the capacity in ending if resetting a partially applied budget
@@ -187,12 +225,12 @@ async fn finish(state: &Shared, r: &Reservation) -> ApiResult<Reservation> {
     let t = state.db.read(move |c| targets::get(c, &target)).await?;
     if t.def.kind == TargetKind::Host {
         let (target, holder) = match &r.holder {
-            Holder::Target(target) => (target.clone(), String::new()),
+            Holder::Target(target) => (scope(r, target), String::new()),
             Holder::Agent(id) => {
                 let id = id.clone();
                 let holder = state.db.read(move |c| agents::display_name(c, &id)).await?
                     .ok_or_else(|| ApiError::not_found("reservation agent was deleted"))?;
-                ("_reservation".into(), holder)
+                (scope(r, "_reservation"), holder)
             }
         };
         executor::verb_ok(state, &t.def, "stop reservation slice", move |session| {
@@ -210,6 +248,7 @@ async fn finish(state: &Shared, r: &Reservation) -> ApiResult<Reservation> {
         }).await?;
     }
     apply(state, r, true).await?;
+    if r.exclusive { isolate(state, &r.host, Some(&r.id)).await?; }
     let id = r.id.clone();
     state.db.write("system", move |tx| store::finish_end(tx, &id)).await
 }
@@ -287,11 +326,20 @@ pub fn spawn_timer(state: &Shared) -> tokio::task::JoinHandle<()> {
 pub fn docker_budget(state: &Shared, def: &TargetDef) -> ApiResult<Option<RuntimeLimits>> {
     let Some(host) = &def.host else { return Ok(None); };
     state.db.read_now(|c| {
-        for r in store::list(c, host)? {
+        let rows = store::list(c, host)?;
+        let shared = if rows.iter().any(|r| managed(r) && r.exclusive) {
+            shared_cpus(&store::capacity(c, host)?.0.cpu_ids, &rows)?
+        } else { None };
+        for r in &rows {
             if r.holder == Holder::Target(def.name.clone()) && managed(&r) {
                 if r.state == State::Ending || r.until.is_some_and(|u| u <= now()) { return Err(ApiError::conflict("reservation ended; cleanup is pending")); }
-                return budget(&r).map(Some);
+                let mut limits = budget(r)?;
+                if !r.exclusive { limits.cpus = shared; }
+                return Ok(Some(limits));
             }
+        }
+        if let Some(cpus) = shared {
+            return Ok(Some(RuntimeLimits { cpus: Some(cpus), limits: def.limits.as_ref().map(|l| l.resolve()).transpose().map_err(ApiError::invalid)?.unwrap_or_default(), ..Default::default() }));
         }
         Ok(None)
     })
@@ -303,7 +351,12 @@ pub fn exec_budget(state: &Shared, def: &TargetDef, holder: Option<&str>) -> Api
     let Some(host) = &def.host else { return Ok(None); };
     state.db.read_now(|c| {
         let agent = holder.and_then(|h| agents::find(c, h, None).ok()).map(|a| a.agent.id.to_string());
-        for r in store::list(c, host)? {
+        let rows = store::list(c, host)?;
+        let exclusive = rows.iter().any(|r| managed(r) && r.exclusive);
+        if exclusive && !matches!(def.kind, TargetKind::Host | TargetKind::Docker) {
+            return Err(ApiError::conflict("exclusive CPU reservations prohibit vmlab and SSH execution on this host"));
+        }
+        for r in rows {
             let owns = match &r.holder { Holder::Agent(id) => agent.as_ref() == Some(id), Holder::Target(t) => *t == def.name };
             if !owns || !managed(&r) { continue; }
             if r.state != State::Active || r.until.is_some_and(|u| u <= now()) { return Err(ApiError::conflict("reservation is not active; enforcement or cleanup is pending")); }
@@ -313,10 +366,48 @@ pub fn exec_budget(state: &Shared, def: &TargetDef, holder: Option<&str>) -> Api
             }
             let limits = budget(&r)?;
             return Ok(Some(terrarium_host::protocol::ExecLimits {
-                target: if matches!(r.holder, Holder::Agent(_)) { "_reservation".into() } else { def.name.clone() },
+                target: scope(&r, if matches!(r.holder, Holder::Agent(_)) { "_reservation" } else { &def.name }),
                 holder: holder.unwrap_or("operator").into(), limits: limits.limits, reservation: Some(limits),
             }));
         }
+        if exclusive && def.kind == TargetKind::Host {
+            // Even an otherwise unlimited command must enter terrarium.slice,
+            // whose AllowedCPUs excludes every exclusive allocation.
+            let limits = def.limits.as_ref().map(|l| l.resolve()).transpose().map_err(ApiError::invalid)?.unwrap_or_default();
+            return Ok(Some(terrarium_host::protocol::ExecLimits { target: def.name.clone(), holder: holder.unwrap_or("operator").into(), limits, reservation: None }));
+        }
         Ok(None)
     })
+}
+
+/// Restrict the shared systemd hierarchy and every existing managed Docker
+/// container before an exclusive holder can start. Exclusive scopes are in a
+/// sibling hierarchy, so they do not inherit the shared complement.
+async fn isolate(state: &Shared, host: &str, omit: Option<&str>) -> ApiResult<()> {
+    let name = host.to_owned();
+    let (physical, rows) = state.db.read(move |c| Ok((store::capacity(c, &name)?.0, store::list(c, &name)?))).await?;
+    let rows: Vec<_> = rows.into_iter().filter(|r| Some(r.id.as_str()) != omit).collect();
+    let cpus = shared_cpus(&physical.cpu_ids, &rows)?;
+    let targets = host_targets(state, host).await?;
+    let representative = targets.first().ok_or_else(|| ApiError::conflict("host has no target for isolation"))?;
+    let limits = RuntimeLimits { cpus: cpus.clone(), ..Default::default() };
+    executor::verb_ok(state, &representative.def, "shared CPU isolation", move |session| DaemonFrame::ResourceApply(ResourceApply {
+        session, target: String::new(), holder: String::new(), container: None, limits,
+    })).await?;
+    for t in targets.iter().filter(|t| t.def.kind == TargetKind::Docker && t.state == "running") {
+        let own = rows.iter().find(|r| managed(r) && r.holder == Holder::Target(t.def.name.clone()));
+        let mut limits = match own {
+            Some(r) => budget(r)?,
+            None => RuntimeLimits { limits: t.def.limits.as_ref().map(|l| l.resolve()).transpose().map_err(ApiError::invalid)?.unwrap_or_default(), ..Default::default() },
+        };
+        if !own.is_some_and(|r| r.exclusive) { limits.cpus = cpus.clone(); }
+        // docker update leaves create-time device IO unchanged.
+        limits.io.clear();
+        let container = Some(executor::container_name(&t.def));
+        let target = t.def.name.clone();
+        executor::verb_ok(state, &t.def, "container CPU isolation", move |session| DaemonFrame::ResourceApply(ResourceApply {
+            session, target, holder: String::new(), container, limits,
+        })).await?;
+    }
+    Ok(())
 }

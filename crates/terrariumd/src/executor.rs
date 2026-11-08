@@ -655,6 +655,11 @@ pub fn host_frame(
     limits: Option<ExecLimits>,
 ) -> ApiResult<impl FnOnce(u32) -> DaemonFrame + use<>> {
     no_exec(def)?;
+    // SSH takes a separate execution path, but must not bypass a host's
+    // exclusive reservation policy.
+    if def.kind == TargetKind::Ssh {
+        crate::reservations::exec_budget(state, def, cmd.holder.as_deref())?;
+    }
     cmd.check()?;
     let def = def.clone();
     let cmd = cmd.clone();

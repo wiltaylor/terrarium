@@ -59,6 +59,12 @@ pub fn escape(s: &str) -> String {
 /// `terrarium-<target>-_operator.slice`: no project name starts with `_`.
 /// A name that is too long for systemd becomes `terrarium-x<hash>.slice`.
 pub fn slice_name(target: &str, holder: &str) -> String {
+    if let Some(target) = target.strip_prefix("_exclusive/") {
+        return slice_name(target, holder).replacen("terrarium-", "terrariumreserved-", 1);
+    }
+    if target.is_empty() && holder.is_empty() {
+        return "terrarium.slice".into();
+    }
     if holder.is_empty() {
         return format!("terrarium-{}.slice", escape(target));
     }

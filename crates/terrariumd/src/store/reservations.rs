@@ -262,8 +262,11 @@ fn allocation(
     let mut available = physical.cpu_ids;
     available.sort_unstable();
     available.dedup();
+    if needed >= available.len() {
+        return Err(ApiError::invalid("exclusive reservations must leave a CPU for shared managed workloads"));
+    }
     available.retain(|cpu| !held.iter().any(|r| r.cores.contains(cpu)));
-    if available.len() < needed {
+    if available.len() <= needed {
         return Err(conflict());
     }
     available.truncate(needed);
