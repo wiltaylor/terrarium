@@ -3658,9 +3658,11 @@ mod tests {
         let id = card.clone();
         // API queueing also runs inside an operator transaction. Its
         // generated notes must still be authored by system.
-        db.write("operator", move |t| comment(t, &id, "Job queue: a comment."))
-            .await
-            .unwrap();
+        db.write("operator", move |t| {
+            comment(t, &id, "Job queue: a comment.")
+        })
+        .await
+        .unwrap();
         let id = card.clone();
         db.write("operator", move |t| {
             board::add_comment(t, &Actor::Operator, &id, "By hand.").map(|_| ())

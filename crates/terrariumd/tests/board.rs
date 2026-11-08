@@ -132,10 +132,13 @@ async fn human_create_and_move_comments_notify_and_bound_recipients_deduplicate(
     }
     // Fixture: a live bound agent, without starting a harness process.
     let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
-    let worker: String = conn.query_row(
-        "SELECT id FROM agents WHERE project = 'proj' AND name = 'w2'",
-        [], |r| r.get(0),
-    ).unwrap();
+    let worker: String = conn
+        .query_row(
+            "SELECT id FROM agents WHERE project = 'proj' AND name = 'w2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     conn.execute(
         "INSERT INTO spawns (id, owner, owner_name, project, name, template, harness, task,
          spawned_by, spawned_at, deadline_at, bound_kind, bound_id)
