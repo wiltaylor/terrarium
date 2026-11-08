@@ -444,7 +444,7 @@ empty and must not start with `-`.
 | Verb | `value` |
 |---|---|
 | `docker.run` (detached) | `{"id": "<container id>"}` |
-| `docker.inspect` | `{"state": "running", "id", "name", "image", "status", "running", "exit_code", "started_at", "finished_at"}`. A missing container gives `{"state": "absent"}`. |
+| `docker.inspect` | `{"state": "running", "id", "name", "image", "container_limits", "mounts", "workspace_mounts", "status", "running", "exit_code", "started_at", "finished_at"}`. `container_limits` contains selected HostConfig CPU, memory, swap, PIDs and IO values for legacy baseline capture. `mounts` is Docker's `Mounts` array, or null when unavailable. `workspace_mounts` maps relative workspace paths to exact writable, rprivate bind records verified against the host's canonical work root. Recreation accepts only these recorded workspace binds, refusing foreign or unknown mounts. A missing container gives `{"state": "absent"}`. |
 | `docker.ps` | `[{"id", "names", "image", "state", "status", "labels": {..}}]` |
 
 `state` is `terrarium_core::protocol::TargetState`: `running`, `stopped`,

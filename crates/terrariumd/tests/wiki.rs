@@ -1,7 +1,7 @@
 //! The wiki and its rules (PLAN §15.1).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use hyper::Method;

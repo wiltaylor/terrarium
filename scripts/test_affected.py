@@ -307,6 +307,57 @@ class Rules(unittest.TestCase):
         self.assertTrue(p.dashboard)
 
 
+class ConsolidatedTargets(unittest.TestCase):
+    def setUp(self):
+        self.base = "crates/terrariumd/tests/"
+        self.files = {
+            self.base + "it/main.rs":
+                '#[path = "../board.rs"] mod board;\n'
+                '#[path = "../spawns.rs"] mod spawns;\n',
+            self.base + "board.rs": "terrariumd::calendar::tick(s)",
+            self.base + "spawns.rs": "",
+            self.base + "no_token_endpoint.rs": "",
+        }
+        self.crates = {
+            "terrariumd": affected.Crate(
+                "terrariumd", "crates/terrariumd/",
+                tests={"it": self.base + "it/main.rs",
+                       "no_token_endpoint": self.base + "no_token_endpoint.rs"})
+        }
+
+    def plan(self, path):
+        return affected.plan([path], self.crates, read=self.files.__getitem__,
+                             common=[], embedded={})
+
+    def test_module_edit_selects_containing_binary(self):
+        for name in ("board.rs", "it/main.rs"):
+            self.assertEqual(self.plan(self.base + name).daemon_targets, {"it"})
+
+    def test_source_references_and_module_names_select_binary_and_guard(self):
+        for module in ("board", "calendar", "spawn"):
+            self.assertEqual(
+                self.plan(f"crates/terrariumd/src/{module}.rs").daemon_targets,
+                {"it", "no_token_endpoint"})
+
+    def test_common_and_unknown_modules_fall_back_to_whole_crate(self):
+        for name in ("common/mod.rs", "fixtures/example.rs", "new_test.rs"):
+            self.assertEqual(self.plan(self.base + name).whole, {"terrariumd"})
+
+    def test_every_daemon_test_file_is_registered_once(self):
+        # autotests=false must not silently drop a new test module.
+        import tomllib
+        root = HERE.parent
+        manifest = tomllib.loads((root / "crates/terrariumd/Cargo.toml").read_text())
+        registered = []
+        for target in manifest["test"]:
+            path = "crates/terrariumd/" + target["path"]
+            registered.extend(affected.test_sources(
+                path, lambda p: (root / p).read_text()))
+        for path in (root / self.base).glob("*.rs"):
+            self.assertEqual(registered.count(path.relative_to(root).as_posix()), 1,
+                             f"{path.name}: register new modules in tests/it/main.rs")
+
+
 class Cli(unittest.TestCase):
     def test_read_changed(self):
         with tempfile.TemporaryDirectory() as d:

@@ -3,7 +3,7 @@
 //! `GET /api/usage?group=card` and `GET /api/cards/{id}/usage` sum them.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::io::Write;

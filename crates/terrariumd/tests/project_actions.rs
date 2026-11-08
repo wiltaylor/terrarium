@@ -4,7 +4,7 @@
 //! events are those of any schedule.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use chrono::{Duration, Utc};
 use common::TestDaemon;

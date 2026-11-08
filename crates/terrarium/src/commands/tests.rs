@@ -2953,6 +2953,26 @@ async fn host_show_prints_the_usage_record() {
 /// `card move` does; not both.
 #[tokio::test]
 async fn card_comment_takes_m_like_card_move() {
+    ok(
+        true,
+        &[
+            "card",
+            "comment",
+            "TER-1",
+            "--reply-to",
+            "C1",
+            "-m",
+            "checked",
+        ],
+        vec![(201, json!({"id": "TER-1"}))],
+        vec![(
+            Post,
+            "/api/cards/TER-1/comments",
+            vec![],
+            Some(json!({"body": "checked", "reply_to": "C1"})),
+        )],
+    )
+    .await;
     for args in [
         &["card", "comment", "TER-1", "-m", "looks good"][..],
         &["card", "comment", "TER-1", "--message", "looks good"][..],
@@ -3860,6 +3880,29 @@ async fn target_edit_patches_only_the_flags_given() {
     ] {
         assert!(Cli::try_parse_from(std::iter::once("terrarium").chain(bad)).is_err());
     }
+}
+
+#[tokio::test]
+async fn target_edit_reports_explicit_recreate_and_sends_the_verb() {
+    let out = ok(
+        true,
+        &["admin", "target", "edit", "dbox", "--image", "alpine:latest"],
+        vec![(200, json!({"name": "dbox", "recreate_note": "New image requires recreate; writable layer is lost, volumes are kept"}))],
+        vec![(Patch, "/api/targets/dbox", vec![], Some(json!({"image": "alpine:latest"})))],
+    ).await;
+    assert!(out.contains("writable layer is lost"));
+    assert!(out.contains("terrarium admin target verb dbox recreate"));
+    let out = ok(
+        true,
+        &["admin", "target", "verb", "dbox", "recreate"],
+        vec![(
+            200,
+            json!({"target": "dbox", "verb": "recreate", "state": "running"}),
+        )],
+        vec![(Post, "/api/targets/dbox/recreate", vec![], None)],
+    )
+    .await;
+    assert!(out.contains("dbox: recreate: running"));
 }
 
 /// One body flag for every command with a body: `--body`/`-b`, `-` for

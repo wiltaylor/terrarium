@@ -5,7 +5,7 @@
 //! of `terrariumd::card_reminder` cover the status rules.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

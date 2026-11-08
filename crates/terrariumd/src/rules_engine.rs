@@ -19,10 +19,10 @@
 //!   and at most [`MAX_PER_CARD_PER_HOUR`] times for one card unless
 //!   `max_per_hour` explicitly sets both limits. A guard
 //!   writes a `skipped` row with the reason.
-//! - **Per-card order.** [`run_pending`] runs the pending rows in event
+//! - **Per-card order.** [`pass`] runs the pending rows in event
 //!   order, then rule order. The rows of one card (its lane) run one after
 //!   another; other lanes run beside them. A row that cannot be recorded
-//!   stops its lane until the next pass. A row of a rule that is disabled
+//!   stops its lane until a bounded retry. A row of a rule that is disabled
 //!   or gone since the plan is skipped when it has not started.
 //! - **Conditions on the current state** (`if_card`, `if_job`) and the
 //!   column check (each column that the rule names is still on the board)
@@ -48,7 +48,7 @@
 //! do in its write (the queue tick, a kill, a wake, the close of a bound
 //! agent) runs after the action's commit.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,7 +61,7 @@ use terrarium_core::config::Policy;
 use terrarium_core::rules_file::{self, Action, BoardColumn, Context, Rule, RuleSet};
 use terrarium_core::template::value_text;
 use tokio::sync::broadcast::error::TryRecvError;
-use tokio::task::JoinHandle;
+use tokio::task::{Id, JoinHandle, JoinSet};
 use tracing::warn;
 
 use crate::actor::{Actor, AgentActor};
@@ -75,8 +75,8 @@ use crate::store::{board, jobs, rules};
 
 /// The most events that one [`plan_pass`] reads.
 pub const BATCH: usize = 500;
-/// The most pending rows that one [`run_pending`] takes.
-pub const RUN_BATCH: usize = 200;
+/// The most lane rows (including their effects) running concurrently.
+const MAX_LANES: usize = 200;
 /// The runs of one rule in an hour without `max_per_hour`.
 pub const DEFAULT_MAX_PER_HOUR: u32 = 30;
 /// The most runs of one rule for one card in an hour.
@@ -335,12 +335,15 @@ fn count_since(
     rule: &str,
     card: Option<&str>,
     since: &str,
+    limit: i64,
 ) -> ApiResult<i64> {
+    // Guards only need to know whether the limit was reached. Once it
+    // was, do not scan the growing tail of skipped rows on every event.
     Ok(conn.query_row(
-        "SELECT count(*) FROM rule_runs
+        "SELECT count(*) FROM (SELECT 1 FROM rule_runs
           WHERE project = ?1 AND rule = ?2 AND created_at >= ?3 AND state != 'skipped'
-            AND (?4 IS NULL OR card = ?4)",
-        params![project, rule, since, card],
+            AND (?4 IS NULL OR card = ?4) LIMIT ?5)",
+        params![project, rule, since, card, limit],
         |r| r.get(0),
     )?)
 }
@@ -413,10 +416,10 @@ pub fn decide(
     let card_max = rule.max_per_hour.map_or(MAX_PER_CARD_PER_HOUR, i64::from);
     let mut out = Vec::new();
     for card in cards {
-        let skip = if count_since(conn, project, &rule.name, None, &hour_ago)? >= max {
+        let skip = if count_since(conn, project, &rule.name, None, &hour_ago, max)? >= max {
             Some(format!("rate limit: {max} runs in an hour"))
         } else if let Some(c) = &card
-            && count_since(conn, project, &rule.name, Some(c), &hour_ago)? >= card_max
+            && count_since(conn, project, &rule.name, Some(c), &hour_ago, card_max)? >= card_max
         {
             Some(format!(
                 "card rate limit: {card_max} runs for {c} in an hour"
@@ -450,42 +453,48 @@ pub async fn plan_pass(
     projects: Vec<ProjectRules>,
     now: DateTime<Utc>,
 ) -> ApiResult<(usize, bool)> {
-    db.write("system", move |t| {
-        let Some(cursor) = cursor(t)? else {
-            let last = events::last_seq(t)?;
-            set_cursor(t, last)?;
-            return Ok((0, false));
-        };
-        let evs = events::list(t, &EventFilter::default(), cursor, BATCH)?;
-        let Some(last) = evs.last().map(|e| e.seq) else {
-            return Ok((0, false));
-        };
-        let by_project: HashMap<&str, &ProjectRules> =
-            projects.iter().map(|p| (p.project.as_str(), p)).collect();
-        let mut written = 0;
-        let mut touched: Vec<String> = Vec::new();
-        for e in &evs {
-            let Some(pr) = e.project.as_deref().and_then(|p| by_project.get(p)) else {
-                continue;
-            };
-            for (ord, rule) in pr.set.rules.iter().enumerate() {
-                let planned = decide(t, &pr.project, rule, e, Some(&pr.updated_at), now)?;
-                for p in planned {
-                    insert_run(t, pr, ord, rule, e, &p, now)?;
-                    written += 1;
-                }
-            }
-            if !touched.contains(&pr.project) {
-                touched.push(pr.project.clone());
-            }
-        }
+    db.write("system", move |t| plan_events(t, &projects, now))
+        .await
+}
+
+fn plan_events(
+    t: &Tx<'_>,
+    projects: &[ProjectRules],
+    now: DateTime<Utc>,
+) -> ApiResult<(usize, bool)> {
+    let Some(cursor) = cursor(t)? else {
+        let last = events::last_seq(t)?;
         set_cursor(t, last)?;
-        for p in &touched {
-            prune(t, p, now)?;
+        return Ok((0, false));
+    };
+    let evs = events::list(t, &EventFilter::default(), cursor, BATCH)?;
+    let Some(last) = evs.last().map(|e| e.seq) else {
+        return Ok((0, false));
+    };
+    let by_project: HashMap<&str, &ProjectRules> =
+        projects.iter().map(|p| (p.project.as_str(), p)).collect();
+    let mut written = 0;
+    let mut touched: Vec<String> = Vec::new();
+    for e in &evs {
+        let Some(pr) = e.project.as_deref().and_then(|p| by_project.get(p)) else {
+            continue;
+        };
+        for (ord, rule) in pr.set.rules.iter().enumerate() {
+            let planned = decide(t, &pr.project, rule, e, Some(&pr.updated_at), now)?;
+            for p in planned {
+                insert_run(t, pr, ord, rule, e, &p, now)?;
+                written += 1;
+            }
         }
-        Ok((written, evs.len() == BATCH))
-    })
-    .await
+        if !touched.contains(&pr.project) {
+            touched.push(pr.project.clone());
+        }
+    }
+    set_cursor(t, last)?;
+    for p in &touched {
+        prune(t, p, now)?;
+    }
+    Ok((written, evs.len() == BATCH))
 }
 
 fn insert_run(
@@ -640,66 +649,253 @@ pub fn live_rules(projects: &[ProjectRules]) -> HashSet<(String, String)> {
         .collect()
 }
 
-/// Run the pending rows (at most [`RUN_BATCH`]): the rows of one lane (a
-/// card) in order, the lanes beside each other. A row that cannot be
-/// recorded (a database error) stops its lane, so the later rows of its
-/// card wait for it. `live`: the enabled rules ([`live_rules`]). Returns
-/// whether more rows wait and every lane went through (no error), so a
-/// caller that loops does not spin on a failing row.
-pub async fn run_pending(state: &Shared, live: Arc<HashSet<(String, String)>>) -> ApiResult<bool> {
-    let pending: Vec<(String, String)> = state
-        .db
-        .read(|c| {
-            let mut st = c.prepare(
-                "SELECT id, lane FROM rule_runs WHERE state = 'pending'
-                  ORDER BY event_seq, ord, id LIMIT ?1",
-            )?;
-            let rows = st
-                .query_map([RUN_BATCH as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
-    let more = pending.len() == RUN_BATCH;
-    let mut lanes: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (id, lane) in pending {
-        lanes.entry(lane).or_default().push(id);
-    }
-    let tasks: Vec<JoinHandle<bool>> = lanes
-        .into_values()
-        .map(|ids| {
-            let st = state.clone();
-            let live = live.clone();
-            tokio::spawn(async move {
-                for id in ids {
-                    if let Err(e) = run_one(&st, &id, &live).await {
-                        // Keep the card's order: its later rows wait for
-                        // this one (the next pass).
-                        warn!(run = %id, "a rule run failed to record; its lane waits: {e}");
-                        return false;
-                    }
-                }
-                true
-            })
-        })
-        .collect();
-    let mut clean = true;
-    for t in tasks {
-        match t.await {
-            Ok(ok) => clean &= ok,
-            Err(e) => {
-                warn!("a rule lane task ended: {e}");
-                clean = false;
-            }
-        }
-    }
-    Ok(more && clean)
+fn pending_lanes(c: &Connection) -> ApiResult<Vec<String>> {
+    let mut st = c.prepare(
+        "SELECT lane FROM rule_runs WHERE state = 'pending'
+        GROUP BY lane ORDER BY min(event_seq), lane",
+    )?;
+    Ok(st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
 }
 
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+    use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_load_error_waits_for_a_committed_lane_to_finish_once() {
+        // Intentionally omit the projects table to inject a real load
+        // error, independently of a lane's already committed work.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE probe (actions INTEGER, recorded INTEGER);
+            INSERT INTO probe VALUES (0, 0);",
+        )
+        .unwrap();
+        let db = Db::new(conn, events::EventHub::default());
+        let committed = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let mut lanes = Lanes::default();
+        lanes.start(vec!["held".into()], |_| {
+            let db = db.clone();
+            let committed = committed.clone();
+            let release = release.clone();
+            async move {
+                db.read(|c| {
+                    c.execute("UPDATE probe SET actions = actions + 1", [])?;
+                    Ok(())
+                })
+                .await?;
+                committed.add_permits(1);
+                let _permit = release.acquire().await;
+                db.read(|c| {
+                    c.execute("UPDATE probe SET recorded = 1", [])?;
+                    Ok(())
+                })
+                .await
+            }
+        });
+        committed.acquire().await.unwrap().forget();
+        let result = load(&db, &mut Cache::default()).await.map(|_| ());
+        assert!(result.is_err());
+        // This is the same completion path used by pass for both load
+        // and plan errors. It must not return and drop the held task.
+        let mut finishing = tokio::spawn(async move {
+            lanes.finish_pass(result).await;
+            assert!(lanes.active.is_empty());
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut finishing)
+                .await
+                .is_err()
+        );
+        release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), finishing)
+            .await
+            .unwrap()
+            .unwrap();
+        let row: (i64, i64) = db
+            .read(|c| {
+                // Model the next pass: only an unrecorded row would replay.
+                c.execute(
+                    "UPDATE probe SET actions = actions + 1 WHERE recorded = 0",
+                    [],
+                )?;
+                Ok(c.query_row("SELECT actions, recorded FROM probe", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(row, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_gated_lane_does_not_hold_other_rows_and_tasks_are_bounded() {
+        let gate = Arc::new(Semaphore::new(0));
+        let mut lanes = Lanes::default();
+        lanes.start(vec!["slow".into()], |_| {
+            let gate = gate.clone();
+            async move {
+                let _permit = gate.acquire().await;
+                Ok(())
+            }
+        });
+        // More than the former global batch completes while slow is held.
+        for n in 0..=MAX_LANES {
+            lanes.start(vec![format!("fast-{n}")], |_| async { Ok(()) });
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), lanes.join())
+                    .await
+                    .is_ok()
+            );
+            assert_eq!(lanes.active.len(), 1);
+            assert!(lanes.active.values().any(|lane| lane == "slow"));
+        }
+        lanes.start(
+            (0..MAX_LANES * 2).map(|n| format!("held-{n}")).collect(),
+            |_| {
+                let gate = gate.clone();
+                async move {
+                    let _permit = gate.acquire().await;
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(lanes.tasks.len(), MAX_LANES);
+        gate.add_permits(MAX_LANES);
+        while !lanes.tasks.is_empty() {
+            lanes.join().await;
+        }
+        assert!(lanes.active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stopped_lane_retries_while_another_lane_remains_active() {
+        let mut lanes = Lanes::default();
+        lanes.start(vec!["failed".into()], |_| async {
+            Err(ApiError::internal("recording failed"))
+        });
+        lanes.join().await;
+        assert!(lanes.stopped.contains_key("failed"));
+        lanes.start(vec!["slow".into()], |_| std::future::pending());
+        lanes.start(vec!["failed".into()], |_| async {
+            panic!("a recording error must not hot-loop")
+        });
+        assert_eq!(lanes.active.len(), 1);
+
+        // Keep the same scheduler and active lane throughout the retry
+        // interval, with a continuous stream of unrelated completions.
+        let retry = lanes.stopped["failed"];
+        while tokio::time::Instant::now() < retry {
+            lanes.start(vec!["traffic".into()], |_| async { Ok(()) });
+            lanes.join().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lanes.start(vec!["failed".into()], |_| async { Ok(()) });
+        assert!(!lanes.stopped.contains_key("failed"));
+        assert!(lanes.active.values().any(|lane| lane == "failed"));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), lanes.join())
+                .await
+                .is_ok()
+        );
+        assert_eq!(lanes.active.len(), 1, "the slow lane is still running");
+    }
+}
+
+/// One owner per lane, including while its committed effects are running.
+/// Dropping the scheduler aborts its workers rather than detaching them.
+#[derive(Default)]
+struct Lanes {
+    tasks: JoinSet<ApiResult<()>>,
+    active: HashMap<Id, String>,
+    stopped: HashMap<String, tokio::time::Instant>,
+}
+
+impl Lanes {
+    /// A planner failure is not a shutdown. Keep ownership until every
+    /// active row and its post-commit effects finish before retrying.
+    async fn finish_pass(&mut self, result: ApiResult<()>) {
+        if let Err(e) = result {
+            warn!("the rule engine pass failed; active lanes finish before retry: {e}");
+        }
+        while !self.tasks.is_empty() {
+            self.join().await;
+        }
+    }
+
+    fn start<F, Fut>(&mut self, pending: Vec<String>, run: F)
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = ApiResult<()>> + Send + 'static,
+    {
+        self.stopped
+            .retain(|_, retry| *retry > tokio::time::Instant::now());
+        for lane in pending {
+            if self.tasks.len() >= MAX_LANES {
+                break;
+            }
+            if self.stopped.contains_key(&lane) || self.active.values().any(|l| l == &lane) {
+                continue;
+            }
+            let task = self.tasks.spawn(run(lane.clone()));
+            self.active.insert(task.id(), lane);
+        }
+    }
+
+    async fn join(&mut self) {
+        let Some(result) = self.tasks.join_next_with_id().await else {
+            return;
+        };
+        self.finished(result);
+    }
+
+    fn reap(&mut self) {
+        while let Some(result) = self.tasks.try_join_next_with_id() {
+            self.finished(result);
+        }
+    }
+
+    fn finished(&mut self, result: Result<(Id, ApiResult<()>), tokio::task::JoinError>) {
+        let (id, error) = match result {
+            Ok((id, result)) => (id, result.err().map(|e| e.to_string())),
+            Err(e) => (e.id(), Some(e.to_string())),
+        };
+        if let Some(lane) = self.active.remove(&id)
+            && let Some(error) = error
+        {
+            warn!(%lane, "a rule lane stopped; it waits for a retry: {error}");
+            self.stopped
+                .insert(lane, tokio::time::Instant::now() + TICK);
+        }
+    }
+}
+
+/// Yield ownership after every row, including its effects. The next row
+/// is dispatched only after the planner reloads the enabled rule set.
+async fn run_next(state: &Shared, lane: &str, live: &HashSet<(String, String)>) -> ApiResult<()> {
+    let lane = lane.to_owned();
+    let id: Option<String> = state
+        .db
+        .read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id FROM rule_runs WHERE state = 'pending' AND lane = ?1
+                 ORDER BY event_seq, ord, id LIMIT 1",
+            )?;
+            Ok(st.query_row([lane], |r| r.get(0)).optional()?)
+        })
+        .await?;
+    if let Some(id) = id {
+        // A recording error stops this lane before any later row.
+        run_one(state, &id, live).await?;
+    }
+    Ok(())
+}
 /// What one write of a run did.
 enum Step {
-    /// The run ended (or was not pending), with the effects of its last
-    /// action.
+    /// The run ended (or was not pending), with its final effects.
     Ended(Vec<Effect>),
     /// An action ran, with its effects; more may follow.
     Next(Vec<Effect>),
@@ -1339,9 +1535,12 @@ pub async fn fire_timers(
     fired: &mut HashMap<(String, String), String>,
     now: DateTime<Utc>,
 ) -> ApiResult<usize> {
+    let mut written = fire_hourly(db, projects, fired, now).await;
     let timers = timer_rules(projects);
-    fired.retain(|(p, r), _| timers.iter().any(|t| t.project == *p && t.rule == *r));
-    let mut written = 0;
+    fired.retain(|(p, r), _| {
+        (r == HOURLY_CACHE_KEY && projects.iter().any(|project| project.project == *p))
+            || timers.iter().any(|t| t.project == *p && t.rule == *r)
+    });
     for t in timers {
         match fire_timer(db, &t, fired, now).await {
             Ok(true) => written += 1,
@@ -1353,6 +1552,56 @@ pub async fn fire_timers(
         }
     }
     Ok(written)
+}
+
+/// One persisted hourly event per rules project, including across restarts.
+/// There is no catch-up burst after downtime.
+// NUL cannot occur in a rule name, so this cannot collide with a rule timer.
+const HOURLY_CACHE_KEY: &str = "\0hourly";
+
+async fn fire_hourly(
+    db: &Db,
+    projects: &[ProjectRules],
+    fired: &mut HashMap<(String, String), String>,
+    now: DateTime<Utc>,
+) -> usize {
+    let hour = now.format("%Y-%m-%dT%H").to_string();
+    let mut written = 0;
+    for p in projects {
+        if !p
+            .set
+            .rules
+            .iter()
+            .any(|r| r.enabled && r.on.iter().any(|k| k == "rule.hourly"))
+        {
+            continue;
+        }
+        let key = (p.project.clone(), HOURLY_CACHE_KEY.to_owned());
+        if fired.get(&key) == Some(&hour) {
+            continue;
+        }
+        let (project, hour) = (p.project.clone(), hour.clone());
+        let result = db.write(TIMER_ACTOR, move |tx| {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE project = ?1 AND kind = 'rule.hourly' AND actor = 'system' AND json_extract(payload, '$.hour') = ?2)",
+                rusqlite::params![project, hour], |r| r.get(0),
+            )?;
+            if exists { return Ok(0); }
+            tx.emit(events::EventDraft::new("rule.hourly", "hourly board check", json!({"hour": hour})).project(project))?;
+            Ok(1)
+        }).await;
+        match result {
+            Ok(count) => {
+                written += count;
+                fired.insert(key, now.format("%Y-%m-%dT%H").to_string());
+            }
+            Err(e) => warn!(
+                "the rule engine cannot check the hourly timer of project {}: {e}",
+                p.project
+            ),
+        }
+    }
+    written
 }
 
 /// [`fire_timers`] for one rule: `true` when it wrote the timer.
@@ -1422,21 +1671,21 @@ async fn fire_timer(
 
 // ------------------------------------------------------------ the engine
 
-/// One round: the pending rows of before, then a plan of the new events
-/// and their runs, until the log after the cursor is read. The timers of
-/// the batch rules are checked at most every [`TICK`].
+/// Plan new events while lane workers run the outbox. Neither a slow
+/// lane nor a full batch can hold the planner or another lane.
 pub async fn pass(state: &Shared, cache: &mut Cache) {
-    let mut timers_checked = false;
+    let mut lanes = Lanes::default();
+    let result = drive_pass(state, cache, &mut lanes).await;
+    lanes.finish_pass(result).await;
+}
+
+async fn drive_pass(state: &Shared, cache: &mut Cache, lanes: &mut Lanes) -> ApiResult<()> {
+    let mut rx = state.db.hub().subscribe();
     loop {
-        let projects = match load(&state.db, cache).await {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("the rule engine cannot read the rules: {e}");
-                return;
-            }
-        };
-        if !timers_checked && cache.timers_at.is_none_or(|at| at.elapsed() >= TICK) {
-            timers_checked = true;
+        // Drain wakes before reading the durable log, never after it.
+        while let Ok(_) | Err(TryRecvError::Lagged(_)) = rx.try_recv() {}
+        let projects = load(&state.db, cache).await?;
+        if cache.timers_at.is_none_or(|at| at.elapsed() >= TICK) {
             cache.timers_at = Some(std::time::Instant::now());
             if let Err(e) = state
                 .db
@@ -1450,31 +1699,49 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
             }
         }
         let live = Arc::new(live_rules(&projects));
-        if let Err(e) = drain_runs(state, &live).await {
-            warn!("the rule engine cannot run its outbox: {e}");
-            return;
+        // Discover runnable lanes in the planning transaction. A separate
+        // read would queue behind every worker again before we can plan
+        // the next events under load.
+        let (more, pending) = state
+            .db
+            .write("system", move |t| {
+                let (_, more) = plan_events(t, &projects, Utc::now())?;
+                Ok((more, pending_lanes(t)?))
+            })
+            .await?;
+        lanes.reap();
+        lanes.start(pending, |lane| {
+            let state = state.clone();
+            let live = live.clone();
+            async move { run_next(&state, &lane, &live).await }
+        });
+        if more {
+            continue;
         }
-        match plan_pass(&state.db, projects, Utc::now()).await {
-            Ok((_, true)) => {}
-            Ok((_, false)) => {
-                if let Err(e) = drain_runs(state, &live).await {
-                    warn!("the rule engine cannot run its outbox: {e}");
+        if lanes.tasks.is_empty() && lanes.stopped.is_empty() {
+            return Ok(());
+        }
+        let wake = lanes
+            .stopped
+            .values()
+            .copied()
+            .min()
+            .unwrap_or_else(|| tokio::time::Instant::now() + TICK);
+        tokio::select! {
+            () = lanes.join(), if !lanes.tasks.is_empty() => {}
+            r = rx.recv() => {
+                if matches!(r, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                    rx = state.db.hub().subscribe();
                 }
-                return;
             }
-            Err(e) => {
-                warn!("the rule engine cannot read the event log: {e}");
-                return;
-            }
+            () = tokio::time::sleep_until(wake) => {}
         }
+        // Coalesce both completion and event wakes before another full
+        // rule load and lane scan. The next iteration still refreshes the
+        // live set before dispatching any new row. This is a time bound,
+        // not a barrier waiting for all workers to finish.
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-}
-
-/// Run the pending rows until none wait, or until a lane stops on an
-/// error (the next pass tries again, after the next wake-up).
-async fn drain_runs(state: &Shared, live: &Arc<HashSet<(String, String)>>) -> ApiResult<()> {
-    while run_pending(state, live.clone()).await? {}
-    Ok(())
 }
 
 /// The engine task: [`startup`], then a [`pass`] at each wake-up (a new
@@ -1487,6 +1754,7 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
         }
         let mut cache = Cache::default();
         loop {
+            while let Ok(_) | Err(TryRecvError::Lagged(_)) = rx.try_recv() {}
             pass(&state, &mut cache).await;
             tokio::select! {
                 () = tokio::time::sleep(TICK) => {}
@@ -1496,7 +1764,6 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                     }
                 }
             }
-            while let Ok(_) | Err(TryRecvError::Lagged(_)) = rx.try_recv() {}
         }
     })
 }

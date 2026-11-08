@@ -9,7 +9,7 @@
 //! verb (TER-169).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 
@@ -141,6 +141,88 @@ const TWO_STEPS: &str = r#"rule "note" {
   card_comment { text = "second on {{card.id}} by {{rule.name}}" }
 }
 "#;
+
+/// A recording error must not strand rows beyond the old global batch
+/// limit, or stop planning newly arriving events in another project.
+#[tokio::test]
+async fn a_stopped_lane_does_not_block_new_plans_or_other_lanes() {
+    let td = TestDaemon::start().await;
+    td.project("slow").await;
+    td.project("fast").await;
+    let slow = new_card(&td, "slow", json!({"title": "blocked lane"})).await;
+    let fast = new_card(&td, "fast", json!({"title": "independent lane"})).await;
+    let text: String = (0..25).map(|n| format!(
+        "rule \"note{n}\" {{\n on = [\"test.ping\"]\n card_comment {{ text = \"{n}: {{{{event.data.n}}}}\" }}\n}}\n"
+    )).collect();
+    put_rules(&td, "slow", &text).await;
+    put_rules(&td, "fast", TWO_STEPS).await;
+    settle(&td).await;
+    state(&td)
+        .db
+        .write("system", |t| {
+            t.execute_batch(
+                "CREATE TRIGGER block_slow_run BEFORE UPDATE ON rule_runs
+             WHEN OLD.project = 'slow'
+             BEGIN SELECT RAISE(FAIL, 'test recording failure'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for n in 0..10 {
+        ping(&td, "slow", &slow, n).await;
+    }
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let count: i64 = state(&td)
+                .db
+                .read(|c| {
+                    Ok(c.query_row(
+                "SELECT count(*) FROM rule_runs WHERE project = 'slow' AND state = 'pending'",
+                [], |r| r.get(0),
+            )?)
+                })
+                .await
+                .unwrap();
+            if count == 250 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // This event arrives after more than the old batch limit is stuck.
+        ping(&td, "fast", &fast, 42).await;
+        while comments(&td, &fast).await.len() != 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a failed lane blocked another project's plan or run");
+    assert!(
+        comments(&td, &slow).await.is_empty(),
+        "failed writes rolled back"
+    );
+    state(&td)
+        .db
+        .write("system", |t| {
+            t.execute_batch("DROP TRIGGER block_slow_run")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    settle(&td).await;
+    let expected: Vec<String> = (0..10)
+        .flat_map(|event| (0..25).map(move |rule| format!("{rule}: `{event}`")))
+        .collect();
+    let actual: Vec<String> = comments(&td, &slow)
+        .await
+        .into_iter()
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "the stopped lane resumes in event and rule order"
+    );
+}
 
 #[tokio::test]
 async fn a_restart_between_plan_and_run_loses_no_action() {
@@ -918,6 +1000,45 @@ const OFF: &str = r#"rule "note" {
   card_comment { text = "note {{event.data.n}}" }
 }
 "#;
+
+#[tokio::test]
+async fn a_running_lane_reloads_live_rules_between_rows() {
+    for change in ["disable", "remove"] {
+        let td = TestDaemon::start().await;
+        td.project("off").await;
+        put_rules(&td, "off", ON_OFF).await;
+        let card = new_card(&td, "off", json!({"title": change})).await;
+        settle(&td).await;
+        let id = card.clone();
+        state(&td).db.write("system", move |t| {
+            // Change the rule during the first row, after the lane has
+            // started. All ten rows are already planned in one batch.
+            let update = if change == "disable" {
+                format!("UPDATE project_rules SET text = '{}', hash = 'disabled' WHERE project = 'off';", OFF)
+            } else {
+                "DELETE FROM project_rules WHERE project = 'off';".to_owned()
+            };
+            t.execute_batch(&format!(
+                "CREATE TRIGGER change_rule AFTER INSERT ON card_comments
+                 BEGIN {update} END;"
+            ))?;
+            for n in 0..10 {
+                t.emit(EventDraft::new("test.ping", "queued", json!({"n": n}))
+                    .project("off").card(id.clone()))?;
+            }
+            Ok(())
+        }).await.unwrap();
+        settle(&td).await;
+        assert_eq!(
+            comments(&td, &card).await.len(),
+            1,
+            "{change}: later rows must not act"
+        );
+        let rows = runs(&td, "off").await;
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows.iter().filter(|r| r["state"] == "skipped").count(), 9);
+    }
+}
 
 /// A planned run of a rule that is disabled (or gone) before the run
 /// starts does not act.

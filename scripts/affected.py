@@ -34,7 +34,9 @@ The rules, first match per path:
    - All targets when the module is shared by every test (`lib.rs`,
      `main.rs`, `db`, `error`, `policy`, `api/mod.rs`, `store/mod.rs`, and
      each module that `tests/common` names), or when no target matches.
-   - `tests/<t>.rs`: only that target. `tests/common/`, `tests/fixtures/`,
+   - Explicit #[path] modules of a consolidated target are indexed by
+     filename and daemon references. Edits select the containing target.
+   - `tests/<t>.rs`: only its containing target. `tests/common/`, `tests/fixtures/`,
      or another file of the crate: all targets.
    - Guard (TER-179): any changed `crates/<crate>/src/**/*.rs`, in any crate,
      also runs terrariumd's `no_token_endpoint` target. That test scans the
@@ -232,13 +234,36 @@ def daemon_refs(text: str) -> set[str]:
     return out
 
 
+def test_sources(path: str, read) -> dict[str, str]:
+    """A test entry point and its explicit #[path] modules, including groups.
+
+    The consolidated daemon target keeps its modules beside the standalone
+    targets. Follow those declarations so both source references and edits to
+    a module select the containing binary, not a nonexistent old target.
+    """
+    sources = {}
+    pending = [path]
+    while pending:
+        p = pending.pop()
+        if p in sources:
+            continue
+        try:
+            text = read(p)
+        except OSError:
+            text = ""
+        sources[p] = text
+        for child in re.findall(r'#\[path\s*=\s*"([^"]+)"\]\s*mod\s+\w+\s*;', text):
+            pending.append(posixpath.normpath(posixpath.join(posixpath.dirname(p), child)))
+    return sources
+
+
 def daemon_targets_for(module: str, tests: dict[str, str], refs: dict[str, set[str]],
                        shared: set[str]) -> set[str] | None:
     """The terrariumd test targets of a module, or None for all."""
     if module in shared:
         return None
     hit = {t for t in tests if t in (module, module + "s")}
-    hit |= {t for t, r in refs.items() if module in r}
+    hit |= {t for t, r in refs.items() if module in r or module + "s" in r}
     return hit or None
 
 
@@ -262,6 +287,7 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
     daemon_seen = False
     guard = False
     refs: dict[str, set[str]] | None = None
+    sources: dict[str, dict[str, str]] = {}
     shared: set[str] = set()
     dc = crates.get(DAEMON)
     if embedded is None:
@@ -280,10 +306,10 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
         if refs is None:
             refs = {}
             for t, p in dc.tests.items():
-                try:
-                    refs[t] = daemon_refs(read(p))
-                except OSError:
-                    refs[t] = set()
+                sources[t] = test_sources(p, read)
+                refs[t] = daemon_refs("\n".join(sources[t].values()))
+                # Match modules by filename too, just as standalone targets.
+                refs[t] |= {Path(s).stem for s in sources[t]}
             names = set()
             files = common if common is not None else [
                 p.as_posix() for p in sorted(Path(dc.dir, "tests", "common").glob("**/*.rs"))]
@@ -343,10 +369,13 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
                 daemon_all = True
             else:
                 daemon = (daemon or set()) | got
-        elif rel.startswith("tests/") and rel.count("/") == 1 and rel.endswith(".rs"):
-            t = rel[len("tests/"):-3]
-            if t in dc.tests:
-                daemon = (daemon or set()) | {t}
+        elif rel.startswith(("tests/common/", "tests/fixtures/")):
+            daemon_all = True
+        elif rel.startswith("tests/") and rel.endswith(".rs"):
+            daemon_index()
+            targets = {t for t, files in sources.items() if path in files}
+            if targets:
+                daemon = (daemon or set()) | targets
             else:
                 daemon_all = True
         else:

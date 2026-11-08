@@ -1385,6 +1385,9 @@ pub enum CardCmd {
     /// Comment on a card: `card comment <id> <text>`, `-b <text>`, or `-m <text>`
     Comment {
         id: String,
+        /// Reply to this comment ID. Replies to human comments reach the Inbox.
+        #[arg(long)]
+        reply_to: Option<String>,
         /// The text, or `-` for stdin
         #[arg(required_unless_present_any = ["message", "body"], conflicts_with_all = ["message", "body"])]
         text: Option<String>,
@@ -4049,10 +4052,10 @@ pub enum AdminTargetCmd {
     Edit(Box<AdminTargetEditArgs>),
     /// Remove a target
     Rm { name: String },
-    /// Run a lifecycle verb: up, down, snapshot, restore, or status
+    /// Run a lifecycle verb: up, down, snapshot, restore, status, or recreate
     Verb {
         name: String,
-        /// `up`, `down`, `snapshot`, `restore`, or `status`
+        /// `up`, `down`, `snapshot`, `restore`, `status`, or `recreate`
         verb: String,
         /// The snapshot name for `snapshot` and `restore`
         #[arg(long)]
