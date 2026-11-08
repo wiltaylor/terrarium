@@ -184,6 +184,7 @@ fn save(t: &mut Tx<'_>, r: &Reservation, change: &str) -> ApiResult<()> {
         event = event.agent(id.clone(), name);
     }
     t.emit(event)?;
+    super::waits::check_reservation_waits(t)?;
     if !matches!(change, "starting" | "ending") {
         notify(t, r, change)?;
     }

@@ -132,6 +132,8 @@ async fn list(
 #[serde(deny_unknown_fields)]
 struct WaitBody {
     kind: WaitKind,
+    #[serde(default)]
+    reservation: Option<String>,
     /// `agent`: the agent to wait on (ULID, `project/name`, or a name).
     #[serde(default)]
     agent: Option<String>,
@@ -191,6 +193,21 @@ async fn create(
     let mut poll_session = None;
     let mut read_session = None;
     let mut new = match b.kind {
+        WaitKind::Reservation => {
+            let id = need(&b.reservation, "reservation", "reservation")?.to_owned();
+            let r = state.db.read(move |c| crate::store::reservations::get(c, &id)).await?;
+            policy::read_project(&actor, &r.project)?;
+            NewWait {
+                agent: waiter_id.clone(),
+                kind: WaitKind::Reservation,
+                spec: json!({"reservation":r.id}),
+                summary: format!("reservation {} on {}", r.id, r.host),
+                target_agent: None,
+                reason,
+                timeout_at: None,
+                due_at: None,
+            }
+        }
         WaitKind::Question => {
             // The check that the question is open runs in the write.
             let qid = need(&b.question, "question", "question")?.to_owned();

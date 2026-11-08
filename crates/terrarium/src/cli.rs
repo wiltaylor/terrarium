@@ -2429,6 +2429,12 @@ pub struct WaitOpts {
 
 #[derive(Debug, Subcommand)]
 pub enum WaitCmd {
+    /// Mail when a queued reservation starts, or ends without starting
+    Reservation {
+        id: String,
+        #[command(flatten)]
+        opts: WaitOpts,
+    },
     /// Wait until another agent is done (idle, no open waits, no mail
     /// waiting for it), or until it is idle, blocked, or changes status.
     /// Also ends when it goes to error or stopped, or is deleted

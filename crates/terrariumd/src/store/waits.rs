@@ -44,6 +44,7 @@ pub const RESULT_TAIL: usize = 4000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitKind {
+    Reservation,
     Agent,
     Process,
     Time,
@@ -57,6 +58,7 @@ pub enum WaitKind {
 impl WaitKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Reservation => "reservation",
             Self::Agent => "agent",
             Self::Process => "process",
             Self::Time => "time",
@@ -726,6 +728,7 @@ pub fn sweep_agent_waits(t: &mut Tx<'_>, older_than: &str) -> ApiResult<()> {
 /// End the `time` waits that are due and the waits past their timeout.
 /// Returns the `process` waits that timed out: the caller kills their runs.
 pub fn expire(t: &mut Tx<'_>, now_at: &str) -> ApiResult<Vec<Wait>> {
+    check_reservation_waits(t)?;
     let due = query(
         t,
         "SELECT * FROM waits WHERE state = 'open' AND kind = 'time' AND due_at <= ?1",
@@ -756,6 +759,23 @@ pub fn expire(t: &mut Tx<'_>, now_at: &str) -> ApiResult<Vec<Wait>> {
         }
     }
     Ok(runs)
+}
+
+/// Reconcile durable reservation waits, including grants made before the
+/// wait was registered and changes made before a daemon restart.
+pub fn check_reservation_waits(t: &mut Tx<'_>) -> ApiResult<()> {
+    use super::reservations::{self, State};
+    for w in all_open(t, WaitKind::Reservation)? {
+        let id = w.spec["reservation"].as_str().unwrap_or_default();
+        let r = reservations::get(t, id)?;
+        let result = match r.state {
+            State::Queued | State::Starting => continue,
+            State::Active => WaitState::Resolved,
+            _ => WaitState::Failed,
+        };
+        finish(t, &w.id, result, json!({"reservation":r.id,"outcome":r.state,"until":r.until}), true, 0)?;
+    }
+    Ok(())
 }
 
 /// Check the open `card` waits: a card in its column resolves the wait, a

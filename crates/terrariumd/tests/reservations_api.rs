@@ -60,7 +60,12 @@ async fn queued_grant_cancels_and_holder_receives_warning_mail() {
     let queued = td.post("/api/hosts/h/reservations", json!({"target":"p-box2","amounts":{"cpu_millis":1000},"until":"30m","queue":true,"queue_timeout":"10m"})).await;
     assert_eq!(queued.ok()["state"], "queued");
     let qid = queued.body["id"].as_str().unwrap();
+    td.post_as("other/worker", "/api/agents/other/worker/waits", json!({"kind":"reservation","reservation":qid})).await.err(403, "forbidden");
+    let wait = td.post_as("p/worker", "/api/agents/p/worker/waits", json!({"kind":"reservation","reservation":qid})).await;
+    let wid = wait.ok()["id"].as_str().unwrap();
+    assert_eq!(wait.body["state"], "open");
     td.post(&format!("/api/reservations/{qid}/cancel"), json!({})).await.ok();
+    assert_eq!(td.get(&format!("/api/waits/{wid}")).await.ok()["state"], "failed");
     let state = td.daemon.as_ref().unwrap().state.clone();
     terrariumd::reservations::sweep(&state).await.unwrap();
     let (mail, pointers) = state.db.read(move |c| {
@@ -70,5 +75,25 @@ async fn queued_grant_cancels_and_holder_receives_warning_mail() {
     }).await.unwrap();
     assert_eq!(mail, 1);
     assert!(pointers >= 2);
+    client.abort(); server.abort();
+}
+
+#[tokio::test]
+async fn reservation_wait_resolves_on_start_and_reconciles_already_active() {
+    let (td, server, client) = setup().await;
+    let first = td.post("/api/hosts/h/reservations", json!({"target":"p-box","amounts":{"cpu_millis":2000},"until":"30m"})).await;
+    let first_id = first.ok()["id"].as_str().unwrap();
+    let queued = td.post("/api/hosts/h/reservations", json!({"target":"p-box2","amounts":{"cpu_millis":1000},"until":"30m","queue":true})).await;
+    let id = queued.ok()["id"].as_str().unwrap();
+    let wait = td.post_as("p/worker", "/api/agents/p/worker/waits", json!({"kind":"reservation","reservation":id})).await;
+    let wid = wait.ok()["id"].as_str().unwrap();
+    td.delete(&format!("/api/reservations/{first_id}")).await.ok();
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    terrariumd::reservations::sweep(&state).await.unwrap();
+    assert_eq!(td.get(&format!("/api/waits/{wid}")).await.ok()["state"], "resolved");
+    let late = td.post_as("p/worker", "/api/agents/p/worker/waits", json!({"kind":"reservation","reservation":id})).await;
+    let late_id = late.ok()["id"].as_str().unwrap();
+    state.db.write("system", terrariumd::store::waits::check_reservation_waits).await.unwrap();
+    assert_eq!(td.get(&format!("/api/waits/{late_id}")).await.ok()["state"], "resolved");
     client.abort(); server.abort();
 }

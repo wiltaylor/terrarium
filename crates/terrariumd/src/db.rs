@@ -2505,6 +2505,13 @@ const MIGRATIONS: &[&str] = &[
         data TEXT NOT NULL
     );
     CREATE INDEX reservations_host_state ON reservations(host, state, seq);
+    DROP INDEX waits_open;
+    ALTER TABLE waits ADD COLUMN kind_resources TEXT NOT NULL DEFAULT 'time'
+        CHECK (kind_resources IN ('agent', 'process', 'time', 'card', 'question', 'reservation'));
+    UPDATE waits SET kind_resources = kind;
+    ALTER TABLE waits DROP COLUMN kind;
+    ALTER TABLE waits RENAME COLUMN kind_resources TO kind;
+    CREATE INDEX waits_open ON waits(state, kind);
     "#,
 ];
 
