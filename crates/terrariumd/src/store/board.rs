@@ -696,7 +696,8 @@ fn render(
     } else {
         (worker_eta, worker_start, row.eta_set_by, eta_set_by_name)
     };
-    let eta_history = estimates.history(conn, &row.project, &json_col::<Vec<String>>(&row.labels))?;
+    let eta_history =
+        estimates.history(conn, &row.project, &json_col::<Vec<String>>(&row.labels))?;
     Ok(Card {
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,
