@@ -834,18 +834,25 @@ async fn an_ended_agent_marks_only_its_open_thread_once() {
                 .count(),
             1
         );
-        let late_post = lab.td.post(
-            &format!("/api/threads/{tid}/messages"),
-            json!({"text": "Keep this operator follow-up."}),
-        ).await;
+        let late_post = lab
+            .td
+            .post(
+                &format!("/api/threads/{tid}/messages"),
+                json!({"text": "Keep this operator follow-up."}),
+            )
+            .await;
         assert_eq!(late_post.status, 201, "{}", late_post.body);
         let saved = lab.thread(&tid).await;
         assert_eq!(saved["status"], "closed");
         assert_eq!(saved["close_reason"], "agent_ended");
         assert_eq!(saved["agent_end_outcome"], outcome);
-        assert!(saved["messages"].as_array().unwrap().iter().any(|m|
-            m["author"] == "operator" && m["text"] == "Keep this operator follow-up."
-        ));
+        assert!(
+            saved["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["author"] == "operator" && m["text"] == "Keep this operator follow-up.")
+        );
         assert!(saved["messages"].to_string().contains("Nobody will answer"));
         let operator = lab.td.get("/api/mail?to=operator&from=system").await;
         assert!(

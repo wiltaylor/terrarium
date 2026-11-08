@@ -1135,7 +1135,14 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     if author == "operator" && th.agent_end_outcome.is_some() {
         let summary = "Your message was saved, but the thread agent has ended. Nobody will answer in this thread.";
         insert_message(t, &th.id, "system", "message", summary, &at)?;
-        return close(t, &th.id, "system", CloseReason::AgentEnded, Some(summary), vec![]);
+        return close(
+            t,
+            &th.id,
+            "system",
+            CloseReason::AgentEnded,
+            Some(summary),
+            vec![],
+        );
     }
     let status = if author == "operator" {
         ThreadStatus::WaitingAgent
