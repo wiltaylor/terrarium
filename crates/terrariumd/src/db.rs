@@ -3345,7 +3345,10 @@ mod tests {
         assert_eq!(migrate_named(&mut conn, &[later]).unwrap(), 1);
         assert_eq!(migrate_named(&mut conn, &[earlier, later]).unwrap(), 1);
         assert_eq!(migrate_named(&mut conn, &[earlier, later]).unwrap(), 0);
-        assert_eq!(migrate(&mut conn).unwrap(), migration_count() - MIGRATIONS.len());
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            migration_count() - MIGRATIONS.len()
+        );
         assert_eq!(migrate(&mut conn).unwrap(), 0);
         let version: usize = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))

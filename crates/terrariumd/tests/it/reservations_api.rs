@@ -482,7 +482,8 @@ async fn fixed_docker_limits_update_live_and_failed_ack_keeps_defaults() {
         .write("system", |tx| {
             let row = terrariumd::store::targets::get(tx, "p-box")?;
             let mut runtime = row.runtime;
-            runtime.docker_settings = Some(terrariumd::store::targets::DockerSettings::of(&row.def));
+            runtime.docker_settings =
+                Some(terrariumd::store::targets::DockerSettings::of(&row.def));
             terrariumd::store::targets::set_runtime(tx, "p-box", &runtime)?;
             terrariumd::store::targets::set_state(tx, "p-box", "running", None)
         })
@@ -505,7 +506,9 @@ async fn fixed_docker_limits_update_live_and_failed_ack_keeps_defaults() {
     assert!(!acknowledged.runtime.recreate_required);
     assert_eq!(
         acknowledged.runtime.docker_settings,
-        Some(terrariumd::store::targets::DockerSettings::of(&acknowledged.def))
+        Some(terrariumd::store::targets::DockerSettings::of(
+            &acknowledged.def
+        ))
     );
     std::fs::write(td.dir.path().join("docker.fail"), "fail").unwrap();
     let refused = td
