@@ -136,8 +136,7 @@ async fn daily_spawn_cap_is_not_bypassed_by_daemon() {
     let second = card(&td, "small").await;
     enabled(&td).await;
     assert!(dispatch(&state(&td), "p").await.unwrap());
-    let error = dispatch(&state(&td), "p").await.unwrap_err();
-    assert!(error.message.contains("max_per_day"), "{}", error.message);
+    assert!(!dispatch(&state(&td), "p").await.unwrap());
     assert!(get(&td, &second).await["agent"].is_null());
     assert_eq!(get(&td, &second).await["column"], "ready");
 }
@@ -149,12 +148,7 @@ async fn concurrent_spawn_cap_leaves_card_ready() {
     let second = card(&td, "small").await;
     enabled(&td).await;
     assert!(dispatch(&state(&td), "p").await.unwrap());
-    let error = dispatch(&state(&td), "p").await.unwrap_err();
-    assert!(
-        error.message.contains("max_concurrent"),
-        "{}",
-        error.message
-    );
+    assert!(!dispatch(&state(&td), "p").await.unwrap());
     assert!(get(&td, &second).await["agent"].is_null());
 }
 
@@ -165,7 +159,7 @@ async fn missing_owner_leaves_card_unclaimed() {
     td.patch("/api/projects/p", json!({"card_dispatcher":"missing"}))
         .await
         .ok();
-    assert!(dispatch(&state(&td), "p").await.is_err());
+    assert!(!dispatch(&state(&td), "p").await.unwrap());
     assert!(get(&td, &id).await["assignee"].is_null());
     assert!(get(&td, &id).await["agent"].is_null());
 }
@@ -463,4 +457,149 @@ async fn fleet_setting_can_enable_and_disable_dispatch() {
             expected
         );
     }
+}
+
+async fn deferred_counts(td: &TestDaemon) -> (i64, i64) {
+    state(td)
+        .db
+        .read(|c| {
+            Ok((
+                c.query_row("SELECT count(*) FROM card_dispatch_retries", [], |r| {
+                    r.get(0)
+                })?,
+                c.query_row(
+                    "SELECT count(*) FROM messages WHERE subject = 'p: dispatcher deferred'",
+                    [],
+                    |r| r.get(0),
+                )?,
+            ))
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn daily_cap_defers_project_without_card_failures_until_window_resets() {
+    let td = setup(10, 10, 1).await;
+    card(&td, "small").await;
+    let second = card(&td, "small").await;
+    let third = card(&td, "impl").await;
+    enabled(&td).await;
+    for _ in 0..3 {
+        terrariumd::card_dispatcher::pass(&state(&td)).await;
+    }
+    assert_eq!(deferred_counts(&td).await, (0, 1));
+    for id in [&second, &third] {
+        let c = get(&td, id).await;
+        assert_eq!(c["column"], "ready");
+        assert_eq!(c["comments"], json!([]));
+    }
+    // Advance the rolling daily window without waiting or bypassing its check.
+    state(&td)
+        .db
+        .write("operator", |t| {
+            t.execute(
+                "UPDATE spawns SET spawned_at = '2000-01-01T00:00:00.000Z'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    assert_eq!(get(&td, &second).await["column"], "coding");
+    assert!(!dispatch(&state(&td), "p").await.unwrap());
+    assert_eq!(deferred_counts(&td).await, (0, 2)); // A new cap event.
+}
+
+#[tokio::test]
+async fn missing_spawn_right_is_one_project_notice_and_recovers_after_repair() {
+    let td = setup(3, 3, 10).await;
+    let lead = lead_id(&td).await;
+    td.patch(&format!("/api/agents/{lead}"), json!({"policy":{}}))
+        .await
+        .ok();
+    let id = card(&td, "small").await;
+    card(&td, "impl").await;
+    enabled(&td).await;
+    for _ in 0..3 {
+        terrariumd::card_dispatcher::pass(&state(&td)).await;
+    }
+    assert_eq!(deferred_counts(&td).await, (0, 1));
+    assert_eq!(get(&td, &id).await["comments"], json!([]));
+    td.patch(
+        &format!("/api/agents/{lead}"),
+        json!({"policy":{"spawn":{
+            "templates":["project:*"],"bound":true,"max_concurrent":3
+        }}}),
+    )
+    .await
+    .ok();
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+}
+
+#[tokio::test]
+async fn misconfigured_owner_produces_one_project_notice_not_card_failures() {
+    let td = setup(3, 3, 10).await;
+    let id = card(&td, "small").await;
+    td.patch("/api/projects/p", json!({"card_dispatcher":"missing"}))
+        .await
+        .ok();
+    for _ in 0..3 {
+        terrariumd::card_dispatcher::pass(&state(&td)).await;
+    }
+    assert_eq!(deferred_counts(&td).await, (0, 1));
+    assert_eq!(get(&td, &id).await["comments"], json!([]));
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+}
+
+#[tokio::test]
+async fn retry_state_clears_on_moves_archives_and_direct_updates() {
+    let td = setup(3, 3, 10).await;
+    let mut cards = Vec::new();
+    for _ in 0..3 {
+        let id = card(&td, "small").await;
+        td.agent("p", &id.to_ascii_lowercase(), json!({})).await;
+        cards.push(id);
+    }
+    enabled(&td).await;
+    terrariumd::card_dispatcher::pass(&state(&td)).await;
+    assert_eq!(deferred_counts(&td).await.0, 3);
+    td.post(
+        &format!("/api/cards/{}/move", cards[0]),
+        json!({"column":"backlog"}),
+    )
+    .await
+    .ok();
+    td.delete(&format!("/api/cards/{}", cards[1])).await.ok();
+    let id = cards[2].clone();
+    state(&td).db.write("operator", move |t| {
+        t.execute("UPDATE cards SET column_id = (SELECT id FROM board_columns WHERE project = 'p' AND name = 'backlog') WHERE id = ?1", [&id])?;
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(deferred_counts(&td).await.0, 0);
+}
+
+#[tokio::test]
+async fn done_dependency_uses_role_with_legacy_name_fallback() {
+    let td = setup(3, 3, 10).await;
+    let dep = card(&td, "unknown").await;
+    let id = card(&td, "small").await;
+    td.patch(&format!("/api/cards/{id}"), json!({"depends_on":[dep]}))
+        .await
+        .ok();
+    td.post(&format!("/api/cards/{dep}/move"), json!({"column":"done"}))
+        .await
+        .ok();
+    assert_eq!(get(&td, &id).await["blocked_by"], json!([]));
+    // The current column-edit API still fixes done's name. Exercise the
+    // role-based read/claim path with the schema used by custom column roles.
+    state(&td).db.write("operator", |t| {
+        t.execute("UPDATE board_columns SET name = 'shipped', role = 'done' WHERE project = 'p' AND name = 'done'", [])?;
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(get(&td, &id).await["blocked_by"], json!([]));
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
 }

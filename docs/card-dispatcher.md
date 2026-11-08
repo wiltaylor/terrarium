@@ -27,11 +27,17 @@ and template secret grants use the existing spawn inheritance checks.
 The agent is named after the lower-case card ID and bound to that card. The
 spawn transaction rechecks eligibility, WIP, and owner configuration before
 creating the agent and claiming the card. A failed transaction leaves the
-card ready. Spawn failures get a persistent per-card cooldown: 1 minute,
+card ready. Card-specific spawn failures get a persistent per-card cooldown: 1 minute,
 doubling to at most 30 minutes. One card comment and one mail to the owner
 report the failure, not a new notice on every retry. Other eligible cards
 proceed while a failed card cools down. A successful claim clears its retry
-state. Missing owners defer the project until its configuration is fixed. The existing bound
+state. Leaving ready or archiving also clears a card's retry state.
+
+Spawn caps and missing permissions defer the whole project without card
+comments or card cooldowns. One lead mail reports each deferral reason, not
+one per ready card or timer tick. A misconfigured owner likewise gets one
+project-inbox notice. The timer checks the project once per pass and resumes
+when the budget resets or the configuration is repaired. The existing bound
 agent lifecycle parks agents for review and tears them down after merge.
 
 This switch does not automate reviews, verdicts, or merges. Workers still

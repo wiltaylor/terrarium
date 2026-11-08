@@ -7,9 +7,9 @@ use terrarium_core::Role;
 
 use crate::actor::{Actor, AgentActor};
 use crate::api::Shared;
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, Code};
 use crate::spawn::{Internal, SpawnBody};
-use crate::store::{agents, board, mail, projects};
+use crate::store::{agents, board, mail, projects, spawns};
 
 fn actor(agent: terrarium_core::Agent) -> Actor {
     Actor::Agent(AgentActor {
@@ -95,16 +95,26 @@ fn candidate(c: &Connection, project: &str) -> ApiResult<Option<(String, String)
 /// Public for integration tests with the fake supervisor.
 pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
     let p = project.to_owned();
-    let selected = state
+    let who = match state.db.read(move |c| owner(c, &p)).await {
+        Ok(Some(who)) => who,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            defer_project(state, project, None, &error.message).await?;
+            return Ok(false);
+        }
+    };
+    let owner_actor = who.clone();
+    if let Some(reason) = state
         .db
-        .read(move |c| {
-            let Some(owner) = owner(c, &p)? else {
-                return Ok(None);
-            };
-            Ok(candidate(c, &p)?.map(|(id, template)| (owner, id, template)))
-        })
-        .await?;
-    let Some((who, id, template)) = selected else {
+        .read(move |c| project_limit(c, &owner_actor))
+        .await?
+    {
+        defer_project(state, project, Some(&who), &reason).await?;
+        return Ok(false);
+    }
+    let p = project.to_owned();
+    let selected = state.db.read(move |c| candidate(c, &p)).await?;
+    let Some((id, template)) = selected else {
         return Ok(false);
     };
     let (p, expected, expected_owner, expected_template) = (
@@ -164,10 +174,97 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
     )
     .await;
     if let Err(error) = result {
+        if error.code == Code::Forbidden
+            || error
+                .details
+                .as_ref()
+                .is_some_and(|d| d["spawn_cap"].is_string())
+        {
+            let reason = error
+                .details
+                .as_ref()
+                .and_then(|d| d["spawn_cap"].as_str())
+                .map(|cap| format!("Dispatcher deferred: spawn.{cap} reached"))
+                .unwrap_or_else(|| error.message.clone());
+            defer_project(state, project, Some(&who), &reason).await?;
+            return Ok(false);
+        }
         record_failure(state, id, who, error.message.clone()).await?;
         return Err(error);
     }
+    let p = project.to_owned();
+    state
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "DELETE FROM card_dispatch_deferrals WHERE project = ?1",
+                [&p],
+            )?;
+            Ok(())
+        })
+        .await?;
     Ok(true)
+}
+
+/// Check owner-wide limits before choosing a card. The spawn transaction
+/// repeats the authoritative checks to cover concurrent manual spawns.
+fn project_limit(c: &Connection, who: &Actor) -> ApiResult<Option<String>> {
+    let Some(agent) = who.agent() else {
+        return Ok(None);
+    };
+    let Some(policy) = &agent.policy.spawn else {
+        return Ok(Some("Dispatcher owner has no spawn rights".into()));
+    };
+    if !policy.bound || policy.templates.is_empty() {
+        return Ok(Some(
+            "Dispatcher owner needs spawn.bound and allowed templates".into(),
+        ));
+    }
+    if spawns::running_count(c, &agent.id)? >= policy.max_concurrent as usize {
+        return Ok(Some(
+            "Dispatcher deferred: spawn.max_concurrent reached".into(),
+        ));
+    }
+    if let Some(limit) = policy.max_per_day {
+        let since = (chrono::Utc::now() - chrono::Duration::hours(24))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        if spawns::count_since(c, &agent.id, &since)? >= limit as usize {
+            return Ok(Some(
+                "Dispatcher deferred: spawn.max_per_day reached".into(),
+            ));
+        }
+    }
+    Ok(None)
+}
+
+/// Deduplicate project-wide notices, without penalizing any ready card.
+/// Limits and configuration are rechecked once per timer pass, so a budget
+/// reset or an owner repair resumes dispatch without a card cooldown.
+async fn defer_project(
+    state: &Shared,
+    project: &str,
+    who: Option<&Actor>,
+    reason: &str,
+) -> ApiResult<()> {
+    let (project, reason) = (project.to_owned(), reason.to_owned());
+    let to = who
+        .map(mail::Address::from_actor)
+        .unwrap_or_else(|| mail::Address::Project(project.clone()));
+    state.db.write("system", move |t| {
+        let previous: Option<String> = t.query_row(
+            "SELECT reason FROM card_dispatch_deferrals WHERE project = ?1", [&project], |r| r.get(0),
+        ).optional()?;
+        if previous.as_deref() == Some(&reason) { return Ok(()) }
+        t.execute("INSERT INTO card_dispatch_deferrals (project, reason) VALUES (?1, ?2)
+            ON CONFLICT(project) DO UPDATE SET reason = excluded.reason", params![project, reason])?;
+        mail::send(t, mail::Outgoing {
+            from: &mail::Address::System, to: &to,
+            subject: &format!("{project}: dispatcher deferred"),
+            body: &format!("{reason}. No cards were marked failed. Dispatch resumes when the limit or configuration permits it."),
+            thread: None, in_reply_to: None,
+        })?;
+        Ok(())
+    }).await
 }
 
 /// Persistent cooldown and a single visible notice for a failing card.
