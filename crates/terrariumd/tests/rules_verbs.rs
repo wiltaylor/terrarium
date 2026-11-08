@@ -425,6 +425,7 @@ async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
     let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let g = card(&td, &a).await["group"].clone();
+    assert!(!g.is_null(), "{:?}", runs_of(&td, "p", "merge-queued").await);
     let gid = g["id"].as_str().unwrap().to_owned();
     assert_eq!(g["members"], json!([a, b]));
     assert_eq!(g["column"], "merge_queue");
