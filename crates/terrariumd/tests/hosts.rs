@@ -3845,7 +3845,7 @@ async fn docker_limits_go_on_the_container() {
         ),
         "{run}"
     );
-    // A stopped container keeps the limits it was made with.
+    // This older host has fixed limits but no live-update capability.
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
     let r = lab
         .td
@@ -3856,7 +3856,7 @@ async fn docker_limits_go_on_the_container() {
         r.body["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("stopped container")
+            .contains("missing live resource update support")
     );
     // The same limits are no change.
     let r = lab
