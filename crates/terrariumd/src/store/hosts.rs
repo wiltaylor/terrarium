@@ -219,6 +219,16 @@ pub fn authenticate(conn: &Connection, hash: &str) -> ApiResult<Auth> {
 /// token comes into being at the first connect.
 pub fn create(t: &mut Tx<'_>, name: &str, enrol: bool) -> ApiResult<(Host, Issued)> {
     check_name("host", name)?;
+    let alias_exists: bool = t.query_row(
+        "SELECT EXISTS(SELECT 1 FROM job_host_aliases WHERE alias = ?1 COLLATE NOCASE)",
+        [name],
+        |r| r.get(0),
+    )?;
+    if alias_exists {
+        return Err(ApiError::conflict(format!(
+            "host agent name `{name}` is already a job-host alias"
+        )));
+    }
     if find(t, name)?.is_some() {
         return Err(ApiError::conflict(format!(
             "host agent `{name}` exists; rotate its token (POST /api/hosts/{name}/rotate) \

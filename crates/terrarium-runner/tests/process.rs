@@ -325,7 +325,7 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
         false,
     )
     .await;
-    // The runner answers `whoami` itself.
+    // Identity needs the daemon so roles cannot silently go stale offline.
     let who = hook_socket(
         &hooks,
         json!({"type":"request","id":1,"method":"whoami"}),
@@ -333,7 +333,7 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
     )
     .await
     .expect("whoami");
-    assert_eq!(who["result"]["name"], "tester");
+    assert_eq!(who["error"]["code"], "unavailable", "{who}");
     // A request for the daemon gets the tunnel error.
     let rpc = hook_socket(
         &hooks,

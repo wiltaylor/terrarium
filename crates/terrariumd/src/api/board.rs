@@ -20,6 +20,7 @@ pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/projects/{name}/board", get(show_board).patch(patch_board))
         .route("/projects/{name}/cards", get(list_cards).post(create_card))
+        .route("/projects/{name}/github-issues/import", post(import_issue))
         .route("/cards", get(active_cards))
         .route("/cards/{id}", get(show).patch(update).delete(archive))
         .route("/cards/{id}/move", post(move_card))
@@ -28,6 +29,24 @@ pub fn routes() -> Router<Shared> {
         .route("/cards/{id}/comments", get(comments).post(comment))
         .route("/cards/{id}/links", post(link))
         .route("/cards/{id}/events", get(card_events))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportIssue {
+    repo: String,
+    number: u64,
+}
+
+async fn import_issue(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(body): ApiJson<ImportIssue>,
+) -> ApiResult<Json<Card>> {
+    Ok(Json(
+        crate::github_issues::import(&state, actor, name, body.repo, body.number).await?,
+    ))
 }
 
 async fn show_board(

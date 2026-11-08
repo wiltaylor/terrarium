@@ -617,6 +617,17 @@ pub fn update_with_live_limits(
             admin
         ],
     )?;
+    if patch.as_object().is_some_and(|p| p.contains_key("address")) {
+        for address in [current.def.address.as_deref(), def.address.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            t.execute(
+                "DELETE FROM job_host_keys WHERE hostname = ?1",
+                [super::jobs::address_key(address)],
+            )?;
+        }
+    }
     get(t, name)
 }
 

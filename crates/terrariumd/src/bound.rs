@@ -56,10 +56,11 @@
 //! The wait columns are names, not roles: a board without them never
 //! parks its bound agents.
 //!
-//! With `board_flow = rules` (TER-170) the driver and [`reconcile`] leave
-//! the cards of the project alone: the rules `agent-park`, `agent-unpark`,
-//! and `agent-end-*` of the built-in pack do the same through the verbs
-//! `agent.park`, `agent.unpark`, and `agent.end`. The spawn timer still
+//! With `board_flow = rules` (TER-170) the rules `agent-park`, `agent-unpark`,
+//! and `agent-end-*` handle moves through the verbs `agent.park`,
+//! `agent.unpark`, and `agent.end`; [`reconcile`] skips those cards.
+//! The driver still handles assignment releases in both flows, but never
+//! unparks a card in a wait column on release. The spawn timer still
 //! ends the agent of a finished card ([`finished_object`]).
 //!
 //! An event that the driver misses (a lag of the event hub, or a daemon
