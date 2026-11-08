@@ -248,9 +248,48 @@ impl SwapApplied {
     }
 }
 
-/// Runs agents. Every method returns quickly; the work happens in the
-/// background and shows up as events.
+/// One untouched turn. The ID is opaque and is never reused on a restart.
+#[derive(Debug, Clone)]
+pub struct PendingTurn {
+    pub id: String,
+    pub text: String,
+    pub source: &'static str,
+}
+
+impl From<String> for PendingTurn {
+    fn from(text: String) -> Self {
+        Self {
+            id: AgentId::new().to_string(),
+            text,
+            source: "supervisor",
+        }
+    }
+}
+
+/// A best-effort queue snapshot with runner availability.
+#[derive(Default)]
+pub struct PendingTurns {
+    pub items: Vec<PendingTurn>,
+    /// Only the runner queue failed. Other queues are still usable.
+    pub runner: Option<&'static str>,
+}
+
+/// Runs agents. Work happens in the background and shows up as events.
 pub trait Supervisor: Send + Sync + 'static {
+    fn list_pending(
+        &self,
+        _agent: AgentId,
+    ) -> BoxFuture<'_, Result<PendingTurns, SupervisorError>> {
+        Box::pin(async { Ok(PendingTurns::default()) })
+    }
+    fn cancel_pending(
+        &self,
+        _agent: AgentId,
+        _source: &str,
+        _id: String,
+    ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+        Box::pin(async { Ok(false) })
+    }
     /// Start the agent. `resume` is the harness session to continue.
     fn start(
         &self,
@@ -584,7 +623,7 @@ mod fake {
         typed: Vec<u8>,
         /// Turns that came while the agent started, as the real supervisor
         /// keeps them for its first idle. One goes out at each idle.
-        early: Vec<String>,
+        early: Vec<super::PendingTurn>,
         /// The text of each turn that started, in order. For tests.
         prompts: Vec<String>,
         /// The harness of the last start.
@@ -603,6 +642,7 @@ mod fake {
         compact: FakeCompact,
         /// The compactions that started. For tests.
         compactions: usize,
+        pending_error: Option<bool>,
     }
 
     #[derive(Default)]
@@ -782,7 +822,7 @@ mod fake {
                     _ => return,
                 }
             };
-            if self.turn(agent, text.clone()).is_err()
+            if self.turn(agent, text.text.clone()).is_err()
                 && let Some(a) = self.lock().agents.get_mut(&agent)
             {
                 a.early.insert(0, text);
@@ -1022,8 +1062,13 @@ mod fake {
             self.lock()
                 .agents
                 .get(&agent)
-                .map(|a| a.early.clone())
+                .map(|a| a.early.iter().map(|t| t.text.clone()).collect())
                 .unwrap_or_default()
+        }
+
+        /// Fail queue listing, as an old or disconnected runner does. For tests.
+        pub fn fail_pending(&self, agent: AgentId, unsupported: bool) {
+            self.lock().agents.entry(agent).or_default().pending_error = Some(unsupported);
         }
 
         /// True while the reset gate of `agent` is closed. For tests.
@@ -1068,7 +1113,7 @@ mod fake {
                 }
                 let (_, done, then) = a.compacting.take()?;
                 if let Some(then) = then {
-                    a.early.insert(0, then.turn(&end));
+                    a.early.insert(0, then.turn(&end).into());
                 }
                 end.work = !a.early.is_empty();
                 (done, a.held.clone())
@@ -1094,6 +1139,51 @@ mod fake {
     }
 
     impl Supervisor for InMemorySupervisor {
+        fn list_pending(
+            &self,
+            agent: AgentId,
+        ) -> BoxFuture<'_, Result<super::PendingTurns, SupervisorError>> {
+            Box::pin(async move {
+                if let Some(unsupported) =
+                    self.lock().agents.get(&agent).and_then(|a| a.pending_error)
+                {
+                    return Err(if unsupported {
+                        SupervisorError::Unsupported("list_pending".into())
+                    } else {
+                        SupervisorError::Other("runner exiting".into())
+                    });
+                }
+                Ok(super::PendingTurns {
+                    items: self
+                        .lock()
+                        .agents
+                        .get(&agent)
+                        .map(|a| a.early.clone())
+                        .unwrap_or_default(),
+                    runner: None,
+                })
+            })
+        }
+
+        fn cancel_pending(
+            &self,
+            agent: AgentId,
+            source: &str,
+            id: String,
+        ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+            let supported = source == "supervisor";
+            Box::pin(async move {
+                let mut inner = self.lock();
+                let Some(a) = inner.agents.get_mut(&agent) else {
+                    return Ok(false);
+                };
+                if supported && let Some(index) = a.early.iter().position(|t| t.id == id) {
+                    a.early.remove(index);
+                    return Ok(true);
+                }
+                Ok(false)
+            })
+        }
         fn bind(&self, state: &crate::api::Shared) {
             self.lock().state = Some(Arc::downgrade(state));
             let mut rx = state.db.hub().subscribe();
@@ -1289,7 +1379,7 @@ mod fake {
                             || a.gated
                             || a.compacting.is_some())
                     {
-                        a.early.push(text);
+                        a.early.push(text.into());
                         return Ok(());
                     }
                 }
@@ -1641,7 +1731,8 @@ mod fake {
                         ));
                     }
                     first.extend(plan.then);
-                    a.early.splice(0..0, first);
+                    a.early
+                        .splice(0..0, first.into_iter().map(super::PendingTurn::from));
                 }
                 self.boot_with(agent.id, None, Some(&plan.reason));
                 Ok(())

@@ -363,9 +363,63 @@ pub async fn spawn_with(
     };
     crate::template_files::refresh_quiet(state).await;
     let (p, key) = (owner.project.clone(), body.template.trim().to_owned());
-    let template = state
+    let selection_owner = owner.view.clone();
+    let selection_rules = rules.clone();
+    let selection_operator = actor.is_operator();
+    let selection_state = state.clone();
+    let (template, subscription) = state
         .db
-        .read(move |c| templates::resolve(c, &p, &key))
+        .read(move |c| {
+            let first = templates::resolve(c, &p, &key)?;
+            let allowed = |t: &templates::Template| {
+                selection_operator
+                    || selection_rules.as_ref().is_none_or(|sp| {
+                        sp.allows(SpawnTemplate {
+                            name: &t.name,
+                            global: t.project.is_none(),
+                        })
+                    })
+            };
+            if !allowed(&first) {
+                let allowed = selection_rules
+                    .as_ref()
+                    .map(|sp| sp.templates.join(", "))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "none".to_owned());
+                return Err(ApiError::forbidden(format!(
+                    "template `{}` is not in spawn.templates (allowed: {allowed})",
+                    first.use_key()
+                )));
+            }
+            let mut refusals = Vec::new();
+            let mut candidate = |t: &templates::Template| {
+                let mut def = agent_template::to_def(&t.spec, "selection", &p)
+                    .map_err(|e| ApiError::invalid(e.to_string()))?;
+                spawn_rights::inherit_pool(&mut def, selection_owner.as_ref());
+                if def.subscription.is_none() && def.subscription_pool.is_empty() {
+                    return Ok(Some(None));
+                }
+                crate::spawn_selection::pick(c, &def, &selection_state, &mut refusals)
+                    .map(|s| s.map(Some))
+            };
+            if let Some(sub) = candidate(&first)? {
+                return Ok((first, sub));
+            }
+            // Alternatives stay in the requested template's scope. In
+            // particular a global request cannot pick a project shadow.
+            let alt_name = format!("{}-alt", first.name);
+            if let Some(alt) = templates::find_in(c, first.project.as_deref(), &alt_name)?
+                && allowed(&alt)
+                && let Some(sub) = candidate(&alt)?
+            {
+                return Ok((alt, sub));
+            }
+            Err(ApiError::conflict(format!(
+                "template `{}` and its allowed alternative have no subscription headroom: {}",
+                first.use_key(),
+                refusals.join("; ")
+            )))
+        })
         .await?;
     if let Some(sp) = &rules {
         let t = SpawnTemplate {
@@ -418,6 +472,9 @@ pub async fn spawn_with(
         .filter(|sp| sp.may_spawn_children)
         .map(|sp| Box::new(sp.for_child()));
     spawn_rights::inherit_pool(&mut def, owner.view.as_ref());
+    if let Some(subscription) = subscription {
+        def.subscription = Some(subscription);
+    }
     spawn_rights::limit_thread_open(
         &mut def.policy,
         owner
@@ -818,6 +875,10 @@ pub async fn close(
                 return spawns::get(t, &key);
             }
             let sp = spawns::get(t, &key)?;
+            let thread = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:"));
+            if let Some(thread) = thread {
+                crate::store::threads::agent_ended(t, thread, &sp.id, outcome)?;
+            }
             let owner_live = sp.owner != OPERATOR && agents::display_name(t, &sp.owner)?.is_some();
             let mut data = json!({
                 "outcome": outcome, "spawn": sp.id, "name": sp.name,
@@ -830,7 +891,7 @@ pub async fn close(
                 Some(w) => waits::finish(t, w, WaitState::Resolved, data, true, 0)?.is_some(),
                 None => false,
             };
-            if notify && !waited && outcome != spawns::OWNER_GONE {
+            if notify && !waited && outcome != spawns::OWNER_GONE && thread.is_none() {
                 let to = if sp.owner == OPERATOR {
                     Some(mail::Address::Operator)
                 } else if owner_live {
@@ -1070,7 +1131,12 @@ pub struct PromptInfo {
 /// agents"): who the owner is, and how to finish. Only stable facts.
 pub fn prompt_section(info: &PromptInfo) -> String {
     match &info.bound {
-        Some(b) => bound_prompt_section(&info.owner, b),
+        Some(b) => format!(
+            "{}\n- Your lifetime cap is {} (`spawn.max_bound_lifetime`, default and maximum 30d). \
+             The daemon stops you at the cap even if your bound object is not finished.\n",
+            bound_prompt_section(&info.owner, b),
+            info.lifetime
+        ),
         None => plain_prompt_section(&info.owner, &info.lifetime),
     }
 }
@@ -1207,6 +1273,15 @@ mod tests {
         assert!(s.contains("bound to card TER-74"), "{s}");
         assert!(s.contains("Do not run `terrarium agent done`"), "{s}");
         assert!(!s.contains("lifetime is"), "{s}");
+        assert!(
+            s.contains("lifetime cap is 2h (`spawn.max_bound_lifetime`"),
+            "{s}"
+        );
+        info.bound = Some("thread:T1".into());
+        let s = prompt_section(&info);
+        assert!(s.contains("Inbox thread T1"), "{s}");
+        assert!(s.contains("spawn.max_bound_lifetime"), "{s}");
+        assert!(!s.contains("send the card"), "{s}");
     }
 
     #[test]

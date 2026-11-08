@@ -142,6 +142,128 @@ const TWO_STEPS: &str = r#"rule "note" {
 }
 "#;
 
+#[tokio::test]
+async fn stored_rules_schema_failure_is_visible() {
+    let mut td = TestDaemon::start().await;
+    td.project("broken").await;
+    put_rules(&td, "broken", TWO_STEPS).await;
+    // Model a schema upgrade removing a previously accepted verb. Keep
+    // the stored row, but replace that verb with one the current schema rejects.
+    let text = TWO_STEPS.replace("card_comment", "retired_comment");
+    state(&td)
+        .db
+        .write("system", move |tx| {
+            tx.execute(
+                "UPDATE project_rules SET text = ?1, hash = 'old-schema' WHERE project = 'broken'",
+                [text],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let body = td.get("/api/projects/broken/rules").await.ok().clone();
+    assert_eq!(body["hash"], "old-schema");
+    assert_eq!(body["rules"], json!([]));
+    let problems = body["problems"].as_array().unwrap();
+    assert!(!problems.is_empty());
+    assert!(problems[0]["line"].is_number());
+    assert!(problems[0]["column"].is_number());
+    assert!(problems[0]["message"].is_string());
+
+    let effective = td
+        .get("/api/projects/broken/rules/effective")
+        .await
+        .ok()
+        .clone();
+    assert_eq!(effective["problems"], body["problems"]);
+    let lint = td
+        .post("/api/projects/broken/rules/lint", json!({}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(lint["problems"], body["problems"]);
+    let lint_text = td
+        .post(
+            "/api/projects/broken/rules/lint",
+            json!({"text": TWO_STEPS}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(lint_text["problems"], json!([]));
+
+    let mut cache = rules_engine::Cache::default();
+    let db = state(&td).db.clone();
+    // Stop the daemon's independent cache so event counts are deterministic.
+    td.daemon.take().unwrap().shutdown();
+    let before: i64 = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM events WHERE project = 'broken' AND kind = 'rules.invalid'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    let loaded = rules_engine::load(&db, &mut cache).await.unwrap();
+    assert!(
+        loaded
+            .iter()
+            .find(|p| p.project == "broken")
+            .unwrap()
+            .set
+            .rules
+            .is_empty()
+    );
+    let data: Vec<String> = db
+        .read(|c| {
+            let mut st = c.prepare(
+                "SELECT payload FROM events WHERE project = 'broken' AND kind = 'rules.invalid'",
+            )?;
+            Ok(st
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(data.len() as i64, before + 1);
+    // A second load of the same revision must not emit another diagnostic.
+    rules_engine::load(&db, &mut cache).await.unwrap();
+    let after: i64 = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM events WHERE project = 'broken' AND kind = 'rules.invalid'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(after, before + 1);
+    for data in data {
+        let data: Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(data["hash"], "old-schema");
+        assert_eq!(data["problems"], body["problems"]);
+    }
+
+    db.write("system", |tx| {
+        tx.execute_batch(
+            "CREATE TRIGGER block_rules_invalid BEFORE INSERT ON events
+            WHEN NEW.kind = 'rules.invalid'
+            BEGIN SELECT RAISE(FAIL, 'test event failure'); END;",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    // Failure to record a diagnostic must not fail the engine pass.
+    let loaded = rules_engine::load(&db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
+    assert!(loaded.iter().any(|p| p.project == "broken"));
+}
+
 /// A recording error must not strand rows beyond the old global batch
 /// limit, or stop planning newly arriving events in another project.
 #[tokio::test]

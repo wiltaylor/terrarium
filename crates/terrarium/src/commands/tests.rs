@@ -2050,6 +2050,13 @@ async fn memory_project_keys_for_every_id_command() {
                 Some(json!({"title": "changed"})),
             ),
             (
+                vec!["edit", id, "--body", "changed body"],
+                Patch,
+                "",
+                vec![],
+                Some(json!({"body": "changed body"})),
+            ),
+            (
                 vec!["supersede", id, other],
                 Post,
                 "/supersede",
@@ -2325,8 +2332,7 @@ async fn artifacts_and_labels() {
     )
     .await;
 
-    // TER-58: the version subcommands are gone. Each exits 2 with an
-    // error that names card labels, and sends no request.
+    // Removed version subcommands are rejected by the parser.
     for args in [
         &["version", "new", "v1", "--card", "TER-1"][..],
         &["version", "ls", "--all"],
@@ -2334,21 +2340,26 @@ async fn artifacts_and_labels() {
         &["version", "wait", "v1", "--timeout", "20"],
         &["version", "approve", "v1", "-m", "ok"],
     ] {
-        let r = exec(true, args, vec![], None).await;
-        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
-        let e = r.result.unwrap_err();
-        assert_eq!(exit_code_of(&e), 2, "{args:?}");
-        assert!(e.to_string().contains("card labels"), "{args:?}: {e}");
+        let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
-    // The hidden --version flags of artifact push and ls name --label.
+    // Removed artifact --version flags are rejected by the parser.
     for args in [
         &["artifact", "push", "x.txt", "--version", "v1"][..],
         &["artifact", "ls", "--version", "v1"],
     ] {
-        let r = exec(true, args, vec![], None).await;
-        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
-        let e = r.result.unwrap_err();
-        assert!(e.to_string().contains("--label version:"), "{args:?}: {e}");
+        let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
     // `artifact ls --label` sends `label` to the daemon (TER-129), and keeps
     // the artifacts with that label also when a daemon from before ignores
@@ -8907,17 +8918,20 @@ async fn test_runs() {
         )],
     )
     .await;
-    // TER-58: --version names --label and sends nothing.
+    // Removed test --version flags are rejected by the parser.
     for args in [
         &["test", "push", "x.xml", "--version", "v1"][..],
         &["test", "ls", "--version", "v1"],
         &["test", "link", "01RUN", "--version", "v1"],
         &["test", "unlink", "01RUN", "--version", "v1"],
     ] {
-        let r = exec(true, args, vec![], None).await;
-        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
-        let e = r.result.unwrap_err();
-        assert!(e.to_string().contains("--label version:"), "{args:?}: {e}");
+        let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
     let r = exec(true, &["test", "link", "01RUN"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), 2);
@@ -10367,6 +10381,19 @@ async fn thread_commands() {
     )
     .await;
     assert_eq!(out, "thread T1 is tracking.\n");
+    let out = ok(
+        true,
+        &["thread", "track", "T1", "--monitor", "ops:health"],
+        vec![(200, json!({"id": "T1", "status": "tracking"}))],
+        vec![(
+            Post,
+            "/api/threads/T1/track",
+            vec![],
+            Some(json!({"cards": [], "monitor": "ops:health"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "thread T1 is tracking.\n");
     // TER-146: the agent links cards of any project as it tracks.
     let out = ok(
         true,
@@ -10734,4 +10761,49 @@ async fn rules_every_command() {
         out.contains("applied: project terra runs board_flow rules (rules.wcl changed)"),
         "{out}"
     );
+}
+
+#[tokio::test]
+async fn rules_stored_parse_problems_are_printed_and_check_fails() {
+    let problems = json!([{"line": 3, "column": 5, "message": "unknown verb retired_comment"}]);
+    let out = ok(
+        true,
+        &["rule", "ls"],
+        vec![(
+            200,
+            json!({"project": "terra", "board_flow": "daemon", "rules": [], "problems": problems}),
+        )],
+        vec![req(Get, "/api/projects/terra/rules/effective")],
+    )
+    .await;
+    assert!(
+        out.contains("rules.wcl:3:5: unknown verb retired_comment"),
+        "{out}"
+    );
+    for json_output in [false, true] {
+        let args = if json_output {
+            vec!["--json", "rule", "check"]
+        } else {
+            vec!["rule", "check"]
+        };
+        let r = exec(
+            true,
+            &args,
+            vec![(200, json!({"findings": [], "problems": problems}))],
+            None,
+        )
+        .await;
+        assert_eq!(exit_code_of(&r.result.unwrap_err()), 1);
+        if json_output {
+            let v: Value = serde_json::from_str(&r.out).unwrap();
+            assert_eq!(v["problems"], problems);
+        } else {
+            assert!(
+                r.out
+                    .contains("rules.wcl:3:5: unknown verb retired_comment"),
+                "{}",
+                r.out
+            );
+        }
+    }
 }

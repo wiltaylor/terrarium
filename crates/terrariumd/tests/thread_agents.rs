@@ -294,6 +294,15 @@ async fn round_trip(harness: &str) {
     .await;
     lab.td.wait_status(&eph, "idle").await;
     assert_eq!(lab.sessions(&eph).await[0]["resumes"], 2);
+    assert_eq!(
+        lab.td
+            .sup
+            .prompts(eph.parse().unwrap())
+            .iter()
+            .filter(|p| p.contains("Before acting after this restart"))
+            .count(),
+        1
+    );
 
     // The overall response comes as a turn too.
     lab.post_as(&eph, &tid, "Plan: cache board and cards.")
@@ -734,6 +743,14 @@ async fn a_missed_event_unparks_on_the_timer() {
     .await
     .unwrap();
     terrariumd::thread_agent::retry_missed(&s).await;
+    let restart = lab
+        .prompt(
+            &eph,
+            &format!("[Thread:{tid}] Before acting after this restart"),
+        )
+        .await;
+    assert!(restart.contains("linked cards"), "{restart}");
+    assert!(restart.contains("terrarium card show"), "{restart}");
     let turn = lab
         .prompt(&eph, &format!("[Thread:{tid}] The thread changed"))
         .await;
@@ -742,6 +759,136 @@ async fn a_missed_event_unparks_on_the_timer() {
         "{turn}"
     );
     lab.td.wait_status(&eph, "idle").await;
+}
+
+/// Every finish path shares the transaction that marks the thread and mails
+/// its report-to lead. A retry and the ordinary thread close stay quiet.
+#[tokio::test]
+async fn an_ended_agent_marks_only_its_open_thread_once() {
+    let lab = lab().await;
+    for outcome in ["done", "cancelled", "timeout", "failed"] {
+        let th = lab
+            .open(json!({"topic": "Ended", "scope": "p", "template": "consult"}))
+            .await;
+        let tid = id(&th);
+        let agent = th["agent"].as_str().unwrap();
+        lab.td.wait_status(agent, "idle").await;
+        let asked = lab
+            .td
+            .post_as(
+                agent,
+                &format!("/api/agents/{agent}/questions"),
+                json!({"text": "Continue?", "options": ["yes", "no"], "thread": tid}),
+            )
+            .await;
+        assert_eq!(asked.status, 201, "{}", asked.body);
+        let qid = id(&asked.body);
+        lab.parked(agent).await;
+        let s = state(&lab.td);
+        terrariumd::spawn::close(&s, agent, outcome, Some("ended elsewhere".into()), true)
+            .await
+            .unwrap();
+        terrariumd::spawn::close(&s, agent, outcome, None, true)
+            .await
+            .unwrap();
+        let marked = lab.thread(&tid).await;
+        assert_ne!(marked["status"], "closed");
+        assert_eq!(marked["agent_end_outcome"], outcome);
+        let q = &marked["questions"].as_array().unwrap()[0];
+        assert_eq!(q["status"], "retracted");
+        assert!(q["retract_reason"].as_str().unwrap().contains(outcome));
+        let late = lab
+            .td
+            .post(
+                &format!("/api/questions/{qid}/answer"),
+                json!({"answer": "yes"}),
+            )
+            .await;
+        assert_ne!(late.status, 200, "{}", late.body);
+        let messages = marked["messages"].as_array().unwrap();
+        let marks: Vec<_> = messages
+            .iter()
+            .filter(|m| {
+                m["author"] == "system"
+                    && m["text"].as_str().unwrap().contains("Thread agent ended:")
+            })
+            .collect();
+        assert_eq!(marks.len(), 1, "{marked}");
+        assert!(marks[0]["text"].as_str().unwrap().contains(outcome));
+        let mail = lab
+            .td
+            .get(&format!("/api/mail?to={}&from=system", lab.p_lead))
+            .await
+            .ok()
+            .clone();
+        assert!(
+            mail.to_string()
+                .contains(&format!("Thread {tid}: agent ended")),
+            "{mail}"
+        );
+        assert_eq!(
+            mail.as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["subject"] == format!("Thread {tid}: agent ended"))
+                .count(),
+            1
+        );
+        let operator = lab.td.get("/api/mail?to=operator&from=system").await;
+        assert!(
+            operator.ok().as_array().unwrap().is_empty(),
+            "{}",
+            operator.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn normal_thread_close_retracts_questions_without_an_abnormal_flag() {
+    let lab = lab().await;
+    let th = lab
+        .open(json!({"topic": "Close", "scope": "p", "template": "consult"}))
+        .await;
+    let tid = id(&th);
+    let agent = th["agent"].as_str().unwrap();
+    lab.td.wait_status(agent, "idle").await;
+    lab.td
+        .post_as(
+            agent,
+            &format!("/api/agents/{agent}/questions"),
+            json!({"text": "Continue?", "options": ["yes", "no"], "thread": tid}),
+        )
+        .await
+        .ok();
+    lab.parked(agent).await;
+    lab.td
+        .post(
+            &format!("/api/threads/{tid}/close"),
+            json!({"summary": "No further work."}),
+        )
+        .await
+        .ok();
+    lab.closed(agent).await;
+    let closed = lab.thread(&tid).await;
+    assert_eq!(closed["status"], "closed");
+    assert!(closed["agent_end_outcome"].is_null());
+    assert_eq!(closed["questions"][0]["status"], "retracted");
+    assert!(
+        closed["questions"][0]["retract_reason"]
+            .as_str()
+            .unwrap()
+            .contains("was closed")
+    );
+    assert!(
+        !closed["messages"]
+            .to_string()
+            .contains("Thread agent ended:")
+    );
+    let mail = lab
+        .td
+        .get(&format!("/api/mail?to={}&from=system", lab.p_lead))
+        .await;
+    assert!(mail.ok().as_array().unwrap().is_empty());
 }
 
 /// A2: the thread agent reads and writes the memories of the project it

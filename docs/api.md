@@ -2182,13 +2182,20 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/compact` | none, or `{"then"?: "<prompt>", "defer"?: false}` | `202` agent with `reset` (below). At rest: `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused or held. `409 not_running`: the agent does not run. |
 | `POST /api/agents/{id}/new-session` | none, or `{"then"?: "<prompt>", "recap"?: true, "defer"?: false}` | `202` agent with `reset` (below). A new harness session, not a resume. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run, or an earlier turn still waits in the store) |
-| `GET /api/agents/{id}/queued` | none | `200 {"items": [{"id", "source", "text", "body", "created_at"}]}`: the turns that wait in the store for the agent's wake (`"queued": true` above), oldest first. `source` is where the turn waits: `store` (the live queues of a running agent come with TER-66). `text` is the turn as it will be typed, `body` the text after its tag. Redacted for the caller. The read right of the agent (TER-54). |
-| `DELETE /api/agents/{id}/queued/{turn}?source=store` | none | `204`. Drops one queued turn before the wake types it. `source`: the `source` of the turn in the list (default `store`; another value is `422`); the others keep their order. project_admin of the agent's project, sysadmin, or the operator. `404` when the turn does not wait (any more): the wake hands the turns over one at a time, so a removed turn is never typed and a typed turn is `404`. Audit `agent.queued.remove` with the turn ID and its length (TER-54). |
+| `GET /api/agents/{id}/queued` | none | `200 {"items": [{"id", "source", "text", "body", "created_at"}]}`. Waiting turns in delivery order: `runner`, `supervisor`, then `store`, preserving each queue's order. Store IDs are numbers. Live IDs are opaque strings and are not reused on restart. `created_at` is empty for live turns. `text` includes the tag, `body` excludes it. Redacted for the caller, with the agent's read right. The snapshot can become stale during delivery. Recaps, mail pointers and quota-hold work are not included. |
+| `DELETE /api/agents/{id}/queued/{turn}?source=store` | none | `204`. Removes an untouched queued turn. Pass its ID and `source` from the list (`store` by default, also `supervisor` or `runner`). Unknown sources are `422`. Requires project_admin of the agent's project, sysadmin, or operator. `404` once dispatch takes the turn, including between list and delete. Never interrupts typing or cancels a retry of an already typed turn. Remaining turns keep their order. Audit `agent.queued.remove` includes the ID and source for live turns, or ID and byte length for store turns. |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/interrupt` | none | `202 {"accepted": true, "interrupted": true}`. Stops the running turn; the harness keeps running (§6.5, "Interrupt"). |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/subscription` | `{"subscription": "anthropic-max-20x-2"}` | `200 {"agent", "from"?, "to", "applied"}` (below) |
+
+The queued-turn response also includes `queues.runner`: `available`,
+`unsupported` (an older runner without `list_pending`), or `unavailable`
+(for example an exiting runner or lost control connection). A runner-list
+failure does not hide the supervisor or store items. The dashboard shows
+the marker and still allows editing those items. Empty idle queues are not
+polled repeatedly.
 
 All need project_admin; an agent may `compact` and `new-session`
 itself. The work happens in the background. A `send` writes a row to the
@@ -4017,8 +4024,24 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
-| `POST /api/threads/{id}/track` | no body, or `{"cards"}`: at most 50 cards to link first (TER-146) | The attached agent: `200` the thread, `tracking`, with `tracking_at` and `cards`. `409` with an open question; `404` or `422` for a card (below), and nothing changes |
+| `POST /api/threads/{id}/track` | no body, or `{"cards"?, "monitor"?}`: at most 50 cards to link first (TER-146), optional monitor `project:name` (TER-149) | The attached agent: `200` the thread, `tracking`, with `tracking_at`, `cards` and optional `monitor`. `409` with an open question; invalid links roll back the whole write |
 | `POST /api/threads/{id}/cards` | `{"card"}`: `<project>:<card>` or `<card>` | `200` the thread with `cards`, also when the card was linked already. `404` without the read right on the thread, for a card that does not exist or is not in the named project, and without the read right on the card's project; `422` for an archived card; `409` on a closed thread |
+
+**Ops tracking** (TER-149, D6). `terrarium thread track <id> --monitor <project>:<monitor>`
+links an existing monitor in a project the attached agent can read. Omitting the
+option keeps the link. Readiness waits for all live cards to reach review or
+later and the monitor's latest result to be `ok`. A monitor-only thread waits
+for `ok`. A green transition wakes the agent when the cards are ready. A `crit`
+transition after readiness wakes it again. Repeated results and warn/unknown
+flaps do not wake completed threads. Red re-arms the green wake. Adding
+unfinished cards or moving cards back before review clears completion.
+Linking an already green monitor on a later track call checks readiness too.
+Unreadable monitor links return `404`, and a missing link rolls back the write.
+These use the existing tracking wake path, including held wakes while
+waiting on an operator question, and create no operator notices. The monitor
+reference is hidden from readers who cannot read its project. Held monitor
+wakes are coalesced by reason in latest-transition order, so the last delivered
+monitor state is the latest one.
 
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
 A thread opened with a `template` and no `agent` gets its agent at the
@@ -5245,7 +5268,7 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
 | `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact |
 | `GET /api/projects/{name}/artifacts/usage` | | `200 {"project", "count", "used_bytes", "quota_bytes", "max_file_bytes"}` |
 | `GET /api/artifacts/{id}` | | `200` artifact |
-| `DELETE /api/artifacts/{id}` | | `204`; the author or an admin; `409` on a released version from before TER-58 |
+| `DELETE /api/artifacts/{id}` | | `204`; the author or an admin |
 | `POST /api/artifacts/{id}/links` | `{"kind": "page" \| "card" \| "label", "ref"}` | `201` artifact |
 | `POST /api/artifacts/{id}/url` | none, or `{"ttl"?}` | `200 {"url", "exp", "expires_at"}` |
 | `POST /api/artifacts/prune` | `{"dry_run"?, "as_of"?}` | `200` prune report; sysadmin or operator |
@@ -5256,11 +5279,7 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
   `422 invalid` with a message that names `label`.
 - An admin delete of another author's artifact writes `artifact.delete`. The
   blob goes when no artifact uses it.
-- An artifact on a `released` version from before TER-58 (an old
-  `version_artifacts` row) is not deleted: `409 conflict`, also for its
-  author, an admin, or the operator. The rows stay read only until a later
-  version drops the tables (TER-128). A label link does not block a
-  delete.
+- A label link does not block deletion.
 
 ### 12.4 Serving: `GET /a/{uid}/{path}`
 
@@ -5335,8 +5354,8 @@ port (8081) as a separate origin. The dashboard embeds them in
 endpoint. `as_of` is an RFC 3339 time; the default is now.
 
 - The rule keeps an artifact that is attached to a live page, a card, or a
-  label, or to a version from before TER-58 (the old `version_artifacts`
-  rows), or that a live page embeds.
+  label, or that a live page embeds. Old version links no longer retain artifacts.
+  They go through the same warning and prune as other unattached artifacts.
 - An unattached artifact older than `retention_days - 1` days gets the
   audit row `artifact.prune_warning` with `prune_after`.
 - An unattached artifact older than `retention_days` whose warning is a day
@@ -5362,8 +5381,9 @@ question ask`) with the artifacts linked.
 Every `/api/projects/{name}/versions` and `/api/versions/...` route gives
 `404`. The `version.*` events are gone. The tables `versions`,
 `version_cards`, `version_artifacts`, `version_reviews`, and
-`test_run_versions` keep their rows, and nothing reads or writes them
-except the artifact prune (§12.5). A later version drops them.
+`test_run_versions` and their indexes are dropped by TER-128. No current data
+uses these legacy tables. Artifact deletion (§12.3) and prune (§12.5) no
+longer read them. The migration irreversibly discards the legacy metadata.
 
 ## 14. Not in this phase
 
@@ -6387,6 +6407,54 @@ an agent. Agent host reservations span that agent's targets on the host.
 Host grants return 409 naming existing sessions that must end first:
 phase 1 does not reparent live scopes. Agent and target reservations cannot
 overlap on a host because they use different slice hierarchies.
+
+**GPU reservations.** The same POST accepts an optional `gpus` array. Each
+claim names a stable NVIDIA `uuid`, not a device index. For example:
+
+```json
+{"target":"p-gpu","gpus":[{"uuid":"GPU-abcd1234","exclusive":true}],"until":"30m"}
+```
+
+For cooperative sharing, use `{"uuid":"GPU-abcd1234","vram_bytes":1073741824}`.
+`exclusive` defaults to false. A shared claim requires positive `vram_bytes`
+no larger than physical VRAM. `amounts` may be omitted for GPU-only requests.
+The top-level `exclusive` remains the CPU affinity option, independent of each
+GPU claim's `exclusive`. The CLI accepts the array through `reserve new --gpus
+'[...]'`. No MIG partitions are created.
+
+Exclusive GPUs require a managed **ephemeral Docker target**. Native host,
+SSH and vmlab exclusive GPU requests are refused, never granted as unenforced
+exclusive access. Shared claims are supported for native host targets and
+managed ephemeral Docker targets. Docker reservations belong to the target,
+not individual agents. SSH and vmlab GPU reservations are unsupported.
+
+**Containers get no GPU by default**, including images that set
+`NVIDIA_VISIBLE_DEVICES=all`. Managed container creation overrides that variable
+with `void` without a GPU reservation, or the reserved UUID allowlist with one,
+and passes the same devices through Docker's `--gpus` option. A GPU reservation
+cannot change a running container's exposure. Stop it first and recreate it
+on the next `up`. Permanent and unmanaged Docker targets cannot reserve GPUs.
+An exclusive grant is refused while incompatible non-native sessions or
+containers are active. Active holders of disjoint devices can run concurrently.
+Native host execution remains available and does not generate GPU-session mail.
+
+A zero host reservation percentage disables GPU admission. A positive
+percentage enables whole-device exclusive allocations and shared accounting
+against physical VRAM, without fractionally partitioning devices. Exclusive
+and shared claims cannot overlap on the same device. Shared claims cannot
+overcommit its recorded VRAM. The usual FIFO and cleanup accounting apply.
+Capacity responses include `gpus` inventory (`uuid`, `name`, `memory_bytes`,
+`used_bytes`) and `used.gpus` entries with `reservation`, `holder`, and `claim`.
+
+Shared GPU memory limits are cooperative, not hard limits. The host samples
+NVIDIA compute-process VRAM and attributes it through PID cgroups to the
+container or native holder's systemd scopes. Overages send warning mail to
+the holder and project leads, once until a below-share sample rearms the
+warning. Overages never kill processes. Graphics-process usage and missing
+PID attribution are not inferred from whole-device totals. GPU samples are
+cached for 30 seconds. Inventory is refreshed for every host connection;
+missing reserved devices keep reconciliation closed. Ordinary reservation
+expiry and explicit retraction still perform their normal session cleanup.
 
 Insufficient capacity returns 409 with the current allocations. With
 `queue: true`, the request waits in a durable FIFO queue, without backfill.
@@ -8336,6 +8404,14 @@ test: true}`. Each test writes the audit row `schedule.test`
 A project has one board rules file, `rules.wcl` (TER-162, TER-166). A
 rule reacts to an event of the log and runs verbs on the board. The
 daemon stores and checks the file here; the engine (§19.9) runs it.
+
+If stored text no longer parses under the current schema, GET rules
+preserves the text and hash, returns empty `rules`, and adds
+`problems: [{line, column, message}]`. The engine emits a project event
+`rules.invalid` with the stored hash and problems when it loads that
+revision. Its own rules do not run, but the built-in pack still runs in
+rules mode. A cached revision does not emit again until reloaded (for
+example after a daemon restart).
 
 The file is WCL. The daemon ships its schema
 (`crates/terrarium-core/src/rules.schema.wcl`, `GET /api/rules/schema`)

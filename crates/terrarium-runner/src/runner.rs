@@ -171,9 +171,17 @@ enum Block {
 
 struct PendingTurn {
     id: u64,
+    pending_id: String,
     text: String,
     attempts: u32,
     tx: oneshot::Sender<Result<(), DeliveryError>>,
+}
+
+/// A turn that has not started typing. IDs belong to one runner lifetime.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WaitingTurn {
+    pub id: String,
+    pub text: String,
 }
 
 struct InFlight {
@@ -554,6 +562,7 @@ impl Runner {
         }
         state.queue.push_back(PendingTurn {
             id,
+            pending_id: terrarium_core::AgentId::new().to_string(),
             text: text.into(),
             attempts: 0,
             tx,
@@ -561,6 +570,34 @@ impl Runner {
         drop(state);
         self.inner.wake.notify_one();
         delivery
+    }
+
+    /// Snapshot only untouched turns, under the dispatch lock.
+    pub fn list_pending(&self) -> Vec<WaitingTurn> {
+        lock(&self.inner.state)
+            .queue
+            .iter()
+            .filter(|t| t.attempts == 0)
+            .map(|t| WaitingTurn {
+                id: t.pending_id.clone(),
+                text: t.text.clone(),
+            })
+            .collect()
+    }
+
+    /// Refuse a turn once dispatch has taken it, including retries.
+    pub fn cancel_pending(&self, id: &str) -> bool {
+        let mut state = lock(&self.inner.state);
+        let Some(index) = state
+            .queue
+            .iter()
+            .position(|t| t.pending_id == id && t.attempts == 0)
+        else {
+            return false;
+        };
+        let turn = state.queue.remove(index).expect("pending turn");
+        let _ = turn.tx.send(Err(DeliveryError::Dropped));
+        true
     }
 
     /// Answer the question `request_id` (from `Event::Question` or a

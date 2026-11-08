@@ -157,7 +157,7 @@ async fn upload_list_show_raw_and_the_card_chip() {
     assert_eq!(run["cards"], json!([c1]));
     assert_eq!(run["labels"], json!(["version:1.0.0"]));
     assert_eq!(run["created_by_name"], "proj/w1");
-    // TER-58: a version link is refused with a pointer to labels.
+    // Legacy version fields are unknown JSON fields.
     let r = td
         .post_as(
             "proj/w1",
@@ -170,7 +170,7 @@ async fn upload_list_show_raw_and_the_card_chip() {
         r.body["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("label"),
+            .contains("unknown field"),
         "{}",
         r.body
     );

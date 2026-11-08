@@ -17,12 +17,12 @@ export const AGENT_STATUSES = [
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
 /** The queue of a queued turn. */
-export type QueuedSource = "store";
+export type QueuedSource = "store" | "supervisor" | "runner";
 
-/** One turn that waits in the store for its agent's wake (`GET /api/agents/{id}/queued`, TER-54). */
+/** One untouched queued turn (`GET /api/agents/{id}/queued`). */
 export interface QueuedTurn {
-  id: number;
-  /** Where the turn waits: `store` (the daemon's queue for an agent that does not run). TER-66 adds the live queues. */
+  id: number | string;
+  /** Where the turn waits. Live queue IDs are opaque strings. */
   source: QueuedSource;
   /** The turn as it will be typed, with its tag (`[User] ...`). */
   text: string;
@@ -495,6 +495,10 @@ export interface SpawnPolicy {
   max_lifetime?: string;
   /** The ephemeral agents may spawn too, one level (sysadmin or the operator). */
   may_spawn_children?: boolean;
+  /** May bind agents to cards or threads. Default false. */
+  bound?: boolean;
+  /** Bound-agent lifetime cap. Absent: 30d. At most 30d. */
+  max_bound_lifetime?: string;
 }
 
 /** The outcome of a finished ephemeral agent. */
@@ -1773,6 +1777,7 @@ export interface Card {
   /** The address that set the ETA: an agent ULID or `operator`. */
   eta_set_by?: string | null;
   eta_set_by_name?: string | null;
+  eta_calibrated?: boolean | null;
   /** When the card last moved to `done`; a reopen clears it. */
   done_at?: string | null;
   /** The latest test run linked to the card (docs/api.md, test runs). Absent when no run is linked. */

@@ -33,6 +33,183 @@ async fn card(td: &TestDaemon, agent: &str, body: Value) -> String {
 }
 
 #[tokio::test]
+async fn worker_eta_render_calibrates_but_preserves_raw_events() {
+    let td = setup().await;
+    let id = card(
+        &td,
+        "proj/lead",
+        json!({"title":"Work", "labels":["type:impl"]}),
+    )
+    .await;
+    let path = format!("/api/cards/{id}");
+    let raw = td
+        .patch(&path, json!({"column":"working", "eta_at":"1h"}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(raw["eta_calibrated"], false);
+    for i in 0..5 {
+        let sample = card(
+            &td,
+            "proj/lead",
+            json!({"title":format!("Sample {i}"), "labels":["type:impl"]}),
+        )
+        .await;
+        let p = format!("/api/cards/{sample}");
+        td.patch(&p, json!({"column":"working", "eta_at":"1h"}))
+            .await
+            .ok();
+        td.patch(&p, json!({"column":"ready"})).await.ok();
+        let db = td.daemon.as_ref().unwrap().state.db.clone();
+        db.write("system", move |t| {
+            let now = chrono::Utc::now();
+            t.execute("UPDATE events SET at = ?1, payload = json_set(payload, '$.eta_at', ?2) WHERE card = ?3 AND kind = 'card' AND json_extract(payload, '$.change') = 'eta'", rusqlite::params![(now - chrono::Duration::minutes(10)).to_rfc3339(), (now + chrono::Duration::minutes(50)).to_rfc3339(), sample])?;
+            Ok(())
+        }).await.unwrap();
+    }
+    let calibrated = td.get(&path).await.ok().clone();
+    assert_eq!(calibrated["eta_calibrated"], true);
+    let at = chrono::DateTime::parse_from_rfc3339(calibrated["eta_at"].as_str().unwrap()).unwrap();
+    let start =
+        chrono::DateTime::parse_from_rfc3339(calibrated["eta_set_at"].as_str().unwrap()).unwrap();
+    assert!((590..610).contains(&(at - start).num_seconds()));
+    let events = td
+        .get(&format!("/api/cards/{id}/events"))
+        .await
+        .ok()
+        .clone();
+    let eta = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["data"]["change"] == "eta")
+        .unwrap();
+    assert_eq!(eta["data"]["eta_at"], raw["eta_at"]);
+    let board = td.get("/api/projects/proj/board").await.ok().clone();
+    assert_eq!(
+        board["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()["eta_at"],
+        calibrated["eta_at"]
+    );
+    // No worker guess uses only same-type history, starting at column entry.
+    let no_guess = card(
+        &td,
+        "proj/lead",
+        json!({"title":"No guess", "labels":["type:impl"]}),
+    )
+    .await;
+    let inferred = td
+        .patch(
+            &format!("/api/cards/{no_guess}"),
+            json!({"column":"working"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(inferred["eta_calibrated"], true);
+    assert!(inferred["eta_at"].is_string());
+}
+
+#[tokio::test]
+async fn review_render_uses_history_but_preserves_open_job_eta() {
+    use terrariumd::store::{
+        board, card_history,
+        jobs::{self, JobKind, NewJob},
+    };
+    let td = setup().await;
+    let id = card(&td, "proj/lead", json!({"title":"Await review"})).await;
+    let path = format!("/api/cards/{id}");
+    td.patch(&path, json!({"column":"review", "eta_at":"3h"}))
+        .await
+        .ok();
+    // No history: the manually stored estimate is not a review estimate.
+    assert!(td.get(&path).await.ok().get("eta_at").is_none());
+    for i in 0..3 {
+        let sample = card(&td, "proj/lead", json!({"title":format!("History {i}")})).await;
+        let p = format!("/api/cards/{sample}");
+        td.patch(&p, json!({"column":"review"})).await.ok();
+        td.patch(&p, json!({"column":"ready"})).await.ok();
+    }
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    let cid = id.clone();
+    let (start, median) = db
+        .read(move |conn| {
+            let mut samples = card_history::completed_visits(conn, "proj", board::REVIEW, 20)?;
+            samples.sort();
+            Ok((board::last_moved_at(conn, &cid)?.unwrap(), samples[1]))
+        })
+        .await
+        .unwrap();
+    let c = td.get(&path).await.ok().clone();
+    assert_eq!(c["eta_set_at"], start);
+    let expected = chrono::DateTime::parse_from_rfc3339(&start).unwrap() + median;
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(c["eta_at"].as_str().unwrap()).unwrap(),
+        expected
+    );
+    // The board list follows the same derived rendering path.
+    let b = td.get("/api/projects/proj/board").await.ok().clone();
+    assert_eq!(
+        b["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == id)
+            .unwrap()["eta_at"],
+        c["eta_at"]
+    );
+    let cid = id.clone();
+    let job = db
+        .write("operator", move |t| {
+            jobs::create(
+                t,
+                NewJob {
+                    project: "proj".into(),
+                    card: cid,
+                    kind: JobKind::Merge,
+                    repo: "app".into(),
+                    branch: "b".into(),
+                    commit: None,
+                    by_agent: None,
+                    batch: Vec::new(),
+                    // No plan: queue creation does not clear the stored manual ETA.
+                    planned_secs: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    let queued = td.get(&path).await.ok().clone();
+    assert_eq!(queued["job"]["kind"], "merge");
+    assert_eq!(queued["job"]["state"], "queued");
+    assert!(queued.get("eta_at").is_none());
+    let jid = job.id;
+    let started = db
+        .write("system", move |t| {
+            let job = jobs::get(t, &jid)?;
+            jobs::set_planned(t, &job, 1200, "operator")?;
+            assert!(jobs::start(t, &jid, "machine", Some(1))?);
+            jobs::get(t, &jid)
+        })
+        .await
+        .unwrap();
+    let running = td.get(&path).await.ok().clone();
+    assert_eq!(running["job"]["state"], "running");
+    let expected = chrono::DateTime::parse_from_rfc3339(started.started_at.as_ref().unwrap())
+        .unwrap()
+        + chrono::Duration::seconds(1200);
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(running["eta_at"].as_str().unwrap()).unwrap(),
+        expected
+    );
+    assert!(running.get("eta_set_by").is_some());
+}
+
+#[tokio::test]
 async fn human_comments_mail_leads_and_replies_reach_inbox() {
     let td = setup().await;
     let id = card(

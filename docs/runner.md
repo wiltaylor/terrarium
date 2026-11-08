@@ -246,6 +246,13 @@ gets only the hook sign.
 A turn that is queued while the agent is `working` waits for the stop hook.
 When the child exits, every queued turn resolves with `DeliveryError::Exited`.
 
+`Runner::list_pending` and `cancel_pending` inspect the same queue under the
+dispatch lock. Only untouched turns are listed or removed. Once dispatch
+takes a turn, cancellation refuses it even if typing has not finished or a
+retry later returns it to the queue. Pending IDs are opaque, unique strings,
+not the numeric IDs of delivery receipts. Cancellation never writes to the
+PTY. Local and remote runner handles expose the same controls.
+
 The runner decides "the prompt is ready" in this order:
 
 1. It calls `Adapter::screen_hint` on the screen. `PromptReady` means ready.
@@ -497,6 +504,8 @@ first connection get the error `unavailable`.
 | `write` | `data` (base64), `person` (bool, optional) | `reply`: `null`. The bytes go to the PTY as keystrokes. This is the attach input. With `person: true` (the terminal, `agent keys`), the input-box watchdog does not flag the text that the write leaves (TER-224). |
 | `resize` | `rows`, `cols` | `reply`: `null`. |
 | `type_turn` | `text` | `reply`: `{"delivery":<id>}`. Later, one `delivery` frame with the same id gives the outcome (below). |
+| `list_pending` | none | An ordered array of `{id, text}` for untouched queued turns. `id` is an opaque string, distinct from the numeric delivery receipt. |
+| `cancel_pending` | `delivery`: the opaque string from `list_pending` | Boolean. `true` removes only that waiting turn and resolves its delivery as `dropped`. `false` means it no longer waits. |
 | `claim_idle_stop` | none | `reply`: `{"claimed":true}` only when idle or waiting with no queued, in-flight, or open turn, or when already claimed. Atomically holds turn dispatch for five seconds. The daemon gates new turns and sends exit keys or kills the harness. A busy runner answers `false`. Older runners answer `method_not_found`, so the daemon skips the idle stop and warns once per launch. |
 | `release_idle_stop` | none | Idempotently release a claim after a failed or lost reply. Queued turns may dispatch again. If the release cannot arrive, the claim expires on its own. |
 | `answer` | `request_id`, `answer` (`{"kind":"allow"}`, `{"kind":"deny"}`, `{"kind":"choice","value":2}`) | `reply`: `null`. As `Runner::answer`. |
