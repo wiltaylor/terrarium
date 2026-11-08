@@ -370,9 +370,7 @@ async fn runs(state: &Shared, id: AgentId) -> bool {
 /// new session (`crate::reset`) starts it with no resume instead. See the
 /// module doc for the agents that do not wake.
 pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
-    let Some(_guard) = WakeGuard::take(&state.lifecycle, id) else {
-        return Woke::Busy;
-    };
+    let wake_guard = WakeGuard::take(&state.lifecycle, id);
     let key = id.to_string();
     let read = state
         .db
@@ -403,7 +401,14 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
     }
     if runs(state, id).await {
         deliver_turns(state, id).await;
-        return Woke::Running;
+        return if wake_guard.is_some() {
+            Woke::Running
+        } else {
+            Woke::Busy
+        };
+    }
+    if wake_guard.is_none() {
+        return Woke::Busy;
     }
     if state.self_update.draining() {
         return Woke::Draining;
@@ -585,11 +590,7 @@ async fn idle_stop(state: &Shared, id: AgentId) {
     guard(&state.lifecycle.resting).remove(&id);
     state.lifecycle.expect_stop(id, REASON_IDLE);
     info!(agent = %id, "the agent rested for its idle stop; stopping it");
-    if let Err(e) = state
-        .supervisor
-        .stop_by(id, terrarium_runner::StoppedBy::Operator)
-        .await
-    {
+    if let Err(e) = state.supervisor.stop_idle(id).await {
         state.lifecycle.forget_stop(id);
         debug!(agent = %id, "the idle stop did not stop the agent: {e}");
     }

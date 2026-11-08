@@ -922,6 +922,9 @@ struct Slot {
     /// Bumped by every `start` and `stop`, so a stale task does nothing.
     epoch: u64,
     stop_requested: bool,
+    idle_stop_warned: bool,
+    /// Serialize stop claims, including a refused remote idle claim.
+    stop_lock: Arc<tokio::sync::Mutex<()>>,
     restart_requested: bool,
     restarts: VecDeque<Instant>,
     /// The session this launch resumes.
@@ -939,6 +942,8 @@ struct Slot {
     recap: Option<String>,
     pointer: Pointer,
     pointer_busy: bool,
+    /// Deliveries reserved under `slots`, including turns not yet typed.
+    turns_in_flight: usize,
     /// Turns that came before the first idle of a launch (for example the
     /// queued turns of a wake, PLAN §18). They go out at the first idle,
     /// after the recap turn. A stop before then keeps them for the next
@@ -978,6 +983,21 @@ struct Compacting {
 }
 
 impl Slot {
+    fn can_idle_stop(&self) -> bool {
+        !self.stop_requested
+            && self.seen.is_resting()
+            && self
+                .runner
+                .as_ref()
+                .is_some_and(|r| r.status().is_resting())
+            && self.turns_in_flight == 0
+            && self.turns.is_empty()
+            && self.recap.is_none()
+            && self.pointer.is_empty()
+            && !self.pointer_busy
+            && self.compacting.is_none()
+    }
+
     fn new(agent: Agent) -> Self {
         Self {
             agent,
@@ -986,6 +1006,8 @@ impl Slot {
             phase: Phase::Down(AgentStatus::Stopped),
             epoch: 0,
             stop_requested: false,
+            idle_stop_warned: false,
+            stop_lock: Arc::default(),
             restart_requested: false,
             restarts: VecDeque::new(),
             resume: None,
@@ -995,6 +1017,7 @@ impl Slot {
             recap: None,
             pointer: Pointer::default(),
             pointer_busy: false,
+            turns_in_flight: 0,
             turns: Vec::new(),
             harness_version: None,
             account: None,
@@ -2659,12 +2682,12 @@ impl RunnerSupervisor {
         if self.held(id).is_some() {
             return;
         }
-        let (recap, turns, runner) = {
+        let (recap, turns, runner, epoch) = {
             let mut slots = lock(&self.inner.slots);
             let Some(slot) = slots.get_mut(&id) else {
                 return;
             };
-            if slot.compacting.is_some() || slot.reset_gate {
+            if slot.stop_requested || slot.compacting.is_some() || slot.reset_gate {
                 return;
             }
             let Some(runner) = slot.runner.clone() else {
@@ -2684,7 +2707,15 @@ impl RunnerSupervisor {
             if slot.reached_idle && !self.stream_take(id, sub.as_deref()) {
                 return;
             }
-            (slot.recap.take(), std::mem::take(&mut slot.turns), runner)
+            if slot.recap.is_some() || !slot.turns.is_empty() {
+                slot.turns_in_flight += 1;
+            }
+            (
+                slot.recap.take(),
+                std::mem::take(&mut slot.turns),
+                runner,
+                slot.epoch,
+            )
         };
         if recap.is_none() && turns.is_empty() {
             self.maybe_push(id);
@@ -2707,15 +2738,31 @@ impl RunnerSupervisor {
                 }
                 None => None,
             };
-            for text in turns {
-                type_detached(id, &runner, text);
-            }
+            let deliveries: Vec<_> = turns
+                .into_iter()
+                .map(|text| runner.type_turn(text))
+                .collect();
             if let Some(delivery) = recap
                 && let Err(e) = delivery.wait().await
             {
                 warn!(agent = %id, "the recap turn was not delivered: {e}");
             }
+            for delivery in deliveries {
+                if let Err(e) = delivery.wait().await {
+                    debug!(agent = %id, "a turn was not delivered: {e}");
+                }
+            }
+            me.finish_turn_delivery(id, epoch);
         });
+    }
+
+    fn finish_turn_delivery(&self, id: AgentId, epoch: u64) {
+        if let Some(slot) = lock(&self.inner.slots)
+            .get_mut(&id)
+            .filter(|s| s.epoch == epoch)
+        {
+            slot.turns_in_flight -= 1;
+        }
     }
 
     /// End the compaction of `id` (`token`: only that compaction; `None`:
@@ -3008,6 +3055,8 @@ impl RunnerSupervisor {
         }
         slot.epoch += 1;
         slot.stop_requested = false;
+        slot.idle_stop_warned = false;
+        slot.turns_in_flight = 0;
         slot.restart_requested = false;
         slot.restarts.clear();
         slot.resume = resume;
@@ -3201,7 +3250,8 @@ impl RunnerSupervisor {
             let Some(runner) = slot.runner.clone() else {
                 return;
             };
-            if slot.pointer_busy
+            if slot.stop_requested
+                || slot.pointer_busy
                 || slot.pointer.is_empty()
                 || slot.recap.is_some()
                 || slot.compacting.is_some()
@@ -3910,16 +3960,6 @@ fn migrate_all(state_dir: &Path) {
     }
 }
 
-/// Queue `text` on the runner and log a failed delivery.
-fn type_detached(agent: AgentId, runner: &Arc<dyn RunnerHandle>, text: String) {
-    let delivery = runner.type_turn(text);
-    tokio::spawn(async move {
-        if let Err(e) = delivery.wait().await {
-            debug!(agent = %agent, "a turn was not delivered: {e}");
-        }
-    });
-}
-
 /// The recap turn of a new session after a prompt change, for an agent
 /// with questions. The questions follow it ([`crate::store::questions::recap`]).
 const PROMPT_CHANGED_RECAP: &str = "Terrarium started you in a new session, because your system \
@@ -3974,6 +4014,113 @@ fn one_line(s: &str) -> String {
         out.push('…');
     }
     out
+}
+
+impl RunnerSupervisor {
+    fn stop_with(
+        &self,
+        agent: AgentId,
+        by: StoppedBy,
+        idle: bool,
+    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        Box::pin(async move {
+            let stop_lock = lock(&self.inner.slots)
+                .get(&agent)
+                .ok_or(SupervisorError::NotRunning(agent))?
+                .stop_lock
+                .clone();
+            let _stop = stop_lock.lock().await;
+            let (runner, def) = {
+                let mut slots = lock(&self.inner.slots);
+                let slot = slots
+                    .get_mut(&agent)
+                    .filter(|s| s.live())
+                    .ok_or(SupervisorError::NotRunning(agent))?;
+                if idle
+                    && (!slot.can_idle_stop()
+                        || lock(&self.inner.holds)
+                            .get(&agent)
+                            .is_some_and(|h| !h.waiting.is_empty()))
+                {
+                    return Err(SupervisorError::NotReady(
+                        "the agent has work; no idle stop".into(),
+                    ));
+                }
+                if slot.stop_requested && slot.runner.is_some() {
+                    return Ok(());
+                }
+                slot.stop_requested = true;
+                let def = slot.agent.clone();
+                match slot.runner.clone() {
+                    Some(r) => (Some(r), def),
+                    None => {
+                        slot.epoch += 1;
+                        slot.phase = Phase::Down(AgentStatus::Stopped);
+                        (None, def)
+                    }
+                }
+            };
+            let harness = def.harness;
+            let Some(r) = runner else {
+                lock(&self.inner.ssh_agents).remove(&agent);
+                self.emit_status(agent, AgentStatus::Stopped, "stopped");
+                self.targets_down(&def);
+                return Ok(());
+            };
+            if idle {
+                // The cached remote status can lag its delivery reply.
+                // Claim against the runner's real queue and turn state too.
+                let claimed = tokio::time::timeout(Duration::from_secs(5), r.claim_idle_stop())
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(terrarium_runner::RunnerError::Other(
+                            "idle-stop claim timed out".into(),
+                        ))
+                    });
+                if !matches!(claimed, Ok(true)) {
+                    if let Err(e) = &claimed {
+                        if matches!(e, terrarium_runner::RunnerError::Control(e) if e.code == "method_not_found")
+                        {
+                            if let Some(slot) = lock(&self.inner.slots).get_mut(&agent)
+                                && !slot.idle_stop_warned
+                            {
+                                slot.idle_stop_warned = true;
+                                warn!(agent = %agent, "runner too old for atomic idle stops; restart it to enable idle stops");
+                            }
+                        } else {
+                            // The claim may have applied before its reply
+                            // was lost. Release it, with expiry as a fallback.
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(5), r.release_idle_stop())
+                                    .await;
+                        }
+                    }
+                    if let Some(slot) = lock(&self.inner.slots).get_mut(&agent) {
+                        slot.stop_requested = false;
+                    }
+                    // These paths deferred their hand-over while the
+                    // claim RPC held the stop flag. No new idle event is
+                    // guaranteed after a refusal, so resume them now.
+                    self.deliver_pending(agent);
+                    if let Some(state) = self.state() {
+                        tokio::spawn(async move {
+                            crate::lifecycle::wake(&state, agent, "idle_stop_refused").await;
+                        });
+                    }
+                    return match claimed {
+                        Err(e) => Err(other(e)),
+                        _ => Err(SupervisorError::NotReady(
+                            "the runner has work; no idle stop".into(),
+                        )),
+                    };
+                }
+            }
+            if let Err(e) = r.set_stopped_by(by).await {
+                debug!(agent = %agent, "cannot record the stop reason: {e}");
+            }
+            self.exit_gracefully(agent, r, harness).await
+        })
+    }
 }
 
 impl Supervisor for RunnerSupervisor {
@@ -4076,48 +4223,11 @@ impl Supervisor for RunnerSupervisor {
     }
 
     fn stop_by(&self, agent: AgentId, by: StoppedBy) -> BoxFuture<'_, Result<(), SupervisorError>> {
-        Box::pin(async move {
-            let (runner, def) = {
-                let mut slots = lock(&self.inner.slots);
-                let slot = slots
-                    .get_mut(&agent)
-                    .filter(|s| s.live())
-                    .ok_or(SupervisorError::NotRunning(agent))?;
-                // A stop is on the way already (for example `agent stop`,
-                // then `agent rm --confirm`, which stops again): it types
-                // the exit keys and kills on a timeout. A second set of
-                // keys in its exit-key pause gave Codex `/exit/exit`.
-                if slot.stop_requested && slot.runner.is_some() {
-                    return Ok(());
-                }
-                slot.stop_requested = true;
-                let def = slot.agent.clone();
-                match slot.runner.clone() {
-                    Some(r) => (Some(r), def),
-                    None => {
-                        // Waiting for a restart: cancel it.
-                        slot.epoch += 1;
-                        slot.phase = Phase::Down(AgentStatus::Stopped);
-                        (None, def)
-                    }
-                }
-            };
-            let harness = def.harness;
-            let Some(r) = runner else {
-                lock(&self.inner.ssh_agents).remove(&agent);
-                self.emit_status(agent, AgentStatus::Stopped, "stopped");
-                self.targets_down(&def);
-                return Ok(());
-            };
-            // `runner-exit.json` records the stop and who asked for it
-            // (the operator, or an agent), so a daemon that starts before
-            // this one sees the exit does not launch the agent again.
-            if let Err(e) = r.set_stopped_by(by).await {
-                debug!(agent = %agent, "cannot record the stop reason: {e}");
-            }
-            // A graceful stop.
-            self.exit_gracefully(agent, r, harness).await
-        })
+        self.stop_with(agent, by, false)
+    }
+
+    fn stop_idle(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        self.stop_with(agent, StoppedBy::Operator, true)
     }
 
     fn clear_error(&self, agent: AgentId) -> BoxFuture<'_, ()> {
@@ -4197,8 +4307,15 @@ impl Supervisor for RunnerSupervisor {
             }
             // Before the first idle of the launch: the turn goes after the
             // recap turn. During a compaction: after its end.
-            {
+            let epoch = {
                 let mut slots = lock(&self.inner.slots);
+                let slot = slots
+                    .get_mut(&agent)
+                    .ok_or(SupervisorError::NotRunning(agent))?;
+                if slot.stop_requested {
+                    // The API persists NotRunning turns for the next wake.
+                    return Err(SupervisorError::NotRunning(agent));
+                }
                 if let Some(slot) = slots
                     .get_mut(&agent)
                     .filter(|s| !s.reached_idle || s.compacting.is_some() || s.reset_gate)
@@ -4215,9 +4332,20 @@ impl Supervisor for RunnerSupervisor {
                         slot.turns.push(text);
                         return Ok(());
                     }
+                    slot.turns_in_flight += 1;
+                    slot.epoch
+                } else {
+                    return Err(SupervisorError::NotRunning(agent));
                 }
-            }
-            type_detached(agent, &runner, text);
+            };
+            let delivery = runner.type_turn(text);
+            let me = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = delivery.wait().await {
+                    debug!(agent = %agent, "a turn was not delivered: {e}");
+                }
+                me.finish_turn_delivery(agent, epoch);
+            });
             Ok(())
         })
     }
@@ -4620,10 +4748,18 @@ impl Supervisor for RunnerSupervisor {
     ) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(async move {
             let Some(hold) = hold else {
-                let Some(held) = lock(&self.inner.holds).remove(&agent) else {
-                    return Ok(());
+                let (held, runner) = {
+                    let mut slots = lock(&self.inner.slots);
+                    let Some(held) = lock(&self.inner.holds).remove(&agent) else {
+                        return Ok(());
+                    };
+                    let runner = slots.get(&agent).and_then(|s| s.runner.clone());
+                    if let Some(slot) = slots.get_mut(&agent).filter(|_| runner.is_some()) {
+                        slot.turns.extend(held.waiting.iter().cloned());
+                    }
+                    (held, runner)
                 };
-                let Some(runner) = self.runner(agent) else {
+                let Some(runner) = runner else {
                     if !held.waiting.is_empty() {
                         warn!(
                             agent = %agent,
@@ -4636,15 +4772,6 @@ impl Supervisor for RunnerSupervisor {
                 info!(agent = %agent, turns = held.waiting.len(), "the quota hold ended");
                 if runner.status() == AgentStatus::Idle {
                     self.emit_status(agent, AgentStatus::Idle, "quota hold ended");
-                }
-                let sub = self.stream_sub(agent);
-                if held.waiting.is_empty() || self.stream_take(agent, sub.as_deref()) {
-                    for text in held.waiting {
-                        type_detached(agent, &runner, text);
-                    }
-                } else if let Some(slot) = lock(&self.inner.slots).get_mut(&agent) {
-                    // No free stream: the turns wait for one.
-                    slot.turns.extend(held.waiting);
                 }
                 self.deliver_pending(agent);
                 return Ok(());
@@ -5034,6 +5161,181 @@ fn is_terminal_report(bytes: &[u8]) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    struct ClaimRunner {
+        id: AgentId,
+        entered: tokio::sync::Notify,
+        reply: tokio::sync::Notify,
+        lost: bool,
+        claimed: AtomicBool,
+        typed: Mutex<Vec<String>>,
+        typed_ready: tokio::sync::Notify,
+    }
+
+    impl RunnerHandle for ClaimRunner {
+        fn agent(&self) -> AgentId {
+            self.id
+        }
+        fn socket_path(&self) -> &Path {
+            Path::new("unused")
+        }
+        fn events_path(&self) -> &Path {
+            Path::new("unused")
+        }
+        fn status(&self) -> AgentStatus {
+            AgentStatus::Idle
+        }
+        fn watch_status(&self) -> watch::Receiver<AgentStatus> {
+            watch::channel(AgentStatus::Idle).1
+        }
+        fn subscribe_events(&self) -> broadcast::Receiver<terrarium_core::EventRecord> {
+            broadcast::channel(1).1
+        }
+        fn screen(
+            &self,
+        ) -> BoxFuture<'_, terrarium_runner::Result<terrarium_runner::ScreenSnapshot>> {
+            panic!("unused")
+        }
+        fn attach(
+            &self,
+        ) -> BoxFuture<
+            '_,
+            terrarium_runner::Result<(
+                terrarium_runner::ScreenSnapshot,
+                terrarium_runner::AttachStream,
+            )>,
+        > {
+            panic!("unused")
+        }
+        fn write<'a>(&'a self, _: &'a [u8]) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn write_person<'a>(&'a self, _: &'a [u8]) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn resize(&self, _: u16, _: u16) -> BoxFuture<'_, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn answer<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a terrarium_core::Answer,
+        ) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn answer_keys<'a>(&'a self, _: &'a str) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn interrupt(&self) -> BoxFuture<'_, terrarium_runner::Result<bool>> {
+            panic!("unused")
+        }
+        fn kill(&self) -> BoxFuture<'_, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn wait(&self) -> BoxFuture<'_, terrarium_runner::ExitStatus> {
+            panic!("unused")
+        }
+        fn type_turn(&self, text: String) -> terrarium_runner::Delivery {
+            assert!(!self.claimed.load(Ordering::SeqCst));
+            lock(&self.typed).push(text);
+            self.typed_ready.notify_one();
+            terrarium_runner::test_support::delivered_turn()
+        }
+        fn claim_idle_stop(&self) -> BoxFuture<'_, terrarium_runner::Result<bool>> {
+            Box::pin(async move {
+                self.claimed.store(self.lost, Ordering::SeqCst);
+                self.entered.notify_one();
+                self.reply.notified().await;
+                if self.lost {
+                    Err(terrarium_runner::RunnerError::Disconnected)
+                } else {
+                    Ok(false)
+                }
+            })
+        }
+        fn release_idle_stop(&self) -> BoxFuture<'_, terrarium_runner::Result<()>> {
+            Box::pin(async move {
+                self.claimed.store(false, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_stop_claim_rpc_keeps_a_turn_retryable_on_refusal_and_lost_reply() {
+        for (lost, timeout, pointer) in [
+            (false, false, false),
+            (true, false, false),
+            (true, true, false),
+            (false, false, true),
+            (true, false, true),
+            (true, true, true),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+                tmp.path().join("state"),
+                tmp.path().join("run"),
+                tmp.path().join("prompts"),
+                SandboxConfig::default(),
+                HashMap::new(),
+            ));
+            let agent: Agent = serde_json::from_value(serde_json::json!({
+                "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
+            })).unwrap();
+            let id = agent.id;
+            let runner = Arc::new(ClaimRunner {
+                id,
+                entered: tokio::sync::Notify::new(),
+                reply: tokio::sync::Notify::new(),
+                lost,
+                claimed: AtomicBool::new(false),
+                typed: Mutex::default(),
+                typed_ready: tokio::sync::Notify::new(),
+            });
+            let mut slot = Slot::new(agent);
+            slot.runner = Some(runner.clone());
+            slot.seen = AgentStatus::Idle;
+            slot.reached_idle = true;
+            lock(&sup.inner.slots).insert(id, slot);
+            let stop = tokio::spawn({
+                let sup = sup.clone();
+                async move { sup.stop_idle(id).await }
+            });
+            runner.entered.notified().await;
+            // NotRunning is the API's durable-queue signal, not a 400.
+            assert!(matches!(
+                sup.send_turn(id, "queued turn".into()).await,
+                Err(SupervisorError::NotRunning(_))
+            ));
+            if pointer {
+                sup.lease_granted(id, "box".into(), "lease".into());
+            } else {
+                lock(&sup.inner.slots)
+                    .get_mut(&id)
+                    .unwrap()
+                    .turns
+                    .push("pending hand-over".into());
+                sup.deliver_pending(id);
+            }
+            assert!(lock(&runner.typed).is_empty());
+            if !timeout {
+                runner.reply.notify_one();
+            }
+            assert!(stop.await.unwrap().is_err());
+            tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified())
+                .await
+                .unwrap();
+            let pending = lock(&runner.typed)[0].clone();
+            if pointer {
+                assert!(pending.contains("box"), "{pending}");
+            } else {
+                assert_eq!(pending, "pending hand-over");
+            }
+            sup.send_turn(id, "queued turn".into()).await.unwrap();
+            assert_eq!(lock(&runner.typed)[1], "queued turn");
+            assert!(!runner.claimed.load(Ordering::SeqCst));
+        }
+    }
 
     /// TER-213: idle arrives while the completed delivery still owns busy.
     #[tokio::test]

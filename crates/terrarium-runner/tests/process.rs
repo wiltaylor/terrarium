@@ -227,6 +227,48 @@ fn seqs(path: &Path) -> Vec<u64> {
 }
 
 #[tokio::test]
+async fn idle_stop_claim_uses_the_remote_turn_state() {
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    r.type_turn("/hold".into()).wait().await.expect("delivered");
+    assert!(!r.claim_idle_stop().await.expect("claim"));
+    r.kill().await.expect("kill");
+    r.wait().await;
+
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    assert!(r.claim_idle_stop().await.expect("idle claim"));
+    assert!(r.claim_idle_stop().await.expect("idempotent retry"));
+    let delivery = r.type_turn("after release".into());
+    r.release_idle_stop().await.expect("release");
+    delivery.wait().await.expect("released claim delivers");
+    r.kill().await.expect("kill");
+    r.wait().await;
+}
+
+#[tokio::test]
+async fn idle_stop_claim_expires_when_a_daemon_disconnects_after_claiming() {
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    assert!(r.claim_idle_stop().await.expect("claim applied"));
+    drop(events);
+    drop(r);
+    let r = env.connect(None).await;
+    timeout(wait(), r.type_turn("after lost claim reply".into()).wait())
+        .await
+        .expect("claim expired")
+        .expect("delivered");
+    r.kill().await.expect("kill");
+    r.wait().await;
+}
+
+#[tokio::test]
 async fn the_runner_process_survives_a_daemon_disconnect() {
     let env = Env::new();
     let first = env.spawn().await;
