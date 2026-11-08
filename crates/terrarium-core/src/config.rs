@@ -5,6 +5,7 @@
 //! `targets/`, and `subscriptions/` directories. When a file has no `name`,
 //! the file stem is the name.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};

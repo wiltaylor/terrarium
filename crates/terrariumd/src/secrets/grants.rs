@@ -113,7 +113,9 @@ impl Grantee {
     /// The project of the grantee.
     pub fn project(&self) -> &str {
         match self {
-            Self::Agent { project, .. } | Self::Project(project) | Self::Delivery(project) => project,
+            Self::Agent { project, .. } | Self::Project(project) | Self::Delivery(project) => {
+                project
+            }
         }
     }
 
@@ -149,7 +151,10 @@ pub fn parse_grantee(conn: &Connection, s: &str) -> ApiResult<Grantee> {
             name: v.agent.name,
         });
     }
-    if let Some(p) = s.strip_prefix("project:").or_else(|| s.strip_prefix("delivery:")) {
+    if let Some(p) = s
+        .strip_prefix("project:")
+        .or_else(|| s.strip_prefix("delivery:"))
+    {
         if p.is_empty() || p == GLOBAL {
             return Err(bad());
         }
@@ -498,7 +503,9 @@ pub fn put(conn: &Connection, secret: &SecretInfo, g: &NewGrant<'_>) -> ApiResul
     check_reach(secret, g.grantee)?;
     let level = g.level.unwrap_or_else(|| Level::default_for(secret.kind));
     if matches!(g.grantee, Grantee::Delivery(_)) && (level != Level::Run || g.env.is_some()) {
-        return Err(ApiError::invalid("a delivery grant requires level run, named targets, and no startup env"));
+        return Err(ApiError::invalid(
+            "a delivery grant requires level run, named targets, and no startup env",
+        ));
     }
     if let Some(env) = g.env {
         if level != Level::Read {
@@ -647,7 +654,12 @@ pub struct Effective {
 /// The effective grants of the agent `agent_id` of `project`: one entry
 /// for each secret, the project secrets first, then by name.
 pub fn effective(conn: &Connection, agent_id: &str, project: &str) -> ApiResult<Vec<Effective>> {
-    effective_keys(conn, &format!("agent:{agent_id}"), &format!("project:{project}"), project)
+    effective_keys(
+        conn,
+        &format!("agent:{agent_id}"),
+        &format!("project:{project}"),
+        project,
+    )
 }
 
 /// Grants available only to merge recipes, never to workers or brokers.
@@ -656,7 +668,12 @@ pub fn delivery_effective(conn: &Connection, project: &str) -> ApiResult<Vec<Eff
     effective_keys(conn, &principal, &principal, project)
 }
 
-fn effective_keys(conn: &Connection, agent_key: &str, project_key: &str, project: &str) -> ApiResult<Vec<Effective>> {
+fn effective_keys(
+    conn: &Connection,
+    agent_key: &str,
+    project_key: &str,
+    project: &str,
+) -> ApiResult<Vec<Effective>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {cols}, g.grantee, g.level, g.env, g.targets
          FROM secret_grants g JOIN secrets s ON s.id = g.secret_id

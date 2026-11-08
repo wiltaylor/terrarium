@@ -1911,7 +1911,10 @@ async fn steps(
         }
     }
     let injected = merge_secrets(x.state, job, delivery).await?;
-    let own: Vec<_> = injected.iter().map(|i| (i.label(), i.value.clone())).collect();
+    let own: Vec<_> = injected
+        .iter()
+        .map(|i| (i.label(), i.value.clone()))
+        .collect();
     let mut env = recipe_env(job, x.dir, &head, base);
     for i in &injected {
         env.insert(i.env.clone(), i.value.to_string());
@@ -1924,7 +1927,11 @@ async fn steps(
         argv: vec![
             "sh".into(),
             "-c".into(),
-            if has_secrets { script } else { logged_recipe(script, &log) },
+            if has_secrets {
+                script
+            } else {
+                logged_recipe(script, &log)
+            },
         ],
         cwd: Some(x.dir.to_owned()),
         env,
@@ -2050,23 +2057,34 @@ async fn merge_secrets(
     let project = job.project.clone();
     let target = delivery.target.clone().unwrap_or_default();
     let proxy_on = state.git_proxy.is_on();
-    let injected = state.db.read(move |c| {
-        let use_only = crate::git_proxy::use_only_secrets(c, proxy_on)?;
-        secrets::run_env::resolve_delivery(c, &key, &project, &target, &refs, &use_only)
-    }).await?;
-    let audits: Vec<_> = injected.iter().map(|i| (
-        format!("{}/{}", i.scope, i.name),
-        serde_json::json!({"job": job.id, "project": job.project,
+    let injected = state
+        .db
+        .read(move |c| {
+            let use_only = crate::git_proxy::use_only_secrets(c, proxy_on)?;
+            secrets::run_env::resolve_delivery(c, &key, &project, &target, &refs, &use_only)
+        })
+        .await?;
+    let audits: Vec<_> = injected
+        .iter()
+        .map(|i| {
+            (
+                format!("{}/{}", i.scope, i.name),
+                serde_json::json!({"job": job.id, "project": job.project,
             "target": delivery.target, "field": i.field, "env": i.env,
             "principal": format!("delivery:{}", job.project), "level": "run"}),
-    )).collect();
+            )
+        })
+        .collect();
     let project = job.project.clone();
-    state.db.write("system", move |t| {
-        for (object, detail) in audits {
-            t.audit("secret.run", &object, Some(&project), detail)?;
-        }
-        Ok(())
-    }).await?;
+    state
+        .db
+        .write("system", move |t| {
+            for (object, detail) in audits {
+                t.audit("secret.run", &object, Some(&project), detail)?;
+            }
+            Ok(())
+        })
+        .await?;
     Ok(injected)
 }
 
@@ -2076,7 +2094,9 @@ fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
     }
     let refs = secrets::run_env::parse_refs(&delivery.merge_secrets)?;
     if refs.len() != delivery.merge_secrets.len() {
-        return Err(ApiError::invalid("merge_secrets accepts only @secret references"));
+        return Err(ApiError::invalid(
+            "merge_secrets accepts only @secret references",
+        ));
     }
     Ok(())
 }

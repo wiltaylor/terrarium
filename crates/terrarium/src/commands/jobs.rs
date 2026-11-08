@@ -271,7 +271,9 @@ fn merged(cur: &Value, a: &DeliverySetArgs) -> anyhow::Result<Value> {
     if a.clear_merge_secrets || !a.merge_secrets.is_empty() {
         let mut refs = serde_json::Map::new();
         for entry in &a.merge_secrets {
-            let (name, reference) = entry.split_once('=').ok_or_else(|| anyhow::anyhow!("--merge-secret needs NAME=@secret:name[.field]"))?;
+            let (name, reference) = entry
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("--merge-secret needs NAME=@secret:name[.field]"))?;
             if name.is_empty() || !reference.starts_with("@secret:") {
                 anyhow::bail!("--merge-secret needs NAME=@secret:name[.field]");
             }

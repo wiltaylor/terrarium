@@ -125,7 +125,9 @@ pub fn resolve(
     refs: &[Ref],
     use_only: &HashSet<(String, String)>,
 ) -> ApiResult<Vec<Injected>> {
-    resolve_with(conn, key, target, refs, use_only, |name| grants::find(conn, agent_id, project, name))
+    resolve_with(conn, key, target, refs, use_only, |name| {
+        grants::find(conn, agent_id, project, name)
+    })
 }
 
 /// Resolve only delivery grants. Agent and project grants cannot authorize a job.
@@ -141,7 +143,9 @@ pub fn resolve_delivery(
     resolve_with(conn, key, target, refs, use_only, |name| {
         let found = all.iter().find(|e| e.name == name).cloned();
         if found.as_ref().is_some_and(|e| e.level != Level::Run) {
-            return Err(ApiError::forbidden("delivery secrets require a target-limited run grant"));
+            return Err(ApiError::forbidden(
+                "delivery secrets require a target-limited run grant",
+            ));
         }
         Ok(found)
     })
@@ -290,7 +294,14 @@ mod tests {
     fn delivery_grants_are_isolated_from_workers_and_other_projects() {
         let c = db();
         let k = MasterKey::generate();
-        let s = secret(&c, &k, "p", "deploy", Kind::ApiKey, json!({"fields":{"value":VALUE}}));
+        let s = secret(
+            &c,
+            &k,
+            "p",
+            "deploy",
+            Kind::ApiKey,
+            json!({"fields":{"value":VALUE}}),
+        );
         let refs = parse_refs(&env(&[("KEY", "@secret:deploy")])).unwrap();
         let none = HashSet::new();
         grant_run(&c, &s, "delivery:p", &["box"]).unwrap();

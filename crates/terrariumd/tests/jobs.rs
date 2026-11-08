@@ -2211,6 +2211,39 @@ async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
     jobs.into_iter().find(|j| j["card"] == id.as_str()).unwrap()
 }
 
+#[tokio::test]
+async fn delivery_secrets_reach_only_merge_recipes_and_are_audited_and_redacted() {
+    let lab = lab(1).await;
+    const SENTINEL: &str = "merge-only-dummy-value-363";
+    lab.td.put("/api/secrets/p/merge-key", json!({"kind":"api_key", "fields":{"value":SENTINEL}})).await.ok();
+    lab.td.post("/api/secrets/p/merge-key/grants", json!({"grantee":"delivery:p", "level":"run", "targets":["p-box"]})).await.ok();
+    let config = json!({"target":"p-box", "recipe":"if [ \"$TERRARIUM_JOB_KIND\" = merge ]; then test -n \"$MERGE_KEY\" && printf '%s\\n' \"$MERGE_KEY\"; else test -z \"${MERGE_KEY:-}\"; fi", "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs").display().to_string(), "merge_secrets":{"MERGE_KEY":"@secret:merge-key"}});
+    lab.td.put("/api/projects/p/delivery", config.clone()).await.ok();
+    let head = lab.branch("secret-check", "next", &[("OK", "yes\n")]);
+    let validated = validate_card(&lab, "secret-check", &head).await;
+    assert_eq!(validated["state"], "passed", "{validated:#}");
+    let card = lab.card("secret merge", "secret-check").await;
+    lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({})).await.ok();
+    let jobs = lab.until_idle().await;
+    let merged = jobs.iter().find(|j| j["card"] == card).unwrap();
+    assert_eq!(merged["state"], "passed", "{merged:#}");
+    let detail = lab.td.get(&format!("/api/jobs/{}", merged["id"].as_str().unwrap())).await;
+    let text = detail.ok().to_string();
+    assert!(!text.contains(SENTINEL), "{text}");
+    assert!(text.contains("[secret:run/p/merge-key]"), "{text}");
+    let audit = lab.td.get("/api/audit?action=secret.run").await;
+    let text = audit.ok().to_string();
+    assert!(text.contains("delivery:p"), "{text}");
+    assert!(!text.contains(SENTINEL));
+    // Revocation is checked at the next recipe, not cached in delivery config.
+    lab.td.delete("/api/secrets/p/merge-key/grants?grantee=delivery:p").await.ok();
+    lab.branch("secret-revoked", "next", &[("OK", "yes\n")]);
+    let card = lab.card("revoked merge", "secret-revoked").await;
+    lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({})).await.ok();
+    let jobs = lab.until_idle().await;
+    assert_ne!(jobs.iter().find(|j| j["card"] == card).unwrap()["state"], "passed");
+}
+
 /// Review B1: the recipe commits in its clone and moves HEAD. The push
 /// sends the merge commit that the prepare step recorded, never the
 /// recipe's commit.
