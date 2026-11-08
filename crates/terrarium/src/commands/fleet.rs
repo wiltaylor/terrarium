@@ -473,15 +473,22 @@ warning: prompts: cannot check prompt template `x`
         });
         let (r, out, _) = run(&["fleet", "plan", "-"], vec![(200, reply.clone())]).await;
         r.unwrap();
-        assert_eq!(out, "\
+        assert_eq!(
+            out,
+            "\
 fleet t: 1 to create, 0 to update, 0 to delete, 0 unchanged
 
   + project      p
       description: (none) -> \"Project p\"
       delivery: (none) -> {\"recipe\":\"sh -c 'just build && just test'\",\"target\":\"build-box\"}
-");
+"
+        );
 
-        let (r, out, _) = run(&["--json", "fleet", "plan", "-"], vec![(200, reply.clone())]).await;
+        let (r, out, _) = run(
+            &["--json", "fleet", "plan", "-"],
+            vec![(200, reply.clone())],
+        )
+        .await;
         r.unwrap();
         assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), reply);
     }
