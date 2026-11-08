@@ -2488,6 +2488,24 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (owner, href)
     );
     "#,
+    // 94: host resource budgets and durable FIFO reservations (TER-249).
+    // Self-contained: move to the end if another branch takes this number.
+    r#"
+    CREATE TABLE resource_budgets (
+        host TEXT PRIMARY KEY REFERENCES hosts(name) ON DELETE CASCADE,
+        percentage INTEGER NOT NULL CHECK (percentage BETWEEN 0 AND 100),
+        io TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE TABLE reservations (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        host TEXT NOT NULL REFERENCES hosts(name),
+        project TEXT NOT NULL,
+        state TEXT NOT NULL,
+        data TEXT NOT NULL
+    );
+    CREATE INDEX reservations_host_state ON reservations(host, state, seq);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

@@ -1,0 +1,297 @@
+//! Durable resource admission and host FIFO. All changes run inside the
+//! database write transaction. `starting` consumes capacity until enforcement
+//! succeeds, and `ending` consumes it until sessions and limits are cleaned up.
+
+use std::collections::BTreeMap;
+
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use terrarium_core::resources::{Amounts, HostCapacity, IoAmounts};
+
+use crate::db::Tx;
+use crate::error::{ApiError, ApiResult};
+use crate::events::EventDraft;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    Queued,
+    Starting,
+    Active,
+    Ending,
+    Expired,
+    Retracted,
+    Cancelled,
+    TimedOut,
+}
+
+impl State {
+    fn holds_capacity(self) -> bool {
+        matches!(self, Self::Starting | Self::Active | Self::Ending)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Queued => "queued", Self::Starting => "starting", Self::Active => "active",
+            Self::Ending => "ending", Self::Expired => "expired", Self::Retracted => "retracted",
+            Self::Cancelled => "cancelled", Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum Holder {
+    Agent(String),
+    Target(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reservation {
+    pub id: String,
+    pub host: String,
+    pub project: String,
+    pub holder: Holder,
+    /// The project target through which the holder uses this host.
+    pub target: String,
+    pub amounts: Amounts,
+    pub exclusive: bool,
+    pub cores: Vec<u32>,
+    pub reason: String,
+    pub granted_by: String,
+    pub created_at: i64,
+    pub start: Option<i64>,
+    pub until: Option<i64>,
+    pub duration_ms: i64,
+    pub queue_until: Option<i64>,
+    pub state: State,
+    pub end_state: Option<State>,
+    pub warned_15: bool,
+    pub warned_5: bool,
+}
+
+/// Already-authorized request. The API resolves agent/target IDs and checks
+/// lease permissions before calling the store.
+pub struct Request {
+    pub host: String,
+    pub project: String,
+    pub holder: Holder,
+    pub target: String,
+    pub amounts: Amounts,
+    pub exclusive: bool,
+    pub reason: String,
+    pub duration_ms: i64,
+    pub queue_ms: Option<i64>,
+}
+
+pub fn list(conn: &Connection, host: &str) -> ApiResult<Vec<Reservation>> {
+    let mut stmt = conn.prepare("SELECT data FROM reservations WHERE host=?1 ORDER BY seq")?;
+    let rows = stmt.query_map([host], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter().map(|s| serde_json::from_str(&s)
+        .map_err(|e| ApiError::internal(format!("invalid stored reservation: {e}")))).collect()
+}
+
+pub fn get(conn: &Connection, id: &str) -> ApiResult<Reservation> {
+    let data: Option<String> = conn.query_row("SELECT data FROM reservations WHERE id=?1", [id], |r| r.get(0)).optional()?;
+    serde_json::from_str(&data.ok_or_else(|| ApiError::not_found(format!("no reservation `{id}`")))?)
+        .map_err(|e| ApiError::internal(format!("invalid stored reservation: {e}")))
+}
+
+pub fn capacity(conn: &Connection, host: &str) -> ApiResult<(HostCapacity, Amounts, u8)> {
+    let h = super::hosts::get(conn, host)?;
+    let physical: HostCapacity = serde_json::from_value(h.capabilities.get("capacity").cloned().unwrap_or_default())
+        .map_err(|_| ApiError::conflict(format!("host `{host}` has not reported capacity")))?;
+    let config: Option<(u8, String)> = conn.query_row(
+        "SELECT percentage,io FROM resource_budgets WHERE host=?1", [host], |r| Ok((r.get(0)?, r.get(1)?))
+    ).optional()?;
+    let (percent, io) = config.unwrap_or((0, "{}".into()));
+    let mut amounts = physical.amounts();
+    amounts.io = serde_json::from_str(&io).map_err(|e| ApiError::internal(e.to_string()))?;
+    let budget = amounts.reservable(percent).map_err(ApiError::invalid)?;
+    Ok((physical, budget, percent))
+}
+
+pub fn configure(t: &mut Tx<'_>, host: &str, percentage: u8, io: BTreeMap<String, IoAmounts>) -> ApiResult<()> {
+    super::hosts::get(t, host)?;
+    let amounts = Amounts { io: io.clone(), ..Default::default() };
+    amounts.reservable(percentage).map_err(ApiError::invalid)?;
+    t.execute("INSERT INTO resource_budgets(host,percentage,io) VALUES (?1,?2,?3)
+        ON CONFLICT(host) DO UPDATE SET percentage=excluded.percentage,io=excluded.io",
+        params![host, percentage, serde_json::to_string(&io)?])?;
+    // Changing a budget may prevent new admissions but never kills existing
+    // reservations implicitly. They remain charged until explicitly ended.
+    t.audit("reserve.capacity", host, None, json!({"percentage":percentage,"io":io}))?;
+    Ok(())
+}
+
+fn save(t: &mut Tx<'_>, r: &Reservation, change: &str) -> ApiResult<()> {
+    t.execute("UPDATE reservations SET state=?2,data=?3 WHERE id=?1",
+        params![r.id, r.state.name(), serde_json::to_string(r)?])?;
+    t.audit(&format!("reserve.{change}"), &r.id, Some(&r.project), json!(r))?;
+    let mut event = EventDraft::new("reservation", format!("reservation {} {change} on {}", r.id, r.host), json!({"change":change,"reservation":r}))
+        .project(r.project.clone());
+    if let Holder::Agent(id) = &r.holder {
+        let name = super::agents::display_name(t, id)?.unwrap_or_else(|| id.clone());
+        event = event.agent(id.clone(), name);
+    }
+    t.emit(event)?;
+    Ok(())
+}
+
+fn allocation(conn: &Connection, request: &Reservation, existing: &[Reservation]) -> ApiResult<Vec<u32>> {
+    let (physical, mut remaining, _) = capacity(conn, &request.host)?;
+    let held: Vec<_> = existing.iter().filter(|r| r.id != request.id && r.state.holds_capacity()).collect();
+    let conflict = || ApiError::conflict(format!("reservable capacity on `{}` is exhausted", request.host))
+        .details(json!({"host":request.host,"holders":held.iter().map(|r| json!({"holder":r.holder,"until":r.until,"reservation":r.id})).collect::<Vec<_>>()}));
+    for r in &held {
+        remaining = remaining.remaining_after(&r.amounts).ok_or_else(&conflict)?;
+    }
+    remaining.remaining_after(&request.amounts).ok_or_else(&conflict)?;
+    if !request.exclusive {
+        return Ok(Vec::new());
+    }
+    if request.amounts.cpu_millis == 0 || !request.amounts.cpu_millis.is_multiple_of(1000) {
+        return Err(ApiError::invalid("exclusive CPU reservations need a positive whole number of cores"));
+    }
+    let needed = usize::try_from(request.amounts.cpu_millis / 1000).map_err(|_| conflict())?;
+    let mut available = physical.cpu_ids;
+    available.sort_unstable();
+    available.dedup();
+    available.retain(|cpu| !held.iter().any(|r| r.cores.contains(cpu)));
+    if available.len() < needed {
+        return Err(conflict());
+    }
+    available.truncate(needed);
+    Ok(available)
+}
+
+pub fn request(t: &mut Tx<'_>, req: Request, at: i64) -> ApiResult<Reservation> {
+    req.amounts.validate().map_err(ApiError::invalid)?;
+    if req.amounts.is_empty() || req.duration_ms <= 0 || req.queue_ms.is_some_and(|q| q <= 0) {
+        return Err(ApiError::invalid("give nonzero amounts and positive duration/queue timeout"));
+    }
+    let until = at.checked_add(req.duration_ms).ok_or_else(|| ApiError::invalid("duration overflow"))?;
+    let queue_until = req.queue_ms.map(|q| at.checked_add(q).ok_or_else(|| ApiError::invalid("queue timeout overflow"))).transpose()?;
+    let mut r = Reservation {
+        id: ulid::Ulid::new().to_string(), host: req.host, project: req.project, holder: req.holder,
+        target: req.target, amounts: req.amounts, exclusive: req.exclusive, cores: vec![], reason: req.reason,
+        granted_by: t.actor.clone(), created_at: at, start: Some(at), until: Some(until),
+        duration_ms: req.duration_ms, queue_until, state: State::Starting, end_state: None,
+        warned_15: false, warned_5: false,
+    };
+    // Even queued requests must fit the total budget. Impossible requests
+    // cannot occupy the head and starve the entire FIFO.
+    allocation(t, &r, &[])?;
+    let existing = list(t, &r.host)?;
+    if existing.iter().any(|x| x.holder == r.holder && (x.state.holds_capacity() || x.state == State::Queued)) {
+        return Err(ApiError::conflict("holder already has a reservation on this host; extend or retract it"));
+    }
+    let admission = if existing.iter().any(|x| x.state == State::Queued) {
+        Err(ApiError::conflict("host reservation FIFO has waiting holders"))
+    } else { allocation(t, &r, &existing) };
+    match admission {
+        Ok(cores) => r.cores = cores,
+        Err(_) if queue_until.is_some() => { r.state = State::Queued; r.start = None; r.until = None; }
+        Err(e) => return Err(e),
+    }
+    t.execute("INSERT INTO reservations(id,host,project,state,data) VALUES (?1,?2,?3,?4,?5)",
+        params![r.id,r.host,r.project,r.state.name(),serde_json::to_string(&r)?])?;
+    save(t, &r, if r.state == State::Queued { "queued" } else { "starting" })?;
+    Ok(r)
+}
+
+/// Enforced starts become visible as active only after the host acknowledges.
+pub fn activate(t: &mut Tx<'_>, id: &str) -> ApiResult<Reservation> {
+    let mut r = get(t, id)?;
+    if r.state != State::Starting { return Err(ApiError::conflict("reservation is not starting")); }
+    r.state = State::Active;
+    save(t, &r, "granted")?;
+    Ok(r)
+}
+
+pub fn extend(t: &mut Tx<'_>, id: &str, until: i64, at: i64) -> ApiResult<Reservation> {
+    let mut r = get(t, id)?;
+    if r.state != State::Active || r.until.is_none_or(|u| u <= at) {
+        return Err(ApiError::conflict("only an active, unexpired reservation can be extended"));
+    }
+    if until <= r.until.unwrap_or(at) { return Err(ApiError::invalid("new until must be later than the current until")); }
+    r.until = Some(until);
+    r.warned_15 = false;
+    r.warned_5 = false;
+    save(t, &r, "extended")?;
+    Ok(r)
+}
+
+pub fn end(t: &mut Tx<'_>, id: &str, expired: bool) -> ApiResult<Reservation> {
+    let mut r = get(t, id)?;
+    if !matches!(r.state, State::Starting | State::Active) {
+        return Err(ApiError::conflict("reservation is not active or starting"));
+    }
+    r.state = State::Ending;
+    r.end_state = Some(if expired { State::Expired } else { State::Retracted });
+    save(t, &r, "ending")?;
+    Ok(r)
+}
+
+/// Release capacity only after cleanup, so a slow host cannot overlap budgets.
+pub fn finish_end(t: &mut Tx<'_>, id: &str) -> ApiResult<Reservation> {
+    let mut r = get(t, id)?;
+    if r.state != State::Ending { return Err(ApiError::conflict("reservation is not ending")); }
+    r.state = r.end_state.ok_or_else(|| ApiError::internal("missing reservation end state"))?;
+    save(t, &r, "ended")?;
+    Ok(r)
+}
+
+pub fn cancel(t: &mut Tx<'_>, id: &str) -> ApiResult<Reservation> {
+    let mut r = get(t, id)?;
+    if r.state != State::Queued { return Err(ApiError::conflict("only a queued reservation can be cancelled")); }
+    r.state = State::Cancelled;
+    save(t, &r, "cancelled")?;
+    Ok(r)
+}
+
+/// Expire queue entries, then admit at most the head. No backfilling past a
+/// request that cannot fit. The caller enforces and activates the returned row.
+pub fn advance(t: &mut Tx<'_>, host: &str, at: i64) -> ApiResult<Option<Reservation>> {
+    let mut rows = list(t, host)?;
+    for r in &mut rows {
+        if r.state == State::Queued && r.queue_until.is_some_and(|u| u <= at) {
+            r.state = State::TimedOut;
+            save(t, r, "timed_out")?;
+        }
+    }
+    let Some(head) = rows.iter().find(|r| r.state == State::Queued) else { return Ok(None); };
+    let mut r = head.clone();
+    let cores = match allocation(t, &r, &rows) {
+        Ok(c) => c,
+        Err(e) if e.code == crate::error::Code::Conflict => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    r.cores = cores;
+    r.state = State::Starting;
+    r.start = Some(at);
+    r.until = Some(at.checked_add(r.duration_ms).ok_or_else(|| ApiError::invalid("duration overflow"))?);
+    save(t, &r, "starting")?;
+    Ok(Some(r))
+}
+
+/// Persist warning marks in the same transaction as the caller's pointer and
+/// mail. A late sweep sends only the most urgent warning, not both at once.
+pub fn warnings(t: &mut Tx<'_>, host: &str, at: i64) -> ApiResult<Vec<(Reservation, u8)>> {
+    let mut due = Vec::new();
+    for mut r in list(t, host)? {
+        if r.state != State::Active { continue; }
+        let Some(left) = r.until.and_then(|u| u.checked_sub(at)) else { continue; };
+        if left <= 0 { continue; }
+        let minutes = if left <= 300_000 && !r.warned_5 {
+            r.warned_5 = true; r.warned_15 = true; 5
+        } else if left <= 900_000 && !r.warned_15 {
+            r.warned_15 = true; 15
+        } else { continue; };
+        save(t, &r, "warning")?;
+        due.push((r, minutes));
+    }
+    Ok(due)
+}
