@@ -6196,6 +6196,55 @@ updated and becomes `file`. An API target with the same name becomes
 `file`. When the file is gone, the target is deleted. The API refuses to
 change a file target (`409 file_managed`).
 
+**Host reservations (phase 1).** Hosts advertise physical logical CPU IDs,
+memory bytes and reservation support. `GET /api/hosts/{host}/capacity`
+returns physical, reservable and charged capacity. An operator or sysadmin
+configures `PUT /api/hosts/{host}/capacity` with `percentage` (0–100) and
+an optional `io` map. The default percentage is zero. IO is an operator-set
+budget, not measured disk throughput. Map keys are canonical block-device
+numbers such as `8:0`; values contain `read_bps`, `write_bps`, `read_iops`
+and `write_iops` (nonnegative integers).
+
+`POST /api/hosts/{host}/reservations` accepts `target`, optional `agent`,
+`amounts`, `until`, optional `reason`, `exclusive`, `queue` and
+`queue_timeout`. `amounts` contains `cpu_millis` (1000 is one logical core),
+`memory_bytes`, and `io`. `until` uses the lease time syntax. Without
+`agent`, the reservation belongs to the target. Authorization follows target
+leasing. Docker has one container budget and cannot reserve separately for
+an agent. Agent host reservations span that agent's targets on the host.
+Host grants return 409 naming existing sessions that must end first:
+phase 1 does not reparent live scopes. Agent and target reservations cannot
+overlap on a host because they use different slice hierarchies.
+
+Insufficient capacity returns 409 with the current allocations. With
+`queue: true`, the request waits in a durable FIFO queue, without backfill.
+`queue_timeout` defaults to one hour. Starting and ending reservations keep
+capacity charged until enforcement or cleanup finishes. `GET
+/api/hosts/{host}/reservations` lists visible reservations; `GET
+/api/reservations/{id}` reads one. `PATCH /api/reservations/{id}` with
+`until` extends it, `DELETE` retracts it, and `POST
+/api/reservations/{id}/cancel` cancels a queued request. CLI equivalents are
+`reserve new`, `reserve extend`, `reserve retract`, `reserve ls` and
+`reserve cancel`. `wait reservation <id>` registers a durable wait: admission
+resolves it, and cancellation, expiry or queue timeout fails it. Resolution
+is mailed to the waiting agent.
+
+Warnings at 15 and 5 minutes remaining are audited and sent as mail and
+runner pointers. Ending a reservation ends registered sessions with
+`reservation_ended`. Host cleanup stops its own slice before releasing
+capacity. Docker cleanup waits a bounded interval for process-tree cleanup;
+an unconfirmed result emits a warning and audit record naming the sessions.
+Fixed supported limits are restored before capacity is released.
+
+Exclusive CPU reservations allocate disjoint whole logical CPUs and leave
+at least one CPU for shared work. Isolation covers Terrarium-managed host
+scopes and Docker containers, not unrelated host services. Shared scopes
+inherit the complement on `terrarium.slice`; exclusive scopes use a sibling
+`terrariumreserved` hierarchy. Docker uses cpusets. Existing host sessions
+must end before an exclusive grant. Vmlab, SSH and unmanaged Docker paths
+are refused while exclusivity is active. Nonexclusive reservations provide
+accounted CPU quotas and memory/IO caps, not dedicated CPU affinity.
+
 **Reservation device IO restrictions.** A Docker reservation's per-device
 bandwidth and IOPS limits are create-time settings. A live change returns
 `409 conflict`, explaining that the limit takes effect at the next up.
@@ -6253,12 +6302,12 @@ Rules:
   once.
 - **A `docker` target: one budget for the container.** The container is
   one for all holders (§17.8), so they share the limits. Docker sets them
-  when Terrarium runs the container (`up`). A change of `limits` while the
-  container runs is `409 conflict`, as for every field. While a container of
-  a permanent target is `stopped`, a change of `limits` is `409 conflict`
-  too, because `up` starts that container with its old limits: remove it
-  first (`POST /api/targets/{name}/down` with `{"destroy": true}`). An
-  ephemeral target gets a new container at each `up`.
+  when Terrarium runs the container (`up`). API `PATCH` updates supported
+  fixed limits through `docker update` on running or stopped containers,
+  without recreation. Defaults are saved only after acknowledgement. An
+  active reservation continues to override edited defaults until it ends.
+  An offline or older host without live-update support refuses the edit.
+  An ephemeral target gets a new container at each `up`.
 - **A `host` target is always `running`** while its host agent is online.
   Its `limits` change at any time with `PATCH`. A new session sets the new
   limits on the holder's slice, so the processes of the holder that run

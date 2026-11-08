@@ -50,12 +50,33 @@ async fn fixed_docker_limits_update_live_and_failed_ack_keeps_defaults() {
     td.patch("/api/targets/p-box", json!({"limits":{"cpu":1,"memory":"64M"}})).await.ok();
     let calls = std::fs::read_to_string(td.dir.path().join("docker.calls")).unwrap();
     assert!(calls.contains("update"));
-    assert!(calls.contains("--cpus 1"));
+    assert!(calls.contains("--cpus=1"));
     std::fs::write(td.dir.path().join("docker.fail"), "fail").unwrap();
     let refused = td.patch("/api/targets/p-box", json!({"limits":{"cpu":2}})).await;
     assert!(!refused.status.is_success());
     let saved = state.db.read(|c| terrariumd::store::targets::get(c, "p-box")).await.unwrap();
     assert_eq!(saved.def.limits.unwrap().resolve().unwrap().cpu_millis, Some(1000));
+    client.abort(); server.abort();
+}
+
+#[tokio::test]
+async fn active_docker_budget_overrides_edits_and_retract_restores_defaults() {
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    state.db.write("system", |tx| terrariumd::store::targets::set_state(tx, "p-box", "running", None)).await.unwrap();
+    let granted = td.post("/api/hosts/h/reservations", json!({
+        "target":"p-box","amounts":{"cpu_millis":2000},"until":"30m"
+    })).await;
+    let id = granted.ok()["id"].as_str().unwrap();
+    td.patch("/api/targets/p-box", json!({"limits":{"cpu":1}})).await.ok();
+    let calls = std::fs::read_to_string(td.dir.path().join("docker.calls")).unwrap();
+    assert!(calls.lines().last().unwrap().contains("--cpus=2"));
+    td.delete(&format!("/api/reservations/{id}")).await.ok();
+    let calls = std::fs::read_to_string(td.dir.path().join("docker.calls")).unwrap();
+    assert!(calls.lines().last().unwrap().contains("--cpus=1"));
+    assert!(calls.lines().all(|line| line.starts_with("update ")));
+    let saved = state.db.read(|c| terrariumd::store::targets::get(c, "p-box")).await.unwrap();
+    assert_eq!(saved.state, "running");
     client.abort(); server.abort();
 }
 

@@ -818,6 +818,28 @@ replay, and no `ack`. The code is `crates/terrarium-host/src/metrics.rs`.
 
 ## Resource limits
 
+Reservation-capable hosts advertise `reservations: true` and `capacity`
+with logical `cpu_ids` and `memory_bytes`. Missing capability means no
+reservation enforcement, not unlimited fallback. Per-device IO budgets are
+configured by the daemon operator rather than detected throughput.
+
+`resource_apply` carries `session`, `target`, `holder`, optional `container`
+and runtime `limits` (fixed limits, optional CPU list and per-device IO).
+With a container it invokes `docker update`; per-device IO in a live update
+is rejected. Docker creation accepts per-device limits, only for ephemeral
+reservation containers in phase 1. Without a container, the host applies
+systemd slice properties including AllowedCPUs and device bandwidth/IOPS.
+An empty target and holder address the shared `terrarium.slice`. Exclusive
+scopes use the sibling `terrariumreserved` hierarchy. Clearing affinity
+restores inheritance. Device identifiers map to `/dev/block/<major>:<minor>`.
+
+`resource_stop` carries `session`, `target` and `holder`. It stops only that
+reservation slice through the user systemd manager. Both verbs use normal
+session completion acknowledgements. The daemon keeps capacity charged
+until cleanup and restoration succeed. Docker expiry uses registered
+process-tree cleanup rather than stopping permanent shared containers.
+No privileged helper or direct cgroup-file writes are used.
+
 docs/api.md §17.2, "Resource limits". The code is
 `crates/terrarium-host/src/limits.rs` (systemd) and `limit_flags` in
 `crates/terrarium-host/src/docker.rs`. The shared types and checks are in
