@@ -261,8 +261,9 @@ pub enum ScheduleAction {
     Turn {
         agent: String,
         text: String,
-        /// Start a stopped agent first. Without it, a stopped agent makes
-        /// the run `skipped`.
+        /// Start a stopped agent with `agent start` first. Without it, a
+        /// stopped agent gets the turn as `agent send` gives it: queued,
+        /// and a wake starts the agent.
         #[serde(default, skip_serializing_if = "is_false")]
         start_if_stopped: bool,
     },

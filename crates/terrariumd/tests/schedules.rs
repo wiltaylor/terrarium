@@ -8,7 +8,9 @@ mod common;
 use chrono::{DateTime, Duration, Utc};
 use common::{TestDaemon, write};
 use serde_json::{Value, json};
+use terrarium_core::config::{CompactMaxAge, IdleStop};
 use terrariumd::api::Shared;
+use terrariumd::lifecycle::Tuning;
 use terrariumd::store::schedules::Run;
 
 fn state(td: &TestDaemon) -> Shared {
@@ -518,7 +520,7 @@ async fn turn_starts(td: &TestDaemon, text: &str) -> usize {
 async fn turn_actions_follow_the_agent_state() {
     let td = TestDaemon::start().await;
     let (lead, worker, _) = setup(&td).await;
-    let skip = id(td
+    let nudge = id(td
         .post_as(&lead, "/api/schedules", turn_body("nudge", false))
         .await
         .ok());
@@ -527,17 +529,22 @@ async fn turn_actions_follow_the_agent_state() {
         .await
         .ok());
 
-    // Stopped, no start_if_stopped: skipped, and the agent stays stopped.
-    let run = td.post_empty(&format!("/api/schedules/{skip}/run")).await;
-    assert_eq!(run.ok()["status"], "skipped");
-    assert_eq!(run.body["summary"], "skipped: agent not running");
+    // Stopped, no start_if_stopped: the turn goes in as a send gives it,
+    // queued, and the wake starts the agent (TER-210).
+    let run = td.post_empty(&format!("/api/schedules/{nudge}/run")).await;
+    let run = run.ok();
+    assert_eq!(run["status"], "ok", "{run}");
+    assert_eq!(run["output"]["started"], true);
+    assert_eq!(run["output"]["delivery"], "queued");
     assert_eq!(
-        td.get(&format!("/api/agents/{worker}")).await.body["status"],
-        "stopped"
+        turn_starts(&td, "[System:schedule nudge] turn from nudge").await,
+        1
     );
-    // A skip for a stopped agent is not a rights skip.
-    let s = td.get(&format!("/api/schedules/{skip}")).await;
-    assert_eq!(s.ok()["consecutive_skips"], 0);
+    td.wait_status(&worker, "idle").await;
+    td.post_empty(&format!("/api/agents/{worker}/stop"))
+        .await
+        .ok();
+    td.wait_status(&worker, "stopped").await;
 
     // start_if_stopped: the run starts the agent, then types the turn.
     let run = td.post_empty(&format!("/api/schedules/{start}/run")).await;
@@ -553,15 +560,97 @@ async fn turn_actions_follow_the_agent_state() {
 
     // A running agent: the turn goes in as an operator send does.
     td.wait_status(&worker, "idle").await;
-    let run = td.post_empty(&format!("/api/schedules/{skip}/run")).await;
+    let run = td.post_empty(&format!("/api/schedules/{nudge}/run")).await;
     assert_eq!(run.ok()["status"], "ok", "{}", run.body);
     assert_eq!(run.body["output"]["started"], false);
     assert_eq!(
         turn_starts(&td, "[System:schedule nudge] turn from nudge").await,
-        1
+        2
     );
     let audit = td.get("/api/audit?action=agent.send").await;
     assert_eq!(audit.ok()[0]["actor"], format!("agent:{lead}"));
+}
+
+/// TER-210: a one-shot `at` turn schedule for an agent that its idle stop
+/// stopped starts the agent and delivers the turn; it is not skipped.
+#[tokio::test]
+async fn an_at_turn_starts_an_idle_stopped_agent() {
+    let td = TestDaemon::start().await;
+    let (lead, worker, _) = setup(&td).await;
+    let tuning = |idle| {
+        state(&td).lifecycle.set_tuning(Tuning {
+            idle_stop: idle,
+            tick: std::time::Duration::from_millis(20),
+            compact_on_idle: false,
+            compact_max_age: CompactMaxAge::Off,
+            compact_wait: std::time::Duration::from_secs(5),
+        })
+    };
+    td.post_empty(&format!("/api/agents/{worker}/start"))
+        .await
+        .ok();
+    td.wait_status(&worker, "idle").await;
+    tuning(IdleStop::After(std::time::Duration::from_millis(200)));
+    td.wait_status(&worker, "stopped").await;
+    let a = td.get(&format!("/api/agents/{worker}")).await;
+    assert_eq!(a.ok()["status_reason"], "idle", "{}", a.body);
+    tuning(IdleStop::Off);
+
+    let body = json!({"name": "change", "project": "terra",
+                      "spec": {"kind": "at", "at": hours(1).to_rfc3339()},
+                      "action": {"type": "turn", "agent": "worker", "text": "do the change"}});
+    let sid = id(td.post_as(&lead, "/api/schedules", body).await.ok());
+    let runs = tick(&td, hours(2)).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "ok", "{:?}", runs[0]);
+    assert!(runs[0].summary.starts_with("woke "), "{:?}", runs[0]);
+    assert_eq!(
+        turn_starts(&td, "[System:schedule change] do the change").await,
+        1
+    );
+    let s = td.get(&format!("/api/schedules/{sid}")).await;
+    assert_eq!(s.ok()["last_run"]["status"], "ok", "{}", s.body);
+}
+
+/// TER-210: a turn for a stopped agent that may not wake (paused) fails
+/// with the reason, keeps the turn queued, and mails the schedule's owner.
+#[tokio::test]
+async fn a_turn_that_cannot_start_the_agent_mails_the_owner() {
+    let td = TestDaemon::start().await;
+    let (lead, worker, _) = setup(&td).await;
+    td.post(&format!("/api/agents/{worker}/pause"), json!({}))
+        .await
+        .ok();
+    let sid = id(td
+        .post_as(&lead, "/api/schedules", turn_body("paused", false))
+        .await
+        .ok());
+    let run = td.post_empty(&format!("/api/schedules/{sid}/run")).await;
+    let run = run.ok();
+    assert_eq!(run["status"], "failed", "{run}");
+    assert!(run["error"].as_str().unwrap().contains("paused"), "{run}");
+    assert_eq!(run["output"]["delivery"], "queued");
+    let a = td.get(&format!("/api/agents/{worker}")).await;
+    assert_eq!(a.ok()["status"], "stopped");
+    assert_eq!(a.body["queued"], 1, "{}", a.body);
+    let mail = td.mail_of(&lead).await;
+    assert_eq!(mail.len(), 1, "{mail:?}");
+    assert_eq!(mail[0]["from"], "system");
+    assert!(
+        mail[0]["subject"]
+            .as_str()
+            .unwrap()
+            .contains("turn not delivered"),
+        "{mail:?}"
+    );
+    // The unpause delivers the queued turn.
+    td.post(&format!("/api/agents/{worker}/unpause"), json!({}))
+        .await
+        .ok();
+    assert_eq!(
+        turn_starts(&td, "[System:schedule paused] turn from paused").await,
+        1
+    );
 }
 
 #[tokio::test]
