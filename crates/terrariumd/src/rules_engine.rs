@@ -817,6 +817,7 @@ pub struct RunCtx {
     pub rerun: Option<jobs::Job>,
     /// The halves of the job, when it was split (left first).
     pub halves: Vec<jobs::Job>,
+    pub merge_group_key: Option<String>,
 }
 
 impl RunCtx {
@@ -871,6 +872,24 @@ fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
         ),
         None => (None, Vec::new()),
     };
+    let merge_group_key = match &job {
+        Some(j) if j.kind == jobs::JobKind::Merge => conn
+            .query_row(
+                "SELECT g.key FROM card_groups g JOIN group_members m ON m.group_card = g.card
+             WHERE m.card IN (SELECT value FROM json_each(?1))
+             AND g.project = ?2 AND g.key LIKE 'merge:%'
+             AND (g.closed_at IS NULL OR g.closed_at >= ?3)
+             ORDER BY g.rowid DESC LIMIT 1",
+                rusqlite::params![
+                    serde_json::to_string(&j.cards().iter().map(|c| &c.card).collect::<Vec<_>>())?,
+                    j.project,
+                    j.created_at
+                ],
+                |r| r.get(0),
+            )
+            .optional()?,
+        _ => None,
+    };
     Ok(RunCtx {
         project: row.project.clone(),
         rule: row.rule.clone(),
@@ -880,6 +899,7 @@ fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
         job,
         rerun,
         halves,
+        merge_group_key,
     })
 }
 
@@ -1077,6 +1097,11 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
             };
             // The texts of the coded flow (TER-170), from its own code.
             let out = match f {
+                "group_key" => Some(
+                    ctx.merge_group_key
+                        .clone()
+                        .unwrap_or_else(|| format!("merge:{}", j.id)),
+                ),
                 "id" => Some(j.id.clone()),
                 "kind" => Some(j.kind.as_str().to_owned()),
                 "state" => Some(j.state.as_str().to_owned()),

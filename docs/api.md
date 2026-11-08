@@ -8290,6 +8290,8 @@ shows a header in each column containing members, without moving members.
 - `group_close`: `key`, optional `comment`. Archives the header, retains
   historical membership, and frees members to join their next group.
   Repeated close and mutations of a closed group are no-ops.
+  Optional `all_done = true` closes only a nonempty group whose members
+  have all reached its `done_when` anchor.
 
 `{{group.id|key|title|column|status|done|total|eta_at}}` (one field per
 placeholder) reads the open group of the event's card, or the group card
@@ -8500,7 +8502,18 @@ only after three fix cards. The fix cards of a group are the cards with a
 out) include every card of this job: those of its reruns and of the group
 it was split from count, those of another group that shared a card do
 not. Set another number with your own `merge-red-group` rule. The pack
-does not spawn the fix agent or queue the group again (TER-181).
+does not spawn the fix agent or queue the group again (TER-256).
+
+Queued merge jobs open a board group in `@review`, with `@accepted`
+as its completion anchor. The `queued` and `merged (full suite passed)` steps track
+the job. A red result keeps the group open and adds its fix card as the
+first member. Queue the repair and the original members together, fix
+first, to reuse the group. The passed merge verdict follows the configured
+recipe and the push of `next`. Each member then moves to accepted, and
+the last member closes the group. `{{job.group_key}}` is the stored
+merge group's key, or `merge:<job id>` for a new group, including when
+replaying verdicts after closure. Migration omits group actions on boards
+without review or accepted, retaining their existing delivery flow.
 
 A rule of the project's `rules.wcl` with the name of a pack rule
 replaces it. A rule with only `enabled = false` (no `on`, no verb) turns
