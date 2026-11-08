@@ -2133,7 +2133,18 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
     let cached = state_jobs.join("p/repos/app.git");
     assert_eq!(git(&cached, &["rev-parse", &next]), next);
     git(&cached, &["update-ref", "refs/test/retained", &next]);
-    let second = merge_with_recipe(&lab, "ter-m4", "test -f OK").await;
+    lab.branch("ter-m4", "next", &[("SECOND", "yes\n")]);
+    let card = lab.card("ter-m4", "ter-m4").await;
+    lab.td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await
+        .ok();
+    let second = lab
+        .until_idle()
+        .await
+        .into_iter()
+        .find(|j| j["card"] == card.as_str())
+        .unwrap();
     assert_eq!(second["state"], "passed", "{second:#}");
     assert_eq!(git(&cached, &["rev-parse", "refs/test/retained"]), next);
     assert_eq!(
