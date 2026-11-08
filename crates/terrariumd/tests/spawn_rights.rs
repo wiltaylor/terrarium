@@ -454,6 +454,72 @@ async fn the_child_takes_the_owner_pool() {
     assert!(r.body["agent"]["subscription_pool"].is_null(), "{}", r.body);
 }
 
+#[tokio::test]
+async fn spawn_headroom_picks_pool_then_allowed_alternative() {
+    let (td, _lead, _w) = setup().await;
+    let s = state(&td);
+    for n in ["pool-a", "pool-b", "pool-alt"] {
+        td.post("/api/subscriptions", json!({"name": n, "provider": "anthropic",
+            "harnesses": ["claude"]})).await.ok();
+        let login = r#"{"claudeAiOauth":{"accessToken":"test","refreshToken":"test","expiresAt":4102444800000}}"#;
+        terrariumd::accounts::write_credential(&s.state_dir, n, HarnessId::Claude, login.as_bytes()).unwrap();
+    }
+    for (name, spec) in [
+        ("worker", json!({"harness": "claude", "subscription": "pool-a", "subscription_pool": ["pool-b"]})),
+        ("worker-alt", json!({"harness": "claude", "subscription": "pool-alt"})),
+    ] {
+        td.post("/api/templates", json!({"name": name, "project": "p", "spec": spec})).await.ok();
+    }
+    let o = id(&td.agent("p", "selector", json!({"policy": {"spawn": {
+        "templates": ["worker", "worker-alt"], "max_concurrent": 10}}})).await);
+    s.db.write("system", |t| {
+        terrariumd::store::subscriptions::insert_sample(t, "pool-a", "5h", 79.9, None, &json!({}))?;
+        terrariumd::store::subscriptions::insert_sample(t, "pool-b", "7d", 20.0, None, &json!({}))
+    }).await.unwrap();
+    let r = spawn_as(&td, &o, &o, json!({})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["agent"]["subscription"], "pool-b");
+    s.db.write("system", |t| {
+        terrariumd::store::subscriptions::insert_sample(t, "pool-a", "7d", 80.0, None, &json!({}))?;
+        terrariumd::store::subscriptions::insert_sample(t, "pool-b", "5h", 90.0, None, &json!({}))
+    }).await.unwrap();
+    let r = spawn_as(&td, &o, &o, json!({})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["agent"]["subscription"], "pool-alt");
+    assert_eq!(r.body["template"], "worker-alt");
+    let restricted = id(&td.agent("p", "restricted", json!({"policy": {"spawn": {
+        "templates": ["worker"]}}})).await);
+    let r = spawn_as(&td, &restricted, &restricted, json!({})).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+}
+
+#[tokio::test]
+async fn spawn_headroom_ignores_reset_windows_and_full_streams() {
+    let (td, _lead, _w) = setup().await;
+    let s = state(&td);
+    for n in ["local-a", "local-b"] {
+        td.post("/api/subscriptions", json!({"name": n, "provider": "selfhosted",
+            "harnesses": ["pi"], "selfhosted": {"base_url": "http://localhost:1234/v1",
+            "max_concurrent": 1}})).await.ok();
+    }
+    td.post("/api/templates", json!({"name": "worker", "project": "p", "spec": {
+        "harness": "pi", "subscription": "local-a", "subscription_pool": ["local-b"]}})).await.ok();
+    s.db.write("system", |t| {
+        terrariumd::store::subscriptions::insert_sample(t, "local-a", "5h", 100.0,
+            Some("2000-01-01T00:00:00Z"), &json!({}))
+    }).await.unwrap();
+    let o = id(&td.agent("p", "local-owner", json!({"policy": {"spawn": {
+        "templates": ["worker"], "max_concurrent": 10}}})).await);
+    let r = spawn_as(&td, &o, &o, json!({})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["agent"]["subscription"], "local-a");
+    let busy = terrarium_core::AgentId::new();
+    s.usage.streams.take(Some("local-a"), busy);
+    let r = spawn_as(&td, &o, &o, json!({})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["agent"]["subscription"], "local-b");
+}
+
 /// TER-93 (review finding 1): a spawn gives no `thread:open` past the
 /// owner's. A template cannot carry `policy.thread_open` (the template
 /// files take `targets`, `mail_to`, and `cross_project` only), and the

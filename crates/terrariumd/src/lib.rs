@@ -63,6 +63,7 @@ pub mod session_archive;
 pub mod settings;
 pub mod skills;
 pub mod spawn;
+pub mod spawn_selection;
 pub mod spawn_rights;
 pub mod ssh_agent;
 pub mod store;
