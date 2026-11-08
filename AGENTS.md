@@ -53,6 +53,12 @@ When `RESULTS_DIR` is set to an absolute path, `ci::test` also writes libtest
 JSON to `$RESULTS_DIR/rust.json`, and `ci::dashboard-check` writes JUnit XML to
 `$RESULTS_DIR/dashboard.xml`. Without `RESULTS_DIR` the output is the plain console output.
 
+`just ci::test-nextest` is opt-in: it installs pinned cargo-nextest 0.9.103,
+runs the bounded `ci` profile, then runs doctests separately. With `RESULTS_DIR`,
+it writes nextest JUnit to `rust.xml` and doctest libtest JSON to `doctests.json`.
+Cargo test remains the default because the TER-239 matched-load comparison
+was 642.2s for cargo test versus 791.1s for this nextest profile (2495 passed each).
+
 The recipes set `RUSTUP_TOOLCHAIN=1.97.1` (the toolchain CI pins) and the
 CI cargo env: `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`,
 `CARGO_PROFILE_TEST_DEBUG=0`. They do not run the release, image, or version

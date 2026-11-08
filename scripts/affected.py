@@ -416,15 +416,10 @@ def read_changed(path: str | None) -> list[str] | None:
 
 
 def run(cmds: list[list[str]]) -> int:
-    results = os.environ.get("RESULTS_DIR")
     for cmd in cmds:
         print("+ " + " ".join(cmd), flush=True)
-        if cmd[:2] == ["cargo", "test"] and results:
-            os.makedirs(results, exist_ok=True)
-            env = dict(os.environ, RUSTC_BOOTSTRAP="1")
-            full = cmd + ["--", "-Z", "unstable-options", "--format", "json", "--report-time"]
-            with open(os.path.join(results, "rust.json"), "ab") as out:
-                code = subprocess.call(full, stdout=out, env=env)
+        if cmd[:2] == ["cargo", "test"]:
+            code = subprocess.call([sys.executable, "scripts/rust_tests.py", *cmd[2:]])
         else:
             code = subprocess.call(cmd)
         if code != 0:
@@ -457,10 +452,11 @@ def main(argv: list[str]) -> int:
             print("  " + " ".join(c))
     if a.run:
         if os.environ.get("RESULTS_DIR"):
-            # rust.json is appended per cargo test call: start empty.
-            p = Path(os.environ["RESULTS_DIR"], "rust.json")
-            if p.exists() and not pl.full:
-                p.unlink()
+            if not pl.full:
+                directory = Path(os.environ["RESULTS_DIR"])
+                for p in [directory / "rust.json"]:
+                    if p.exists():
+                        p.unlink()
         return run(cmds)
     return 0
 
