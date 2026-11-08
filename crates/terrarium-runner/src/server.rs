@@ -38,7 +38,8 @@ mod replay_tests {
 
     fn context() -> RequestContext {
         serde_json::from_value(json!({"agent":"00000000000000000000000001",
-            "name":"tester", "project":"demo", "harness":"claude", "status":"idle"})).unwrap()
+            "name":"tester", "project":"demo", "harness":"claude", "status":"idle"}))
+        .unwrap()
     }
 
     #[tokio::test]
@@ -49,12 +50,21 @@ mod replay_tests {
         let params = json!({"method":"POST", "path":"/api/mail", "request_id":"stable"});
         let ctx = context();
         let (answer, ()) = tokio::join!(hub.forward(&ctx, "http", params.clone()), async {
-            let ServerFrame::RpcRequest { params: sent, .. } = first.recv().await.unwrap() else { panic!("request"); };
+            let ServerFrame::RpcRequest { params: sent, .. } = first.recv().await.unwrap() else {
+                panic!("request");
+            };
             assert_eq!(sent, params);
             hub.release(epoch);
             let (tx, mut second) = mpsc::channel(4);
             hub.claim(tx);
-            let ServerFrame::RpcRequest { id, params: replayed, .. } = second.recv().await.unwrap() else { panic!("replay"); };
+            let ServerFrame::RpcRequest {
+                id,
+                params: replayed,
+                ..
+            } = second.recv().await.unwrap()
+            else {
+                panic!("replay");
+            };
             assert_eq!(replayed, params);
             hub.resolve(id, Ok(json!({"stored_answer":true})));
         });
@@ -69,7 +79,9 @@ mod replay_tests {
         let (epoch, _) = hub.claim(tx);
         let ctx = context();
         let (answer, ()) = tokio::join!(hub.forward(&ctx, "echo", json!({})), async {
-            let ServerFrame::RpcRequest { id, .. } = daemon.recv().await.unwrap() else { panic!("request"); };
+            let ServerFrame::RpcRequest { id, .. } = daemon.recv().await.unwrap() else {
+                panic!("request");
+            };
             hub.hold(epoch);
             hub.resolve(id, Ok(json!("finished")));
         });
@@ -83,7 +95,10 @@ mod replay_tests {
         let (tx, mut daemon) = mpsc::channel(4);
         let (epoch, _) = hub.claim(tx);
         hub.hold(epoch);
-        let err = hub.forward(&context(), "http", json!({"request_id":"held"})).await.unwrap_err();
+        let err = hub
+            .forward(&context(), "http", json!({"request_id":"held"}))
+            .await
+            .unwrap_err();
         assert_eq!(err.code, "unavailable");
         assert!(err.message.contains("tunnel is down"));
         assert!(daemon.try_recv().is_err());
@@ -95,10 +110,15 @@ mod replay_tests {
         let (tx, mut daemon) = mpsc::channel(4);
         hub.claim(tx);
         let ctx = context();
-        let (answer, ()) = tokio::join!(hub.forward(&ctx, "http", json!({"request_id":"once"})), async {
-            let ServerFrame::RpcRequest { id, .. } = daemon.recv().await.unwrap() else { panic!("request"); };
-            hub.resolve(id, Err(unavailable("application failure")));
-        });
+        let (answer, ()) = tokio::join!(
+            hub.forward(&ctx, "http", json!({"request_id":"once"})),
+            async {
+                let ServerFrame::RpcRequest { id, .. } = daemon.recv().await.unwrap() else {
+                    panic!("request");
+                };
+                hub.resolve(id, Err(unavailable("application failure")));
+            }
+        );
         assert_eq!(answer.unwrap_err().message, "application failure");
         assert!(daemon.try_recv().is_err());
     }
@@ -236,54 +256,63 @@ impl Hub {
         let replay = method == "http" && params["request_id"].is_string();
         let mut deadline = None;
         loop {
-        let ready = rx.borrow().clone().filter(|l| !l.held);
-        let link = if ready.is_some() {
-            ready
-        } else {
-            let until = *deadline.get_or_insert_with(|| tokio::time::Instant::now() + self.queue_timeout);
-            match tokio::time::timeout_at(until, rx.wait_for(|l| l.as_ref().is_some_and(|l| !l.held))).await {
-                Ok(Ok(l)) => l.clone(),
-                _ => None,
-            }
-        };
-        let Some(link) = link else {
-            return Err(unavailable(format!(
-                "the agent RPC tunnel is down: no daemon connected to the runner within {} ms; \
+            let ready = rx.borrow().clone().filter(|l| !l.held);
+            let link = if ready.is_some() {
+                ready
+            } else {
+                let until = *deadline
+                    .get_or_insert_with(|| tokio::time::Instant::now() + self.queue_timeout);
+                match tokio::time::timeout_at(
+                    until,
+                    rx.wait_for(|l| l.as_ref().is_some_and(|l| !l.held)),
+                )
+                .await
+                {
+                    Ok(Ok(l)) => l.clone(),
+                    _ => None,
+                }
+            };
+            let Some(link) = link else {
+                return Err(unavailable(format!(
+                    "the agent RPC tunnel is down: no daemon connected to the runner within {} ms; \
                  try again later",
-                self.queue_timeout.as_millis()
-            )));
-        };
-        let id = self.next_rpc.fetch_add(1, Ordering::Relaxed);
-        let (tx, answer) = oneshot::channel();
-        lock(&self.pending).insert(id, (link.epoch, tx));
-        let frame = ServerFrame::RpcRequest {
-            id,
-            method: method.to_owned(),
-            params: params.clone(),
-            context: ctx.clone(),
-        };
-        if link.out.send(frame).await.is_err() {
+                    self.queue_timeout.as_millis()
+                )));
+            };
+            let id = self.next_rpc.fetch_add(1, Ordering::Relaxed);
+            let (tx, answer) = oneshot::channel();
+            lock(&self.pending).insert(id, (link.epoch, tx));
+            let frame = ServerFrame::RpcRequest {
+                id,
+                method: method.to_owned(),
+                params: params.clone(),
+                context: ctx.clone(),
+            };
+            if link.out.send(frame).await.is_err() {
+                lock(&self.pending).remove(&id);
+                self.release(link.epoch);
+                if replay {
+                    deadline
+                        .get_or_insert_with(|| tokio::time::Instant::now() + self.queue_timeout);
+                    continue;
+                }
+                return Err(unavailable("the daemon disconnected"));
+            }
+            let outcome = tokio::select! {
+                answer = answer => answer.unwrap_or_else(|_| Err(RpcError::new("tunnel_lost", "the daemon disconnected"))),
+                _ = rx.wait_for(|l| l.as_ref().is_none_or(|l| l.epoch != link.epoch)) => Err(RpcError::new("tunnel_lost", "the daemon disconnected")),
+            };
             lock(&self.pending).remove(&id);
-            self.release(link.epoch);
-            if replay {
+            if outcome.as_ref().is_err_and(|e| e.code == "tunnel_lost") {
+                if !replay {
+                    return Err(unavailable("the daemon disconnected"));
+                }
+                // The queue budget starts when the connection is lost, not when a
+                // potentially long-running command was first sent.
                 deadline.get_or_insert_with(|| tokio::time::Instant::now() + self.queue_timeout);
                 continue;
             }
-            return Err(unavailable("the daemon disconnected"));
-        }
-        let outcome = tokio::select! {
-            answer = answer => answer.unwrap_or_else(|_| Err(RpcError::new("tunnel_lost", "the daemon disconnected"))),
-            _ = rx.wait_for(|l| l.as_ref().is_none_or(|l| l.epoch != link.epoch)) => Err(RpcError::new("tunnel_lost", "the daemon disconnected")),
-        };
-        lock(&self.pending).remove(&id);
-        if outcome.as_ref().is_err_and(|e| e.code == "tunnel_lost") {
-            if !replay { return Err(unavailable("the daemon disconnected")); }
-            // The queue budget starts when the connection is lost, not when a
-            // potentially long-running command was first sent.
-            deadline.get_or_insert_with(|| tokio::time::Instant::now() + self.queue_timeout);
-            continue;
-        }
-        return outcome;
+            return outcome;
         }
     }
 }

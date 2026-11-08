@@ -212,43 +212,47 @@ impl RunnerTunnelTransport {
         line.push(b'\n');
         let mut retry_until = None;
         'retry: loop {
-        let stream = tokio::net::UnixStream::connect(&self.socket)
-            .await
-            .with_context(|| {
-                format!("cannot connect to the runner at {}", self.socket.display())
-            })?;
-        let (read, mut write) = stream.into_split();
-        write
-            .write_all(&line)
-            .await
-            .context("cannot send to the runner")?;
-        let mut reader = BufReader::new(read);
-        loop {
-            let mut reply = String::new();
-            let n = reader
-                .read_line(&mut reply)
+            let stream = tokio::net::UnixStream::connect(&self.socket)
                 .await
-                .context("cannot read from the runner")?;
-            if n == 0 {
-                anyhow::bail!("the runner closed the socket before it answered");
-            }
-            let reply: Value =
-                serde_json::from_str(reply.trim()).context("bad answer from the runner")?;
-            // Skip lines that answer another request.
-            if reply.get("id").and_then(Value::as_u64) == Some(id)
-                || reply.get("id").is_none_or(Value::is_null)
-            {
-                if reply["error"]["code"] == "retry" {
-                    let until = *retry_until.get_or_insert_with(|| tokio::time::Instant::now() + std::time::Duration::from_secs(15 * 60));
-                    if tokio::time::Instant::now() >= until {
-                        anyhow::bail!("the agent RPC tunnel is down: restart exceeded 15 minutes");
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    continue 'retry;
+                .with_context(|| {
+                    format!("cannot connect to the runner at {}", self.socket.display())
+                })?;
+            let (read, mut write) = stream.into_split();
+            write
+                .write_all(&line)
+                .await
+                .context("cannot send to the runner")?;
+            let mut reader = BufReader::new(read);
+            loop {
+                let mut reply = String::new();
+                let n = reader
+                    .read_line(&mut reply)
+                    .await
+                    .context("cannot read from the runner")?;
+                if n == 0 {
+                    anyhow::bail!("the runner closed the socket before it answered");
                 }
-                return Self::unframe(&reply);
+                let reply: Value =
+                    serde_json::from_str(reply.trim()).context("bad answer from the runner")?;
+                // Skip lines that answer another request.
+                if reply.get("id").and_then(Value::as_u64) == Some(id)
+                    || reply.get("id").is_none_or(Value::is_null)
+                {
+                    if reply["error"]["code"] == "retry" {
+                        let until = *retry_until.get_or_insert_with(|| {
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(15 * 60)
+                        });
+                        if tokio::time::Instant::now() >= until {
+                            anyhow::bail!(
+                                "the agent RPC tunnel is down: restart exceeded 15 minutes"
+                            );
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue 'retry;
+                    }
+                    return Self::unframe(&reply);
+                }
             }
-        }
         }
     }
 }
@@ -347,17 +351,25 @@ mod tests {
                 let frame: Value = serde_json::from_str(&line).unwrap();
                 let id = frame["params"]["request_id"].as_str().unwrap();
                 assert!(ulid::Ulid::from_string(id).is_ok());
-                if let Some(previous) = &first { assert_eq!(previous, &frame); }
+                if let Some(previous) = &first {
+                    assert_eq!(previous, &frame);
+                }
                 first = Some(frame.clone());
                 let response = if attempt == 0 {
                     json!({"type":"response", "id":frame["id"], "error":{"code":"retry", "message":"restarting"}})
                 } else {
                     json!({"type":"response", "id":frame["id"], "result":{"status":200, "body":[]}})
                 };
-                write.write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                write
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
             }
         });
-        let response = RunnerTunnelTransport::new(socket).send(ApiRequest::new(Method::Get, "/api/mail")).await.unwrap();
+        let response = RunnerTunnelTransport::new(socket)
+            .send(ApiRequest::new(Method::Get, "/api/mail"))
+            .await
+            .unwrap();
         assert_eq!(response.status, 200);
         server.await.unwrap();
     }

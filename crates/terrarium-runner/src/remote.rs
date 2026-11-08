@@ -795,7 +795,10 @@ async fn forward_attach(
 impl RunnerHandle for RemoteRunner {
     fn hold(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            self.inner.shared.out.send(Outgoing::Frame(ClientFrame::Hold))
+            self.inner
+                .shared
+                .out
+                .send(Outgoing::Frame(ClientFrame::Hold))
                 .map_err(|_| RunnerError::Disconnected)?;
             Ok(())
         })

@@ -4938,8 +4938,10 @@ impl Supervisor for RunnerSupervisor {
     /// An in-process harness ends.
     fn hold_agent_calls(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            let runners: Vec<_> = lock(&self.inner.slots).values()
-                .filter_map(|s| s.runner.clone()).collect();
+            let runners: Vec<_> = lock(&self.inner.slots)
+                .values()
+                .filter_map(|s| s.runner.clone())
+                .collect();
             for runner in runners {
                 if let Err(e) = runner.hold().await {
                     warn!(agent = %runner.agent(), "cannot hold agent calls: {e}");

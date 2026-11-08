@@ -12,9 +12,9 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Method, Request, header};
 use http_body_util::BodyExt;
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use terrarium_runner::{BoxFuture, RequestContext, RequestHandler, RpcError};
 use tower::ServiceExt;
@@ -44,10 +44,15 @@ impl Default for CallGate {
 
 impl CallGate {
     fn key(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
-        let mut keys = self.keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut keys = self
+            .keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         keys.retain(|_, v| v.strong_count() != 0);
         let entry = keys.entry(key).or_default();
-        if let Some(lock) = entry.upgrade() { return lock; }
+        if let Some(lock) = entry.upgrade() {
+            return lock;
+        }
         let lock = Arc::new(tokio::sync::Mutex::new(()));
         *entry = Arc::downgrade(&lock);
         lock
@@ -55,7 +60,10 @@ impl CallGate {
 }
 
 fn retry() -> RpcError {
-    RpcError::new("retry", "the daemon is restarting; retry this request with the same request ID")
+    RpcError::new(
+        "retry",
+        "the daemon is restarting; retry this request with the same request ID",
+    )
 }
 
 fn internal(e: crate::error::ApiError) -> RpcError {
@@ -71,23 +79,50 @@ pub async fn drain(state: &Arc<AppState>, limit: Duration) -> crate::error::ApiR
     state.supervisor.hold_agent_calls().await;
     let drained = state.agent_calls.active.write();
     tokio::pin!(drained);
-    if tokio::time::timeout_at(start + Duration::from_secs(30).min(limit), &mut drained).await.is_ok() {
+    if tokio::time::timeout_at(start + Duration::from_secs(30).min(limit), &mut drained)
+        .await
+        .is_ok()
+    {
         return Ok(());
     }
     tracing::warn!("deferring daemon restart for admitted agent writes");
-    state.db.write("system", |t| t.audit("agent_rpc.drain_deferred", "daemon", None, json!({}))).await?;
-    if tokio::time::timeout_at(start + limit, &mut drained).await.is_err() {
+    state
+        .db
+        .write("system", |t| {
+            t.audit("agent_rpc.drain_deferred", "daemon", None, json!({}))
+        })
+        .await?;
+    if tokio::time::timeout_at(start + limit, &mut drained)
+        .await
+        .is_err()
+    {
         // The NULL entries remain durable. The next daemon refuses to execute
         // them, even if their side effect happened before this process exited.
-        state.db.write("system", |t| {
-            let rows: Vec<(String, String)> = t.prepare("SELECT agent, request_id FROM agent_rpc_answers WHERE answer IS NULL")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
-            for (agent, id) in rows {
-                tracing::warn!(agent, request_id = id, "agent write indeterminate at drain cap");
-                t.audit("agent_rpc.indeterminate", &id, None, json!({"agent": agent, "reason": "drain_cap"}))?;
-            }
-            Ok(())
-        }).await?;
+        state
+            .db
+            .write("system", |t| {
+                let rows: Vec<(String, String)> = t
+                    .prepare(
+                        "SELECT agent, request_id FROM agent_rpc_answers WHERE answer IS NULL",
+                    )?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()?;
+                for (agent, id) in rows {
+                    tracing::warn!(
+                        agent,
+                        request_id = id,
+                        "agent write indeterminate at drain cap"
+                    );
+                    t.audit(
+                        "agent_rpc.indeterminate",
+                        &id,
+                        None,
+                        json!({"agent": agent, "reason": "drain_cap"}),
+                    )?;
+                }
+                Ok(())
+            })
+            .await?;
     }
     Ok(())
 }
@@ -174,7 +209,9 @@ impl AgentRpc {
         let state = self.state.upgrade().ok_or_else(retry)?;
         let mut draining = state.agent_calls.draining.subscribe();
         let _admitted = state.agent_calls.active.read().await;
-        if *draining.borrow() { return Err(retry()); }
+        if *draining.borrow() {
+            return Err(retry());
+        }
         let p: HttpParams = serde_json::from_value(params.clone())
             .map_err(|e| bad_params(format!("bad `http` params: {e}")))?;
         if p.method.eq_ignore_ascii_case("GET") || p.method.eq_ignore_ascii_case("HEAD") {
@@ -193,7 +230,14 @@ impl AgentRpc {
         let agent = ctx.agent.to_string();
         let lock = state.agent_calls.key(format!("{agent}:{id}"));
         let _unique = lock.lock().await;
-        journaled(&state.db, ctx, id, &params, self.execute_http(ctx, params.clone())).await
+        journaled(
+            &state.db,
+            ctx,
+            id,
+            &params,
+            self.execute_http(ctx, params.clone()),
+        )
+        .await
     }
 
     async fn execute_http(&self, ctx: &RequestContext, params: Value) -> Result<Value, RpcError> {
@@ -277,7 +321,6 @@ impl AgentRpc {
     }
 }
 
-
 /// Persist admission before polling the effect, and its answer before replying.
 /// The caller serializes concurrent requests with the same agent and ID.
 async fn journaled(
@@ -288,12 +331,16 @@ async fn journaled(
     effect: impl std::future::Future<Output = Result<Value, RpcError>>,
 ) -> Result<Value, RpcError> {
     let agent = ctx.agent.to_string();
-        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&params).map_err(|e| bad_params(e.to_string()))?));
-        let key = agent.clone();
-        let request_id = id.clone();
-        let project = ctx.project.clone();
-        let method = params["method"].as_str().unwrap_or_default().to_owned();
-        let cached = db.write(format!("agent:{agent}"), move |t| {
+    let fingerprint: String =
+        Sha256::digest(serde_json::to_vec(params).map_err(|e| bad_params(e.to_string()))?)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+    let key = agent.clone();
+    let request_id = id.clone();
+    let project = ctx.project.clone();
+    let method = params["method"].as_str().unwrap_or_default().to_owned();
+    let cached = db.write(format!("agent:{agent}"), move |t| {
             let old: Option<(String, Option<String>)> = t.query_row(
                 "SELECT fingerprint, answer FROM agent_rpc_answers WHERE agent = ?1 AND request_id = ?2",
                 rusqlite::params![key, request_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
@@ -311,14 +358,22 @@ async fn journaled(
             t.execute("INSERT INTO agent_rpc_answers(agent, request_id, fingerprint) VALUES (?1, ?2, ?3)", rusqlite::params![key, request_id, fingerprint])?;
             Ok(None)
         }).await.map_err(internal)?;
-        if let Some(answer) = cached { return answer; }
-        let answer = effect.await;
-        let stored = serde_json::to_string(&answer).map_err(|e| RpcError::new("internal", e.to_string()))?;
-        db.write(format!("agent:{agent}"), move |t| {
-            t.execute("UPDATE agent_rpc_answers SET answer = ?3 WHERE agent = ?1 AND request_id = ?2", rusqlite::params![agent, id, stored])?;
-            Ok(())
-        }).await.map_err(internal)?;
-        answer
+    if let Some(answer) = cached {
+        return answer;
+    }
+    let answer = effect.await;
+    let stored =
+        serde_json::to_string(&answer).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    db.write(format!("agent:{agent}"), move |t| {
+        t.execute(
+            "UPDATE agent_rpc_answers SET answer = ?3 WHERE agent = ?1 AND request_id = ?2",
+            rusqlite::params![agent, id, stored],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(internal)?;
+    answer
 }
 
 #[cfg(test)]
@@ -330,7 +385,8 @@ mod tests {
         serde_json::from_value(json!({
             "agent":"00000000000000000000000001", "name":"tester", "project":"demo",
             "harness":"claude", "status":"idle"
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     fn crash_params() -> Value {
@@ -348,7 +404,9 @@ mod tests {
     #[tokio::test]
     async fn journal_crash_child() {
         use std::io::Write;
-        let Some(path) = std::env::var_os("TER_260_CRASH_DB") else { return; };
+        let Some(path) = std::env::var_os("TER_260_CRASH_DB") else {
+            return;
+        };
         let db = crash_db(std::path::Path::new(&path));
         let _ = journaled(&db, &crash_context(), "crash-boundary".into(), &crash_params(), async {
             db.write("test", |t| {
@@ -367,30 +425,63 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.sqlite");
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "agent_rpc::tests::journal_crash_child", "--nocapture"])
+            .args([
+                "--exact",
+                "agent_rpc::tests::journal_crash_child",
+                "--nocapture",
+            ])
             .env("TER_260_CRASH_DB", &path)
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
         let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let line = lines.next_line().await.unwrap().expect("child reached the durable effect");
-                if line == "effect durable" { break; }
+                let line = lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("child reached the durable effect");
+                if line == "effect durable" {
+                    break;
+                }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         // Tokio Child::kill sends SIGKILL on Unix and reaps only our child.
         child.kill().await.unwrap();
         let db = crash_db(&path);
-        let result = journaled(&db, &crash_context(), "crash-boundary".into(), &crash_params(), async {
-            panic!("an unresolved write must never be executed again");
-        }).await.unwrap_err();
+        let result = journaled(
+            &db,
+            &crash_context(),
+            "crash-boundary".into(),
+            &crash_params(),
+            async {
+                panic!("an unresolved write must never be executed again");
+            },
+        )
+        .await
+        .unwrap_err();
         assert_eq!(result.code, "indeterminate");
         assert!(result.message.contains("crash-boundary (POST)"));
         assert!(result.message.contains("check before you retry"));
-        let count: i64 = db.read(|c| Ok(c.query_row("SELECT count(*) FROM crash_effect", [], |r| r.get(0))?)).await.unwrap();
+        let count: i64 = db
+            .read(|c| Ok(c.query_row("SELECT count(*) FROM crash_effect", [], |r| r.get(0))?))
+            .await
+            .unwrap();
         assert_eq!(count, 1);
-        let audits: i64 = db.read(|c| Ok(c.query_row("SELECT count(*) FROM audit WHERE action = 'agent_rpc.indeterminate'", [], |r| r.get(0))?)).await.unwrap();
+        let audits: i64 = db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM audit WHERE action = 'agent_rpc.indeterminate'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
         assert_eq!(audits, 1);
     }
 
