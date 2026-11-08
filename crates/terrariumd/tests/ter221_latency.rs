@@ -1,4 +1,4 @@
-//! TER-221 research (scratch, not for merge): the latency of the board rule
+//! TER-221 probes retained for TER-233: the latency of the board rule
 //! engine from an event to the end of its rule run, idle and under load,
 //! and the per-card order of the outbox under concurrent writers.
 //!
@@ -242,6 +242,7 @@ async fn lab() -> (TestDaemon, Vec<String>, Vec<String>) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual latency measurement on a named target"]
 async fn latency_idle() {
     let (td, cards, _) = lab().await;
     measure("idle", &state(&td), &cards, 80).await;
@@ -252,6 +253,7 @@ async fn latency_idle() {
 /// of events that match no rule, as fast as the writer lock allows; and
 /// CPU hogs on every core.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual load measurement: saturates all available CPUs"]
 async fn latency_under_load() {
     let (td, cards, noise) = lab().await;
     let st = state(&td);

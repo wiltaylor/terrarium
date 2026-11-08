@@ -448,42 +448,43 @@ pub async fn plan_pass(
     projects: Vec<ProjectRules>,
     now: DateTime<Utc>,
 ) -> ApiResult<(usize, bool)> {
-    db.write("system", move |t| {
-        let Some(cursor) = cursor(t)? else {
-            let last = events::last_seq(t)?;
-            set_cursor(t, last)?;
-            return Ok((0, false));
-        };
-        let evs = events::list(t, &EventFilter::default(), cursor, BATCH)?;
-        let Some(last) = evs.last().map(|e| e.seq) else {
-            return Ok((0, false));
-        };
-        let by_project: HashMap<&str, &ProjectRules> =
-            projects.iter().map(|p| (p.project.as_str(), p)).collect();
-        let mut written = 0;
-        let mut touched: Vec<String> = Vec::new();
-        for e in &evs {
-            let Some(pr) = e.project.as_deref().and_then(|p| by_project.get(p)) else {
-                continue;
-            };
-            for (ord, rule) in pr.set.rules.iter().enumerate() {
-                let planned = decide(t, &pr.project, rule, e, Some(&pr.updated_at), now)?;
-                for p in planned {
-                    insert_run(t, pr, ord, rule, e, &p, now)?;
-                    written += 1;
-                }
-            }
-            if !touched.contains(&pr.project) {
-                touched.push(pr.project.clone());
-            }
-        }
+    db.write("system", move |t| plan_events(t, &projects, now)).await
+}
+
+fn plan_events(t: &Tx<'_>, projects: &[ProjectRules], now: DateTime<Utc>) -> ApiResult<(usize, bool)> {
+    let Some(cursor) = cursor(t)? else {
+        let last = events::last_seq(t)?;
         set_cursor(t, last)?;
-        for p in &touched {
-            prune(t, p, now)?;
+        return Ok((0, false));
+    };
+    let evs = events::list(t, &EventFilter::default(), cursor, BATCH)?;
+    let Some(last) = evs.last().map(|e| e.seq) else {
+        return Ok((0, false));
+    };
+    let by_project: HashMap<&str, &ProjectRules> =
+        projects.iter().map(|p| (p.project.as_str(), p)).collect();
+    let mut written = 0;
+    let mut touched: Vec<String> = Vec::new();
+    for e in &evs {
+        let Some(pr) = e.project.as_deref().and_then(|p| by_project.get(p)) else {
+            continue;
+        };
+        for (ord, rule) in pr.set.rules.iter().enumerate() {
+            let planned = decide(t, &pr.project, rule, e, Some(&pr.updated_at), now)?;
+            for p in planned {
+                insert_run(t, pr, ord, rule, e, &p, now)?;
+                written += 1;
+            }
         }
-        Ok((written, evs.len() == BATCH))
-    })
-    .await
+        if !touched.contains(&pr.project) {
+            touched.push(pr.project.clone());
+        }
+    }
+    set_cursor(t, last)?;
+    for p in &touched {
+        prune(t, p, now)?;
+    }
+    Ok((written, evs.len() == BATCH))
 }
 
 fn insert_run(
@@ -642,11 +643,16 @@ pub fn live_rules(projects: &[ProjectRules]) -> HashSet<(String, String)> {
 /// Returns false once drained (failed lanes are left for the next pass).
 pub async fn run_pending(state: &Shared, live: Arc<HashSet<(String, String)>>) -> ApiResult<bool> {
     let mut lanes = Lanes::default();
-    lanes.start(state, live).await?;
+    lanes.start(state, live, state.db.read(pending_lanes).await?);
     while !lanes.tasks.is_empty() {
         lanes.join().await;
     }
     Ok(false)
+}
+
+fn pending_lanes(c: &Connection) -> ApiResult<Vec<String>> {
+    let mut st = c.prepare("SELECT DISTINCT lane FROM rule_runs WHERE state = 'pending'")?;
+    Ok(st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
 }
 
 /// One owner per lane, including while its committed effects are running.
@@ -659,19 +665,12 @@ struct Lanes {
 }
 
 impl Lanes {
-    async fn start(
+    fn start(
         &mut self,
         state: &Shared,
         live: Arc<HashSet<(String, String)>>,
-    ) -> ApiResult<()> {
-        let pending: Vec<String> = state
-            .db
-            .read(|c| {
-                let mut st =
-                    c.prepare("SELECT DISTINCT lane FROM rule_runs WHERE state = 'pending'")?;
-                Ok(st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
-            })
-            .await?;
+        pending: Vec<String>,
+    ) {
         for lane in pending {
             if self.stopped.contains(&lane) || self.active.values().any(|l| l == &lane) {
                 continue;
@@ -684,7 +683,6 @@ impl Lanes {
                 .spawn(async move { run_lane(&st, &name, &live).await });
             self.active.insert(task.id(), lane);
         }
-        Ok(())
     }
 
     async fn join(&mut self) {
@@ -1409,17 +1407,20 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
             }
         }
         let live = Arc::new(live_rules(&projects));
-        let more = match plan_pass(&state.db, projects, Utc::now()).await {
-            Ok((_, more)) => more,
+        // Discover runnable lanes in the planning transaction. A separate
+        // read would queue behind every worker again before we can plan
+        // the next events under load.
+        let (more, pending) = match state.db.write("system", move |t| {
+            let (_, more) = plan_events(t, &projects, Utc::now())?;
+            Ok((more, pending_lanes(t)?))
+        }).await {
+            Ok(planned) => planned,
             Err(e) => {
                 warn!("the rule engine cannot read the event log: {e}");
                 return;
             }
         };
-        if let Err(e) = lanes.start(state, live).await {
-            warn!("the rule engine cannot run its outbox: {e}");
-            return;
-        }
+        lanes.start(state, live, pending);
         if more {
             continue;
         }
