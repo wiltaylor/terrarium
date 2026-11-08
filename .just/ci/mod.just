@@ -16,6 +16,8 @@ validate:
 	#!/usr/bin/env bash
 	set -euo pipefail
 	export RUSTUP_TOOLCHAIN=1.97.1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+	# Stable test-only inputs across slot checkouts. Release builds do not use this gate.
+	export TERRARIUM_GIT_REF=ci-test TERRARIUM_TEST_BUILD=1 SOURCE_DATE_EPOCH=0
 	just ci::fmt-check
 	just ci::lint
 	just ci::test
@@ -28,6 +30,7 @@ validate-affected: require-uv
 	#!/usr/bin/env bash
 	set -euo pipefail
 	export RUSTUP_TOOLCHAIN=1.97.1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+	export TERRARIUM_GIT_REF=ci-test TERRARIUM_TEST_BUILD=1 SOURCE_DATE_EPOCH=0
 	kind=${TERRARIUM_JOB_KIND:-}
 	list=${TERRARIUM_CHANGED_FILES:-}
 	if [ "$kind" = merge ]; then
@@ -63,17 +66,37 @@ fmt-check: require-cargo
 lint: require-cargo
 	cargo clippy --workspace --all-targets -- -D warnings
 
-# Run the Rust unit and integration tests; --no-fail-fast runs every test binary, so one failure does not hide the rest. With RESULTS_DIR set, libtest writes JSON to $RESULTS_DIR/rust.json
+# Install the same pinned runner locally, in merge jobs, and in GitHub CI.
+[group('ci')]
+install-nextest: require-cargo
+	#!/usr/bin/env bash
+	set -euo pipefail
+	case "$(cargo nextest --version 2>/dev/null || true)" in
+		'cargo-nextest 0.9.103 ('*) ;;
+		*) cargo install cargo-nextest --version 0.9.103 --locked ;;
+	esac
+
+# Default Rust gate. Cargo test was faster in the TER-239 contention comparison.
 [group('ci')]
 test: require-cargo
 	#!/usr/bin/env bash
 	set -euo pipefail
-	if [ -z "${RESULTS_DIR:-}" ]; then
-		cargo test --workspace --no-fail-fast
-		exit 0
+	if [ -n "${RESULTS_DIR:-}" ]; then
+		mkdir -p "$RESULTS_DIR"
+		: > "$RESULTS_DIR/rust.json"
 	fi
-	mkdir -p "$RESULTS_DIR"
-	RUSTC_BOOTSTRAP=1 cargo test --workspace --no-fail-fast -- -Z unstable-options --format json --report-time > "$RESULTS_DIR/rust.json"
+	python3 scripts/rust_tests.py --workspace --no-fail-fast
+
+# Opt-in parallel runner. RESULTS_DIR retains rust.xml and doctests.json.
+[group('ci')]
+test-nextest: require-cargo
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [ -n "${RESULTS_DIR:-}" ]; then
+		mkdir -p "$RESULTS_DIR"
+		rm -f "$RESULTS_DIR"/rust*.xml "$RESULTS_DIR/doctests.json"
+	fi
+	python3 scripts/rust_tests.py --nextest --workspace --no-fail-fast
 
 # Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer, the deploy, the CI workflow)
 [group('ci')]

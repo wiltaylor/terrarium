@@ -6,7 +6,7 @@
 //! of `terrariumd::target_test` (a fake `ssh`, no network).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::{TestDaemon, write};
 use serde_json::{Value, json};

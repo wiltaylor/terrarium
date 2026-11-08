@@ -26,6 +26,8 @@ pub fn fleet_source(name: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
+    /// Mail human card comments to leads and the card's agents by default.
+    pub human_comment_notifications: bool,
     pub name: String,
     pub description: String,
     /// The card ID prefix: `TER` makes `TER-42`.
@@ -55,6 +57,7 @@ pub struct Project {
 
 fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
+        human_comment_notifications: r.get("human_comment_notifications")?,
         name: r.get("name")?,
         description: r
             .get::<_, Option<String>>("description")?
@@ -235,6 +238,8 @@ pub fn create(t: &mut Tx<'_>, p: &NewProject, source: &str) -> ApiResult<Project
 #[serde(deny_unknown_fields)]
 pub struct ProjectPatch {
     #[serde(default)]
+    pub human_comment_notifications: Option<bool>,
+    #[serde(default)]
     pub description: Option<String>,
     #[serde(default, alias = "prefix")]
     pub card_prefix: Option<String>,
@@ -255,6 +260,12 @@ pub struct ProjectPatch {
 /// no cards, so card IDs stay stable.
 pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Project> {
     let before = get(t, name)?;
+    if let Some(enabled) = patch.human_comment_notifications {
+        t.execute(
+            "UPDATE projects SET human_comment_notifications = ?2 WHERE name = ?1",
+            params![name, enabled],
+        )?;
+    }
     if let Some(prefix) = patch
         .card_prefix
         .as_deref()
@@ -309,7 +320,8 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
         Some(name),
         json!({"description": patch.description, "card_prefix": patch.card_prefix,
                "idle_alert": patch.idle_alert, "github_authors": patch.github_authors,
-               "board_flow": patch.board_flow}),
+               "board_flow": patch.board_flow,
+               "human_comment_notifications": patch.human_comment_notifications}),
     )?;
     get(t, name)
 }

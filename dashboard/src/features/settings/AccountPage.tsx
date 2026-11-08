@@ -8,6 +8,7 @@ import { timeUntil } from "../../lib/format";
 import { api, auth, changePasswordNow, signOutAll, signOutNow, theme } from "../../stores";
 import { ApiError } from "../../api";
 import { MIN_PASSWORD, passwordFormError } from "../../stores/auth";
+import { DefaultAgent } from "./DefaultAgent";
 
 export default function AccountPage() {
   const now = useNow(30_000);
@@ -65,6 +66,7 @@ export default function AccountPage() {
   return (
     <div class="stack">
       <PageHead title="Account" level={2} />
+      <DefaultAgent />
 
       <section class="card-box stack" aria-labelledby="session-h">
         <h2 id="session-h" style={{ margin: 0 }}>

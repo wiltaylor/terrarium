@@ -4,7 +4,7 @@
 //! remotes are local bare repos.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -641,12 +641,21 @@ async fn the_browser_reads_main_and_agent_trees() {
     let dest = PathBuf::from(a["workspace"].as_str().unwrap()).join("proj");
     // The agent works on a branch: one commit, one staged file, one
     // change in the work tree, one untracked file, a binary file.
+    // This is browser fixture data, not an agent-authored commit. The
+    // checkout has a production provenance hook, tested separately above.
     sh(
         &dest,
         "git checkout -q -b feat && printf 'one\\nmore\\n' > a.txt && mkdir -p d && \
-         echo '# Doc' > d/x.md && git add . && git commit -q -m 'feat: more' && \
+         echo '# Doc' > d/x.md && git add . && \
+         git -c core.hooksPath=/dev/null commit -q -m 'feat: more' && \
          echo staged > s.txt && git add s.txt && echo changed >> a.txt && echo u > u.txt && \
          printf '\\x89PNG\\0\\1' > img.png",
+    );
+    // Check the same full-message contract even on hosts where bwrap is
+    // unavailable and the agent-tree API assertions below cannot run.
+    assert_eq!(
+        agent_git(&dest, &["show", "-s", "--format=%B"], &[]).trim(),
+        "feat: more"
     );
     let repos = td.get("/api/projects/terra/repos").await;
     let id = repos
@@ -680,7 +689,14 @@ async fn the_browser_reads_main_and_agent_trees() {
             "{trees:#?}"
         );
         td.get(&format!("{base}/main/files")).await.ok();
-        eprintln!("skipped the agent tree reads: no read sandbox here");
+        // Write directly so libtest does not hide this coverage gap when
+        // the fallback assertions pass (normal output is captured).
+        use std::io::Write as _;
+        writeln!(
+            std::io::stderr(),
+            "SKIP the_browser_reads_main_and_agent_trees: agent-tree API assertions need a working bwrap read sandbox"
+        )
+        .unwrap();
         return;
     }
 
