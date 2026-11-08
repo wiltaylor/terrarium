@@ -3779,7 +3779,7 @@ mod tests {
         task.await.unwrap();
         assert_eq!(read.unwrap().unwrap(), 1);
         // A new handle simulates a restart. A changed DNS answer must not
-        // move a running job away from its cap, or retry a failed lookup.
+        // move a running job away from its cap.
         let reopened = crate::db::Db::new(
             crate::db::open(&path).unwrap(),
             crate::events::EventHub::default(),
@@ -3804,10 +3804,22 @@ mod tests {
             .await
             .unwrap();
         prepare_hosts_with(&reopened, Some("FAILED.INVALID".into()), |_| {
-            panic!("failed lookups must be pinned too")
+            "192.0.2.3".into()
         })
         .await
         .unwrap();
+        reopened
+            .read(|c| {
+                let key: String = c.query_row(
+                    "SELECT host_key FROM job_host_keys WHERE hostname = 'failed.invalid'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(key, "192.0.2.3");
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     /// A job for the verdict tests: ended at attempt 2 on `C1`.

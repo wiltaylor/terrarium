@@ -113,6 +113,7 @@ async fn effective(
         "hash": r.rules.hash,
         "source": r.rules.source,
         "rules": list,
+        "problems": r.rules.problems,
     })))
 }
 
@@ -145,6 +146,7 @@ async fn lint(
         "board_flow": r.flow.as_str(),
         "source": source,
         "findings": findings,
+        "problems": if source == "stored" { r.rules.problems } else { Vec::new() },
     })))
 }
 

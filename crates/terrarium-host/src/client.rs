@@ -55,6 +55,8 @@ pub struct ClientOptions {
     pub handshake_timeout: Duration,
     pub policy: PathPolicy,
     pub docker_bin: String,
+    /// NVIDIA inventory/compute sampler. Tests may substitute a fixture binary.
+    pub nvidia_smi_bin: String,
     pub vmlab_bin: String,
     /// The `git` binary for `vmlab.prepare` and `vmlab.release`.
     pub git_bin: String,
@@ -99,6 +101,7 @@ impl ClientOptions {
             handshake_timeout: Duration::from_secs(15),
             policy: PathPolicy::default(),
             docker_bin: "docker".into(),
+            nvidia_smi_bin: "nvidia-smi".into(),
             vmlab_bin: "vmlab".into(),
             git_bin: "git".into(),
             paths: HostPaths::default(),
@@ -117,7 +120,12 @@ impl ClientOptions {
 /// Send a `metrics` frame every `interval` until the link ends. The sampler reads `/proc` on a blocking thread; while one sample
 /// runs, the next tick waits, so a slow `statvfs` holds back only the
 /// metrics.
-async fn run_metrics(out: mpsc::Sender<HostFrame>, interval: Duration) {
+async fn run_metrics(
+    out: mpsc::Sender<HostFrame>,
+    interval: Duration,
+    docker: String,
+    nvidia: String,
+) {
     let interval = interval.max(Duration::from_millis(10));
     let Ok(mut sampler) = tokio::task::spawn_blocking(|| {
         let mut s = crate::metrics::Sampler::default();
@@ -130,6 +138,7 @@ async fn run_metrics(out: mpsc::Sender<HostFrame>, interval: Duration) {
     };
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut gpu = crate::gpu::Cache::default();
     loop {
         ticker.tick().await;
         let Ok((s, sample)) = tokio::task::spawn_blocking(move || {
@@ -141,7 +150,10 @@ async fn run_metrics(out: mpsc::Sender<HostFrame>, interval: Duration) {
             return;
         };
         sampler = s;
-        let Some(m) = sample else { continue };
+        let Some(mut m) = sample else { continue };
+        gpu.refresh(&nvidia, &docker).await;
+        m.gpus = gpu.devices.clone();
+        m.gpu_usage = gpu.usage.clone();
         match out.try_send(HostFrame::Metrics(Box::new(m))) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -389,7 +401,15 @@ impl Client {
         }
     }
 
-    fn hello(&self) -> Hello {
+    async fn hello(&self) -> Hello {
+        let mut capabilities = self.opts.capabilities.clone();
+        if capabilities.gpu_reservations {
+            // Never reuse startup inventory after a reconnect. Missing probes
+            // clear inventory so the daemon keeps affected admission closed.
+            capabilities.gpus = crate::gpu::sample_with(&self.opts.nvidia_smi_bin)
+                .await
+                .unwrap_or_default();
+        }
         let token = self.token().clone();
         let resume = token.map(|token| {
             let mut sessions: Vec<ResumeOffer> = self
@@ -410,7 +430,7 @@ impl Client {
             version: self.opts.version.clone(),
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
-            capabilities: self.opts.capabilities.clone(),
+            capabilities,
             max_sessions: self.opts.max_sessions,
             max_running_targets: Some(self.opts.max_running_targets),
             resume,
@@ -564,7 +584,7 @@ impl Client {
         .map_err(|_| ClientError::Timeout("connect"))??;
         let (mut sink, mut stream) = ws.split();
 
-        let hello = HostFrame::Hello(Box::new(self.hello()));
+        let hello = HostFrame::Hello(Box::new(self.hello().await));
         sink.send(Message::Text(text(&hello)?.into())).await?;
 
         let welcome = tokio::time::timeout(self.opts.handshake_timeout, async {
@@ -599,8 +619,14 @@ impl Client {
         // when the other queue is empty, so a sample never delays a frame
         // of a session; a sample that finds the queue full is dropped.
         let (mtx, mut mrx) = mpsc::channel::<HostFrame>(1);
-        let sampler = (welcome.metrics && self.opts.capabilities.metrics)
-            .then(|| tokio::spawn(run_metrics(mtx, self.opts.metrics_interval)));
+        let sampler = (welcome.metrics && self.opts.capabilities.metrics).then(|| {
+            tokio::spawn(run_metrics(
+                mtx,
+                self.opts.metrics_interval,
+                self.opts.docker_bin.clone(),
+                self.opts.nvidia_smi_bin.clone(),
+            ))
+        });
 
         let mut writer = tokio::spawn(async move {
             loop {
@@ -1514,6 +1540,28 @@ pub fn ensure_crypto_provider() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn each_connection_hello_refreshes_gpu_inventory_and_clears_failed_probes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("smi");
+        let inventory = dir.path().join("inventory");
+        std::fs::write(&bin, format!("#!/bin/sh\ncat '{}'\n", inventory.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut opts = ClientOptions::new("ws://localhost", "test", "test");
+        opts.capabilities.gpu_reservations = true;
+        opts.nvidia_smi_bin = bin.to_string_lossy().into_owned();
+        let client = Client::new(opts);
+        std::fs::write(&inventory, "GPU-abcd, test, 8192, 0\n").unwrap();
+        assert_eq!(client.hello().await.capabilities.gpus[0].uuid, "GPU-abcd");
+        std::fs::write(&inventory, "GPU-1234, replacement, 16384, 0\n").unwrap();
+        let hello = client.hello().await;
+        assert_eq!(hello.capabilities.gpus[0].uuid, "GPU-1234");
+        assert_eq!(hello.capabilities.gpus[0].memory_bytes, 16 << 30);
+        std::fs::write(&inventory, "unavailable\n").unwrap();
+        assert!(client.hello().await.capabilities.gpus.is_empty());
+    }
 
     #[test]
     fn backoff_doubles_with_jitter_and_caps() {

@@ -10735,3 +10735,48 @@ async fn rules_every_command() {
         "{out}"
     );
 }
+
+#[tokio::test]
+async fn rules_stored_parse_problems_are_printed_and_check_fails() {
+    let problems = json!([{"line": 3, "column": 5, "message": "unknown verb retired_comment"}]);
+    let out = ok(
+        true,
+        &["rule", "ls"],
+        vec![(
+            200,
+            json!({"project": "terra", "board_flow": "daemon", "rules": [], "problems": problems}),
+        )],
+        vec![req(Get, "/api/projects/terra/rules/effective")],
+    )
+    .await;
+    assert!(
+        out.contains("rules.wcl:3:5: unknown verb retired_comment"),
+        "{out}"
+    );
+    for json_output in [false, true] {
+        let args = if json_output {
+            vec!["--json", "rule", "check"]
+        } else {
+            vec!["rule", "check"]
+        };
+        let r = exec(
+            true,
+            &args,
+            vec![(200, json!({"findings": [], "problems": problems}))],
+            None,
+        )
+        .await;
+        assert_eq!(exit_code_of(&r.result.unwrap_err()), 1);
+        if json_output {
+            let v: Value = serde_json::from_str(&r.out).unwrap();
+            assert_eq!(v["problems"], problems);
+        } else {
+            assert!(
+                r.out
+                    .contains("rules.wcl:3:5: unknown verb retired_comment"),
+                "{}",
+                r.out
+            );
+        }
+    }
+}

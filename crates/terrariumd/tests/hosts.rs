@@ -1100,7 +1100,7 @@ async fn lifecycle_verbs_map_to_docker_and_vmlab() {
         .err(422, "invalid");
     let log = lab.log();
     assert!(
-        log.contains("docker run -d --init --name terrarium-dbox --label terrarium.target=dbox alpine:3 sleep infinity"),
+        log.contains("docker run -d --init --name terrarium-dbox -e NVIDIA_VISIBLE_DEVICES --label terrarium.target=dbox alpine:3 sleep infinity"),
         "{log}"
     );
     assert!(log.contains("docker rm -f -v terrarium-dbox"), "{log}");

@@ -523,6 +523,8 @@ impl Sampler {
             })
             .unwrap_or_default();
         Some(HostMetrics {
+            gpus: vec![],
+            gpu_usage: vec![],
             interval_secs: secs,
             cpu,
             memory: self.read("meminfo").as_deref().and_then(parse_meminfo),

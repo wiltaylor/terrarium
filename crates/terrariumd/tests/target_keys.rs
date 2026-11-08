@@ -13,6 +13,29 @@ use serde_json::{Value, json};
 use ssh_key::{HashAlg, PrivateKey, PublicKey};
 use terrariumd::secrets::{self, Secret};
 
+#[tokio::test]
+async fn patch_address_keeps_the_new_pin() {
+    let td = TestDaemon::start().await;
+    td.post(
+        "/api/targets",
+        json!({"name": "dns-box", "kind": "ssh", "address": "old.invalid"}),
+    )
+    .await
+    .ok();
+    td.patch("/api/targets/dns-box", json!({"address": "localhost"}))
+        .await
+        .ok();
+    let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
+    let key: String = conn
+        .query_row(
+            "SELECT host_key FROM job_host_keys WHERE hostname = 'localhost'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(key.parse::<std::net::IpAddr>().unwrap().is_loopback());
+}
+
 async fn generate(td: &TestDaemon, scope: &str, name: &str, body: Value) -> Value {
     let r = td
         .post(&format!("/api/secrets/{scope}/{name}/generate"), body)

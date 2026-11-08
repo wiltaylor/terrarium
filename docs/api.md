@@ -6333,6 +6333,54 @@ Host grants return 409 naming existing sessions that must end first:
 phase 1 does not reparent live scopes. Agent and target reservations cannot
 overlap on a host because they use different slice hierarchies.
 
+**GPU reservations.** The same POST accepts an optional `gpus` array. Each
+claim names a stable NVIDIA `uuid`, not a device index. For example:
+
+```json
+{"target":"p-gpu","gpus":[{"uuid":"GPU-abcd1234","exclusive":true}],"until":"30m"}
+```
+
+For cooperative sharing, use `{"uuid":"GPU-abcd1234","vram_bytes":1073741824}`.
+`exclusive` defaults to false. A shared claim requires positive `vram_bytes`
+no larger than physical VRAM. `amounts` may be omitted for GPU-only requests.
+The top-level `exclusive` remains the CPU affinity option, independent of each
+GPU claim's `exclusive`. The CLI accepts the array through `reserve new --gpus
+'[...]'`. No MIG partitions are created.
+
+Exclusive GPUs require a managed **ephemeral Docker target**. Native host,
+SSH and vmlab exclusive GPU requests are refused, never granted as unenforced
+exclusive access. Shared claims are supported for native host targets and
+managed ephemeral Docker targets. Docker reservations belong to the target,
+not individual agents. SSH and vmlab GPU reservations are unsupported.
+
+**Containers get no GPU by default**, including images that set
+`NVIDIA_VISIBLE_DEVICES=all`. Managed container creation overrides that variable
+with `void` without a GPU reservation, or the reserved UUID allowlist with one,
+and passes the same devices through Docker's `--gpus` option. A GPU reservation
+cannot change a running container's exposure. Stop it first and recreate it
+on the next `up`. Permanent and unmanaged Docker targets cannot reserve GPUs.
+An exclusive grant is refused while incompatible non-native sessions or
+containers are active. Active holders of disjoint devices can run concurrently.
+Native host execution remains available and does not generate GPU-session mail.
+
+A zero host reservation percentage disables GPU admission. A positive
+percentage enables whole-device exclusive allocations and shared accounting
+against physical VRAM, without fractionally partitioning devices. Exclusive
+and shared claims cannot overlap on the same device. Shared claims cannot
+overcommit its recorded VRAM. The usual FIFO and cleanup accounting apply.
+Capacity responses include `gpus` inventory (`uuid`, `name`, `memory_bytes`,
+`used_bytes`) and `used.gpus` entries with `reservation`, `holder`, and `claim`.
+
+Shared GPU memory limits are cooperative, not hard limits. The host samples
+NVIDIA compute-process VRAM and attributes it through PID cgroups to the
+container or native holder's systemd scopes. Overages send warning mail to
+the holder and project leads, once until a below-share sample rearms the
+warning. Overages never kill processes. Graphics-process usage and missing
+PID attribution are not inferred from whole-device totals. GPU samples are
+cached for 30 seconds. Inventory is refreshed for every host connection;
+missing reserved devices keep reconciliation closed. Ordinary reservation
+expiry and explicit retraction still perform their normal session cleanup.
+
 Insufficient capacity returns 409 with the current allocations. With
 `queue: true`, the request waits in a durable FIFO queue, without backfill.
 `queue_timeout` defaults to one hour. Starting and ending reservations keep
@@ -8281,6 +8329,14 @@ test: true}`. Each test writes the audit row `schedule.test`
 A project has one board rules file, `rules.wcl` (TER-162, TER-166). A
 rule reacts to an event of the log and runs verbs on the board. The
 daemon stores and checks the file here; the engine (§19.9) runs it.
+
+If stored text no longer parses under the current schema, GET rules
+preserves the text and hash, returns empty `rules`, and adds
+`problems: [{line, column, message}]`. The engine emits a project event
+`rules.invalid` with the stored hash and problems when it loads that
+revision. Its own rules do not run, but the built-in pack still runs in
+rules mode. A cached revision does not emit again until reloaded (for
+example after a daemon restart).
 
 The file is WCL. The daemon ships its schema
 (`crates/terrarium-core/src/rules.schema.wcl`, `GET /api/rules/schema`)

@@ -54,6 +54,10 @@ pub enum Holder {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reservation {
+    #[serde(default)]
+    pub gpus: Vec<terrarium_core::resources::GpuClaim>,
+    #[serde(default)]
+    pub gpu_warned: bool,
     pub id: String,
     pub host: String,
     pub project: String,
@@ -79,6 +83,7 @@ pub struct Reservation {
 /// Already-authorized request. The API resolves agent/target IDs and checks
 /// lease permissions before calling the store.
 pub struct Request {
+    pub gpus: Vec<terrarium_core::resources::GpuClaim>,
     pub host: String,
     pub project: String,
     pub holder: Holder,
@@ -232,6 +237,13 @@ fn notify(t: &mut Tx<'_>, r: &Reservation, change: &str) -> ApiResult<()> {
             }
         }
     }
+    if change.starts_with("gpu_") {
+        let mut stmt = t.prepare("SELECT a.id FROM agents a JOIN roles r ON r.agent_id=a.id WHERE a.project=?1 AND r.role='project_admin'")?;
+        ids.extend(
+            stmt.query_map([&r.project], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
     ids.sort();
     ids.dedup();
     let end = r
@@ -239,7 +251,12 @@ fn notify(t: &mut Tx<'_>, r: &Reservation, change: &str) -> ApiResult<()> {
         .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
         .map(|d| d.to_rfc3339())
         .unwrap_or_else(|| "not started".into());
-    let line = if change == "warning" {
+    let line = if change == "gpu_overage" {
+        format!(
+            "Reservation {} on {}: measured holder compute VRAM exceeds a cooperative shared GPU share. No process was killed. Reduce GPU memory use or ask the lead to change the reservation.",
+            r.id, r.host
+        )
+    } else if change == "warning" {
         let minutes = if r.warned_5 { 5 } else { 15 };
         format!(
             "Reservation {} on {} ends within {minutes} minutes, at {end}. Ask your lead to run `terrarium reserve extend {} --until <duration>` before it ends. Sessions end with reservation_ended at expiry.",
@@ -302,6 +319,48 @@ fn allocation(
         ApiError::conflict(format!("reservable capacity on `{}` is exhausted", request.host))
         .with_details(json!({"host":request.host,"holders":held.iter().map(|r| json!({"holder":r.holder,"until":r.until,"reservation":r.id})).collect::<Vec<_>>()}))
     };
+    let host = super::hosts::get(conn, &request.host)?;
+    let devices: Vec<terrarium_core::resources::GpuDevice> = serde_json::from_value(
+        host.capabilities
+            .get("gpus")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )?;
+    let mut seen = std::collections::BTreeSet::new();
+    for claim in &request.gpus {
+        terrarium_core::resources::validate_gpu_id(&claim.uuid).map_err(ApiError::invalid)?;
+        if !seen.insert(&claim.uuid) {
+            return Err(ApiError::invalid("duplicate GPU claim"));
+        }
+        let device = devices
+            .iter()
+            .find(|d| d.uuid == claim.uuid)
+            .ok_or_else(|| ApiError::conflict("GPU is absent from host inventory"))?;
+        if !claim.exclusive && (claim.vram_bytes == 0 || claim.vram_bytes > device.memory_bytes) {
+            return Err(ApiError::invalid(
+                "shared GPU needs a positive VRAM share no larger than device capacity",
+            ));
+        }
+        if capacity(conn, &request.host)?.2 == 0 {
+            return Err(conflict());
+        }
+        let mut available = device.memory_bytes;
+        for other in held
+            .iter()
+            .flat_map(|r| &r.gpus)
+            .filter(|g| g.uuid == claim.uuid)
+        {
+            if claim.exclusive || other.exclusive {
+                return Err(conflict());
+            }
+            available = available
+                .checked_sub(other.vram_bytes)
+                .ok_or_else(&conflict)?;
+        }
+        if !claim.exclusive && claim.vram_bytes > available {
+            return Err(conflict());
+        }
+    }
     for r in &held {
         remaining = remaining
             .remaining_after(&r.amounts)
@@ -346,7 +405,10 @@ pub fn request_deferred(
     deferred: bool,
 ) -> ApiResult<Reservation> {
     req.amounts.validate().map_err(ApiError::invalid)?;
-    if req.amounts.is_empty() || req.duration_ms <= 0 || req.queue_ms.is_some_and(|q| q <= 0) {
+    if (req.amounts.is_empty() && req.gpus.is_empty())
+        || req.duration_ms <= 0
+        || req.queue_ms.is_some_and(|q| q <= 0)
+    {
         return Err(ApiError::invalid(
             "give nonzero amounts and positive duration/queue timeout",
         ));
@@ -362,6 +424,8 @@ pub fn request_deferred(
         })
         .transpose()?;
     let mut r = Reservation {
+        gpus: req.gpus,
+        gpu_warned: false,
         id: ulid::Ulid::new().to_string(),
         host: req.host,
         project: req.project,
@@ -564,4 +628,22 @@ pub fn warnings(t: &mut Tx<'_>, host: &str, at: i64) -> ApiResult<Vec<(Reservati
         due.push((r, minutes));
     }
     Ok(due)
+}
+
+/// Warning only: a shared allocation is cooperative, never a kill threshold.
+pub fn gpu_usage(t: &mut Tx<'_>, id: &str, over: bool) -> ApiResult<()> {
+    let mut r = get(t, id)?;
+    if r.state != State::Active || r.gpu_warned == over {
+        return Ok(());
+    }
+    r.gpu_warned = over;
+    if over {
+        save(t, &r, "gpu_overage")
+    } else {
+        t.execute(
+            "UPDATE reservations SET data=?2 WHERE id=?1",
+            params![r.id, serde_json::to_string(&r)?],
+        )?;
+        Ok(())
+    }
 }

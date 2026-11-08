@@ -853,6 +853,10 @@ fn yes() -> bool {
 /// read is absent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct HostMetrics {
+    #[serde(default)]
+    pub gpu_usage: Vec<crate::gpu::Usage>,
+    #[serde(default)]
+    pub gpus: Vec<terrarium_core::resources::GpuDevice>,
     /// The seconds that the rates and the CPU busy share cover.
     pub interval_secs: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1335,6 +1339,8 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             capabilities: HostCapabilities {
+                gpus: vec![],
+                gpu_reservations: false,
                 capacity: None,
                 reservations: false,
                 docker: ToolCapability {

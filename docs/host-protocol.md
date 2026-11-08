@@ -834,6 +834,39 @@ with logical `cpu_ids` and `memory_bytes`. Missing capability means no
 reservation enforcement, not unlimited fallback. Per-device IO budgets are
 configured by the daemon operator rather than detected throughput.
 
+### GPU reservations and metrics
+
+GPU-capable hosts additionally advertise `gpu_reservations: true` and a `gpus`
+array in `hello.capabilities`. Each device has `uuid`, `name`, `memory_bytes`
+and `used_bytes`. UUIDs come from `nvidia-smi`, rather than unstable device
+indices. Both fields default to false/empty for older hosts. Inventory is
+queried again before each connection's hello, including reconnects. A failed
+probe produces empty inventory rather than reusing a stale startup result.
+The daemon refuses GPU grants without this capability and keeps admission
+closed if a reserved device is missing after reconnect.
+
+`docker.run.reservation.gpu_devices` is a UUID array, default empty. Containers
+get **no GPU by default**: the host overrides `NVIDIA_VISIBLE_DEVICES` with
+`void`, even if the caller or image set it to `all`. With a nonempty allowlist,
+it sets the variable to those UUIDs and adds `--gpus` with the same device list.
+GPU exposure is create-only. `resource.apply` with nonempty `gpu_devices` for
+a Docker update is rejected. The daemon supports GPU claims on managed
+ephemeral containers, whose next `up` recreates the device exposure. No MIG
+configuration or privileged native device control is added.
+
+`metrics.gpus` carries device inventory and sampled total usage.
+`metrics.gpu_usage` contains `{uuid, container, cgroup, used_bytes}` entries
+aggregated from compute-process VRAM. The host joins NVIDIA PIDs with
+`/proc/<pid>/cgroup` and Docker container IDs. Native entries have an empty
+`container` and retain their cgroup path for holder-scope attribution.
+Unavailable or unparseable measurements are omitted, not charged to another
+holder. Graphics-only allocations are not included. The GPU sampler caches
+both successful and failed probes for 30 seconds, independently of the
+ordinary metrics tick. Each command has a two-second timeout. A new connection
+starts a fresh cache. Shared overages only notify, never kill.
+
+### Applying CPU, memory and IO limits
+
 `resource.apply` carries `session`, `target`, `holder`, optional `container`
 and runtime `limits` (fixed limits, optional CPU list and per-device IO).
 With a container it invokes `docker update`; per-device IO in a live update
