@@ -676,6 +676,9 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     let lab = Lab::start().await;
     let _host = lab.host("lab1").await;
     lab.td.project("terra").await;
+    let base = lab.bins.path().join("builds");
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "project": "terra", "work_root": base}))
+        .await;
     let owner = lab
         .td
         .agent(
@@ -707,9 +710,6 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     let worker = lab.td.post_as(owner_id, &format!("/api/agents/{owner_id}/spawn"),
         json!({"template": "builder", "task": "Build", "bind": format!("card:{}", card["id"].as_str().unwrap())})).await.ok().clone();
     let id = worker["id"].as_str().unwrap().to_owned();
-    let base = lab.bins.path().join("builds");
-    lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "work_root": base}))
-        .await;
     let root = base.join("terra").join(worker["name"].as_str().unwrap());
     let cache = base.join("shared-cache");
     std::fs::create_dir_all(&cache).unwrap();
