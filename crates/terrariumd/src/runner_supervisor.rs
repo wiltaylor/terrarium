@@ -4181,14 +4181,19 @@ impl Supervisor for RunnerSupervisor {
             let mut runner_status = None;
             if let Some(runner) = runner {
                 match runner.list_pending().await {
-                    Ok(pending) => turns = pending.into_iter()
-                    .map(|t| crate::supervisor::PendingTurn {
-                        id: t.id,
-                        text: t.text,
-                        source: "runner",
-                    })
-                    .collect(),
-                    Err(terrarium_runner::RunnerError::Control(e)) if e.code == "method_not_found" => {
+                    Ok(pending) => {
+                        turns = pending
+                            .into_iter()
+                            .map(|t| crate::supervisor::PendingTurn {
+                                id: t.id,
+                                text: t.text,
+                                source: "runner",
+                            })
+                            .collect()
+                    }
+                    Err(terrarium_runner::RunnerError::Control(e))
+                        if e.code == "method_not_found" =>
+                    {
                         runner_status = Some("unsupported");
                     }
                     Err(_) => runner_status = Some("unavailable"),
@@ -4199,7 +4204,10 @@ impl Supervisor for RunnerSupervisor {
             if let Some(slot) = lock(&self.inner.slots).get(&agent) {
                 turns.extend(slot.turns.clone());
             }
-            Ok(crate::supervisor::PendingTurns { items: turns, runner: runner_status })
+            Ok(crate::supervisor::PendingTurns {
+                items: turns,
+                runner: runner_status,
+            })
         })
     }
 
@@ -5288,11 +5296,17 @@ mod tests {
     }
 
     impl RunnerHandle for ClaimRunner {
-        fn list_pending(&self) -> BoxFuture<'_, terrarium_runner::Result<Vec<terrarium_runner::WaitingTurn>>> {
+        fn list_pending(
+            &self,
+        ) -> BoxFuture<'_, terrarium_runner::Result<Vec<terrarium_runner::WaitingTurn>>> {
             Box::pin(async move {
                 Err(if self.pending_error == Some(true) {
-                    terrarium_runner::RunnerError::Control(terrarium_runner::RpcError::method_not_found("list_pending"))
-                } else { terrarium_runner::RunnerError::Exited })
+                    terrarium_runner::RunnerError::Control(
+                        terrarium_runner::RpcError::method_not_found("list_pending"),
+                    )
+                } else {
+                    terrarium_runner::RunnerError::Exited
+                })
             })
         }
         fn agent(&self) -> AgentId {
@@ -5388,17 +5402,24 @@ mod tests {
         for (unsupported, expected) in [(true, "unsupported"), (false, "unavailable")] {
             let tmp = tempfile::tempdir().unwrap();
             let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
-                tmp.path().join("state"), tmp.path().join("run"),
-                tmp.path().join("prompts"), SandboxConfig::default(), HashMap::new(),
+                tmp.path().join("state"),
+                tmp.path().join("run"),
+                tmp.path().join("prompts"),
+                SandboxConfig::default(),
+                HashMap::new(),
             ));
             let agent: Agent = serde_json::from_value(serde_json::json!({
                 "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
             })).unwrap();
             let id = agent.id;
             let runner = Arc::new(ClaimRunner {
-                id, pending_error: Some(unsupported),
-                entered: tokio::sync::Notify::new(), reply: tokio::sync::Notify::new(),
-                lost: false, claimed: AtomicBool::new(false), typed: Mutex::default(),
+                id,
+                pending_error: Some(unsupported),
+                entered: tokio::sync::Notify::new(),
+                reply: tokio::sync::Notify::new(),
+                lost: false,
+                claimed: AtomicBool::new(false),
+                typed: Mutex::default(),
                 typed_ready: tokio::sync::Notify::new(),
             });
             let mut slot = Slot::new(agent);

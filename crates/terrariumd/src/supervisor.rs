@@ -266,7 +266,7 @@ impl From<String> for PendingTurn {
     }
 }
 
-/// Runs agents. Work happens in the background and shows up as events.
+/// A best-effort queue snapshot with runner availability.
 #[derive(Default)]
 pub struct PendingTurns {
     pub items: Vec<PendingTurn>,
@@ -274,6 +274,7 @@ pub struct PendingTurns {
     pub runner: Option<&'static str>,
 }
 
+/// Runs agents. Work happens in the background and shows up as events.
 pub trait Supervisor: Send + Sync + 'static {
     fn list_pending(
         &self,
@@ -1143,16 +1144,24 @@ mod fake {
             agent: AgentId,
         ) -> BoxFuture<'_, Result<super::PendingTurns, SupervisorError>> {
             Box::pin(async move {
-                if let Some(unsupported) = self.lock().agents.get(&agent).and_then(|a| a.pending_error) {
-                    return Err(if unsupported { SupervisorError::Unsupported("list_pending".into()) }
-                        else { SupervisorError::Other("runner exiting".into()) });
+                if let Some(unsupported) =
+                    self.lock().agents.get(&agent).and_then(|a| a.pending_error)
+                {
+                    return Err(if unsupported {
+                        SupervisorError::Unsupported("list_pending".into())
+                    } else {
+                        SupervisorError::Other("runner exiting".into())
+                    });
                 }
-                Ok(super::PendingTurns { items: self
-                    .lock()
-                    .agents
-                    .get(&agent)
-                    .map(|a| a.early.clone())
-                    .unwrap_or_default(), runner: None })
+                Ok(super::PendingTurns {
+                    items: self
+                        .lock()
+                        .agents
+                        .get(&agent)
+                        .map(|a| a.early.clone())
+                        .unwrap_or_default(),
+                    runner: None,
+                })
             })
         }
 
