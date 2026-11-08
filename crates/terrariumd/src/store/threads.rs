@@ -645,9 +645,8 @@ fn flush_pending_wakes(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
         return Ok(());
     }
     let reasons: Vec<String> = {
-        let mut st = t.prepare(
-            "SELECT reason FROM thread_pending_wakes WHERE thread = ?1 ORDER BY reason",
-        )?;
+        let mut st =
+            t.prepare("SELECT reason FROM thread_pending_wakes WHERE thread = ?1 ORDER BY reason")?;
         st.query_map([id], |r| r.get(0))?
             .collect::<Result<Vec<_>, _>>()?
     };
