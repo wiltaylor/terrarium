@@ -1095,17 +1095,6 @@ async fn end_hold(td: &Td, id: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn board_changes_nudge_the_project_leads() {
     let td = Td::start().await;
-    // Isolate the rate-limited nudge turns from immediate human-comment
-    // mail, which would otherwise be the second turn before the interval.
-    let (status, body) = td
-        .req(
-            Method::PATCH,
-            "/api/projects/demo",
-            Some(json!({"human_comment_notifications": false})),
-            None,
-        )
-        .await;
-    assert_eq!(status, 200, "{body}");
     // Not about the card reminder: it would add a turn after the idle.
     td.daemon
         .as_ref()
@@ -1121,6 +1110,17 @@ async fn board_changes_nudge_the_project_leads() {
     let olead = td
         .agent("other", "olead", json!({"roles": ["project_admin"]}))
         .await;
+    // Isolate the rate-limited nudge turns from immediate human-comment
+    // mail, which would otherwise be the second turn before the interval.
+    let (status, body) = td
+        .req(
+            Method::PATCH,
+            "/api/projects/demo",
+            Some(json!({"human_comment_notifications": false})),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
     for id in [&lead, &bob, &olead] {
         td.post(&format!("/api/agents/{id}/start"), None).await;
     }
