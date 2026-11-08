@@ -253,6 +253,33 @@ async fn board_shape_and_card_ids() {
     assert_eq!(l.next_cursor(), None);
 }
 
+#[tokio::test]
+async fn board_http_baseline() {
+    use std::time::Instant;
+    for count in [294, 2940] {
+        let td = setup().await;
+        let mut conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
+        let tx = conn.transaction().unwrap();
+        for n in 1..=count {
+            let id = format!("TER-{n}");
+            let column = if n % 3 == 0 { "ready" } else { "done" };
+            tx.execute("INSERT INTO cards(id, project, number, column_id, position, title, body, created_by, created_at, updated_at)
+              VALUES (?1, 'proj', ?2, (SELECT id FROM board_columns WHERE project = 'proj' AND name = ?3), ?2, ?4, ?5, 'operator', '2026-11-08T00:00:00Z', '2026-11-08T00:00:00Z')",
+              rusqlite::params![id, n, column, "Board performance fixture ".repeat(4), "b".repeat(950)]).unwrap();
+            for j in 0..10 {
+                tx.execute("INSERT INTO card_comments(id, card, author, body, created_at) VALUES (?1, ?2, 'operator', ?3, '2026-11-08T00:00:00Z')",
+                  rusqlite::params![format!("comment-{n}-{j}"), id, "c".repeat(950)]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let start = Instant::now();
+        let response = td.get("/api/projects/proj/board").await;
+        let http_ms = start.elapsed().as_secs_f64() * 1000.0;
+        println!("board HTTP baseline count={count}: {} bytes {http_ms:.2}ms", serde_json::to_vec(response.ok()).unwrap().len());
+        assert_eq!(response.ok()["cards"].as_array().unwrap().len(), count as usize);
+    }
+}
+
 fn ids(v: &Value) -> Vec<&str> {
     v.as_array()
         .unwrap()
