@@ -6,6 +6,17 @@ A validate job of the queue gives its recipe the changed paths
 checks that can reach them, and prints the plan or runs it. A merge job runs
 the full suite (`just ci::validate`), not this plan.
 
+Before running any plan, the commit gate rejects case-insensitive lines
+starting with `Co-authored-by:` anywhere in commit messages since the
+merge-base of HEAD and the first available base: TERRARIUM_BASE_REF, TERRARIUM_BASE,
+origin/next, job/next, then next. Ordinary body mentions and Terrarium-*
+provenance trailers are allowed. Full validation runs the same gate via
+`--check-commit-trailers`. Without any base it visibly skips the check
+(main/tag CI has no card range). Local next equal to HEAD is not a base.
+An explicit invalid base or Git error
+fails closed. Full plans delegate the gate to ci::validate. Plan-only mode
+does not run the gate.
+
 A file that a crate source embeds with `include_str!` or `include_bytes!`
 from outside that crate (for example `scripts/install-host.sh` in
 terrariumd's `src/api/install.rs`) also counts as a change to each source
@@ -458,25 +469,46 @@ def run(cmds: list[list[str]]) -> int:
 
 
 def check_commit_trailers() -> int:
-    """Reject co-author trailers on every commit since origin/next's merge-base."""
+    """Reject co-author lines in the available card commit range."""
     try:
-        base = subprocess.run(["git", "merge-base", "origin/next", "HEAD"],
+        ref = os.environ.get("TERRARIUM_BASE_REF") or os.environ.get("TERRARIUM_BASE")
+        if not ref:
+            for candidate in ("origin/next", "job/next", "next"):
+                probe = subprocess.run(
+                    ["git", "show-ref", "--verify", "--quiet",
+                     "refs/heads/next" if candidate == "next" else f"refs/remotes/{candidate}"],
+                    capture_output=True, text=True)
+                if probe.returncode == 0:
+                    if candidate == "next":
+                        tips = subprocess.run(
+                            ["git", "rev-parse", "next", "HEAD"],
+                            check=True, capture_output=True, text=True).stdout.splitlines()
+                        if tips[0] == tips[1]:
+                            continue
+                    ref = candidate
+                    break
+                if probe.returncode != 1:
+                    probe.check_returncode()
+        if not ref:
+            print("affected: commit gate skipped: no card base ref available")
+            return 0
+        base = subprocess.run(["git", "merge-base", ref, "HEAD"],
                               check=True, capture_output=True, text=True).stdout.strip()
         commits = subprocess.run(["git", "rev-list", f"{base}..HEAD"],
                                  check=True, capture_output=True, text=True).stdout.splitlines()
         rejected = []
         for commit in commits:
-            trailers = subprocess.run(
-                ["git", "show", "-s", "--format=%(trailers:only,unfold)", commit],
+            message = subprocess.run(
+                ["git", "show", "-s", "--format=%B", commit],
                 check=True, capture_output=True, text=True).stdout
-            if re.search(r"^co-authored-by\s*:", trailers, re.IGNORECASE | re.MULTILINE):
+            if re.search(r"^co-authored-by\s*:", message, re.IGNORECASE | re.MULTILINE):
                 rejected.append(commit)
     except subprocess.CalledProcessError as error:
         print(f"affected: cannot check commit trailers: {error.stderr.strip()}", file=sys.stderr)
         return 1
     if rejected:
         for commit in rejected:
-            print(f"affected: {commit}: forbidden Co-authored-by trailer", file=sys.stderr)
+            print(f"affected: {commit}: forbidden Co-authored-by line", file=sys.stderr)
         return 1
     return 0
 
@@ -485,10 +517,11 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--files", help="the file of changed paths (default: $TERRARIUM_CHANGED_FILES)")
     ap.add_argument("--run", action="store_true", help="run the plan")
+    ap.add_argument("--check-commit-trailers", action="store_true", help="run only the commit gate")
     ap.add_argument("--json", action="store_true", help="print the plan as JSON")
     a = ap.parse_args(argv)
-    if a.run and check_commit_trailers():
-        return 1
+    if a.check_commit_trailers:
+        return check_commit_trailers()
     changed = read_changed(a.files or os.environ.get("TERRARIUM_CHANGED_FILES"))
     if changed is None:
         crates: dict[str, Crate] = {}
@@ -497,6 +530,8 @@ def main(argv: list[str]) -> int:
                               check=True, capture_output=True, text=True).stdout
         crates = workspace(json.loads(meta), Path.cwd())
     pl = plan(changed, crates)
+    if a.run and not pl.full and check_commit_trailers():
+        return 1
     cmds = commands(pl)
     if a.json:
         print(json.dumps(dict(pl.to_dict(), commands=cmds), indent=2))
