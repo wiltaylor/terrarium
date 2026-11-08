@@ -3173,7 +3173,10 @@ pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
             Ok((name.as_ref(), sql))
         })
         .collect::<anyhow::Result<_>>()?;
-    let borrowed: Vec<_> = files.iter().map(|(name, sql)| (*name, sql.as_str())).collect();
+    let borrowed: Vec<_> = files
+        .iter()
+        .map(|(name, sql)| (*name, sql.as_str()))
+        .collect();
     Ok(legacy + migrate_named(conn, &borrowed)?)
 }
 
@@ -3254,9 +3257,13 @@ mod tests {
         assert_eq!(migrate_named(&mut conn, &[earlier, later]).unwrap(), 1);
         assert_eq!(migrate_named(&mut conn, &[earlier, later]).unwrap(), 0);
         assert_eq!(migrate(&mut conn).unwrap(), 0);
-        let version: usize = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let version: usize = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, MIGRATIONS.len());
-        let project: String = conn.query_row("SELECT name FROM projects", [], |r| r.get(0)).unwrap();
+        let project: String = conn
+            .query_row("SELECT name FROM projects", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(project, "preserved");
     }
 
@@ -3264,14 +3271,25 @@ mod tests {
     fn named_migrations_roll_back_failed_schema_and_record() {
         let mut conn = Connection::open_in_memory().unwrap();
         let good = ("good.sql", "CREATE TABLE good (id INTEGER);");
-        let err = migrate_named(&mut conn, &[
-            good,
-            ("bad.sql", "CREATE TABLE bad (id INTEGER); invalid SQL"),
-        ]).unwrap_err();
+        let err = migrate_named(
+            &mut conn,
+            &[
+                good,
+                ("bad.sql", "CREATE TABLE bad (id INTEGER); invalid SQL"),
+            ],
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("migration bad.sql failed"));
         assert!(conn.table_exists(None, "good").unwrap());
         assert!(!conn.table_exists(None, "bad").unwrap());
-        assert_eq!(migrate_named(&mut conn, &[good, ("bad.sql", "CREATE TABLE bad (id INTEGER);")]).unwrap(), 1);
+        assert_eq!(
+            migrate_named(
+                &mut conn,
+                &[good, ("bad.sql", "CREATE TABLE bad (id INTEGER);")]
+            )
+            .unwrap(),
+            1
+        );
     }
 
     #[test]
