@@ -1,6 +1,6 @@
 //! Estimates from card move events. Review uses the last 20 completed
 //! visits in this project, with at least three samples. Repeated visits
-//! count separately. Only the latest 2000 project events are considered, bounding
+//! count separately. Only the latest 2000 project card moves are considered, bounding
 //! query work. Open visits and malformed or backwards times do not count.
 
 use chrono::{DateTime, Duration};
@@ -10,7 +10,7 @@ use crate::error::ApiResult;
 
 /// Completed visits to a column role (falling back to its name for older
 /// events), newest exit first. This query is shared with ETA calibration.
-/// The SQL window is the latest 2000 project events. At most `limit`
+/// The SQL window is the latest 2000 project card moves. At most `limit`
 /// completed visits are returned, excluding invalid timestamps.
 pub fn completed_visits(
     conn: &Connection,
@@ -20,15 +20,15 @@ pub fn completed_visits(
 ) -> ApiResult<Vec<Duration>> {
     let mut stmt = conn.prepare(
         "WITH recent AS (
-           SELECT seq, card, at, kind, payload FROM events WHERE project = ?1
+           SELECT seq, card, at, payload FROM events WHERE project = ?1
+             AND kind = 'card' AND json_extract(payload, '$.change') = 'moved'
            ORDER BY seq DESC LIMIT 2000
          ), moves AS (
            SELECT seq, at, payload,
              lead(at) OVER (PARTITION BY card ORDER BY seq) AS left_at,
              lead(seq) OVER (PARTITION BY card ORDER BY seq) AS left_seq,
              lead(payload) OVER (PARTITION BY card ORDER BY seq) AS left_payload
-           FROM recent WHERE kind = 'card'
-             AND json_extract(payload, '$.change') = 'moved'
+           FROM recent
          ) SELECT at, left_at FROM moves
            WHERE coalesce(json_extract(payload, '$.to_role'), json_extract(payload, '$.to')) = ?2
              AND coalesce(json_extract(left_payload, '$.from_role'), json_extract(left_payload, '$.from')) = ?2
@@ -54,21 +54,6 @@ pub fn completed_visits(
         }
     }
     Ok(samples)
-}
-
-/// Derived review deadline and start, never persisted as a worker estimate.
-/// An open merge job supersedes review, including while queued.
-#[cfg(test)]
-fn review_eta(
-    conn: &Connection,
-    project: &str,
-    card: &str,
-    merge_open: bool,
-) -> ApiResult<Option<(String, String)>> {
-    if merge_open {
-        return Ok(None);
-    }
-    ReviewEstimates::default().eta(conn, project, card)
 }
 
 /// Per-response cache, including projects without enough history. List renders
@@ -174,25 +159,24 @@ mod tests {
         let c = db();
         history(&c);
         assert_eq!(
-            review_eta(&c, "p", "open", false).unwrap().unwrap().0,
+            ReviewEstimates::default().eta(&c, "p", "open").unwrap().unwrap().0,
             "2026-11-08T00:14:00+00:00"
         );
         moved(&c, "p", "open", 10, "review", "working");
         moved(&c, "p", "open", 20, "working", "review");
         // Re-entry completes a zero-minute visit: {0, 2, 4, 12} has median 3.
         assert_eq!(
-            review_eta(&c, "p", "open", false).unwrap().unwrap().0,
+            ReviewEstimates::default().eta(&c, "p", "open").unwrap().unwrap().0,
             "2026-11-08T00:23:00+00:00"
         );
     }
 
     #[test]
-    fn no_history_or_merge_means_no_review_eta() {
+    fn no_history_means_no_review_eta() {
         let c = db();
-        assert!(review_eta(&c, "p", "open", false).unwrap().is_none());
+        assert!(ReviewEstimates::default().eta(&c, "p", "open").unwrap().is_none());
         history(&c);
-        assert!(review_eta(&c, "p", "open", true).unwrap().is_none());
-        assert!(review_eta(&c, "other", "open", false).unwrap().is_none());
+        assert!(ReviewEstimates::default().eta(&c, "other", "open").unwrap().is_none());
     }
 
     #[test]
@@ -216,9 +200,12 @@ mod tests {
         history(&c);
         let mut cache = ReviewEstimates::default();
         let first = cache.eta(&c, "p", "open").unwrap();
-        // Changes after this response's first lookup must not trigger a
-        // second project history query, even when history becomes unavailable.
+        // Non-card traffic must not evict review history from the window.
         c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,kind,payload) SELECT 'p','other','{}' FROM n;").unwrap();
+        c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,kind,payload) SELECT 'p','card','{\"change\":\"comment\"}' FROM n;").unwrap();
+        assert_eq!(ReviewEstimates::default().eta(&c, "p", "open").unwrap(), first);
+        // New card moves evict history, but this response reuses its cached median.
+        c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,card,kind,payload) SELECT 'p','noise','card','{\"change\":\"moved\"}' FROM n;").unwrap();
         assert_eq!(cache.eta(&c, "p", "open").unwrap(), first);
         assert!(completed_visits(&c, "p", "review", 20).unwrap().is_empty());
         assert!(

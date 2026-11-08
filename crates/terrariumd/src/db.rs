@@ -2545,6 +2545,12 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(thread, reason)
     );
     "#,
+    // 98: Bound review-history reads independently of non-card traffic (TER-157).
+    // Self-contained: append after any migration added by another branch.
+    r#"
+    CREATE INDEX events_card_moves ON events(project, seq)
+        WHERE kind = 'card' AND json_extract(payload, '$.change') = 'moved';
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

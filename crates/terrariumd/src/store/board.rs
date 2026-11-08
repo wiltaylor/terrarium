@@ -633,7 +633,8 @@ fn render(
     } else {
         None
     };
-    let (eta_at, eta_set_at, eta_set_by, eta_set_by_name) = if review && job.is_none() {
+    let queued = job.as_ref().is_some_and(|j| j.state == super::jobs::JobState::Queued);
+    let (eta_at, eta_set_at, eta_set_by, eta_set_by_name) = if review && (job.is_none() || queued) {
         (
             review_eta.as_ref().map(|v| v.0.clone()),
             review_eta.map(|v| v.1),

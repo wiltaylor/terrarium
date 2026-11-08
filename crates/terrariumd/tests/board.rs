@@ -94,7 +94,8 @@ async fn review_render_uses_history_but_preserves_open_job_eta() {
                     commit: None,
                     by_agent: None,
                     batch: Vec::new(),
-                    planned_secs: Some(1200),
+                    // No plan: queue creation does not clear the stored manual ETA.
+                    planned_secs: None,
                 },
             )
         })
@@ -107,6 +108,8 @@ async fn review_render_uses_history_but_preserves_open_job_eta() {
     let jid = job.id;
     let started = db
         .write("system", move |t| {
+            let job = jobs::get(t, &jid)?;
+            jobs::set_planned(t, &job, 1200, "operator")?;
             assert!(jobs::start(t, &jid, "machine", Some(1))?);
             jobs::get(t, &jid)
         })
