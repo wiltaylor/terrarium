@@ -9,7 +9,7 @@
 //! builds it; with `-p terrariumd`, the first test builds it.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

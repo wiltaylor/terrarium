@@ -2,7 +2,7 @@
 //! compare as UTC (api.md §2.1). A bare clock time is `400`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use serde_json::json;

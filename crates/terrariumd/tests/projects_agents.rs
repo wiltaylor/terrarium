@@ -1,7 +1,7 @@
 //! Projects, agents, file sync, the fake supervisor, the PTY, audit, TCP.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 
