@@ -13,11 +13,11 @@ it("moves the full progress block with members instead of leaving it at home", (
     created_at: "2026-11-08T12:00:00Z", updated_at: "2026-11-08T12:00:00Z", archived: false,
   });
   const [cards, setCards] = createSignal([card("P-3", "review", "group"), card("P-1", "review"), card("P-2", "done")]);
-  const columns = ["ready", "review", "done"].map((name) => ({ name, title: name }));
+  const columns = ["ready", "review", "done"].map((name, position) => ({ name, title: name, position }));
   const el = document.createElement("div");
   document.body.append(el);
   const dispose = render(() => createComponent(LanesBoard, {
-    get board() { return { columns, cards: cards() } as Board; },
+    get board(): Board { return { project: "demo", columns, cards: cards() }; },
     get lanes() { return [{ key: "all", cards: cards() }]; },
     phone: false, collapsed: [], onToggle: () => {}, visible: () => true,
     addButton: () => null, card: () => null, onDrop: () => {},
