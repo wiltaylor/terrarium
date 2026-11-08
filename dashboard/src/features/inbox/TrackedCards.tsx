@@ -66,7 +66,7 @@ export function TrackedCards(props: { thread: Thread; now: number }) {
     setBoards(b);
     setLoaded(true);
   };
-  createEffect(on(() => projects().join("\n"), () => void load()));
+  createEffect(on(() => links().map(l => `${l.project}:${l.card}`).join("\n"), () => void load()));
   onMount(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const off = events.on((e) => {

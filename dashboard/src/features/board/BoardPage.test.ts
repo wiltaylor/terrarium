@@ -13,8 +13,21 @@ vi.mock("../../stores", () => ({
   agents: { inProject: () => [], byId: () => undefined },
 }));
 const { BoardPage } = await import("./BoardPage");
+const { loadBoards } = await import("../inbox/TrackedCards");
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ""; vi.restoreAllMocks(); });
+
+it("fetches only missing linked Done cards for Inbox progress", async () => {
+  const done = await api.cards.create("terrarium", { title: "Linked completion", column: "done" });
+  const get = vi.spyOn(api.cards, "get");
+  const boards = await loadBoards(["terrarium"], [
+    { project: "terrarium", card: done.id, linked_by: "operator", linked_at: "" },
+    { project: "terrarium", card: "TER-12", linked_by: "operator", linked_at: "" },
+  ]);
+  expect(get).toHaveBeenCalledExactlyOnceWith(done.id);
+  expect(boards.terrarium!.cards.find(c => c.id === done.id)?.column).toBe("done");
+  expect(boards.terrarium!.cards.some(c => c.id === "TER-11")).toBe(false);
+});
 
 it("opens full details for a Done card absent from the active board", async () => {
   const done = await api.cards.create("terrarium", { title: "Completed regression", column: "done", body: "Full detail only" });
