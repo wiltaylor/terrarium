@@ -7,7 +7,7 @@ import { MOVED_ROUTES, movedTo, withQuery } from "./nav";
 import { LoginScreen } from "./LoginScreen";
 import { Home } from "../features/home/Home";
 import { AgentsPage } from "../features/agents/AgentsPage";
-import { BoardPage } from "../features/board/BoardPage";
+import { BoardPage, DoneCardsPage } from "../features/board/BoardPage";
 import BoardScreen from "../features/board/BoardScreen";
 
 const AgentDetail = lazy(() => import("../features/agents/AgentDetail"));
@@ -116,6 +116,7 @@ export function App() {
         {/* The board screen: the tabs Cards, Artifacts, Tests, Schedules, and Rules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it filters and groups the cards by version label (?version=<name>&group=version). */}
         <Route path="/p/:project/board" component={BoardScreen}>
           <Route path="/" component={BoardPage} />
+          <Route path="/done" component={DoneCardsPage} />
           <Route path="/artifacts/:id?" component={ArtifactsPage} />
           <Route path="/tests" component={TestRunsPage} />
           <Route path="/tests/:id" component={TestRunPage} />
