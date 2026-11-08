@@ -202,6 +202,17 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         ("askUserQuestionTimeout", "60s"),
         // A message from another local session is held for approval.
         ("crossSessionInbound", "refuse"),
+        // Operator rule: no `Co-Authored-By` or other co-author line in a
+        // commit, and no "Generated with" line in a PR (TER-127). An empty
+        // string hides each text (schema: "Empty string hides
+        // attribution"). Read in the 2.1.319 bundle: `CJo` takes
+        // `attribution.commit` and `attribution.pr` before the deprecated
+        // `includeCoAuthoredBy`, and `fg` adds no attribution reminder to a
+        // fresh session when both are empty. A session that already got
+        // the reminder gets "From here on, do not add attribution lines"
+        // one time. A user `attribution: true` becomes this object.
+        ("attribution.commit", ""),
+        ("attribution.pr", ""),
     ],
     forced_deny: &[
         // D5: the tools that ask a human and wait. Plan mode ends with a
