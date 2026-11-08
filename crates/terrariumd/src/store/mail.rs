@@ -360,21 +360,31 @@ pub struct MailFilter {
 /// The durable, non-ephemeral admin responsible for a project inbox.
 /// Prefer the named lead, otherwise the oldest admin.
 fn inbox_recipient(conn: &Connection, project: &str) -> ApiResult<Option<Address>> {
-    Ok(conn.query_row(
-        "SELECT id, name, project FROM agents a
+    Ok(conn
+        .query_row(
+            "SELECT id, name, project FROM agents a
          WHERE project = ?1 AND owner IS NULL
            AND EXISTS (SELECT 1 FROM roles r WHERE r.agent_id = a.id
                        AND r.role = 'project_admin' AND r.project = a.project)
          ORDER BY (name = 'lead') DESC, id LIMIT 1",
-        [project],
-        |r| Ok(Address::Agent { id: r.get(0)?, name: r.get(1)?, project: r.get(2)? }),
-    ).optional()?)
+            [project],
+            |r| {
+                Ok(Address::Agent {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    project: r.get(2)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 pub(crate) fn routed_inbox(conn: &Connection, id: &str) -> ApiResult<String> {
-    let project: Option<String> = conn.query_row(
-        "SELECT project FROM agents WHERE id = ?1", [id], |r| r.get(0),
-    ).optional()?;
+    let project: Option<String> = conn
+        .query_row("SELECT project FROM agents WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?;
     let Some(project) = project else {
         return Ok(String::new());
     };
@@ -393,7 +403,8 @@ pub(crate) fn queued_inbox_recipients(conn: &Connection) -> ApiResult<Vec<String
         "SELECT DISTINCT substr(to_agent, 9) FROM messages
          WHERE to_kind = 'project' AND state = 'queued'",
     )?;
-    let projects = stmt.query_map([], |r| r.get::<_, String>(0))?
+    let projects = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     let mut recipients = Vec::new();
     for project in projects {

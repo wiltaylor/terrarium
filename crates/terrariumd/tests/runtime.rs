@@ -791,29 +791,48 @@ async fn project_inbox_mail_reaches_lead_as_a_turn() {
 async fn queued_project_mail_survives_restart_and_wakes_stopped_lead() {
     let mut td = Td::start().await;
     td.agent("source", "worker", json!({})).await;
-    let id = td.agent("destination", "lead", json!({"roles": ["project_admin"]})).await;
+    let id = td
+        .agent("destination", "lead", json!({"roles": ["project_admin"]}))
+        .await;
     // Pause the stopped lead so the live event cannot deliver the message.
     td.post(&format!("/api/agents/{id}/pause"), None).await;
     assert_eq!(td.status(&id).await, "stopped");
-    let (status, mail) = td.req(Method::POST, "/api/mail",
-        Some(json!({"to": "project:destination", "body": "queued release"})),
-        Some("source/worker")).await;
+    let (status, mail) = td
+        .req(
+            Method::POST,
+            "/api/mail",
+            Some(json!({"to": "project:destination", "body": "queued release"})),
+            Some("source/worker"),
+        )
+        .await;
     assert_eq!(status, 201);
     assert_eq!(mail["state"], "queued");
     let key = id.clone();
-    td.daemon.as_ref().unwrap().state.db.read(move |c| {
-        assert_eq!(terrariumd::store::agents::queued_count(c, &key)?, 1);
-        assert!(terrariumd::store::agents::with_queued_work(c)?.contains(&key));
-        Ok(())
-    }).await.unwrap();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(move |c| {
+            assert_eq!(terrariumd::store::agents::queued_count(c, &key)?, 1);
+            assert!(terrariumd::store::agents::with_queued_work(c)?.contains(&key));
+            Ok(())
+        })
+        .await
+        .unwrap();
     // Discard the supervisor's in-memory live pointer, then wake from stored work.
     td.restart_daemon().await;
     assert_eq!(td.status(&id).await, "stopped");
     td.post(&format!("/api/agents/{id}/unpause"), None).await;
     let mid = mail["id"].as_str().unwrap();
-    td.wait_events(&id, "turn_start", |es| es.iter().any(|e| {
-        e["data"]["prompt"].as_str().is_some_and(|p| p.contains(mid) && p.contains("> queued release"))
-    })).await;
+    td.wait_events(&id, "turn_start", |es| {
+        es.iter().any(|e| {
+            e["data"]["prompt"]
+                .as_str()
+                .is_some_and(|p| p.contains(mid) && p.contains("> queued release"))
+        })
+    })
+    .await;
     td.wait_status(&id, "idle").await;
     assert_eq!(td.get(&format!("/api/mail/{mid}")).await["read_by"], id);
 }
