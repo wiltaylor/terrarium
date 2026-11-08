@@ -71,12 +71,15 @@ class DockerGateTests(unittest.TestCase):
             env_seen.append(env)
             self.assertEqual(env["DOCKER_HOST"], docker_ci.DOCKER_HOST)
             self.assertNotIn(docker_ci.KEY_ENV, env)
+            self.assertNotIn("DOCKER_CONTEXT", env)
+            self.assertNotIn("DOCKER_TLS_VERIFY", env)
             temp = Path(env["SSH_AUTH_SOCK"]).parent
             self.assertEqual((temp / "known_hosts").read_text(), docker_ci.KNOWN_HOST)
             self.assertIn("StrictHostKeyChecking=yes", (temp / "ssh").read_text())
             self.assertEqual({p.name for p in temp.iterdir()}, {"ssh", "known_hosts", "agent.sock"})
             raise RuntimeError("test failure after setup")
-        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "merge", docker_ci.KEY_ENV: "dummy-key"}):
+        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "merge", docker_ci.KEY_ENV: "dummy-key",
+                                     "DOCKER_CONTEXT": "wrong-daemon", "DOCKER_TLS_VERIFY": "1"}):
             with patch.object(subprocess, "Popen", side_effect=start), \
                  patch.object(subprocess, "run", side_effect=add), \
                  patch.object(docker_ci.shutil, "which", return_value="/usr/bin/ssh"), \

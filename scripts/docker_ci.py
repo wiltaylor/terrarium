@@ -72,11 +72,16 @@ def main() -> int:
         print("Docker gate requires a merge job and its delivery-granted key", file=sys.stderr)
         return 1
     env = dict(os.environ)
+    # An inherited context overrides DOCKER_HOST. Never let the merge
+    # gate run its live tests against a developer's selected daemon.
+    for name in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"):
+        env.pop(name, None)
     ssh = shutil.which("ssh")
     if not ssh:
         raise RuntimeError("Docker gate needs OpenSSH and the Docker CLI on the build target")
     with tempfile.TemporaryDirectory(prefix="terrarium-docker-ci-") as directory:
         temp = Path(directory)
+        env["DOCKER_CONFIG"] = str(temp / "docker-config")
         socket = temp / "agent.sock"
         hosts = temp / "known_hosts"
         hosts.write_text(KNOWN_HOST, encoding="utf-8")
