@@ -134,4 +134,28 @@ async fn real_container_hot_swap_and_failed_health_rollback() {
     assert_eq!(identity.image.reference, "ter-261-good");
     let check = docker.exec(&before.id, vec!["python3".into(), "-c".into(), "import sqlite3; c=sqlite3.connect('/state/terrarium.db'); assert not c.execute(\"SELECT name FROM sqlite_master WHERE name='failed_migration'\").fetchall()".into()]).await.unwrap();
     assert_eq!(check.code, 0, "failed image migration was restored");
+    let updater = Arc::new(Updater::new(
+        Arc::new(Local {
+            docker: docker.clone(),
+            next: "unused".into(),
+        }),
+        Arc::new(Release),
+        Arc::new(Release),
+        store,
+        Config {
+            health_timeout: Duration::from_secs(30),
+            health_poll: Duration::from_millis(100),
+            ..Default::default()
+        },
+    ));
+    let rollback = updater
+        .run_now(RunKind::Rollback, "previous", "scratch-test")
+        .await;
+    assert_eq!(rollback.outcome, Outcome::Succeeded, "{rollback:#?}");
+    let restored = docker.target().await.unwrap();
+    assert_ne!(
+        restored.id, before.id,
+        "explicit rollback must replace the container"
+    );
+    assert_eq!(restored.image.reference, "ter-261-old");
 }

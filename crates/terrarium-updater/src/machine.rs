@@ -652,7 +652,7 @@ impl Updater {
                 // response. Never rewind the journal after attempting admission.
                 self.step(
                     "commit",
-                    self.exec_ok(&cur.id, hot_argv("commit", &[])),
+                    self.exec_ok(&cur.id, hot_argv("commit", &[&backup])),
                     Clone::clone,
                 )
                 .await
@@ -676,7 +676,8 @@ impl Updater {
                     self.store
                         .set_image(&cur.image.reference)
                         .map_err(|e| e.to_string())?;
-                    self.exec_ok(&cur.id, hot_argv("commit", &[])).await?;
+                    self.exec_ok(&cur.id, hot_argv("commit", &[&backup]))
+                        .await?;
                     Ok::<_, String>(())
                 }
                 .await;

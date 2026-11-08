@@ -110,6 +110,8 @@ def main(argv):
         wait_for(lambda: not (run / "upgrade-paused").exists())
     elif command == "commit":
         (root / "probation").unlink(missing_ok=True)
+        if len(argv) > 1:
+            Path(argv[1] + ".hot-swap.sqlite").unlink(missing_ok=True)
     elif command in ("snapshot", "restore-database"):
         # Full restore moves the agent directories, which live runners still
         # have open. Automatic hot rollback must restore ONLY the database.
@@ -119,7 +121,10 @@ def main(argv):
                                else (snapshot, database))
         if not source.is_file():
             raise RuntimeError("missing offline database snapshot")
-        with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as src:
+        if command == "snapshot":
+            fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        with sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True) as src:
             with sqlite3.connect(destination) as dst:
                 src.backup(dst)
         destination.chmod(0o600)

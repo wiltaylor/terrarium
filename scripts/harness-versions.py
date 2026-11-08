@@ -109,7 +109,12 @@ def check_dockerfile(cfg: dict, text: str) -> list[str]:
                 f"docker/Dockerfile installs {package} with `npm install -g`; the harnesses go in the tools "
                 "volume (`terrariumd harness install`), not in the image"
             )
-    if not TOML_COPY_RE.search(text):
+    release_pins = all(part in text for part in (
+        "COPY harnesses.toml /payload/harnesses.toml",
+        "COPY --from=release-payload /payload/ /opt/terrarium/bundled/",
+        "ln -s /state/releases/current/harnesses.toml /etc/terrarium/harnesses.toml",
+    ))
+    if not TOML_COPY_RE.search(text) and not release_pins:
         problems.append("docker/Dockerfile does not copy harnesses.toml to /etc/terrarium/harnesses.toml")
     return problems
 

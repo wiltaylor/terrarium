@@ -198,7 +198,8 @@ ENV HOME=/home/terrarium \
     TERRARIUM_RUNNER_MODE=process \
     TERRARIUM_RUNNER=/usr/local/bin/terrarium-runner \
     TERRARIUM_CONFIG_REPO=/config/terrarium \
-    TERRARIUM_DEFAULTS_DIR=/opt/terrarium/defaults
+    TERRARIUM_DEFAULTS_DIR=/opt/terrarium/defaults \
+    TERRARIUM_HOST_DIST_DIR=/state/releases/current/dist
 
 # One terrarium-runner process holds each agent (PLAN §6), so an agent
 # lives through a restart of terrariumd.
@@ -206,7 +207,7 @@ RUN ln -s /state/releases/current/bin/terrariumd /usr/local/bin/terrariumd \
     && ln -s /state/releases/current/bin/terrarium /usr/local/bin/terrarium \
     && ln -s /state/releases/current/bin/terrarium-runner /usr/local/bin/terrarium-runner \
     && ln -s /opt/terrarium/bundled/bin/terrarium-updater /usr/local/bin/terrarium-updater \
-    && ln -s /state/releases/current/dist /opt/terrarium/dist \
+    && ln -s /opt/terrarium/bundled/dist /opt/terrarium/dist \
     && ln -s /state/releases/current/defaults /opt/terrarium/defaults \
     && ln -s /state/releases/current/harnesses.toml /etc/terrarium/harnesses.toml
 # The updater (docs/api.md §34): the same image with the entrypoint

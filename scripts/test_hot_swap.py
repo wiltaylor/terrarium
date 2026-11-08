@@ -70,8 +70,9 @@ class HotSwapTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT name FROM sqlite_master WHERE name='migrated'").fetchall(), [])
         self.assertEqual(runner.read_text(), "events after snapshot")
         self.assertTrue(probation.exists())
-        HOT.main(["commit"])
+        HOT.main(["commit", backup])
         self.assertFalse(probation.exists())
+        self.assertFalse(Path(backup + ".hot-swap.sqlite").exists())
 
     def test_release_path_cannot_escape_volume(self):
         with self.assertRaises(ValueError):
