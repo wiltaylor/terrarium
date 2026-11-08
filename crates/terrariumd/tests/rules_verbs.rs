@@ -26,6 +26,62 @@ fn state(td: &TestDaemon) -> Shared {
 
 const SOURCE: &str = "source:test/ping";
 
+#[tokio::test]
+async fn group_step_eta_uses_project_history_and_records_real_duration() {
+    use terrariumd::store::groups;
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.project("q").await;
+    state(&td).db.write("system", |t| {
+        let mut ids = Vec::new();
+        for (project, key, secs) in [("p", "one", 60), ("p", "two", 180), ("q", "other", 999)] {
+            groups::open(t, groups::Open { project, rule: "merge", key, title: key,
+                column: "review", done_when: "accepted", eta: None, close_after: None })?;
+            let g = groups::by_key(t, project, key)?.unwrap();
+            groups::step(t, &g, "e2e", Some("running"), None, None)?;
+            groups::step(t, &g, "e2e", Some("done"), None, None)?;
+            t.execute("UPDATE group_steps SET started_at = '2026-11-08T10:00:00Z',
+                finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', '2026-11-08T10:00:00Z', ?2 || ' seconds')
+                WHERE group_card = ?1", rusqlite::params![g.id, secs])?;
+            ids.push(g.id);
+        }
+        groups::open(t, groups::Open { project: "p", rule: "merge", key: "untimed", title: "untimed",
+            column: "review", done_when: "accepted", eta: None, close_after: None })?;
+        let untimed = groups::by_key(t, "p", "untimed")?.unwrap();
+        groups::step(t, &untimed, "e2e", Some("pending"), None, None)?;
+        groups::step(t, &untimed, "e2e", Some("done"), None, None)?;
+        let untimed = groups::get(t, &untimed.id)?;
+        assert!(untimed.steps[0].started_at.is_none());
+        assert!(untimed.steps[0].duration_secs.is_none());
+        groups::open(t, groups::Open { project: "p", rule: "merge", key: "new", title: "new",
+            column: "review", done_when: "accepted", eta: None, close_after: None })?;
+        let g = groups::by_key(t, "p", "new")?.unwrap();
+        groups::step(t, &g, "e2e", Some("running"), None, None)?;
+        let current = groups::get(t, &g.id)?;
+        let s = &current.steps[0];
+        assert_eq!(s.estimated_secs, Some(120));
+        let at = chrono::DateTime::parse_from_rfc3339(s.eta_at.as_deref().unwrap()).unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339(s.started_at.as_deref().unwrap()).unwrap();
+        assert_eq!((at - start).num_seconds(), 120);
+        assert!(!groups::step(t, &g, "e2e", Some("running"), None, None)?);
+        groups::step(t, &g, "e2e", Some("done"), None, None)?;
+        let done = groups::get(t, &g.id)?;
+        assert!(done.steps[0].duration_secs.is_some());
+        assert!(done.steps[0].eta_at.is_none());
+        assert_eq!(groups::get(t, &ids[0])?.steps[0].duration_secs, Some(60));
+        groups::step(t, &g, "e2e", Some("running"), None, Some("1m"))?;
+        groups::step(t, &g, "e2e", Some("failed"), None, None)?;
+        groups::step(t, &g, "e2e", Some("running"), None, None)?;
+        let restarted = groups::get(t, &g.id)?;
+        assert!(restarted.steps[0].duration_secs.is_none());
+        assert_eq!(restarted.steps[0].estimated_secs, Some(120));
+        let eta = chrono::DateTime::parse_from_rfc3339(restarted.steps[0].eta_at.as_deref().unwrap()).unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339(restarted.steps[0].started_at.as_deref().unwrap()).unwrap();
+        assert_eq!((eta - start).num_seconds(), 120);
+        Ok(())
+    }).await.unwrap();
+}
+
 /// Write an event of `kind` about `card` with `data`, as an event source
 /// does. Returns its `seq`.
 async fn emit(td: &TestDaemon, kind: &str, project: &str, card: &str, data: Value) -> i64 {
@@ -1059,6 +1115,68 @@ async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
 }
 
 #[tokio::test]
+async fn merge_group_failure_tracks_the_phase_that_actually_started() {
+    use terrariumd::store::groups;
+    for (outcome, recipe) in [("conflict", false), ("error", false), ("red", true)] {
+        let td = queue_lab().await;
+        put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+        let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
+        let job = store_job(&td, JobKind::Merge, &[&a]).await;
+        settle(&td).await;
+        let id = job.id.clone();
+        state(&td)
+            .db
+            .write("system", move |t| {
+                jobs::start(t, &id, "machine", None)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        settle(&td).await;
+        if recipe {
+            let member = a.clone();
+            state(&td)
+                .db
+                .write("system", move |t| groups::merge_recipe_started(t, &member))
+                .await
+                .unwrap();
+            let g = card(&td, &a).await["group"].clone();
+            assert_eq!(g["steps"][1]["state"], "done");
+            assert_eq!(g["steps"][2]["state"], "running");
+        }
+        let (id, end_outcome) = (job.id.clone(), outcome.to_owned());
+        let failed = state(&td)
+            .db
+            .write("system", move |t| {
+                Ok(jobs::finish(
+                    t,
+                    &id,
+                    &JobEnd {
+                        passed: false,
+                        outcome: Some(end_outcome),
+                        exit_code: Some(1),
+                        ..JobEnd::default()
+                    },
+                )?
+                .unwrap())
+            })
+            .await
+            .unwrap();
+        verdict(&td, &failed, &a, outcome).await;
+        settle(&td).await;
+        let g = card(&td, &a).await["group"].clone();
+        assert_eq!(
+            g["steps"][1]["state"],
+            if recipe { "done" } else { "failed" }
+        );
+        assert_eq!(
+            g["steps"][2]["state"],
+            if recipe { "failed" } else { "pending" }
+        );
+    }
+}
+
+#[tokio::test]
 async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
@@ -1076,7 +1194,9 @@ async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     settle(&td).await;
     let g = card(&td, &gid).await["group"].clone();
     assert_eq!(g["total"], 3);
+    assert_eq!(g["steps"][1]["name"], "merge job");
     assert_eq!(g["steps"][1]["state"], "failed");
+    assert_eq!(g["steps"][2]["state"], "pending");
     let fix = g["members"][0].as_str().unwrap().to_owned();
     assert_ne!(fix, a);
     assert_ne!(fix, b);

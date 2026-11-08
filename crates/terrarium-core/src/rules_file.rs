@@ -309,7 +309,15 @@ pub const JOB_OUTCOMES: &[&str] = &["red", "conflict", "error", "none"];
 pub const CARD_FIELDS: &[&str] = &["id", "title", "column", "assignee", "labels", "project"];
 /// The group containing the event's card (or the group card itself).
 pub const GROUP_FIELDS: &[&str] = &[
-    "id", "key", "title", "column", "status", "done", "total", "eta_at",
+    "id",
+    "key",
+    "title",
+    "column",
+    "status",
+    "done",
+    "total",
+    "eta_at",
+    "failed_step",
 ];
 /// The placeholders after `job.`.
 pub const JOB_FIELDS: &[&str] = &[
