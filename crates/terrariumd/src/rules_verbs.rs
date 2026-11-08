@@ -916,7 +916,15 @@ fn earlier_fixes(conn: &Connection, j: &Job) -> ApiResult<i64> {
             st.query_map([&fix], |r| r.get(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        if group.iter().all(|c| linked.contains(c)) {
+        let linked = linked
+            .into_iter()
+            .filter_map(|c| match is_fix_card(conn, &c) {
+                Ok(false) => Some(Ok(c)),
+                Ok(true) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<ApiResult<Vec<_>>>()?;
+        if group.len() == linked.len() && group.iter().all(|c| linked.contains(c)) {
             n += 1;
         }
     }

@@ -2171,8 +2171,8 @@ async fn a_failure_block_is_quoted_and_raw_texts_come_from_the_job() {
     );
 }
 
-/// TER-170 review, minor 4: only the fix cards of this group count. A fix
-/// card of an older group that shared a card with this one does not, so
+/// TER-218: only the fix cards of this exact group count. A fix
+/// card of an older superset of this group does not, so
 /// the new group gets its own fix card instead of a split.
 #[tokio::test]
 async fn a_fix_card_of_another_group_does_not_count() {
@@ -2182,12 +2182,12 @@ async fn a_fix_card_of_another_group_does_not_count() {
     let a = new_card(&td, "p", json!({"title": "a"})).await;
     let x = new_card(&td, "p", json!({"title": "x"})).await;
     let b = new_card(&td, "p", json!({"title": "b"})).await;
-    let old = store_job(&td, JobKind::Merge, &[&a, &x]).await;
+    let old = store_job(&td, JobKind::Merge, &[&a, &x, &b]).await;
     let old = fail_job(&td, &old, "red").await;
     settle(&td).await;
     verdict(&td, &old, &a, "red").await;
     settle(&td).await;
-    // A new group with `a` and another card.
+    // A smaller group must not inherit the superset's fix count.
     let new = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     let new = fail_job(&td, &new, "red").await;
     verdict(&td, &new, &a, "red").await;
@@ -2202,6 +2202,24 @@ async fn a_fix_card_of_another_group_does_not_count() {
         .filter(|j| j.parent.is_some())
         .count();
     assert_eq!(halves, 0);
+}
+
+#[tokio::test]
+async fn default_lifecycle_labels_only_merge_jobs() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(&td, "p", json!({"title": "a"})).await;
+    for kind in ["validate", "merge"] {
+        for change in ["started", "requeued"] {
+            emit(&td, "job", "p", &a, json!({"kind": kind, "change": change})).await;
+            settle(&td).await;
+            let c = card(&td, &a).await;
+            let labels = c["labels"].as_array().unwrap();
+            assert_eq!(labels.contains(&json!("validation:running")), kind == "merge" && change == "started");
+            assert_eq!(labels.contains(&json!("validation:queued")), kind == "merge" && change == "requeued");
+        }
+    }
 }
 
 // ------------------------------------------------- the merge queue rules
