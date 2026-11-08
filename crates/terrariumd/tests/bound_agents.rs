@@ -1104,7 +1104,7 @@ async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
         terrariumd::lifecycle::wake(&s, agent_id, "test race").await,
         terrariumd::lifecycle::Woke::Busy
     );
-    assert_eq!(agent(&td, &eph).await["status"], "idle");
+    assert_eq!(agent(&td, &eph).await["status"], "stopped");
     release.send(()).unwrap();
     stopping.await.unwrap();
     until("the resumed return turn", || async {
