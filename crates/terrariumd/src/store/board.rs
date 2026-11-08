@@ -2203,6 +2203,7 @@ pub fn archive_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
         t.audit("card.archive", &card.id, Some(&card.project), json!({}))?;
     }
     card_event(t, &card, "archived", json!({}))?;
+    crate::store::threads::on_card_archived(t, &card.id)?;
     Ok(())
 }
 

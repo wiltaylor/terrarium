@@ -611,6 +611,9 @@ pub fn on_card_moved(
 fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
     let th = get_bare(t, id)?;
     let at = now();
+    if th.status == ThreadStatus::WaitingOperator {
+        return Ok(());
+    }
     let status = if th.status == ThreadStatus::Tracking {
         ThreadStatus::WaitingAgent
     } else {
@@ -979,6 +982,8 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     let msg = insert_message(t, &th.id, author, "message", &text, &at)?;
     let status = if author == "operator" {
         ThreadStatus::WaitingAgent
+    } else if open_questions(t, &th.id)? > 0 {
+        ThreadStatus::WaitingOperator
     } else if th.tracking_at.is_some() {
         ThreadStatus::Tracking
     } else {
@@ -1036,6 +1041,7 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
 /// with an open question waits on the operator: `409 conflict`.
 pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
+    let first = th.tracking_at.is_none();
     not_closed(&th, "tracking")?;
     let open = open_questions(t, &th.id)?;
     if open > 0 {
@@ -1055,7 +1061,31 @@ pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     let th = get(t, &th.id)?;
     t.audit("thread.track", &th.id, th.project(), json!({"by": by}))?;
     emit_with(t, &th, "tracking", json!({"author": by}))?;
-    Ok(th)
+    if first && all_review_or_later(t, id)? {
+        wake(t, id, WAKE_REVIEW)?;
+    }
+    get(t, id)
+}
+
+/// Archiving an unfinished card can leave all remaining live cards ready.
+pub fn on_card_archived(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
+    let ids: Vec<String> = {
+        let mut st = t.prepare(
+            "SELECT th.id FROM thread_cards tc JOIN threads th ON th.id = tc.thread
+             WHERE tc.card = ?1 AND th.status != 'closed' AND th.tracking_at IS NOT NULL",
+        )?;
+        st.query_map([card], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for id in ids {
+        let states = linked_states(t, &id)?;
+        if states.iter().any(|s| s.card == card && !s.review_or_later)
+            && all_review_or_later(t, &id)?
+        {
+            wake(t, &id, WAKE_REVIEW)?;
+        }
+    }
+    Ok(())
 }
 
 fn clear_proposal(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {

@@ -410,6 +410,53 @@ async fn a_thread_with_cards_of_two_projects_wakes_and_closes_after_works() {
 }
 
 #[tokio::test]
+async fn tracking_ready_cards_and_archiving_unfinished_cards_wake_review() {
+    let lab = lab().await;
+    for archive in [false, true] {
+        let (tid, eph) = lab.started("consult", "Ready work").await;
+        let ready = lab.card("p", "Ready").await;
+        lab.link(&tid, &format!("p:{ready}")).await;
+        lab.mv(&ready, "review", None).await;
+        let dropped = if archive {
+            let card = lab.card("p", "Dropped").await;
+            lab.link(&tid, &format!("p:{card}")).await;
+            Some(card)
+        } else {
+            None
+        };
+        let r = lab.td.post_empty_as(&eph, &format!("/api/threads/{tid}/track")).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        if let Some(card) = dropped {
+            lab.parked(&eph).await;
+            lab.td.delete(&format!("/api/cards/{card}")).await.ok();
+        }
+        assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
+        lab.nth_prompt(&eph, &format!("[Thread:{tid}] {REVIEW_TURN}"), 1).await;
+        assert_eq!(lab.wakes(&tid).await, ["review"]);
+    }
+}
+
+#[tokio::test]
+async fn card_events_and_agent_replies_preserve_open_question_waits() {
+    let lab = lab().await;
+    let (tid, eph) = lab.started("consult", "Question pending").await;
+    let card = lab.card("p", "Work").await;
+    lab.link(&tid, &format!("p:{card}")).await;
+    lab.track(&eph, &tid).await;
+    lab.parked(&eph).await;
+    lab.td.post_as(&eph, &format!("/api/agents/{eph}/questions"),
+        json!({"text": "Proceed?", "options": ["yes", "no"], "thread": tid})).await.ok();
+    lab.parked(&eph).await;
+    lab.mv(&card, "blocked", None).await;
+    lab.mv(&card, "review", None).await;
+    assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
+    assert!(lab.wakes(&tid).await.is_empty());
+    let th = lab.post_as(&eph, &tid, "Still waiting for your answer.").await;
+    assert_eq!(th["status"], "waiting_operator");
+    lab.parked(&eph).await;
+}
+
+#[tokio::test]
 async fn only_a_thread_that_tracks_wakes_on_its_cards() {
     let lab = lab().await;
     let (tid, eph) = lab.started("consult", "Not tracking").await;

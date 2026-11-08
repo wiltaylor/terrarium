@@ -552,7 +552,8 @@ pub fn action_of(ev: &StoredEvent) -> Option<(String, Action)> {
     let status = ThreadStatus::parse(s("status")?)?;
     let action = match (s("change")?, status) {
         (_, ThreadStatus::Closed) => Action::End,
-        // A linked card woke it (TER-148), whatever the status.
+        // Card events must not interrupt an operator wait.
+        ("cards", ThreadStatus::WaitingOperator) => return None,
         ("cards", _) => Action::Cards(s("reason")?.to_owned()),
         ("message", ThreadStatus::WaitingOperator) => Action::Park,
         // The agent moved the thread into tracking, or replied in a thread
@@ -911,7 +912,7 @@ mod tests {
                 json!({"change": "cards", "id": "01T", "status": "waiting_operator",
                      "reason": "review"})
             ),
-            Some(Action::Cards("review".into()))
+            None
         );
         // A card link alone wakes nothing (TER-146).
         assert_eq!(
