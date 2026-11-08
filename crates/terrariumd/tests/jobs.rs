@@ -671,6 +671,29 @@ struct Lab {
     flow: &'static str,
 }
 
+/// Drive queue picks directly in tests that exercise retries, not the timer.
+struct QueueTicks(tokio::task::JoinHandle<()>);
+
+impl QueueTicks {
+    fn start(lab: &Lab) -> Self {
+        let state = lab.td.daemon.as_ref().unwrap().state.clone();
+        Self(tokio::spawn(async move {
+            loop {
+                if let Err(error) = terrariumd::jobs::tick(&state).await {
+                    tracing::warn!(%error, "test queue tick failed");
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }))
+    }
+}
+
+impl Drop for QueueTicks {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .args(args)
@@ -2384,7 +2407,8 @@ async fn until_not(lab: &Lab, id: &str, state: &str) -> Value {
 /// it shows as ended, no process of it is left. The rerun does the same.
 #[tokio::test]
 async fn a_job_timeout_ends_every_process_of_the_recipe() {
-    let (lab, _bins, children) = docker_lab(1, 3).await;
+    let (lab, _bins, children) = docker_lab(1, 1).await;
+    let _ticks = QueueTicks::start(&lab);
     let h = lab.branch("ter-t1", "next", &[("OK", "1")]);
     let c = lab.card("t1", "ter-t1").await;
     let r = lab
@@ -3837,6 +3861,7 @@ both_flows!(a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects);
 /// not move; the job starts once the host agent connects, and passes.
 async fn a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects(flow: &'static str) {
     let lab = lab_flow(2, flow).await;
+    let _ticks = QueueTicks::start(&lab);
     let td = &lab.td;
     let r = td.post("/api/hosts", json!({"name": "lab2"})).await;
     assert_eq!(r.status, 201, "{}", r.body);
@@ -3849,8 +3874,12 @@ async fn a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects(flow:
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let id = queue_for(&lab, "p-off").await;
-    // More than two ticks of the queue (5 s each).
-    tokio::time::sleep(Duration::from_secs(12)).await;
+    // Exercise repeated queue picks without waiting for its background timer.
+    for _ in 0..3 {
+        terrariumd::jobs::tick(&td.daemon.as_ref().unwrap().state)
+            .await
+            .unwrap();
+    }
     let jobs = job_of(&lab, &id).await;
     assert_eq!(jobs.len(), 1, "no rerun, no second job: {jobs:?}");
     assert_eq!(jobs[0]["state"], "queued", "{jobs:?}");

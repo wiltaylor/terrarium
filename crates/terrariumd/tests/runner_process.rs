@@ -9,6 +9,8 @@
 //! builds it; with `-p terrariumd`, the first test builds it.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -321,6 +323,7 @@ impl Td {
 
     /// Start a daemon with a new supervisor on the same state dir.
     async fn boot(&mut self) {
+        common::seed_database(&self.dir.path().join("state"));
         let daemon = terrariumd::start(DaemonConfig {
             socket: self.socket.clone(),
             listen: None,
