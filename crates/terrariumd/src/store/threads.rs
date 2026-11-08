@@ -365,7 +365,8 @@ pub fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
 /// the thread who cannot read that project.
 pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
     if th.monitor.as_ref().is_some_and(|m| {
-        m.split_once(':').is_none_or(|(p, _)| policy::read_project(actor, p).is_err())
+        m.split_once(':')
+            .is_none_or(|(p, _)| policy::read_project(actor, p).is_err())
     }) {
         th.monitor = None;
     }
@@ -560,8 +561,14 @@ pub fn linked_states(conn: &Connection, thread: &str) -> ApiResult<Vec<LinkedSta
 fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
     let monitor = get_bare(conn, thread)?.monitor;
     if let Some(key) = &monitor {
-        let m = crate::store::monitors::find(conn, &key.replace(':', "/"))?;
-        if !m.last.is_some_and(|r| r.status == crate::monitors::parse::Status::Ok) {
+        let (project, name) = key.split_once(':').unwrap_or(("", ""));
+        let green: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM monitors m WHERE m.project = ?1 AND m.name = ?2
+             AND (SELECT status FROM monitor_results r WHERE r.monitor = m.id
+                  ORDER BY r.pk DESC LIMIT 1) = 'ok')",
+            params![project, name], |r| r.get(0),
+        )?;
+        if !green {
             return Ok(false);
         }
     }
@@ -575,21 +582,33 @@ fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
 /// Link only monitors in a project the caller can read. The API transaction
 /// rolls back the link if tracking or another link fails.
 pub fn link_monitor(t: &mut Tx<'_>, actor: &Actor, id: &str, key: &str) -> ApiResult<()> {
-    let (project, name) = key.split_once(':').filter(|(p, n)| !p.is_empty() && !n.is_empty())
+    let (project, name) = key
+        .split_once(':')
+        .filter(|(p, n)| !p.is_empty() && !n.is_empty())
         .ok_or_else(|| ApiError::invalid("monitor must be PROJECT:MONITOR"))?;
     policy::read_project(actor, project)?;
     crate::store::monitors::find(t, &format!("{project}/{name}"))?;
-    t.execute("UPDATE threads SET monitor = ?2, monitor_done = 0 WHERE id = ?1 AND monitor IS NOT ?2", params![id, key])?;
+    t.execute(
+        "UPDATE threads SET monitor = ?2, monitor_done = 0 WHERE id = ?1 AND monitor IS NOT ?2",
+        params![id, key],
+    )?;
     Ok(())
 }
 
 /// Monitor transitions reuse tracking wakes, never operator notices.
-pub fn on_monitor_status(t: &mut Tx<'_>, project: &str, name: &str, status: crate::monitors::parse::Status) -> ApiResult<()> {
+pub fn on_monitor_status(
+    t: &mut Tx<'_>,
+    project: &str,
+    name: &str,
+    status: crate::monitors::parse::Status,
+) -> ApiResult<()> {
     use crate::monitors::parse::Status;
     let ids: Vec<(String, bool)> = {
         let mut st = t.prepare("SELECT id, monitor_done FROM threads WHERE monitor = ?1 AND tracking_at IS NOT NULL AND status != 'closed'")?;
-        st.query_map([format!("{project}:{name}")], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<_, _>>()?
+        st.query_map([format!("{project}:{name}")], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<Result<_, _>>()?
     };
     for (id, done) in ids {
         if status == Status::Ok && all_review_or_later(t, &id)? {
@@ -665,7 +684,10 @@ pub fn on_card_moved(
 /// need not read the card's project (TER-146).
 fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
     if reason == WAKE_REVIEW {
-        t.execute("UPDATE threads SET monitor_done = 1 WHERE id = ?1 AND monitor IS NOT NULL", [id])?;
+        t.execute(
+            "UPDATE threads SET monitor_done = 1 WHERE id = ?1 AND monitor IS NOT NULL",
+            [id],
+        )?;
     }
     let th = get_bare(t, id)?;
     let reason = if reason == WAKE_REVIEW && th.monitor.is_some() {

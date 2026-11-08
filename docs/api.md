@@ -4017,7 +4017,17 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
-| `POST /api/threads/{id}/track` | no body, or `{"cards"}`: at most 50 cards to link first (TER-146) | The attached agent: `200` the thread, `tracking`, with `tracking_at` and `cards`. `409` with an open question; `404` or `422` for a card (below), and nothing changes |
+| `POST /api/threads/{id}/track` | no body, or `{"cards", "monitor"?}`: at most 50 cards to link first (TER-146), optional monitor `project:name` (TER-149) | The attached agent: `200` the thread, `tracking`, with `tracking_at`, `cards` and optional `monitor`. `409` with an open question; invalid links roll back the whole write |
+
+**Ops tracking** (TER-149, D6). `terrarium thread track <id> --monitor <project>:<monitor>`
+links an existing monitor in a project the attached agent can read. Omitting the
+option keeps the link. Readiness waits for all live cards to reach review or
+later and the monitor's latest result to be `ok`. A monitor-only thread waits
+for `ok`. A green transition wakes the agent when the cards are ready. A `crit`
+transition after readiness wakes it again. Repeated identical results do not
+wake it. These use the existing tracking wake path, including held wakes while
+waiting on an operator question, and create no operator notices. The monitor
+reference is hidden from readers who cannot read its project.
 | `POST /api/threads/{id}/cards` | `{"card"}`: `<project>:<card>` or `<card>` | `200` the thread with `cards`, also when the card was linked already. `404` without the read right on the thread, for a card that does not exist or is not in the named project, and without the read right on the card's project; `422` for an archived card; `409` on a closed thread |
 
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
