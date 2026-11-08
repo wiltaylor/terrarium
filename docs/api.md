@@ -6206,8 +6206,9 @@ Run `terrarium admin target verb NAME recreate` (`POST
 the rights to define the target (project admin or global sysadmin), refuses
 running containers and live exec sessions, and removes the stopped container
 without force or volume deletion before starting the new image. **The old
-writable layer is lost.** Volumes remain on the host, but anonymous volumes
-are not automatically reattached. Existing-container targets (`container`)
+writable layer is lost.** Recreation refuses any mounted container, because
+mount-preserving recreation is not yet supported. Older host agents that do
+not report mounts also refuse. Existing-container targets (`container`)
 cannot be recreated. Ephemeral targets keep their existing behavior.
 
 An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values

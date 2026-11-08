@@ -444,7 +444,7 @@ empty and must not start with `-`.
 | Verb | `value` |
 |---|---|
 | `docker.run` (detached) | `{"id": "<container id>"}` |
-| `docker.inspect` | `{"state": "running", "id", "name", "image", "status", "running", "exit_code", "started_at", "finished_at"}`. A missing container gives `{"state": "absent"}`. |
+| `docker.inspect` | `{"state": "running", "id", "name", "image", "mounts", "status", "running", "exit_code", "started_at", "finished_at"}`. `mounts` is Docker's `Mounts` array, or null when unavailable. Recreation refuses nonempty or unavailable mounts. A missing container gives `{"state": "absent"}`. |
 | `docker.ps` | `[{"id", "names", "image", "state", "status", "labels": {..}}]` |
 
 `state` is `terrarium_core::protocol::TargetState`: `running`, `stopped`,

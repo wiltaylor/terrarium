@@ -142,7 +142,7 @@ fn fake_tool(tool: &str, dir: &Path) -> String {
 if [ "$1" = run ]; then prev=; for a in "$@"; do if [ "$prev" = --name ]; then c=$a; fi; prev=$a; done; fi
 f='{s}'.$c
 case "$1" in
-  inspect) if [ -f "$f" ]; then st=$(cat "$f"); echo "[{{\"Id\":\"abc\",\"Name\":\"/terrarium-dbox\",\"State\":{{\"Status\":\"$st\"}}}}]"; else echo '[]'; echo 'Error: No such object' >&2; exit 1; fi ;;
+  inspect) if [ -f "$f" ]; then st=$(cat "$f"); mounts='[]'; if [ -f '{mounts}' ]; then mounts=$(cat '{mounts}'); fi; echo "[{{\"Id\":\"abc\",\"Name\":\"/terrarium-dbox\",\"Mounts\":$mounts,\"State\":{{\"Status\":\"$st\"}}}}]"; else echo '[]'; echo 'Error: No such object' >&2; exit 1; fi ;;
   run) echo running > "$f"; echo abc123 ;;
   start) echo running > "$f"; echo "$2" ;;
   stop) echo exited > "$f"; echo "$4" ;;
@@ -150,6 +150,7 @@ case "$1" in
   exec) for a in "$@"; do if [ "$a" = sleeper ]; then i=0; while [ ! -f '{end}' ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done; fi; done ;;
 esac"#,
             s = state.display(),
+            mounts = dir.join("docker.mounts").display(),
             end = dir.join("sleeper.end").display()
         ),
         _ => format!(
@@ -3853,7 +3854,10 @@ async fn docker_limits_go_on_the_container() {
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.body["runtime"]["recreate_required"], true);
-    lab.td.post_empty("/api/targets/dbox/up").await.err(409, "conflict");
+    lab.td
+        .post_empty("/api/targets/dbox/up")
+        .await
+        .err(409, "conflict");
     lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
     assert!(lab.log().contains("--cpus=2 "), "{}", lab.log());
     // The same limits are no change.
@@ -3888,26 +3892,56 @@ async fn docker_image_edit_needs_explicit_recreate_without_volume_deletion() {
     let lab = Lab::start().await;
     let _h = lab.host("lab1").await;
     lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1",
-                      "image": "alpine:3"})).await;
+                      "image": "alpine:3"}))
+        .await;
     lab.td.post_empty("/api/targets/dbox/up").await.ok();
-    lab.td.post_empty("/api/targets/dbox/recreate").await.err(409, "conflict");
+    lab.td
+        .post_empty("/api/targets/dbox/recreate")
+        .await
+        .err(409, "conflict");
     assert!(!lab.log().contains("docker rm"));
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
-    let unchanged = lab.td.patch("/api/targets/dbox", json!({"image": "alpine:3"})).await.ok();
+    let unchanged = lab
+        .td
+        .patch("/api/targets/dbox", json!({"image": "alpine:3"}))
+        .await
+        .ok();
     assert!(unchanged["recreate_note"].is_null());
-    let edited = lab.td.patch("/api/targets/dbox", json!({"image": "alpine:latest"})).await.ok();
-    assert!(edited["recreate_note"].as_str().unwrap().contains("writable layer"));
+    let edited = lab
+        .td
+        .patch("/api/targets/dbox", json!({"image": "alpine:latest"}))
+        .await
+        .ok();
+    assert!(
+        edited["recreate_note"]
+            .as_str()
+            .unwrap()
+            .contains("writable layer")
+    );
     // An unrelated patch must not clear the persisted requirement.
-    let edited = lab.td.patch("/api/targets/dbox", json!({"keep": true})).await.ok();
+    let edited = lab
+        .td
+        .patch("/api/targets/dbox", json!({"keep": true}))
+        .await
+        .ok();
     assert_eq!(edited["runtime"]["recreate_required"], true);
-    lab.td.post_empty("/api/targets/dbox/up").await.err(409, "conflict");
+    lab.td
+        .post_empty("/api/targets/dbox/up")
+        .await
+        .err(409, "conflict");
     let recreated = lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
     assert_eq!(recreated["verb"], "recreate");
     assert_eq!(recreated["state"], "running");
     let log = lab.log();
     assert!(log.contains("docker rm terrarium-dbox"), "{log}");
     assert!(!log.contains("docker rm -"), "{log}");
-    assert!(log.lines().rfind(|l| l.starts_with("docker run")).unwrap().contains("alpine:latest"), "{log}");
+    assert!(
+        log.lines()
+            .rfind(|l| l.starts_with("docker run"))
+            .unwrap()
+            .contains("alpine:latest"),
+        "{log}"
+    );
     assert_eq!(log.matches("docker run ").count(), 2, "{log}");
     assert!(lab.td.get("/api/targets/dbox").await.ok()["recreate_note"].is_null());
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
@@ -3921,20 +3955,58 @@ async fn docker_recreate_requires_admin_and_refuses_live_sessions() {
     let lab = Lab::start().await;
     let _h = lab.host("lab1").await;
     lab.td.project("terra").await;
-    let worker = lab.td.agent("terra", "worker", json!({"policy": {"targets": ["dbox"]}})).await;
+    let worker = lab
+        .td
+        .agent("terra", "worker", json!({"policy": {"targets": ["dbox"]}}))
+        .await;
     let worker = worker["id"].as_str().unwrap();
-    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3"})).await;
-    lab.td.req(hyper::Method::POST, "/api/targets/dbox/recreate", None, Some(worker)).await.err(403, "forbidden");
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3"}))
+        .await;
+    lab.td
+        .req(
+            hyper::Method::POST,
+            "/api/targets/dbox/recreate",
+            None,
+            Some(worker),
+        )
+        .await
+        .err(403, "forbidden");
     lab.td.post_empty("/api/targets/dbox/up").await.ok();
     let sid = exec(&lab.td, "dbox", json!({"cmd": ["sleeper"]})).await;
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
-    lab.td.post_empty("/api/targets/dbox/recreate").await.err(409, "conflict");
+    lab.td
+        .post_empty("/api/targets/dbox/recreate")
+        .await
+        .err(409, "conflict");
     assert!(!lab.log().contains("docker rm"));
     std::fs::write(lab.bins.path().join("sleeper.end"), "").unwrap();
     drain(&lab.td, "dbox", &sid).await;
     lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
-    lab.target(json!({"name": "external", "kind": "docker", "host": "lab1", "container": "existing"})).await;
-    lab.td.post_empty("/api/targets/external/recreate").await.err(422, "invalid");
+    lab.target(
+        json!({"name": "external", "kind": "docker", "host": "lab1", "container": "existing"}),
+    )
+    .await;
+    lab.td
+        .post_empty("/api/targets/external/recreate")
+        .await
+        .err(422, "invalid");
+}
+
+#[tokio::test]
+async fn docker_recreate_refuses_mounts_and_unknown_mount_metadata() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3"})).await;
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    for mounts in [json!([{"Type": "volume", "Name": "data", "Destination": "/data"}]),
+                   json!([{"Type": "bind", "Source": "/tmp/data", "Destination": "/data"}]),
+                   Value::Null] {
+        std::fs::write(lab.bins.path().join("docker.mounts"), mounts.to_string()).unwrap();
+        lab.td.post_empty("/api/targets/dbox/recreate").await.err(409, "conflict");
+        assert!(!lab.log().contains("docker rm"));
+        assert_eq!(lab.log().matches("docker run ").count(), 1);
+    }
 }
 
 /// The whole path on this machine: the daemon sends the limits and the

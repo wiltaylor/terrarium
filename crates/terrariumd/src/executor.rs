@@ -2452,21 +2452,44 @@ async fn docker_rm(state: &Shared, def: &TargetDef) -> ApiResult<()> {
 /// Explicit consent to lose the stopped container's writable layer, never volumes.
 pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
     if def.kind != TargetKind::Docker || def.container.is_some() || def.image.is_none() {
-        return Err(ApiError::invalid("recreate needs a managed Docker target with an image"));
+        return Err(ApiError::invalid(
+            "recreate needs a managed Docker target with an image",
+        ));
     }
     host_online(state, def)?;
     if state.executor.live_on(&def.name) > 0 {
-        return Err(ApiError::conflict("recreate refused: exec sessions are live on the target"));
+        return Err(ApiError::conflict(
+            "recreate refused: exec sessions are live on the target",
+        ));
     }
     let st = docker_state(state, def).await?;
     if st != "stopped" && st != "absent" {
-        return Err(ApiError::conflict("recreate refused: bring the container down first"));
+        return Err(ApiError::conflict(
+            "recreate refused: bring the container down first",
+        ));
     }
     // Check capability and capacity before discarding the old writable layer.
     docker_limits(state, def)?;
     check_running_cap(state, def, None).await?;
     if st == "stopped" {
         let container = container_name(def);
+        let inspect_container = container.clone();
+        let inspected = verb_ok(state, def, "docker.inspect", move |session| {
+            DaemonFrame::DockerInspect(DockerInspect {
+                session,
+                container: inspect_container,
+                timeout_secs: Some(60),
+            })
+        }).await?;
+        let mounts = inspected.result.as_ref().and_then(|r| r["mounts"].as_array())
+            .ok_or_else(|| ApiError::conflict(
+                "recreate refused: host did not report container mounts; update the host agent",
+            ))?;
+        if !mounts.is_empty() {
+            return Err(ApiError::conflict(
+                "recreate refused: container has mounts; mount-preserving recreation is not supported",
+            ));
+        }
         verb_ok(state, def, "docker.rm", move |session| {
             DaemonFrame::DockerRm(DockerRm {
                 session,

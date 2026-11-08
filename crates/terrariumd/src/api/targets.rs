@@ -516,9 +516,17 @@ async fn recreate(
     policy::define_target(&actor, r.def.project.as_deref())?;
     let out = executor::recreate(&state, &r.def).await?;
     let detail = out.clone();
-    state.db.write(actor.label(), move |t| {
-        t.audit("target.recreate", &r.def.name, r.def.project.as_deref(), detail)
-    }).await?;
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit(
+                "target.recreate",
+                &r.def.name,
+                r.def.project.as_deref(),
+                detail,
+            )
+        })
+        .await?;
     Ok(Json(out))
 }
 

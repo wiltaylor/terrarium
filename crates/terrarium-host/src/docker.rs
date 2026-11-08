@@ -338,6 +338,7 @@ pub fn parse_inspect(stdout: &str, code: Option<i32>) -> Value {
         "id": first["Id"],
         "name": first["Name"].as_str().map(|n| n.trim_start_matches('/')),
         "image": first["Config"]["Image"],
+        "mounts": first["Mounts"],
         "status": status,
         "running": st["Running"],
         "exit_code": st["ExitCode"],
@@ -656,6 +657,9 @@ mod tests {
         assert_eq!(v["state"], "running");
         assert_eq!(v["name"], "t-buildbox");
         assert_eq!(v["id"], "abc123");
+        assert!(v["mounts"].is_null());
+        let mounted = out.replace("\"State\":", "\"Mounts\":[{\"Type\":\"volume\",\"Name\":\"data\",\"Destination\":\"/data\"}],\"State\":");
+        assert_eq!(parse_inspect(&mounted, Some(0))["mounts"][0]["Name"], "data");
         assert_eq!(parse_inspect("[]\n", Some(1))["state"], "absent");
         let exited = out.replace("\"running\"", "\"exited\"");
         assert_eq!(parse_inspect(&exited, Some(0))["state"], "stopped");

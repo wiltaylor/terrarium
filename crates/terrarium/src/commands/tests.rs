@@ -3875,9 +3875,13 @@ async fn target_edit_reports_explicit_recreate_and_sends_the_verb() {
     let out = ok(
         true,
         &["admin", "target", "verb", "dbox", "recreate"],
-        vec![(200, json!({"target": "dbox", "verb": "recreate", "state": "running"}))],
+        vec![(
+            200,
+            json!({"target": "dbox", "verb": "recreate", "state": "running"}),
+        )],
         vec![(Post, "/api/targets/dbox/recreate", vec![], None)],
-    ).await;
+    )
+    .await;
     assert!(out.contains("dbox: recreate: running"));
 }
 

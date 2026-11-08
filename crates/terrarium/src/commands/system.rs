@@ -694,7 +694,10 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 ));
                 if let Some(note) = t["recreate_note"].as_str() {
                     c.line(note);
-                    c.line(format!("run: terrarium admin target verb {} recreate", a.name));
+                    c.line(format!(
+                        "run: terrarium admin target verb {} recreate",
+                        a.name
+                    ));
                 }
             })
         }
@@ -709,7 +712,8 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             snapshot,
             agent,
         } => {
-            if !["up", "down", "snapshot", "restore", "status", "recreate"].contains(&verb.as_str()) {
+            if !["up", "down", "snapshot", "restore", "status", "recreate"].contains(&verb.as_str())
+            {
                 return Err(crate::api::CliError::usage(format!(
                     "unknown verb `{verb}`: use up, down, snapshot, restore, status, or recreate"
                 )));
