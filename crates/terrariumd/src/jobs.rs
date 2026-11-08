@@ -2104,6 +2104,16 @@ async fn merge_secrets(
 }
 
 fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
+    if let Some(config) = &delivery.docker_ci {
+        for destination in [&config.destination, &config.reset_destination] {
+            if destination.is_empty() || destination.starts_with('-') || destination.chars().any(char::is_whitespace) {
+                return Err(ApiError::invalid("Docker CI SSH destinations must be nonempty user@host values, not options"));
+            }
+        }
+        if config.port == 0 || config.reset_port == 0 || config.known_hosts.trim().is_empty() {
+            return Err(ApiError::invalid("Docker CI requires nonzero SSH ports and a pinned known_hosts line"));
+        }
+    }
     for name in delivery.merge_secrets.keys() {
         secrets::grants::check_env_name(name)?;
         if name != "DOCKER_CI_KEY" && name != "DOCKER_CI_RESET_KEY" {

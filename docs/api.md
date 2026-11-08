@@ -11628,6 +11628,7 @@ or the operator) read and set the config. The body is a JSON object:
 | `timeout_secs` | the most time the recipe may run                                | 3600                  |
 | `failure_patterns` | literal strings to extract from recipe output, with three following lines of context | `["FAILED", "panicked", "test result: FAILED", "failures:"]` |
 | `merge_secrets` | `DOCKER_CI_KEY` and `DOCKER_CI_RESET_KEY` mapped to `@secret:<name>[.<field>]`, consumed only by the daemon for merge jobs | `{}` |
+| `docker_ci` | public SSH settings: `destination`, `port`, `known_hosts`, `reset_destination`, `reset_port` | none |
 
 `merge_secrets` uses the project's `delivery:<project>` principal, never
 agent or project grants. A delivery grant requires `level: run`, named
@@ -11643,9 +11644,19 @@ credential. Each use emits `secret.run` with the job, principal,
 target, field, and reference name, never the value. The SSH key remains in
 a private daemon run directory and is never sent to the target, recipe,
 or their environment. Output is stream-redacted with the full key and
-individual PEM lines before retention. Docker-tunnel recipes do not
-write a raw target log, so their retained output is bounded by the job's
-output limit instead of a full log file.
+individual PEM lines before retention. The recipe retains its full raw target
+log because credentials never reach the target process tree.
+
+Configure `docker_ci` through the delivery API or fleet configuration before
+adding merge secret references. For example, `destination` is `root@vm`,
+`port` is its SSH port, and `known_hosts` is the administrator-verified
+OpenSSH host-key line (including `[host]:port` for a nonstandard port).
+`reset_destination` and `reset_port` identify the forced reset command;
+that host must already be pinned in the daemon's known_hosts. No endpoint
+or key pin is compiled into the daemon. Reset exit 75 retries twice with
+a two-second delay; any other failure prevents opening the tunnel.
+The daemon resolves configured merge secrets and opens the tunnel for every
+merge, independently of the recipe's `TERRARIUM_DOCKER_CI` gate switch.
 
 The Docker gate is off by default: merges continue to run the full
 `ci::validate` without requiring Docker or a key. To roll it out in order:

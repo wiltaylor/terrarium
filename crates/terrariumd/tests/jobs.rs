@@ -2224,6 +2224,42 @@ async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
 }
 
 #[tokio::test]
+#[ignore = "requires an isolated scratch SSH endpoint with real Docker"]
+async fn live_docker_through_daemon_tunnel_and_release_relay() {
+    // The scratch exercise supplies a temporary, local-only SSH identity and
+    // sshd. Never use the production Docker CI or reset identities here.
+    let ssh = std::env::var("TER363_SCRATCH_SSH").unwrap();
+    let key = std::fs::read_to_string(std::env::var("TER363_SCRATCH_KEY").unwrap()).unwrap();
+    let pin = std::fs::read_to_string(std::env::var("TER363_SCRATCH_PIN").unwrap()).unwrap();
+    let port: u16 = std::env::var("TER363_SCRATCH_PORT").unwrap().parse().unwrap();
+    let lab = lab_impl_ssh(1, None, "code", Some(&ssh)).await;
+    for name in ["vm", "reset"] {
+        lab.td.put(&format!("/api/secrets/p/{name}"), json!({"kind":"api_key", "fields":{"value":key}})).await.ok();
+        lab.td.post(&format!("/api/secrets/p/{name}/grants"), json!({"grantee":"delivery:p", "level":"run", "targets":["p-box"]})).await.ok();
+    }
+    let recipe = r#"set -eu
+docker version
+docker pull alpine:3.21
+name=ter-363-relay-$$
+trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+docker run --name "$name" alpine:3.21 sh -c 'yes ter-363-large-log | head -c 8388608'
+test "$(docker logs "$name" | wc -c)" -eq 8388608
+echo real-tunnel-large-log-ok
+"#;
+    lab.td.put("/api/projects/p/delivery", json!({"target":"p-box", "recipe":recipe, "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm", "DOCKER_CI_RESET_KEY":"@secret:reset"}, "docker_ci":{"destination":"root@127.0.0.1", "port":port, "known_hosts":pin, "reset_destination":"reset@unused", "reset_port":22}})).await.ok();
+    lab.branch("live-relay", "next", &[("live-relay", "yes\n")]);
+    let card = lab.card("live relay", "live-relay").await;
+    lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({})).await.ok();
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["card"] == card).unwrap();
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let detail = lab.td.get(&format!("/api/jobs/{}", job["id"].as_str().unwrap())).await;
+    let detail = detail.ok().to_string();
+    assert!(detail.contains("real-tunnel-large-log-ok"), "{detail}");
+    assert!(!detail.contains(&key));
+}
+
+#[tokio::test]
 async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
     use std::os::unix::fs::PermissionsExt;
     let fixtures = tempfile::tempdir().unwrap();
@@ -2325,8 +2361,21 @@ while True: time.sleep(1)
     for key in ["dummy-reset-key-363", "dummy-tunnel-key-363"] {
         assert!(!text.contains(key));
     }
+    let events = lab.td.daemon.as_ref().unwrap().state.db.read(|c| {
+        let mut statement = c.prepare("SELECT summary || payload FROM events WHERE project = 'p'")?;
+        let rows = statement.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?.join("\n"))
+    }).await.unwrap();
+    for key in ["dummy-reset-key-363", "dummy-tunnel-key-363"] {
+        assert!(!events.contains(key), "{events}");
+    }
     let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
-    assert_eq!(order, "reset\ntunnel\nreset\nreset\nreset\ntunnel\n");
+    // The queue may retry another failed card while a new merge is queued.
+    // Every tunnel, including those retries, must follow a successful reset.
+    assert!(order.starts_with("reset\ntunnel\nreset\nreset\nreset\ntunnel\n"), "{order}");
+    for pair in order.lines().collect::<Vec<_>>().windows(2) {
+        if pair[1] == "tunnel" { assert_eq!(pair[0], "reset"); }
+    }
 }
 
 #[tokio::test]

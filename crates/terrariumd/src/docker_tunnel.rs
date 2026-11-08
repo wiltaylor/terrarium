@@ -383,6 +383,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn large_stream_obeys_credits_without_drops() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let size = 8 * 1024 * 1024;
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; size];
+                socket.read_exact(&mut request).await.unwrap();
+                assert!(request.iter().all(|b| *b == 42));
+                socket.write_all(&request).await.unwrap();
+            });
+            let (events, rx) = mpsc::channel(2);
+            let (ctl, mut controls) = mpsc::unbounded_channel();
+            let (ready, _) = oneshot::channel();
+            let bridge_task = tokio::spawn(bridge(crate::executor::Running { events: rx, ctl }, path, ready));
+            let frame = |event: Value| Ev::Data(Stream::Stdout, format!("{event}\n").into_bytes());
+            events.send(frame(json!({"id":1,"open":true}))).await.unwrap();
+            let sender = events.clone();
+            let producer = tokio::spawn(async move {
+                // More than the channel capacity, while the server deliberately
+                // waits for the entire upload before returning its response.
+                for _ in 0..size / 16384 {
+                    sender.send(Ev::Data(Stream::Stdout, format!("{}\n", json!({"id":1,"data":STANDARD.encode(vec![42;16384])})).into_bytes())).await.unwrap();
+                }
+            });
+            let mut received = 0;
+            while received < size {
+                let Control::Stdin(bytes) = controls.recv().await.unwrap() else { panic!("expected stdin") };
+                let event: Value = serde_json::from_slice(&bytes).unwrap();
+                if let Some(data) = event["data"].as_str() {
+                    let data = STANDARD.decode(data).unwrap();
+                    assert!(data.iter().all(|b| *b == 42));
+                    received += data.len();
+                    // Simulate a slow target accepting each Docker response.
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    events.send(frame(json!({"id":1,"ack":true}))).await.unwrap();
+                }
+            }
+            producer.await.unwrap();
+            server.await.unwrap();
+            drop(events);
+            bridge_task.await.unwrap();
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn daemon_bridge_round_trips_without_any_secret_in_target_frames() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("docker.sock");
