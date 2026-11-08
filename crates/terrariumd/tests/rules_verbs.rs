@@ -794,7 +794,13 @@ async fn default_merge_group_returned_members_leave_and_last_abandons() {
         json!({"title":"b", "column":"review", "repo":"app"}),
     )
     .await;
-    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    let c = new_card(
+        &td,
+        "p",
+        json!({"title":"c", "column":"review", "repo":"app"}),
+    )
+    .await;
+    store_job(&td, JobKind::Merge, &[&a, &b, &c]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
         .as_str()
@@ -804,14 +810,19 @@ async fn default_merge_group_returned_members_leave_and_last_abandons() {
     settle(&td).await;
     assert!(card(&td, &a).await.get("group").is_none());
     assert_eq!(card(&td, &gid).await["archived"], false);
-    assert_eq!(card(&td, &b).await["group"]["members"], json!([b]));
+    assert_eq!(card(&td, &b).await["group"]["members"], json!([b, c]));
     move_to(&td, &b, "in_progress").await;
     settle(&td).await;
+    assert!(card(&td, &b).await.get("group").is_none());
+    assert_eq!(card(&td, &gid).await["archived"], false);
+    move_to(&td, &c, "blocked").await;
+    settle(&td).await;
+    assert!(card(&td, &c).await.get("group").is_none());
     let group = card(&td, &gid).await;
     assert_eq!(group["archived"], true);
     assert_eq!(group["group"]["total"], 0);
     let runs = runs_of(&td, "p", "merge-group-returned").await;
-    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(runs.len(), 3, "{runs:?}");
     assert!(runs.iter().all(|r| r["state"] == "done"), "{runs:?}");
 }
 
