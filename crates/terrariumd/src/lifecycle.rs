@@ -282,6 +282,9 @@ impl Lifecycle {
 
 /// Holds the wake of one agent; the drop lets the next wake go. Public
 /// for the tests that hold a wake on the way.
+/// This serializes starts, not queued-turn delivery: a Busy wake still
+/// drains DB-queued turns to a running supervisor under the turn lock.
+/// Turns refused while starting stay queued for the start or timer pass.
 pub struct WakeGuard {
     lifecycle: Arc<Lifecycle>,
     agent: AgentId,
@@ -603,8 +606,9 @@ async fn idle_stop(state: &Shared, id: AgentId) {
 /// an unpark may have landed since. The stop holds the wake of the agent
 /// ([`WakeGuard`]) and checks the park again first: an agent that was
 /// unparked runs on, and a wake on the way skips the stop. An unpark
-/// that lands during the stop finds the wake held (`Woke::Busy`), so the
-/// agent wakes after the stop.
+/// that lands during the stop finds the wake held (`Woke::Busy`): it may
+/// deliver DB-queued turns if the supervisor still runs. After the stop
+/// the agent wakes again to deliver any turns that remain queued.
 pub async fn park_stop(state: &Shared, id: AgentId) {
     let Some(wake) = WakeGuard::take(&state.lifecycle, id) else {
         return;
