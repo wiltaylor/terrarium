@@ -3905,13 +3905,13 @@ async fn docker_image_edit_needs_explicit_recreate_without_volume_deletion() {
         .td
         .patch("/api/targets/dbox", json!({"image": "alpine:3"}))
         .await
-        .ok();
+        .ok().clone();
     assert!(unchanged["recreate_note"].is_null());
     let edited = lab
         .td
         .patch("/api/targets/dbox", json!({"image": "alpine:latest"}))
         .await
-        .ok();
+        .ok().clone();
     assert!(
         edited["recreate_note"]
             .as_str()
@@ -3923,13 +3923,13 @@ async fn docker_image_edit_needs_explicit_recreate_without_volume_deletion() {
         .td
         .patch("/api/targets/dbox", json!({"keep": true}))
         .await
-        .ok();
+        .ok().clone();
     assert_eq!(edited["runtime"]["recreate_required"], true);
     lab.td
         .post_empty("/api/targets/dbox/up")
         .await
         .err(409, "conflict");
-    let recreated = lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
+    let recreated = lab.td.post_empty("/api/targets/dbox/recreate").await.ok().clone();
     assert_eq!(recreated["verb"], "recreate");
     assert_eq!(recreated["state"], "running");
     let log = lab.log();
