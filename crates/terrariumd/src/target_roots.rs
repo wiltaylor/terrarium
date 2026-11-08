@@ -293,11 +293,7 @@ pub async fn prepare(
         state,
         def,
         &RemoteCmd {
-            argv: vec![
-                "sh".into(),
-                "-c".into(),
-                PYTHON_PROBE.into(),
-            ],
+            argv: vec!["sh".into(), "-c".into(), PYTHON_PROBE.into()],
             timeout_secs: Some(30),
             ..RemoteCmd::default()
         },
@@ -597,12 +593,21 @@ mod tests {
     fn measurements_reject_noise_and_commands_have_finite_bounds() {
         assert_eq!(measurement(b"123\n"), Some(123));
         assert_eq!(measurement(b"0"), Some(0));
-        for bad in [b"".as_slice(), b"banner\n123", b"-1", b"18446744073709551616", b"\xff"] {
+        for bad in [
+            b"".as_slice(),
+            b"banner\n123",
+            b"-1",
+            b"18446744073709551616",
+            b"\xff",
+        ] {
             assert_eq!(measurement(bad), None);
         }
         for mode in ["prepare", "measure", "delete"] {
             let cmd = command(mode, "/src/terrarium", "p", "a", "id", "").unwrap();
-            assert_eq!(cmd.timeout_secs, Some(if mode == "prepare" { 120 } else { 900 }));
+            assert_eq!(
+                cmd.timeout_secs,
+                Some(if mode == "prepare" { 120 } else { 900 })
+            );
         }
     }
 

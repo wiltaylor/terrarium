@@ -175,9 +175,9 @@ esac"#,
             mounts = dir.join("docker.mounts").display(),
             image = dir.join("docker.image").display(),
             hc = dir.join("docker.host-config").display(),
-            end = dir.join("sleeper.end").display()
-            ,missing_python = dir.join("missing-python").display()
-            ,bad_measure = dir.join("bad-measure").display()
+            end = dir.join("sleeper.end").display(),
+            missing_python = dir.join("missing-python").display(),
+            bad_measure = dir.join("bad-measure").display()
         ),
         _ => format!(
             r#"case "$1" in
@@ -700,42 +700,99 @@ async fn owned_target_roots_legacy_python_and_bad_measurement() {
     let lab = Lab::start().await;
     let _host = lab.host("lab1").await;
     lab.td.project("terra").await;
-    lab.target(json!({"name": "box", "kind": "docker", "host": "lab1", "image": "alpine:3", "project": "terra", "work_root": lab.bins.path().join("builds")})).await;
-    let owner = lab.td.agent("terra", "lead", json!({"roles": ["project_admin"],
-        "policy": {"targets": ["box"], "spawn": {"templates": ["project:*"],
-        "max_concurrent": 1, "max_lifetime": "5m", "bound": true}}})).await;
-    lab.td.post("/api/templates", json!({"name": "builder", "project": "terra",
-        "spec": {"harness": "claude", "policy": {"targets": ["box"]}}})).await.ok();
-    let card = lab.td.post("/api/projects/terra/cards",
-        json!({"title": "Build", "column": "in_progress"})).await.ok().clone();
+    lab.target(json!({"name": "terra-box", "kind": "docker", "host": "lab1", "image": "alpine:3", "project": "terra", "work_root": lab.bins.path().join("builds")})).await;
+    let owner = lab
+        .td
+        .agent(
+            "terra",
+            "lead",
+            json!({"roles": ["project_admin"],
+        "policy": {"targets": ["terra-box"], "spawn": {"templates": ["project:*"],
+        "max_concurrent": 1, "max_lifetime": "5m", "bound": true}}}),
+        )
+        .await;
+    lab.td
+        .post(
+            "/api/templates",
+            json!({"name": "builder", "project": "terra",
+        "spec": {"harness": "claude", "policy": {"targets": ["terra-box"]}}}),
+        )
+        .await
+        .ok();
+    let card = lab
+        .td
+        .post(
+            "/api/projects/terra/cards",
+            json!({"title": "Build", "column": "in_progress"}),
+        )
+        .await
+        .ok()
+        .clone();
     let owner_id = owner["id"].as_str().unwrap();
     let worker = lab.td.post_as(owner_id, &format!("/api/agents/{owner_id}/spawn"),
         json!({"template": "builder", "task": "Build", "bind": format!("card:{}", card["id"].as_str().unwrap())})).await.ok().clone();
     let id = worker["id"].as_str().unwrap().to_owned();
     let state = lab.state();
     std::fs::write(lab.bins.path().join("missing-python"), "").unwrap();
-    let r = lab.td.post_as(&id, "/api/targets/box/exec", json!({"cmd": ["true"]})).await;
+    let r = lab
+        .td
+        .post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["true"]}))
+        .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    drain(&lab.td, "box", r.body["session_id"].as_str().unwrap()).await;
-    let count = state.db.read(|c| Ok(c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
+    let count = state
+        .db
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
     assert_eq!(count, 0, "missing Python must not register an owned root");
-    assert!(!lab.log().contains("CARGO_TARGET_DIR"), "legacy exec must not inject owned build paths");
+    assert!(
+        !lab.log().contains("CARGO_TARGET_DIR"),
+        "legacy exec must not inject owned build paths"
+    );
     std::fs::remove_file(lab.bins.path().join("missing-python")).unwrap();
-    let r = lab.td.post_as(&id, "/api/targets/box/exec", json!({"cmd": ["true"]})).await;
+    let r = lab
+        .td
+        .post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["true"]}))
+        .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    drain(&lab.td, "box", r.body["session_id"].as_str().unwrap()).await;
-    terrariumd::spawn::close(&state, &id, terrariumd::store::spawns::DONE, Some("Built".into()), false).await.unwrap();
+    drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
+    terrariumd::spawn::close(
+        &state,
+        &id,
+        terrariumd::store::spawns::DONE,
+        Some("Built".into()),
+        false,
+    )
+    .await
+    .unwrap();
     state.db.write("system", |t| {
         t.execute("INSERT INTO agent_target_roots (agent, project, name, target, definition) SELECT 'zz-good', project, 'zz-good', target, definition FROM agent_target_roots", [])?;
         Ok(())
     }).await.unwrap();
     std::fs::write(lab.bins.path().join("bad-measure"), "").unwrap();
     terrariumd::target_roots::sweep(&state).await.unwrap();
-    let remaining = state.db.read(|c| {
-        let mut q = c.prepare("SELECT agent, last_error FROM agent_target_roots")?;
-        Ok(q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?)
-    }).await.unwrap();
-    assert_eq!(remaining, vec![(id, "target measurement returned no size".into())]);
+    let remaining = state
+        .db
+        .read(|c| {
+            let mut q = c.prepare("SELECT agent, last_error FROM agent_target_roots")?;
+            Ok(
+                q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        remaining,
+        vec![(id, "target measurement returned no size".into())]
+    );
     let audit = lab.td.get("/api/audit?action=agent.target_cleanup").await;
     assert_eq!(audit.ok()[0]["detail"]["agent"], "zz-good");
 }
