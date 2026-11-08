@@ -337,7 +337,7 @@ impl Sync {
             &self.remote,
             &format!("{}/", stage.display()),
             Some(&self.shell),
-            Some(basis.path()),
+            Some(&self.root),
             false,
         )
         .await
