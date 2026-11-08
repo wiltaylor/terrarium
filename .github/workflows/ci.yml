@@ -71,7 +71,7 @@ jobs:
       # bump io.terrarium.runner-compat-epoch in docker/Dockerfile.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 97858951d7636766896332751f0fad02306b79d5
+          ref: f23f285ab6950c6434c40a7811844a248b4a6c92
           path: .compat/runner-n-1
       - name: Old runner against current daemon, commit and rollback
         run: |
