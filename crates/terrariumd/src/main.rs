@@ -231,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
     let hints_state = std::sync::Arc::downgrade(&daemon.state);
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
             let Some(state) = hints_state.upgrade() else {
                 return;
             };
