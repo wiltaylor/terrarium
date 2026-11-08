@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeLimits {
+    /// Create-time Docker GPU allowlist. Empty means no GPU access.
+    #[serde(default)]
+    pub gpu_devices: Vec<String>,
     pub limits: crate::limits::Limits,
     #[serde(default)]
     pub cpus: Option<Vec<u32>>,
@@ -38,6 +41,9 @@ impl RuntimeLimits {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        for id in &self.gpu_devices {
+            validate_gpu_id(id)?;
+        }
         Amounts {
             io: self.io.clone(),
             ..Default::default()
@@ -184,6 +190,35 @@ impl Amounts {
 pub struct HostCapacity {
     pub cpu_ids: Vec<u32>,
     pub memory_bytes: u64,
+}
+
+pub const GPU_ENFORCEMENT: &str = "enforced: docker only; native processes not restricted";
+
+/// Stable NVIDIA UUID, rather than an index that can change after reboot.
+pub fn validate_gpu_id(id: &str) -> Result<(), String> {
+    if !id.starts_with("GPU-") || id.len() <= 4 || !id[4..].bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        return Err("GPU device must be an NVIDIA GPU UUID (GPU-...)".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuDevice {
+    pub uuid: String,
+    pub name: String,
+    pub memory_bytes: u64,
+    pub used_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuClaim {
+    pub uuid: String,
+    /// Cooperative share for shared access. Exclusive access reserves the device.
+    #[serde(default)]
+    pub vram_bytes: u64,
+    #[serde(default)]
+    pub exclusive: bool,
 }
 
 impl HostCapacity {

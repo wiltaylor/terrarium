@@ -25,7 +25,9 @@ pub async fn run(ctx: &Ctx, cmd: &ReserveCmd) -> anyhow::Result<()> {
             reason,
             queue,
             queue_timeout,
+            gpus,
         } => {
+            let gpus: Vec<terrarium_core::resources::GpuClaim> = gpus.as_deref().map(serde_json::from_str).transpose()?.unwrap_or_default();
             let limits: TargetLimits = serde_json::from_value(json!({"cpu":cpu,"memory":memory}))?;
             let limits = limits.resolve().map_err(crate::api::CliError::usage)?;
             let amounts = terrarium_core::resources::Amounts {
@@ -36,7 +38,7 @@ pub async fn run(ctx: &Ctx, cmd: &ReserveCmd) -> anyhow::Result<()> {
             amounts.validate().map_err(crate::api::CliError::usage)?;
             ctx.api.post(&format!("/api/hosts/{}/reservations", encode(host)), Some(json!({
                 "target":target,"agent":agent,"amounts":amounts,"until":until,
-                "exclusive":exclusive,"reason":reason,"queue":queue,"queue_timeout":queue_timeout
+                "exclusive":exclusive,"reason":reason,"queue":queue,"queue_timeout":queue_timeout,"gpus":gpus
             }))).await?
         }
         ReserveCmd::Extend { id, until } => {

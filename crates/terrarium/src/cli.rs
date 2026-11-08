@@ -2471,6 +2471,9 @@ pub enum ReserveCmd {
         queue: bool,
         #[arg(long, requires = "queue")]
         queue_timeout: Option<String>,
+        /// GPU claims JSON: [{"uuid":"GPU-...","exclusive":true}] or vram_bytes for shared
+        #[arg(long)]
+        gpus: Option<String>,
     },
     /// Extend an active reservation
     Extend {

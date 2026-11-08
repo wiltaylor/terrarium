@@ -117,7 +117,7 @@ impl ClientOptions {
 /// Send a `metrics` frame every `interval` until the link ends. The sampler reads `/proc` on a blocking thread; while one sample
 /// runs, the next tick waits, so a slow `statvfs` holds back only the
 /// metrics.
-async fn run_metrics(out: mpsc::Sender<HostFrame>, interval: Duration) {
+async fn run_metrics(out: mpsc::Sender<HostFrame>, interval: Duration, docker: String) {
     let interval = interval.max(Duration::from_millis(10));
     let Ok(mut sampler) = tokio::task::spawn_blocking(|| {
         let mut s = crate::metrics::Sampler::default();
@@ -141,7 +141,9 @@ async fn run_metrics(out: mpsc::Sender<HostFrame>, interval: Duration) {
             return;
         };
         sampler = s;
-        let Some(m) = sample else { continue };
+        let Some(mut m) = sample else { continue };
+        m.gpus = crate::gpu::sample().await.unwrap_or_default();
+        m.gpu_usage = crate::gpu::usage(&docker).await;
         match out.try_send(HostFrame::Metrics(Box::new(m))) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -600,7 +602,7 @@ impl Client {
         // of a session; a sample that finds the queue full is dropped.
         let (mtx, mut mrx) = mpsc::channel::<HostFrame>(1);
         let sampler = (welcome.metrics && self.opts.capabilities.metrics)
-            .then(|| tokio::spawn(run_metrics(mtx, self.opts.metrics_interval)));
+            .then(|| tokio::spawn(run_metrics(mtx, self.opts.metrics_interval, self.opts.docker_bin.clone())));
 
         let mut writer = tokio::spawn(async move {
             loop {

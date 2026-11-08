@@ -518,7 +518,11 @@ pub fn admin_after_write(
     def: &TargetDef,
     before: Option<(&TargetDef, bool)>,
 ) -> ApiResult<bool> {
-    if secrets::is_admin_actor(t, &t.actor)? {
+    admin_after_write_as(t, &t.actor, def, before)
+}
+
+fn admin_after_write_as(t: &Connection, actor: &str, def: &TargetDef, before: Option<(&TargetDef, bool)>) -> ApiResult<bool> {
+    if secrets::is_admin_actor(t, actor)? {
         return Ok(true);
     }
     let Some((old, true)) = before else {
@@ -578,7 +582,7 @@ pub fn update_with_live_limits(
     live: bool,
     acknowledged: bool,
 ) -> ApiResult<TargetRow> {
-    let (def, admin) = prepare_update(t, name, patch, live)?;
+    let (def, admin) = prepare_update(t, &t.actor, name, patch, live)?;
     let current = get(t, name)?;
     if def.kind == TargetKind::Docker
         && !def.ephemeral
@@ -613,7 +617,8 @@ pub fn update_with_live_limits(
 
 /// Validate without changing stored defaults before host acknowledgement.
 pub fn prepare_update(
-    t: &Tx<'_>,
+    t: &Connection,
+    actor: &str,
     name: &str,
     patch: &Value,
     live: bool,
@@ -682,7 +687,7 @@ pub fn prepare_update(
     }
     check_credential(t, &def, Some(&current.def))?;
     let was = credential_admin(t, name)?;
-    let admin = admin_after_write(t, &def, Some((&current.def, was)))?;
+    let admin = admin_after_write_as(t, actor, &def, Some((&current.def, was)))?;
     check_global_credential(t, &def, admin)?;
     Ok((def, admin))
 }

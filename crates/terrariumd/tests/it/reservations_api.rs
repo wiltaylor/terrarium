@@ -90,6 +90,8 @@ async fn setup_docker(
     std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
     options.docker_bin = docker.to_string_lossy().into_owned();
     options.capabilities = HostCapabilities {
+        gpu_reservations: true,
+        gpus: vec![terrarium_core::resources::GpuDevice { uuid: "GPU-abcd".into(), name: "test".into(), memory_bytes: 8 << 30, used_bytes: 0 }],
         reservations: true,
         capacity: Some(HostCapacity {
             cpu_ids: vec![0, 1, 2, 3],
@@ -132,6 +134,49 @@ async fn setup_docker(
         .await
         .ok();
     (td, server, client)
+}
+
+#[tokio::test]
+async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let body = json!({"target":"p-box","amounts":{},"gpus":[{"uuid":"GPU-abcd","exclusive":true}],"until":"30m"});
+    assert!(!td.post("/api/hosts/h/reservations", body.clone()).await.status.is_success());
+    td.patch("/api/targets/p-box", json!({"ephemeral":true})).await.ok();
+    let grant = td.post("/api/hosts/h/reservations", body).await;
+    let id = grant.ok()["id"].as_str().unwrap();
+    assert_eq!(grant.body["gpu_enforcement"], terrarium_core::resources::GPU_ENFORCEMENT);
+    let capacity = td.get("/api/hosts/h/capacity").await;
+    assert_eq!(capacity.ok()["used"]["gpus"][0]["claim"]["uuid"], "GPU-abcd");
+    let mut def = state.db.read(|c| Ok(terrariumd::store::targets::get(c, "p-box")?.def)).await.unwrap();
+    assert_eq!(terrariumd::reservations::docker_budget(&state, &def).unwrap().unwrap().gpu_devices, vec!["GPU-abcd"]);
+    def.kind = terrarium_core::config::TargetKind::Host;
+    assert!(terrariumd::reservations::exec_budget(&state, &def, Some("p/worker")).is_ok());
+    for kind in [terrarium_core::config::TargetKind::Ssh, terrarium_core::config::TargetKind::Vmlab] {
+        def.kind = kind;
+        assert!(terrariumd::reservations::exec_budget(&state, &def, None).is_err());
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let count: i64 = state.db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages WHERE subject LIKE '%gpu_native_session'", [], |r| r.get(0))?)).await.unwrap();
+            if count >= 2 { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    td.delete(&format!("/api/reservations/{id}")).await.ok();
+    let shared = td.post("/api/hosts/h/reservations", json!({"target":"p-box","amounts":{},"gpus":[{"uuid":"GPU-abcd","vram_bytes":1048576}],"until":"30m"})).await;
+    let sid = shared.ok()["id"].as_str().unwrap();
+    state.executor.hosts.record_metrics("h", terrarium_host::protocol::HostMetrics {
+        gpu_usage: vec![terrarium_host::gpu::Usage { uuid: "GPU-abcd".into(), container: "terrarium-p-box".into(), used_bytes: 2 << 20 }],
+        ..Default::default()
+    }, std::time::Instant::now());
+    terrariumd::reservations::sweep(&state).await.unwrap();
+    terrariumd::reservations::sweep(&state).await.unwrap();
+    let count: i64 = state.db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages WHERE subject LIKE '%gpu_overage'", [], |r| r.get(0))?)).await.unwrap();
+    assert_eq!(count, 2, "holder and project lead, deduplicated across sweeps");
+    assert_eq!(td.get(&format!("/api/reservations/{sid}")).await.ok()["state"], "active");
+    assert!(!td.dir.path().join("docker.calls").exists(), "overage must not stop or update the container");
+    client.abort(); server.abort();
 }
 
 #[tokio::test]
@@ -321,6 +366,9 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         .unwrap()
         .unwrap();
     assert!(state.executor.resource_verb_idle("h").is_ok());
+    terrariumd::reservations::sweep(&state).await.unwrap();
+    let id = queued.body["id"].as_str().unwrap();
+    assert_eq!(td.get(&format!("/api/reservations/{id}")).await.ok()["state"], "active");
     client.abort();
     server.abort();
     client_b.abort();
@@ -527,6 +575,78 @@ async fn fixed_docker_limits_update_live_and_failed_ack_keeps_defaults() {
     assert_eq!(saved.runtime, acknowledged.runtime);
     client.abort();
     server.abort();
+}
+
+#[tokio::test]
+async fn combined_image_and_limits_edit_keeps_recreate_required() {
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    state.db.write("system", |tx| {
+        let row = terrariumd::store::targets::get(tx, "p-box")?;
+        let mut runtime = row.runtime;
+        runtime.docker_settings = Some(terrariumd::store::targets::DockerSettings::of(&row.def));
+        terrariumd::store::targets::set_runtime(tx, "p-box", &runtime)?;
+        terrariumd::store::targets::set_state(tx, "p-box", "stopped", None)
+    }).await.unwrap();
+    td.patch("/api/targets/p-box", json!({"image":"new-image","limits":{"cpu":1}})).await.ok();
+    let row = state.db.read(|c| terrariumd::store::targets::get(c, "p-box")).await.unwrap();
+    assert!(row.runtime.recreate_required);
+    assert_eq!(row.def.image.as_deref(), Some("new-image"));
+    assert!(std::fs::read_to_string(td.dir.path().join("docker.calls")).unwrap().contains("--cpus=1"));
+    client.abort(); server.abort();
+}
+
+#[tokio::test]
+async fn missing_host_ack_at_api_keeps_limits_and_baseline() {
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    state.db.write("system", |tx| {
+        let row = terrariumd::store::targets::get(tx, "p-box")?;
+        let mut runtime = row.runtime;
+        runtime.docker_settings = Some(terrariumd::store::targets::DockerSettings::of(&row.def));
+        terrariumd::store::targets::set_runtime(tx, "p-box", &runtime)?;
+        terrariumd::store::targets::set_state(tx, "p-box", "stopped", None)
+    }).await.unwrap();
+    let before = state.db.read(|c| terrariumd::store::targets::get(c, "p-box")).await.unwrap();
+    client.abort();
+    let _ = client.await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.executor.hosts.is_online("h") { tokio::time::sleep(Duration::from_millis(10)).await; }
+    }).await.unwrap();
+    assert!(!td.patch("/api/targets/p-box", json!({"limits":{"cpu":2}})).await.status.is_success());
+    let after = state.db.read(|c| terrariumd::store::targets::get(c, "p-box")).await.unwrap();
+    assert_eq!(after.def.limits, before.def.limits);
+    assert_eq!(after.runtime.docker_settings, before.runtime.docker_settings);
+    server.abort();
+}
+
+#[tokio::test]
+async fn contended_command_errors_are_end_events_and_dropped_controls_kill() {
+    use terrariumd::executor::{RemoteCmd, start_cmd, End};
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let mut def = state.db.read(|c| Ok(terrariumd::store::targets::get(c, "p-box")?.def)).await.unwrap();
+    def.kind = terrarium_core::config::TargetKind::Host;
+    let guard = state.executor.resource_lock("h").lock_owned().await;
+    let mut bad = def.clone();
+    bad.host = Some("missing-host".into());
+    let other_guard = state.executor.resource_lock("missing-host").lock_owned().await;
+    let run = start_cmd(&state, &bad, &RemoteCmd { argv: vec!["true".into()], ..Default::default() }).unwrap();
+    drop(other_guard);
+    assert!(matches!(run.collect(1024).await.end, Some(End::Error { .. })));
+    let run = start_cmd(&state, &def, &RemoteCmd { argv: vec!["sh".into(), "-c".into(), "sleep 30".into()], ..Default::default() }).unwrap();
+    drop(guard);
+    let terrariumd::executor::Running { ctl, mut events } = run;
+    while let Some(event) = events.recv().await {
+        if matches!(event, terrariumd::executor::Ev::Started) { break; }
+    }
+    drop(ctl);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = events.recv().await {
+            if matches!(event, terrariumd::executor::Ev::End(_)) { return; }
+        }
+    }).await.unwrap();
+    client.abort(); server.abort();
 }
 
 #[tokio::test]
@@ -862,6 +982,7 @@ async fn exclusive_budget_pins_owner_and_excludes_shared_workloads() {
             let r = r::request(
                 tx,
                 Request {
+                    gpus: vec![],
                     host: "h".into(),
                     project: "p".into(),
                     holder: Holder::Target("p-box".into()),

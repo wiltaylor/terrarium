@@ -32,7 +32,9 @@ async fn capacity(State(state): State<Shared>, Path(host): Path<String>) -> ApiR
         let charged = rows.iter().filter(|r| matches!(r.state, store::State::Starting | store::State::Active | store::State::Ending));
         let mut used = terrarium_core::resources::Amounts::default();
         let mut cores = std::collections::BTreeSet::new();
+        let mut gpus = Vec::new();
         for r in charged {
+            for gpu in &r.gpus { gpus.push(json!({"reservation":r.id,"holder":r.holder,"claim":gpu})); }
             used.cpu_millis = used.cpu_millis.saturating_add(r.amounts.cpu_millis);
             used.memory_bytes = used.memory_bytes.saturating_add(r.amounts.memory_bytes);
             cores.extend(r.cores.iter().copied());
@@ -46,8 +48,10 @@ async fn capacity(State(state): State<Shared>, Path(host): Path<String>) -> ApiR
         }
         let mut used = serde_json::to_value(used)?;
         used["exclusive_cores"] = json!(cores);
+        used["gpus"] = json!(gpus);
+        let inventory = hosts::get(c, &host)?.capabilities.get("gpus").cloned().unwrap_or_else(|| json!([]));
         Ok(json!({"host":host,"physical":physical,"reservable":budget,"percentage":percentage,
-            "used":used}))
+            "used":used,"gpus":inventory,"gpu_enforcement":terrarium_core::resources::GPU_ENFORCEMENT}))
     }).await?))
 }
 

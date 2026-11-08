@@ -103,6 +103,13 @@ pub fn plan_run(
         sources.push(crate::workspace::resolve(work_dir, w)?);
     }
     let mut req_env = req.env.clone();
+    // Override image defaults and caller env. Docker mounts only this allowlist.
+    let devices = req.reservation.as_ref().map(|r| r.gpu_devices.as_slice()).unwrap_or_default();
+    req_env.insert("NVIDIA_VISIBLE_DEVICES".into(), if devices.is_empty() { "void".into() } else { devices.join(",") });
+    if !devices.is_empty() {
+        a.push("--gpus".into());
+        a.push(format!("\"device={}\"", devices.join(",")));
+    }
     let mut user = req.user.clone();
     if user.is_none()
         && let Some(first) = sources.first()
@@ -245,6 +252,9 @@ pub fn plan_update(
         return Err(BuildError::bad(
             "device IO limits take effect at the next up; Docker cannot change them live",
         ));
+    }
+    if !l.gpu_devices.is_empty() {
+        return Err(BuildError::bad("GPU exposure takes effect at create; Docker cannot change it live"));
     }
     if l.limits.cpu_millis.is_none() || l.limits.memory_bytes.is_none() || l.cpus.is_none() {
         return Err(BuildError::bad(
@@ -518,6 +528,21 @@ mod tests {
     }
 
     #[test]
+    fn gpu_allowlist_overrides_caller_and_image_defaults() {
+        let mut r = run_req();
+        r.env.insert("NVIDIA_VISIBLE_DEVICES".into(), "all".into());
+        let plan = plan_run(&r, "docker", &PathPolicy::default(), std::path::Path::new("/nonexistent")).unwrap();
+        assert_eq!(plan.exec.env["NVIDIA_VISIBLE_DEVICES"], "void");
+        assert!(!plan.exec.args.contains(&"--gpus".into()));
+        r.reservation = Some(terrarium_core::resources::RuntimeLimits { gpu_devices: vec!["GPU-abcd".into(), "GPU-1234".into()], ..Default::default() });
+        let plan = plan_run(&r, "docker", &PathPolicy::default(), std::path::Path::new("/nonexistent")).unwrap();
+        assert_eq!(plan.exec.env["NVIDIA_VISIBLE_DEVICES"], "GPU-abcd,GPU-1234");
+        assert!(plan.exec.args.windows(2).any(|w| w == ["--gpus", "\"device=GPU-abcd,GPU-1234\""]));
+        r.reservation.as_mut().unwrap().gpu_devices = vec!["all".into()];
+        assert!(plan_run(&r, "docker", &PathPolicy::default(), std::path::Path::new("/nonexistent")).is_err());
+    }
+
+    #[test]
     fn run_golden() {
         let mut r = run_req();
         r.name = Some("t-buildbox".into());
@@ -550,7 +575,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             plan.exec.args.join(" "),
-            "run -d --rm --init --name t-buildbox -e TOKEN -v /srv/work:/work -v cache:/cache:ro \
+            "run -d --rm --init --name t-buildbox -e NVIDIA_VISIBLE_DEVICES -e TOKEN -v /srv/work:/work -v cache:/cache:ro \
              -w /work --network lab -u 1000:1000 --label terrarium.target=buildbox \
              alpine:3 sleep infinity"
         );
