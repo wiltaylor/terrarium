@@ -672,6 +672,63 @@ async fn exec_streams_output_and_the_exit_code() {
 }
 
 #[tokio::test]
+async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
+    let lab = Lab::start().await;
+    let _host = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let worker = lab.td.agent("terra", "worker", json!({"policy": {"targets": ["box"]}})).await;
+    let id = worker["id"].as_str().unwrap().to_owned();
+    let base = lab.bins.path().join("builds");
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "work_root": base})).await;
+    let root = base.join("terra/worker");
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join(".terrarium-owner"), &id).unwrap();
+    std::fs::write(root.join("target/output"), "build output").unwrap();
+    let cache = base.join("shared-cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("keep"), "shared data").unwrap();
+    let gate = lab.bins.path().join("gate");
+    let r = lab.td.post_as(&id, "/api/targets/box/exec", json!({
+        "cmd": ["sh", "-c", "while [ ! -f \"$1\" ]; do sleep 0.02; done", "sh", gate], "timeout_secs": 10
+    })).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let sid = r.body["session_id"].as_str().unwrap().to_owned();
+    let state = lab.state();
+    let key = id.clone();
+    state.db.write("system", move |t| {
+        let target = terrariumd::store::targets::get(t, "box")?;
+        t.execute("INSERT INTO agent_target_roots (agent, project, name, target, definition) VALUES (?1, 'terra', 'worker', 'box', ?2)",
+            rusqlite::params![key, serde_json::to_string(&target.def).unwrap()])?;
+        terrariumd::store::agents::delete(t, &key)?;
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(state.executor.live_of(&id), 1);
+    terrariumd::target_roots::sweep(&state).await.unwrap();
+    assert!(root.exists(), "must not delete output of a live run");
+    std::fs::write(&gate, "go").unwrap();
+    drain(&lab.td, "box", &sid).await;
+
+    // Failed ownership checks retain both the directory and the durable row.
+    std::fs::write(root.join(".terrarium-owner"), "foreign-agent").unwrap();
+    terrariumd::target_roots::sweep(&state).await.unwrap();
+    assert!(root.exists());
+    let count = state.db.read(|c| Ok(c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    assert_eq!(count, 1);
+    std::fs::write(root.join(".terrarium-owner"), &id).unwrap();
+    terrariumd::target_roots::sweep(&state).await.unwrap();
+    assert!(!root.exists());
+    assert!(cache.join("keep").exists());
+    let audit = lab.td.get("/api/audit?action=agent.target_cleanup").await;
+    let detail = &audit.ok()[0]["detail"];
+    assert_eq!(detail["agent"], id);
+    assert_eq!(detail["target"], "box");
+    assert_eq!(detail["path"], root.to_str().unwrap());
+    assert!(detail["size"].as_u64().unwrap() > 0);
+    let count = state.db.read(|c| Ok(c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn pty_exec_takes_input_and_resize() {
     let lab = Lab::start().await;
     let _h = lab.host("lab1").await;
