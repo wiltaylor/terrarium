@@ -61,7 +61,7 @@ including the mode 1 run. Keep them when you edit a template.
 - `--wait` on `question ask` registers a `question` wait: the lead is `waiting` until the answer comes. The answer mail is the wake mail of the wait, so the lead gets one mail, not two.
 - A lead with several related decisions for the operator at the same time asks them as one bundle: `terrarium question bundle "<summary>" --items-file <path>` (2 to 20 questions). The operator answers all of them in one step, and the lead gets all answers in one mail. The lead templates tell it not to put unrelated questions in a bundle. The leader persona does not teach bundles: it is at its word cap.
 - A worker cannot ask the operator (`403`). It mails its lead, and the lead asks for it. `default.md` does not teach `question` (the word cap).
-- A lead tells the operator something that needs no decision (a milestone, a finished deploy, a risk) with `terrarium notify`, not with mail to `operator` (PLAN §12e). The operator acknowledges the notice in the Inbox, and the lead gets one mail. The system lead sends its daily summary as a notice. The leader persona (`leader.md`) says the same in one bullet, and stays under its word cap. A worker cannot send a notice.
+- A lead uses `terrarium notify --card <id>`, `--reply-to <id>`, or `--urgent` only for an answer, one done per request, or a real problem. No routine summaries, progress, release, or deploy notices. The operator acknowledges it in the Inbox. A worker cannot send a notice. Update an open question instead of asking another on the same card or thread.
 - The system lead gives each lead `--subscription` in `admin agent new`: the one the operator gave, or its own. Its reply to the operator gives the project, repo, and lead names.
 
 ## Personas

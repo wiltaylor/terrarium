@@ -267,6 +267,8 @@ struct AskBody {
     #[serde(default)]
     card: Option<String>,
     #[serde(default)]
+    reply_to: Option<String>,
+    #[serde(default)]
     priority: Option<Priority>,
     /// Also register a `question` wait on the new question.
     #[serde(default)]
@@ -392,6 +394,7 @@ async fn ask(
         priority: b.priority.unwrap_or_default(),
         thread,
         hold_card: None,
+        reply_to: b.reply_to,
     };
     let wait = b.wait;
     let (question, wait) = state
