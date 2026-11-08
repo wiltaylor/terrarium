@@ -841,8 +841,8 @@ async fn prepare_hosts_with(
     }
     // Keep the guard in the blocking task: timing out does not cancel libc
     // DNS. Even an explicitly cleared pin must not start a second lookup.
-    static LOOKUPS: std::sync::Mutex<std::collections::HashSet<String>> =
-        std::sync::Mutex::new(std::collections::HashSet::new());
+    static LOOKUPS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
     struct Lookup(String);
     impl Drop for Lookup {
         fn drop(&mut self) {
