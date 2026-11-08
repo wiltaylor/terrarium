@@ -1985,7 +1985,11 @@ async fn steps(
     let log_location = if has_secrets {
         "No raw log retained for this secret-bearing recipe.".to_owned()
     } else {
-        format!("Full log on target {}: {}", delivery.target.as_deref().unwrap_or("-"), log)
+        format!(
+            "Full log on target {}: {}",
+            delivery.target.as_deref().unwrap_or("-"),
+            log
+        )
     };
     let mut tail = format!(
         "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\n{}",

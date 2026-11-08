@@ -4259,9 +4259,18 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
     let seed = state.work_dir.join("terra/worker/seed");
     std::fs::write(&seed, "workspace-survives-recreate\n").unwrap();
     let copied = std::process::Command::new("docker")
-        .args(["cp", seed.to_str().unwrap(), &format!("{name}:/work/terra/worker/seed")])
-        .output().unwrap();
-    assert!(copied.status.success(), "{}", String::from_utf8_lossy(&copied.stderr));
+        .args([
+            "cp",
+            seed.to_str().unwrap(),
+            &format!("{name}:/work/terra/worker/seed"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        copied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&copied.stderr)
+    );
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
     lab.td
         .patch("/api/targets/dbox", json!({"image":"alpine:3.21"}))
@@ -4271,7 +4280,8 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
     let after = inspect();
     let content = std::process::Command::new("docker")
         .args(["exec", &name, "cat", "/work/terra/worker/seed"])
-        .output().unwrap();
+        .output()
+        .unwrap();
     assert!(content.status.success());
     assert_eq!(content.stdout, b"workspace-survives-recreate\n");
     println!(

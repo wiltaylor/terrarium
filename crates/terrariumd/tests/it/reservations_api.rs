@@ -131,7 +131,8 @@ async fn setup_docker(
         // or memory capacity and can produce invalid cpusets there.
         let output = std::process::Command::new("docker")
             .args(["info", "--format", "{{json .}}"])
-            .output().unwrap();
+            .output()
+            .unwrap();
         assert!(output.status.success());
         let info: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let count = u32::try_from(info["NCPU"].as_u64().unwrap()).unwrap();
@@ -787,12 +788,7 @@ async fn live_docker_release_impl(check_io: bool) {
     } else {
         json!({"percentage":100})
     };
-    td.put(
-        "/api/hosts/h/capacity",
-        capacity,
-    )
-    .await
-    .ok();
+    td.put("/api/hosts/h/capacity", capacity).await.ok();
     td.post("/api/targets/p-box/up", json!({})).await.ok();
     let granted = td.post("/api/hosts/h/reservations", json!({"target":"p-box","amounts":{"cpu_millis":500,"memory_bytes":67108864},"until":"30m"})).await;
     let id = granted.ok()["id"].as_str().unwrap();
