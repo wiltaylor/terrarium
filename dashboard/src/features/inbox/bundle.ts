@@ -6,6 +6,7 @@
 // change carry over to the new revision.
 
 import type { BundleItem, Question, QuestionAnswer } from "../../api/types";
+import { answerBody } from "./questions";
 
 /** The longest answer of one item, as in the daemon. */
 const MAX_TEXT = 8000;
@@ -14,6 +15,7 @@ const MAX_TEXT = 8000;
 export interface ItemDraft {
   option: number | null;
   text: string;
+  skip?: boolean;
 }
 
 export type BundleDraft = ItemDraft[];
@@ -25,7 +27,7 @@ export const itemsOf = (q: Pick<Question, "items">): BundleItem[] => q.items ?? 
 export const emptyDraft = (q: Pick<Question, "items">): BundleDraft => itemsOf(q).map(() => ({ option: null, text: "" }));
 
 /** Does the item have an answer (an option, a text, or both)? */
-export const itemDone = (d: ItemDraft | undefined): boolean => !!d && (d.option !== null || d.text.trim() !== "");
+export const itemDone = (d: ItemDraft | undefined): boolean => !!d && ((!d.skip && d.option !== null) || d.text.trim() !== "");
 
 /** How many items have an answer. */
 export const answeredCount = (draft: BundleDraft): number => draft.filter(itemDone).length;
@@ -60,6 +62,12 @@ export function bundleAnswerBody(q: Pick<Question, "items" | "status" | "revisio
   const out: QuestionAnswer["items"] = [];
   for (const [i, item] of items.entries()) {
     const d = draft[i]!;
+    if (d.skip) {
+      const result = answerBody({ status: q.status, options: item.options }, d.text, null, true);
+      if ("error" in result) return { error: `Item ${i + 1}: ${result.error}` };
+      out.push(result.body);
+      continue;
+    }
     const t = d.text.trim();
     if (d.option !== null && (d.option < 0 || d.option >= item.options.length)) return { error: `Item ${i + 1}: pick one of the options.` };
     if (t.length > MAX_TEXT) return { error: `Item ${i + 1}: the answer is longer than ${MAX_TEXT} characters.` };
@@ -85,9 +93,9 @@ export function parseDraft(q: Pick<Question, "items">, raw: string | null): Bund
   const out: BundleDraft = [];
   for (const [i, e] of v.entries()) {
     if (!e || typeof e !== "object") return null;
-    const { option, text } = e as Record<string, unknown>;
+    const { option, text, skip } = e as Record<string, unknown>;
     const opt = typeof option === "number" && Number.isInteger(option) && option >= 0 && option < items[i]!.options.length ? option : null;
-    out.push({ option: opt, text: typeof text === "string" ? text : "" });
+    out.push({ option: skip === true ? null : opt, text: typeof text === "string" ? text : "", ...(skip === true ? { skip: true } : {}) });
   }
   return out;
 }
@@ -117,7 +125,7 @@ export function loadDraft(store: DraftStorage | null, q: Pick<Question, "id" | "
 export function saveDraft(store: DraftStorage | null, q: Pick<Question, "id" | "revision">, draft: BundleDraft): void {
   try {
     if (!store) return;
-    if (answeredCount(draft) === 0 && draft.every((d) => !d.text)) store.removeItem(draftKey(q));
+    if (answeredCount(draft) === 0 && draft.every((d) => !d.text && !d.skip)) store.removeItem(draftKey(q));
     else store.setItem(draftKey(q), JSON.stringify(draft));
   } catch {
     /* a full or blocked storage: the draft stays in the page only */

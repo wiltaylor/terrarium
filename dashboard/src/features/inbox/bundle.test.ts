@@ -55,6 +55,29 @@ function memory(broken = false): DraftStorage & { data: Map<string, string> } {
 }
 
 describe("bundle answer form", () => {
+  it("mixes skipped items with answers and requires a reason for each skip", () => {
+    const q = bundle();
+    const draft = [{ option: 0, text: "", skip: true }, { option: 1, text: "" }, { option: null, text: "not relevant", skip: true }];
+    expect(isComplete(q, draft)).toBe(false);
+    expect(bundleAnswerBody(q, draft)).toHaveProperty("error");
+    draft[0]!.text = "Need more context";
+    expect(isComplete(q, draft)).toBe(true);
+    expect(bundleAnswerBody(q, draft)).toEqual({ body: { revision: 2, items: [
+      { answer: "Skipped question: Need more context" }, { option: 1 }, { answer: "Skipped question: not relevant" },
+    ] } });
+  });
+
+  it("persists skip mode even before a reason is entered and carries it across revisions", () => {
+    const q = bundle();
+    const draft = emptyDraft(q);
+    draft[0] = { option: null, text: "", skip: true };
+    const store = memory();
+    saveDraft(store, q, draft);
+    expect(loadDraft(store, q)).toEqual(draft);
+    expect(carryDraft(q, draft, bundle({ revision: 3 })).draft).toEqual(draft);
+    expect(parseDraft(q, JSON.stringify([{ option: 0, text: "why", skip: "true" }, ...draft.slice(1)]))?.[0]).toEqual({ option: 0, text: "why" });
+  });
+
   it("counts the answered items and is complete only when each item has an option or a text", () => {
     const q = bundle();
     const d = emptyDraft(q);
