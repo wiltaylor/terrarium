@@ -409,8 +409,16 @@ pub fn eta_line(k: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<String>
 fn print_eta_history(ctx: &Ctx, k: &Value) {
     let h = &k["eta_history"];
     let Some(n) = h["n"].as_u64() else { return };
-    let minutes = |v: &Value| v.as_f64().map(|ms| format!("{:.1}m", ms / 60000.0)).unwrap_or_else(|| "n/a".into());
-    ctx.line(format!("Similar cards (same project and type): median {}, p70 {}, n={n}", minutes(&h["median_ms"]), minutes(&h["p70_ms"])));
+    let minutes = |v: &Value| {
+        v.as_f64()
+            .map(|ms| format!("{:.1}m", ms / 60000.0))
+            .unwrap_or_else(|| "n/a".into())
+    };
+    ctx.line(format!(
+        "Similar cards (same project and type): median {}, p70 {}, n={n}",
+        minutes(&h["median_ms"]),
+        minutes(&h["p70_ms"])
+    ));
 }
 
 fn card_line(ctx: &Ctx, verb: &str, k: &Value) {
@@ -513,8 +521,8 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                 .await?;
             ctx.emit(&k, |c, k| {
                 match k["eta_at"].as_str() {
-                Some(at) => c.line(format!("{} ETA {at}", field(k, "id"))),
-                None => c.line(format!("{} has no ETA", field(k, "id"))),
+                    Some(at) => c.line(format!("{} ETA {at}", field(k, "id"))),
+                    None => c.line(format!("{} has no ETA", field(k, "id"))),
                 }
                 print_eta_history(c, k);
             })

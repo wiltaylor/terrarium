@@ -19,7 +19,7 @@ pub struct WorkSample {
     pub labels: Vec<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkHistory {
     pub n: usize,
     pub median_ms: Option<f64>,
@@ -29,19 +29,31 @@ pub struct WorkHistory {
 /// The same latest 30 distinct cards and type matching as worker calibration.
 fn work_history(samples: &[WorkSample], labels: &[String]) -> WorkHistory {
     let mut seen = std::collections::HashSet::new();
-    let mut values: Vec<_> = samples.iter()
+    let mut values: Vec<_> = samples
+        .iter()
         .filter(|s| seen.insert(&s.card))
-        .filter(|s| labels.iter().any(|l| l.starts_with("type:") && s.labels.contains(l)))
+        .filter(|s| {
+            labels
+                .iter()
+                .any(|l| l.starts_with("type:") && s.labels.contains(l))
+        })
         .take(30)
         .map(|s| s.actual_ms)
         .collect();
     values.sort_by(f64::total_cmp);
     let n = values.len();
     let median_ms = (n > 0).then(|| {
-        if n % 2 == 0 { (values[n / 2 - 1] + values[n / 2]) / 2.0 }
-        else { values[n / 2] }
+        if n % 2 == 0 {
+            (values[n / 2 - 1] + values[n / 2]) / 2.0
+        } else {
+            values[n / 2]
+        }
     });
-    WorkHistory { n, median_ms, p70_ms: (n > 0).then(|| values[(n * 7).div_ceil(10) - 1]) }
+    WorkHistory {
+        n,
+        median_ms,
+        p70_ms: (n > 0).then(|| values[(n * 7).div_ceil(10) - 1]),
+    }
 }
 
 /// Most recent completed estimates, excluding jobs, superseded guesses,
@@ -190,9 +202,15 @@ pub struct ReviewEstimates {
 }
 
 impl ReviewEstimates {
-    pub fn history(&mut self, conn: &Connection, project: &str, labels: &[String]) -> ApiResult<WorkHistory> {
+    pub fn history(
+        &mut self,
+        conn: &Connection,
+        project: &str,
+        labels: &[String],
+    ) -> ApiResult<WorkHistory> {
         if !self.work.contains_key(project) {
-            self.work.insert(project.to_owned(), work_samples(conn, project)?);
+            self.work
+                .insert(project.to_owned(), work_samples(conn, project)?);
         }
         Ok(work_history(&self.work[project], labels))
     }
@@ -281,11 +299,16 @@ mod tests {
 
     #[test]
     fn similar_history_uses_latest_distinct_same_type_cards() {
-        let samples: Vec<_> = (1..=40).map(|n| WorkSample {
-            card: n.to_string(), start_seq: n, end_seq: n + 1,
-            actual_ms: n as f64, guess_ms: 100.0,
-            labels: vec!["type:small".into()],
-        }).collect();
+        let samples: Vec<_> = (1..=40)
+            .map(|n| WorkSample {
+                card: n.to_string(),
+                start_seq: n,
+                end_seq: n + 1,
+                actual_ms: n as f64,
+                guess_ms: 100.0,
+                labels: vec!["type:small".into()],
+            })
+            .collect();
         let labels = vec!["type:small".into()];
         let h = work_history(&samples, &labels);
         assert_eq!(h.n, 30);
