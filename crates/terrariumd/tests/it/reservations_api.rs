@@ -734,7 +734,6 @@ async fn exclusive_budget_pins_owner_and_excludes_shared_workloads() {
                         cpu_millis: 1000,
                         memory_bytes: 16 << 20,
                         io,
-                        ..Default::default()
                     },
                     exclusive: true,
                     reason: "test".into(),
