@@ -979,10 +979,7 @@ async fn eta_set_clear_and_rules() {
     assert_eq!(n, 5);
 }
 
-/// Every move to another column clears the ETA (TER-155 D1); a reorder in
-/// the column keeps it, and the `moved` event has the old ETA. An ETA in
-/// the same patch as the move is for the new column. A done card gets
-/// `done_at` and takes no new ETA; a reopen clears `done_at`.
+/// Without an open job, a validating move resolves its ETA from now.
 #[tokio::test]
 async fn move_to_validating_without_a_job_resolves_eta_from_now() {
     let td = setup().await;
@@ -1011,6 +1008,10 @@ async fn move_to_validating_without_a_job_resolves_eta_from_now() {
     assert!(eta <= after + chrono::Duration::minutes(20));
 }
 
+/// Every move to another column clears the ETA (TER-155 D1); a reorder in
+/// the column keeps it, and the `moved` event has the old ETA. An ETA in
+/// the same patch as the move is for the new column. A done card gets
+/// `done_at` and takes no new ETA; a reopen clears `done_at`.
 #[tokio::test]
 async fn eta_clears_on_every_column_change() {
     let td = setup().await;

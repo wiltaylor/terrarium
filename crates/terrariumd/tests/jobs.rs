@@ -468,17 +468,27 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     assert_eq!(c["eta_at"], before, "{c:#}");
     assert!(c["job"].get("planned_secs").is_none(), "{c:#}");
 
-    // A duration given while the job is queued is its planned duration:
-    // no ETA yet. A time is an ETA as before.
+    // D2: a move to validating with a queued validate job sets its planned
+    // duration, not a point-in-time card ETA. No ETA until the job starts.
     let j = create(ids[2].clone(), None).await;
     let path = format!("/api/cards/{}", ids[2]);
     let c = td
-        .patch_as("p/w", &path, json!({"eta_at": "45m"}))
+        .patch_as(
+            "p/w",
+            &path,
+            json!({"column": "validating", "eta_at": "45m"}),
+        )
         .await
         .ok()
         .clone();
     assert!(c.get("eta_at").is_none(), "{c:#}");
     assert_eq!(c["job"]["planned_secs"], 2700, "{c:#}");
+    assert_eq!(c["column"], "validating", "{c:#}");
+    assert_eq!(c["job"]["state"], "queued", "{c:#}");
+    let jid = j.id.clone();
+    let queued = db.read(move |c| jobs::get(c, &jid)).await.unwrap();
+    assert_eq!(queued.planned_secs, Some(2700));
+    assert!(queued.started_at.is_none());
     let jid = j.id.clone();
     let started = db
         .write("system", move |t| {
