@@ -4429,16 +4429,19 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 | `GET /api/cards/{id}/comments` | | `200` comments |
 | `POST /api/cards/{id}/comments` | `{"body", "reply_to"?: "comment ID on this card"}` | `201` card |
 
-Human comments mail the project's project_admin agents and the card's assignee
-and bound agent, deduplicated. Agents' ordinary comments do not. A project admin
-can disable human comment mail with `PATCH /api/projects/{name}` and
-`{"human_comment_notifications": false}` (default true, including new projects).
-An agent comment replying to a human comment with `reply_to`, or mentioning
-`@operator` as a standalone mention, mails the operator's Inbox with a card link.
-The CLI supports `card comment <id> --reply-to <comment-id> -m <text>`.
 | `POST /api/cards/{id}/links` | `{"kind", "ref"}` | `201` card |
 | `GET /api/cards/{id}/events?since=` | | `200` card events, cursor: `seq`. `since` is a `seq`, an event ID, or a time (§2.1). |
 | `GET /api/cards/{id}/sessions` | | `200` the session links (§6.6) of the card's comments and card events, distinct, oldest first |
+
+Human comments, including comments supplied with card creation or moves,
+mail the project's project_admin agents and the card's assignee and bound
+agent, deduplicated. Agents' ordinary comments and daemon notes do not.
+A project admin can disable human comment mail with
+`PATCH /api/projects/{name}` and `{"human_comment_notifications": false}`
+(default true, including new projects). An agent comment replying to a human
+comment with `reply_to`, or mentioning `@operator` as a standalone mention,
+mails the operator's Inbox with a card link. The CLI supports
+`card comment <id> --reply-to <comment-id> -m <text>`.
 
 **Columns.** The `PATCH` list is the whole board, in order. Each column is
 `{"name", "title"?, "wip_limit"?, "role"?, "rename_from"?}`.

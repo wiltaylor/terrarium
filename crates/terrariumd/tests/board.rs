@@ -109,6 +109,42 @@ async fn human_comments_mail_leads_and_replies_reach_inbox() {
 }
 
 #[tokio::test]
+async fn human_create_and_move_comments_notify_and_bound_recipients_deduplicate() {
+    let td = setup().await;
+    let response = td.post("/api/projects/proj/cards", json!({
+        "title": "Create comment", "comment": "initial", "assignee": "w1"
+    })).await;
+    let id = response.ok()["id"].as_str().unwrap();
+    td.patch(&format!("/api/cards/{id}"), json!({"column": "ready", "comment": "moving"})).await.ok();
+    for recipient in ["proj/lead", "proj/w1"] {
+        let response = td.get(&format!("/api/mail?to={recipient}")).await;
+        assert_eq!(response.ok().as_array().unwrap().len(), 2);
+    }
+    // Fixture: a live bound agent, without starting a harness process.
+    let response = td.get("/api/agents/proj/w2").await;
+    let worker = response.ok()["id"].as_str().unwrap();
+    let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
+    conn.execute(
+        "INSERT INTO spawns (id, owner, owner_name, project, name, template, harness, task,
+         spawned_by, spawned_at, deadline_at, bound_kind, bound_id)
+         VALUES (?1, 'operator', 'operator', 'proj', 'w2', 'worker', 'claude', 'test',
+         'operator', '2026-01-01', '2099-01-01', 'card', ?2)",
+        rusqlite::params![worker, id],
+    ).unwrap();
+    td.post(&format!("/api/cards/{id}/comments"), json!({"body": "bound delivery"})).await.ok();
+    let response = td.get("/api/mail?to=proj/w2").await;
+    assert_eq!(response.ok().as_array().unwrap().len(), 1);
+    td.post(&format!("/api/cards/{id}/assign"), json!({"assignee": "w2"})).await.ok();
+    td.post(&format!("/api/cards/{id}/comments"), json!({"body": "same bound and assignee"})).await.ok();
+    let response = td.get("/api/mail?to=proj/w2").await;
+    assert_eq!(response.ok().as_array().unwrap().len(), 2);
+    td.post(&format!("/api/cards/{id}/assign"), json!({"assignee": "lead"})).await.ok();
+    td.post(&format!("/api/cards/{id}/comments"), json!({"body": "same lead and assignee"})).await.ok();
+    let response = td.get("/api/mail?to=proj/lead").await;
+    assert_eq!(response.ok().as_array().unwrap().len(), 5);
+}
+
+#[tokio::test]
 async fn board_shape_and_card_ids() {
     let td = setup().await;
     let b = td.get("/api/projects/proj/board").await;

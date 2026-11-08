@@ -870,7 +870,7 @@ pub fn clear_job_labels(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
 pub fn mark_queued(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     for c in j.cards() {
         set_labels(t, &c.card, &[LABEL_QUEUED], &[])?;
-        board::add_comment(t, &Actor::Operator, &c.card, &queue_comment(j, &c.card))?;
+        board::system_comment(t, &c.card, &queue_comment(j, &c.card), None)?;
     }
     Ok(())
 }
@@ -2420,7 +2420,7 @@ fn unassign(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
 }
 
 fn comment(t: &mut Tx<'_>, card: &str, text: &str) -> ApiResult<()> {
-    match board::add_comment(t, &Actor::Operator, card, text) {
+    match board::system_comment(t, card, text, None) {
         Ok(_) => Ok(()),
         Err(e) if e.code.status().is_client_error() => Ok(()),
         Err(e) => Err(e),
