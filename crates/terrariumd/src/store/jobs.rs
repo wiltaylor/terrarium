@@ -2199,11 +2199,11 @@ mod tests {
         let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
         let db = crate::db::Db::new(conn, crate::events::EventHub::default());
         db.write("operator", |t| {
-            hosts::create(t, "First", false)?;
-            hosts::create(t, "Second", false)?;
-            set_host_aliases(t, "First", &["one.lan".into(), "10.0.0.1".into()])?;
-            set_host_aliases(t, "Second", &["two.lan".into()])?;
-            pin_hosts(t, vec![("one.lan".into(), "10.0.0.1".into())])
+            hosts::create(t, "first", false)?;
+            hosts::create(t, "second", false)?;
+            set_host_aliases(t, "first", &["one-lan".into(), "10.0.0.1".into()])?;
+            set_host_aliases(t, "second", &["two.lan".into()])?;
+            pin_hosts(t, vec![("one-lan".into(), "10.0.0.1".into())])
         })
         .await
         .unwrap();
@@ -2221,33 +2221,33 @@ mod tests {
         .unwrap();
         assert!(
             db.write("operator", |t| {
-                set_host_aliases(t, "Second", &["free.lan".into()])
+                set_host_aliases(t, "second", &["free.lan".into()])
             })
             .await
             .is_err()
         );
         assert!(
             db.write("operator", |t| {
-                set_host_aliases(t, "Second", &["FIRST".into()])
+                set_host_aliases(t, "second", &["FIRST".into()])
             })
             .await
             .is_err()
         );
         assert!(
-            db.write("operator", |t| { hosts::create(t, "ONE.LAN", false) })
+            db.write("operator", |t| { hosts::create(t, "one-lan", false) })
                 .await
                 .is_err()
         );
         // Failed writes leave the previous aliases and pins untouched.
         db.read_now(|c| {
-            assert_eq!(canonical_key(c, "two.lan")?, hosts::get(c, "Second")?.id);
-            assert_eq!(canonical_key(c, "free.lan")?, hosts::get(c, "First")?.id);
+            assert_eq!(canonical_key(c, "two.lan")?, hosts::get(c, "second")?.id);
+            assert_eq!(canonical_key(c, "free.lan")?, hosts::get(c, "first")?.id);
             Ok(())
         })
         .unwrap();
         // A repeated resolution must preserve the first pin, even if the new key clashes.
         db.write("operator", |t| {
-            pin_hosts(t, vec![("one.lan".into(), "two.lan".into())])
+            pin_hosts(t, vec![("one-lan".into(), "two.lan".into())])
         })
         .await
         .unwrap();
