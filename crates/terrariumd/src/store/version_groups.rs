@@ -109,8 +109,10 @@ pub fn cut(
     }
     // Gathering happened before this snapshot was cut, not in zero seconds.
     if let Some(since) = pick.first_since {
-        t.execute("UPDATE group_steps SET started_at = ?2 WHERE group_card = ?1 AND name = 'gathering'",
-            rusqlite::params![g.id, crate::time_param::stored(since)])?;
+        t.execute(
+            "UPDATE group_steps SET started_at = ?2 WHERE group_card = ?1 AND name = 'gathering'",
+            rusqlite::params![g.id, crate::time_param::stored(since)],
+        )?;
     }
     groups::status(
         t,

@@ -30,6 +30,7 @@ pub struct GroupStep {
     pub text: String,
     pub eta_at: Option<String>,
     pub started_at: Option<String>,
+    pub finished_at: Option<String>,
     pub duration_secs: Option<i64>,
     pub estimated_secs: Option<i64>,
 }
@@ -142,16 +143,30 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Group> {
                 text: r.get(2)?,
                 eta_at: r.get(3)?,
                 started_at: r.get(4)?,
+                finished_at: r.get(5)?,
                 duration_secs: elapsed(r.get(4)?, r.get(5)?),
                 estimated_secs: None,
             })
         })?
         .collect::<Result<_, _>>()?;
-    let mut cursor = Utc::now();
+    let created: String =
+        conn.query_row("SELECT created_at FROM cards WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })?;
+    let mut cursor = chrono::DateTime::parse_from_rfc3339(&created)
+        .map(|v| v.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
     for step in &mut g.steps {
         step.estimated_secs = historical_secs(conn, id, &step.name)?;
         if step.state == "done" || step.state == "failed" {
             step.eta_at = None;
+            if let Some(at) = step
+                .finished_at
+                .as_deref()
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+            {
+                cursor = cursor.max(at.with_timezone(&Utc));
+            }
             continue;
         }
         if step.eta_at.is_none() {
@@ -199,6 +214,27 @@ fn historical_secs(conn: &Connection, id: &str, name: &str) -> ApiResult<Option<
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
+    // Before phase timing existed, successful merge jobs still recorded queue
+    // wait and total run time. Use run time as the initial e2e estimate only.
+    if samples.is_empty() && matches!(name, "queued" | "e2e") {
+        let mut jobs = conn.prepare(
+            "SELECT j.created_at, j.started_at, j.ended_at FROM jobs j
+            JOIN card_groups g ON g.card = ?1 AND g.project = j.project
+            WHERE g.key LIKE 'merge:%' AND j.kind = 'merge' AND j.state = 'passed'",
+        )?;
+        samples = jobs
+            .query_map([id], |r| {
+                if name == "queued" {
+                    Ok(elapsed(r.get(0)?, r.get(1)?))
+                } else {
+                    Ok(elapsed(r.get(1)?, r.get(2)?))
+                }
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+    }
     samples.sort_unstable();
     let n = samples.len();
     Ok(if n == 0 {
@@ -439,6 +475,12 @@ pub fn step(
     let eta_at = match eta {
         Some("jobs") => return Err(ApiError::invalid("a step ETA takes a duration, not jobs")),
         Some(value) => Some(deadline(value)?),
+        None if state == "pending"
+            || (state == "running"
+                && existing.is_some_and(|s| s.state == "done" || s.state == "failed")) =>
+        {
+            None
+        }
         None => stored_eta.clone(),
     };
     if existing.is_some_and(|s| s.state == state && s.text == text && stored_eta == eta_at) {

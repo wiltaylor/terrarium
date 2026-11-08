@@ -55,11 +55,21 @@ async fn group_step_eta_uses_project_history_and_records_real_duration() {
         let at = chrono::DateTime::parse_from_rfc3339(s.eta_at.as_deref().unwrap()).unwrap();
         let start = chrono::DateTime::parse_from_rfc3339(s.started_at.as_deref().unwrap()).unwrap();
         assert_eq!((at - start).num_seconds(), 120);
+        assert!(!groups::step(t, &g, "e2e", Some("running"), None, None)?);
         groups::step(t, &g, "e2e", Some("done"), None, None)?;
         let done = groups::get(t, &g.id)?;
         assert!(done.steps[0].duration_secs.is_some());
         assert!(done.steps[0].eta_at.is_none());
         assert_eq!(groups::get(t, &ids[0])?.steps[0].duration_secs, Some(60));
+        groups::step(t, &g, "e2e", Some("running"), None, Some("1m"))?;
+        groups::step(t, &g, "e2e", Some("failed"), None, None)?;
+        groups::step(t, &g, "e2e", Some("running"), None, None)?;
+        let restarted = groups::get(t, &g.id)?;
+        assert!(restarted.steps[0].duration_secs.is_none());
+        assert_eq!(restarted.steps[0].estimated_secs, Some(120));
+        let eta = chrono::DateTime::parse_from_rfc3339(restarted.steps[0].eta_at.as_deref().unwrap()).unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339(restarted.steps[0].started_at.as_deref().unwrap()).unwrap();
+        assert_eq!((eta - start).num_seconds(), 120);
         Ok(())
     }).await.unwrap();
 }
