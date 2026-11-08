@@ -48,6 +48,8 @@ async fn worker_eta_render_calibrates_but_preserves_raw_events() {
         .ok()
         .clone();
     assert_eq!(raw["eta_calibrated"], false);
+    assert_eq!(raw["eta_history"]["n"], 0);
+    assert!(raw["eta_history"]["median_ms"].is_null());
     for i in 0..5 {
         let sample = card(
             &td,
@@ -69,6 +71,10 @@ async fn worker_eta_render_calibrates_but_preserves_raw_events() {
     }
     let calibrated = td.get(&path).await.ok().clone();
     assert_eq!(calibrated["eta_calibrated"], true);
+    assert_eq!(calibrated["eta_history"]["n"], 5);
+    for key in ["median_ms", "p70_ms"] {
+        assert!((590000.0..610000.0).contains(&calibrated["eta_history"][key].as_f64().unwrap()));
+    }
     let at = chrono::DateTime::parse_from_rfc3339(calibrated["eta_at"].as_str().unwrap()).unwrap();
     let start =
         chrono::DateTime::parse_from_rfc3339(calibrated["eta_set_at"].as_str().unwrap()).unwrap();

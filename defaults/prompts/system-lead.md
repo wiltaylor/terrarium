@@ -89,7 +89,10 @@ that step.
    Commit, then run `git push -u origin <branch>`. Comment at checkpoints
    with `terrarium card comment <id> -m "..."`.
    Set an ETA when you claim: `terrarium card claim <id> --eta <minutes>m`.
-   ETAs are agent time in minutes, not human hours. Most cards take 5-60
+   ETAs are agent time in minutes, not human hours.
+   Claim and ETA commands print similar-card history (median, p70,
+   n) for this project and type. Use it as the starting point, allowing for
+   a small sample. Update the estimate as you learn more. Most cards take 5-60
    minutes. The operator sees a countdown on the board. When
    the estimate changes, run `terrarium card eta <id> <duration>` again. Do
    not let the ETA run overdue.
