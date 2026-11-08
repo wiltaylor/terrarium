@@ -677,7 +677,7 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     let _host = lab.host("lab1").await;
     lab.td.project("terra").await;
     let base = lab.bins.path().join("builds");
-    lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "project": "terra", "work_root": base}))
+    lab.target(json!({"name": "terra-box", "kind": "host", "host": "lab1", "project": "terra", "work_root": base}))
         .await;
     let owner = lab
         .td
@@ -685,7 +685,7 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
             "terra",
             "lead",
             json!({"roles": ["project_admin"],
-        "policy": {"targets": ["box"], "spawn": {"templates": ["project:*"],
+        "policy": {"targets": ["terra-box"], "spawn": {"templates": ["project:*"],
         "max_concurrent": 1, "max_lifetime": "5m", "bound": true}}}),
         )
         .await;
@@ -693,7 +693,7 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
         .post(
             "/api/templates",
             json!({"name": "builder", "project": "terra",
-        "spec": {"harness": "claude", "policy": {"targets": ["box"]}}}),
+        "spec": {"harness": "claude", "policy": {"targets": ["terra-box"]}}}),
         )
         .await
         .ok();
@@ -718,11 +718,11 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
         let body = json!({"cmd": ["sh", "-c", "printf '%s' \"$CARGO_TARGET_DIR\""],
             "env": {"CARGO_TARGET_DIR": cache}});
         let r = match caller {
-            None => lab.td.post("/api/targets/box/exec", body).await,
-            Some(caller) => lab.td.post_as(caller, "/api/targets/box/exec", body).await,
+            None => lab.td.post("/api/targets/terra-box/exec", body).await,
+            Some(caller) => lab.td.post_as(caller, "/api/targets/terra-box/exec", body).await,
         };
         assert_eq!(r.status, 201, "{}", r.body);
-        let out = drain(&lab.td, "box", r.body["session_id"].as_str().unwrap()).await;
+        let out = drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
             cache.to_str().unwrap()
@@ -735,12 +735,12 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
             .td
             .post_as(
                 &id,
-                "/api/targets/box/exec",
+                "/api/targets/terra-box/exec",
                 json!({"cmd": ["true"], "cwd": cache}),
             )
             .await;
         assert_eq!(r.status, 201, "{}", r.body);
-        drain(&lab.td, "box", r.body["session_id"].as_str().unwrap()).await;
+        drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
     }
     assert!(!root.exists());
     let state = lab.state();
@@ -759,10 +759,10 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
         .await
         .unwrap();
     assert_eq!(counts, (1, 0));
-    let r = lab.td.post_as(&id, "/api/targets/box/exec", json!({"cmd": ["sh", "-c",
+    let r = lab.td.post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["sh", "-c",
         "printf '%s\\n%s\\n' \"$CARGO_TARGET_DIR\" \"$RESULTS_DIR\"; mkdir -p \"$CARGO_TARGET_DIR\" \"$RESULTS_DIR\"; echo output > \"$CARGO_TARGET_DIR/output\""]})).await;
     assert_eq!(r.status, 201, "{}", r.body);
-    let output = drain(&lab.td, "box", r.body["session_id"].as_str().unwrap()).await;
+    let output = drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         format!("{}/target\n{}/results\n", root.display(), root.display())
@@ -774,11 +774,11 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     assert!(root.join("target/output").exists());
     // An unrelated target edit must not block the next exec or cleanup.
     lab.td
-        .patch("/api/targets/box", json!({"keep": true}))
+        .patch("/api/targets/terra-box", json!({"keep": true}))
         .await
         .ok();
     let gate = lab.bins.path().join("gate");
-    let r = lab.td.post_as(&id, "/api/targets/box/exec", json!({
+    let r = lab.td.post_as(&id, "/api/targets/terra-box/exec", json!({
         "cmd": ["sh", "-c", "while [ ! -f \"$1\" ]; do sleep 0.02; done", "sh", gate], "timeout_secs": 10
     })).await;
     assert_eq!(r.status, 201, "{}", r.body);
@@ -796,7 +796,7 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     terrariumd::target_roots::sweep(&state).await.unwrap();
     assert!(root.exists(), "must not delete output of a live run");
     std::fs::write(&gate, "go").unwrap();
-    drain(&lab.td, "box", &sid).await;
+    drain(&lab.td, "terra-box", &sid).await;
 
     // Failed ownership checks retain both the directory and the durable row.
     std::fs::write(root.join(".terrarium-owner"), "foreign-agent").unwrap();
@@ -826,7 +826,7 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     );
     lab.td
         .patch(
-            "/api/targets/box",
+            "/api/targets/terra-box",
             json!({"work_root": base.join("elsewhere")}),
         )
         .await
@@ -845,7 +845,7 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
         "target machine or work_root changed"
     );
     lab.td
-        .patch("/api/targets/box", json!({"work_root": base}))
+        .patch("/api/targets/terra-box", json!({"work_root": base}))
         .await
         .ok();
     std::fs::write(root.join(".terrarium-owner"), &id).unwrap();
@@ -855,7 +855,7 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     let audit = lab.td.get("/api/audit?action=agent.target_cleanup").await;
     let detail = &audit.ok()[0]["detail"];
     assert_eq!(detail["agent"], id);
-    assert_eq!(detail["target"], "box");
+    assert_eq!(detail["target"], "terra-box");
     assert_eq!(detail["path"], root.to_str().unwrap());
     assert!(detail["size"].as_u64().unwrap() > 0);
     let started = lab
