@@ -295,7 +295,9 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
             // A job queued before the pack was installed has no header.
             // Its completion must still run the ordinary delivery actions.
             if a.raw("key") == Some("{{job.group_key}}") && ctx.job.is_some() {
-                return Ok(noop(json!({"key": key, "reason": "job has no merge group"})));
+                return Ok(noop(
+                    json!({"key": key, "reason": "job has no merge group"}),
+                ));
             }
             return Err(ApiError::invalid(format!("no group with key `{key}`")));
         };

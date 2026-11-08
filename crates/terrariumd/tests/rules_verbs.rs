@@ -545,7 +545,10 @@ async fn default_merge_group_finds_members_after_a_manual_fix_card() {
     let b = new_card(&td, "p", json!({"title":"b", "repo":"app"})).await;
     let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
-    let gid = card(&td, &a).await["group"]["id"].as_str().unwrap().to_owned();
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     fail_job(&td, &job, "red").await;
     let fix = new_card(&td, "p", json!({"title":"manual fix", "repo":"app"})).await;
     assert!(card(&td, &fix).await.get("group").is_none());
@@ -558,7 +561,10 @@ async fn default_merge_group_finds_members_after_a_manual_fix_card() {
     assert_eq!(card(&td, &gid).await["archived"], false);
     let runs = runs_of(&td, "p", "merge-queued").await;
     assert!(runs.iter().all(|r| r["state"] != "failed"), "{runs:?}");
-    assert_eq!(card(&td, &fix).await["group"]["key"], format!("merge:{}", job.id));
+    assert_eq!(
+        card(&td, &fix).await["group"]["key"],
+        format!("merge:{}", job.id)
+    );
     assert_ne!(job.id, retry.id);
 }
 
@@ -570,10 +576,23 @@ async fn default_merge_group_skips_jobs_queued_before_pack_installation() {
     settle(&td).await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
     let id = job.id.clone();
-    let passed = state(&td).db.write("system", move |t| {
-        jobs::start(t, &id, "machine", None)?;
-        Ok(jobs::finish(t, &id, &JobEnd { passed: true, exit_code: Some(0), ..JobEnd::default() })?.unwrap())
-    }).await.unwrap();
+    let passed = state(&td)
+        .db
+        .write("system", move |t| {
+            jobs::start(t, &id, "machine", None)?;
+            Ok(jobs::finish(
+                t,
+                &id,
+                &JobEnd {
+                    passed: true,
+                    exit_code: Some(0),
+                    ..JobEnd::default()
+                },
+            )?
+            .unwrap())
+        })
+        .await
+        .unwrap();
     verdict(&td, &passed, &a, "passed").await;
     settle(&td).await;
     assert_eq!(card(&td, &a).await["column"], "accepted");

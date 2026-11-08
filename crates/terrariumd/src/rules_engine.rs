@@ -878,7 +878,11 @@ fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
              AND g.project = ?2 AND g.key LIKE 'merge:%'
              AND (g.closed_at IS NULL OR g.closed_at >= ?3)
              ORDER BY g.rowid DESC LIMIT 1",
-                rusqlite::params![serde_json::to_string(&j.cards().iter().map(|c| &c.card).collect::<Vec<_>>())?, j.project, j.created_at],
+                rusqlite::params![
+                    serde_json::to_string(&j.cards().iter().map(|c| &c.card).collect::<Vec<_>>())?,
+                    j.project,
+                    j.created_at
+                ],
                 |r| r.get(0),
             )
             .optional()?,
