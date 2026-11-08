@@ -47,7 +47,7 @@
 //! do in its write (the queue tick, a kill, a wake, the close of a bound
 //! agent) runs after the action's commit.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,7 +60,7 @@ use terrarium_core::config::Policy;
 use terrarium_core::rules_file::{self, Action, BoardColumn, Context, Rule, RuleSet};
 use terrarium_core::template::value_text;
 use tokio::sync::broadcast::error::TryRecvError;
-use tokio::task::JoinHandle;
+use tokio::task::{Id, JoinHandle, JoinSet};
 use tracing::warn;
 
 use crate::actor::{Actor, AgentActor};
@@ -74,7 +74,7 @@ use crate::store::{board, jobs, rules};
 
 /// The most events that one [`plan_pass`] reads.
 pub const BATCH: usize = 500;
-/// The most pending rows that one [`run_pending`] takes.
+/// The most pending rows that a lane reads at once.
 pub const RUN_BATCH: usize = 200;
 /// The runs of one rule in an hour without `max_per_hour`.
 pub const DEFAULT_MAX_PER_HOUR: u32 = 30;
@@ -638,69 +638,80 @@ pub fn live_rules(projects: &[ProjectRules]) -> HashSet<(String, String)> {
         .collect()
 }
 
-/// Run the pending rows (at most [`RUN_BATCH`]): the rows of one lane (a
-/// card) in order, the lanes beside each other. A row that cannot be
-/// recorded (a database error) stops its lane, so the later rows of its
-/// card wait for it. `live`: the enabled rules ([`live_rules`]). Returns
-/// whether more rows wait and every lane went through (no error), so a
-/// caller that loops does not spin on a failing row.
+/// Run pending lanes independently, with no cross-lane batch barrier.
+/// Returns false once drained (failed lanes are left for the next pass).
 pub async fn run_pending(state: &Shared, live: Arc<HashSet<(String, String)>>) -> ApiResult<bool> {
-    let pending: Vec<(String, String)> = state
-        .db
-        .read(|c| {
-            let mut st = c.prepare(
-                "SELECT id, lane FROM rule_runs WHERE state = 'pending'
-                  ORDER BY event_seq, ord, id LIMIT ?1",
-            )?;
-            let rows = st
-                .query_map([RUN_BATCH as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
-    let more = pending.len() == RUN_BATCH;
-    let mut lanes: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (id, lane) in pending {
-        lanes.entry(lane).or_default().push(id);
+    let mut lanes = Lanes::default();
+    lanes.start(state, live).await?;
+    while !lanes.tasks.is_empty() {
+        lanes.join().await;
     }
-    let tasks: Vec<JoinHandle<bool>> = lanes
-        .into_values()
-        .map(|ids| {
-            let st = state.clone();
-            let live = live.clone();
-            tokio::spawn(async move {
-                for id in ids {
-                    if let Err(e) = run_one(&st, &id, &live).await {
-                        // Keep the card's order: its later rows wait for
-                        // this one (the next pass).
-                        warn!(run = %id, "a rule run failed to record; its lane waits: {e}");
-                        return false;
-                    }
-                }
-                true
-            })
-        })
-        .collect();
-    let mut clean = true;
-    for t in tasks {
-        match t.await {
-            Ok(ok) => clean &= ok,
-            Err(e) => {
-                warn!("a rule lane task ended: {e}");
-                clean = false;
-            }
-        }
-    }
-    Ok(more && clean)
+    Ok(false)
 }
 
-/// What one write of a run did.
-enum Step {
-    /// The run ended (or was not pending), with the effects of its last
-    /// action.
-    Ended(Vec<Effect>),
-    /// An action ran, with its effects; more may follow.
-    Next(Vec<Effect>),
+/// One owner per lane, including while its committed effects are running.
+/// Dropping the scheduler aborts its workers rather than detaching them.
+#[derive(Default)]
+struct Lanes {
+    tasks: JoinSet<ApiResult<()>>,
+    active: HashMap<Id, String>,
+    stopped: HashSet<String>,
+}
+
+impl Lanes {
+    async fn start(&mut self, state: &Shared, live: Arc<HashSet<(String, String)>>) -> ApiResult<()> {
+        let pending: Vec<String> = state.db.read(|c| {
+            let mut st = c.prepare("SELECT DISTINCT lane FROM rule_runs WHERE state = 'pending'")?;
+            Ok(st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
+        }).await?;
+        for lane in pending {
+            if self.stopped.contains(&lane) || self.active.values().any(|l| l == &lane) {
+                continue;
+            }
+            let st = state.clone();
+            let live = live.clone();
+            let name = lane.clone();
+            let task = self.tasks.spawn(async move { run_lane(&st, &name, &live).await });
+            self.active.insert(task.id(), lane);
+        }
+        Ok(())
+    }
+
+    async fn join(&mut self) {
+        let Some(result) = self.tasks.join_next_with_id().await else { return };
+        let (id, error) = match result {
+            Ok((id, result)) => (id, result.err().map(|e| e.to_string())),
+            Err(e) => (e.id(), Some(e.to_string())),
+        };
+        if let Some(lane) = self.active.remove(&id)
+            && let Some(error) = error
+        {
+            warn!(%lane, "a rule lane stopped; it waits for the next pass: {error}");
+            self.stopped.insert(lane);
+        }
+    }
+}
+
+async fn run_lane(state: &Shared, lane: &str, live: &HashSet<(String, String)>) -> ApiResult<()> {
+    loop {
+        let lane = lane.to_owned();
+        let ids: Vec<String> = state.db.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id FROM rule_runs WHERE state = 'pending' AND lane = ?1
+                 ORDER BY event_seq, ord, id LIMIT ?2",
+            )?;
+            Ok(st.query_map(params![lane, RUN_BATCH as i64], |r| r.get(0))?
+                .collect::<Result<_, _>>()?)
+        }).await?;
+        if ids.is_empty() {
+            return Ok(());
+        }
+        for id in ids {
+            // A recording error stops this lane before any later row.
+            run_one(state, &id, live).await?;
+        }
+    }
+}
     /// The action failed: its write rolled back. Record the failure.
     Failed {
         step: i64,
@@ -1354,12 +1365,14 @@ async fn fire_timer(
 
 // ------------------------------------------------------------ the engine
 
-/// One round: the pending rows of before, then a plan of the new events
-/// and their runs, until the log after the cursor is read. The timers of
-/// the batch rules are checked at most every [`TICK`].
+/// Plan new events while lane workers run the outbox. Neither a slow
+/// lane nor a full batch can hold the planner or another lane.
 pub async fn pass(state: &Shared, cache: &mut Cache) {
-    let mut timers_checked = false;
+    let mut rx = state.db.hub().subscribe();
+    let mut lanes = Lanes::default();
     loop {
+        // Drain wakes before reading the durable log, never after it.
+        while let Ok(_) | Err(TryRecvError::Lagged(_)) = rx.try_recv() {}
         let projects = match load(&state.db, cache).await {
             Ok(p) => p,
             Err(e) => {
@@ -1367,39 +1380,36 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
                 return;
             }
         };
-        if !timers_checked && cache.timers_at.is_none_or(|at| at.elapsed() >= TICK) {
-            timers_checked = true;
+        if cache.timers_at.is_none_or(|at| at.elapsed() >= TICK) {
             cache.timers_at = Some(std::time::Instant::now());
             if let Err(e) = fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await {
                 warn!("the rule engine cannot check the timers: {e}");
             }
         }
         let live = Arc::new(live_rules(&projects));
-        if let Err(e) = drain_runs(state, &live).await {
-            warn!("the rule engine cannot run its outbox: {e}");
-            return;
-        }
-        match plan_pass(&state.db, projects, Utc::now()).await {
-            Ok((_, true)) => {}
-            Ok((_, false)) => {
-                if let Err(e) = drain_runs(state, &live).await {
-                    warn!("the rule engine cannot run its outbox: {e}");
-                }
-                return;
-            }
+        let more = match plan_pass(&state.db, projects, Utc::now()).await {
+            Ok((_, more)) => more,
             Err(e) => {
                 warn!("the rule engine cannot read the event log: {e}");
                 return;
             }
+        };
+        if let Err(e) = lanes.start(state, live).await {
+            warn!("the rule engine cannot run its outbox: {e}");
+            return;
+        }
+        if more {
+            continue;
+        }
+        if lanes.tasks.is_empty() {
+            return;
+        }
+        tokio::select! {
+            () = lanes.join() => {}
+            _ = rx.recv() => {}
+            () = tokio::time::sleep(TICK) => {}
         }
     }
-}
-
-/// Run the pending rows until none wait, or until a lane stops on an
-/// error (the next pass tries again, after the next wake-up).
-async fn drain_runs(state: &Shared, live: &Arc<HashSet<(String, String)>>) -> ApiResult<()> {
-    while run_pending(state, live.clone()).await? {}
-    Ok(())
 }
 
 /// The engine task: [`startup`], then a [`pass`] at each wake-up (a new
@@ -1412,6 +1422,7 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
         }
         let mut cache = Cache::default();
         loop {
+            while let Ok(_) | Err(TryRecvError::Lagged(_)) = rx.try_recv() {}
             pass(&state, &mut cache).await;
             tokio::select! {
                 () = tokio::time::sleep(TICK) => {}
@@ -1421,7 +1432,6 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                     }
                 }
             }
-            while let Ok(_) | Err(TryRecvError::Lagged(_)) = rx.try_recv() {}
         }
     })
 }
