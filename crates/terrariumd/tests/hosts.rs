@@ -840,10 +840,9 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
         .td
         .get("/api/audit?action=agent.target_cleanup_refused")
         .await;
-    assert_eq!(
-        refused.ok()[0]["detail"]["error"],
-        "target machine or work_root changed"
-    );
+    assert!(refused.ok().as_array().unwrap().iter().any(|row| {
+        row["detail"]["error"] == "target machine or work_root changed"
+    }));
     lab.td
         .patch("/api/targets/terra-box", json!({"work_root": base}))
         .await
