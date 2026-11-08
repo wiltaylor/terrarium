@@ -277,6 +277,11 @@ fn refuse(
 /// Remove the queued return turns of the card `card_id` from the agent
 /// `id`: a queued unpark queued its turn already.
 fn drop_return_turns(t: &mut crate::db::Tx<'_>, id: &str, card_id: &str) -> ApiResult<()> {
+    t.execute(
+        "DELETE FROM queued_turns WHERE agent = ?1 AND unpark_card = ?2",
+        rusqlite::params![id, card_id],
+    )?;
+    // Also recognise default return turns queued before origin tracking.
     let prefix = return_prefix(card_id);
     for q in crate::store::agents::queued_turns(t, id)? {
         if q.text.starts_with(&prefix) {
@@ -370,6 +375,12 @@ pub fn unpark_tx(
     if let Some(turn) = turn {
         crate::store::transcripts::record_turn(t, id, turn)?;
         crate::store::agents::queue_turn(t, id, turn)?;
+        if let Some(card_id) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:")) {
+            t.execute(
+                "UPDATE queued_turns SET unpark_card = ?1 WHERE id = last_insert_rowid()",
+                [card_id],
+            )?;
+        }
     }
     if sp.parked_at.is_none() {
         let r = if turn.is_some() {
@@ -749,6 +760,7 @@ pub fn reconcile_action(
     }
     let waits = WAIT_COLUMNS.contains(&column);
     match (parked, waits) {
+        (true, true) if queued => Some(Action::Park(format!("card in {column}"))),
         (false, true) if moved_since => Some(Action::Park(format!("card in {column}"))),
         (true, false) if !queued => Some(Action::Unpark),
         _ => None,
@@ -940,6 +952,9 @@ mod tests {
         for col in WAIT_COLUMNS {
             assert_eq!(reconcile_action(col, false, false, true), park(col));
             assert_eq!(reconcile_action(col, true, false, true), None);
+            for moved in [true, false] {
+                assert_eq!(reconcile_action(col, true, true, moved), park(col));
+            }
             // Bound to a card that waited already (no move since the
             // spawn): the event rule would not park it, nor does this.
             assert_eq!(reconcile_action(col, false, false, false), None);
