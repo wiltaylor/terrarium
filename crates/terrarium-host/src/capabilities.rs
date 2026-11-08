@@ -45,9 +45,16 @@ pub async fn detect_with(
 /// current free memory. A missing source means unknown capacity.
 pub fn detect_capacity(proc_root: &Path) -> Option<terrarium_core::resources::HostCapacity> {
     let stat = std::fs::read_to_string(proc_root.join("stat")).ok()?;
-    let mut cpu_ids: Vec<u32> = stat.lines().filter_map(|line| {
-        line.split_whitespace().next()?.strip_prefix("cpu")?.parse().ok()
-    }).collect();
+    let mut cpu_ids: Vec<u32> = stat
+        .lines()
+        .filter_map(|line| {
+            line.split_whitespace()
+                .next()?
+                .strip_prefix("cpu")?
+                .parse()
+                .ok()
+        })
+        .collect();
     cpu_ids.sort_unstable();
     cpu_ids.dedup();
     if cpu_ids.is_empty() {
@@ -65,7 +72,10 @@ pub fn detect_capacity(proc_root: &Path) -> Option<terrarium_core::resources::Ho
         }
         kb.checked_mul(1024).filter(|n| *n > 0)
     })?;
-    Some(terrarium_core::resources::HostCapacity { cpu_ids, memory_bytes })
+    Some(terrarium_core::resources::HostCapacity {
+        cpu_ids,
+        memory_bytes,
+    })
 }
 
 /// `$SHELL` when it exists, else `/bin/sh`.

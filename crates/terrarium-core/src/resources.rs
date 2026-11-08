@@ -43,10 +43,15 @@ impl Amounts {
             let Some((major, minor)) = device.split_once(':') else {
                 return Err(format!("invalid IO device {device}: use major:minor"));
             };
-            let canonical = major.parse::<u32>().ok().zip(minor.parse::<u32>().ok())
+            let canonical = major
+                .parse::<u32>()
+                .ok()
+                .zip(minor.parse::<u32>().ok())
                 .map(|(a, b)| format!("{a}:{b}"));
             if canonical.as_deref() != Some(device.as_str()) {
-                return Err(format!("invalid IO device {device}: use canonical major:minor"));
+                return Err(format!(
+                    "invalid IO device {device}: use canonical major:minor"
+                ));
             }
         }
         Ok(())
@@ -62,12 +67,21 @@ impl Amounts {
         Ok(Self {
             cpu_millis: percentage(self.cpu_millis, percent),
             memory_bytes: percentage(self.memory_bytes, percent),
-            io: self.io.iter().map(|(device, io)| (device.clone(), IoAmounts {
-                read_bps: percentage(io.read_bps, percent),
-                write_bps: percentage(io.write_bps, percent),
-                read_iops: percentage(io.read_iops, percent),
-                write_iops: percentage(io.write_iops, percent),
-            })).collect(),
+            io: self
+                .io
+                .iter()
+                .map(|(device, io)| {
+                    (
+                        device.clone(),
+                        IoAmounts {
+                            read_bps: percentage(io.read_bps, percent),
+                            write_bps: percentage(io.write_bps, percent),
+                            read_iops: percentage(io.read_iops, percent),
+                            write_iops: percentage(io.write_iops, percent),
+                        },
+                    )
+                })
+                .collect(),
         })
     }
 
@@ -88,8 +102,11 @@ impl Amounts {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cpu_millis == 0 && self.memory_bytes == 0 && self.io.values().all(|v|
-            v.read_bps == 0 && v.write_bps == 0 && v.read_iops == 0 && v.write_iops == 0)
+        self.cpu_millis == 0
+            && self.memory_bytes == 0
+            && self.io.values().all(|v| {
+                v.read_bps == 0 && v.write_bps == 0 && v.read_iops == 0 && v.write_iops == 0
+            })
     }
 }
 
