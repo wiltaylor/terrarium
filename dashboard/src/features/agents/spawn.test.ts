@@ -35,6 +35,25 @@ describe("spawn rights in the agent form", () => {
     const c = templateChoices("p", [t("worker", null), t("reviewer", "p"), t("other", "q")]);
     expect(c.map((x) => x.value)).toEqual(["project:*", "global:*", "reviewer", "global:worker"]);
   });
+
+  it("validates bound caps and detects changes without dropping bound rights", () => {
+    const spawn = { templates: ["project:*"], bound: true, max_bound_lifetime: "3d" };
+    const a = agent({ policy: { spawn } });
+    const v = agentToForm(a);
+    expect(formToPatch(a, v)).toEqual({});
+    expect(formToPatch(a, { ...v, spawn: { ...spawn, bound: false } }).policy?.spawn?.bound).toBe(false);
+    expect(formToPatch(a, { ...v, spawn: { ...spawn, max_bound_lifetime: "4d" } }).policy?.spawn?.max_bound_lifetime).toBe("4d");
+    expect(formToPatch(a, { ...v, mail_to: "lead" }).policy?.spawn).toEqual(spawn);
+    expect(sameSpawn({ templates: [] }, { templates: [], bound: false })).toBe(true);
+    expect(spawnProblem(spawn)).toBeNull();
+    expect(spawnProblem({ ...spawn, max_bound_lifetime: "30d" })).toBeNull();
+    for (const max_bound_lifetime of ["0s", "soon"]) {
+      expect(spawnProblem({ ...spawn, max_bound_lifetime })).toContain("not a duration");
+    }
+    expect(spawnProblem({ ...spawn, max_bound_lifetime: "31d" })).toContain("30d");
+    expect(spawnRightsText(spawn)).toContain("bound agents allowed (cap 3d)");
+    expect(spawnRightsText({ templates: [], bound: true })).toContain("cap 30d");
+  });
 });
 
 describe("the Spawned tab rows", () => {
