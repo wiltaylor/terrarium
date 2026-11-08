@@ -323,7 +323,8 @@ pub async fn spawn_with(
                 return Err(ApiError::forbidden(format!(
                     "agent `{}` has no spawn rights: {why}",
                     owner.name
-                )));
+                ))
+                .with_details(json!({"spawn_owner_right": "spawn"})));
             }
         },
         None => None,
@@ -353,7 +354,8 @@ pub async fn spawn_with(
             "`{}` may not bind an ephemeral agent: its spawn policy has no `bound`; ask \
              sysadmin or the operator (`terrarium agent set {} --spawn-bound on`)",
             owner.name, owner.name
-        )));
+        ))
+        .with_details(json!({"spawn_owner_right": "bound"})));
     }
     let lifetime = match (&bound, &rules) {
         (Some(_), Some(sp)) => sp.bound_lifetime().map_err(ApiError::invalid)?,

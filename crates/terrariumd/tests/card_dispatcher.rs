@@ -150,6 +150,8 @@ async fn concurrent_spawn_cap_leaves_card_ready() {
     assert!(dispatch(&state(&td), "p").await.unwrap());
     assert!(!dispatch(&state(&td), "p").await.unwrap());
     assert!(get(&td, &second).await["agent"].is_null());
+    assert_eq!(get(&td, &second).await["comments"], json!([]));
+    assert_eq!(deferred_counts(&td).await.0, 0);
 }
 
 #[tokio::test]
@@ -600,6 +602,151 @@ async fn done_dependency_uses_role_with_legacy_name_fallback() {
         Ok(())
     }).await.unwrap();
     assert_eq!(get(&td, &id).await["blocked_by"], json!([]));
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+}
+
+#[tokio::test]
+async fn template_denials_back_off_one_card_and_allow_later_templates() {
+    for target_denial in [false, true] {
+        let td = setup(3, 3, 10).await;
+        let lead = lead_id(&td).await;
+        if target_denial {
+            td.post(
+                "/api/targets",
+                json!({"name":"restricted","kind":"ssh","address":"u@h"}),
+            )
+            .await
+            .ok();
+            td.patch(
+                "/api/templates/p%2Fcard-small",
+                json!({"spec":{
+                    "harness":"codex","policy":{"targets":["restricted"]}
+                }}),
+            )
+            .await
+            .ok();
+        } else {
+            td.patch(
+                &format!("/api/agents/{lead}"),
+                json!({"policy":{"spawn":{
+                    "templates":["card-impl"],"bound":true,"max_concurrent":3
+                }}}),
+            )
+            .await
+            .ok();
+        }
+        let bad = card(&td, "small").await;
+        let good = card(&td, "impl").await;
+        enabled(&td).await;
+        terrariumd::card_dispatcher::pass(&state(&td)).await;
+        assert_eq!(get(&td, &bad).await["column"], "ready");
+        assert_eq!(
+            get(&td, &bad).await["comments"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(get(&td, &good).await["column"], "coding");
+        assert_eq!(deferred_counts(&td).await, (1, 0));
+        terrariumd::card_dispatcher::pass(&state(&td)).await;
+        assert_eq!(
+            get(&td, &bad).await["comments"].as_array().unwrap().len(),
+            1
+        );
+    }
+}
+
+async fn lead_actor(td: &TestDaemon) -> terrariumd::actor::Actor {
+    let a = state(td)
+        .db
+        .read(|c| Ok(terrariumd::store::agents::find(c, "lead", Some("p"))?.agent))
+        .await
+        .unwrap();
+    terrariumd::actor::Actor::Agent(terrariumd::actor::AgentActor {
+        id: a.id.to_string(),
+        name: a.name,
+        project: a.project,
+        roles: a.roles,
+        policy: a.policy,
+    })
+}
+
+#[tokio::test]
+async fn cap_reached_after_selection_defers_without_card_failure() {
+    let td = setup(3, 1, 10).await;
+    let id = card(&td, "small").await;
+    enabled(&td).await;
+    let who = lead_actor(&td).await;
+    // Selection has a free place. A manual spawn takes it before the
+    // dispatcher's spawn transaction. Exercise the transaction's cap error,
+    // not the dispatcher's preflight shortcut.
+    td.post_as(
+        &who.address(),
+        &format!("/api/agents/{}/spawn", who.address()),
+        json!({"template":"card-impl", "task":"Take the available spawn place"}),
+    )
+    .await
+    .ok();
+    for _ in 0..2 {
+        let error = terrariumd::spawn::spawn(
+            &state(&td),
+            &who,
+            who.address(),
+            terrariumd::spawn::SpawnBody {
+                template: "card-small".into(),
+                task: "Selected card".into(),
+                name: Some(id.to_ascii_lowercase()),
+                wait: false,
+                timeout: None,
+                project: None,
+                targets: vec![],
+                grants: vec![],
+                bind: Some(format!("card:{id}")),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.details.as_ref().unwrap()["spawn_cap"],
+            "max_concurrent"
+        );
+        assert!(
+            !terrariumd::card_dispatcher::handle_spawn_error(
+                &state(&td),
+                "p",
+                id.clone(),
+                who.clone(),
+                error
+            )
+            .await
+            .unwrap()
+        );
+    }
+    assert_eq!(deferred_counts(&td).await, (0, 1));
+    assert_eq!(get(&td, &id).await["comments"], json!([]));
+    assert_eq!(get(&td, &id).await["column"], "ready");
+}
+
+#[tokio::test]
+async fn selection_changed_is_not_a_card_failure() {
+    let td = setup(3, 3, 10).await;
+    let id = card(&td, "small").await;
+    let error = terrariumd::error::ApiError::conflict("dispatcher selection changed")
+        .with_details(json!({"dispatcher_selection_changed":true}));
+    assert!(
+        !terrariumd::card_dispatcher::handle_spawn_error(
+            &state(&td),
+            "p",
+            id.clone(),
+            lead_actor(&td).await,
+            error
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(deferred_counts(&td).await, (0, 0));
+    assert_eq!(get(&td, &id).await["comments"], json!([]));
     enabled(&td).await;
     assert!(dispatch(&state(&td), "p").await.unwrap());
 }

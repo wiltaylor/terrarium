@@ -33,12 +33,15 @@ report the failure, not a new notice on every retry. Other eligible cards
 proceed while a failed card cools down. A successful claim clears its retry
 state. Leaving ready or archiving also clears a card's retry state.
 
-Spawn caps and missing permissions defer the whole project without card
+Spawn caps and missing owner-wide spawn rights defer the whole project without card
 comments or card cooldowns. One lead mail reports each deferral reason, not
 one per ready card or timer tick. A misconfigured owner likewise gets one
 project-inbox notice. The timer checks the project once per pass and resumes
 when the budget resets or the configuration is repaired. The existing bound
 agent lifecycle parks agents for review and tears them down after merge.
+Denials specific to a template (allowlist, targets, or grants) use per-card
+backoff instead. A selection invalidated by a concurrent edit or claim is
+not a failure and does not create a comment, notice, or cooldown.
 
 This switch does not automate reviews, verdicts, or merges. Workers still
 validate their own pushed commits before moving cards to review.

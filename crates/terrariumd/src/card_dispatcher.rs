@@ -7,7 +7,7 @@ use terrarium_core::Role;
 
 use crate::actor::{Actor, AgentActor};
 use crate::api::Shared;
-use crate::error::{ApiError, ApiResult, Code};
+use crate::error::{ApiError, ApiResult};
 use crate::spawn::{Internal, SpawnBody};
 use crate::store::{agents, board, mail, projects, spawns};
 
@@ -127,7 +127,8 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
         if owner(c, &p)?.as_ref() != Some(&expected_owner)
             || candidate(c, &p)? != Some((expected, expected_template))
         {
-            return Err(ApiError::conflict("dispatcher selection changed"));
+            return Err(ApiError::conflict("dispatcher selection changed")
+                .with_details(serde_json::json!({"dispatcher_selection_changed": true})));
         }
         Ok(())
     });
@@ -174,23 +175,7 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
     )
     .await;
     if let Err(error) = result {
-        if error.code == Code::Forbidden
-            || error
-                .details
-                .as_ref()
-                .is_some_and(|d| d["spawn_cap"].is_string())
-        {
-            let reason = error
-                .details
-                .as_ref()
-                .and_then(|d| d["spawn_cap"].as_str())
-                .map(|cap| format!("Dispatcher deferred: spawn.{cap} reached"))
-                .unwrap_or_else(|| error.message.clone());
-            defer_project(state, project, Some(&who), &reason).await?;
-            return Ok(false);
-        }
-        record_failure(state, id, who, error.message.clone()).await?;
-        return Err(error);
+        return handle_spawn_error(state, project, id, who, error).await;
     }
     let p = project.to_owned();
     state
@@ -204,6 +189,33 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
         })
         .await?;
     Ok(true)
+}
+
+/// Handle a refusal after selection, including a cap reached by a concurrent
+/// manual spawn. Separate from preflight so both paths have regression tests.
+pub async fn handle_spawn_error(
+    state: &Shared,
+    project: &str,
+    id: String,
+    who: Actor,
+    error: ApiError,
+) -> ApiResult<bool> {
+    let details = error.details.as_ref();
+    if details.is_some_and(|d| d["dispatcher_selection_changed"] == true) {
+        return Ok(false);
+    }
+    if details.is_some_and(|d| d["spawn_cap"].is_string() || d["spawn_owner_right"].is_string()) {
+        let reason = details
+            .and_then(|d| d["spawn_cap"].as_str())
+            .map(|cap| format!("Dispatcher deferred: spawn.{cap} reached"))
+            .unwrap_or_else(|| error.message.clone());
+        defer_project(state, project, Some(&who), &reason).await?;
+        return Ok(false);
+    }
+    // Forbidden is not inherently owner-wide: template allowlists, targets,
+    // and grants can reject only this card while later templates are usable.
+    record_failure(state, id, who, error.message.clone()).await?;
+    Err(error)
 }
 
 /// Check owner-wide limits before choosing a card. The spawn transaction
