@@ -56,7 +56,7 @@ describe("ProjectScreen", () => {
       ["/p/demo/knowledge/wiki/a/b", "Knowledge"],
       ["/p/demo/repos/infra", "Repos"],
       ["/p/demo/settings/secrets", "Settings"],
-    ]) {
+    ] as const) {
       const { root } = mount(path);
       expect(active(root).map((a) => a.textContent), path).toEqual([label]);
       dispose?.();
