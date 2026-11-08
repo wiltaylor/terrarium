@@ -231,6 +231,37 @@ async fn research_helpers_daily_history_and_research_wip() {
     spawn_as(&td, &parent, body).await.ok();
 }
 
+#[tokio::test]
+async fn research_helpers_daily_admission_is_atomic_and_project_scoped() {
+    let (td, parent, card) = research_setup().await;
+    state(&td).db.write("system", move |t| {
+        for n in 0..19 {
+            t.execute("INSERT INTO research_helpers(id, card, project, spawned_at, finished_at) VALUES (?1, ?2, 'p', ?3, ?3)", rusqlite::params![format!("history-{n}"), card, terrariumd::db::now()])?;
+        }
+        for n in 0..20 {
+            t.execute("INSERT INTO research_helpers(id, card, project, spawned_at, finished_at) VALUES (?1, 'OTHER-1', 'other', ?2, ?2)", rusqlite::params![format!("other-{n}"), terrariumd::db::now()])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let body = json!({"template": "card-research", "task": "research"});
+    let (a, b) = tokio::join!(spawn_as(&td, &parent, body.clone()), spawn_as(&td, &parent, body));
+    let mut codes = [a.status, b.status];
+    codes.sort();
+    assert_eq!(codes, [201, 409], "{} {}", a.body, b.body);
+}
+
+#[tokio::test]
+async fn research_card_moves_count_live_helpers() {
+    let (td, parent, _) = research_setup().await;
+    spawn_as(&td, &parent, json!({"template": "card-research", "task": "research"})).await.ok();
+    state(&td).db.write("system", |t| {
+        t.execute("UPDATE board_columns SET name = 'research', wip_limit = 1 WHERE project = 'p' AND name = 'ready'", [])?;
+        Ok(())
+    }).await.unwrap();
+    let card = id(td.post("/api/projects/p/cards", json!({"title": "Research queued"})).await.ok());
+    td.post(&format!("/api/cards/{card}/move"), json!({"column": "research"})).await.err(409, "wip_limit");
+}
+
 async fn spawn_ok(td: &TestDaemon, owner: &str, task: &str) -> Value {
     let r = spawn_as(td, owner, json!({"template": "worker", "task": task})).await;
     assert_eq!(r.status, 201, "{}", r.body);

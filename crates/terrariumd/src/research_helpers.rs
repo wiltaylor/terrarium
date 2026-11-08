@@ -25,6 +25,14 @@ fn cap(name: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
+pub fn running(conn: &Connection, project: &str) -> ApiResult<i64> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM research_helpers WHERE project = ?1 AND finished_at IS NULL",
+        [project],
+        |r| r.get(0),
+    )?)
+}
+
 /// None means admitted. Return a refusal as data so its event can commit.
 pub fn admit(t: &mut Tx<'_>, owner: &str, project: &str, card: &str) -> ApiResult<Option<String>> {
     check(
