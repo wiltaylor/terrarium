@@ -3118,10 +3118,15 @@ mod tests {
     #[test]
     fn fresh_migrations_roll_back_together() {
         let mut conn = Connection::open_in_memory().unwrap();
-        let err = migrate_with(&mut conn, &["CREATE TABLE first (id INTEGER);", "invalid SQL"])
-            .unwrap_err();
+        let err = migrate_with(
+            &mut conn,
+            &["CREATE TABLE first (id INTEGER);", "invalid SQL"],
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("migration 2 failed"));
-        let version: usize = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let version: usize = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, 0);
         assert!(!conn.table_exists(None, "first").unwrap());
     }
@@ -3130,11 +3135,16 @@ mod tests {
     fn upgrades_keep_each_successful_migration() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
-        assert!(migrate_with(
-            &mut conn,
-            &["unused", "CREATE TABLE second (id INTEGER);", "invalid SQL"],
-        ).is_err());
-        let version: usize = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert!(
+            migrate_with(
+                &mut conn,
+                &["unused", "CREATE TABLE second (id INTEGER);", "invalid SQL"],
+            )
+            .is_err()
+        );
+        let version: usize = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, 2);
         assert!(conn.table_exists(None, "second").unwrap());
     }

@@ -17,18 +17,26 @@ fn template_databases_are_independent_and_restarts_preserve_data() {
     let second = tempfile::tempdir().unwrap();
     common::seed_database(first.path());
     let conn = terrariumd::db::open(&first.path().join("terrarium.db")).unwrap();
-    conn.execute_batch("CREATE TABLE test_marker (id INTEGER); INSERT INTO test_marker VALUES (42);")
-        .unwrap();
+    conn.execute_batch(
+        "CREATE TABLE test_marker (id INTEGER); INSERT INTO test_marker VALUES (42);",
+    )
+    .unwrap();
     conn.close().unwrap();
     common::seed_database(second.path());
     common::seed_database(first.path());
     let mut conn = terrariumd::db::open(&first.path().join("terrarium.db")).unwrap();
     assert_eq!(terrariumd::db::migrate(&mut conn).unwrap(), 0);
-    assert_eq!(conn.query_row("SELECT id FROM test_marker", [], |r| r.get::<_, i64>(0)).unwrap(), 42);
+    assert_eq!(
+        conn.query_row("SELECT id FROM test_marker", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        42
+    );
     let mut other = terrariumd::db::open(&second.path().join("terrarium.db")).unwrap();
     assert_eq!(terrariumd::db::migrate(&mut other).unwrap(), 0);
     assert!(!other.table_exists(None, "test_marker").unwrap());
-    let synchronous: i64 = other.pragma_query_value(None, "synchronous", |r| r.get(0)).unwrap();
+    let synchronous: i64 = other
+        .pragma_query_value(None, "synchronous", |r| r.get(0))
+        .unwrap();
     assert_ne!(synchronous, 0);
 }
 
