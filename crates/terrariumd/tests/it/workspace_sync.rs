@@ -175,6 +175,10 @@ async fn ssh_api_exec_run_copy_and_conflict() {
     std::fs::create_dir_all(&root).unwrap();
     let remote = ssh.jail.join(root.strip_prefix("/").unwrap());
     std::fs::write(root.join("input"), "pushed").unwrap();
+    std::fs::write(root.join("id_parser.rs"), "source").unwrap();
+    for name in ["id_rsa", "id_ed25519.pub", "id_ecdsa", "id_dsa.pub"] {
+        std::fs::write(root.join(name), "excluded").unwrap();
+    }
     std::fs::write(root.join(".env"), "never ship").unwrap();
     let started = td
         .post(
@@ -190,6 +194,14 @@ async fn ssh_api_exec_run_copy_and_conflict() {
     })
     .await
     .unwrap();
+    // Plant hostile remote output while the command is still running.
+    std::fs::write(remote.join("privileged"), "not privileged locally").unwrap();
+    std::fs::set_permissions(remote.join("privileged"), std::fs::Permissions::from_mode(0o6755)).unwrap();
+    std::fs::create_dir(remote.join("privileged-dir")).unwrap();
+    std::fs::set_permissions(remote.join("privileged-dir"), std::fs::Permissions::from_mode(0o2775)).unwrap();
+    for args in [vec!["mkfifo", "pipe"], vec!["mknod", "device", "c", "1", "3"]] {
+        assert!(std::process::Command::new(args[0]).args(&args[1..]).current_dir(&remote).status().unwrap().success());
+    }
     assert!(!root.join("output").exists());
     assert_eq!(
         td.get(&format!("/api/targets/synced/sessions/{sid}"))
@@ -203,6 +215,15 @@ async fn ssh_api_exec_run_copy_and_conflict() {
         "pushed"
     );
     assert!(!remote.join(".env").exists());
+    assert_eq!(std::fs::read_to_string(remote.join("id_parser.rs")).unwrap(), "source");
+    for name in ["id_rsa", "id_ed25519.pub", "id_ecdsa", "id_dsa.pub"] {
+        assert!(!remote.join(name).exists());
+    }
+    for name in ["privileged", "privileged-dir"] {
+        assert_eq!(std::fs::metadata(root.join(name)).unwrap().permissions().mode() & 0o6000, 0);
+    }
+    assert!(!root.join("pipe").exists());
+    assert!(!root.join("device").exists());
 
     let run = td
         .post_as(

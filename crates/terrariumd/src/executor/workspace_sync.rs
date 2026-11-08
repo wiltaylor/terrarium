@@ -16,7 +16,14 @@ const EXCLUDES: &[&str] = &[
     ".netrc",
     ".npmrc",
     ".pypirc",
-    "id_*",
+    "id_rsa",
+    "id_rsa.pub",
+    "id_ed25519",
+    "id_ed25519.pub",
+    "id_ecdsa",
+    "id_ecdsa.pub",
+    "id_dsa",
+    "id_dsa.pub",
     "*.pem",
     ".ssh",
 ];
@@ -151,15 +158,31 @@ pub(super) struct Sync {
 }
 
 async fn rsync(source: &str, destination: &str, shell: Option<&str>) -> ApiResult<()> {
+    rsync_basis(source, destination, shell, None).await
+}
+
+async fn rsync_basis(
+    source: &str,
+    destination: &str,
+    shell: Option<&str>,
+    basis: Option<&Path>,
+) -> ApiResult<()> {
     let mut cmd = tokio::process::Command::new("rsync");
     cmd.args([
         "-a",
         "--no-owner",
         "--no-group",
+        "--chmod=ugo-s",
+        "--no-specials",
+        "--no-devices",
+        "--no-whole-file",
         "--delete",
         "--checksum",
         "--protect-args",
     ]);
+    if let Some(basis) = basis {
+        cmd.arg("--copy-dest").arg(basis);
+    }
     for name in EXCLUDES {
         cmd.arg(format!("--exclude={name}"));
     }
@@ -285,10 +308,13 @@ impl Sync {
     async fn pull(&self) -> ApiResult<()> {
         let stage =
             tempfile::tempdir().map_err(|e| ApiError::invalid(format!("sync staging: {e}")))?;
-        rsync(
+        // Reuse unchanged local files without hard-linking the live workspace.
+        // The checksum still detects same-size, same-mtime remote edits.
+        rsync_basis(
             &self.remote,
             &format!("{}/", stage.path().display()),
             Some(&self.shell),
+            Some(&self.root),
         )
         .await?;
         let now = scan(&self.root).await?;
@@ -319,7 +345,7 @@ pub(super) fn finish_with(sess: &Arc<ExecSession>, sync: Option<Sync>) {
     tokio::spawn(async move {
         if let Some(end) = rx.recv().await {
             // A killed/lost process may still be writing. Leave its output remote.
-            let end = if matches!(
+            let mut end = if matches!(
                 end,
                 End::Cp { .. }
                     | End::Exit {
@@ -343,6 +369,13 @@ pub(super) fn finish_with(sess: &Arc<ExecSession>, sync: Option<Sync>) {
                 end
             };
             if let Some(sess) = sess.upgrade() {
+                // Serialize handoff with finish(): events received during the pull
+                // must win over the original process exit (including pull errors).
+                let mut sender = sess.sync_end.lock().unwrap_or_else(|e| e.into_inner());
+                sender.take();
+                while let Ok(pending) = rx.try_recv() {
+                    end = pending;
+                }
                 sess.finish_synced(end);
             }
         }
@@ -379,6 +412,7 @@ mod tests {
         std::fs::write(root.path().join("nested/.ssh/config"), "secret").unwrap();
         assert_eq!(snapshot(root.path()).unwrap().len(), 1);
         assert!(!excluded(std::ffi::OsStr::new("environment.rs")));
+        assert!(!excluded(std::ffi::OsStr::new("id_parser.rs")));
         assert_eq!(rsync_reason(Some(23)), "partial transfer");
         assert_eq!(
             rsync_reason(Some(255)),
@@ -488,6 +522,32 @@ mod tests {
             std::fs::read_to_string(local.path().join("result")).unwrap(),
             "remote"
         );
+
+        let sync = Sync {
+            root: local.path().to_owned(),
+            remote: format!("{}/", remote.path().display()),
+            shell: "ssh".into(),
+            before: snapshot(local.path()).unwrap(),
+            _key: None,
+            _lock: workspace_lock(local.path()).try_lock_owned().unwrap(),
+        };
+        let (revoked, _ctl) = ExecSession::new("revoked", None, "exec", 1024);
+        finish_with(&revoked, Some(sync));
+        revoked.finish(End::Exit {
+            code: Some(0),
+            signal: None,
+            reason: "exited".into(),
+        });
+        // Let the receiver start its asynchronous pull before revoking.
+        tokio::task::yield_now().await;
+        let end = End::error("lease_revoked", "lease revoked");
+        revoked.finish(end.clone());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !revoked.is_done() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(revoked.end(), Some(end));
 
         let sync = Sync {
             root: local.path().to_owned(),
