@@ -417,7 +417,14 @@ pub fn decide(
         let skip = if count_since(conn, project, &rule.name, None, &hour_ago, max)? >= max {
             Some(format!("rate limit: {max} runs in an hour"))
         } else if let Some(c) = &card
-            && count_since(conn, project, &rule.name, Some(c), &hour_ago, MAX_PER_CARD_PER_HOUR)? >= MAX_PER_CARD_PER_HOUR
+            && count_since(
+                conn,
+                project,
+                &rule.name,
+                Some(c),
+                &hour_ago,
+                MAX_PER_CARD_PER_HOUR,
+            )? >= MAX_PER_CARD_PER_HOUR
         {
             Some(format!(
                 "card rate limit: {MAX_PER_CARD_PER_HOUR} runs for {c} in an hour"
