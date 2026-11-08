@@ -621,11 +621,35 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
             .optional()?,
         _ => None,
     };
+    let job = crate::store::jobs::card_job(conn, &row.id)?;
+    let review = row.column_role.as_deref() == Some(REVIEW)
+        || (row.column_role.is_none() && row.column == REVIEW);
+    let review_eta = if review && !row.archived {
+        crate::store::card_history::review_eta(
+            conn,
+            &row.project,
+            &row.id,
+            job.as_ref()
+                .is_some_and(|j| j.kind == crate::store::jobs::JobKind::Merge),
+        )?
+    } else {
+        None
+    };
+    let (eta_at, eta_set_at, eta_set_by, eta_set_by_name) = if review {
+        (
+            review_eta.as_ref().map(|v| v.0.clone()),
+            review_eta.map(|v| v.1),
+            None,
+            None,
+        )
+    } else {
+        (row.eta_at, row.eta_set_at, row.eta_set_by, eta_set_by_name)
+    };
     Ok(Card {
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,
         tests: crate::store::test_runs::card_chip(conn, &row.id)?,
-        job: crate::store::jobs::card_job(conn, &row.id)?,
+        job,
         assignee_status,
         depends_on: deps(conn, &row.id)?,
         blocked_by: unmet(conn, &row.id)?,
@@ -649,9 +673,9 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         created_at: row.created_at,
         updated_at: row.updated_at,
         archived: row.archived,
-        eta_at: row.eta_at,
-        eta_set_at: row.eta_set_at,
-        eta_set_by: row.eta_set_by,
+        eta_at,
+        eta_set_at,
+        eta_set_by,
         eta_set_by_name,
         done_at: row.done_at,
         idle_since: row.idle_since,
