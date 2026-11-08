@@ -12,6 +12,17 @@ the tests in `crates/terrarium-host/tests/stub_daemon.rs`.
 
 ## Summary
 
+Commands with an argv on host, Docker, and SSH targets run through a POSIX
+`sh` wrapper, including direct argv commands that do not request a shell.
+The target environment (inside the image for Docker) must provide `sh`,
+`mv`, `rm`, and `sleep`, plus the shell's `kill` builtin or an equivalent
+utility. BusyBox implementations suffice, GNU coreutils are not required.
+Shell-less images such as distroless are not supported for these commands.
+The wrapper writes PID files in writable `/tmp`. Linux `/proc` enables
+PID start-time checks and session-wide cleanup. Without it, cancellation
+can only signal the process group. A missing PID file is retried once after
+one second before cancellation falls back to killing the local client.
+
 - The host agent dials **out** to `wss://<daemon>:8082/hosts/connect`. It
   sends `Authorization: Bearer <per-host token>`. Plaintext `ws://` is for
   loopback only, unless the config sets `allow_insecure` (see [TLS](#tls)).
