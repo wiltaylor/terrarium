@@ -766,8 +766,8 @@ function CardDrawer(props: {
   const sessionRows = () => cardSessionRows(sessions.latest ?? commentSessions(props.card), props.card);
   // docs/api.md §16.3 `GET /api/cards/{id}/usage`. A daemon without it gives no line.
   const [usage] = createResource(
-    () => props.card.id,
-    (id) => api.usage.card(id).catch(() => null),
+    () => [props.card.id, props.card.updated_at] as const,
+    ([id]) => api.usage.card(id).catch(() => null),
   );
   const usageLine = () => {
     const u = usage.latest;

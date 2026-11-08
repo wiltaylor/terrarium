@@ -25,26 +25,44 @@ pub fn routes() -> Router<Shared> {
         .route("/usage/me", get(me))
         .route("/usage/project", get(project))
         .route("/cards/{id}/usage", get(card_usage))
-        .route("/projects/{name}/trouble", get(trouble_settings).put(update_trouble_settings))
+        .route(
+            "/projects/{name}/trouble",
+            get(trouble_settings).put(update_trouble_settings),
+        )
         .route("/agents/{id}/status", post(self_report))
 }
 
-async fn trouble_settings(State(state): State<Shared>, actor: Actor, Path(name): Path<String>)
-    -> ApiResult<Json<crate::trouble::Settings>> {
+async fn trouble_settings(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crate::trouble::Settings>> {
     policy::read_project(&actor, &name)?;
-    Ok(Json(state.db.read(move |c| {
-        crate::store::projects::get(c, &name)?;
-        crate::trouble::settings(c, &name)
-    }).await?))
+    Ok(Json(
+        state
+            .db
+            .read(move |c| {
+                crate::store::projects::get(c, &name)?;
+                crate::trouble::settings(c, &name)
+            })
+            .await?,
+    ))
 }
 
-async fn update_trouble_settings(State(state): State<Shared>, actor: Actor, Path(name): Path<String>,
-    ApiJson(settings): ApiJson<crate::trouble::Settings>) -> ApiResult<Json<crate::trouble::Settings>> {
+async fn update_trouble_settings(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(settings): ApiJson<crate::trouble::Settings>,
+) -> ApiResult<Json<crate::trouble::Settings>> {
     policy::admin_project(&actor, &name, "changing trouble thresholds")?;
-    let result = state.db.write(actor.label(), move |t| {
-        crate::trouble::set_settings(t, &name, &settings)?;
-        Ok(settings)
-    }).await?;
+    let result = state
+        .db
+        .write(actor.label(), move |t| {
+            crate::trouble::set_settings(t, &name, &settings)?;
+            Ok(settings)
+        })
+        .await?;
     Ok(Json(result))
 }
 
