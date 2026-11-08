@@ -144,6 +144,53 @@ async fn cancel(td: &TestDaemon, child: &str) {
     assert_eq!(r.status, 200, "{}", r.body);
 }
 
+#[tokio::test]
+async fn like_copies_agent_rights_and_skills() {
+    let (td, _, w) = setup().await;
+    let r = spawn_as(&td, &w, &w, json!({"like": "w"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["agent"]["policy"]["targets"], json!(["box"]));
+    assert_eq!(r.body["skipped"], json!([]));
+    let child = r.body["id"].as_str().unwrap();
+    let grants = grants_of(&td, "global/openai").await;
+    assert!(grants.iter().any(|g| g["grantee"] == format!("agent:{child}")
+        && g["level"] == "read" && g["env"] == "SPAWN_RIGHTS_DB_PASS"));
+    let source = td.get(&format!("/api/agents/{w}")).await.ok();
+    for field in ["skills", "skills_off", "default_skills", "subscription_pool"] {
+        assert_eq!(r.body["agent"][field], source[field], "{field}");
+    }
+}
+
+#[tokio::test]
+async fn like_never_copies_authority_past_owner() {
+    let (td, lead, w) = setup().await;
+    td.patch(&format!("/api/agents/{lead}"), json!({"policy": {
+        "spawn": {"templates": ["worker"], "max_concurrent": 4}
+    }})).await.ok();
+    // A lead with no target or secret rights cannot obtain those of w.
+    let r = spawn_as(&td, &lead, &lead, json!({"like": "w"})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = spawn_as(&td, &lead, &lead, json!({"like": "w", "like_skip_missing": true})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert!(r.body["skipped"].as_array().unwrap().contains(&json!("target:box")));
+    assert!(r.body["agent"]["policy"]["targets"].as_array().unwrap().is_empty());
+    let child = r.body["id"].as_str().unwrap();
+    assert!(!grants_of(&td, "global/openai").await.iter()
+        .any(|g| g["grantee"] == format!("agent:{child}")));
+    // A lead spawning for w still uses w's rights.
+    let r = spawn_as(&td, &lead, &w, json!({"like": "w"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+}
+
+#[tokio::test]
+async fn like_rejects_cross_project_sources() {
+    let (td, _, w) = setup().await;
+    td.project("q").await;
+    td.agent("q", "foreign", json!({})).await;
+    let r = spawn_as(&td, &w, &w, json!({"like": "q/foreign", "like_skip_missing": true})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+}
+
 /// A target in the owner's policy goes into the child's policy, also a
 /// global one that the lead could not add by `agent set`. A target that
 /// the owner may not use is 403 with the target named, also when the lead

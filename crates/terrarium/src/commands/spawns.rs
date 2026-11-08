@@ -299,6 +299,11 @@ pub async fn spawn(ctx: &Ctx, a: &SpawnArgs) -> anyhow::Result<()> {
         return poll(ctx, &r, a.timeout.as_deref()).await;
     }
     ctx.emit(&r, |c, r| {
+        if let Some(skipped) = r["skipped"].as_array() {
+            for right in skipped {
+                c.line(format!("skipped copied right: {}", right.as_str().unwrap_or("")));
+            }
+        }
         let life = match r["bound"].as_str() {
             Some(b) => format!(
                 "bound to {b}, at most until {}",
