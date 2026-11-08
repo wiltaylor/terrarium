@@ -2980,10 +2980,7 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
     assert!(!lab.log().contains("docker rm "));
     assert!(!lab.log().contains("docker stop "));
     let t = lab.td.get("/api/targets/terra-dbox").await;
-    assert_eq!(
-        t.ok()["runtime"]["attached"],
-        json!(["terra/w1"])
-    );
+    assert_eq!(t.ok()["runtime"]["attached"], json!(["terra/w1"]));
 
     // A live session: the third holder cannot join. The fake `sleeper`
     // runs until the test writes `sleeper.end` (at most 60 s), not for a
@@ -3002,7 +2999,10 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
         errs[0].1.message
     );
     assert!(
-        errs[0].1.message.contains("must not replace a running container"),
+        errs[0]
+            .1
+            .message
+            .contains("must not replace a running container"),
         "{}",
         errs[0].1.message
     );
