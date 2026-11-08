@@ -193,28 +193,75 @@ pub struct SessionPeriod {
     pub until: String,
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod session_period_tests {
+    use super::*;
+
+    #[test]
+    fn current_month_and_active_plan_window() {
+        let now = "2026-11-08T12:00:00Z".parse().unwrap();
+        let month = session_period(&[], now);
+        assert_eq!(month.since, "2026-11-01T00:00:00+00:00");
+        assert_eq!(month.until, "2026-12-01T00:00:00+00:00");
+        let window = |name: &str, end: &str| WindowView {
+            window: name.into(),
+            used_pct: 1.0,
+            resets_at: Some(end.into()),
+            at: now.to_rfc3339(),
+            balance: None,
+        };
+        let week = session_period(
+            &[
+                window("5h", "2026-11-08T14:00:00Z"),
+                window("7d", "2026-11-10T00:00:00Z"),
+            ],
+            now,
+        );
+        assert_eq!(week.since, "2026-11-03T00:00:00+00:00");
+        assert_eq!(
+            session_period(&[window("7d", "2026-10-10T00:00:00Z")], now),
+            month
+        );
+        let billing = session_period(&[window("monthly", "2026-11-15T00:00:00Z")], now);
+        assert_eq!(billing.since, "2026-10-15T00:00:00+00:00");
+    }
+}
+
 fn session_period(windows: &[WindowView], now: chrono::DateTime<chrono::Utc>) -> SessionPeriod {
     use chrono::{Datelike, TimeZone};
     // Prefer the longest active plan window, not its short burst limit.
-    let window = windows.iter().filter_map(|w| {
-        let duration = match w.window.as_str() {
-            "7d" => chrono::Duration::days(7),
-            "30d" => chrono::Duration::days(30),
-            "5h" => chrono::Duration::hours(5),
-            _ => return None,
-        };
-        let end = chrono::DateTime::parse_from_rfc3339(w.resets_at.as_deref()?).ok()?.with_timezone(&chrono::Utc);
-        let start = end - duration;
-        (start <= now && now < end).then_some((duration, start, end))
-    }).max_by_key(|(duration, _, _)| *duration);
+    let window = windows
+        .iter()
+        .filter_map(|w| {
+            let end = chrono::DateTime::parse_from_rfc3339(w.resets_at.as_deref()?)
+                .ok()?
+                .with_timezone(&chrono::Utc);
+            let duration = match w.window.as_str() {
+                "monthly" => end - end.checked_sub_months(chrono::Months::new(1))?,
+                "7d" => chrono::Duration::days(7),
+                "30d" => chrono::Duration::days(30),
+                "5h" => chrono::Duration::hours(5),
+                _ => return None,
+            };
+            let start = end - duration;
+            (start <= now && now < end).then_some((duration, start, end))
+        })
+        .max_by_key(|(duration, _, _)| *duration);
     let (since, until) = if let Some((_, start, end)) = window {
         (start, end)
     } else {
-        let start = chrono::Utc.with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0).single().expect("valid month start");
+        let start = chrono::Utc
+            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
+            .single()
+            .expect("valid month start");
         let end = start + chrono::Months::new(1);
         (start, end)
     };
-    SessionPeriod { since: since.to_rfc3339(), until: until.to_rfc3339() }
+    SessionPeriod {
+        since: since.to_rfc3339(),
+        until: until.to_rfc3339(),
+    }
 }
 
 fn view(
@@ -228,7 +275,12 @@ fn view(
         .map(WindowView::from)
         .collect();
     let session_period = session_period(&windows, chrono::Utc::now());
-    let sessions = crate::store::session_refs::on_subscription(c, &sub.name, &session_period.since, &session_period.until)?;
+    let sessions = crate::store::session_refs::on_subscription(
+        c,
+        &sub.name,
+        &session_period.since,
+        &session_period.until,
+    )?;
     let label = subs::label(c, &sub.name)?;
     let display_name = subs::display_name(c, &sub)?;
     let cause = crate::usage_limit::cause(&sub.name);
