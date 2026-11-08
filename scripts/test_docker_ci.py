@@ -21,14 +21,29 @@ class DockerGateTests(unittest.TestCase):
             self.assertFalse(docker_ci.passed_exactly(output, name))
 
     def test_worker_cannot_enter_gate(self):
-        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "validate", docker_ci.KEY_ENV: "dummy"}):
+        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "validate", "TERRARIUM_DOCKER_CI": "1", docker_ci.KEY_ENV: "dummy"}):
             with patch.object(docker_ci, "gate") as gate:
                 self.assertEqual(docker_ci.main(), 1)
                 gate.assert_not_called()
 
     def test_missing_key_is_a_failure(self):
-        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "merge"}, clear=True):
+        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "merge", "TERRARIUM_DOCKER_CI": "1"}, clear=True):
             self.assertEqual(docker_ci.main(), 1)
+
+    def test_default_path_needs_no_key_or_docker_and_keeps_full_validation(self):
+        for switch in (None, "0"):
+            env = {"TERRARIUM_JOB_KIND": "merge", docker_ci.KEY_ENV: "dummy"}
+            if switch is not None:
+                env["TERRARIUM_DOCKER_CI"] = switch
+            with patch.dict(os.environ, env, clear=True), \
+                 patch.object(subprocess, "call", return_value=17) as validate, \
+                 patch.object(subprocess, "Popen") as agent, \
+                 patch.object(docker_ci, "gate") as gate:
+                self.assertEqual(docker_ci.main(), 17)
+                validate.assert_called_once_with(["just", "ci::validate"], env={
+                    k: v for k, v in env.items() if k != docker_ci.KEY_ENV})
+                agent.assert_not_called()
+                gate.assert_not_called()
 
     def test_live_tests_fail_when_cargo_selects_nothing_or_ignores_test(self):
         for output in ("", json.dumps({"type": "test", "name": docker_ci.LIVE_TESTS[0], "event": "ignored"})):
@@ -78,7 +93,7 @@ class DockerGateTests(unittest.TestCase):
             self.assertIn("StrictHostKeyChecking=yes", (temp / "ssh").read_text())
             self.assertEqual({p.name for p in temp.iterdir()}, {"ssh", "known_hosts", "agent.sock"})
             raise RuntimeError("test failure after setup")
-        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "merge", docker_ci.KEY_ENV: "dummy-key",
+        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "merge", "TERRARIUM_DOCKER_CI": "1", docker_ci.KEY_ENV: "dummy-key",
                                      "DOCKER_CONTEXT": "wrong-daemon", "DOCKER_TLS_VERIFY": "1"}):
             with patch.object(subprocess, "Popen", side_effect=start), \
                  patch.object(subprocess, "run", side_effect=add), \

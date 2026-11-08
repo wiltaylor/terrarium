@@ -11643,12 +11643,16 @@ with the injected values before retention. Secret-bearing recipes do not
 write a raw target log, so their retained output is bounded by the job's
 output limit instead of a full log file.
 
-For this repo's Docker merge gate, after deploying the job-runner support,
+The Docker gate is off by default: merges continue to run the full
+`ci::validate` without requiring Docker or a key. To roll it out in order:
+deploy the job-runner support first, then
 the secret administrator grants `terrarium/docker-ci-vm` to
 `delivery:terrarium` with `--level run --target terrarium-helios-build`.
 Do not grant the key to `project:terrarium` or workers. The lead configures
 `--merge-secret DOCKER_CI_KEY=@secret:docker-ci-vm` on delivery, with recipe
-`just ci::validate-affected`. `--clear-merge-secrets` removes the references.
+`TERRARIUM_DOCKER_CI=1 just ci::validate-affected` to explicitly enable the
+live Docker gate. Leave the switch unset (or `0`) until the daemon and
+grant are ready. `--clear-merge-secrets` removes the references.
 The merge gate pins the Docker VM's public host key and uses a private
 ssh-agent, loading the key through stdin without writing a key file. It
 runs the full suite, then explicitly runs the lifecycle/workspace and
@@ -11709,7 +11713,8 @@ no `next`, or the commit has no merge-base with it, `TERRARIUM_BASE` and
 must run all of them. The terrarium repo's recipe for this is `just
 ci::validate-affected`: a validate job runs the checks that its changed
 files reach (the rules are in `scripts/affected.py`), and a merge job runs
-the full `just ci::validate` plus the Docker gate (`just ci::merge`).
+the full `just ci::validate` through `just ci::merge`, plus the Docker
+gate only when `TERRARIUM_DOCKER_CI=1` is explicitly enabled.
 
 Jobs start first in, first out across all projects. A job starts when:
 

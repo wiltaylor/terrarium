@@ -68,6 +68,14 @@ def gate(env: dict[str, str]) -> int:
 
 def main() -> int:
     key = os.environ.pop(KEY_ENV, "")
+    # Rollout is staged: deploy grant resolution and configure the delivery
+    # principal before enabling the live gate in the delivery recipe.
+    enabled = os.environ.get("TERRARIUM_DOCKER_CI", "0")
+    if enabled == "0":
+        return subprocess.call(["just", "ci::validate"], env=dict(os.environ))
+    if enabled != "1":
+        print("TERRARIUM_DOCKER_CI must be 0 or 1", file=sys.stderr)
+        return 1
     if os.environ.get("TERRARIUM_JOB_KIND") != "merge" or not key:
         print("Docker gate requires a merge job and its delivery-granted key", file=sys.stderr)
         return 1
