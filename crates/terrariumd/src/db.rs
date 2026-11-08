@@ -2474,6 +2474,10 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE projects ADD COLUMN board_flow TEXT;
     ALTER TABLE projects ADD COLUMN board_flow_at TEXT;
     "#,
+    // 92: retain the origin of custom bound-agent return turns (TER-217).
+    r#"
+    ALTER TABLE queued_turns ADD COLUMN unpark_card TEXT;
+    "#,
     // Board groups (TER-180). Self-contained, append after concurrent migrations.
     r#"
     ALTER TABLE cards ADD COLUMN kind TEXT NOT NULL DEFAULT 'card'
