@@ -238,6 +238,8 @@ pub enum CloseReason {
     Stale,
     /// Its agent did not start.
     FailedStart,
+    /// A later operator message reached a thread whose agent ended.
+    AgentEnded,
 }
 
 impl CloseReason {
@@ -247,6 +249,7 @@ impl CloseReason {
             Self::Confirmed => "confirmed",
             Self::Stale => "stale",
             Self::FailedStart => "failed_start",
+            Self::AgentEnded => "agent_ended",
         }
     }
 }
@@ -1129,6 +1132,11 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     let text = t.redact_string(check_text("text", text, MAX_MESSAGE)?);
     let at = now();
     let msg = insert_message(t, &th.id, author, "message", &text, &at)?;
+    if author == "operator" && th.agent_end_outcome.is_some() {
+        let summary = "Your message was saved, but the thread agent has ended. Nobody will answer in this thread.";
+        insert_message(t, &th.id, "system", "message", summary, &at)?;
+        return close(t, &th.id, "system", CloseReason::AgentEnded, Some(summary), vec![]);
+    }
     let status = if author == "operator" {
         ThreadStatus::WaitingAgent
     } else if open_questions(t, &th.id)? > 0 {
@@ -1183,9 +1191,15 @@ pub fn agent_ended(t: &mut Tx<'_>, id: &str, agent: &str, outcome: &str) -> ApiR
             )),
         )?;
     }
-    if let Some(lead) = &th.report_to
-        && let Ok(to) = super::mail::resolve(t, lead, None)
-    {
+    if let Some(lead) = &th.report_to {
+        let to = match super::mail::resolve(t, lead, None) {
+            Ok(to) => to,
+            Err(e) => {
+                tracing::warn!(thread = %id, report_to = %lead, "no agent-end mail: {}", e.message);
+                emit(t, &get_bare(t, id)?, "agent_ended")?;
+                return Ok(());
+            }
+        };
         super::mail::send(
             t,
             super::mail::Outgoing {

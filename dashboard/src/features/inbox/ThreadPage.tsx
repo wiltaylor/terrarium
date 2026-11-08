@@ -212,6 +212,7 @@ function ThreadMeta(props: { thread: Thread; now: number }) {
         )}
       </Show>
       <Show when={t().report_to_name}>{(n) => <span>reports to {n()}</span>}</Show>
+      <Show when={t().agent_end_outcome}>{(outcome) => <span class="warn">agent ended: {outcome()}. Nobody will answer in this thread.</span>}</Show>
       <Show when={t().template}>{(n) => <span class="muted">template {n()}</span>}</Show>
       <span class="muted" title={t().created_at}>
         opened by {t().opened_by_name} {ago(t().created_at, props.now)}
