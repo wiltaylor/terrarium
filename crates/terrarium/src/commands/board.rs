@@ -540,6 +540,7 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
         }
         CardCmd::Comment {
             id,
+            reply_to,
             text,
             message,
             body,
@@ -553,7 +554,7 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                 .api
                 .post(
                     &format!("{}/comments", card_path(id)),
-                    Some(json!({"body": ctx.text(text)?})),
+                    Some(json!({"body": ctx.text(text)?, "reply_to": reply_to})),
                 )
                 .await?;
             ctx.emit(&k, |c, k| {

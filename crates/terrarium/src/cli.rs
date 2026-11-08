@@ -1380,6 +1380,9 @@ pub enum CardCmd {
     /// Comment on a card: `card comment <id> <text>`, `-b <text>`, or `-m <text>`
     Comment {
         id: String,
+        /// Reply to this comment ID. Replies to human comments reach the Inbox.
+        #[arg(long)]
+        reply_to: Option<String>,
         /// The text, or `-` for stdin
         #[arg(required_unless_present_any = ["message", "body"], conflicts_with_all = ["message", "body"])]
         text: Option<String>,

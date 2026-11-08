@@ -2180,16 +2180,66 @@ pub fn archive_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
 }
 
 pub fn add_comment(t: &mut Tx<'_>, actor: &Actor, id: &str, body: &str) -> ApiResult<Card> {
+    reply_comment(t, actor, id, body, None)
+}
+
+/// An explicit reply must refer to a comment on this card. Replies to a
+/// human, and standalone @operator mentions, also reach the operator's Inbox.
+pub fn reply_comment(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    id: &str,
+    body: &str,
+    reply_to: Option<&str>,
+) -> ApiResult<Card> {
     let card = find_row(t, id)?;
     policy::write_project(actor, &card.project)?;
     let body = body.trim();
     if body.is_empty() {
         return Err(ApiError::invalid("the comment is empty"));
     }
+    let human_reply = if let Some(reply) = reply_to {
+        let author: Option<String> = t.query_row(
+            "SELECT author FROM card_comments WHERE id = ?1 AND card = ?2",
+            params![reply, card.id], |r| r.get(0),
+        ).optional()?;
+        author.ok_or_else(|| ApiError::invalid("reply_to must name a comment on this card"))? == "operator"
+    } else {
+        false
+    };
     let author = author_of(t, actor);
     insert_comment(t, &card.id, &author, body)?;
     touch(t, &card.id)?;
     card_event(t, &card, "commented", json!({"comment": body}))?;
+    let mut recipients = Vec::new();
+    if actor.is_operator()
+        && crate::store::projects::get(t, &card.project)?.human_comment_notifications
+    {
+        recipients = crate::question_guard::leads(t, &card.project, "")?;
+        let full = get_card(t, &card.id)?;
+        for id in [full.assignee, full.agent].into_iter().flatten() {
+            if let Ok(address @ Address::Agent { .. }) = mail::resolve(t, &id, Some(&card.project)) {
+                recipients.push(address);
+            }
+        }
+    } else if !actor.is_operator()
+        && (human_reply || body.split(|c: char| !c.is_alphanumeric() && c != '@' && c != '_')
+            .any(|word| word.eq_ignore_ascii_case("@operator")))
+    {
+        recipients.push(Address::Operator);
+    }
+    let mut sent = HashSet::new();
+    let subject = format!("{} comment: {}", card.id, card.title);
+    let by = name_of(t, &author)?;
+    let message = format!("{by} commented on {}: {}\n\n{body}\n\n[Open card](/p/{}/board?card={})", card.id, card.title, card.project, card.id);
+    for to in recipients {
+        if sent.insert(to.key()) {
+            mail::send(t, Outgoing {
+                from: &Address::System, to: &to, subject: &subject, body: &message,
+                thread: None, in_reply_to: None,
+            })?;
+        }
+    }
     get_card(t, &card.id)
 }
 

@@ -2479,6 +2479,10 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE queued_turns ADD COLUMN unpark_card TEXT;
     "#,
+    // 93: built-in human card comment delivery (TER-254).
+    r#"
+    ALTER TABLE projects ADD COLUMN human_comment_notifications INTEGER NOT NULL DEFAULT 1;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

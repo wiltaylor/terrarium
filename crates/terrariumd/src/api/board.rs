@@ -249,6 +249,8 @@ async fn comments(
 #[serde(deny_unknown_fields)]
 struct CommentBody {
     body: String,
+    #[serde(default)]
+    reply_to: Option<String>,
 }
 
 async fn comment(
@@ -260,7 +262,7 @@ async fn comment(
     let card = state
         .db
         .write(actor.label(), move |t| {
-            board::add_comment(t, &actor, &id, &c.body)
+            board::reply_comment(t, &actor, &id, &c.body, c.reply_to.as_deref())
         })
         .await?;
     Ok((StatusCode::CREATED, Json(card)))
