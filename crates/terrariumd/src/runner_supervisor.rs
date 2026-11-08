@@ -922,6 +922,8 @@ struct Slot {
     /// Bumped by every `start` and `stop`, so a stale task does nothing.
     epoch: u64,
     stop_requested: bool,
+    /// Serialize stop claims, including a refused remote idle claim.
+    stop_lock: Arc<tokio::sync::Mutex<()>>,
     restart_requested: bool,
     restarts: VecDeque<Instant>,
     /// The session this launch resumes.
@@ -983,7 +985,10 @@ impl Slot {
     fn can_idle_stop(&self) -> bool {
         !self.stop_requested
             && self.seen.is_resting()
-            && self.runner.as_ref().is_some_and(|r| r.status().is_resting())
+            && self
+                .runner
+                .as_ref()
+                .is_some_and(|r| r.status().is_resting())
             && self.turns_in_flight == 0
             && self.turns.is_empty()
             && self.recap.is_none()
@@ -1000,6 +1005,7 @@ impl Slot {
             phase: Phase::Down(AgentStatus::Stopped),
             epoch: 0,
             stop_requested: false,
+            stop_lock: Arc::default(),
             restart_requested: false,
             restarts: VecDeque::new(),
             resume: None,
@@ -2692,7 +2698,12 @@ impl RunnerSupervisor {
             if slot.recap.is_some() || !slot.turns.is_empty() {
                 slot.turns_in_flight += 1;
             }
-            (slot.recap.take(), std::mem::take(&mut slot.turns), runner, slot.epoch)
+            (
+                slot.recap.take(),
+                std::mem::take(&mut slot.turns),
+                runner,
+                slot.epoch,
+            )
         };
         if recap.is_none() && turns.is_empty() {
             self.maybe_push(id);
@@ -2715,7 +2726,10 @@ impl RunnerSupervisor {
                 }
                 None => None,
             };
-            let deliveries: Vec<_> = turns.into_iter().map(|text| runner.type_turn(text)).collect();
+            let deliveries: Vec<_> = turns
+                .into_iter()
+                .map(|text| runner.type_turn(text))
+                .collect();
             if let Some(delivery) = recap
                 && let Err(e) = delivery.wait().await
             {
@@ -2731,7 +2745,10 @@ impl RunnerSupervisor {
     }
 
     fn finish_turn_delivery(&self, id: AgentId, epoch: u64) {
-        if let Some(slot) = lock(&self.inner.slots).get_mut(&id).filter(|s| s.epoch == epoch) {
+        if let Some(slot) = lock(&self.inner.slots)
+            .get_mut(&id)
+            .filter(|s| s.epoch == epoch)
+        {
             slot.turns_in_flight -= 1;
         }
     }
@@ -3979,15 +3996,31 @@ fn one_line(s: &str) -> String {
 }
 
 impl RunnerSupervisor {
-    fn stop_with(&self, agent: AgentId, by: StoppedBy, idle: bool) -> BoxFuture<'_, Result<(), SupervisorError>> {
+    fn stop_with(
+        &self,
+        agent: AgentId,
+        by: StoppedBy,
+        idle: bool,
+    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(async move {
+            let stop_lock = lock(&self.inner.slots).get(&agent)
+                .ok_or(SupervisorError::NotRunning(agent))?.stop_lock.clone();
+            let _stop = stop_lock.lock().await;
             let (runner, def) = {
                 let mut slots = lock(&self.inner.slots);
-                let slot = slots.get_mut(&agent).filter(|s| s.live())
+                let slot = slots
+                    .get_mut(&agent)
+                    .filter(|s| s.live())
                     .ok_or(SupervisorError::NotRunning(agent))?;
-                if idle && (!slot.can_idle_stop()
-                    || lock(&self.inner.holds).get(&agent).is_some_and(|h| !h.waiting.is_empty())) {
-                    return Err(SupervisorError::NotReady("the agent has work; no idle stop".into()));
+                if idle
+                    && (!slot.can_idle_stop()
+                        || lock(&self.inner.holds)
+                            .get(&agent)
+                            .is_some_and(|h| !h.waiting.is_empty()))
+                {
+                    return Err(SupervisorError::NotReady(
+                        "the agent has work; no idle stop".into(),
+                    ));
                 }
                 if slot.stop_requested && slot.runner.is_some() {
                     return Ok(());
@@ -4010,6 +4043,20 @@ impl RunnerSupervisor {
                 self.targets_down(&def);
                 return Ok(());
             };
+            if idle {
+                // The cached remote status can lag its delivery reply.
+                // Claim against the runner's real queue and turn state too.
+                let claimed = r.claim_idle_stop().await;
+                if !matches!(claimed, Ok(true)) {
+                    if let Some(slot) = lock(&self.inner.slots).get_mut(&agent) {
+                        slot.stop_requested = false;
+                    }
+                    return match claimed {
+                        Err(e) => Err(other(e)),
+                        _ => Err(SupervisorError::NotReady("the runner has work; no idle stop".into())),
+                    };
+                }
+            }
             if let Err(e) = r.set_stopped_by(by).await {
                 debug!(agent = %agent, "cannot record the stop reason: {e}");
             }
@@ -4204,9 +4251,13 @@ impl Supervisor for RunnerSupervisor {
             // recap turn. During a compaction: after its end.
             let epoch = {
                 let mut slots = lock(&self.inner.slots);
-                let slot = slots.get_mut(&agent).ok_or(SupervisorError::NotRunning(agent))?;
+                let slot = slots
+                    .get_mut(&agent)
+                    .ok_or(SupervisorError::NotRunning(agent))?;
                 if slot.stop_requested {
-                    return Err(SupervisorError::NotReady("the agent stops now; the turn waits".into()));
+                    return Err(SupervisorError::NotReady(
+                        "the agent stops now; the turn waits".into(),
+                    ));
                 }
                 if let Some(slot) = slots
                     .get_mut(&agent)

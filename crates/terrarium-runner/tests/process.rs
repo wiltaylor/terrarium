@@ -227,6 +227,27 @@ fn seqs(path: &Path) -> Vec<u64> {
 }
 
 #[tokio::test]
+async fn idle_stop_claim_uses_the_remote_turn_state() {
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    r.type_turn("/hold".into()).wait().await.expect("delivered");
+    assert!(!r.claim_idle_stop().await.expect("claim"));
+    r.kill().await.expect("kill");
+    r.wait().await;
+
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    assert!(r.claim_idle_stop().await.expect("idle claim"));
+    assert!(r.type_turn("too late".into()).wait().await.is_err());
+    r.kill().await.expect("kill");
+    r.wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_runner_process_survives_a_daemon_disconnect() {
     let env = Env::new();
     let first = env.spawn().await;

@@ -42,6 +42,11 @@ pub trait RunnerHandle: Send + Sync + 'static {
     fn resize(&self, rows: u16, cols: u16) -> BoxFuture<'_, Result<()>>;
     /// Queue a user turn (see `docs/runner.md`, "Typing a turn").
     fn type_turn(&self, text: String) -> Delivery;
+    /// Claim an idle stop under the same lock as `type_turn`.
+    /// Unsupported handles refuse the claim rather than risk a busy stop.
+    fn claim_idle_stop(&self) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
     fn answer<'a>(&'a self, request_id: &'a str, answer: &'a Answer) -> BoxFuture<'a, Result<()>>;
     fn answer_keys<'a>(&'a self, keys: &'a str) -> BoxFuture<'a, Result<()>>;
     /// Interrupt the running turn with the adapter's interrupt keys
@@ -60,6 +65,9 @@ pub trait RunnerHandle: Send + Sync + 'static {
 }
 
 impl RunnerHandle for Runner {
+    fn claim_idle_stop(&self) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(Runner::claim_idle_stop(self)) })
+    }
     fn agent(&self) -> AgentId {
         Runner::agent(self)
     }

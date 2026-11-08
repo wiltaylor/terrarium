@@ -922,6 +922,13 @@ impl RunnerHandle for RemoteRunner {
         })
     }
 
+    fn claim_idle_stop(&self) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move {
+            let v = self.inner.shared.call("claim_idle_stop", json!({})).await?;
+            Ok(v.get("claimed").and_then(Value::as_bool).unwrap_or(false))
+        })
+    }
+
     fn kill(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.call_unit("kill", json!({})))
     }

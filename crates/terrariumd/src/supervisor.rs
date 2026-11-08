@@ -809,12 +809,14 @@ mod fake {
             prompt: String,
             gate: Option<tokio::sync::oneshot::Receiver<()>>,
         ) -> Result<(), SupervisorError> {
-            let Some((_, epoch)) = self.current(agent).filter(|(s, _)| s.is_live()) else {
-                return Err(SupervisorError::NotRunning(agent));
-            };
-            if let Some(a) = self.lock().agents.get_mut(&agent) {
+            let epoch = {
+                let mut inner = self.lock();
+                let a = inner.agents.get_mut(&agent).filter(|a| a.status.is_live())
+                    .ok_or(SupervisorError::NotRunning(agent))?;
                 a.prompts.push(prompt.clone());
-            }
+                a.status = AgentStatus::Working;
+                a.epoch
+            };
             self.emit(
                 agent,
                 SupervisorEventKind::Harness(Event::TurnStart {
@@ -1194,15 +1196,22 @@ mod fake {
             Box::pin(async move {
                 {
                     let mut inner = self.lock();
-                    let a = inner.agents.get_mut(&agent)
+                    let a = inner
+                        .agents
+                        .get_mut(&agent)
                         .ok_or(SupervisorError::NotRunning(agent))?;
                     if !a.status.is_resting() || !a.early.is_empty() || a.compacting.is_some() {
-                        return Err(SupervisorError::NotReady("the agent has work; no idle stop".into()));
+                        return Err(SupervisorError::NotReady(
+                            "the agent has work; no idle stop".into(),
+                        ));
                     }
                     a.epoch += 1;
                     a.status = AgentStatus::Stopped;
                 }
-                self.emit(agent, SupervisorEventKind::Harness(Event::Exit { code: Some(0) }));
+                self.emit(
+                    agent,
+                    SupervisorEventKind::Harness(Event::Exit { code: Some(0) }),
+                );
                 self.set_status(agent, AgentStatus::Stopped, Some("stopped"));
                 Ok(())
             })

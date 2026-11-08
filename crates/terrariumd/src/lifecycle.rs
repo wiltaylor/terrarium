@@ -585,11 +585,7 @@ async fn idle_stop(state: &Shared, id: AgentId) {
     guard(&state.lifecycle.resting).remove(&id);
     state.lifecycle.expect_stop(id, REASON_IDLE);
     info!(agent = %id, "the agent rested for its idle stop; stopping it");
-    if let Err(e) = state
-        .supervisor
-        .stop_idle(id)
-        .await
-    {
+    if let Err(e) = state.supervisor.stop_idle(id).await {
         state.lifecycle.forget_stop(id);
         debug!(agent = %id, "the idle stop did not stop the agent: {e}");
     }

@@ -397,6 +397,7 @@ impl Conn {
                     .map_err(runner_err),
                 Err(e) => Err(e),
             },
+            "claim_idle_stop" => Ok(json!({ "claimed": runner.claim_idle_stop() })),
             "type_turn" => match params::<TypeTurnParams>(p) {
                 Ok(t) => {
                     let delivery = runner.type_turn(t.text);

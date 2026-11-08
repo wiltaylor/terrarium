@@ -496,6 +496,7 @@ first connection get the error `unavailable`.
 | `write` | `data` (base64), `person` (bool, optional) | `reply`: `null`. The bytes go to the PTY as keystrokes. This is the attach input. With `person: true` (the terminal, `agent keys`), the input-box watchdog does not flag the text that the write leaves (TER-224). |
 | `resize` | `rows`, `cols` | `reply`: `null`. |
 | `type_turn` | `text` | `reply`: `{"delivery":<id>}`. Later, one `delivery` frame with the same id gives the outcome (below). |
+| `claim_idle_stop` | none | `reply`: `{"claimed":true}` only when idle or waiting with no queued, in-flight, or open turn. Atomically prevents further turn delivery. The daemon then sends exit keys or kills the harness. A busy runner answers `false`. Older runners answer `method_not_found`, so the daemon skips the idle stop. |
 | `answer` | `request_id`, `answer` (`{"kind":"allow"}`, `{"kind":"deny"}`, `{"kind":"choice","value":2}`) | `reply`: `null`. As `Runner::answer`. |
 | `answer_keys` | `keys` | `reply`: `null`. As `Runner::answer_keys`. |
 | `interrupt` | none | `reply`: `{"sent":true}` when the interrupt keys went out, `{"sent":false}` when no turn runs (the status is not `working` or `blocked`). As `Runner::interrupt`. A runner from before this call answers `method_not_found`. |

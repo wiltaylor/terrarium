@@ -544,7 +544,7 @@ impl Runner {
         let id = self.inner.next_delivery.fetch_add(1, Ordering::Relaxed);
         let delivery = Delivery { id, rx };
         let mut state = lock(&self.inner.state);
-        if state.exited {
+        if state.exited || state.stop_requested {
             let _ = tx.send(Err(DeliveryError::Exited));
             return delivery;
         }
@@ -626,6 +626,18 @@ impl Runner {
         });
         self.inner.wake.notify_one();
         Ok(true)
+    }
+
+    /// Atomically claim an idle stop against queued and running turns.
+    /// The caller must finish the stop with exit keys or `kill`.
+    pub fn claim_idle_stop(&self) -> bool {
+        let mut state = lock(&self.inner.state);
+        if state.exited || state.stop_requested || !state.status.is_resting()
+            || state.turn_open || state.in_flight.is_some() || !state.queue.is_empty() {
+            return false;
+        }
+        state.stop_requested = true;
+        true
     }
 
     /// Stop the harness on purpose. The status becomes `stopped` when the
