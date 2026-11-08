@@ -374,9 +374,8 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
             && a.args.get("key").and_then(Value::as_str) == Some("{{job.group_key}}")
             && (!resolves(columns, "@review") || !resolves(columns, "@accepted"))
         {
-            reasons.push(
-                "merge groups need review and accepted columns: group action dropped".into(),
-            );
+            reasons
+                .push("merge groups need review and accepted columns: group action dropped".into());
             continue;
         }
         let Some(verb) = VERBS.iter().find(|v| v.name == a.verb) else {
