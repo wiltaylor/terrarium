@@ -294,6 +294,28 @@ pub async fn spawn_with(
         }
     };
     policy::spawn_for(actor, &owner.id, &owner.project)?;
+    let helper_card = {
+        let oid = owner.id.clone();
+        state
+            .db
+            .read(move |c| {
+                let helper: bool = c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM research_helpers WHERE id = ?1)",
+                    [&oid],
+                    |r| r.get(0),
+                )?;
+                if helper {
+                    return Err(ApiError::forbidden(
+                        "research helpers cannot spawn children",
+                    ));
+                }
+                crate::research_helpers::card(c, &oid)
+            })
+            .await?
+    };
+    if helper_card.is_some() && body.bind.is_some() {
+        return Err(ApiError::forbidden("a research helper cannot be bound"));
+    }
     let task = body.task.trim().to_owned();
     if task.is_empty() {
         return Err(ApiError::invalid("the task is empty"));
@@ -328,7 +350,8 @@ pub async fn spawn_with(
                 return Err(ApiError::forbidden(format!(
                     "agent `{}` has no spawn rights: {why}",
                     owner.name
-                )));
+                ))
+                .with_details(json!({"spawn_owner_right": "spawn"})));
             }
         },
         None => None,
@@ -358,7 +381,8 @@ pub async fn spawn_with(
             "`{}` may not bind an ephemeral agent: its spawn policy has no `bound`; ask \
              sysadmin or the operator (`terrarium agent set {} --spawn-bound on`)",
             owner.name, owner.name
-        )));
+        ))
+        .with_details(json!({"spawn_owner_right": "bound"})));
     }
     let lifetime = match (&bound, &rules) {
         (Some(_), Some(sp)) => sp.bound_lifetime().map_err(ApiError::invalid)?,
@@ -442,6 +466,16 @@ pub async fn spawn_with(
             )))
         })
         .await?;
+    if helper_card.is_some()
+        && !matches!(
+            template.name.as_str(),
+            "card-research" | "card-research-alt"
+        )
+    {
+        return Err(ApiError::forbidden(
+            "card agents may spawn only card-research or card-research-alt helpers",
+        ));
+    }
     if let Some(sp) = &rules {
         let t = SpawnTemplate {
             name: &template.name,
@@ -492,6 +526,9 @@ pub async fn spawn_with(
         .as_ref()
         .filter(|sp| sp.may_spawn_children)
         .map(|sp| Box::new(sp.for_child()));
+    if helper_card.is_some() {
+        def.policy.spawn = None;
+    }
     spawn_rights::inherit_pool(&mut def, owner.view.as_ref());
     if let Some(subscription) = subscription {
         def.subscription = Some(subscription);
@@ -535,6 +572,11 @@ pub async fn spawn_with(
     let (view, wait_row, skipped) = state
         .db
         .write(actor.label(), move |t| {
+            if let Some(card) = &helper_card
+                && let Some(reason) = crate::research_helpers::admit(t, &oid, &def.project, card)?
+            {
+                return Ok(Err(ApiError::conflict(reason)));
+            }
             if let Some(sp) = &rules2
                 && !who.is_operator()
             {
@@ -544,7 +586,7 @@ pub async fn spawn_with(
                         "`{oname}` runs {running} ephemeral agent(s); its spawn.max_concurrent is {}. \
                          Wait for one to finish, or cancel one",
                         sp.max_concurrent
-                    )));
+                    )).with_details(json!({"spawn_cap": "max_concurrent"})));
                 }
                 if let Some(day) = sp.max_per_day {
                     let since = crate::waits::from_now(Duration::ZERO);
@@ -560,7 +602,7 @@ pub async fn spawn_with(
                         return Err(ApiError::conflict(format!(
                             "`{oname}` spawned {n} ephemeral agent(s) in the last 24 hours; \
                              its spawn.max_per_day is {day}"
-                        )));
+                        )).with_details(json!({"spawn_cap": "max_per_day"})));
                     }
                 }
             }
@@ -661,6 +703,9 @@ pub async fn spawn_with(
                     bound: bound.as_ref(),
                 },
             )?;
+            if let Some(card) = &helper_card {
+                crate::research_helpers::record(t, &id, &def.project, card)?;
+            }
             if let Some(f) = after_create {
                 f(t, &id)?;
             }
@@ -706,9 +751,9 @@ pub async fn spawn_with(
             } else {
                 None
             };
-            Ok((agents::get(t, &id)?, w, skipped))
+            Ok(Ok((agents::get(t, &id)?, w, skipped)))
         })
-        .await?;
+        .await??;
     let id = view.agent.id;
     let key = id.to_string();
     info!(agent = %id, name = %view.agent.name, owner = %owner.name, "spawned an ephemeral agent");
@@ -947,6 +992,7 @@ pub async fn close(
                 return spawns::get(t, &key);
             }
             let sp = spawns::get(t, &key)?;
+            crate::research_helpers::finish(t, &sp)?;
             let thread = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:"));
             if let Some(thread) = thread {
                 crate::store::threads::agent_ended(t, thread, &sp.id, outcome)?;

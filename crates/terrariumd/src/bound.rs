@@ -398,6 +398,7 @@ pub fn unpark_tx(
     }
     if sp.parked_at.is_some()
         && sp.unpark_queued_at.is_none()
+        && !spawns::holds_place(t, id)?
         && let Some(thread) = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:"))
         && t.execute("UPDATE threads SET restart_context_sent = 1 WHERE id = ?1 AND restart_context_sent = 0", [thread])? > 0
     {

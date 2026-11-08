@@ -687,6 +687,220 @@ async fn exec_streams_output_and_the_exit_code() {
 }
 
 #[tokio::test]
+async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
+    let lab = Lab::start().await;
+    let _host = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let base = lab.bins.path().join("builds");
+    lab.target(json!({"name": "terra-box", "kind": "host", "host": "lab1", "project": "terra", "work_root": base}))
+        .await;
+    let owner = lab
+        .td
+        .agent(
+            "terra",
+            "lead",
+            json!({"roles": ["project_admin"],
+        "policy": {"targets": ["terra-box"], "spawn": {"templates": ["project:*"],
+        "max_concurrent": 1, "max_lifetime": "5m", "bound": true}}}),
+        )
+        .await;
+    lab.td
+        .post(
+            "/api/templates",
+            json!({"name": "builder", "project": "terra",
+        "spec": {"harness": "claude", "policy": {"targets": ["terra-box"]}}}),
+        )
+        .await
+        .ok();
+    let card = lab
+        .td
+        .post(
+            "/api/projects/terra/cards",
+            json!({"title": "Build", "column": "in_progress"}),
+        )
+        .await
+        .ok()
+        .clone();
+    let owner_id = owner["id"].as_str().unwrap();
+    let worker = lab.td.post_as(owner_id, &format!("/api/agents/{owner_id}/spawn"),
+        json!({"template": "builder", "task": "Build", "bind": format!("card:{}", card["id"].as_str().unwrap())})).await.ok().clone();
+    let id = worker["id"].as_str().unwrap().to_owned();
+    let root = base.join("terra").join(worker["name"].as_str().unwrap());
+    let cache = base.join("shared-cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("keep"), "shared data").unwrap();
+    for caller in [None, Some(owner_id)] {
+        let body = json!({"cmd": ["sh", "-c", "printf '%s' \"$CARGO_TARGET_DIR\""],
+            "env": {"CARGO_TARGET_DIR": cache}});
+        let r = match caller {
+            None => lab.td.post("/api/targets/terra-box/exec", body).await,
+            Some(caller) => {
+                lab.td
+                    .post_as(caller, "/api/targets/terra-box/exec", body)
+                    .await
+            }
+        };
+        assert_eq!(r.status, 201, "{}", r.body);
+        let out = drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            cache.to_str().unwrap()
+        );
+    }
+    // Transition work outside the root neither creates nor claims it, and
+    // warns once even when the agent repeats the outside operation.
+    for _ in 0..2 {
+        let r = lab
+            .td
+            .post_as(
+                &id,
+                "/api/targets/terra-box/exec",
+                json!({"cmd": ["true"], "cwd": cache}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
+    }
+    assert!(!root.exists());
+    let state = lab.state();
+    let counts = state
+        .db
+        .read(|c| {
+            Ok((
+                c.query_row("SELECT count(*) FROM agent_target_root_warnings", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+                c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts, (1, 0));
+    let r = lab.td.post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["sh", "-c",
+        "printf '%s\\n%s\\n' \"$CARGO_TARGET_DIR\" \"$RESULTS_DIR\"; mkdir -p \"$CARGO_TARGET_DIR\" \"$RESULTS_DIR\"; echo output > \"$CARGO_TARGET_DIR/output\""]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let output = drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}/target\n{}/results\n", root.display(), root.display())
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".terrarium-owner")).unwrap(),
+        id
+    );
+    assert!(root.join("target/output").exists());
+    // An unrelated target edit must not block the next exec or cleanup.
+    lab.td
+        .patch("/api/targets/terra-box", json!({"keep": true}))
+        .await
+        .ok();
+    let gate = lab.bins.path().join("gate");
+    let r = lab.td.post_as(&id, "/api/targets/terra-box/exec", json!({
+        "cmd": ["sh", "-c", "while [ ! -f \"$1\" ]; do sleep 0.02; done", "sh", gate], "timeout_secs": 10
+    })).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let sid = r.body["session_id"].as_str().unwrap().to_owned();
+    terrariumd::spawn::close(
+        &state,
+        &id,
+        terrariumd::store::spawns::DONE,
+        Some("Built".into()),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.executor.live_of(&id), 1);
+    terrariumd::target_roots::sweep(&state).await.unwrap();
+    assert!(root.exists(), "must not delete output of a live run");
+    std::fs::write(&gate, "go").unwrap();
+    drain(&lab.td, "terra-box", &sid).await;
+
+    // Failed ownership checks retain both the directory and the durable row.
+    std::fs::write(root.join(".terrarium-owner"), "foreign-agent").unwrap();
+    terrariumd::target_roots::sweep(&state).await.unwrap();
+    assert!(root.exists());
+    let count = state
+        .db
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    terrariumd::target_roots::sweep(&state).await.unwrap();
+    let refused = lab
+        .td
+        .get("/api/audit?action=agent.target_cleanup_refused")
+        .await;
+    assert_eq!(
+        refused.ok().as_array().unwrap().len(),
+        1,
+        "unchanged refusals are not repeated"
+    );
+    lab.td
+        .patch(
+            "/api/targets/terra-box",
+            json!({"work_root": base.join("elsewhere")}),
+        )
+        .await
+        .ok();
+    terrariumd::target_roots::sweep(&state).await.unwrap();
+    assert!(
+        root.join("target/output").exists(),
+        "changed location must not be cleaned"
+    );
+    let refused = lab
+        .td
+        .get("/api/audit?action=agent.target_cleanup_refused")
+        .await;
+    assert!(
+        refused
+            .ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| { row["detail"]["error"] == "target machine or work_root changed" })
+    );
+    lab.td
+        .patch("/api/targets/terra-box", json!({"work_root": base}))
+        .await
+        .ok();
+    std::fs::write(root.join(".terrarium-owner"), &id).unwrap();
+    terrariumd::target_roots::sweep(&state).await.unwrap();
+    assert!(!root.exists());
+    assert!(cache.join("keep").exists());
+    let audit = lab.td.get("/api/audit?action=agent.target_cleanup").await;
+    let detail = &audit.ok()[0]["detail"];
+    assert_eq!(detail["agent"], id);
+    assert_eq!(detail["target"], "terra-box");
+    assert_eq!(detail["path"], root.to_str().unwrap());
+    assert!(detail["size"].as_u64().unwrap() > 0);
+    let started = lab
+        .td
+        .get("/api/audit?action=agent.target_cleanup_started")
+        .await;
+    assert_eq!(started.ok()[0]["detail"]["size"], detail["size"]);
+    let count = state
+        .db
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn pty_exec_takes_input_and_resize() {
     let lab = Lab::start().await;
     let _h = lab.host("lab1").await;

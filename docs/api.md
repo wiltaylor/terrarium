@@ -6213,6 +6213,7 @@ all projects. Targets are project targets by default: a global target
 
 | Field | Meaning |
 |---|---|
+| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Keep project shared caches outside each agent root. |
 | `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. A snapshot delete removes a name. A snapshot list removes the names that the host no longer has (§17.3, "Snapshots"). |
@@ -6224,6 +6225,30 @@ all projects. Targets are project targets by default: a global target
 | `runtime` | What runs now (§17.8): `attached` (the agent workspaces, `<project>/<agent>`, in the container or the lab instance), `lab` and `head` (the instance dir on the host and the commit of a `lab_repo` target), `instances` (one for each holder of a `lab_from_workspace` target, by the agent ULID: `{agent_name, lab, state, attached}`). `{}` when nothing runs. |
 | `credential_info` | Only with a `credential`: `{name, scope, kind, fingerprint?, warning?}`. `scope` and `kind` are those of the secret that the daemon uses (`null` when there is none). `fingerprint` is the `SHA256:` fingerprint of an `ssh_key`. `warning` tells why the credential does not work (below), also a global secret with no grant to the project (§5.2). Never a value. |
 | `limits_info` | Only with `limits` ("Resource limits", below): `{summary, per, problem?}`. `summary` is the short text, for example `2 CPU · 4G`. `per` is `holder` (a `host` target: each holder has its own budget) or `container` (a `docker` target: one budget). `problem` is the refusal that a session or an `up` gets now, because the online host agent cannot apply the limits. |
+
+Card agents record owned roots before target checkouts or runs create them.
+Checkouts must use absolute paths. During transition, work outside the owned
+root remains supported with one warning per agent and target and is never
+automatically deleted. Runs using the root default `CARGO_TARGET_DIR` and
+`RESULTS_DIR` to its `target` and `results` subdirectories. Shell commands
+must also keep their own output paths there. Target preparation and cleanup
+require Linux with procfs and Python 3.9 or newer on the target. Cleanup uses
+directory-FD operations available before Python 3.11, not `rmtree(dir_fd=...)`.
+
+After an agent is removed and its exec sessions end, the daemon sweeps its
+recorded roots within 30 seconds. Failures remain recorded for retry across
+daemon restarts. Cleanup refuses changed machine/path identity (kind, host,
+address, port, container, username, work root), foreign owner
+markers, and symlink ancestors or roots. Nested symlinks are unlinked without
+following them. Mount points, including same-device bind mounts, are refused
+before deleting anything. Unrelated edits such as limits, credentials and
+`keep` do not block live work or cleanup. Each cleanup starts with an
+`agent.target_cleanup_started` audit containing the pre-deletion allocated
+size, so even a timed-out or partially completed attempt has an audit. A new
+refusal writes `agent.target_cleanup_refused` and remains available for retry.
+Deletion has a 15-minute timeout. Each successful cleanup writes an `agent.target_cleanup`
+audit record with the agent, target, path and allocated size in bytes. Old
+untracked directories and shared caches are never swept.
 
 **The project prefix.** `POST /api/targets` with a `project` names the
 target `<project>-<name>`, unless `name` starts with `<project>-` already.

@@ -1572,6 +1572,8 @@ export interface Thread {
   agent_name: string | null;
   report_to: string | null;
   report_to_name: string | null;
+  /** The outcome when the attached agent ended while this thread was open. */
+  agent_end_outcome?: string | null;
   status: ThreadStatus;
   /** When the agent moved the thread into tracking (TER-145); set while it tracks. An older daemon sends none. */
   tracking_at?: string | null;
@@ -1604,7 +1606,7 @@ export interface ThreadCard {
 }
 
 /** `confirmed`: the operator confirmed the agent's proposal; `operator`: the operator closed it; `stale`: untouched; `failed_start`: its agent did not start. */
-export type ThreadCloseReason = "confirmed" | "operator" | "stale" | "failed_start";
+export type ThreadCloseReason = "confirmed" | "operator" | "stale" | "failed_start" | "agent_ended";
 
 /** `POST /api/threads`. `agent`: a ULID or `project/name`, until TER-92 spawns it from the template. */
 export interface NewThread {
@@ -1777,6 +1779,7 @@ export interface Card {
   /** The address that set the ETA: an agent ULID or `operator`. */
   eta_set_by?: string | null;
   eta_set_by_name?: string | null;
+  eta_calibrated?: boolean | null;
   /** When the card last moved to `done`; a reopen clears it. */
   done_at?: string | null;
   /** The latest test run linked to the card (docs/api.md, test runs). Absent when no run is linked. */

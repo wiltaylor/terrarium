@@ -419,6 +419,12 @@ pub fn set_parked(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<bool> {
          WHERE id = ?1 AND finished_at IS NULL AND parked_at IS NULL",
         params![id, now(), reason],
     )?;
+    if n > 0 {
+        t.execute(
+            "UPDATE threads SET restart_context_sent = 0 WHERE agent = ?1",
+            [id],
+        )?;
+    }
     Ok(n > 0)
 }
 

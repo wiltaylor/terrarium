@@ -73,7 +73,7 @@ export function countdown(c: Card, now = Date.now()): Countdown | null {
     label: overdue ? `overdue ${span(-left, false)}` : `${span(left)} left`,
     overdue,
     progress,
-    title: `ETA ${new Date(at).toLocaleString()}${by ? `, set by ${by}` : ""}${overdue ? " (overdue)" : ""}`,
+    title: `ETA ${new Date(at).toLocaleString()}${by ? `, set by ${by}` : ""}${c.eta_calibrated === false ? " (uncalibrated)" : c.eta_calibrated ? " (calibrated p70)" : ""}${overdue ? " (overdue)" : ""}`,
   };
 }
 
