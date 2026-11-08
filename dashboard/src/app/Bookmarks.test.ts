@@ -11,6 +11,7 @@ import { bookmarks } from "../stores";
 import { expanded } from "./TreeRoot";
 import { Bookmarks } from "./Bookmarks";
 import ManageBookmarks from "./ManageBookmarks";
+import { waitFor } from "../test/wait";
 
 let dispose: (() => void) | undefined;
 beforeEach(() => expanded.open("/bookmarks"));
@@ -37,7 +38,7 @@ it("opens wiki pages in place and external URLs in a new window", () => {
   expect(root.querySelector('button[aria-label^="Remove bookmark"]')).toBeNull();
 });
 
-it("opens management with the cog and adds, edits and removes with sidebar updates", () => {
+it("opens management with the cog and adds, edits and removes with sidebar updates", async () => {
   const root = document.createElement("div");
   document.body.append(root);
   dispose = render(() => createComponent(MemoryRouter, {
@@ -45,7 +46,7 @@ it("opens management with the cog and adds, edits and removes with sidebar updat
     get children() { return [createComponent(Route, { path: "/", component: () => null }), createComponent(Route, { path: "/bookmarks", component: ManageBookmarks })]; },
   }), root);
   root.querySelector<HTMLAnchorElement>('a[aria-label="Manage bookmarks"]')!.click();
-  expect(root.querySelector("h1")?.textContent).toBe("Manage bookmarks");
+  await waitFor(() => expect(root.querySelector("h1")?.textContent).toBe("Manage bookmarks"));
   expect(root.querySelector("input")).toBeNull();
   const click = (text: string) => Array.from(document.querySelectorAll("button")).find((b) => b.textContent === text)!.click();
   click("Add bookmark");
