@@ -899,7 +899,12 @@ impl ExecSession {
     }
 
     fn finish(&self, end: End) {
-        if let Some(tx) = self.sync_end.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some(tx) = self
+            .sync_end
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             let _ = tx.send(end);
             return;
         }
@@ -1664,7 +1669,14 @@ async fn start_exec_secrets(
         cmd.env.insert("TERRARIUM_GIT_TRAILERS".into(), p.trailers);
         cmd.env.remove("TERRARIUM_GIT_TRAILERS_FILE");
     }
-    let sync = workspace_sync::prepare(state, actor, &def, cmd.agent.as_deref()).await?;
+    cmd.check()?;
+    let sync = workspace_sync::prepare(
+        state,
+        actor,
+        &def,
+        cmd.agent.as_deref().or(cmd.holder.as_deref()),
+    )
+    .await?;
     let (run, report) = crate::run_kill::start(state, &def, &cmd)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
     let view = match actor {
