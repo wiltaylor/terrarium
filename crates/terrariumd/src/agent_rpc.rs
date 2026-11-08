@@ -181,8 +181,11 @@ impl RequestHandler for AgentRpc {
                 "whoami" => {
                     let state = self.state.upgrade().ok_or_else(retry)?;
                     let key = ctx.agent.to_string();
-                    let agent = state.db.read(move |c| crate::store::agents::get(c, &key))
-                        .await.map_err(|e| RpcError::new("internal", e.message))?;
+                    let agent = state
+                        .db
+                        .read(move |c| crate::store::agents::get(c, &key))
+                        .await
+                        .map_err(|e| RpcError::new("internal", e.message))?;
                     Ok(json!({
                         "agent": ctx.agent,
                         "name": agent.agent.name,

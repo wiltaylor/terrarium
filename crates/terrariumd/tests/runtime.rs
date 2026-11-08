@@ -1625,12 +1625,14 @@ async fn runner_whoami_reads_role_changes_without_restart() {
     td.wait_status(&bob, "idle").await;
     let sock = td.runner_socket(&bob);
     for roles in [json!([]), json!(["project_admin"]), json!([])] {
-        let (status, body) = td.req(
-            Method::PUT,
-            &format!("/api/agents/{bob}/roles"),
-            Some(roles.clone()),
-            None,
-        ).await;
+        let (status, body) = td
+            .req(
+                Method::PUT,
+                &format!("/api/agents/{bob}/roles"),
+                Some(roles.clone()),
+                None,
+            )
+            .await;
         assert_eq!(status, 200, "{body}");
         let answer = rpc(&sock, "whoami", json!({})).await;
         assert_eq!(answer["result"]["roles"], roles, "{answer}");
