@@ -4203,12 +4203,12 @@ async fn docker_legacy_edit_captures_inspect_not_the_stale_definition() {
 #[tokio::test]
 #[ignore = "requires the leased terrarium-docker-scratch VM with Docker"]
 async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
-    let name = "ter-202-image-check";
-    struct ContainerGuard(&'static str);
+    let name = format!("ter-363-image-check-{}", std::process::id());
+    struct ContainerGuard(String);
     impl Drop for ContainerGuard {
         fn drop(&mut self) {
             let _ = std::process::Command::new("docker")
-                .args(["rm", "-f", self.0])
+                .args(["rm", "-f", &self.0])
                 .output();
         }
     }
@@ -4228,7 +4228,7 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         .await
         .unwrap()
         .def;
-    let _guard = ContainerGuard(name);
+    let _guard = ContainerGuard(name.clone());
     terrariumd::executor::lifecycle(
         &state,
         &def,
@@ -4242,7 +4242,7 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
     .unwrap();
     let inspect = || {
         let out = std::process::Command::new("docker")
-            .args(["inspect", name])
+            .args(["inspect", &name])
             .output()
             .unwrap();
         assert!(
@@ -4253,6 +4253,15 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         serde_json::from_slice::<Value>(&out.stdout).unwrap()[0].clone()
     };
     let before = inspect();
+    // With DOCKER_HOST=ssh://..., this bind source is on the daemon,
+    // not on the test host. Transfer the seed through Docker's archive
+    // API instead of assuming the daemon can read a local temp file.
+    let seed = state.work_dir.join("terra/worker/seed");
+    std::fs::write(&seed, "workspace-survives-recreate\n").unwrap();
+    let copied = std::process::Command::new("docker")
+        .args(["cp", seed.to_str().unwrap(), &format!("{name}:/work/terra/worker/seed")])
+        .output().unwrap();
+    assert!(copied.status.success(), "{}", String::from_utf8_lossy(&copied.stderr));
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
     lab.td
         .patch("/api/targets/dbox", json!({"image":"alpine:3.21"}))
@@ -4260,6 +4269,11 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         .ok();
     lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
     let after = inspect();
+    let content = std::process::Command::new("docker")
+        .args(["exec", &name, "cat", "/work/terra/worker/seed"])
+        .output().unwrap();
+    assert!(content.status.success());
+    assert_eq!(content.stdout, b"workspace-survives-recreate\n");
     println!(
         "docker inspect before: {}",
         json!({"Id":before["Id"],"Image":before["Image"],"Mounts":before["Mounts"]})

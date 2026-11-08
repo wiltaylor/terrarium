@@ -36,13 +36,18 @@ validate-affected: require-uv
 	list=${TERRARIUM_CHANGED_FILES:-}
 	if [ "$kind" = merge ]; then
 		echo "validate-affected: a merge job runs the full suite"
-		exec just ci::validate
+		exec just ci::merge
 	fi
 	if [ -z "$list" ] || [ ! -f "$list" ]; then
 		echo "validate-affected: no list of changed files, the full suite runs"
 		exec just ci::validate
 	fi
 	uv run python scripts/affected.py --files "$list" --run
+
+# The merge-only Docker key is resolved by the job runner, never by a worker.
+[group('ci')]
+merge:
+	python3 scripts/docker_ci.py
 
 # Print the plan of `validate-affected` without running it: the changed files of TERRARIUM_CHANGED_FILES, else the diff of HEAD against its merge-base with `base`
 [group('ci')]

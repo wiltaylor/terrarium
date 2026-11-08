@@ -11627,6 +11627,35 @@ or the operator) read and set the config. The body is a JSON object:
 | `work_dir`     | the dir on the target for the work trees of the slots           | `/tmp/terrarium-jobs` |
 | `timeout_secs` | the most time the recipe may run                                | 3600                  |
 | `failure_patterns` | literal strings to extract from recipe output, with three following lines of context | `["FAILED", "panicked", "test result: FAILED", "failures:"]` |
+| `merge_secrets` | env names mapped to `@secret:<name>[.<field>]` references, injected only into merge recipes | `{}` |
+
+`merge_secrets` uses the project's `delivery:<project>` principal, never
+agent or project grants. A delivery grant requires `level: run`, named
+targets, and no startup `env`. Worker runs, launches, secret reads, and
+brokers do not consider delivery grants. No database migration is needed:
+the existing grantee column stores principal strings without a type CHECK.
+Env names follow the secret grant name rule. Literal values are refused.
+References resolve against current grants at each merge recipe, including
+reruns, and fail closed on a missing grant, wrong target, or proxy-only
+credential. Each injection emits `secret.run` with the job, principal,
+target, field, and env name, never the value. Output is stream-redacted
+with the injected values before retention. Secret-bearing recipes do not
+write a raw target log, so their retained output is bounded by the job's
+output limit instead of a full log file.
+
+For this repo's Docker merge gate, after deploying the job-runner support,
+the secret administrator grants `terrarium/docker-ci-vm` to
+`delivery:terrarium` with `--level run --target terrarium-helios-build`.
+Do not grant the key to `project:terrarium` or workers. The lead configures
+`--merge-secret DOCKER_CI_KEY=@secret:docker-ci-vm` on delivery, with recipe
+`just ci::validate-affected`. `--clear-merge-secrets` removes the references.
+The merge gate pins the Docker VM's public host key and uses a private
+ssh-agent, loading the key through stdin without writing a key file. It
+runs the full suite, then explicitly runs the lifecycle/workspace and
+reservation/release Docker tests, rejecting ignored or unmatched results.
+The create-only device-IO test remains manual: its host-side `/dev/block`
+resolution requires a host agent colocated with Docker, not a remote
+`DOCKER_HOST`. The separate reservation/release case runs remotely.
 
 `failure_patterns: []` disables extraction. The patterns are literal, not
 regular expressions, must not be empty or whitespace-only, and can also be
@@ -11661,7 +11690,8 @@ validate or a merge is a `409 conflict` that says how to set it.
   (`[{card, branch, by_agent?, outcome?, note?}]`); `card`, `branch`, and
   `by_agent` are those of the first card. See 35.3 for the results.
 
-The recipe gets this env (TER-100), and no credential:
+The recipe gets this env (TER-100), plus any configured merge-only secrets
+for a merge job. It never receives the repository credential:
 
 | variable                  | value                                                                 |
 |---------------------------|-----------------------------------------------------------------------|
@@ -11679,7 +11709,7 @@ no `next`, or the commit has no merge-base with it, `TERRARIUM_BASE` and
 must run all of them. The terrarium repo's recipe for this is `just
 ci::validate-affected`: a validate job runs the checks that its changed
 files reach (the rules are in `scripts/affected.py`), and a merge job runs
-the full `just ci::validate`.
+the full `just ci::validate` plus the Docker gate (`just ci::merge`).
 
 Jobs start first in, first out across all projects. A job starts when:
 

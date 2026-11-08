@@ -49,6 +49,15 @@ It runs, in this order, the same parts as the GitHub CI `check` job
 The merge queue (a batch merge job) runs it on the merged result. Run it
 yourself only when your change touches the build (see above).
 
+Merge jobs enter through `ci::validate-affected` and `ci::merge`. The merge
+gate requires `DOCKER_CI_KEY` from a `delivery:terrarium` run grant and runs
+the full suite with the pinned remote Docker daemon, then explicitly runs
+the ignored lifecycle/workspace and reservation/release tests. A missing
+Docker backend, skipped test, or empty selection fails the gate. Workers
+must not fetch this key or connect to the Docker CI VM. Card checks remain
+`ci::validate-affected` without `TERRARIUM_JOB_KIND=merge`. Device-IO live
+tests still require a colocated host agent and remain manual.
+
 When `RESULTS_DIR` is set to an absolute path, `ci::test` also writes libtest
 JSON to `$RESULTS_DIR/rust.json`, and `ci::dashboard-check` writes JUnit XML to
 `$RESULTS_DIR/dashboard.xml`. Without `RESULTS_DIR` the output is the plain console output.

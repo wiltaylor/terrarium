@@ -1982,14 +1982,18 @@ async fn steps(
     } else {
         String::new()
     };
+    let log_location = if has_secrets {
+        "No raw log retained for this secret-bearing recipe.".to_owned()
+    } else {
+        format!("Full log on target {}: {}", delivery.target.as_deref().unwrap_or("-"), log)
+    };
     let mut tail = format!(
-        "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\nFull log on target {}: {}",
+        "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\n{}",
         excerpt.trim_end(),
         output_of(&c).trim_end(),
         end_text(c.end.as_ref()),
         low_priority(Vec::new(), x.ionice).join(" "),
-        delivery.target.as_deref().unwrap_or("-"),
-        log
+        log_location
     );
     if let Some(b) = &batch {
         tail.push_str(&format!("\n[{}]", batch_summary(b)));
