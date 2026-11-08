@@ -1132,7 +1132,7 @@ async fn run_inner(
     };
     // The slot's tree stays on the target for the next job of the slot
     // (TER-190): no delete of the tree and its build output per job.
-    let result = steps(&ctx, recipe, def.timeout_secs()).await;
+    let result = steps(&ctx, recipe, def).await;
     drop(ctx);
     remove_job_repo(local).await;
     result
@@ -1470,7 +1470,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
 
 /// Prepare in the daemon, clone on the target from the bundle, run the
 /// recipe there, and push `next` from the daemon for a merge.
-async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEnd> {
+async fn steps(x: &StepCtx<'_>, recipe: String, delivery: &DeliveryDef) -> ApiResult<JobEnd> {
     let job = x.job;
     if job.kind == JobKind::Merge {
         for c in job.cards().iter().skip(1) {
@@ -1545,11 +1545,25 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         .get("base")
         .filter(|b| check_commit(b).is_ok())
         .map(String::as_str);
+    let log = format!(
+        "{}/{}/logs/{}.log",
+        delivery.work_dir().trim_end_matches('/'),
+        job.project,
+        job.id
+    );
     let recipe_cmd = RemoteCmd {
-        argv: vec!["sh".into(), "-c".into(), recipe_script(recipe, base)],
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            logged_recipe(
+                recipe_script(recipe, base),
+                &log,
+                delivery.failure_patterns.as_deref(),
+            ),
+        ],
         cwd: Some(x.dir.to_owned()),
         env: recipe_env(job, x.dir, &head, base),
-        timeout_secs: Some(timeout),
+        timeout_secs: Some(delivery.timeout_secs()),
         holder: x.holder.clone(),
         ..RemoteCmd::default()
     };
@@ -1558,10 +1572,12 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
     x.recipe_started.store(true, Ordering::SeqCst);
     let ok = c.end.as_ref().is_some_and(End::success);
     let mut tail = format!(
-        "{}\n[{}]\n[run as: {} sh -c <recipe>]",
+        "{}\n[{}]\n[run as: {} sh -c <recipe>]\nFull log on target {}: {}",
         output_of(&c).trim_end(),
         end_text(c.end.as_ref()),
-        low_priority(Vec::new(), x.ionice).join(" ")
+        low_priority(Vec::new(), x.ionice).join(" "),
+        delivery.target.as_deref().unwrap_or("-"),
+        log
     );
     if let Some(b) = &batch {
         tail.push_str(&format!("\n[{}]", batch_summary(b)));
@@ -1618,6 +1634,38 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
         return recipe;
     }
     format!("unset TERRARIUM_BASE TERRARIUM_CHANGED_FILES\n{recipe}")
+}
+
+/// Keep merged stdout/stderr outside the reusable slot, so the next checkout
+/// cannot clean it away. Only a bounded excerpt crosses the runner protocol.
+/// No pipeline wraps the recipe: its exact exit status remains the job status.
+fn logged_recipe(recipe: String, log: &str, patterns: Option<&[String]>) -> String {
+    use crate::executor::sh_quote;
+    let defaults = ["FAILED", "panicked", "test result: FAILED", "failures:"]
+        .map(str::to_owned);
+    let patterns = patterns.unwrap_or(&defaults);
+    let grep = if patterns.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "printf 'Failure lines (first 1800 bytes, with context):\\n'; grep -a -F -A 3 {} -- \"$log\" | head -c 1800; printf '\\n'",
+            patterns.iter().map(|p| format!("-e {}", sh_quote(p))).collect::<Vec<_>>().join(" ")
+        )
+    };
+    format!(
+        r#"umask 077
+log={log}
+mkdir -p -- "$(dirname -- "$log")" || exit 125
+sh -c {recipe} > "$log" 2>&1
+status=$?
+{grep}
+printf '\nOutput tail (last 1200 bytes):\n'
+tail -c 1200 -- "$log"
+exit "$status"
+"#,
+        log = sh_quote(log),
+        recipe = sh_quote(&recipe),
+    )
 }
 
 /// The env of the recipe (TER-100, docs/api.md 35.2): the job kind and
@@ -1795,15 +1843,10 @@ pub(crate) fn failure_block(j: &Job) -> String {
         .as_deref()
         .unwrap_or("")
         .lines()
-        .rev()
-        .take(40)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
         .map(|l| format!("    {l}\n"))
         .collect();
     format!(
-        "Validation failed: {}, {} job {}, repo {}, branch {}, commit {}, tested {}, exit code {}, outcome {}, attempt {}.\nOutput tail:\n\n{tail}\n",
+        "Validation failed: {}, {} job {}, repo {}, branch {}, commit {}, tested {}, exit code {}, outcome {}, attempt {}.\nJob output (failure lines, then tail):\n\n{tail}\n",
         j.ended_at.as_deref().unwrap_or("-"),
         j.kind.as_str(),
         j.id,
@@ -2417,6 +2460,51 @@ printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn job_log_keeps_early_panics_before_a_long_noisy_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("logs with 'quotes/job.log");
+        let recipe = "printf 'test early_failure ... FAILED\\n'\nprintf \"thread 'early_failure' panicked at test.rs:1:2:\\nexpected value\\n\" >&2\ni=0; while [ \"$i\" -lt 2000 ]; do printf 'unrelated build noise\\n'; i=$((i + 1)); done\nexit 101";
+        let script = logged_recipe(recipe.into(), log.to_str().unwrap(), None);
+        let out = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(101));
+        let full = std::fs::read_to_string(&log).unwrap();
+        assert!(full.len() > RECIPE_MAX / 32);
+        assert!(full.contains("early_failure"));
+        assert!(full.contains("expected value"));
+        assert_eq!(full.matches("unrelated build noise").count(), 2000);
+        let excerpt = String::from_utf8_lossy(&out.stdout);
+        assert!(excerpt.len() < jobs::TAIL_MAX);
+        let mut j = ended(JobKind::Merge, jobs::JobState::Failed, Some("red"));
+        j.tail = Some(jobs::clip_tail(&excerpt));
+        let block = failure_block(&j);
+        assert!(block.contains("test early_failure ... FAILED"));
+        assert!(block.contains("panicked at test.rs:1:2"));
+        assert!(block.contains("expected value"));
+        assert!(block.find("expected value").unwrap() < block.find("Output tail").unwrap());
+    }
+
+    #[test]
+    fn job_log_patterns_are_literal_and_can_be_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("job.log");
+        for patterns in [Some(vec!["custom [failure] 'marker'".into()]), Some(vec![])] {
+            let script = logged_recipe(
+                "printf \"custom [failure] 'marker'\\nmessage\\n\"; exit 7".into(),
+                log.to_str().unwrap(),
+                patterns.as_deref(),
+            );
+            let out = std::process::Command::new("sh").args(["-c", &script]).output().unwrap();
+            assert_eq!(out.status.code(), Some(7));
+            let excerpt = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(excerpt.contains("Failure lines"), !patterns.unwrap().is_empty());
+            assert!(excerpt.contains("custom [failure] 'marker'"));
+        }
+    }
 
     /// TER-100 review round 2: without a base, a list from the outer env
     /// does not reach the recipe. With a base, the recipe runs as given.

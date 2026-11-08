@@ -308,6 +308,25 @@ class Rules(unittest.TestCase):
 
 
 class Cli(unittest.TestCase):
+    def test_failed_result_output_is_also_in_the_job_log(self):
+        import io
+
+        failure = '{"type":"test","event":"failed","name":"early_failure","stdout":"panicked: expected value"}\n'
+
+        def call(cmd, stdout=None, env=None):
+            stdout.write(failure.encode())
+            return 101
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(affected.subprocess, "call", call), \
+                mock.patch.dict(os.environ, {"RESULTS_DIR": d}), \
+                mock.patch.object(affected.sys, "stdout", new_callable=io.StringIO) as console:
+            Path(d, "rust.json").write_text("old result\n")
+            self.assertEqual(affected.run([["cargo", "test", "-p", "example"]]), 101)
+            self.assertIn(failure, console.getvalue())
+            self.assertNotIn("old result", console.getvalue())
+            self.assertEqual(Path(d, "rust.json").read_text(), "old result\n" + failure)
+
     def test_read_changed(self):
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "changed")

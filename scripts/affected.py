@@ -424,7 +424,15 @@ def run(cmds: list[list[str]]) -> int:
             env = dict(os.environ, RUSTC_BOOTSTRAP="1")
             full = cmd + ["--", "-Z", "unstable-options", "--format", "json", "--report-time"]
             with open(os.path.join(results, "rust.json"), "ab") as out:
+                start = out.tell()
                 code = subprocess.call(full, stdout=out, env=env)
+            # Keep the result file, but do not hide failed test names and
+            # panic output from the job's retained console log.
+            with open(os.path.join(results, "rust.json"), encoding="utf-8", errors="replace") as captured:
+                captured.seek(start)
+                for line in captured:
+                    sys.stdout.write(line)
+                sys.stdout.flush()
         else:
             code = subprocess.call(cmd)
         if code != 0:
