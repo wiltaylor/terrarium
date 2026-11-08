@@ -2158,6 +2158,42 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
     assert_eq!(repos, [std::ffi::OsString::from("app.git")]);
 }
 
+/// A crash can leave a lock or broken ref in the daemon's persistent
+/// cache. The next job rebuilds it, fetches, and merges successfully.
+#[tokio::test]
+async fn the_next_job_recovers_a_damaged_daemon_repo() {
+    let lab = lab(2).await;
+    let first = merge_with_recipe(&lab, "ter-cache", "test -f OK").await;
+    assert_eq!(first["state"], "passed", "{first:#}");
+    let cached = lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .state_dir
+        .join("jobs/p/repos/app.git");
+    for (i, damage) in ["index.lock", "refs/job/broken"].iter().enumerate() {
+        std::fs::write(cached.join(damage), "interrupted").unwrap();
+        let branch = format!("ter-recover-{i}");
+        lab.branch(&branch, "next", &[(&branch, "new\n")]);
+        let card = lab.card(&branch, &branch).await;
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .await
+            .ok();
+        let job = lab
+            .until_idle()
+            .await
+            .into_iter()
+            .find(|j| j["card"] == card.as_str())
+            .unwrap();
+        assert_eq!(job["state"], "passed", "{damage}: {job:#}");
+        assert!(!cached.join(damage).exists());
+        assert_eq!(git(&cached, &["rev-parse", "refs/job/merge"]), job["head"].as_str().unwrap());
+    }
+}
+
 /// TER-159: merges have their own lane. With 1 slot, a validate job queued
 /// after a merge starts beside it and passes while the merge runs, and a
 /// second merge waits for the first.

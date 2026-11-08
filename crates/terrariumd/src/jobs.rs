@@ -283,6 +283,9 @@ pub fn kill(job: &str) {
 /// background, while their slots stay taken.
 pub fn spawn(state: &Shared) -> JoinHandle<()> {
     // Persistent daemon repositories survive recovery too.
+    if let Err(e) = cleanup_job_files(&state.state_dir.join(JOBS_DIR)) {
+        warn!("cannot remove stale job files: {e}");
+    }
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         if let Some(state) = weak.upgrade() {
@@ -1384,8 +1387,10 @@ fn job_repo_dir(state: &Shared, project: &str, repo: &str) -> PathBuf {
         .join(format!("{repo}.git"))
 }
 
-/// Serialize only creation and prepare, whose scratch refs are shared.
-/// Recipes and pushes of recorded commit IDs can run concurrently.
+/// Serialize creation, health checks and prepare, whose scratch refs are
+/// shared. The guard moves into blocking prepare so cancellation cannot
+/// unlock a fetch that is still running. Recipes use independent bundles,
+/// and pushes use recorded commit IDs, never these shared scratch refs.
 fn repo_lock(path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     LOCKS
@@ -1395,6 +1400,42 @@ fn repo_lock(path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
         .entry(path.to_owned())
         .or_default()
         .clone()
+}
+
+/// Before starting jobs, remove pre-cache per-job repositories and all
+/// interrupted bundles. Preserve `repos/*.git` and never follow symlinks.
+fn cleanup_job_files(root: &std::path::Path) -> std::io::Result<()> {
+    let projects = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for project in projects {
+        let project = project?;
+        if !project.file_type()?.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(project.path())? {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if path.extension().is_some_and(|e| e == "git") && kind.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else if path.extension().is_some_and(|e| e == "bundle") && kind.is_file() {
+                std::fs::remove_file(path)?;
+            } else if entry.file_name() == "repos" && kind.is_dir() {
+                for bundle in std::fs::read_dir(path)? {
+                    let bundle = bundle?;
+                    if bundle.path().extension().is_some_and(|e| e == "bundle")
+                        && bundle.file_type()?.is_file()
+                    {
+                        std::fs::remove_file(bundle.path())?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The command that the steps of a job run under (TER-97): the idle IO
@@ -2675,6 +2716,24 @@ printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_removes_legacy_repos_and_bundles_but_keeps_cached_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("jobs");
+        cleanup_job_files(&root).unwrap();
+        let project = root.join("p");
+        std::fs::create_dir_all(project.join("J1.git/objects")).unwrap();
+        std::fs::create_dir_all(project.join("repos/app.git")).unwrap();
+        std::fs::write(project.join("J1.bundle"), "old").unwrap();
+        std::fs::write(project.join("repos/J2.bundle"), "old").unwrap();
+        std::fs::write(project.join("repos/app.git/HEAD"), "kept").unwrap();
+        cleanup_job_files(&root).unwrap();
+        assert!(!project.join("J1.git").exists());
+        assert!(!project.join("J1.bundle").exists());
+        assert!(!project.join("repos/J2.bundle").exists());
+        assert_eq!(std::fs::read_to_string(project.join("repos/app.git/HEAD")).unwrap(), "kept");
+    }
 
     /// TER-100 review round 2: without a base, a list from the outer env
     /// does not reach the recipe. With a base, the recipe runs as given.

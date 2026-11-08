@@ -2454,12 +2454,24 @@ impl JobRepo {
             .ok_or_else(|| io("the job repo path has no parent"))?;
         std::fs::create_dir_all(parent).map_err(io)?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
-        if std::fs::symlink_metadata(&c.dest).is_ok() {
-            let fd = open_git_dir(&c.dest, true)?;
-            check_git_dir(&fd, &c.dest)?;
-            return Ok(Self { c });
-        }
         let me = Self { c };
+        if std::fs::symlink_metadata(&me.c.dest).is_ok() {
+            let healthy = || -> Result<bool, GitError> {
+                let fd = open_git_dir(&me.c.dest, true)?;
+                check_git_dir(&fd, &me.c.dest)?;
+                if job_repo_has_locks(&me.c.dest)? {
+                    return Ok(false);
+                }
+                me.local(&["fsck", "--connectivity-only", "--no-dangling"])?;
+                Ok(true)
+            };
+            if healthy().unwrap_or(false) {
+                return Ok(me);
+            }
+            // A killed fetch/update-ref can leave locks or incomplete
+            // objects. This is a disposable cache, not the source repo.
+            std::fs::remove_dir_all(&me.c.dest).map_err(io)?;
+        }
         let dest = me.c.dest.to_string_lossy().into_owned();
         me.runner(false)?.git(
             None,
@@ -2637,6 +2649,23 @@ impl JobRepo {
             )
             .map(|_| ())
     }
+}
+
+/// Called while prepare owns the repository lock, so any local git lock
+/// is from an interrupted operation. Do not follow directory symlinks.
+fn job_repo_has_locks(dir: &Path) -> Result<bool, GitError> {
+    for entry in std::fs::read_dir(dir).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        if entry.file_name().to_string_lossy().ends_with(".lock") {
+            return Ok(true);
+        }
+        if entry.file_type().map_err(io)?.is_dir()
+            && job_repo_has_locks(&entry.path())?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
