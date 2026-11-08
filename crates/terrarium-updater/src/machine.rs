@@ -718,6 +718,7 @@ impl Updater {
             self.store
                 .set_previous(&Previous {
                     image: cur.image.clone(),
+                    spec: Some(cur.spec.clone()),
                     backup: Some(backup.clone()),
                 })
                 .map_err(|e| Fail(e.to_string()))?;
