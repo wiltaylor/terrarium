@@ -3861,6 +3861,7 @@ async fn docker_limits_go_on_the_container() {
     lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
     assert!(lab.log().contains("--cpus=2 "), "{}", lab.log());
     // The same limits are no change.
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
     let r = lab
         .td
         .patch(
