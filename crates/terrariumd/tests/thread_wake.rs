@@ -457,7 +457,7 @@ async fn card_events_and_agent_replies_preserve_open_question_waits() {
         .await
         .ok();
     lab.parked(&eph).await;
-    lab.mv(&card, "blocked", None).await;
+    lab.mv(&card, "blocked", Some("Need a decision.")).await;
     lab.mv(&card, "review", None).await;
     assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
     assert!(lab.wakes(&tid).await.is_empty());
