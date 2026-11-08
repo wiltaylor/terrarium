@@ -117,6 +117,9 @@ rule "open-group" {
   group_open { key = "batch" title = "Batch" column = "review" done_when = "review" close_after = "1h" }
   group_add { key = "batch" }
   group_status { key = "batch" text = "{{group.done}}/{{group.total}}" }
+  group_status { key = "batch" step = "queued" state = "done" }
+  group_status { key = "batch" step = "merge" state = "running" eta = "10m" }
+  group_status { key = "batch" step = "queued" text = "Ready" }
 }
 rule "other-group" {
   on = ["test.ping"]
@@ -155,6 +158,13 @@ async fn group_lifecycle_is_rule_only_and_members_keep_their_columns() {
     assert_eq!(g["total"], 2);
     assert_eq!(g["status"], "`1`/`2`");
     assert_eq!(g["members"], json!([a, b]));
+    assert_eq!(g["steps"][0]["name"], "queued");
+    assert_eq!(g["steps"][0]["state"], "done");
+    assert_eq!(g["steps"][0]["text"], "Ready");
+    assert_eq!(g["steps"][1]["name"], "merge");
+    assert_eq!(g["steps"][1]["state"], "running");
+    assert!(g["steps"][1]["eta_at"].as_str().is_some());
+    assert_eq!(g["steps"].as_array().unwrap().len(), 2);
     let gc = card(&td, id).await;
     assert_eq!(gc["kind"], "group");
     assert!(gc.get("assignee").is_none());
