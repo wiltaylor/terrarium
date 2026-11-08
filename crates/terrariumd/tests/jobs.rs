@@ -2190,7 +2190,10 @@ async fn the_next_job_recovers_a_damaged_daemon_repo() {
             .unwrap();
         assert_eq!(job["state"], "passed", "{damage}: {job:#}");
         assert!(!cached.join(damage).exists());
-        assert_eq!(git(&cached, &["rev-parse", "refs/job/merge"]), job["head"].as_str().unwrap());
+        assert_eq!(
+            git(&cached, &["rev-parse", "refs/job/merge"]),
+            job["head"].as_str().unwrap()
+        );
     }
 }
 

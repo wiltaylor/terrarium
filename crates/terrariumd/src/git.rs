@@ -2659,9 +2659,7 @@ fn job_repo_has_locks(dir: &Path) -> Result<bool, GitError> {
         if entry.file_name().to_string_lossy().ends_with(".lock") {
             return Ok(true);
         }
-        if entry.file_type().map_err(io)?.is_dir()
-            && job_repo_has_locks(&entry.path())?
-        {
+        if entry.file_type().map_err(io)?.is_dir() && job_repo_has_locks(&entry.path())? {
             return Ok(true);
         }
     }

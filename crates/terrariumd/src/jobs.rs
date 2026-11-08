@@ -2732,7 +2732,10 @@ mod tests {
         assert!(!project.join("J1.git").exists());
         assert!(!project.join("J1.bundle").exists());
         assert!(!project.join("repos/J2.bundle").exists());
-        assert_eq!(std::fs::read_to_string(project.join("repos/app.git/HEAD")).unwrap(), "kept");
+        assert_eq!(
+            std::fs::read_to_string(project.join("repos/app.git/HEAD")).unwrap(),
+            "kept"
+        );
     }
 
     /// TER-100 review round 2: without a base, a list from the outer env
