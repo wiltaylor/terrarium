@@ -411,6 +411,7 @@ fn live_project(
         "repos": repos,
         "checkout": checkout,
     });
+    if let Some(owner) = &p.review_dispatcher { spec["review_dispatcher"] = json!(owner); }
     if let Some(owner) = &p.card_dispatcher {
         spec["card_dispatcher"] = json!(owner);
     }
@@ -433,6 +434,7 @@ fn desired_project(
         "repos": desired_repos(def),
         "checkout": def.checkout.on_agent_create,
     });
+    if let Some(owner) = def.review_dispatcher.as_deref().filter(|v| *v != "off") { spec["review_dispatcher"] = json!(owner); }
     if let Some(owner) = def
         .card_dispatcher
         .as_deref()
@@ -1703,6 +1705,7 @@ fn apply_project(
                     &def.name,
                     &ProjectPatch {
                         card_dispatcher: None,
+ review_dispatcher: None,
                         human_comment_notifications: None,
                         description: Some(description),
                         card_prefix: prefix,
@@ -1719,7 +1722,8 @@ fn apply_project(
     if let Some(flow) = def.board_flow {
         projects::set_board_flow(t, &def.name, flow)?;
     }
-    projects::set_card_dispatcher(
+    projects::set_review_dispatcher(t, &def.name, def.review_dispatcher.as_deref().unwrap_or("off"))?;
+ projects::set_card_dispatcher(
         t,
         &def.name,
         def.card_dispatcher.as_deref().unwrap_or("off"),
@@ -2024,6 +2028,7 @@ pub fn export(
         projects: vec![fleet::FleetProject {
             def: ProjectDef {
                 card_dispatcher: p.card_dispatcher,
+ review_dispatcher: p.review_dispatcher,
                 name: p.name.clone(),
                 description: (!p.description.is_empty()).then_some(p.description),
                 prefix: Some(p.card_prefix),

@@ -28,6 +28,8 @@ pub fn fleet_source(name: &str) -> String {
 pub struct Project {
     #[serde(default)]
     pub card_dispatcher: Option<String>,
+    #[serde(default)]
+    pub review_dispatcher: Option<String>,
     /// Mail human card comments to leads and the card's agents by default.
     pub human_comment_notifications: bool,
     pub name: String,
@@ -60,6 +62,7 @@ pub struct Project {
 fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
         card_dispatcher: r.get("card_dispatcher")?,
+        review_dispatcher: r.get("review_dispatcher")?,
         human_comment_notifications: r.get("human_comment_notifications")?,
         name: r.get("name")?,
         description: r
@@ -244,6 +247,8 @@ pub struct ProjectPatch {
     #[serde(default)]
     pub card_dispatcher: Option<String>,
     #[serde(default)]
+    pub review_dispatcher: Option<String>,
+    #[serde(default)]
     pub human_comment_notifications: Option<bool>,
     #[serde(default)]
     pub description: Option<String>,
@@ -266,6 +271,7 @@ pub struct ProjectPatch {
 /// no cards, so card IDs stay stable.
 pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Project> {
     let before = get(t, name)?;
+    if let Some(owner) = &patch.review_dispatcher { set_review_dispatcher(t, name, owner)?; }
     if let Some(owner) = &patch.card_dispatcher {
         set_card_dispatcher(t, name, owner)?;
     }
@@ -337,6 +343,11 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
 
 /// Store a name rather than an ID so file sync can precede agent creation.
 /// The runtime requires this agent to be a project admin on every dispatch.
+pub fn set_review_dispatcher(t: &mut Tx<'_>, project: &str, owner: &str) -> ApiResult<()> {
+    check_name("review dispatcher owner", owner)?;
+    t.execute("UPDATE projects SET review_dispatcher = ?2 WHERE name = ?1", params![project, (owner != "off").then_some(owner)])?;
+    Ok(())
+}
 pub fn set_card_dispatcher(t: &mut Tx<'_>, project: &str, owner: &str) -> ApiResult<()> {
     check_name("dispatcher owner", owner)?;
     let owner = (owner != "off").then_some(owner);

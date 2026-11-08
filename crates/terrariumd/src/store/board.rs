@@ -177,6 +177,7 @@ pub struct Card {
     /// The dependencies that are neither accepted nor done yet.
     pub blocked_by: Vec<String>,
     pub comments: Vec<Comment>,
+    pub review_round: u32,
     pub links: Vec<Link>,
     pub created_by: String,
     pub created_by_name: String,
@@ -695,6 +696,7 @@ fn render(
         (worker_eta, worker_start, row.eta_set_by, eta_set_by_name)
     };
     Ok(Card {
+        review_round: conn.query_row("SELECT round FROM card_reviews WHERE card = ?1", [&row.id], |r| r.get(0)).optional()?.unwrap_or(0),
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,
         tests: crate::store::test_runs::card_chip(conn, &row.id)?,
@@ -2589,6 +2591,7 @@ pub fn reply_comment(
     insert_reply(t, &card.id, &author, body, human_reply)?;
     touch(t, &card.id)?;
     card_event(t, &card, "commented", json!({"comment": body}))?;
+    crate::review_dispatcher::verdict(t, actor, &card.id, body)?;
     get_card(t, &card.id)
 }
 

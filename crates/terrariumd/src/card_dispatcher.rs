@@ -11,7 +11,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::spawn::{Internal, SpawnBody};
 use crate::store::{agents, board, mail, projects, spawns};
 
-fn actor(agent: terrarium_core::Agent) -> Actor {
+pub(crate) fn actor(agent: terrarium_core::Agent) -> Actor {
     Actor::Agent(AgentActor {
         id: agent.id.to_string(),
         name: agent.name,
@@ -220,7 +220,7 @@ pub async fn handle_spawn_error(
 
 /// Check owner-wide limits before choosing a card. The spawn transaction
 /// repeats the authoritative checks to cover concurrent manual spawns.
-fn project_limit(c: &Connection, who: &Actor) -> ApiResult<Option<String>> {
+pub(crate) fn project_limit(c: &Connection, who: &Actor) -> ApiResult<Option<String>> {
     let Some(agent) = who.agent() else {
         return Ok(None);
     };
@@ -252,7 +252,7 @@ fn project_limit(c: &Connection, who: &Actor) -> ApiResult<Option<String>> {
 /// Deduplicate project-wide notices, without penalizing any ready card.
 /// Limits and configuration are rechecked once per timer pass, so a budget
 /// reset or an owner repair resumes dispatch without a card cooldown.
-async fn defer_project(
+pub(crate) async fn defer_project(
     state: &Shared,
     project: &str,
     who: Option<&Actor>,
@@ -284,8 +284,9 @@ async fn defer_project(
 async fn record_failure(state: &Shared, id: String, who: Actor, error: String) -> ApiResult<()> {
     state.db.write("system", move |t| {
         let card = board::get_card(t, &id)?;
-        let ready = board::role_name(t, &card.project, "ready", "ready")?;
-        if card.archived || card.column != ready || card.agent.is_some() || card.assignee.is_some() {
+    let ready = board::role_name(t, &card.project, "ready", "ready")?;
+        let review = board::role_name(t, &card.project, "review", "review")?;
+        if card.archived || (card.column != review && (card.column != ready || card.agent.is_some())) || card.assignee.is_some() {
             return Ok(());
         }
         let previous: Option<(u32, i64)> = t.query_row(

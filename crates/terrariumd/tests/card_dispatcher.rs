@@ -13,6 +13,7 @@ async fn setup(limit: i64, concurrent: u32, daily: u32) -> TestDaemon {
             {"name":"backlog"}, {"name":"ready"},
             {"name":"coding", "role":"working", "wip_limit":limit},
             {"name":"review", "role":"review"},
+            {"name":"merge_queue", "role":"merge_queue"},
             {"name":"merged", "role":"accepted"},
             {"name":"blocked", "role":"blocked"}, {"name":"done"}
         ]}),
@@ -61,6 +62,62 @@ async fn enabled(td: &TestDaemon) {
     td.patch("/api/projects/p", json!({"card_dispatcher":"lead"}))
         .await
         .ok();
+}
+
+async fn review_setup() -> (TestDaemon, String) {
+    let td = setup(2, 4, 20).await;
+    td.post("/api/templates", json!({"name":"card-review","project":"p","spec":{"harness":"codex"}})).await.ok();
+    td.patch("/api/projects/p", json!({"review_dispatcher":"lead"})).await.ok();
+    let id = card(&td, "small").await;
+    td.post(&format!("/api/cards/{id}/move"), json!({"column":"review"})).await.ok();
+    (td, id)
+}
+
+async fn reviewer(td: &TestDaemon, id: &str) -> String {
+    let id = id.to_owned();
+    state(td).db.read(move |c| {
+        Ok(c.query_row("SELECT agent FROM card_reviews WHERE card = ?1", [&id], |r| r.get(0))?)
+    }).await.unwrap()
+}
+
+#[tokio::test]
+async fn review_opt_in_concurrent_spawn_and_accept() {
+    let (td, id) = review_setup().await;
+    td.patch("/api/projects/p", json!({"review_dispatcher":"off"})).await.ok();
+    assert!(!terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+    td.patch("/api/projects/p", json!({"review_dispatcher":"lead"})).await.ok();
+    let s = state(&td);
+    let (a,b) = tokio::join!(terrariumd::review_dispatcher::dispatch(&s,"p"), terrariumd::review_dispatcher::dispatch(&s,"p"));
+    assert_eq!(usize::from(a.unwrap_or(false)) + usize::from(b.unwrap_or(false)), 1);
+    assert_eq!(get(&td,&id).await["review_round"], 1);
+    // Neither a human nor the lead can impersonate this round's verdict.
+    td.post(&format!("/api/cards/{id}/comments"),json!({"body":"accept"})).await.ok();
+    assert_eq!(get(&td,&id).await["column"], "review");
+    let agent = reviewer(&td,&id).await;
+    td.post_as(&agent,&format!("/api/cards/{id}/comments"),json!({"body":"accept\nChecked diff and evidence."})).await.ok();
+    assert_eq!(get(&td,&id).await["column"], "merge_queue");
+}
+
+#[tokio::test]
+async fn review_changes_returns_top_and_lead_label_reserves_decision() {
+    for lead_only in [false,true] {
+        let (td,id) = review_setup().await;
+        let other = card(&td,"small").await;
+        if lead_only {
+            td.patch(&format!("/api/cards/{id}"),json!({"labels":["review:lead"]})).await.ok();
+        }
+        assert!(terrariumd::review_dispatcher::dispatch(&state(&td),"p").await.unwrap());
+        let agent = reviewer(&td,&id).await;
+        td.post_as(&agent,&format!("/api/cards/{id}/comments"),json!({"body":"Not a verdict\naccept"})).await.ok();
+        assert_eq!(get(&td,&id).await["column"], "review");
+        td.post_as(&agent,&format!("/api/cards/{id}/comments"),json!({"body":"changes\nF1: Missing test."})).await.ok();
+        let c = get(&td,&id).await;
+        assert_eq!(c["column"], if lead_only { "review" } else { "ready" });
+        if !lead_only { assert!(c["position"].as_i64().unwrap() < get(&td,&other).await["position"].as_i64().unwrap()); }
+        // Repeated verdicts cannot override the first one.
+        td.post_as(&agent,&format!("/api/cards/{id}/comments"),json!({"body":"accept"})).await.ok();
+        assert_eq!(get(&td,&id).await["column"], c["column"]);
+    }
 }
 
 async fn get(td: &TestDaemon, id: &str) -> Value {
