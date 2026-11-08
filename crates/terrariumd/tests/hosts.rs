@@ -4062,7 +4062,7 @@ async fn docker_pending_edits_can_be_undone_after_recreate_refusal() {
         .await
         .ok()
         .clone();
-    assert_eq!(undone["runtime"]["recreate_required"], false);
+    assert!(undone["runtime"]["recreate_required"].is_null());
     assert!(undone["recreate_note"].is_null());
     let old = lab.td.post_empty("/api/targets/dbox/up").await.ok().clone();
     assert!(old["recreate_note"].is_null());
