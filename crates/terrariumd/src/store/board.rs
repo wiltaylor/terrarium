@@ -768,9 +768,15 @@ pub fn board_summary(
         None
     };
     // Load group metadata once per group, rather than once per member.
-    let mut groups = conn.prepare("SELECT card FROM card_groups WHERE project = ?1")?;
+    let visible_ids = json!(cards.iter().map(|c| &c["id"]).collect::<Vec<_>>()).to_string();
+    let mut groups = conn.prepare(
+        "SELECT card FROM card_groups WHERE project = ?1 AND
+         (card IN (SELECT value FROM json_each(?2)) OR
+          (closed_at IS NULL AND EXISTS (SELECT 1 FROM group_members m
+           WHERE m.group_card = card_groups.card AND m.card IN (SELECT value FROM json_each(?2)))))",
+    )?;
     let ids = groups
-        .query_map([project], |r| r.get::<_, String>(0))?
+        .query_map(params![project, visible_ids], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     for id in ids {
         let group = crate::store::groups::get(conn, &id)?;

@@ -294,7 +294,13 @@ async fn board_summary_budget_and_done_pages() {
             summary["cards"].as_array().unwrap().len(),
             count as usize / 3
         );
+        let start = Instant::now();
         let response = td.get("/api/projects/proj/board").await;
+        let http_ms = start.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "board HTTP count={count}: {} bytes {http_ms:.2}ms",
+            serde_json::to_vec(response.ok()).unwrap().len()
+        );
         let c = &response.ok()["cards"][0];
         assert_eq!(c["comment_count"], 10);
         for field in ["body", "comments", "links", "tests"] {
