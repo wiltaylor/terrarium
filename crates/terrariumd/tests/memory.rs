@@ -360,6 +360,8 @@ async fn links_contradictions_first_and_graph() {
 
 #[tokio::test]
 async fn edits_and_supersedes_isolate_colliding_project_ids() {
+    // Store isolation guard, not a reproduction of TER-113's CLI routing bug.
+    // commands::tests::memory_project_keys_for_every_id_command proves that fix.
     let td = setup().await;
     for (project, agent) in [("proj", "proj/w1"), ("other", "other/x")] {
         for n in 1..=2 {
