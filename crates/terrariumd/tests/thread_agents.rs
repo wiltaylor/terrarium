@@ -834,10 +834,11 @@ async fn an_ended_agent_marks_only_its_open_thread_once() {
                 .count(),
             1
         );
+        let endpoint = if outcome == "done" || outcome == "failed" { "respond" } else { "messages" };
         let late_post = lab
             .td
             .post(
-                &format!("/api/threads/{tid}/messages"),
+                &format!("/api/threads/{tid}/{endpoint}"),
                 json!({"text": "Keep this operator follow-up."}),
             )
             .await;
@@ -846,6 +847,9 @@ async fn an_ended_agent_marks_only_its_open_thread_once() {
         assert_eq!(saved["status"], "closed");
         assert_eq!(saved["close_reason"], "agent_ended");
         assert_eq!(saved["agent_end_outcome"], outcome);
+        if endpoint == "respond" {
+            assert_eq!(saved["response"]["text"], "Keep this operator follow-up.");
+        }
         assert!(
             saved["messages"]
                 .as_array()
@@ -861,6 +865,35 @@ async fn an_ended_agent_marks_only_its_open_thread_once() {
             operator.body
         );
     }
+}
+
+#[tokio::test]
+async fn ending_while_waiting_agent_warns_when_report_to_is_gone() {
+    let lab = lab().await;
+    let th = lab.open(json!({"topic": "Unanswered", "scope": "p", "template": "consult"})).await;
+    let tid = id(&th);
+    let agent = th["agent"].as_str().unwrap().to_owned();
+    lab.td.wait_status(&agent, "idle").await;
+    assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let file = log.reopen().unwrap();
+    let key = tid.clone();
+    state(&lab.td).db.write("system", move |t| {
+        t.execute("UPDATE threads SET report_to = 'missing-lead' WHERE id = ?1", [&key])?;
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || file.try_clone().unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            terrariumd::store::threads::agent_ended(t, &key, &agent, "failed")
+        })
+    }).await.unwrap();
+    let marked = lab.thread(&tid).await;
+    assert_eq!(marked["status"], "waiting_operator");
+    let warning = std::fs::read_to_string(log.path()).unwrap();
+    assert!(warning.contains("WARN"), "{warning}");
+    assert!(warning.contains("no agent-end mail"), "{warning}");
+    assert!(warning.contains("missing-lead"), "{warning}");
 }
 
 #[tokio::test]

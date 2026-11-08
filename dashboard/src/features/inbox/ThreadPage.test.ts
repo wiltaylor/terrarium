@@ -175,6 +175,14 @@ describe("the chat page of a thread", () => {
     ]);
   });
 
+  it("shows that an ended thread agent cannot answer", async () => {
+    const t = await api.threads.open({ topic: "Agent ended", scope: "terrarium", agent: "terrarium/lead" });
+    const stored = api.world.threads.find((th) => th.id === t.id)!;
+    stored.agent_end_outcome = "failed";
+    const { el } = mount(`/inbox/threads/${t.id}`);
+    await waitFor(() => expect(el.textContent).toContain("agent ended: failed. Nobody will answer in this thread."));
+  });
+
   it("says that a close retracts the open questions", async () => {
     const t = await api.threads.open({ topic: "One question", scope: "terrarium", agent: "terrarium/lead" });
     api.sim.threadAsk(t.id, { text: "Yes or no?", options: ["Yes", "No"] });
