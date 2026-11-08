@@ -951,6 +951,7 @@ mod tests {
             ("in_progress", Some("working")),
             ("validating", Some("validating")),
             ("review", Some("review")),
+            ("merge_queue", None),
             ("accepted", Some("accepted")),
             ("blocked", Some("blocked")),
             ("done", None),
