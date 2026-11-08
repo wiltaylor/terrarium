@@ -10367,6 +10367,19 @@ async fn thread_commands() {
     )
     .await;
     assert_eq!(out, "thread T1 is tracking.\n");
+    let out = ok(
+        true,
+        &["thread", "track", "T1", "--monitor", "ops:health"],
+        vec![(200, json!({"id": "T1", "status": "tracking"}))],
+        vec![(
+            Post,
+            "/api/threads/T1/track",
+            vec![],
+            Some(json!({"cards": [], "monitor": "ops:health"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "thread T1 is tracking.\n");
     // TER-146: the agent links cards of any project as it tracks.
     let out = ok(
         true,
