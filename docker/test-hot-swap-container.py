@@ -71,7 +71,7 @@ raise SystemExit(42)
                         (payload / "bin/terrariumd").chmod(0o755)
                     dockerfile = "FROM ter-261-base\n"
                     if changed:
-                        dockerfile += "RUN touch /different-runtime-base\n"
+                        dockerfile += "RUN touch /home/terrarium/different-runtime-base\n"
                     dockerfile += "COPY payload/ /opt/terrarium/bundled/\n"
                     (context / "Dockerfile").write_text(dockerfile)
                     image = "ter-261-" + tag
