@@ -2452,8 +2452,8 @@ pub struct JobRepo {
 }
 
 impl JobRepo {
-    /// A new, empty bare repo at `c.dest` (an old one there is removed),
-    /// in a 0700 parent dir.
+    /// Open the persistent bare repo at `c.dest`, or initialize it in a
+    /// 0700 parent dir. The caller serializes creation and preparation.
     pub fn create(c: Checkout) -> Result<Self, GitError> {
         use std::os::unix::fs::PermissionsExt;
         check_url(&c.url, &c.deny_local_under)?;
@@ -2463,10 +2463,24 @@ impl JobRepo {
             .ok_or_else(|| io("the job repo path has no parent"))?;
         std::fs::create_dir_all(parent).map_err(io)?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
-        if std::fs::symlink_metadata(&c.dest).is_ok() {
-            std::fs::remove_dir_all(&c.dest).map_err(io)?;
-        }
         let me = Self { c };
+        if std::fs::symlink_metadata(&me.c.dest).is_ok() {
+            let healthy = || -> Result<bool, GitError> {
+                let fd = open_git_dir(&me.c.dest, true)?;
+                check_git_dir(&fd, &me.c.dest)?;
+                if job_repo_has_locks(&me.c.dest)? {
+                    return Ok(false);
+                }
+                me.local(&["fsck", "--connectivity-only", "--no-dangling"])?;
+                Ok(true)
+            };
+            if healthy().unwrap_or(false) {
+                return Ok(me);
+            }
+            // A killed fetch/update-ref can leave locks or incomplete
+            // objects. This is a disposable cache, not the source repo.
+            std::fs::remove_dir_all(&me.c.dest).map_err(io)?;
+        }
         let dest = me.c.dest.to_string_lossy().into_owned();
         me.runner(false)?.git(
             None,
@@ -2652,6 +2666,21 @@ impl JobRepo {
             )
             .map(|_| ())
     }
+}
+
+/// Called while prepare owns the repository lock, so any local git lock
+/// is from an interrupted operation. Do not follow directory symlinks.
+fn job_repo_has_locks(dir: &Path) -> Result<bool, GitError> {
+    for entry in std::fs::read_dir(dir).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        if entry.file_name().to_string_lossy().ends_with(".lock") {
+            return Ok(true);
+        }
+        if entry.file_type().map_err(io)?.is_dir() && job_repo_has_locks(&entry.path())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -3540,13 +3569,30 @@ mod tests {
         );
         assert_eq!(ls_remote(&c, "nope").unwrap(), None);
 
-        let r = JobRepo::create(c).unwrap();
+        let r = JobRepo::create(c.clone()).unwrap();
         let specs: Vec<String> = ["next", "clean", "c1", "c2", "lone"]
             .iter()
             .map(|b| format!("+refs/heads/{b}:refs/remotes/job/{b}"))
             .collect();
         r.fetch(&specs).unwrap();
         let next = r.commit_of("refs/remotes/job/next").unwrap().unwrap();
+        // A second job opens the same repo and fetches only new objects.
+        // Its first job's refs and locally made objects must survive.
+        let marker = r
+            .merge(&next, "refs/remotes/job/clean", "cached merge")
+            .unwrap();
+        let MergeStep::Merged(marker) = marker else {
+            panic!("clean merge failed")
+        };
+        r.set_ref("refs/job/cached", &marker).unwrap();
+        drop(r);
+        let r = JobRepo::create(c).unwrap();
+        assert_eq!(r.commit_of("refs/job/cached").unwrap(), Some(marker));
+        r.fetch(&specs).unwrap();
+        assert_eq!(
+            r.commit_of("refs/remotes/job/next").unwrap(),
+            Some(next.clone())
+        );
         assert_eq!(r.commit_of("refs/remotes/job/nope").unwrap(), None);
 
         let MergeStep::Merged(m1) = r
