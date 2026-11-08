@@ -492,6 +492,10 @@ impl RemoteRunner {
             .await
             .and_then(decode_value::<Hello>);
         let hello = match hello {
+            Ok(h) if !crate::control::supported_protocol(h.protocol) => {
+                abort(&tasks);
+                return Err(RunnerError::Other(format!("unsupported runner protocol {}", h.protocol)));
+            }
             Ok(h) if h.agent == agent => h,
             Ok(h) => {
                 abort(&tasks);

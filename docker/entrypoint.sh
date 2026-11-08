@@ -51,6 +51,12 @@ for dir in "${AUTH_DIRS[@]}" "${STATE_DIRS[@]}"; do
 done
 chmod 700 /state/credentials 2>/dev/null || true
 
+# Only the container entrypoint initializes current. One-off backup and stage
+# commands bypass this entrypoint, so they cannot select a different release.
+if [ -f /usr/local/lib/terrarium-hot-swap.py ]; then
+	python3 /usr/local/lib/terrarium-hot-swap.py init
+fi
+
 # The runner processes (PLAN §6). The image sets TERRARIUM_RUNNER; keep a
 # value from compose, else find the binary on PATH.
 if [ "${TERRARIUM_RUNNER_MODE:-process}" = "process" ] && [ -z "${TERRARIUM_RUNNER:-}" ]; then
@@ -112,6 +118,16 @@ on_stop() {
 }
 trap 'on_stop TERM' TERM
 trap 'on_stop INT' INT
+
+# SIGUSR1 pauses only our daemon child. Unlike a container stop, it does not
+# stop runners or impose the five-second container shutdown timeout.
+on_upgrade_pause() {
+	if [ -f "$RUN_DIR/upgrade-pause" ] && [ -n "$daemon_pid" ]; then
+		kill -TERM "$daemon_pid" 2>/dev/null
+	fi
+}
+trap on_upgrade_pause USR1
+printf '%s\n' "$$" > "$RUN_DIR/upgrade-supervisor.pid"
 
 now() { date +%s; }
 
@@ -206,12 +222,20 @@ stop_runners() {
 
 backoff=1
 while :; do
+	if [ -f "$RUN_DIR/upgrade-pause" ]; then
+		touch "$RUN_DIR/upgrade-paused"
+		while [ -f "$RUN_DIR/upgrade-pause" ] && [ -z "$stop_signal" ]; do
+			sleep 0.1
+		done
+		if [ -n "$stop_signal" ]; then break; fi
+	fi
 	started="$(now)"
 	# A background job of a shell without job control ignores SIGINT and
 	# SIGQUIT; `env --default-signal` gives terrariumd and the runners the
 	# default dispositions back.
 	env --default-signal "$@" &
 	daemon_pid=$!
+	rm -f "$RUN_DIR/upgrade-paused"
 	if [ -n "$stop_signal" ]; then kill -s "$stop_signal" "$daemon_pid" 2>/dev/null; fi
 	log "started terrariumd (pid $daemon_pid)"
 	wait_daemon stop
@@ -221,6 +245,10 @@ while :; do
 		break
 	fi
 	uptime=$(($(now) - started))
+	if [ -f "$RUN_DIR/upgrade-pause" ]; then
+		daemon_pid=""
+		continue
+	fi
 	if [ "$daemon_status" = 0 ]; then
 		log "terrariumd exited with status 0 after ${uptime}s: stopping the container"
 		break

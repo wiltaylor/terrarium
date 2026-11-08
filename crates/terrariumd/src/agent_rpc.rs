@@ -27,6 +27,9 @@ const MAX_BODY: usize = 16 * 1024 * 1024;
 
 /// Admission and draining are shared by all runner connections of one daemon.
 pub struct CallGate {
+    /// A supervisor-owned marker. Its removal commits a hot swap. Keep this
+    /// outside the restored database so recovery cannot accidentally admit RPCs.
+    probation: Option<std::path::PathBuf>,
     draining: tokio::sync::watch::Sender<bool>,
     active: tokio::sync::RwLock<()>,
     keys: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
@@ -35,6 +38,7 @@ pub struct CallGate {
 impl Default for CallGate {
     fn default() -> Self {
         Self {
+            probation: None,
             draining: tokio::sync::watch::Sender::new(false),
             active: Default::default(),
             keys: Default::default(),
@@ -43,6 +47,17 @@ impl Default for CallGate {
 }
 
 impl CallGate {
+    pub fn with_probation(path: Option<std::path::PathBuf>) -> Self {
+        Self { probation: path, ..Self::default() }
+    }
+
+    fn in_probation(&self) -> bool {
+        self.probation.as_ref().is_some_and(|p| {
+            // Fail closed on permission and other IO errors, not just presence.
+            !matches!(std::fs::metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        })
+    }
+
     fn key(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
         let mut keys = self
             .keys
@@ -226,7 +241,7 @@ impl AgentRpc {
         let state = self.state.upgrade().ok_or_else(retry)?;
         let mut draining = state.agent_calls.draining.subscribe();
         let _admitted = state.agent_calls.active.read().await;
-        if *draining.borrow() {
+        if *draining.borrow() || state.agent_calls.in_probation() {
             return Err(retry());
         }
         let p: HttpParams = serde_json::from_value(params.clone())

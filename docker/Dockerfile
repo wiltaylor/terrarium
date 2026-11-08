@@ -116,6 +116,16 @@ RUN set -eu; \
 # ---------------------------------------------------------------------------
 FROM docker:29.0.3-cli AS docker-cli
 
+# Every file that changes with a release lives in one final runtime layer.
+# The updater compares all preceding RootFS layer digests, not a mutable tag
+# or a caller-supplied "base" label. Changing this layout bumps hot-swap-layout.
+FROM ${NODE_IMAGE} AS release-payload
+COPY --from=rust /out/ /payload/bin/
+COPY --from=host-build /dist/ /payload/dist/
+COPY harnesses.toml /payload/harnesses.toml
+COPY defaults /payload/defaults/
+RUN cd /payload && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 > release-id
+
 FROM ${NODE_IMAGE} AS runtime
 
 # Compose resolves the deployment environment; swaps still use the Engine API.
@@ -192,24 +202,27 @@ ENV HOME=/home/terrarium \
 
 # One terrarium-runner process holds each agent (PLAN §6), so an agent
 # lives through a restart of terrariumd.
-COPY --from=rust /out/terrariumd /out/terrarium /out/terrarium-runner /usr/local/bin/
+RUN ln -s /state/releases/current/bin/terrariumd /usr/local/bin/terrariumd \
+    && ln -s /state/releases/current/bin/terrarium /usr/local/bin/terrarium \
+    && ln -s /state/releases/current/bin/terrarium-runner /usr/local/bin/terrarium-runner \
+    && ln -s /opt/terrarium/bundled/bin/terrarium-updater /usr/local/bin/terrarium-updater \
+    && ln -s /state/releases/current/dist /opt/terrarium/dist \
+    && ln -s /state/releases/current/defaults /opt/terrarium/defaults \
+    && ln -s /state/releases/current/harnesses.toml /etc/terrarium/harnesses.toml
 # The updater (docs/api.md §34): the same image with the entrypoint
 # terrarium-updater (compose.yaml, profile `updater`). `gh attestation
 # verify` checks the build provenance of a release image before the
 # updater pulls it (TERRARIUM_UPDATE_VERIFY=gh, the default; the gh stage).
-COPY --from=rust /out/terrarium-updater /usr/local/bin/
 COPY --from=gh /out/gh /usr/local/bin/gh
 # The host installer serves these (GET /install/terrarium-host?arch=<arch>,
 # TERRARIUM_HOST_DIST_DIR). One arch for now: the arch of the build.
-COPY --from=host-build /dist/ /opt/terrarium/dist/
 COPY docker/entrypoint.sh /usr/local/bin/terrarium-entrypoint
+COPY docker/hot-swap.py /usr/local/lib/terrarium-hot-swap.py
 # The pins of the first install (`terrariumd harness install`).
-COPY harnesses.toml /etc/terrarium/harnesses.toml
 # The packaged defaults (PLAN §8.3): the prompts and the harness settings.
 # The daemon copies them into the config repo (/config/terrarium) at each
 # start: a missing file is written, an unedited one is upgraded, and an
 # edited one gets the new default as <file>.new.
-COPY defaults /opt/terrarium/defaults
 
 USER terrarium
 WORKDIR /home/terrarium
@@ -221,6 +234,12 @@ EXPOSE 8080 8081 8082 8083
 # stops terrariumd and then the runners in order (docker/README.md).
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/terrarium-entrypoint"]
 CMD ["terrariumd"]
+
+# Must remain the LAST filesystem layer. Everything before it is the runtime
+# base and must be byte-identical for a hot swap. Metadata below adds no layer.
+COPY --from=release-payload /payload/ /opt/terrarium/bundled/
+LABEL io.terrarium.hot-swap-layout="1" \
+      io.terrarium.runner-compat-epoch="1"
 
 # OCI labels (docs/release.md). Last, so a new ref or version does not
 # rebuild a layer. CI sets the same version, revision, and source labels.

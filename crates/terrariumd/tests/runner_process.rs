@@ -49,6 +49,13 @@ fn fake_tui() -> PathBuf {
 /// The `terrarium-runner` binary next to the test binaries. A missing one
 /// is built once.
 fn runner_bin() -> PathBuf {
+    // CI builds the pinned N-1 runner separately and drives it with this
+    // daemon, rather than pretending that a current binary is an old one.
+    if let Some(path) = std::env::var_os("TERRARIUM_TEST_OLD_RUNNER") {
+        let path = PathBuf::from(path);
+        assert!(path.is_file(), "old runner fixture is missing");
+        return path;
+    }
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let exe = std::env::current_exe().unwrap();
@@ -674,6 +681,15 @@ async fn interrupt_stops_the_turn_and_keeps_the_harness() {
 /// Actual CLI calls wait through a hold and reach the next daemon exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_rpc_cli_calls_cross_a_graceful_restart() {
+    hot_swap_probation(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_hot_swap_failed_health_restores_then_replays_once() {
+    hot_swap_probation(true).await;
+}
+
+async fn hot_swap_probation(rollback: bool) {
     let cli = cli_bin();
     let mut td = Td::start().await;
     let bob = td.agent("bob", json!({})).await;
@@ -718,7 +734,37 @@ async fn agent_rpc_cli_calls_cross_a_graceful_restart() {
         "calls must wait for hello from the next daemon"
     );
     td.shutdown();
+    let state = td.dir.path().join("state");
+    let releases = state.join("releases");
+    std::fs::create_dir_all(&releases).unwrap();
+    let probation = releases.join("probation");
+    std::fs::write(&probation, "held").unwrap();
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker/hot-swap.py");
+    let backup = state.join("test-backup");
+    let control = |command: &str| {
+        let out = std::process::Command::new("python3")
+            .arg(&helper).arg(command).arg(&backup)
+            .env("TERRARIUM_STATE_DIR", &state).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    control("snapshot");
     td.boot().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!calls.is_finished(), "healthy probation must not admit held calls");
+    if rollback {
+        let conn = rusqlite::Connection::open(state.join("terrarium.db")).unwrap();
+        conn.execute_batch("CREATE TABLE hot_swap_test_migration(value TEXT)").unwrap();
+        drop(conn);
+        terrariumd::agent_rpc::drain(&td.daemon.as_ref().unwrap().state, Duration::from_secs(2))
+            .await.unwrap();
+        td.shutdown();
+        control("restore-database");
+        td.boot().await;
+        let conn = rusqlite::Connection::open(state.join("terrarium.db")).unwrap();
+        assert!(conn.prepare("SELECT * FROM hot_swap_test_migration").is_err());
+        assert!(!calls.is_finished(), "restored daemon still awaits health commit");
+    }
+    std::fs::remove_file(&probation).unwrap();
     timeout(WAIT, calls).await.unwrap().unwrap();
     assert_eq!(
         td.runner_pid(&bob),

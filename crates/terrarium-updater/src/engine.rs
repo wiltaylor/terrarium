@@ -66,6 +66,10 @@ pub enum Health {
 
 /// The container engine.
 pub trait Engine: Send + Sync {
+    /// Fail closed unless the runtime base and runner compatibility epoch match.
+    fn can_hot_swap<'a>(&'a self, _cur: &'a Container, _to: &'a Image) -> BoxFut<'a, Res<bool>> {
+        Box::pin(async { Ok(false) })
+    }
     /// The terrarium container (the service `terrarium` of the compose
     /// project of the updater, or `TERRARIUM_UPDATER_TARGET`).
     fn target(&self) -> BoxFut<'_, Res<Container>>;
