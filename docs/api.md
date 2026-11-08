@@ -6241,6 +6241,13 @@ budget, not measured disk throughput. Map keys are canonical block-device
 numbers such as `8:0`; values contain `read_bps`, `write_bps`, `read_iops`
 and `write_iops` (nonnegative integers).
 
+The `used` object includes charged `cpu_millis`, `memory_bytes`, the summed
+per-device `io` map, and sorted `exclusive_cores` CPU IDs. Queued and terminal
+reservations are excluded. Admission locks are per host agent. Docker lifecycle
+verbs publish an in-progress intent, then release admission while pulling or
+creating a container. Resource changes on that host return 409 until the verb
+finishes, and expiry cleanup retries afterward. Other hosts remain independent.
+
 `POST /api/hosts/{host}/reservations` accepts `target`, optional `agent`,
 `amounts`, `until`, optional `reason`, `exclusive`, `queue` and
 `queue_timeout`. `amounts` contains `cpu_millis` (1000 is one logical core),

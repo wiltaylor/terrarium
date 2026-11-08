@@ -1230,7 +1230,8 @@ async fn pull_via_cat(
 /// The executor state: the host registry and the exec sessions.
 pub struct Executor {
     /// Serialize reservation enforcement and cleanup across API calls/timers.
-    pub resource_lock: tokio::sync::Mutex<()>,
+    resource_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    resource_verbs: Mutex<HashMap<String, String>>,
     resource_pending: Mutex<HashMap<String, String>>,
     pub hosts: Arc<HostRegistry>,
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
@@ -1246,7 +1247,8 @@ impl Default for Executor {
     fn default() -> Self {
         Self {
             hosts: Arc::default(),
-            resource_lock: tokio::sync::Mutex::new(()),
+            resource_locks: Mutex::default(),
+            resource_verbs: Mutex::default(),
             resource_pending: Mutex::default(),
             sessions: Mutex::default(),
             max_per_agent: MAX_SESSIONS_PER_AGENT,
@@ -1258,7 +1260,62 @@ impl Default for Executor {
     }
 }
 
+struct ResourceVerb {
+    executor: Arc<Executor>,
+    host: String,
+}
+
+impl Drop for ResourceVerb {
+    fn drop(&mut self) {
+        self.executor
+            .resource_verbs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.host);
+    }
+}
+
 impl Executor {
+    pub fn resource_lock(&self, host: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.resource_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(host.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    pub fn target_resource_lock(&self, def: &TargetDef) -> Arc<tokio::sync::Mutex<()>> {
+        self.resource_lock(def.host.as_deref().unwrap_or(&def.name))
+    }
+
+    pub fn resource_verb_idle(&self, host: &str) -> ApiResult<()> {
+        if let Some(target) = self
+            .resource_verbs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(host)
+        {
+            return Err(ApiError::conflict(format!(
+                "target `{target}` has a lifecycle verb in progress on host `{host}`; retry the resource change"
+            )));
+        }
+        Ok(())
+    }
+
+    fn begin_resource_verb(self: &Arc<Self>, def: &TargetDef) -> ApiResult<ResourceVerb> {
+        let host = host_of(def)?.to_owned();
+        self.resource_verb_idle(&host)?;
+        self.resource_verbs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(host.clone(), def.name.clone());
+        Ok(ResourceVerb {
+            executor: self.clone(),
+            host,
+        })
+    }
+
     pub fn set_resource_pending(&self, host: &str, pending: bool) {
         let mut hosts = self
             .resource_pending
@@ -1520,9 +1577,13 @@ pub(crate) fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
 
 /// Start a command on a target.
 pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
-    let _resources = state.executor.resource_lock.try_lock().map_err(|_| {
-        ApiError::conflict("resource reservations are being updated; retry the command")
-    })?;
+    let _resources = state
+        .executor
+        .target_resource_lock(def)
+        .try_lock_owned()
+        .map_err(|_| {
+            ApiError::conflict("resource reservations are being updated; retry the command")
+        })?;
     let run = start_cmd_locked(state, def, cmd)?;
     track_resource_run(state, def, cmd, run, None)
 }
@@ -1868,7 +1929,7 @@ async fn start_exec_secrets(
         cmd.env.insert("TERRARIUM_GIT_TRAILERS".into(), p.trailers);
         cmd.env.remove("TERRARIUM_GIT_TRAILERS_FILE");
     }
-    let resources = state.executor.resource_lock.lock().await;
+    let resources = state.executor.target_resource_lock(&def).lock_owned().await;
     let (run, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
     let view = match actor {
@@ -1956,7 +2017,7 @@ pub async fn start_tool_exec(
     cmd.shell = false;
     cmd.pty = None;
     cmd.holder = holder_of(actor);
-    let resources = state.executor.resource_lock.lock().await;
+    let resources = state.executor.target_resource_lock(&def).lock_owned().await;
     let (running, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     let (sess, ctl) = ExecSession::new(
         name,
@@ -2641,7 +2702,10 @@ fn docker_limits(state: &Shared, def: &TargetDef) -> ApiResult<Option<Limits>> {
 }
 
 async fn docker_start(state: &Shared, def: &TargetDef) -> ApiResult<()> {
-    crate::reservations::before_docker_start(state, def).await?;
+    {
+        let _admission = state.executor.target_resource_lock(def).lock_owned().await;
+        crate::reservations::before_docker_start(state, def).await?;
+    }
     let container = container_name(def);
     verb_ok(state, def, "docker.start", move |session| {
         DaemonFrame::DockerStart(DockerStart {
@@ -2737,14 +2801,19 @@ pub async fn lifecycle(
         // Boxed: an instance verb runs `lifecycle` on the instance's lab dir.
         return Box::pin(instance_lifecycle(state, def, verb_kind, opts)).await;
     }
-    // Docker creation and state publication must be atomic with reservation
-    // admission: a grant must not observe a stopped target while it starts.
-    let _resources = if def.kind == TargetKind::Docker {
-        Some(state.executor.resource_lock.lock().await)
+    // Publish a short-lived intent under the host admission lock. Resource
+    // changes refuse this host while a verb runs, without holding a mutex
+    // across image pulls or blocking work on any other host.
+    let _resource_verb = if def.kind == TargetKind::Docker {
+        let _admission = state.executor.target_resource_lock(def).lock_owned().await;
+        if verb_kind == V::Up {
+            crate::reservations::lifecycle_admission(state, def)?;
+        }
+        Some(state.executor.begin_resource_verb(def)?)
     } else {
         None
     };
-    if verb_kind == V::Up {
+    if verb_kind == V::Up && def.kind != TargetKind::Docker {
         crate::reservations::lifecycle_admission(state, def)?;
     }
     let mut add_snapshot = None;

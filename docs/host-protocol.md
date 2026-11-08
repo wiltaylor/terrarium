@@ -823,7 +823,7 @@ with logical `cpu_ids` and `memory_bytes`. Missing capability means no
 reservation enforcement, not unlimited fallback. Per-device IO budgets are
 configured by the daemon operator rather than detected throughput.
 
-`resource_apply` carries `session`, `target`, `holder`, optional `container`
+`resource.apply` carries `session`, `target`, `holder`, optional `container`
 and runtime `limits` (fixed limits, optional CPU list and per-device IO).
 With a container it invokes `docker update`; per-device IO in a live update
 is rejected. Docker creation accepts per-device limits, only for ephemeral

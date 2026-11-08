@@ -386,7 +386,15 @@ async fn update(
     Path(name): Path<String>,
     ApiJson(patch): ApiJson<Value>,
 ) -> ApiResult<Json<TargetView>> {
-    let _resources = state.executor.resource_lock.lock().await;
+    let current = load(&state, &actor, name.clone()).await?;
+    let _resources = state
+        .executor
+        .target_resource_lock(&current.def)
+        .lock_owned()
+        .await;
+    if let Some(host) = &current.def.host {
+        state.executor.resource_verb_idle(host)?;
+    }
     let current = load(&state, &actor, name.clone()).await?;
     policy::define_target(&actor, current.def.project.as_deref())?;
     if let Some(p) = patch.get("project")

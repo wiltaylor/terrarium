@@ -305,7 +305,8 @@ pub async fn grant(
     host: &str,
     body: NewBody,
 ) -> ApiResult<Reservation> {
-    let _guard = state.executor.resource_lock.lock().await;
+    let _guard = state.executor.resource_lock(host).lock_owned().await;
+    state.executor.resource_verb_idle(host)?;
     ready(state, host)?;
     let target = body.target.clone();
     let key = body.agent.clone();
@@ -618,8 +619,9 @@ pub async fn extend(
     id: &str,
     value: &str,
 ) -> ApiResult<Reservation> {
-    let _guard = state.executor.resource_lock.lock().await;
     let r = row(state, id).await?;
+    let _guard = state.executor.resource_lock(&r.host).lock_owned().await;
+    state.executor.resource_verb_idle(&r.host)?;
     authorize(state, actor, &r, false).await?;
     let end = until(value)?;
     let id = id.to_owned();
@@ -630,8 +632,9 @@ pub async fn extend(
 }
 
 pub async fn retract(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Reservation> {
-    let _guard = state.executor.resource_lock.lock().await;
     let r = row(state, id).await?;
+    let _guard = state.executor.resource_lock(&r.host).lock_owned().await;
+    state.executor.resource_verb_idle(&r.host)?;
     authorize(state, actor, &r, true).await?;
     let id = id.to_owned();
     let r = state
@@ -642,8 +645,9 @@ pub async fn retract(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Reser
 }
 
 pub async fn cancel(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Reservation> {
-    let _guard = state.executor.resource_lock.lock().await;
     let r = row(state, id).await?;
+    let _guard = state.executor.resource_lock(&r.host).lock_owned().await;
+    state.executor.resource_verb_idle(&r.host)?;
     authorize(state, actor, &r, true).await?;
     let id = id.to_owned();
     state
@@ -666,7 +670,10 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         if !needs_work && !state.executor.resource_pending(&host.name) {
             continue;
         }
-        let _guard = state.executor.resource_lock.lock().await;
+        let _guard = state.executor.resource_lock(&host.name).lock_owned().await;
+        if state.executor.resource_verb_idle(&host.name).is_err() {
+            continue;
+        }
         if state.executor.resource_pending(&host.name)
             && let Err(error) = reconcile_host_locked(state, &host.name).await
         {
@@ -735,11 +742,12 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
 /// Reapply persisted enforcement before permitting new work after a host
 /// reconnect. Failure leaves the admission gate closed and the sweep retries.
 pub async fn reconcile_host(state: &Shared, host: &str) -> ApiResult<()> {
-    let _guard = state.executor.resource_lock.lock().await;
+    let _guard = state.executor.resource_lock(host).lock_owned().await;
     reconcile_host_locked(state, host).await
 }
 
 async fn reconcile_host_locked(state: &Shared, host: &str) -> ApiResult<()> {
+    state.executor.resource_verb_idle(host)?;
     let epoch = state.executor.resource_epoch(host);
     if !state.executor.hosts.is_online(host) {
         return Err(ApiError::conflict("host is offline"));

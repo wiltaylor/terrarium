@@ -30,11 +30,24 @@ async fn capacity(State(state): State<Shared>, Path(host): Path<String>) -> ApiR
         let (physical, budget, percentage) = store::capacity(c, &host)?;
         let rows = store::list(c, &host)?;
         let charged = rows.iter().filter(|r| matches!(r.state, store::State::Starting | store::State::Active | store::State::Ending));
-        let (cpu, memory) = charged.fold((0_u64, 0_u64), |(cpu, memory), r| (
-            cpu.saturating_add(r.amounts.cpu_millis), memory.saturating_add(r.amounts.memory_bytes)
-        ));
+        let mut used = terrarium_core::resources::Amounts::default();
+        let mut cores = std::collections::BTreeSet::new();
+        for r in charged {
+            used.cpu_millis = used.cpu_millis.saturating_add(r.amounts.cpu_millis);
+            used.memory_bytes = used.memory_bytes.saturating_add(r.amounts.memory_bytes);
+            cores.extend(r.cores.iter().copied());
+            for (device, amount) in &r.amounts.io {
+                let io = used.io.entry(device.clone()).or_default();
+                io.read_bps = io.read_bps.saturating_add(amount.read_bps);
+                io.write_bps = io.write_bps.saturating_add(amount.write_bps);
+                io.read_iops = io.read_iops.saturating_add(amount.read_iops);
+                io.write_iops = io.write_iops.saturating_add(amount.write_iops);
+            }
+        }
+        let mut used = serde_json::to_value(used)?;
+        used["exclusive_cores"] = json!(cores);
         Ok(json!({"host":host,"physical":physical,"reservable":budget,"percentage":percentage,
-            "used":{"cpu_millis":cpu,"memory_bytes":memory}}))
+            "used":used}))
     }).await?))
 }
 
@@ -53,7 +66,8 @@ async fn configure(
     ApiJson(body): ApiJson<CapacityBody>,
 ) -> ApiResult<Json<Value>> {
     policy::sysadmin(&actor, "configure reservable host capacity")?;
-    let _guard = state.executor.resource_lock.lock().await;
+    let _guard = state.executor.resource_lock(&host).lock_owned().await;
+    state.executor.resource_verb_idle(&host)?;
     state
         .db
         .write(actor.label(), move |t| {

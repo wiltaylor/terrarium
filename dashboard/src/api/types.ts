@@ -2954,7 +2954,7 @@ export interface HostCapacityBudget {
   percentage: number;
   physical: { cpu_ids: number[]; memory_bytes: number };
   reservable: ResourceAmounts;
-  used: ResourceAmounts;
+  used: ResourceAmounts & { exclusive_cores?: number[] };
 }
 export interface Reservation {
   id: string;

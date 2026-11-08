@@ -101,6 +101,8 @@ async fn setup_docker(
         },
         limits: Some(LimitsCapability {
             docker: true,
+            systemd: true,
+            controllers: vec!["cpu".into(), "memory".into(), "io".into(), "cpuset".into()],
             ..Default::default()
         }),
         ..Default::default()
@@ -130,6 +132,155 @@ async fn setup_docker(
         .await
         .ok();
     (td, server, client)
+}
+
+#[tokio::test]
+async fn host_reservation_refusal_names_existing_agent_sessions() {
+    let (td, server, client) = setup().await;
+    td.post(
+        "/api/targets",
+        json!({"name":"p-host","kind":"host","host":"h","project":"p"}),
+    )
+    .await
+    .ok();
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let def = state
+        .db
+        .read(|c| Ok(terrariumd::store::targets::get(c, "p-host")?.def))
+        .await
+        .unwrap();
+    let cmd = terrariumd::executor::RemoteCmd {
+        argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
+        holder: Some("p/worker".into()),
+        ..Default::default()
+    };
+    let run = terrariumd::executor::start_cmd(&state, &def, &cmd).unwrap();
+    let names = vec!["p-host".to_owned()];
+    let sessions = state.executor.resource_sessions(&names, None);
+    assert_eq!(sessions.len(), 1);
+    for agent in [Some("p/worker"), None] {
+        let mut body = json!({"target":"p-host","amounts":{"cpu_millis":1000},"until":"30m"});
+        if let Some(agent) = agent {
+            body["agent"] = json!(agent);
+        }
+        let refused = td.post("/api/hosts/h/reservations", body).await;
+        refused.err(409, "conflict");
+        assert_eq!(
+            refused.body["error"]["details"]["sessions"],
+            json!(sessions),
+            "{}",
+            refused.body
+        );
+    }
+    state.executor.end_resource_sessions(&names, None).await;
+    run.collect(1024).await;
+    client.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
+    use terrarium_core::protocol::LifecycleVerb;
+    use terrariumd::executor::{LifecycleOpts, lifecycle};
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let directory = td.dir.path();
+    std::fs::write(directory.join("reservation-docker"), format!(
+        "#!/bin/sh\ncase $1 in\ninspect) echo '[]'; echo 'Error: No such object' >&2; exit 1;;\nrun) touch '{0}/pull-entered'; while [ ! -f '{0}/pull-release' ]; do sleep 0.05; done;;\nupdate) exit 0;;\nesac\n", directory.display()
+    )).unwrap();
+    let (server_b, address) = terrariumd::hosts::serve(state.clone(), "127.0.0.1:0")
+        .await
+        .unwrap();
+    let registration = td.post("/api/hosts", json!({"name":"other-host"})).await;
+    let mut options = ClientOptions::new(
+        format!("ws://{address}/hosts/connect"),
+        registration.ok()["token"].as_str().unwrap(),
+        "other-host",
+    );
+    options.docker_bin = directory
+        .join("reservation-docker")
+        .to_string_lossy()
+        .into_owned();
+    options.capabilities = state.executor.hosts.capabilities("h").unwrap();
+    let client_b = tokio::spawn(Client::new(options).run());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !state.executor.hosts.is_online("other-host")
+            || state.executor.resource_pending("other-host")
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    td.post(
+        "/api/targets",
+        json!({"name":"p-fast","kind":"docker","host":"other-host","project":"p","image":"fake"}),
+    )
+    .await
+    .ok();
+    let (slow, fast) = state
+        .db
+        .read(|c| {
+            Ok((
+                terrariumd::store::targets::get(c, "p-box")?.def,
+                terrariumd::store::targets::get(c, "p-fast")?.def,
+            ))
+        })
+        .await
+        .unwrap();
+    let task_state = state.clone();
+    let pull = tokio::spawn(async move {
+        lifecycle(
+            &task_state,
+            &slow,
+            LifecycleVerb::Up,
+            &LifecycleOpts::default(),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !directory.join("pull-entered").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(state.executor.resource_lock("h").try_lock_owned().is_ok());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        lifecycle(
+            &state,
+            &fast,
+            LifecycleVerb::Status,
+            &LifecycleOpts::default(),
+        )
+        .await
+        .unwrap();
+        td.put("/api/hosts/other-host/capacity", json!({"percentage":50}))
+            .await
+            .ok();
+        td.post(
+            "/api/hosts/other-host/reservations",
+            json!({"target":"p-fast","amounts":{"cpu_millis":1000},"until":"30m"}),
+        )
+        .await
+        .ok();
+    })
+    .await
+    .unwrap();
+    td.put("/api/hosts/h/capacity", json!({"percentage":50}))
+        .await
+        .err(409, "conflict");
+    std::fs::write(directory.join("pull-release"), "").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), pull)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(state.executor.resource_verb_idle("h").is_ok());
+    client.abort();
+    server.abort();
+    client_b.abort();
+    server_b.abort();
 }
 
 #[tokio::test]
@@ -549,7 +700,10 @@ async fn reservation_wait_resolves_on_start_and_reconciles_already_active() {
 
 #[tokio::test]
 async fn exclusive_budget_pins_owner_and_excludes_shared_workloads() {
-    use terrarium_core::{config::TargetKind, resources::Amounts};
+    use terrarium_core::{
+        config::TargetKind,
+        resources::{Amounts, IoAmounts},
+    };
     use terrariumd::store::{
         reservations::{self as r, Holder, Request},
         targets,
@@ -559,6 +713,16 @@ async fn exclusive_budget_pins_owner_and_excludes_shared_workloads() {
     state
         .db
         .write("system", |tx| {
+            let io = std::collections::BTreeMap::from([(
+                "8:0".to_owned(),
+                IoAmounts {
+                    read_bps: 1000,
+                    write_bps: 2000,
+                    read_iops: 30,
+                    write_iops: 40,
+                },
+            )]);
+            r::configure(tx, "h", 100, io.clone())?;
             let r = r::request(
                 tx,
                 Request {
@@ -568,6 +732,8 @@ async fn exclusive_budget_pins_owner_and_excludes_shared_workloads() {
                     target: "p-box".into(),
                     amounts: Amounts {
                         cpu_millis: 1000,
+                        memory_bytes: 16 << 20,
+                        io,
                         ..Default::default()
                     },
                     exclusive: true,
@@ -582,6 +748,14 @@ async fn exclusive_budget_pins_owner_and_excludes_shared_workloads() {
         })
         .await
         .unwrap();
+    let capacity = td.get("/api/hosts/h/capacity").await;
+    assert_eq!(capacity.ok()["used"]["exclusive_cores"], json!([0]));
+    assert_eq!(
+        capacity.body["used"]["io"]["8:0"],
+        json!({"read_bps":1000,"write_bps":2000,"read_iops":30,"write_iops":40})
+    );
+    assert_eq!(capacity.body["used"]["cpu_millis"], 1000);
+    assert_eq!(capacity.body["used"]["memory_bytes"], 16 << 20);
     let (owner, shared) = state
         .db
         .read(|c| {
