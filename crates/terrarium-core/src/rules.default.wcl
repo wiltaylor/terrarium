@@ -124,6 +124,9 @@ rule "job-requeued" {
     remove = ["validation:running"]
     add = ["validation:queued"]
   }
+  group_status { key = "{{job.group_key}}" step = "queued" state = "running" }
+  group_status { key = "{{job.group_key}}" step = "merge job" state = "pending" }
+  group_status { key = "{{job.group_key}}" step = "e2e" state = "pending" }
 }
 
 // ------------------------------------------------------------ the end

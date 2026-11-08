@@ -155,15 +155,22 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Group> {
             continue;
         }
         if step.eta_at.is_none() {
-            let start = step.started_at.as_deref()
+            let start = step
+                .started_at
+                .as_deref()
                 .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-                .map(|v| v.with_timezone(&Utc)).unwrap_or(cursor);
-            step.eta_at = step.estimated_secs
+                .map(|v| v.with_timezone(&Utc))
+                .unwrap_or(cursor);
+            step.eta_at = step
+                .estimated_secs
                 .and_then(|secs| start.checked_add_signed(Duration::seconds(secs)))
                 .map(crate::time_param::stored);
         }
-        if let Some(at) = step.eta_at.as_deref()
-            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok()) {
+        if let Some(at) = step
+            .eta_at
+            .as_deref()
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        {
             cursor = cursor.max(at.with_timezone(&Utc));
         }
     }
@@ -178,19 +185,29 @@ fn elapsed(start: Option<String>, end: Option<String>) -> Option<i64> {
 
 /// Successful samples only, scoped to this project and group lifecycle rule.
 fn historical_secs(conn: &Connection, id: &str, name: &str) -> ApiResult<Option<i64>> {
-    let mut stmt = conn.prepare("SELECT s.started_at, s.finished_at FROM group_steps s
+    let mut stmt = conn.prepare(
+        "SELECT s.started_at, s.finished_at FROM group_steps s
         JOIN card_groups g ON g.card = s.group_card
         JOIN card_groups current ON current.card = ?1
         WHERE g.project = current.project AND g.rule = current.rule
         AND s.group_card <> ?1 AND s.name = ?2 AND s.state = 'done'
-        AND s.started_at IS NOT NULL AND s.finished_at IS NOT NULL")?;
-    let mut samples = stmt.query_map(params![id, name], |r| {
-        Ok(elapsed(r.get(0)?, r.get(1)?))
-    })?.collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<_>>();
+        AND s.started_at IS NOT NULL AND s.finished_at IS NOT NULL",
+    )?;
+    let mut samples = stmt
+        .query_map(params![id, name], |r| Ok(elapsed(r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     samples.sort_unstable();
     let n = samples.len();
-    Ok(if n == 0 { None } else if n % 2 == 1 { Some(samples[n / 2]) }
-        else { Some(samples[n / 2 - 1] + (samples[n / 2] - samples[n / 2 - 1]) / 2) })
+    Ok(if n == 0 {
+        None
+    } else if n % 2 == 1 {
+        Some(samples[n / 2])
+    } else {
+        Some(samples[n / 2 - 1] + (samples[n / 2] - samples[n / 2 - 1]) / 2)
+    })
 }
 
 pub fn by_key(conn: &Connection, project: &str, key: &str) -> ApiResult<Option<Group>> {
@@ -411,13 +428,20 @@ pub fn step(
         text.or_else(|| existing.map(|s| s.text.as_str()))
             .unwrap_or_default(),
     );
+    let stored_eta = t
+        .query_row(
+            "SELECT eta_at FROM group_steps WHERE group_card = ?1 AND name = ?2",
+            params![g.id, name],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
     let eta_at = match eta {
         Some("jobs") => return Err(ApiError::invalid("a step ETA takes a duration, not jobs")),
         Some(value) => Some(deadline(value)?),
-        None => t.query_row("SELECT eta_at FROM group_steps WHERE group_card = ?1 AND name = ?2",
-            params![g.id, name], |r| r.get::<_, Option<String>>(0)).optional()?.flatten(),
+        None => stored_eta.clone(),
     };
-    if existing.is_some_and(|s| s.state == state && s.text == text && s.eta_at == eta_at) {
+    if existing.is_some_and(|s| s.state == state && s.text == text && stored_eta == eta_at) {
         return Ok(false);
     }
     let at = crate::time_param::stored(Utc::now());

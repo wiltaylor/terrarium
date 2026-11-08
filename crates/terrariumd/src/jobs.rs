@@ -1846,14 +1846,18 @@ async fn steps(
     );
     if job.kind == JobKind::Merge {
         let card = job.card.clone();
-        x.state.db.write("system", move |t| {
-            if let Some(g) = crate::store::groups::for_card(t, &card)?
-                && g.key.starts_with("merge:") {
-                crate::store::groups::step(t, &g, "merge job", Some("done"), None, None)?;
-                crate::store::groups::step(t, &g, "e2e", Some("running"), None, None)?;
-            }
-            Ok(())
-        }).await?;
+        x.state
+            .db
+            .write("system", move |t| {
+                if let Some(g) = crate::store::groups::for_card(t, &card)?
+                    && g.key.starts_with("merge:")
+                {
+                    crate::store::groups::step(t, &g, "merge job", Some("done"), None, None)?;
+                    crate::store::groups::step(t, &g, "e2e", Some("running"), None, None)?;
+                }
+                Ok(())
+            })
+            .await?;
     }
     let recipe_cmd = RemoteCmd {
         argv: vec![

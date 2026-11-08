@@ -901,7 +901,8 @@ async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     settle(&td).await;
     let g = card(&td, &gid).await["group"].clone();
     assert_eq!(g["total"], 3);
-    assert_eq!(g["steps"][1]["state"], "failed");
+    assert_eq!(g["steps"][2]["name"], "e2e");
+    assert_eq!(g["steps"][2]["state"], "failed");
     let fix = g["members"][0].as_str().unwrap().to_owned();
     assert_ne!(fix, a);
     assert_ne!(fix, b);
