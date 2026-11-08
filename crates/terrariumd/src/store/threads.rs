@@ -615,6 +615,10 @@ fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
     let th = get_bare(t, id)?;
     let at = now();
     if th.status == ThreadStatus::WaitingOperator {
+        t.execute(
+            "INSERT OR IGNORE INTO thread_pending_wakes(thread, reason) VALUES (?1, ?2)",
+            params![id, reason],
+        )?;
         return Ok(());
     }
     let status = if th.status == ThreadStatus::Tracking {
@@ -631,6 +635,29 @@ fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
         json!({"reason": reason}),
     )?;
     emit_with(t, &th, "cards", json!({"reason": reason}))
+}
+
+/// Deliver each held reason once, after the operator wait ends. Keep the
+/// reason even if the card moved again: it is an event, not a status poll.
+fn flush_pending_wakes(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
+    let th = get_bare(t, id)?;
+    if th.status == ThreadStatus::WaitingOperator {
+        return Ok(());
+    }
+    let reasons: Vec<String> = {
+        let mut st = t.prepare(
+            "SELECT reason FROM thread_pending_wakes WHERE thread = ?1 ORDER BY reason",
+        )?;
+        st.query_map([id], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    t.execute("DELETE FROM thread_pending_wakes WHERE thread = ?1", [id])?;
+    if th.status != ThreadStatus::Closed {
+        for reason in reasons {
+            wake(t, id, &reason)?;
+        }
+    }
+    Ok(())
 }
 
 fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
@@ -1000,6 +1027,7 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     }
     let th = get(t, &th.id)?;
     emit_with(t, &th, "message", json!({"message": msg, "author": author}))?;
+    flush_pending_wakes(t, id)?;
     Ok(th)
 }
 
@@ -1035,6 +1063,7 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
         "response",
         json!({"message": msg, "author": "operator"}),
     )?;
+    flush_pending_wakes(t, id)?;
     Ok(th)
 }
 
@@ -1065,6 +1094,7 @@ pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     let th = get(t, &th.id)?;
     t.audit("thread.track", &th.id, th.project(), json!({"by": by}))?;
     emit_with(t, &th, "tracking", json!({"author": by}))?;
+    flush_pending_wakes(t, id)?;
     if first && all_review_or_later(t, id)? {
         wake(t, id, WAKE_REVIEW)?;
     }
@@ -1410,7 +1440,8 @@ pub fn on_question(t: &mut Tx<'_>, id: &str, q: &Question, change: &str) -> ApiR
         }
     }
     let th = get_bare(t, &th.id)?;
-    emit(t, &th, "question")
+    emit(t, &th, "question")?;
+    flush_pending_wakes(t, id)
 }
 
 /// The `thread` and `inbox` events of a change.
