@@ -1,6 +1,7 @@
 //! Estimates from card move events. Review uses the last 20 completed
 //! visits in this project, with at least three samples. Repeated visits
-//! count separately. Open visits and malformed or backwards times do not count.
+//! count separately. Only the latest 2000 project events are considered, bounding
+//! query work. Open visits and malformed or backwards times do not count.
 
 use chrono::{DateTime, Duration};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -100,6 +101,8 @@ pub fn calibrated_ms(samples: &[WorkSample], labels: &[String], guess: Option<f6
 
 /// Completed visits to a column role (falling back to its name for older
 /// events), newest exit first. This query is shared with ETA calibration.
+/// The SQL window is the latest 2000 project events. At most `limit`
+/// completed visits are returned, excluding invalid timestamps.
 pub fn completed_visits(
     conn: &Connection,
     project: &str,
@@ -107,20 +110,23 @@ pub fn completed_visits(
     limit: usize,
 ) -> ApiResult<Vec<Duration>> {
     let mut stmt = conn.prepare(
-        "WITH moves AS (
+        "WITH recent AS (
+           SELECT seq, card, at, kind, payload FROM events WHERE project = ?1
+           ORDER BY seq DESC LIMIT 2000
+         ), moves AS (
            SELECT seq, at, payload,
              lead(at) OVER (PARTITION BY card ORDER BY seq) AS left_at,
              lead(seq) OVER (PARTITION BY card ORDER BY seq) AS left_seq,
              lead(payload) OVER (PARTITION BY card ORDER BY seq) AS left_payload
-           FROM events WHERE project = ?1 AND kind = 'card'
+           FROM recent WHERE kind = 'card'
              AND json_extract(payload, '$.change') = 'moved'
          ) SELECT at, left_at FROM moves
            WHERE coalesce(json_extract(payload, '$.to_role'), json_extract(payload, '$.to')) = ?2
              AND coalesce(json_extract(left_payload, '$.from_role'), json_extract(left_payload, '$.from')) = ?2
              AND coalesce(json_extract(left_payload, '$.to_role'), json_extract(left_payload, '$.to')) <> ?2
-           ORDER BY left_seq DESC",
+           ORDER BY left_seq DESC LIMIT ?3",
     )?;
-    let rows = stmt.query_map(params![project, column], |r| {
+    let rows = stmt.query_map(params![project, column, limit as i64], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })?;
     let mut samples = Vec::new();
@@ -143,7 +149,8 @@ pub fn completed_visits(
 
 /// Derived review deadline and start, never persisted as a worker estimate.
 /// An open merge job supersedes review, including while queued.
-pub fn review_eta(
+#[cfg(test)]
+fn review_eta(
     conn: &Connection,
     project: &str,
     card: &str,
@@ -152,6 +159,53 @@ pub fn review_eta(
     if merge_open {
         return Ok(None);
     }
+    ReviewEstimates::default().eta(conn, project, card)
+}
+
+/// Per-response cache, including projects without enough history. List renders
+/// share one instance, so history is queried once per project, not per card.
+#[derive(Default)]
+pub struct ReviewEstimates {
+    review: std::collections::HashMap<String, Option<Duration>>,
+    work: std::collections::HashMap<String, Vec<WorkSample>>,
+}
+
+impl ReviewEstimates {
+    pub fn worker_ms(
+        &mut self,
+        conn: &Connection,
+        project: &str,
+        labels: &[String],
+        guess: Option<f64>,
+    ) -> ApiResult<Option<f64>> {
+        if !self.work.contains_key(project) {
+            self.work.insert(project.to_owned(), work_samples(conn, project)?);
+        }
+        Ok(self.work.get(project).and_then(|s| calibrated_ms(s, labels, guess)))
+    }
+
+    pub fn eta(
+        &mut self,
+        conn: &Connection,
+        project: &str,
+        card: &str,
+    ) -> ApiResult<Option<(String, String)>> {
+        let median = match self.review.get(project) {
+            Some(value) => *value,
+            None => {
+                let value = review_duration(conn, project)?;
+                self.review.insert(project.to_owned(), value);
+                value
+            }
+        };
+        let Some(median) = median else {
+            return Ok(None);
+        };
+        review_deadline(conn, card, median)
+    }
+}
+
+fn review_duration(conn: &Connection, project: &str) -> ApiResult<Option<Duration>> {
     let mut samples = completed_visits(conn, project, super::board::REVIEW, 20)?;
     if samples.len() < 3 {
         return Ok(None);
@@ -163,13 +217,24 @@ pub fn review_eta(
     } else {
         samples[mid]
     };
-    let start: Option<String> = conn.query_row(
-        "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
+    Ok(Some(median))
+}
+
+fn review_deadline(
+    conn: &Connection,
+    card: &str,
+    median: Duration,
+) -> ApiResult<Option<(String, String)>> {
+    let start: Option<String> = conn
+        .query_row(
+            "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
            AND json_extract(payload, '$.change') = 'moved'
-           AND coalesce(json_extract(payload, '$.to_role'), json_extract(payload, '$.to')) = 'review'
+           AND coalesce(json_extract(payload, '$.to_role'), json_extract(payload, '$.to')) = ?2
          ORDER BY seq DESC LIMIT 1",
-        [card], |r| r.get(0),
-    ).optional()?;
+            params![card, super::board::REVIEW],
+            |r| r.get(0),
+        )
+        .optional()?;
     Ok(start.and_then(|start| {
         let at = DateTime::parse_from_rfc3339(&start)
             .ok()?
@@ -312,7 +377,7 @@ mod tests {
         );
         moved(&c, "p", "open", 10, "review", "working");
         moved(&c, "p", "open", 20, "working", "review");
-        // Even sample median: (2 + 4) / 2 = 3 minutes.
+        // Re-entry completes a zero-minute visit: {0, 2, 4, 12} has median 3.
         assert_eq!(
             review_eta(&c, "p", "open", false).unwrap().unwrap().0,
             "2026-11-08T00:23:00+00:00"
@@ -340,6 +405,25 @@ mod tests {
             completed_visits(&c, "other", "review", 20)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn render_cache_reuses_history_and_sql_window_is_bounded() {
+        let c = db();
+        history(&c);
+        let mut cache = ReviewEstimates::default();
+        let first = cache.eta(&c, "p", "open").unwrap();
+        // Changes after this response's first lookup must not trigger a
+        // second project history query, even when history becomes unavailable.
+        c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,kind,payload) SELECT 'p','other','{}' FROM n;").unwrap();
+        assert_eq!(cache.eta(&c, "p", "open").unwrap(), first);
+        assert!(completed_visits(&c, "p", "review", 20).unwrap().is_empty());
+        assert!(
+            ReviewEstimates::default()
+                .eta(&c, "p", "open")
+                .unwrap()
+                .is_none()
         );
     }
 }

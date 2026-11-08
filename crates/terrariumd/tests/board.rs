@@ -33,6 +33,98 @@ async fn card(td: &TestDaemon, agent: &str, body: Value) -> String {
 }
 
 #[tokio::test]
+async fn review_render_uses_history_but_preserves_open_job_eta() {
+    use terrariumd::store::{
+        board, card_history,
+        jobs::{self, JobKind, NewJob},
+    };
+    let td = setup().await;
+    let id = card(&td, "proj/lead", json!({"title":"Await review"})).await;
+    let path = format!("/api/cards/{id}");
+    td.patch(&path, json!({"column":"review", "eta_at":"3h"}))
+        .await
+        .ok();
+    // No history: the manually stored estimate is not a review estimate.
+    assert!(td.get(&path).await.ok().get("eta_at").is_none());
+    for i in 0..3 {
+        let sample = card(&td, "proj/lead", json!({"title":format!("History {i}")})).await;
+        let p = format!("/api/cards/{sample}");
+        td.patch(&p, json!({"column":"review"})).await.ok();
+        td.patch(&p, json!({"column":"ready"})).await.ok();
+    }
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    let cid = id.clone();
+    let (start, median) = db
+        .read(move |conn| {
+            let mut samples = card_history::completed_visits(conn, "proj", board::REVIEW, 20)?;
+            samples.sort();
+            Ok((board::last_moved_at(conn, &cid)?.unwrap(), samples[1]))
+        })
+        .await
+        .unwrap();
+    let c = td.get(&path).await.ok().clone();
+    assert_eq!(c["eta_set_at"], start);
+    let expected = chrono::DateTime::parse_from_rfc3339(&start).unwrap() + median;
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(c["eta_at"].as_str().unwrap()).unwrap(),
+        expected
+    );
+    // The board list follows the same derived rendering path.
+    let b = td.get("/api/projects/proj/board").await.ok().clone();
+    assert_eq!(
+        b["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == id)
+            .unwrap()["eta_at"],
+        c["eta_at"]
+    );
+    let cid = id.clone();
+    let job = db
+        .write("operator", move |t| {
+            jobs::create(
+                t,
+                NewJob {
+                    project: "proj".into(),
+                    card: cid,
+                    kind: JobKind::Merge,
+                    repo: "app".into(),
+                    branch: "b".into(),
+                    commit: None,
+                    by_agent: None,
+                    batch: Vec::new(),
+                    planned_secs: Some(1200),
+                },
+            )
+        })
+        .await
+        .unwrap();
+    let queued = td.get(&path).await.ok().clone();
+    assert_eq!(queued["job"]["kind"], "merge");
+    assert_eq!(queued["job"]["state"], "queued");
+    assert!(queued.get("eta_at").is_none());
+    let jid = job.id;
+    let started = db
+        .write("system", move |t| {
+            assert!(jobs::start(t, &jid, "machine", Some(1))?);
+            jobs::get(t, &jid)
+        })
+        .await
+        .unwrap();
+    let running = td.get(&path).await.ok().clone();
+    assert_eq!(running["job"]["state"], "running");
+    let expected = chrono::DateTime::parse_from_rfc3339(started.started_at.as_ref().unwrap())
+        .unwrap()
+        + chrono::Duration::seconds(1200);
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(running["eta_at"].as_str().unwrap()).unwrap(),
+        expected
+    );
+    assert!(running.get("eta_set_by").is_some());
+}
+
+#[tokio::test]
 async fn human_comments_mail_leads_and_replies_reach_inbox() {
     let td = setup().await;
     let id = card(
