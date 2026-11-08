@@ -965,34 +965,12 @@ pub fn add_link(
     render(t, by_pk(t, row.pk)?)
 }
 
-/// The name of a released version from before TER-58 that the artifact is
-/// on. The old `version_artifacts` and `versions` rows stay read only until a
-/// later version drops the tables (TER-128). Until then an artifact of a
-/// released version cannot be deleted (TER-129).
-fn on_released_version(conn: &Connection, pk: i64) -> ApiResult<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT v.name FROM version_artifacts va JOIN versions v ON v.id = va.version
-             WHERE va.artifact = ?1 AND v.status = 'released' LIMIT 1",
-            [pk],
-            |r| r.get(0),
-        )
-        .optional()?)
-}
-
 /// Delete an artifact. Returns the blob to remove when no one else uses it.
 pub fn delete(t: &mut Tx<'_>, actor: &Actor, key: &str) -> ApiResult<(String, String)> {
     let row = find_for(t, actor, key)?;
     // A write: the own project only, also for an architect (TER-47).
     crate::policy::write_project(actor, &row.project)?;
     policy::delete_artifact(actor, &row.project, &row.created_by)?;
-    if let Some(v) = on_released_version(t, row.pk)? {
-        return Err(ApiError::conflict(format!(
-            "{} is attached to released version `{v}` (from before TER-58); \
-             released versions are immutable",
-            short(row.num)
-        )));
-    }
     t.execute("DELETE FROM artifacts WHERE pk = ?1", [row.pk])?;
     if actor.address() != row.created_by {
         t.audit(
@@ -1034,14 +1012,12 @@ pub struct PruneReport {
 }
 
 /// Kept: attached to anything that still exists (a live page, a card, a
-/// label, or a version from before TER-58: the `version_artifacts` rows
-/// stay until a later version drops the table) or embedded in a live page.
+/// label) or embedded in a live page.
 fn attached(conn: &Connection, row: &ArtRow) -> ApiResult<bool> {
     let target = format!("{}/{}", row.project, short(row.num));
     let n: i64 = conn.query_row(
         "SELECT
-           (SELECT count(*) FROM version_artifacts WHERE artifact = ?1)
-         + (SELECT count(*) FROM artifact_labels WHERE artifact = ?1)
+           (SELECT count(*) FROM artifact_labels WHERE artifact = ?1)
          + (SELECT count(*) FROM artifact_links l JOIN wiki_pages p ON p.id = l.ref
              WHERE l.artifact = ?1 AND l.kind = 'page' AND p.deleted_at IS NULL)
          + (SELECT count(*) FROM artifact_links l JOIN cards c ON c.id = l.ref

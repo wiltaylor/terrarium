@@ -5268,7 +5268,7 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
 | `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact |
 | `GET /api/projects/{name}/artifacts/usage` | | `200 {"project", "count", "used_bytes", "quota_bytes", "max_file_bytes"}` |
 | `GET /api/artifacts/{id}` | | `200` artifact |
-| `DELETE /api/artifacts/{id}` | | `204`; the author or an admin; `409` on a released version from before TER-58 |
+| `DELETE /api/artifacts/{id}` | | `204`; the author or an admin |
 | `POST /api/artifacts/{id}/links` | `{"kind": "page" \| "card" \| "label", "ref"}` | `201` artifact |
 | `POST /api/artifacts/{id}/url` | none, or `{"ttl"?}` | `200 {"url", "exp", "expires_at"}` |
 | `POST /api/artifacts/prune` | `{"dry_run"?, "as_of"?}` | `200` prune report; sysadmin or operator |
@@ -5279,11 +5279,7 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
   `422 invalid` with a message that names `label`.
 - An admin delete of another author's artifact writes `artifact.delete`. The
   blob goes when no artifact uses it.
-- An artifact on a `released` version from before TER-58 (an old
-  `version_artifacts` row) is not deleted: `409 conflict`, also for its
-  author, an admin, or the operator. The rows stay read only until a later
-  version drops the tables (TER-128). A label link does not block a
-  delete.
+- A label link does not block deletion.
 
 ### 12.4 Serving: `GET /a/{uid}/{path}`
 
@@ -5358,8 +5354,8 @@ port (8081) as a separate origin. The dashboard embeds them in
 endpoint. `as_of` is an RFC 3339 time; the default is now.
 
 - The rule keeps an artifact that is attached to a live page, a card, or a
-  label, or to a version from before TER-58 (the old `version_artifacts`
-  rows), or that a live page embeds.
+  label, or that a live page embeds. Old version links no longer retain artifacts.
+  They go through the same warning and prune as other unattached artifacts.
 - An unattached artifact older than `retention_days - 1` days gets the
   audit row `artifact.prune_warning` with `prune_after`.
 - An unattached artifact older than `retention_days` whose warning is a day
@@ -5385,8 +5381,9 @@ question ask`) with the artifacts linked.
 Every `/api/projects/{name}/versions` and `/api/versions/...` route gives
 `404`. The `version.*` events are gone. The tables `versions`,
 `version_cards`, `version_artifacts`, `version_reviews`, and
-`test_run_versions` keep their rows, and nothing reads or writes them
-except the artifact prune (§12.5). A later version drops them.
+`test_run_versions` and their indexes are dropped by TER-128. No current data
+uses these legacy tables. Artifact deletion (§12.3) and prune (§12.5) no
+longer read them. The migration irreversibly discards the legacy metadata.
 
 ## 14. Not in this phase
 
