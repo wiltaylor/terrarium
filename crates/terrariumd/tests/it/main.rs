@@ -67,6 +67,8 @@ mod harness_tools;
 mod hosts;
 #[path = "../idle_alert.rs"]
 mod idle_alert;
+#[path = "../conflict_hints.rs"]
+mod conflict_hints;
 #[path = "../inbox.rs"]
 mod inbox;
 mod inbox_perf;
