@@ -13,6 +13,7 @@ async fn setup(limit: i64, concurrent: u32, daily: u32) -> TestDaemon {
             {"name":"backlog"}, {"name":"ready"},
             {"name":"coding", "role":"working", "wip_limit":limit},
             {"name":"review", "role":"review"},
+            {"name":"merged", "role":"accepted"},
             {"name":"blocked", "role":"blocked"}, {"name":"done"}
         ]}),
     )
@@ -227,4 +228,207 @@ async fn timer_pass_fills_only_available_places() {
     assert_eq!(get(&td, &third).await["column"], "ready");
     terrariumd::card_dispatcher::pass(&state(&td)).await;
     assert!(get(&td, &third).await["agent"].is_null());
+}
+
+async fn lead_id(td: &TestDaemon) -> String {
+    state(td)
+        .db
+        .read(|c| {
+            Ok(terrariumd::store::agents::find(c, "lead", Some("p"))?
+                .agent
+                .id
+                .to_string())
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn failures_back_off_once_and_do_not_block_later_cards() {
+    let td = setup(3, 3, 20).await;
+    let bad = card(&td, "small").await;
+    td.agent("p", &bad.to_ascii_lowercase(), json!({})).await;
+    let good = card(&td, "impl").await;
+    enabled(&td).await;
+    terrariumd::card_dispatcher::pass(&state(&td)).await;
+    assert_eq!(get(&td, &good).await["column"], "coding");
+    assert_eq!(get(&td, &bad).await["column"], "ready");
+    assert_eq!(
+        get(&td, &bad).await["comments"].as_array().unwrap().len(),
+        1
+    );
+    assert!(!dispatch(&state(&td), "p").await.unwrap());
+    for attempt in 2..=8 {
+        let key = bad.clone();
+        state(&td)
+            .db
+            .write("operator", move |t| {
+                t.execute(
+                    "UPDATE card_dispatch_retries SET retry_at = 0 WHERE card = ?1",
+                    [&key],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(dispatch(&state(&td), "p").await.is_err());
+        let key = bad.clone();
+        let (n, remaining): (u32, i64) = state(&td)
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT failures, retry_at FROM card_dispatch_retries WHERE card = ?1",
+                    [&key],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get::<_, i64>(1)? - chrono::Utc::now().timestamp(),
+                        ))
+                    },
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(n, attempt);
+        let delay = (60_i64 << (attempt - 1).min(5)).min(1800);
+        assert!(
+            (delay - 2..=delay).contains(&remaining),
+            "{remaining} vs {delay}"
+        );
+    }
+    assert_eq!(
+        get(&td, &bad).await["comments"].as_array().unwrap().len(),
+        1
+    );
+    let mails: i64 = state(&td).db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages WHERE subject LIKE '%dispatcher could not start agent'", [], |r| r.get(0))?)).await.unwrap();
+    assert_eq!(mails, 1);
+}
+
+#[tokio::test]
+async fn dispatch_uses_template_targets_not_all_owner_targets() {
+    let td = setup(2, 3, 10).await;
+    for name in ["p-needed", "p-extra"] {
+        td.post(
+            "/api/targets",
+            json!({"name":name,"kind":"ssh","project":"p","address":"u@h"}),
+        )
+        .await
+        .ok();
+    }
+    let lead = lead_id(&td).await;
+    td.patch(
+        &format!("/api/agents/{lead}"),
+        json!({"policy":{
+            "targets":["p-needed","p-extra"],
+            "spawn":{"templates":["project:*"],"bound":true,"max_concurrent":3}
+        }}),
+    )
+    .await
+    .ok();
+    td.patch(
+        "/api/templates/p%2Fcard-small",
+        json!({"spec":{
+            "harness":"codex","policy":{"targets":["p-needed"]}
+        }}),
+    )
+    .await
+    .ok();
+    let id = card(&td, "small").await;
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    let c = get(&td, &id).await;
+    let a = td
+        .get(&format!("/api/agents/{}", c["agent"].as_str().unwrap()))
+        .await;
+    assert_eq!(a.ok()["policy"]["targets"], json!(["p-needed"]));
+    let manual = td
+        .post_as(
+            &lead,
+            &format!("/api/agents/{lead}/spawn"),
+            json!({"template":"card-small","task":"Compare target rights"}),
+        )
+        .await;
+    let child = &manual.ok()["agent"];
+    assert_eq!(child["policy"]["targets"], a.ok()["policy"]["targets"]);
+}
+
+#[tokio::test]
+async fn paused_owner_does_not_dispatch() {
+    let td = setup(2, 2, 10).await;
+    let id = card(&td, "small").await;
+    enabled(&td).await;
+    td.post_empty(&format!("/api/agents/{}/pause", lead_id(&td).await))
+        .await
+        .ok();
+    assert!(!dispatch(&state(&td), "p").await.unwrap());
+    assert!(get(&td, &id).await["agent"].is_null());
+}
+
+#[tokio::test]
+async fn accepted_dependency_allows_claim_without_waiting_for_release() {
+    let td = setup(2, 2, 10).await;
+    let dep = card(&td, "unknown").await;
+    let id = card(&td, "small").await;
+    td.patch(&format!("/api/cards/{id}"), json!({"depends_on":[dep]}))
+        .await
+        .ok();
+    td.post(
+        &format!("/api/cards/{dep}/move"),
+        json!({"column":"merged"}),
+    )
+    .await
+    .ok();
+    assert_eq!(get(&td, &id).await["blocked_by"], json!([]));
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    assert_eq!(get(&td, &id).await["column"], "coding");
+}
+
+#[tokio::test]
+async fn file_removal_of_setting_disables_dispatch() {
+    let td = setup(2, 2, 10).await;
+    for setting in [Some("lead"), None] {
+        let mut def = json!({"name":"p"});
+        if let Some(owner) = setting {
+            def["card_dispatcher"] = json!(owner);
+        }
+        let defs = terrarium_core::config::Definitions {
+            projects: vec![serde_json::from_value(def).unwrap()],
+            ..Default::default()
+        };
+        let path = td.state.clone();
+        state(&td)
+            .db
+            .write("operator", move |t| {
+                terrariumd::store::sync::sync(t, &defs, &path)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            td.get("/api/projects/p").await.ok()["card_dispatcher"],
+            json!(setting)
+        );
+    }
+    card(&td, "small").await;
+    assert!(!dispatch(&state(&td), "p").await.unwrap());
+}
+
+#[tokio::test]
+async fn fleet_setting_can_enable_and_disable_dispatch() {
+    let td = TestDaemon::start().await;
+    for setting in ["card_dispatcher = \"lead\"", ""] {
+        let content = format!("name = \"dispatch\"\n[[projects]]\nname = \"p\"\n{setting}\n");
+        td.post("/api/fleet/apply", json!({"content":content}))
+            .await
+            .ok();
+        let expected = if setting.is_empty() {
+            Value::Null
+        } else {
+            json!("lead")
+        };
+        assert_eq!(
+            td.get("/api/projects/p").await.ok()["card_dispatcher"],
+            expected
+        );
+    }
 }
