@@ -1376,67 +1376,6 @@ async fn daemon_restart_relaunches_with_resume() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires process runner mode and TER_260_CLI pointing to the built CLI"]
-async fn agent_rpc_cli_calls_cross_a_graceful_restart() {
-    assert!(process_mode_bin().is_some());
-    let cli = std::env::var_os("TER_260_CLI").expect("built CLI");
-    let mut td = Td::start_with(false).await;
-    let bob = td.agent("demo", "bob", json!({})).await;
-    td.post(&format!("/api/agents/{bob}/start"), None).await;
-    td.wait_status(&bob, "idle").await;
-    let sock = td.runner_socket(&bob);
-    terrariumd::agent_rpc::drain(&td.daemon.as_ref().unwrap().state, Duration::from_secs(2))
-        .await
-        .unwrap();
-    let cli_sock = sock.clone();
-    let calls = tokio::spawn(async move {
-        for n in 0..5 {
-            let out = tokio::process::Command::new(&cli)
-                .env_clear()
-                .env("TERRARIUM_AGENT", "bob")
-                .env("TERRARIUM_SOCKET", &cli_sock)
-                .args([
-                    "-p",
-                    "demo",
-                    "mail",
-                    "send",
-                    "demo/bob",
-                    "-s",
-                    "restart",
-                    &format!("restart-message-{n}"),
-                ])
-                .kill_on_drop(true)
-                .output()
-                .await
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "CLI failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-    });
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert!(
-        !calls.is_finished(),
-        "calls must wait for hello from the next daemon"
-    );
-    td.restart_daemon().await;
-    timeout(WAIT, calls).await.unwrap().unwrap();
-    let mail = rpc(&sock, "http", json!({"method":"GET", "path":"/api/mail"})).await;
-    let messages = mail["result"]["body"].as_array().unwrap();
-    for n in 0..5 {
-        assert_eq!(
-            messages
-                .iter()
-                .filter(|m| m["body"] == format!("restart-message-{n}"))
-                .count(),
-            1
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_rpc_drain_retries_long_polls_without_journaling_them() {
     use terrarium_runner::RequestHandler;
     let td = Td::start_with(false).await;

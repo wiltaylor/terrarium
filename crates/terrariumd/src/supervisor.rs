@@ -523,13 +523,14 @@ pub trait Supervisor: Send + Sync + 'static {
             .join(&agent.project)
             .join(&agent.name)
     }
+    /// Hold new agent calls on connected runners before draining writes.
+    fn hold_agent_calls(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
     /// The daemon shuts down. Keep the stored status. A harness in a
     /// runner process keeps running, and the next daemon start connects to
     /// it again. An in-process harness ends, and the next daemon start
     /// launches it again with resume (PLAN §18).
-    fn hold_agent_calls(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async {})
-    }
     fn shutdown(&self) {}
 }
 

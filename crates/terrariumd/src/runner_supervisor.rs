@@ -4933,9 +4933,7 @@ impl Supervisor for RunnerSupervisor {
         }
     }
 
-    /// Drop every runner handle. A runner process keeps its harness: only
-    /// the control connection closes, and the next daemon connects again.
-    /// An in-process harness ends.
+    /// Hold new agent calls on each connected runner while writes drain.
     fn hold_agent_calls(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             let runners: Vec<_> = lock(&self.inner.slots)
@@ -4950,6 +4948,9 @@ impl Supervisor for RunnerSupervisor {
         })
     }
 
+    /// Drop every runner handle. A runner process keeps its harness: only
+    /// the control connection closes, and the next daemon connects again.
+    /// An in-process harness ends.
     fn shutdown(&self) {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
         self.inner.stop_tx.send_replace(true);

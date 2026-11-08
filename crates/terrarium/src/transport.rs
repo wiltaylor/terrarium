@@ -205,6 +205,15 @@ impl RunnerTunnelTransport {
     }
 
     async fn round_trip(&self, req: ApiRequest) -> anyhow::Result<ApiResponse> {
+        self.round_trip_with_retry_timeout(req, std::time::Duration::from_secs(15 * 60))
+            .await
+    }
+
+    async fn round_trip_with_retry_timeout(
+        &self,
+        req: ApiRequest,
+        retry_timeout: std::time::Duration,
+    ) -> anyhow::Result<ApiResponse> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut frame = Self::frame(id, &req);
         frame["params"]["request_id"] = json!(ulid::Ulid::new().to_string());
@@ -225,15 +234,13 @@ impl RunnerTunnelTransport {
             let mut reader = BufReader::new(read);
             loop {
                 let mut reply = String::new();
-                let read = reader.read_line(&mut reply);
-                let n = if let Some(until) = retry_until {
-                    tokio::time::timeout_at(until, read)
-                        .await
-                        .context("the agent RPC tunnel is down: restart exceeded 15 minutes")?
-                } else {
-                    read.await
-                }
-                .context("cannot read from the runner")?;
+                // A pending reply may belong to an admitted, long-running
+                // write. Never apply the admission retry budget to its answer.
+                // The runner bounds time held without a daemon separately.
+                let n = reader
+                    .read_line(&mut reply)
+                    .await
+                    .context("cannot read from the runner")?;
                 if n == 0 {
                     anyhow::bail!("the runner closed the socket before it answered");
                 }
@@ -244,9 +251,8 @@ impl RunnerTunnelTransport {
                     || reply.get("id").is_none_or(Value::is_null)
                 {
                     if reply["error"]["code"] == "retry" {
-                        let until = *retry_until.get_or_insert_with(|| {
-                            tokio::time::Instant::now() + std::time::Duration::from_secs(15 * 60)
-                        });
+                        let until = *retry_until
+                            .get_or_insert_with(|| tokio::time::Instant::now() + retry_timeout);
                         if tokio::time::Instant::now() >= until {
                             anyhow::bail!(
                                 "the agent RPC tunnel is down: restart exceeded 15 minutes"
@@ -340,6 +346,82 @@ pub mod mock {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_admitted_write_can_finish_after_the_admission_retry_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("runner.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let budget = std::time::Duration::from_millis(100);
+        let server = tokio::spawn(async move {
+            let mut first = None;
+            let mut effects = 0;
+            for attempt in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                let frame: Value = serde_json::from_str(&line).unwrap();
+                if let Some(previous) = &first {
+                    assert_eq!(previous, &frame);
+                }
+                first = Some(frame.clone());
+                let response = if attempt == 0 {
+                    json!({"id":frame["id"], "error":{"code":"retry", "message":"draining"}})
+                } else {
+                    effects += 1;
+                    // The replacement daemon admitted this write. Its answer
+                    // takes longer than the entire remaining admission budget.
+                    tokio::time::sleep(budget * 3).await;
+                    json!({"id":frame["id"], "result":{"status":201,"body":{"id":"one-effect"}}})
+                };
+                write
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            effects
+        });
+        let response = RunnerTunnelTransport::new(socket)
+            .round_trip_with_retry_timeout(ApiRequest::new(Method::Post, "/api/mail"), budget)
+            .await
+            .unwrap();
+        assert_eq!(response.status, 201);
+        assert_eq!(response.body["id"], "one-effect");
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_admission_refusals_still_exhaust_the_retry_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("runner.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                let frame: Value = serde_json::from_str(&line).unwrap();
+                let reply =
+                    json!({"id":frame["id"], "error":{"code":"retry", "message":"draining"}});
+                write
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        // The 50 ms retry backoff exceeds this admission-refusal budget.
+        let error = RunnerTunnelTransport::new(socket)
+            .round_trip_with_retry_timeout(
+                ApiRequest::new(Method::Post, "/api/mail"),
+                std::time::Duration::from_millis(10),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("tunnel is down"));
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn retries_long_poll_with_the_same_request_id() {

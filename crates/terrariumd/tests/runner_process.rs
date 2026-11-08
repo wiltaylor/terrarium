@@ -668,6 +668,76 @@ async fn interrupt_stops_the_turn_and_keeps_the_harness() {
     td.wait_status(&id, "stopped").await;
 }
 
+/// Actual CLI calls wait through a hold and reach the next daemon exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_cli_calls_cross_a_graceful_restart() {
+    let cli = cli_bin();
+    let mut td = Td::start().await;
+    let bob = td.agent("bob", json!({})).await;
+    td.post(&format!("/api/agents/{bob}/start"), None).await;
+    td.wait_status(&bob, "idle").await;
+    let sock = td.run_dir().join(format!("agents/{bob}.sock"));
+    let pid = td.runner_pid(&bob).unwrap();
+    terrariumd::agent_rpc::drain(&td.daemon.as_ref().unwrap().state, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let cli_sock = sock.clone();
+    let calls = tokio::spawn(async move {
+        for n in 0..5 {
+            let out = tokio::process::Command::new(&cli)
+                .env_clear()
+                .env("TERRARIUM_AGENT", "bob")
+                .env("TERRARIUM_SOCKET", &cli_sock)
+                .args([
+                    "-p",
+                    "demo",
+                    "mail",
+                    "send",
+                    "demo/bob",
+                    "-s",
+                    "restart",
+                    &format!("restart-message-{n}"),
+                ])
+                .kill_on_drop(true)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "CLI failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !calls.is_finished(),
+        "calls must wait for hello from the next daemon"
+    );
+    td.shutdown();
+    td.boot().await;
+    timeout(WAIT, calls).await.unwrap().unwrap();
+    assert_eq!(
+        td.runner_pid(&bob),
+        Some(pid),
+        "runner survived the restart"
+    );
+    let (status, mail) = td
+        .req_as(Some("demo/bob"), Method::GET, "/api/mail", None)
+        .await;
+    assert_eq!(status, 200);
+    let messages = mail.as_array().unwrap();
+    for n in 0..5 {
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m["body"] == format!("restart-message-{n}"))
+                .count(),
+            1
+        );
+    }
+}
+
 /// PLAN §18: the daemon restarts, the agent does not. A new supervisor on
 /// the same state dir connects to the live runner, gets the events of the
 /// downtime once, and turns go through.
