@@ -85,17 +85,16 @@ async fn settled_signals(td: &TestDaemon, card: &str, expected: Value) {
 async fn notice_is_once_across_ticks_resolution_recurrence_and_restart() {
     let (mut td, lead, worker, card) = setup().await;
     eta(&td, &card, true).await;
-    terrariumd::trouble::pass(&state(&td)).await;
+    settled_signals(&td, &card, json!(["eta_overdue"])).await;
     terrariumd::trouble::pass(&state(&td)).await;
     assert_eq!(usage(&td, &card).await["signals"], json!(["eta_overdue"]));
     assert_eq!(notices(&td, &lead).await, 1);
     assert_eq!(notices(&td, &worker).await, 1);
     eta(&td, &card, false).await;
-    terrariumd::trouble::pass(&state(&td)).await;
-    assert_eq!(usage(&td, &card).await["signals"], json!([]));
+    settled_signals(&td, &card, json!([])).await;
     td.boot(None, None).await;
     eta(&td, &card, true).await;
-    terrariumd::trouble::pass(&state(&td)).await;
+    settled_signals(&td, &card, json!(["eta_overdue"])).await;
     assert_eq!(notices(&td, &lead).await, 1);
     assert_eq!(notices(&td, &worker).await, 1);
     assert_eq!(
@@ -118,8 +117,7 @@ async fn notice_is_once_across_ticks_resolution_recurrence_and_restart() {
     )
     .await
     .ok();
-    terrariumd::trouble::pass(&state(&td)).await;
-    assert_eq!(usage(&td, &card).await["signals"], json!([]));
+    settled_signals(&td, &card, json!([])).await;
 }
 
 #[tokio::test]
@@ -183,8 +181,7 @@ async fn token_and_turn_budget_crossings_clear_when_disabled() {
         })
         .await
         .unwrap();
-    terrariumd::trouble::pass(&state(&td)).await;
-    assert_eq!(usage(&td, &card).await["signals"], json!(["turn_budget"]));
+    settled_signals(&td, &card, json!(["turn_budget"])).await;
     let c = card.clone();
     state(&td)
         .db
@@ -197,16 +194,11 @@ async fn token_and_turn_budget_crossings_clear_when_disabled() {
         })
         .await
         .unwrap();
-    terrariumd::trouble::pass(&state(&td)).await;
-    assert_eq!(
-        usage(&td, &card).await["signals"],
-        json!(["token_budget", "turn_budget"])
-    );
+    settled_signals(&td, &card, json!(["token_budget", "turn_budget"])).await;
     td.put_as(&lead, "/api/projects/p/trouble", json!({}))
         .await
         .ok();
-    terrariumd::trouble::pass(&state(&td)).await;
-    assert_eq!(usage(&td, &card).await["signals"], json!([]));
+    settled_signals(&td, &card, json!([])).await;
 }
 
 #[tokio::test]
@@ -256,6 +248,7 @@ async fn history_signals_and_working_time_reach_the_card_and_board() {
         "time_budget",
         "timer_polls"
     ]);
+    settled_signals(&td, &card, expected.clone()).await;
     let u = usage(&td, &card).await;
     assert_eq!(u["signals"], expected);
     assert!(u["working_seconds"].as_u64().unwrap() >= 90);
@@ -269,8 +262,7 @@ async fn history_signals_and_working_time_reach_the_card_and_board() {
     terrariumd::trouble::pass(&state(&td)).await;
     assert_eq!(notices(&td, &lead).await, 5);
     td.put_as(&lead, "/api/projects/p/trouble", json!({"time_seconds": {"small": 0}, "review_rounds": 0, "eta_delays": 0, "compactions": 0, "timer_polls": 0})).await.ok();
-    terrariumd::trouble::pass(&state(&td)).await;
-    assert_eq!(usage(&td, &card).await["signals"], json!([]));
+    settled_signals(&td, &card, json!([])).await;
 }
 
 #[tokio::test]
@@ -305,7 +297,7 @@ async fn deploy_baseline_ignores_existing_cards_until_a_new_claim() {
         .await
         .ok();
     eta(&td, &card, true).await;
-    terrariumd::trouble::pass(&state(&td)).await;
+    settled_signals(&td, &card, json!(["eta_overdue"])).await;
     assert_eq!(notices(&td, &lead).await, 1);
 }
 
@@ -333,8 +325,7 @@ async fn review_wait_marks_and_clears_on_return_to_work() {
             rusqlite::params![c, (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339()])?;
         Ok(())
     }).await.unwrap();
-    terrariumd::trouble::pass(&state(&td)).await;
-    assert_eq!(usage(&td, &card).await["signals"], json!(["review_wait"]));
+    settled_signals(&td, &card, json!(["review_wait"])).await;
     td.post_as(&worker, &format!("/api/cards/{card}/claim"), json!({}))
         .await
         .ok();
