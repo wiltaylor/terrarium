@@ -196,7 +196,7 @@ pub fn open(t: &mut Tx<'_>, n: Open<'_>) -> ApiResult<bool> {
         [n.project],
     )?;
     let (prefix, seq): (String, i64) = t.query_row(
-        "SELECT card_prefix, card_seq FROM projects WHERE name = ?1",
+        "SELECT prefix, card_seq FROM projects WHERE name = ?1",
         [n.project],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
