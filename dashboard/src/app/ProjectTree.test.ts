@@ -6,11 +6,14 @@ import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createBookmarksStore } from "../stores/bookmarks";
+const bookmarks = createBookmarksStore(null, window.location.origin);
 
 // The agents, in a signal: a change is a live status update.
 const [agentList, setAgentList] = createSignal<{ id: string; project: string; name: string; status: string }[]>([]);
 
 vi.mock("../stores", () => ({
+  bookmarks,
   // No folders: the caller is not the operator or a sysadmin (TER-48).
   projectFolders: {
     available: () => false,
@@ -43,6 +46,8 @@ const { expanded } = await import("./TreeRoot");
 let dispose: (() => void) | undefined;
 afterEach(() => {
   setAgentList([]);
+  expanded.close("bookmarks");
+  for (const b of bookmarks.items()) bookmarks.remove(b.href);
   // The open set is global: each test starts with its nodes closed.
   for (const n of expanded.list()) if (/\/(agents|repos)$/.test(n)) expanded.close(n);
   dispose?.();
@@ -69,6 +74,25 @@ const mount = (path: string) => {
 };
 
 describe("ProjectTree", () => {
+  it("navigates the Bookmarks node and wiki links with arrow keys", () => {
+    bookmarks.add("Wiki", "/p/alpha/knowledge/wiki/a%20b");
+    const el = mount("/projects");
+    const row = el.querySelector<HTMLElement>('[data-key="bookmarks"]')!;
+    expect(row.closest('[role="tree"]')?.getAttribute("aria-label")).toBe("Projects");
+    const key = (target: HTMLElement, value: string) => target.dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true }));
+    row.focus();
+    key(row, "ArrowRight");
+    expect(row.getAttribute("aria-expanded")).toBe("true");
+    key(row, "ArrowDown");
+    const link = el.querySelector<HTMLElement>('[data-key^="bookmark:"]')!;
+    expect(document.activeElement).toBe(link);
+    key(link, "ArrowLeft");
+    expect(document.activeElement).toBe(row);
+    key(row, "ArrowLeft");
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    key(row, "ArrowLeft");
+    expect(document.activeElement?.getAttribute("data-key")).toBe("root");
+  });
   it("has a cog on each project row that links the project settings screen", () => {
     const el = mount("/projects");
     const cogs = Array.from(el.querySelectorAll<HTMLAnchorElement>("a.tree-cog"));

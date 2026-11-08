@@ -2474,6 +2474,15 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE projects ADD COLUMN board_flow TEXT;
     ALTER TABLE projects ADD COLUMN board_flow_at TEXT;
     "#,
+    // Sidebar bookmarks, scoped to the operator, independent of projects.
+    r#"
+    CREATE TABLE bookmarks (
+        owner TEXT NOT NULL,
+        href TEXT NOT NULL,
+        title TEXT NOT NULL,
+        PRIMARY KEY (owner, href)
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
