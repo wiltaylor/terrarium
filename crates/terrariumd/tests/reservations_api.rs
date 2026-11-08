@@ -123,5 +123,9 @@ async fn exclusive_budget_pins_owner_and_excludes_shared_workloads() {
         assert!(terrariumd::reservations::lifecycle_admission(&state,&host).is_err());
         assert!(terrariumd::reservations::exec_budget(&state,&host,Some("p/worker")).is_err());
     }
+    host.kind = TargetKind::Docker;
+    host.image = None;
+    assert!(terrariumd::reservations::lifecycle_admission(&state,&host).is_err());
+    assert!(terrariumd::reservations::exec_budget(&state,&host,Some("p/worker")).is_err());
     client.abort(); server.abort();
 }

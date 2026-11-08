@@ -95,7 +95,8 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
     }
     if r.exclusive {
         RuntimeLimits { cpus: Some(vec![0]), ..Default::default() }.host_support(caps.limits.as_ref()).map_err(ApiError::conflict)?;
-        let incompatible: Vec<_> = rows.iter().filter(|t| t.state == "running" && !matches!(t.def.kind, TargetKind::Host | TargetKind::Docker)).map(|t| t.def.name.clone()).collect();
+        let incompatible: Vec<_> = rows.iter().filter(|t| t.state == "running" && (!matches!(t.def.kind, TargetKind::Host | TargetKind::Docker)
+            || (t.def.kind == TargetKind::Docker && t.def.image.is_none()))).map(|t| t.def.name.clone()).collect();
         if !incompatible.is_empty() { return Err(ApiError::conflict("exclusive CPU cannot cover these running targets").with_details(json!({"targets":incompatible}))); }
         let names: Vec<_> = rows.iter().filter(|t| t.def.kind == TargetKind::Host).map(|t| t.def.name.clone()).collect();
         let sessions = state.executor.resource_sessions(&names, None);
@@ -118,6 +119,12 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
         if !sessions.is_empty() {
             return Err(ApiError::conflict("finish existing host sessions before granting an agent reservation; live scopes cannot be reparented")
                 .with_details(json!({"sessions":sessions,"host":r.host,"holder":agent})));
+        }
+    } else if target.def.kind == TargetKind::Host {
+        let sessions = state.executor.resource_sessions(std::slice::from_ref(&r.target), None);
+        if !sessions.is_empty() {
+            return Err(ApiError::conflict("finish existing host sessions before granting a target reservation; unscoped processes cannot be reparented")
+                .with_details(json!({"sessions":sessions,"host":r.host,"target":r.target})));
         }
     }
     Ok(())
@@ -366,8 +373,9 @@ pub fn lifecycle_admission(state: &Shared, def: &TargetDef) -> ApiResult<()> {
     let Some(host) = &def.host else { return Ok(()); };
     state.db.read_now(|c| {
         let rows = store::list(c, host)?;
-        if rows.iter().any(|r| managed(r) && r.exclusive) && !matches!(def.kind, TargetKind::Host | TargetKind::Docker) {
-            return Err(ApiError::conflict("exclusive CPU reservations prohibit vmlab and SSH paths on this host"));
+        if rows.iter().any(|r| managed(r) && r.exclusive) && (!matches!(def.kind, TargetKind::Host | TargetKind::Docker)
+            || (def.kind == TargetKind::Docker && def.image.is_none())) {
+            return Err(ApiError::conflict("exclusive CPU reservations prohibit vmlab, SSH and unmanaged Docker paths on this host"));
         }
         if rows.iter().any(|r| r.holder == Holder::Target(def.name.clone()) && managed(r)
             && (r.state != State::Active || r.until.is_some_and(|u| u <= now()))) {
@@ -410,8 +418,9 @@ pub fn exec_budget(state: &Shared, def: &TargetDef, holder: Option<&str>) -> Api
         let agent = holder.and_then(|h| agents::find(c, h, None).ok()).map(|a| a.agent.id.to_string());
         let rows = store::list(c, host)?;
         let exclusive = rows.iter().any(|r| managed(r) && r.exclusive);
-        if exclusive && !matches!(def.kind, TargetKind::Host | TargetKind::Docker) {
-            return Err(ApiError::conflict("exclusive CPU reservations prohibit vmlab and SSH execution on this host"));
+        if exclusive && (!matches!(def.kind, TargetKind::Host | TargetKind::Docker)
+            || (def.kind == TargetKind::Docker && def.image.is_none())) {
+            return Err(ApiError::conflict("exclusive CPU reservations prohibit vmlab, SSH and unmanaged Docker execution on this host"));
         }
         for r in rows {
             let owns = match &r.holder { Holder::Agent(id) => agent.as_ref() == Some(id), Holder::Target(t) => *t == def.name };
@@ -446,6 +455,9 @@ async fn isolate(state: &Shared, host: &str, omit: Option<&str>) -> ApiResult<()
     let rows: Vec<_> = rows.into_iter().filter(|r| Some(r.id.as_str()) != omit).collect();
     let cpus = shared_cpus(&physical.cpu_ids, &rows)?;
     let targets = host_targets(state, host).await?;
+    if targets.iter().any(|t| t.def.kind == TargetKind::Docker && t.state == "running" && t.def.image.is_none()) {
+        return Err(ApiError::conflict("cannot change affinity of an unmanaged Docker container"));
+    }
     let representative = targets.first().ok_or_else(|| ApiError::conflict("host has no target for isolation"))?;
     let limits = RuntimeLimits { cpus: cpus.clone(), ..Default::default() };
     executor::verb_ok(state, &representative.def, "shared CPU isolation", move |session| DaemonFrame::ResourceApply(ResourceApply {
