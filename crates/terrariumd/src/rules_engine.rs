@@ -668,6 +668,49 @@ mod lane_tests {
     use tokio::sync::Semaphore;
 
     #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_load_error_waits_for_a_committed_lane_to_finish_once() {
+        // Intentionally omit the projects table to inject a real load
+        // error, independently of a lane's already committed work.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE probe (actions INTEGER, recorded INTEGER);
+            INSERT INTO probe VALUES (0, 0);").unwrap();
+        let db = Db::new(conn, events::EventHub::default());
+        let committed = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let mut lanes = Lanes::default();
+        lanes.start(vec!["held".into()], |_| {
+            let db = db.clone();
+            let committed = committed.clone();
+            let release = release.clone();
+            async move {
+                db.read(|c| { c.execute("UPDATE probe SET actions = actions + 1", [])?; Ok(()) }).await?;
+                committed.add_permits(1);
+                let _permit = release.acquire().await;
+                db.read(|c| { c.execute("UPDATE probe SET recorded = 1", [])?; Ok(()) }).await
+            }
+        });
+        committed.acquire().await.unwrap().forget();
+        let result = load(&db, &mut Cache::default()).await.map(|_| ());
+        assert!(result.is_err());
+        // This is the same completion path used by pass for both load
+        // and plan errors. It must not return and drop the held task.
+        let mut finishing = tokio::spawn(async move {
+            lanes.finish_pass(result).await;
+            assert!(lanes.active.is_empty());
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut finishing).await.is_err());
+        release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), finishing).await.unwrap().unwrap();
+        let row: (i64, i64) = db.read(|c| {
+            // Model the next pass: only an unrecorded row would replay.
+            c.execute("UPDATE probe SET actions = actions + 1 WHERE recorded = 0", [])?;
+            Ok(c.query_row("SELECT actions, recorded FROM probe", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        }).await.unwrap();
+        assert_eq!(row, (1, 1));
+    }
+
+    #[tokio::test]
     async fn a_gated_lane_does_not_hold_other_rows_and_tasks_are_bounded() {
         let gate = Arc::new(Semaphore::new(0));
         let mut lanes = Lanes::default();
@@ -751,6 +794,17 @@ struct Lanes {
 }
 
 impl Lanes {
+    /// A planner failure is not a shutdown. Keep ownership until every
+    /// active row and its post-commit effects finish before retrying.
+    async fn finish_pass(&mut self, result: ApiResult<()>) {
+        if let Err(e) = result {
+            warn!("the rule engine pass failed; active lanes finish before retry: {e}");
+        }
+        while !self.tasks.is_empty() {
+            self.join().await;
+        }
+    }
+
     fn start<F, Fut>(&mut self, pending: Vec<String>, run: F)
     where
         F: Fn(String) -> Fut,
@@ -1480,18 +1534,17 @@ async fn fire_timer(
 /// Plan new events while lane workers run the outbox. Neither a slow
 /// lane nor a full batch can hold the planner or another lane.
 pub async fn pass(state: &Shared, cache: &mut Cache) {
-    let mut rx = state.db.hub().subscribe();
     let mut lanes = Lanes::default();
+    let result = drive_pass(state, cache, &mut lanes).await;
+    lanes.finish_pass(result).await;
+}
+
+async fn drive_pass(state: &Shared, cache: &mut Cache, lanes: &mut Lanes) -> ApiResult<()> {
+    let mut rx = state.db.hub().subscribe();
     loop {
         // Drain wakes before reading the durable log, never after it.
         while let Ok(_) | Err(TryRecvError::Lagged(_)) = rx.try_recv() {}
-        let projects = match load(&state.db, cache).await {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("the rule engine cannot read the rules: {e}");
-                return;
-            }
-        };
+        let projects = load(&state.db, cache).await?;
         if cache.timers_at.is_none_or(|at| at.elapsed() >= TICK) {
             cache.timers_at = Some(std::time::Instant::now());
             if let Err(e) = fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await {
@@ -1502,20 +1555,13 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
         // Discover runnable lanes in the planning transaction. A separate
         // read would queue behind every worker again before we can plan
         // the next events under load.
-        let (more, pending) = match state
+        let (more, pending) = state
             .db
             .write("system", move |t| {
                 let (_, more) = plan_events(t, &projects, Utc::now())?;
                 Ok((more, pending_lanes(t)?))
             })
-            .await
-        {
-            Ok(planned) => planned,
-            Err(e) => {
-                warn!("the rule engine cannot read the event log: {e}");
-                return;
-            }
-        };
+            .await?;
         lanes.reap();
         lanes.start(pending, |lane| {
             let state = state.clone();
@@ -1526,7 +1572,7 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
             continue;
         }
         if lanes.tasks.is_empty() && lanes.stopped.is_empty() {
-            return;
+            return Ok(());
         }
         let wake = lanes
             .stopped
@@ -1536,9 +1582,18 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
             .unwrap_or_else(|| tokio::time::Instant::now() + TICK);
         tokio::select! {
             () = lanes.join(), if !lanes.tasks.is_empty() => {}
-            _ = rx.recv() => {}
+            r = rx.recv() => {
+                if matches!(r, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                    rx = state.db.hub().subscribe();
+                }
+            }
             () = tokio::time::sleep_until(wake) => {}
         }
+        // Coalesce both completion and event wakes before another full
+        // rule load and lane scan. The next iteration still refreshes the
+        // live set before dispatching any new row. This is a time bound,
+        // not a barrier waiting for all workers to finish.
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
