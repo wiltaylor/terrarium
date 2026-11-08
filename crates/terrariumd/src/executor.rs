@@ -1643,7 +1643,10 @@ async fn start_exec_secrets(
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
     let mut cmd = cmd;
     cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
-    if let Some(a) = actor.agent() {
+    // VMLab's exec protocol cannot carry an environment.
+    if def.kind != TargetKind::Vmlab
+        && let Some(a) = actor.agent()
+    {
         let p = crate::git_identity::provenance(state, &a.id).await?;
         p.identity.env(&mut cmd.env);
         cmd.env.insert("TERRARIUM_GIT_TRAILERS".into(), p.trailers);
