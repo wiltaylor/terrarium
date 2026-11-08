@@ -531,7 +531,11 @@ async fn a_running_container_retries_status_until_the_daemon_is_ready() {
         .await;
     assert_eq!(run.outcome, Outcome::Succeeded, "{run:#?}");
     assert_eq!(
-        r.fake.calls().iter().filter(|c| c.starts_with(&status)).count(),
+        r.fake
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with(&status))
+            .count(),
         3
     );
     assert!(!steps(&run).contains(&"rollback".into()));
@@ -549,8 +553,20 @@ async fn a_running_container_with_an_unreachable_daemon_times_out_and_rolls_back
         .await;
     assert!(started.elapsed() >= r.updater.cfg.health_timeout);
     assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
-    assert!(run.error.as_deref().unwrap().contains("terrarium daemon status"));
-    assert!(r.fake.calls().iter().filter(|c| c.starts_with(&status)).count() > 1);
+    assert!(
+        run.error
+            .as_deref()
+            .unwrap()
+            .contains("terrarium daemon status")
+    );
+    assert!(
+        r.fake
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with(&status))
+            .count()
+            > 1
+    );
     assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
 }
 

@@ -656,8 +656,10 @@ impl Updater {
                     self.cfg.health_timeout.as_secs()
                 ));
             }
-            tokio::time::sleep_until((tokio::time::Instant::now() + self.cfg.health_poll).min(deadline))
-                .await;
+            tokio::time::sleep_until(
+                (tokio::time::Instant::now() + self.cfg.health_poll).min(deadline),
+            )
+            .await;
         }
     }
 
