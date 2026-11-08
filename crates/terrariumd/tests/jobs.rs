@@ -2170,7 +2170,8 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
 /// TER-103: the target holds no credential and no push repo. The recipe
 /// of a merge finds no `.ssh` or `.push` dir beside its clone, no git
 /// credential env, and no remote in its clone. `TERRARIUM_GIT_REF` is a
-/// public build stamp, not a credential. It deletes the job ref in
+/// public build stamp and `TERRARIUM_GIT_TRAILERS` is public provenance,
+/// not a credential. It deletes the job ref in
 /// its clone, and the merge still pushes the recorded commit: the push
 /// runs from the daemon's repo.
 #[tokio::test]
@@ -2179,7 +2180,7 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
     let before = git(&lab.origin, &["rev-parse", "next"]);
     let recipe = "test -f OK \
          && ! ls -a .. | grep -E '[.](ssh|push)$' \
-         && ! env | grep -v '^TERRARIUM_GIT_REF=' | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
+         && ! env | grep -vE '^TERRARIUM_GIT_(REF|TRAILERS)=' | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
          && test -z \"$(git remote)\" \
          && test \"$(git rev-parse refs/job/merge)\" = \"$(git rev-parse HEAD)\" \
          && git update-ref -d refs/job/merge \

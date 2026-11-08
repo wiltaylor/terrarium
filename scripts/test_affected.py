@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -412,6 +413,7 @@ class Cli(unittest.TestCase):
             meta = json.dumps({"packages": [], "workspace_members": []})
             with mock.patch.object(affected.subprocess, "run",
                                    return_value=mock.Mock(stdout=meta)), \
+                    mock.patch.object(affected, "check_commit_trailers", return_value=0), \
                     mock.patch.object(affected.subprocess, "call",
                                       lambda cmd, **kw: calls.append(cmd) or 0), \
                     mock.patch.dict(os.environ, {"RESULTS_DIR": str(results)}), \
@@ -423,6 +425,58 @@ class Cli(unittest.TestCase):
     def test_plan_json_shape(self):
         d = plan("crates/terrariumd/src/jobs.rs").to_dict()
         self.assertEqual(json.loads(json.dumps(d))["daemon_targets"], ["jobs", "no_token_endpoint"])
+
+
+class CommitTrailers(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.old = Path.cwd()
+        os.chdir(self.temp.name)
+        self.addCleanup(os.chdir, self.old)
+        self.git("init", "-q")
+        self.git("config", "user.name", "Test")
+        self.git("config", "user.email", "test@example.invalid")
+        self.commit("base\n\nCo-authored-by: Historical <old@example.invalid>")
+        self.git("update-ref", "refs/remotes/origin/next", "HEAD")
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
+
+    def commit(self, message):
+        self.git("-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-qm", message)
+
+    def check(self):
+        with contextlib.redirect_stderr(io.StringIO()) as output:
+            result = affected.check_commit_trailers()
+        return result, output.getvalue()
+
+    def test_base_and_provenance_are_allowed(self):
+        self.commit("fix: normal\n\nTerrarium-Card: TER-228\nTerrarium-Agent: ter-228")
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_rejects_mixed_case_in_an_earlier_commit(self):
+        self.commit("fix: bad\n\ncO-AuThOrEd-By: Test <test@example.invalid>")
+        bad = self.git("rev-parse", "HEAD").strip()
+        self.commit("fix: later clean commit")
+        code, output = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn(bad, output)
+
+    def test_body_mention_is_not_a_trailer(self):
+        self.commit("fix: explain\n\nCo-authored-by: is discussed here\n\nNot a trailer block.")
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_missing_base_fails_closed(self):
+        self.git("update-ref", "-d", "refs/remotes/origin/next")
+        self.assertEqual(self.check()[0], 1)
+
+    def test_run_stops_before_metadata_or_tests(self):
+        self.commit("fix: bad\n\nCo-authored-by: Test <test@example.invalid>")
+        with mock.patch.object(affected, "run") as run, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(affected.main(["--run"]), 1)
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

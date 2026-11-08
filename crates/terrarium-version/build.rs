@@ -102,7 +102,7 @@ fn main() {
          /// `--version` text: the full version, then `built <time>` on its own line.\n\
          pub const LONG: &str = {long:?};\n",
         r = git_ref.unwrap_or(parse::UNKNOWN),
-        // The first line must end with the version: host agents up to 0.5.0
+        // The first line must end with the version: host agents from releases before TER-195
         // take the last word of the first line of `terrarium-host --version`
         // as the version of a staged update (TER-195).
         long = format!("{full}\nbuilt {built}"),

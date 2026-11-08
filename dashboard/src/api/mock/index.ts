@@ -4094,7 +4094,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       let rows: { title: string; href: string }[] = [];
       return {
         list: async () => [...rows],
-        add: async (title: string, href: string) => (rows = [...rows.filter((b) => b.href !== href), { title, href }]),
+        add: async (title: string, href: string, previousHref?: string) => {
+          if (previousHref && (!rows.some((b) => b.href === previousHref) || rows.some((b) => b.href === href && b.href !== previousHref))) {
+            fail(422, "invalid", "Bookmark missing or URL already bookmarked");
+          }
+          const old = previousHref ?? href;
+          return rows = rows.some((b) => b.href === old) ? rows.map((b) => b.href === old ? { title, href } : b) : [...rows, { title, href }];
+        },
         remove: async (href: string) => (rows = rows.filter((b) => b.href !== href)),
       };
     })(),
