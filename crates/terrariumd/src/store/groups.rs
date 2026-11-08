@@ -17,6 +17,14 @@ fn event(t: &mut Tx<'_>, id: &str, change: &str) -> ApiResult<()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupStep {
+    pub name: String,
+    pub state: String,
+    pub text: String,
+    pub eta_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub id: String,
     pub key: String,
@@ -28,6 +36,7 @@ pub struct Group {
     pub members: Vec<String>,
     pub eta_at: Option<String>,
     pub closed_at: Option<String>,
+    pub steps: Vec<GroupStep>,
 }
 
 pub fn for_card(conn: &Connection, card: &str) -> ApiResult<Option<Group>> {
@@ -48,7 +57,7 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Group> {
          WHERE g.card = ?1", [id], |r| Ok((Group {
             id: id.into(), key: r.get(0)?, title: r.get(1)?, column: r.get(2)?,
             status: r.get(3)?, eta_at: r.get(4)?, closed_at: r.get(5)?,
-            done: 0, total: 0, members: Vec::new(),
+            done: 0, total: 0, members: Vec::new(), steps: Vec::new(),
         }, r.get::<_, String>(6)?, r.get::<_, bool>(7)?)),
     )?;
     let anchor: Option<i64> = conn.query_row("SELECT k.position FROM board_columns k
@@ -72,6 +81,11 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Group> {
         }
         g.members.push(card);
     }
+    let mut steps = conn.prepare("SELECT name, state, text, eta_at FROM group_steps
+        WHERE group_card = ?1 ORDER BY position, name")?;
+    g.steps = steps.query_map([id], |r| Ok(GroupStep {
+        name: r.get(0)?, state: r.get(1)?, text: r.get(2)?, eta_at: r.get(3)?,
+    }))?.collect::<Result<_, _>>()?;
     Ok(g)
 }
 
@@ -183,6 +197,30 @@ pub fn close(t: &mut Tx<'_>, g: &Group, comment: &str) -> ApiResult<bool> {
     t.execute("UPDATE card_groups SET closed_at = ?2 WHERE card = ?1", params![g.id, at])?;
     t.execute("UPDATE cards SET archived = 1, updated_at = ?2 WHERE id = ?1", params![g.id, at])?;
     board::system_comment(t, &g.id, comment, None)?;
+    Ok(true)
+}
+
+pub fn step(t: &mut Tx<'_>, g: &Group, name: &str, state: Option<&str>, text: Option<&str>, eta: Option<&str>) -> ApiResult<bool> {
+    if g.closed_at.is_some() { return Ok(false); }
+    if name.trim().is_empty() { return Err(ApiError::invalid("group step name must not be empty")); }
+    if let Some(state) = state && !["pending", "running", "done", "failed"].contains(&state) {
+        return Err(ApiError::invalid("group step state must be pending, running, done or failed"));
+    }
+    let existing = g.steps.iter().find(|s| s.name == name);
+    let state = state.or_else(|| existing.map(|s| s.state.as_str())).unwrap_or("pending");
+    let text = t.redact(text.or_else(|| existing.map(|s| s.text.as_str())).unwrap_or_default());
+    let eta_at = match eta {
+        Some("jobs") => return Err(ApiError::invalid("a step ETA takes a duration, not jobs")),
+        Some(value) => Some(deadline(value)?),
+        None => existing.and_then(|s| s.eta_at.clone()),
+    };
+    if existing.is_some_and(|s| s.state == state && s.text == text && s.eta_at == eta_at) { return Ok(false); }
+    t.execute("INSERT INTO group_steps (group_card, name, position, state, text, eta_at)
+        SELECT ?1, ?2, coalesce(max(position), -1) + 1, ?3, ?4, ?5 FROM group_steps WHERE group_card = ?1
+        ON CONFLICT(group_card, name) DO UPDATE SET state = excluded.state,
+        text = excluded.text, eta_at = excluded.eta_at",
+        params![g.id, name, state, text, eta_at])?;
+    event(t, &g.id, "group_step")?;
     Ok(true)
 }
 

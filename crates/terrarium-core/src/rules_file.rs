@@ -154,7 +154,8 @@ pub const VERBS: &[Verb] = &[
     Verb {
         kind: "group_status",
         name: "group.status",
-        args: &[("key", Arg::Text), ("text", Arg::Text), ("eta", Arg::Text)],
+        args: &[("key", Arg::Text), ("text", Arg::Text), ("eta", Arg::Text),
+            ("step", Arg::Text), ("state", Arg::OneOf(&["pending", "running", "done", "failed"]))],
         required: &["key"],
     },
     Verb {

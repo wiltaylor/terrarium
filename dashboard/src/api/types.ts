@@ -1782,6 +1782,7 @@ export interface Card {
 }
 
 export interface BoardGroup {
+  steps: { name: string; state: "pending" | "running" | "done" | "failed"; text: string; eta_at: string | null }[];
   id: string;
   key: string;
   title: string;

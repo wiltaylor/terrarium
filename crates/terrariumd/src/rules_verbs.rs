@@ -293,7 +293,13 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
         match verb {
             "group.add" => groups::add(t, &g, &the_card(ctx, verb)?.id)?,
             "group.remove" => groups::remove(t, &g, &the_card(ctx, verb)?.id)?,
-            "group.status" => groups::status(t, &g, a.text("text").as_deref(), a.text("eta").as_deref())?,
+            "group.status" => match a.text("step") {
+                Some(step) => groups::step(t, &g, &step, a.raw("state"), a.text("text").as_deref(), a.text("eta").as_deref())?,
+                None => {
+                    if a.raw("state").is_some() { return Err(ApiError::invalid("group_status state requires step")); }
+                    groups::status(t, &g, a.text("text").as_deref(), a.text("eta").as_deref())?
+                }
+            },
             "group.close" => groups::close(t, &g, &a.text("comment").unwrap_or_else(|| format!("Closed by rule {}", ctx.rule)))?,
             _ => unreachable!(),
         }

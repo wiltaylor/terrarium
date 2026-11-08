@@ -2497,6 +2497,15 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(group_card, card)
     );
     CREATE INDEX group_members_card ON group_members(card);
+    CREATE TABLE group_steps (
+        group_card TEXT NOT NULL REFERENCES card_groups(card) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending', 'running', 'done', 'failed')),
+        text TEXT NOT NULL DEFAULT '',
+        eta_at TEXT,
+        PRIMARY KEY(group_card, name)
+    );
     "#,
 ];
 

@@ -8248,7 +8248,12 @@ shows a header in each column containing members, without moving members.
   remove the event's card. Adding to a second open group fails in the
   rule log. A group cannot contain a group, a held card, an archived card,
   or a card of another project. Duplicate membership is a no-op.
-- `group_status`: `key`, optional `text`, optional `eta` as above.
+- `group_status`: `key`, optional `text`, optional `eta` as above. With
+  `step = "name"`, updates that named step instead of the overall line.
+  `state` is `pending`, `running`, `done`, or `failed` (new steps default
+  to pending). A step ETA is a duration. The group exposes `steps` in
+  first-insertion order, each with `name`, `state`, `text`, and `eta_at`.
+  Omitted fields keep their previous values. `state` requires `step`.
 - `group_close`: `key`, optional `comment`. Archives the header, retains
   historical membership, and frees members to join their next group.
   Repeated close and mutations of a closed group are no-ops.

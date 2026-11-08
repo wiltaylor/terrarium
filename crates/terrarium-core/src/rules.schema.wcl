@@ -89,6 +89,8 @@ type GroupStatus {
   key: utf8
   text: utf8?
   eta: utf8?
+  step: utf8?
+  state: utf8?
 }
 
 @block("group_close")

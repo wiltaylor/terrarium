@@ -98,6 +98,10 @@ export function LanesBoard(props: {
                   <progress aria-label={`${group().title} progress`} value={group().done} max={Math.max(1, group().total)} />
                   <Show when={group().eta_at}>{(eta) => <time dateTime={eta()}>ETA {new Date(eta()).toLocaleString()}</time>}</Show>
                   <Show when={group().status}><span>{group().status}</span></Show>
+                  <ol><For each={group().steps}>{(step) => <li>
+                    {step.name}: {step.state} {step.text}
+                    <Show when={step.eta_at}>{(eta) => <time dateTime={eta()}> ETA {new Date(eta()).toLocaleString()}</time>}</Show>
+                  </li>}</For></ol>
                 </Show>
               </header>
             )}</Show>

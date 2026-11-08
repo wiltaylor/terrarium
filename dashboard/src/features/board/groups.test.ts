@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { BoardGroup, Card } from "../../api/types";
 import { groupSections } from "./groups";
 
-const group: BoardGroup = { id: "P-3", key: "batch", title: "Batch", column: "review", status: "", done: 1, total: 2, members: ["P-2", "P-1"], eta_at: null, closed_at: null };
+const group: BoardGroup = { id: "P-3", key: "batch", title: "Batch", column: "review", status: "", done: 1, total: 2, members: ["P-2", "P-1"], eta_at: null, closed_at: null, steps: [] };
 const card = (id: string, column: string, kind: "card" | "group" = "card"): Card => ({ id, column, kind, group } as Card);
 
 describe("board groups", () => {
