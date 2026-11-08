@@ -26,18 +26,21 @@ pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSampl
     let mut stmt = conn.prepare(
         "WITH recent AS MATERIALIZED (
            SELECT seq, card, at, payload FROM events WHERE project = ?1 AND kind = 'card'
-             AND json_extract(payload, '$.change') IN ('eta','moved')
+             AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END IN ('eta','moved')
            ORDER BY seq DESC LIMIT 2000
-         ) SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
-                coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]'), e.seq, x.seq, e.card
-         FROM recent e JOIN recent x ON x.seq = (
-           SELECT min(n.seq) FROM recent n WHERE n.card = e.card AND n.seq > e.seq)
+         ), visits AS (
+           SELECT *, lead(at) OVER w AS end_at, lead(seq) OVER w AS end_seq,
+             lead(payload) OVER w AS end_payload
+           FROM recent WINDOW w AS (PARTITION BY card ORDER BY seq)
+         ) SELECT e.at, json_extract(e.payload, '$.eta_at'), e.end_at,
+                coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]'), e.seq, e.end_seq, e.card
+         FROM visits e
          LEFT JOIN cards c ON c.id = e.card
          WHERE json_extract(e.payload, '$.change') = 'eta'
            AND coalesce(json_extract(e.payload, '$.column_role'), json_extract(e.payload, '$.column')) IN ('working', 'in_progress')
            AND coalesce(json_extract(e.payload, '$.job'), 0) = 0
-           AND json_extract(x.payload, '$.change') = 'moved'
-         ORDER BY x.seq DESC",
+           AND json_extract(e.end_payload, '$.change') = 'moved'
+         ORDER BY e.end_seq DESC",
     )?;
     let rows = stmt.query_map([project], |r| {
         Ok((
@@ -168,6 +171,19 @@ pub struct ReviewEstimates {
     entries: std::collections::HashMap<String, std::collections::HashMap<String, (String, String)>>,
 }
 
+// The inner card-index lookup stops at each board card's latest move. The
+// outer lookup uses the guarded partial move index, not all project history.
+const COLUMN_ENTRIES_SQL: &str = "
+    SELECT e.card, e.at,
+      coalesce(json_extract(e.payload, '$.to_role'), json_extract(e.payload, '$.to'), '')
+    FROM cards c JOIN events e INDEXED BY events_card_moves ON e.seq = (
+      SELECT seq FROM events WHERE card = c.id AND kind = 'card'
+        AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
+      ORDER BY seq DESC LIMIT 1
+    )
+    WHERE c.project = ?1 AND c.archived = 0 AND e.project = ?1 AND e.kind = 'card'
+      AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.change') END = 'moved'";
+
 impl ReviewEstimates {
     /// One latest-column-entry query per project per response, including misses.
     pub fn entered_at(
@@ -178,12 +194,7 @@ impl ReviewEstimates {
         role: Option<&str>,
     ) -> ApiResult<Option<String>> {
         if !self.entries.contains_key(project) {
-            let mut stmt = conn.prepare(
-                "SELECT card, at, coalesce(json_extract(payload, '$.to_role'), json_extract(payload, '$.to'), '')
-                 FROM events WHERE seq IN (SELECT max(seq) FROM events WHERE project = ?1 AND kind = 'card'
-                   AND json_extract(payload, '$.change') = 'moved'
-                 GROUP BY card)",
-            )?;
+            let mut stmt = conn.prepare(COLUMN_ENTRIES_SQL)?;
             let rows = stmt.query_map([project], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -273,11 +284,13 @@ mod tests {
 
     fn db() -> Connection {
         let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, project TEXT, card TEXT, kind TEXT, at TEXT, payload TEXT); CREATE TABLE cards(id TEXT, labels TEXT);").unwrap();
+        c.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, project TEXT, card TEXT, kind TEXT, at TEXT, payload TEXT); CREATE TABLE cards(id TEXT PRIMARY KEY, labels TEXT, project TEXT, archived INTEGER DEFAULT 0); CREATE INDEX events_card ON events(card, seq);").unwrap();
+        c.execute_batch(include_str!("../../migrations/ter-157-card-move-history-index.sql")).unwrap();
         c
     }
 
     fn moved(c: &Connection, project: &str, card: &str, minute: u32, from: &str, to: &str) {
+        c.execute("INSERT OR IGNORE INTO cards(id,project) VALUES (?1,?2)", params![card, project]).unwrap();
         c.execute(
             "INSERT INTO events(project,card,kind,at,payload) VALUES (?1,?2,'card',?3,?4)",
             params![
@@ -368,10 +381,19 @@ mod tests {
         assert_eq!(samples[0].guess_ms, 540000.0);
         assert_eq!(samples[0].labels, vec!["type:impl"]);
         let mut cache = ReviewEstimates::default();
-        let first = cache.worker_ms(&c, "p", &[], None).unwrap();
+        // Five distinct completions make the cached answer nonempty.
+        for n in 0..5 {
+            let card = format!("cache{n}");
+            c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES ('p',?1,'card','2026-11-08T00:00:00Z',?2)", params![card, json!({"change":"eta","column_role":"working","eta_at":"2026-11-08T00:10:00Z","labels":["type:impl"]}).to_string()]).unwrap();
+            moved(&c, "p", &card, 5, "working", "review");
+        }
+        let labels = vec!["type:impl".into()];
+        let first = cache.worker_ms(&c, "p", &labels, None).unwrap();
+        assert!(first.is_some());
         c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,card,kind,payload) SELECT 'p','noise','card','{\"change\":\"moved\"}' FROM n;").unwrap();
         assert!(work_samples(&c, "p").unwrap().is_empty());
-        assert_eq!(cache.worker_ms(&c, "p", &[], None).unwrap(), first);
+        assert_eq!(cache.worker_ms(&c, "p", &labels, None).unwrap(), first);
+        assert_eq!(ReviewEstimates::default().worker_ms(&c, "p", &labels, None).unwrap(), None);
     }
 
     #[test]
@@ -379,6 +401,13 @@ mod tests {
         let c = db();
         moved(&c, "p", "a", 1, "ready", "working");
         moved(&c, "p", "b", 2, "working", "review");
+        c.execute("INSERT INTO events(project,card,kind,payload) VALUES ('p','a','card','broken JSON')", []).unwrap();
+        assert!(work_samples(&c, "p").unwrap().is_empty());
+        let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {COLUMN_ENTRIES_SQL}")).unwrap();
+        let plan = stmt.query_map(["p"], |r| r.get::<_, String>(3)).unwrap().collect::<Result<Vec<_>, _>>().unwrap().join("\n");
+        assert!(plan.contains("events_card_moves"), "{plan}");
+        assert!(plan.contains("events_card (card=?"), "{plan}");
+        assert!(!plan.contains("SCAN e"), "{plan}");
         let mut cache = ReviewEstimates::default();
         assert!(cache.entered_at(&c, "p", "a", None).unwrap().is_some());
         c.execute("DELETE FROM events", []).unwrap();
