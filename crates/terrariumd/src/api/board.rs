@@ -39,7 +39,10 @@ async fn show_board(
 ) -> ApiResult<Json<serde_json::Value>> {
     policy::read_project(&actor, &name)?;
     Ok(Json(
-        state.db.read(move |c| board::board_summary(c, &name, query.done, &page)).await?,
+        state
+            .db
+            .read(move |c| board::board_summary(c, &name, query.done, &page))
+            .await?,
     ))
 }
 

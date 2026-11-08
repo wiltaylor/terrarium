@@ -282,11 +282,18 @@ async fn board_summary_budget_and_done_pages() {
         let summary = board::board_summary(&conn, "proj", false, &Page::default()).unwrap();
         let after = serde_json::to_vec(&summary).unwrap();
         let after_ms = start.elapsed().as_secs_f64() * 1000.0;
-        println!("board count={count}: before={} bytes {before_ms:.2}ms after={} bytes {after_ms:.2}ms", before.len(), after.len());
+        println!(
+            "board count={count}: before={} bytes {before_ms:.2}ms after={} bytes {after_ms:.2}ms",
+            before.len(),
+            after.len()
+        );
         assert!(after.len() < count as usize * 400, "summary size budget");
         assert!(after.len() * 10 < before.len(), "at least 90% smaller");
         assert!(after_ms < 2000.0, "board query and serialization budget");
-        assert_eq!(summary["cards"].as_array().unwrap().len(), count as usize / 3);
+        assert_eq!(
+            summary["cards"].as_array().unwrap().len(),
+            count as usize / 3
+        );
         let response = td.get("/api/projects/proj/board").await;
         let c = &response.ok()["cards"][0];
         assert_eq!(c["comment_count"], 10);
@@ -299,7 +306,11 @@ async fn board_summary_budget_and_done_pages() {
         let mut cursor = String::new();
         let mut seen = std::collections::HashSet::new();
         loop {
-            let response = td.get(&format!("/api/projects/proj/board?done=true&limit=37&cursor={cursor}")).await;
+            let response = td
+                .get(&format!(
+                    "/api/projects/proj/board?done=true&limit=37&cursor={cursor}"
+                ))
+                .await;
             let b = response.ok();
             let cards = b["cards"].as_array().unwrap();
             assert!(cards.len() <= 37);
@@ -307,11 +318,15 @@ async fn board_summary_budget_and_done_pages() {
                 assert_eq!(c["column"], "done");
                 assert!(seen.insert(c["id"].as_str().unwrap().to_owned()));
             }
-            let Some(next) = b["next_cursor"].as_str() else { break };
+            let Some(next) = b["next_cursor"].as_str() else {
+                break;
+            };
             cursor = next.to_owned();
         }
         assert_eq!(seen.len(), count as usize * 2 / 3);
-        td.get("/api/projects/proj/board?done=true&cursor=bad").await.err(422, "invalid");
+        td.get("/api/projects/proj/board?done=true&cursor=bad")
+            .await
+            .err(422, "invalid");
     }
 }
 
