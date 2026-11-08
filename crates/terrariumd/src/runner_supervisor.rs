@@ -5194,9 +5194,7 @@ mod tests {
         fn type_turn(&self, text: String) -> terrarium_runner::Delivery {
             assert!(!self.claimed.load(Ordering::SeqCst));
             lock(&self.typed).push(text);
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let _ = tx.send(Ok(()));
-            terrarium_runner::Delivery::from_parts(1, rx)
+            terrarium_runner::test_support::delivered_turn()
         }
         fn claim_idle_stop(&self) -> BoxFuture<'_, terrarium_runner::Result<bool>> {
             Box::pin(async move {
