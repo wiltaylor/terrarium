@@ -2028,7 +2028,7 @@ fn hold(
     Ok(())
 }
 
-/// The operator or a sysadmin released a held card with the answer of its hold
+/// The operator released a held card with the answer of its hold
 /// question (TER-85): take `hold` off, and move the card from the
 /// blocked column to the backlog. A card that is gone or archived stays
 /// as it is.
@@ -2055,12 +2055,9 @@ pub(crate) fn release_hold(t: &mut Tx<'_>, id: &str, question: &str) -> ApiResul
     // release: a held card goes to the backlog from any column.
     if held && row.column != BACKLOG {
         let backlog = column(t, &row.project, BACKLOG)?;
-        let by = match t.actor.as_str() {
-            "operator" => "the operator".to_owned(),
-            _ => actor_display(t)?,
-        };
-        let comment =
-            format!("Released by {by} (the answer to hold question {question}): the card is work.");
+        let comment = format!(
+            "Released by the operator (the answer to hold question {question}): the card is work."
+        );
         apply_move(t, &Actor::Operator, &row, &backlog, None, Some(&comment))?;
     }
     Ok(())

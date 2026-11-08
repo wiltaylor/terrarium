@@ -254,7 +254,7 @@ async fn only_the_operator_releases_a_held_card() {
 /// The answer of the hold question: "Keep held" keeps it; "Release to
 /// backlog" takes off `hold` and moves the card to the backlog.
 #[tokio::test]
-async fn sysadmin_hold_release_names_the_answering_agent() {
+async fn sysadmin_cannot_answer_a_hold_question() {
     let td = setup().await;
     allow(&td, &["wiltaylor"]).await;
     let c = make(
@@ -271,18 +271,10 @@ async fn sysadmin_hold_release_names_the_answering_agent() {
         json!({"option": 0}),
     )
     .await
-    .ok();
+    .err(403, "forbidden");
     let c = card(&td, id).await;
-    assert_eq!(c["column"], "backlog");
-    assert!(
-        c["comments"].as_array().unwrap().iter().any(|c| {
-            c["body"]
-                .as_str()
-                .unwrap()
-                .starts_with("Released by ops/sys (")
-        }),
-        "{c:#}"
-    );
+    assert_eq!(c["column"], "blocked");
+    assert!(labels(&c).contains(&"hold".to_owned()));
 }
 
 #[tokio::test]
