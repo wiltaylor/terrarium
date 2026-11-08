@@ -824,8 +824,10 @@ mod tests {
                 "`terrarium question bundle \"<summary>\" --items-file <path>`",
                 "Do not put unrelated questions in a\n  bundle",
                 "- `notify`: tell the operator something that needs no decision",
-                "run `terrarium notify \"<text>\"`",
-                "Do not mail\n  `operator` for these",
+                "`terrarium notify \"<text>\" --card <id>`",
+                "`--reply-to <message-or-question>`",
+                "No progress, release, or deploy\n  notices.",
+                "on the same card or Inbox thread.",
                 "Use `--critical` only when the operator must act now",
             ] {
                 assert!(t.contains(needle), "{name}: {needle}");
