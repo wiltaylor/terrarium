@@ -1017,13 +1017,7 @@ enum Ran {
 /// queue (TER-196): first the kill of a lost run ends what may still run
 /// of it on the target ([`end_lost`]), then the same job waits again with
 /// its attempt and its place. `live` keeps its slot taken until then.
-async fn rerun_lost(
-    state: &Shared,
-    job: Job,
-    why: String,
-    red: Option<JobEnd>,
-    live: LiveRun,
-) {
+async fn rerun_lost(state: &Shared, job: Job, why: String, red: Option<JobEnd>, live: LiveRun) {
     warn!(job = %job.id, "the run of a job was lost after its recipe started: {why}");
     hold(&job.id, why.clone(), None);
     // As in [`recover_lost`]: the kill goes to the current delivery
