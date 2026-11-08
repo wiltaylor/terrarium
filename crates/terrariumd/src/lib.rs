@@ -25,6 +25,7 @@ pub mod fleet;
 pub mod git;
 pub mod git_identity;
 pub mod git_proxy;
+pub mod github_issues;
 pub mod harness_auto_update;
 pub mod harness_tools;
 pub mod harness_versions;

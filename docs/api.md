@@ -4570,8 +4570,8 @@ supply:
 - `assignee` follows the assign rules.
 - `eta_at` follows the ETA rule (§8.2). The daemon sets it last, after the
   assignment.
-- `github_author` is the GitHub login of the issue author of a GitHub card,
-  for the GitHub author gate (below).
+- `github_author` is a legacy caller assertion, ignored by the author gate.
+  Use the issue import endpoint below for a daemon-verified author.
 - `inbox_thread` is an Inbox thread that tracks the new card (TER-146,
   §6.13 "Linked cards"). The caller must read the thread: else `404`, and
   no card is made.
@@ -4615,16 +4615,21 @@ is a card with the label `github` (any case), or a title that starts with
   from any column, in the same write. Any other answer leaves the
   card held. The operator can also edit or move the card directly.
 
-The gap: `github_author` is what the creating agent says. The daemon does
-not read the issue, so an agent that gives a false author, or that makes
-the card with neither the label nor the title, gets past the gate. The
-gate enforces the rule against mistakes, not against a hostile agent.
+Agent-supplied `github_author` never bypasses the gate. A card with neither
+the GitHub label nor title cannot be recognized as GitHub work.
 A card that a schedule `card` action (§19) opens as the operator is not
 gated. The action never finds a held card: `close` does not move it and
 `open` does not comment on it, whatever its `trigger:<key>` label.
-A daemon-side issue sync that takes the author from the signed GitHub
-webhook closes the gap (TER-124). The ingest listener (§20) must then be
-reachable from GitHub.
+**Import an issue** (TER-124): `POST /api/projects/{name}/github-issues/import`
+with `{"repo":"configured-repo-name","number":123}` returns `200` and the
+card. Requires project write access. The daemon fetches the issue from
+`api.github.com` using the configured repository's token credential, if any.
+Only canonical github.com HTTPS and SSH repository URLs are accepted, redirects
+are refused, and pull requests are rejected. No card is created on fetch failure.
+The API's author, title and body supply the card, which starts in backlog or
+is held by the project's configured author gate. Repeated imports return the
+same card, including archived or held cards. The reserved `github_issue` link
+records its canonical URL and cannot be supplied through the card link API.
 
 **Active cards** (`GET /api/cards`, TER-43, for the dashboard home). The
 cards that are not archived in the columns `columns` (a comma list,

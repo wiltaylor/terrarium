@@ -5,7 +5,7 @@
 //! (`github_authors` in `projects/<name>.toml`, or an operator `PATCH`).
 //! An empty list: no gate. With a list, a GitHub card that an agent makes
 //! (the label `github`, or a title that starts with `GitHub #<n>:`) needs
-//! `github_author` from that list. Any other GitHub card is held: it goes
+//! a daemon-verified author from that list. Any other GitHub card is held: it goes
 //! to the blocked column with the labels `github` and `hold`, whatever
 //! column it asked for, and the daemon opens a question to the operator
 //! for the creating agent, linked to the card.
@@ -15,9 +15,8 @@
 //! question with [`RELEASE`]. An agent edit cannot turn a card into a
 //! GitHub card, so GitHub work starts with `card new` and meets the gate.
 //!
-//! The gap: the author is what the creating agent says. The daemon does
-//! not read the issue. A daemon-side issue sync that takes the author from
-//! the signed webhook closes it (TER-124).
+//! Agent-supplied `github_author` assertions never bypass this gate.
+//! The daemon's GitHub issue importer reads the author from the API.
 
 use rusqlite::{Connection, OptionalExtension};
 

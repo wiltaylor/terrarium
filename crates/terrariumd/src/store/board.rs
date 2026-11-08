@@ -1789,9 +1789,8 @@ pub struct NewCard {
     /// The ETA: an RFC 3339 time or a duration from now (`2h30m`).
     #[serde(default)]
     pub eta_at: Option<String>,
-    /// The GitHub login of the issue author, for a GitHub card (TER-85,
-    /// [`github_gate`]). The caller says it; the daemon does not check it
-    /// against GitHub.
+    /// Legacy caller assertion. Ignored by the author gate. Import an issue
+    /// through the daemon's GitHub import endpoint for a verified author.
     #[serde(default)]
     pub github_author: Option<String>,
     /// An Inbox thread that tracks the new card (TER-146, TER-144 D2,
@@ -1858,7 +1857,18 @@ pub fn create_card(
     t: &mut Tx<'_>,
     actor: &Actor,
     project: &str,
+    new: NewCard,
+) -> ApiResult<Card> {
+    create_card_with_author(t, actor, project, new, None)
+}
+
+/// Only daemon-verified issue data may supply an author to the gate.
+pub(crate) fn create_card_with_author(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    project: &str,
     mut new: NewCard,
+    verified_author: Option<&str>,
 ) -> ApiResult<Card> {
     policy::write_project(actor, project)?;
     let prefix = crate::store::projects::get(t, project)?.card_prefix;
@@ -1889,7 +1899,7 @@ pub fn create_card(
             let list = github_gate::authors(t, project)?;
             (!list.is_empty()
                 && github_gate::is_github(&title, &new.labels)
-                && !github_gate::allowed(&list, new.github_author.as_deref()))
+                && !github_gate::allowed(&list, verified_author))
             .then(|| a.clone())
         }
         Actor::Operator => None,
@@ -1948,7 +1958,7 @@ pub fn create_card(
         json!({"from_mail": new.from_mail, "thread_id": thread}),
     )?;
     if let Some(agent) = &held_for {
-        hold(t, actor, agent, &row, new.github_author.as_deref())?;
+        hold(t, actor, agent, &row, verified_author)?;
         if let Some(c) = new.comment.as_deref().filter(|c| !c.trim().is_empty()) {
             let author = author_of(t, actor);
             insert_comment(t, &id, &author, c.trim())?;
@@ -1999,8 +2009,7 @@ fn hold(
     let comment = github_gate::hold_comment(&row.project, author);
     apply_move(t, actor, row, &blocked, None, Some(&comment))?;
     let context = format!(
-        "Title: {}\nGitHub author given: {}\nThe author is what the agent said; the daemon \
-         does not read the issue.",
+        "Title: {}\nDaemon-verified GitHub author: {}",
         row.title,
         author
             .map(str::trim)

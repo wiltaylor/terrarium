@@ -124,7 +124,7 @@ async fn only_the_operator_sets_the_allow_list() {
     assert!(p.ok().get("github_authors").is_none(), "{}", p.body);
 }
 
-/// An author on the list makes work as asked, in any case.
+/// Even an allow-listed author assertion from an agent is unverified.
 #[tokio::test]
 async fn an_allowed_author_makes_work() {
     let td = setup().await;
@@ -136,15 +136,15 @@ async fn an_allowed_author_makes_work() {
                "github_author": "WilTaylor-DAF"}),
     )
     .await;
-    assert_eq!(c["column"], "ready");
-    assert_eq!(labels(&c), ["github"]);
+    assert_eq!(c["column"], "blocked");
+    assert_eq!(labels(&c), ["github", "hold"]);
     let c = make(
         &td,
         "proj/w1",
         json!({"title": "GitHub #3: z", "github_author": "wiltaylor"}),
     )
     .await;
-    assert_eq!(c["column"], "backlog");
+    assert_eq!(c["column"], "blocked");
 }
 
 /// The acceptance of TER-85: another author, no author, or the title
