@@ -5376,25 +5376,44 @@ mod tests {
     async fn pending_slot_turns_keep_ids_order_and_refuse_after_handoff() {
         let tmp = tempfile::tempdir().unwrap();
         let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
-            tmp.path().join("state"), tmp.path().join("run"),
-            tmp.path().join("prompts"), SandboxConfig::default(), HashMap::new(),
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
         ));
         let agent: Agent = serde_json::from_value(serde_json::json!({
             "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
         })).unwrap();
         let id = agent.id;
         let mut slot = Slot::new(agent);
-        slot.turns = ["first", "second", "third"].into_iter()
-            .map(|s| crate::supervisor::PendingTurn::from(s.to_owned())).collect();
+        slot.turns = ["first", "second", "third"]
+            .into_iter()
+            .map(|s| crate::supervisor::PendingTurn::from(s.to_owned()))
+            .collect();
         lock(&sup.inner.slots).insert(id, slot);
         let pending = sup.list_pending(id).await.unwrap();
-        assert_eq!(pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["first", "second", "third"]);
-        assert!(sup.cancel_pending(id, "supervisor", pending[1].id.clone()).await.unwrap());
+        assert_eq!(
+            pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+        assert!(
+            sup.cancel_pending(id, "supervisor", pending[1].id.clone())
+                .await
+                .unwrap()
+        );
         let remaining = sup.list_pending(id).await.unwrap();
-        assert_eq!(remaining.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), [pending[0].id.as_str(), pending[2].id.as_str()]);
+        assert_eq!(
+            remaining.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            [pending[0].id.as_str(), pending[2].id.as_str()]
+        );
         // Dispatch takes the queue under this same lock before typing.
         lock(&sup.inner.slots).get_mut(&id).unwrap().turns.clear();
-        assert!(!sup.cancel_pending(id, "supervisor", pending[0].id.clone()).await.unwrap());
+        assert!(
+            !sup.cancel_pending(id, "supervisor", pending[0].id.clone())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

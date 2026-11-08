@@ -297,13 +297,20 @@ fn transitions(events: &[EventRecord]) -> Vec<AgentStatus> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_turns_refuse_cancellation_during_typing() {
-    let mut h = start(Opts { submit_pause: ms(1000), ..Opts::default() }).await;
+    let mut h = start(Opts {
+        submit_pause: ms(1000),
+        ..Opts::default()
+    })
+    .await;
     until_idle(&mut h).await;
     assert!(h.runner.claim_idle_stop());
     let delivery = h.runner.type_turn("typing");
     let id = h.runner.list_pending()[0].id.clone();
     h.runner.release_idle_stop();
-    until("dispatch took the turn", || h.runner.list_pending().is_empty()).await;
+    until("dispatch took the turn", || {
+        h.runner.list_pending().is_empty()
+    })
+    .await;
     assert!(!h.runner.cancel_pending(&id));
     delivery.wait().await.expect("typing was not cancelled");
     h.runner.kill().expect("kill");
