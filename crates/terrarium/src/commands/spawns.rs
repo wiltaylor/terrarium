@@ -17,6 +17,12 @@ use crate::transport::encode;
 /// `terrarium agent spawn`.
 #[derive(Debug, Args)]
 pub struct SpawnArgs {
+    /// Copy targets, agent grants, skills and pool from a same-project agent
+    #[arg(long, value_name = "AGENT")]
+    pub like: Option<String>,
+    /// Omit copied rights the owner cannot grant and list them in the response
+    #[arg(long, requires = "like")]
+    pub like_skip_missing: bool,
     /// The template: a name (the project's template, else the global one)
     /// or `global:<name>`
     pub template: String,
@@ -256,6 +262,10 @@ pub async fn spawn(ctx: &Ctx, a: &SpawnArgs) -> anyhow::Result<()> {
     }
     if !a.targets.is_empty() {
         body["targets"] = json!(a.targets);
+    }
+    if let Some(like) = &a.like {
+        body["like"] = json!(like);
+        body["like_skip_missing"] = json!(a.like_skip_missing);
     }
     if !a.grants.is_empty() {
         body["grants"] = json!(a.grants);

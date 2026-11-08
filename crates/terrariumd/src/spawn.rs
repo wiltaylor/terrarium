@@ -121,6 +121,10 @@ impl Drop for CloseGuard {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnBody {
+    #[serde(default)]
+    pub like: Option<String>,
+    #[serde(default)]
+    pub like_skip_missing: bool,
     /// The template: a name (the project's template, else the global
     /// one) or `global:<name>`.
     pub template: String,
@@ -161,6 +165,7 @@ pub struct SpawnBody {
 /// The answer of a spawn: the spawn row, the agent, and the wait.
 #[derive(Debug, serde::Serialize)]
 pub struct Spawned {
+    pub skipped: Vec<String>,
     #[serde(flatten)]
     pub spawn: Spawn,
     pub agent: Option<AgentView>,
@@ -511,7 +516,7 @@ pub async fn spawn_with(
     let deadline = crate::waits::from_now(lifetime);
     let wait_at =
         crate::waits::from_now(wait_timeout.unwrap_or(lifetime + Duration::from_secs(60)));
-    let (view, wait_row) = state
+    let (view, wait_row, skipped) = state
         .db
         .write(actor.label(), move |t| {
             if let Some(sp) = &rules2
@@ -543,6 +548,46 @@ pub async fn spawn_with(
                     }
                 }
             }
+            let mut skipped = Vec::new();
+            let mut copied_targets = Vec::new();
+            let mut copied_grants = Vec::new();
+            if let Some(key) = &body.like {
+                let source = agents::find(t, key, Some(&def.project))?;
+                if source.agent.project != def.project {
+                    return Err(ApiError::forbidden("--like requires an agent of the same project"));
+                }
+                def.skills = source.agent.skills.clone();
+                def.skills_off = source.agent.skills_off.clone();
+                def.default_skills = source.agent.default_skills;
+                crate::skills::check_assignment(skills.as_deref(), &def.skills)?;
+                if source.agent.harness != def.harness {
+                    return Err(ApiError::invalid("--like requires the same harness as the template"));
+                }
+                def.subscription = source.agent.subscription.clone();
+                def.subscription_pool = source.agent.subscription_pool.clone();
+                for name in &source.agent.policy.targets {
+                    match spawn_rights::check_targets(t, owner_view.as_ref(), &def.project, std::slice::from_ref(name)) {
+                        Ok(mut rights) => copied_targets.append(&mut rights),
+                        Err(e) if body.like_skip_missing && e.code == crate::error::Code::Forbidden => skipped.push(format!("target:{name}")),
+                        Err(e) => return Err(e),
+                    }
+                }
+                let grantee = format!("agent:{}", source.agent.id);
+                for secret in crate::secrets::list(t, None)? {
+                    for grant in crate::secrets::grants::list(t, &secret)?.into_iter().filter(|g| g.grantee == grantee) {
+                        let suffix = if grant.targets.is_empty() { String::new() } else { format!("={}", grant.targets.join(",")) };
+                        let label = format!("{}/{}:{}{suffix}", grant.scope, grant.name, grant.level);
+                        let ask = spawn_rights::parse_grant(&label)?;
+                        match spawn_rights::check_spawn_grants(t, owner_view.as_ref(), &def.project, &spawn_rights::TemplateGrants::default(), &[ask]) {
+                            Ok(mut rights) => copied_grants.append(&mut rights),
+                            Err(e) if body.like_skip_missing && e.code == crate::error::Code::Forbidden => skipped.push(format!("grant:{label}")),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+            } else if body.like_skip_missing {
+                return Err(ApiError::invalid("like_skip_missing requires like"));
+            }
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
             if let Some(check) = def_check {
                 check(t, &mut def)?;
@@ -551,15 +596,18 @@ pub async fn spawn_with(
             // not by the policy rule above, so a lead passes on a global
             // target that it may use.
             let ov = owner_view.as_ref();
-            let target_grants =
+            let mut target_grants =
                 spawn_rights::check_targets(t, ov, &def.project, &target_names)?;
-            let secret_grants = spawn_rights::check_spawn_grants(
+            target_grants.extend(copied_targets);
+            let mut secret_grants = spawn_rights::check_spawn_grants(
                 t,
                 ov,
                 &def.project,
                 &template_grants,
                 &grant_asks,
             )?;
+            copied_grants.retain(|g| !secret_grants.iter().any(|explicit| explicit.info.id == g.info.id));
+            secret_grants.extend(copied_grants);
             for tg in &target_grants {
                 if let spawn_rights::TargetGrant::Policy(n) = tg
                     && !def.policy.targets.contains(n)
@@ -635,7 +683,7 @@ pub async fn spawn_with(
             } else {
                 None
             };
-            Ok((agents::get(t, &id)?, w))
+            Ok((agents::get(t, &id)?, w, skipped))
         })
         .await?;
     let id = view.agent.id;
@@ -681,6 +729,7 @@ pub async fn spawn_with(
         })
         .await?;
     Ok(Spawned {
+        skipped,
         spawn,
         agent,
         wait: wait_row,
