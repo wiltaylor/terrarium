@@ -451,6 +451,13 @@ async fn remove(
 ) -> ApiResult<StatusCode> {
     let current = load(&state, &actor, name.clone()).await?;
     policy::define_target(&actor, current.def.project.as_deref())?;
+    let reserved_name = name.clone();
+    state
+        .db
+        .read(move |conn| {
+            crate::store::reservations::guard_identity(conn, "target", &reserved_name)
+        })
+        .await?;
     if current.source != crate::store::projects::SOURCE_FILE {
         executor::teardown(&state, &current).await;
     }

@@ -115,6 +115,24 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Reservation> {
     .map_err(|e| ApiError::internal(format!("invalid stored reservation: {e}")))
 }
 
+/// Keep the identity needed to restore limits until cleanup has completed.
+pub fn guard_identity(conn: &Connection, kind: &str, id: &str) -> ApiResult<()> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM reservations WHERE state IN ('queued','starting','active','ending')
+         AND ((?1='target' AND json_extract(data,'$.target')=?2)
+           OR (?1='agent' AND json_extract(data,'$.holder.kind')='agent'
+               AND json_extract(data,'$.holder.id')=?2)) ORDER BY seq",
+    )?;
+    let ids = stmt
+        .query_map(params![kind, id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::conflict("cancel or retract reservations and wait for cleanup before changing their target or holder")
+        .with_details(json!({"reservations":ids})))
+}
+
 pub fn capacity(conn: &Connection, host: &str) -> ApiResult<(HostCapacity, Amounts, u8)> {
     let h = super::hosts::get(conn, host)?;
     let physical: HostCapacity =

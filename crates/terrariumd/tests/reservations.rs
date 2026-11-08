@@ -45,6 +45,33 @@ fn request(holder: &str, cpu: u64, queue: bool) -> Request {
 }
 
 #[tokio::test]
+async fn identities_stay_until_reservation_cleanup_finishes() {
+    let db = database().await;
+    db.write("operator", |t| {
+        let mut req = request("box", 1000, false);
+        req.holder = Holder::Agent("worker".into());
+        let reservation = r::request(t, req, 0)?;
+        for kind_id in [("target", "box"), ("agent", "worker")] {
+            assert!(r::guard_identity(t, kind_id.0, kind_id.1).is_err());
+        }
+        r::guard_identity(t, "target", "other")?;
+        r::activate(t, &reservation.id)?;
+        r::end(t, &reservation.id, false)?;
+        assert!(r::guard_identity(t, "target", "box").is_err());
+        r::finish_end(t, &reservation.id)?;
+        r::guard_identity(t, "target", "box")?;
+        r::guard_identity(t, "agent", "worker")?;
+        r::request(t, request("full", 2000, false), 0)?;
+        let queued = r::request(t, request("queued", 1000, true), 0)?;
+        assert!(r::guard_identity(t, "target", "queued").is_err());
+        r::cancel(t, &queued.id)?;
+        r::guard_identity(t, "target", "queued")
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn concurrent_admission_never_overcommits() {
     let db = database().await;
     let (a, b) = tokio::join!(

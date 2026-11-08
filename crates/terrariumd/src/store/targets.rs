@@ -619,6 +619,7 @@ pub fn prepare_update(
         .map_err(|e| ApiError::bad_request(format!("bad target field: {e}")))?;
     def.name = name.to_owned();
     validate(&def)?;
+    guard_reserved_update(t, &current.def, &def)?;
     if let Some(p) = &def.project {
         crate::store::projects::get(t, p)?;
     }
@@ -687,8 +688,25 @@ fn is_running(r: &TargetRow) -> bool {
 pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<TargetRow> {
     let current = get(t, name)?;
     refuse_file(&current)?;
+    super::reservations::guard_identity(t, "target", name)?;
     t.execute("DELETE FROM targets WHERE name = ?1", [name])?;
     Ok(current)
+}
+
+fn guard_reserved_update(conn: &Connection, old: &TargetDef, new: &TargetDef) -> ApiResult<()> {
+    let mut old_value = serde_json::to_value(old)?;
+    let mut new_value = serde_json::to_value(new)?;
+    for value in [&mut old_value, &mut new_value] {
+        if let Some(object) = value.as_object_mut() {
+            for field in ["limits", "keep", "snapshot_before_task"] {
+                object.remove(field);
+            }
+        }
+    }
+    if old_value != new_value {
+        super::reservations::guard_identity(conn, "target", &old.name)?;
+    }
+    Ok(())
 }
 
 /// Record the state that a lifecycle verb saw, and a snapshot name to add.
@@ -762,6 +780,10 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[TargetDef]) -> ApiResult<(Changes, Vec
                 changes.added.push(def.name.clone());
             }
             Some(r) if r.def != *def || r.source != SOURCE_FILE => {
+                if let Err(e) = guard_reserved_update(t, &r.def, def) {
+                    errors.push(format!("targets/{}.toml: {}", def.name, e.message));
+                    continue;
+                }
                 t.execute(
                     "UPDATE targets SET project = ?2, kind = ?3, def = ?4, source = 'file',
                                         updated_at = ?5, credential_admin = 1
@@ -785,6 +807,10 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[TargetDef]) -> ApiResult<(Changes, Vec
         .map(|r| r.def.name)
         .collect();
     for name in gone {
+        if let Err(e) = super::reservations::guard_identity(t, "target", &name) {
+            errors.push(format!("targets/{name}.toml: {}", e.message));
+            continue;
+        }
         t.execute("DELETE FROM targets WHERE name = ?1", [&name])?;
         changes.removed.push(name);
     }
