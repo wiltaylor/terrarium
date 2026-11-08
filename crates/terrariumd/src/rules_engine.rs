@@ -1193,6 +1193,11 @@ pub fn card_condition_fails(
     card: &board::Card,
     columns: &[BoardColumn],
 ) -> Option<String> {
+    if let Some(prefix) = &cond.group_key_prefix
+        && !card.group.as_ref().is_some_and(|g| g.key.starts_with(prefix))
+    {
+        return Some(format!("{} is not in a group with key prefix {prefix}", card.id));
+    }
     let is_in = |refs: &[String]| {
         refs.iter()
             .any(|r| rules_file::resolve_column(columns, r).is_some_and(|c| c.name == card.column))

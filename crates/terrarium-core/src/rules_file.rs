@@ -405,6 +405,8 @@ pub struct Action {
 /// field that is set must hold.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CardCondition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_key_prefix: Option<String>,
     /// In one of these columns (`@<role>` or a name).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub column: Vec<String>,
@@ -902,6 +904,7 @@ fn read_if_card(ctx: &Context, fields: &Map<String, Value>) -> Result<CardCondit
         }
     }
     let c = CardCondition {
+        group_key_prefix: fields.get("group_key_prefix").and_then(Value::as_str).map(str::to_owned),
         column: text_list(fields, "column"),
         not_column: text_list(fields, "not_column"),
         has_labels: text_list(fields, "has_labels"),

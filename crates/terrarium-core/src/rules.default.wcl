@@ -111,6 +111,16 @@ rule "merge-group-failed" {
   group_status { key = "{{job.group_key}}" step = "merged (full suite passed)" state = "failed" }
 }
 
+rule "merge-group-returned" {
+  description = "A card returned for more work leaves its open merge group."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to_role" { one_of = ["in_progress", "ready", "blocked", "backlog"] }
+  if_card { group_key_prefix = "merge:" column = ["@in_progress", "@ready", "@blocked", "@backlog"] }
+  group_remove { key = "{{group.key}}" }
+}
+
 rule "job-requeued" {
   description = "A job waits again (its host was away, or a restart lost its run): running -> queued."
   on = ["job"]

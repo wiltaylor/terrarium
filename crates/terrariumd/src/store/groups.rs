@@ -277,6 +277,9 @@ pub fn remove(t: &mut Tx<'_>, g: &Group, card: &str) -> ApiResult<bool> {
     )? > 0;
     if changed {
         event(t, &g.id, "group_removed")?;
+        if g.key.starts_with("merge:") && get(t, &g.id)?.total == 0 {
+            close(t, &get(t, &g.id)?, "Merge group abandoned: no members remain.")?;
+        }
     }
     Ok(changed)
 }
@@ -380,6 +383,7 @@ pub fn step(
 /// The safeguard is independent of whether the creating rule still exists.
 /// Its comment and rule-log row commit together with the close.
 pub fn expire(t: &mut Tx<'_>) -> ApiResult<()> {
+    reconcile_merge_groups(t)?;
     let at = crate::time_param::stored(Utc::now());
     let due: Vec<(String, String, String)> = {
         let mut stmt = t.prepare(
@@ -402,6 +406,33 @@ pub fn expire(t: &mut Tx<'_>) -> ApiResult<()> {
             ?5, 'close_after safeguard', ?6, ?6)",
             params![run, project, rule, id, steps.to_string(), at],
         )?;
+    }
+    Ok(())
+}
+
+/// Repair memberships left by older rule packs. Review is also a valid
+/// member state: queued jobs may create their group before moving the cards.
+fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
+    let ids: Vec<String> = {
+        let mut stmt = t.prepare(
+            "SELECT card FROM card_groups WHERE closed_at IS NULL AND key LIKE 'merge:%'",
+        )?;
+        stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?
+    };
+    for id in ids {
+        let g = get(t, &id)?;
+        for member in &g.members {
+            let card = board::get_card(t, member)?;
+            if card.archived
+                || matches!(card.column_role.as_deref(), Some("in_progress" | "ready" | "blocked" | "backlog"))
+            {
+                remove(t, &g, member)?;
+            }
+        }
+        let current = get(t, &id)?;
+        if current.closed_at.is_none() && current.total == 0 {
+            close(t, &current, "Merge group abandoned: no members remain.")?;
+        }
     }
     Ok(())
 }

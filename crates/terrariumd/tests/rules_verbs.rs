@@ -779,6 +779,55 @@ async fn fail_job(td: &TestDaemon, job: &Job, outcome: &str) -> Job {
 // ------------------------------------------------------------ card verbs
 
 #[tokio::test]
+async fn default_merge_group_returned_members_leave_and_last_abandons() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(&td, "p", json!({"title":"a", "column":"review", "repo":"app"})).await;
+    let b = new_card(&td, "p", json!({"title":"b", "column":"review", "repo":"app"})).await;
+    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"].as_str().unwrap().to_owned();
+    move_to(&td, &a, "ready").await;
+    settle(&td).await;
+    assert!(card(&td, &a).await.get("group").is_none());
+    assert_eq!(card(&td, &gid).await["archived"], false);
+    assert_eq!(card(&td, &b).await["group"]["members"], json!([b]));
+    move_to(&td, &b, "in_progress").await;
+    settle(&td).await;
+    let group = card(&td, &gid).await;
+    assert_eq!(group["archived"], true);
+    assert_eq!(group["group"]["total"], 0);
+    let runs = runs_of(&td, "p", "merge-group-returned").await;
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(runs.iter().all(|r| r["state"] == "done"), "{runs:?}");
+}
+
+#[tokio::test]
+async fn default_merge_group_sweep_repairs_stale_members_idempotently() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(&td, "p", json!({"title":"a", "column":"review", "repo":"app"})).await;
+    let b = new_card(&td, "p", json!({"title":"b", "column":"review", "repo":"app"})).await;
+    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"].as_str().unwrap().to_owned();
+    let members = [a.clone(), b.clone()];
+    state(&td).db.write("test", move |t| {
+        // Model old data with no move event for the new rule to handle.
+        for id in members {
+            t.execute("UPDATE cards SET column_id = (SELECT id FROM board_columns WHERE project = 'p' AND name = 'ready') WHERE id = ?1", [id])?;
+        }
+        terrariumd::store::groups::expire(t)?;
+        terrariumd::store::groups::expire(t)
+    }).await.unwrap();
+    assert!(card(&td, &a).await.get("group").is_none());
+    assert!(card(&td, &b).await.get("group").is_none());
+    let group = card(&td, &gid).await;
+    assert_eq!(group["archived"], true);
+    assert_eq!(group["group"]["total"], 0);
+}
+
+#[tokio::test]
 async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
