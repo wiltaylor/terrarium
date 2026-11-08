@@ -1212,7 +1212,10 @@ mod tests {
         assert!(s.contains("bound to card TER-74"), "{s}");
         assert!(s.contains("Do not run `terrarium agent done`"), "{s}");
         assert!(!s.contains("lifetime is"), "{s}");
-        assert!(s.contains("lifetime cap is 2h (`spawn.max_bound_lifetime`"), "{s}");
+        assert!(
+            s.contains("lifetime cap is 2h (`spawn.max_bound_lifetime`"),
+            "{s}"
+        );
         info.bound = Some("thread:T1".into());
         let s = prompt_section(&info);
         assert!(s.contains("Inbox thread T1"), "{s}");
