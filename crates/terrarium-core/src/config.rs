@@ -1029,6 +1029,10 @@ impl TargetKind {
 /// A target definition, `targets/<name>.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetDef {
+    /// Card-agent build roots live under `<work_root>/<project>/<agent>`.
+    /// Shared project caches must live outside these roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_root: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     pub kind: TargetKind,
