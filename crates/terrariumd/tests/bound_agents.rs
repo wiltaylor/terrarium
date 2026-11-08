@@ -1045,6 +1045,17 @@ async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
     let agent_id = eph.parse().unwrap();
+    // Startup emits idle before the queued spawn task runs. Wait for its
+    // stored turn_end so the following idle cannot be that startup idle.
+    until("the spawn task ends", || async {
+        !td.get(&format!("/api/agents/{eph}/events?kind=turn_end"))
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    })
+    .await;
     td.wait_status(&eph, "idle").await;
     let before = sessions(&td, &eph).await;
     let hold = terrariumd::lifecycle::WakeGuard::take(&s.lifecycle, agent_id).unwrap();
@@ -1078,6 +1089,18 @@ async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
     stopping.await.unwrap();
     until("the resumed return turn", || async {
         td.sup.prompts(agent_id).contains(&turn)
+    })
+    .await;
+    // A recorded prompt precedes working in the event pump. Do not mistake
+    // the resume's startup idle for the idle after this return turn either.
+    until("the return turn ends", || async {
+        td.get(&format!("/api/agents/{eph}/events?kind=turn_end"))
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .len()
+            == 2
     })
     .await;
     td.wait_status(&eph, "idle").await;
