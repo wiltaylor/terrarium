@@ -1453,6 +1453,11 @@ pub(crate) fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
 pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
     let _resources = state.executor.resource_lock.try_lock()
         .map_err(|_| ApiError::conflict("resource reservations are being updated; retry the command"))?;
+    start_cmd_locked(state, def, cmd)
+}
+
+/// The caller holds resource_lock through session registration.
+pub(crate) fn start_cmd_locked(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
     no_exec(def)?;
     // SSH takes a separate execution path, but must not bypass a host's
     // exclusive reservation policy.
@@ -1705,7 +1710,8 @@ async fn start_exec_secrets(
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
     let mut cmd = cmd;
     cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
-    let (run, report) = crate::run_kill::start(state, &def, &cmd)?;
+    let resources = state.executor.resource_lock.lock().await;
+    let (run, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
     let view = match actor {
         Actor::Agent(a) => terrarium_core::redact::View::Scope(a.project.clone()),
@@ -1724,6 +1730,7 @@ async fn start_exec_secrets(
     sess.set_kill_report(report);
     tokio::spawn(attach(run, sess.clone(), ctl, false, false));
     state.executor.insert(sess.clone());
+    drop(resources);
     let mut detail = json!({"session": sess.id, "kind": targets::kind_str(row.def.kind),
            "command": cmd_text(&cmd), "cwd": cmd.cwd, "pty": cmd.pty.is_some(),
            "env": cmd.env.keys().collect::<Vec<_>>()});
@@ -1791,7 +1798,8 @@ pub async fn start_tool_exec(
     cmd.shell = false;
     cmd.pty = None;
     cmd.holder = holder_of(actor);
-    let (running, report) = crate::run_kill::start(state, &def, &cmd)?;
+    let resources = state.executor.resource_lock.lock().await;
+    let (running, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     let (sess, ctl) = ExecSession::new(
         name,
         actor.agent().map(|a| a.id.clone()),
@@ -1803,6 +1811,7 @@ pub async fn start_tool_exec(
     let daemon = state.db.redactor().get();
     tokio::spawn(attach_tool(running, sess.clone(), ctl, run, daemon));
     state.executor.insert(sess.clone());
+    drop(resources);
     Ok(sess)
 }
 
@@ -2570,6 +2579,11 @@ pub async fn lifecycle(
         // Boxed: an instance verb runs `lifecycle` on the instance's lab dir.
         return Box::pin(instance_lifecycle(state, def, verb_kind, opts)).await;
     }
+    // Docker creation and state publication must be atomic with reservation
+    // admission: a grant must not observe a stopped target while it starts.
+    let _resources = if def.kind == TargetKind::Docker {
+        Some(state.executor.resource_lock.lock().await)
+    } else { None };
     if verb_kind == V::Up {
         crate::reservations::lifecycle_admission(state, def)?;
     }
