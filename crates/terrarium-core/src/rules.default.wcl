@@ -111,6 +111,24 @@ rule "merge-group-failed" {
   group_status { key = "{{job.group_key}}" step = "merged (full suite passed)" state = "failed" }
 }
 
+rule "merge-group-returned" {
+  description = "A card returned for more work leaves its open merge group."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.from_role" { one_of = ["merge_queue", "accepted", "review"] }
+  if_card { group_key_prefix = "merge:" column = ["@working", "ready", "@blocked", "backlog"] }
+  group_remove { key = "{{group.key}}" }
+}
+
+rule "merge-group-cancelled" {
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.kind" { eq = "merge" }
+  when "data.verdict" { eq = "cancelled" }
+  group_close { key = "{{job.group_key}}" comment = "Merge group abandoned: merge job cancelled." }
+}
+
 rule "job-requeued" {
   description = "A job waits again (its host was away, or a restart lost its run): running -> queued."
   on = ["job"]

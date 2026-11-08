@@ -271,14 +271,35 @@ pub fn remove(t: &mut Tx<'_>, g: &Group, card: &str) -> ApiResult<bool> {
     if g.closed_at.is_some() {
         return Ok(false);
     }
+    if g.key.starts_with("merge:") {
+        let member = board::get_card(t, card)?;
+        // Repair cards deliberately stay with their batch while being worked.
+        // Done has no role on the default board, so it is matched by name.
+        if member.labels.iter().any(|l| l.starts_with("merge-fix:")) && member.column != "done" {
+            return Ok(false);
+        }
+    }
     let changed = t.execute(
         "DELETE FROM group_members WHERE group_card = ?1 AND card = ?2",
         params![g.id, card],
     )? > 0;
     if changed {
         event(t, &g.id, "group_removed")?;
+        close_finished_merge(t, &g.id)?;
     }
     Ok(changed)
+}
+
+fn close_finished_merge(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
+    let g = get(t, id)?;
+    if g.closed_at.is_none() && g.key.starts_with("merge:") {
+        if g.total == 0 {
+            close(t, &g, "Merge group abandoned: no members remain.")?;
+        } else if g.done == g.total {
+            close(t, &g, "All remaining members merged (accepted or later).")?;
+        }
+    }
+    Ok(())
 }
 
 pub fn status(t: &mut Tx<'_>, g: &Group, text: Option<&str>, eta: Option<&str>) -> ApiResult<bool> {
@@ -380,6 +401,7 @@ pub fn step(
 /// The safeguard is independent of whether the creating rule still exists.
 /// Its comment and rule-log row commit together with the close.
 pub fn expire(t: &mut Tx<'_>) -> ApiResult<()> {
+    reconcile_merge_groups(t)?;
     let at = crate::time_param::stored(Utc::now());
     let due: Vec<(String, String, String)> = {
         let mut stmt = t.prepare(
@@ -402,6 +424,42 @@ pub fn expire(t: &mut Tx<'_>) -> ApiResult<()> {
             ?5, 'close_after safeguard', ?6, ?6)",
             params![run, project, rule, id, steps.to_string(), at],
         )?;
+    }
+    Ok(())
+}
+
+/// Repair memberships left by older rule packs. Review is also a valid
+/// member state: queued jobs may create their group before moving the cards.
+fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
+    let ids: Vec<String> = {
+        let mut stmt = t.prepare(
+            "SELECT card FROM card_groups WHERE closed_at IS NULL AND key LIKE 'merge:%'",
+        )?;
+        stmt.query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    for id in ids {
+        let g = get(t, &id)?;
+        for member in &g.members {
+            let card = board::get_card(t, member)?;
+            let role: Option<String> = t.query_row(
+                "SELECT k.role FROM cards c JOIN board_columns k ON k.id = c.column_id WHERE c.id = ?1",
+                [member],
+                |r| r.get(0),
+            )?;
+            // Ready, backlog and done have no roles on the default board.
+            // Working and blocked use roles so renamed columns work too.
+            let repair = card.labels.iter().any(|l| l.starts_with("merge-fix:"));
+            if (repair && card.column == "done")
+                || (!repair
+                    && (card.archived
+                        || matches!(role.as_deref(), Some("working" | "blocked"))
+                        || (role.is_none() && matches!(card.column.as_str(), "ready" | "backlog"))))
+            {
+                remove(t, &g, member)?;
+            }
+        }
+        close_finished_merge(t, &id)?;
     }
     Ok(())
 }

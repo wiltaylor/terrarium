@@ -779,6 +779,219 @@ async fn fail_job(td: &TestDaemon, job: &Job, outcome: &str) -> Job {
 // ------------------------------------------------------------ card verbs
 
 #[tokio::test]
+async fn default_merge_group_closes_completed_remainders_and_stale_accepted() {
+    for remove_returned in [false, true] {
+        let td = queue_lab().await;
+        put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+        let a = new_card(
+            &td,
+            "p",
+            json!({"title":"accepted", "column":"review", "repo":"app"}),
+        )
+        .await;
+        let b = new_card(
+            &td,
+            "p",
+            json!({"title":"other", "column":"review", "repo":"app"}),
+        )
+        .await;
+        store_job(&td, JobKind::Merge, &[&a, &b]).await;
+        settle(&td).await;
+        let gid = card(&td, &a).await["group"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (first, second, group) = (a.clone(), b.clone(), gid.clone());
+        state(&td).db.write("test", move |t| {
+            t.execute("UPDATE cards SET column_id = (SELECT id FROM board_columns WHERE project = 'p' AND name = 'accepted') WHERE id = ?1", [&first])?;
+            if remove_returned {
+                let g = terrariumd::store::groups::get(t, &group)?;
+                terrariumd::store::groups::remove(t, &g, &second)?;
+            } else {
+                // TER-327: every member reached accepted but its header stayed open.
+                t.execute("UPDATE cards SET column_id = (SELECT id FROM board_columns WHERE project = 'p' AND name = 'accepted') WHERE id = ?1", [&second])?;
+                terrariumd::store::groups::expire(t)?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let g = card(&td, &gid).await;
+        assert_eq!(g["archived"], true);
+        assert_eq!(g["group"]["done"], g["group"]["total"]);
+        assert_ne!(g["group"]["total"], 0);
+    }
+}
+
+#[tokio::test]
+async fn default_merge_group_sweep_keeps_review_and_repairs_until_done() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"review", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let fix = new_card(
+        &td,
+        "p",
+        json!({"title":"repair", "column":"review", "repo":"app", "labels":["merge-fix:test"]}),
+    )
+    .await;
+    store_job(&td, JobKind::Merge, &[&a, &fix]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for column in ["ready", "in_progress", "blocked"] {
+        td.post(
+            &format!("/api/cards/{fix}/move"),
+            json!({"column":column, "comment":"Repair work needed."}),
+        )
+        .await
+        .ok();
+        settle(&td).await;
+        state(&td)
+            .db
+            .write("test", terrariumd::store::groups::expire)
+            .await
+            .unwrap();
+        assert_eq!(card(&td, &a).await["group"]["id"], gid);
+        assert_eq!(card(&td, &fix).await["group"]["id"], gid);
+        assert_eq!(card(&td, &gid).await["archived"], false);
+    }
+    move_to(&td, &fix, "done").await;
+    settle(&td).await;
+    state(&td)
+        .db
+        .write("test", terrariumd::store::groups::expire)
+        .await
+        .unwrap();
+    assert!(card(&td, &fix).await.get("group").is_none());
+    assert_eq!(card(&td, &a).await["group"]["members"], json!([a]));
+}
+
+#[tokio::test]
+async fn default_merge_group_cancelled_batch_abandons_header() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let job = store_job(&td, JobKind::Merge, &[&a]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let id = job.id.clone();
+    let cancelled = state(&td)
+        .db
+        .write("operator", move |t| jobs::cancel(t, &id))
+        .await
+        .unwrap();
+    verdict(&td, &cancelled, &a, "cancelled").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &gid).await["archived"], true);
+    assert!(card(&td, &a).await.get("group").is_none());
+    assert_eq!(card(&td, &a).await["column"], "review");
+}
+
+#[tokio::test]
+async fn default_merge_group_returned_members_leave_and_last_abandons() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let c = new_card(
+        &td,
+        "p",
+        json!({"title":"c", "column":"review", "repo":"app"}),
+    )
+    .await;
+    store_job(&td, JobKind::Merge, &[&a, &b, &c]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    move_to(&td, &a, "ready").await;
+    settle(&td).await;
+    assert!(card(&td, &a).await.get("group").is_none());
+    assert_eq!(card(&td, &gid).await["archived"], false);
+    assert_eq!(card(&td, &b).await["group"]["members"], json!([b, c]));
+    move_to(&td, &b, "in_progress").await;
+    settle(&td).await;
+    assert!(card(&td, &b).await.get("group").is_none());
+    assert_eq!(card(&td, &gid).await["archived"], false);
+    td.post(
+        &format!("/api/cards/{c}/move"),
+        json!({"column":"blocked", "comment":"Needs a corrected branch."}),
+    )
+    .await
+    .ok();
+    settle(&td).await;
+    assert!(card(&td, &c).await.get("group").is_none());
+    let group = card(&td, &gid).await;
+    assert_eq!(group["archived"], true);
+    assert_eq!(group["group"]["total"], 0);
+    let runs = runs_of(&td, "p", "merge-group-returned").await;
+    assert_eq!(runs.len(), 3, "{runs:?}");
+    assert!(runs.iter().all(|r| r["state"] == "done"), "{runs:?}");
+}
+
+#[tokio::test]
+async fn default_merge_group_sweep_repairs_stale_members_idempotently() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
+    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let members = [a.clone(), b.clone()];
+    state(&td).db.write("test", move |t| {
+        // Model old data with no move event for the new rule to handle.
+        for id in members {
+            t.execute("UPDATE cards SET column_id = (SELECT id FROM board_columns WHERE project = 'p' AND name = 'ready') WHERE id = ?1", [id])?;
+        }
+        terrariumd::store::groups::expire(t)?;
+        terrariumd::store::groups::expire(t)
+    }).await.unwrap();
+    assert!(card(&td, &a).await.get("group").is_none());
+    assert!(card(&td, &b).await.get("group").is_none());
+    let group = card(&td, &gid).await;
+    assert_eq!(group["archived"], true);
+    assert_eq!(group["group"]["total"], 0);
+}
+
+#[tokio::test]
 async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
