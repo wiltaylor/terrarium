@@ -3390,6 +3390,14 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 | `POST /api/inbox/asks` | `{"to", "text"?, "question"?}` | `201` `{"message", "watch"}`: the mail (§7) and the new watch. Below. |
 | `DELETE /api/inbox/watches/{thread}` | | `200` the watch, with `cancelled_at`. An unknown thread is `404 not_found`; a cancelled watch `409 conflict`. The mail stays. |
 
+The Inbox list accepts `limit` (1–400, default 200) and `cursor`. To request
+the next page, URL-encode the JSON tuple `[open, critical, urgent, at, id]`
+of the last item as `cursor`, with the same filters. An empty page ends the
+list. The ordering uses descending ID to break timestamp ties. New items
+above a cursor do not shift older pages, and removing the cursor item does
+not invalidate it. Badge headers always count every matching open item,
+independent of the page. Mail bodies are loaded only for the selected page.
+
 **Ask and forward** (GitHub #24). The operator asks an agent a question
 from the Inbox, or forwards a question, a bundle, or a notice of the Inbox
 to an agent, and the Inbox watches the thread until the agent answers.
@@ -4377,8 +4385,19 @@ A board:
             {"name":"review","title":"Code review","position":3,"count":0},
             {"name":"blocked","title":"blocked","position":4,"role":"blocked","count":1},
             {"name":"done","title":"done","position":5,"count":0}],
- "cards":[ ...cards that are not archived, by column, then position... ]}
+ "cards":[ ...active card summaries, by column, then position... ], "next_cursor":null}
 ```
+
+`GET board` returns summaries, not full cards: `body`, `comments` and `links`
+are omitted. `tests` contains only the latest linked result's compact chip
+(run ID, name, time, status and aggregate counts), never cases or output.
+ETA attribution and creator names are retained. `comment_count` and `last_comment_at` describe
+comments without loading them. Open a card with `GET /api/cards/{id}` for
+its full details. Column counts include Done, but the default card list
+excludes Done. `?done=true&limit=100&cursor=...` reads only Done, up to 100
+cards per page. Use the response body's `next_cursor` for the next page
+(null at the end). Filtering and version grouping on the Done screen apply
+to loaded pages. `PATCH board` retains its full-card response for compatibility.
 
 A new board has the columns `backlog`, `ready`, `in_progress` (role
 `working`), `validating` (role `validating`), `review` (role `review`),
@@ -4473,7 +4492,7 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `GET /api/projects/{name}/board` | | `200` board |
+| `GET /api/projects/{name}/board?done=&limit=&cursor=` | | `200` board with card summaries; Done pages are opt-in |
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
@@ -11785,6 +11804,8 @@ queued.
 - An ETA duration that is given later for a card with an open job (`card
   eta`, `card move ... --eta`) sets the job's `planned_secs` (§8.2).
 - The job's end moves the card, and the move clears the ETA (§8.2).
+- Cancelling a job with a planned duration clears its cards' ETAs too.
+
 Events `job.verdict` {project, job, card, kind, verdict, state, outcome,
 attempt, by_agent, repo, branch, parent, batch, end_comment,
 failure_block}: one per card when a job ends or is cancelled, in the same

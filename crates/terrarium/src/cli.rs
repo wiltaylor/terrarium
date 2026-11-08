@@ -124,8 +124,9 @@ pub enum Command {
         #[command(subcommand)]
         command: InboxCmd,
     },
-    /// The project board, grouped by column; `board columns` and `board
-    /// column` change the columns
+    /// The project board, grouped by column, excluding Done cards.
+    /// Use `card ls --column done` for completed cards. `board columns`
+    /// and `board column` change the columns.
     Board {
         #[command(subcommand)]
         command: Option<BoardCmd>,
@@ -4638,6 +4639,18 @@ pub fn hide_for_mode(cmd: clap::Command, agent_mode: bool) -> clap::Command {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn board_help_points_to_completed_cards() {
+        let mut cli = Cli::command();
+        let help = cli
+            .find_subcommand_mut("board")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("excluding Done cards"));
+        assert!(help.contains("card ls --column done"));
+    }
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))

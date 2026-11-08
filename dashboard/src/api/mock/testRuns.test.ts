@@ -38,13 +38,14 @@ describe("mock test runs", () => {
     expect(p2.items.map((r) => r.id)).not.toContain(p1.items[2]!.id);
   });
 
-  it("gives the card chip of the newest linked run on the board", async () => {
+  it("gives the card chip of the newest linked run on card detail", async () => {
     const api = mock();
-    const board = await api.board.get("terrarium");
-    const card = board.cards.find((c) => c.id === "TER-12")!;
+    const card = await api.cards.get("TER-12");
     const newest = (await api.testRuns.list("terrarium", { card: "TER-12" })).items[0]!;
     expect(card.tests).toEqual({ id: newest.id, name: "unit", status: newest.status, counts: newest.counts, created_at: newest.created_at });
-    expect(board.cards.find((c) => c.id === "TER-17")!.tests).toBeUndefined();
+    expect((await api.cards.get("TER-17")).tests).toBeUndefined();
+    const board = await api.board.get("terrarium");
+    expect(board.cards.find(c => c.id === "TER-12")!.tests).toEqual(card.tests);
   });
 
   it("filters and pages the cases of a run: failed means failed or errored", async () => {

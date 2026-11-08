@@ -1,4 +1,4 @@
-import type { BoardGroup, Card } from "../../api/types";
+import type { BoardGroup, CardSummary as Card } from "../../api/types";
 
 /** Show details once per lane, preferring the home column when occupied. */
 export function groupDetailsColumn(group: BoardGroup, cards: readonly Card[], columns: readonly string[]): string {

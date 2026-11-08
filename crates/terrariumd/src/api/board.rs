@@ -34,11 +34,22 @@ async fn show_board(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
-) -> ApiResult<Json<Board>> {
+    ApiQuery(query): ApiQuery<BoardQuery>,
+    ApiQuery(page): ApiQuery<Page>,
+) -> ApiResult<Json<serde_json::Value>> {
     policy::read_project(&actor, &name)?;
     Ok(Json(
-        state.db.read(move |c| board::get_board(c, &name)).await?,
+        state
+            .db
+            .read(move |c| board::board_summary(c, &name, query.done, &page))
+            .await?,
     ))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BoardQuery {
+    #[serde(default)]
+    done: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -31,7 +31,7 @@ export function ThreadsView(props: { view: ThreadsViewId; project: string; now: 
   const reloadBoards = async (rows: Thread[]) => {
     const mine = ++boardGen;
     const ps = projectsOf(rows);
-    const b = ps.length ? await loadBoards(ps) : {};
+    const b = ps.length ? await loadBoards(ps, rows.flatMap(t => t.cards ?? [])) : {};
     if (mine === boardGen) setBoards(b);
   };
   let gen = 0;
