@@ -453,6 +453,27 @@ async fn rpc(socket: &Path, method: &str, params: Value) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_stop_refuses_a_turn_handed_over_after_the_idle_check() {
+    use terrariumd::supervisor::{Supervisor, SupervisorError};
+    use terrarium_core::AgentStatus;
+
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let agent = id.parse().unwrap();
+    assert_eq!(td.sup.status(agent).await, Some(AgentStatus::Idle));
+    // No await for a working status: the reservation must protect even
+    // the interval before the runner has taken the turn.
+    td.sup.send_turn(agent, "do not stop this turn".into()).await.unwrap();
+    assert!(matches!(td.sup.stop_idle(agent).await, Err(SupervisorError::NotReady(_))));
+    td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
+    td.wait_status(&id, "idle").await;
+    td.sup.stop_idle(agent).await.unwrap();
+    td.wait_status(&id, "stopped").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lifecycle_events_sse_and_pty() {
     let td = Td::start().await;
     let id = td.agent("demo", "bob", json!({})).await;

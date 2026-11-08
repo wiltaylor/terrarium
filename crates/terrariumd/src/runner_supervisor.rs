@@ -939,6 +939,8 @@ struct Slot {
     recap: Option<String>,
     pointer: Pointer,
     pointer_busy: bool,
+    /// Deliveries reserved under `slots`, including turns not yet typed.
+    turns_in_flight: usize,
     /// Turns that came before the first idle of a launch (for example the
     /// queued turns of a wake, PLAN §18). They go out at the first idle,
     /// after the recap turn. A stop before then keeps them for the next
@@ -978,6 +980,18 @@ struct Compacting {
 }
 
 impl Slot {
+    fn can_idle_stop(&self) -> bool {
+        !self.stop_requested
+            && self.seen.is_resting()
+            && self.runner.as_ref().is_some_and(|r| r.status().is_resting())
+            && self.turns_in_flight == 0
+            && self.turns.is_empty()
+            && self.recap.is_none()
+            && self.pointer.is_empty()
+            && !self.pointer_busy
+            && self.compacting.is_none()
+    }
+
     fn new(agent: Agent) -> Self {
         Self {
             agent,
@@ -995,6 +1009,7 @@ impl Slot {
             recap: None,
             pointer: Pointer::default(),
             pointer_busy: false,
+            turns_in_flight: 0,
             turns: Vec::new(),
             harness_version: None,
             account: None,
@@ -2649,12 +2664,12 @@ impl RunnerSupervisor {
         if self.held(id).is_some() {
             return;
         }
-        let (recap, turns, runner) = {
+        let (recap, turns, runner, epoch) = {
             let mut slots = lock(&self.inner.slots);
             let Some(slot) = slots.get_mut(&id) else {
                 return;
             };
-            if slot.compacting.is_some() || slot.reset_gate {
+            if slot.stop_requested || slot.compacting.is_some() || slot.reset_gate {
                 return;
             }
             let Some(runner) = slot.runner.clone() else {
@@ -2674,7 +2689,10 @@ impl RunnerSupervisor {
             if slot.reached_idle && !self.stream_take(id, sub.as_deref()) {
                 return;
             }
-            (slot.recap.take(), std::mem::take(&mut slot.turns), runner)
+            if slot.recap.is_some() || !slot.turns.is_empty() {
+                slot.turns_in_flight += 1;
+            }
+            (slot.recap.take(), std::mem::take(&mut slot.turns), runner, slot.epoch)
         };
         if recap.is_none() && turns.is_empty() {
             self.maybe_push(id);
@@ -2697,15 +2715,25 @@ impl RunnerSupervisor {
                 }
                 None => None,
             };
-            for text in turns {
-                type_detached(id, &runner, text);
-            }
+            let deliveries: Vec<_> = turns.into_iter().map(|text| runner.type_turn(text)).collect();
             if let Some(delivery) = recap
                 && let Err(e) = delivery.wait().await
             {
                 warn!(agent = %id, "the recap turn was not delivered: {e}");
             }
+            for delivery in deliveries {
+                if let Err(e) = delivery.wait().await {
+                    debug!(agent = %id, "a turn was not delivered: {e}");
+                }
+            }
+            me.finish_turn_delivery(id, epoch);
         });
+    }
+
+    fn finish_turn_delivery(&self, id: AgentId, epoch: u64) {
+        if let Some(slot) = lock(&self.inner.slots).get_mut(&id).filter(|s| s.epoch == epoch) {
+            slot.turns_in_flight -= 1;
+        }
     }
 
     /// End the compaction of `id` (`token`: only that compaction; `None`:
@@ -2998,6 +3026,7 @@ impl RunnerSupervisor {
         }
         slot.epoch += 1;
         slot.stop_requested = false;
+        slot.turns_in_flight = 0;
         slot.restart_requested = false;
         slot.restarts.clear();
         slot.resume = resume;
@@ -3191,7 +3220,8 @@ impl RunnerSupervisor {
             let Some(runner) = slot.runner.clone() else {
                 return;
             };
-            if slot.pointer_busy
+            if slot.stop_requested
+                || slot.pointer_busy
                 || slot.pointer.is_empty()
                 || slot.recap.is_some()
                 || slot.compacting.is_some()
@@ -3892,16 +3922,6 @@ fn migrate_all(state_dir: &Path) {
     }
 }
 
-/// Queue `text` on the runner and log a failed delivery.
-fn type_detached(agent: AgentId, runner: &Arc<dyn RunnerHandle>, text: String) {
-    let delivery = runner.type_turn(text);
-    tokio::spawn(async move {
-        if let Err(e) = delivery.wait().await {
-            debug!(agent = %agent, "a turn was not delivered: {e}");
-        }
-    });
-}
-
 /// The recap turn of a new session after a prompt change, for an agent
 /// with questions. The questions follow it ([`crate::store::questions::recap`]).
 const PROMPT_CHANGED_RECAP: &str = "Terrarium started you in a new session, because your system \
@@ -3956,6 +3976,46 @@ fn one_line(s: &str) -> String {
         out.push('…');
     }
     out
+}
+
+impl RunnerSupervisor {
+    fn stop_with(&self, agent: AgentId, by: StoppedBy, idle: bool) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        Box::pin(async move {
+            let (runner, def) = {
+                let mut slots = lock(&self.inner.slots);
+                let slot = slots.get_mut(&agent).filter(|s| s.live())
+                    .ok_or(SupervisorError::NotRunning(agent))?;
+                if idle && (!slot.can_idle_stop()
+                    || lock(&self.inner.holds).get(&agent).is_some_and(|h| !h.waiting.is_empty())) {
+                    return Err(SupervisorError::NotReady("the agent has work; no idle stop".into()));
+                }
+                if slot.stop_requested && slot.runner.is_some() {
+                    return Ok(());
+                }
+                slot.stop_requested = true;
+                let def = slot.agent.clone();
+                match slot.runner.clone() {
+                    Some(r) => (Some(r), def),
+                    None => {
+                        slot.epoch += 1;
+                        slot.phase = Phase::Down(AgentStatus::Stopped);
+                        (None, def)
+                    }
+                }
+            };
+            let harness = def.harness;
+            let Some(r) = runner else {
+                lock(&self.inner.ssh_agents).remove(&agent);
+                self.emit_status(agent, AgentStatus::Stopped, "stopped");
+                self.targets_down(&def);
+                return Ok(());
+            };
+            if let Err(e) = r.set_stopped_by(by).await {
+                debug!(agent = %agent, "cannot record the stop reason: {e}");
+            }
+            self.exit_gracefully(agent, r, harness).await
+        })
+    }
 }
 
 impl Supervisor for RunnerSupervisor {
@@ -4058,48 +4118,11 @@ impl Supervisor for RunnerSupervisor {
     }
 
     fn stop_by(&self, agent: AgentId, by: StoppedBy) -> BoxFuture<'_, Result<(), SupervisorError>> {
-        Box::pin(async move {
-            let (runner, def) = {
-                let mut slots = lock(&self.inner.slots);
-                let slot = slots
-                    .get_mut(&agent)
-                    .filter(|s| s.live())
-                    .ok_or(SupervisorError::NotRunning(agent))?;
-                // A stop is on the way already (for example `agent stop`,
-                // then `agent rm --confirm`, which stops again): it types
-                // the exit keys and kills on a timeout. A second set of
-                // keys in its exit-key pause gave Codex `/exit/exit`.
-                if slot.stop_requested && slot.runner.is_some() {
-                    return Ok(());
-                }
-                slot.stop_requested = true;
-                let def = slot.agent.clone();
-                match slot.runner.clone() {
-                    Some(r) => (Some(r), def),
-                    None => {
-                        // Waiting for a restart: cancel it.
-                        slot.epoch += 1;
-                        slot.phase = Phase::Down(AgentStatus::Stopped);
-                        (None, def)
-                    }
-                }
-            };
-            let harness = def.harness;
-            let Some(r) = runner else {
-                lock(&self.inner.ssh_agents).remove(&agent);
-                self.emit_status(agent, AgentStatus::Stopped, "stopped");
-                self.targets_down(&def);
-                return Ok(());
-            };
-            // `runner-exit.json` records the stop and who asked for it
-            // (the operator, or an agent), so a daemon that starts before
-            // this one sees the exit does not launch the agent again.
-            if let Err(e) = r.set_stopped_by(by).await {
-                debug!(agent = %agent, "cannot record the stop reason: {e}");
-            }
-            // A graceful stop.
-            self.exit_gracefully(agent, r, harness).await
-        })
+        self.stop_with(agent, by, false)
+    }
+
+    fn stop_idle(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        self.stop_with(agent, StoppedBy::Operator, true)
     }
 
     fn clear_error(&self, agent: AgentId) -> BoxFuture<'_, ()> {
@@ -4179,8 +4202,12 @@ impl Supervisor for RunnerSupervisor {
             }
             // Before the first idle of the launch: the turn goes after the
             // recap turn. During a compaction: after its end.
-            {
+            let epoch = {
                 let mut slots = lock(&self.inner.slots);
+                let slot = slots.get_mut(&agent).ok_or(SupervisorError::NotRunning(agent))?;
+                if slot.stop_requested {
+                    return Err(SupervisorError::NotReady("the agent stops now; the turn waits".into()));
+                }
                 if let Some(slot) = slots
                     .get_mut(&agent)
                     .filter(|s| !s.reached_idle || s.compacting.is_some() || s.reset_gate)
@@ -4197,9 +4224,20 @@ impl Supervisor for RunnerSupervisor {
                         slot.turns.push(text);
                         return Ok(());
                     }
+                    slot.turns_in_flight += 1;
+                    slot.epoch
+                } else {
+                    return Err(SupervisorError::NotRunning(agent));
                 }
-            }
-            type_detached(agent, &runner, text);
+            };
+            let delivery = runner.type_turn(text);
+            let me = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = delivery.wait().await {
+                    debug!(agent = %agent, "a turn was not delivered: {e}");
+                }
+                me.finish_turn_delivery(agent, epoch);
+            });
             Ok(())
         })
     }
@@ -4602,8 +4640,15 @@ impl Supervisor for RunnerSupervisor {
     ) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(async move {
             let Some(hold) = hold else {
-                let Some(held) = lock(&self.inner.holds).remove(&agent) else {
-                    return Ok(());
+                let held = {
+                    let mut slots = lock(&self.inner.slots);
+                    let Some(held) = lock(&self.inner.holds).remove(&agent) else {
+                        return Ok(());
+                    };
+                    if let Some(slot) = slots.get_mut(&agent) {
+                        slot.turns.extend(held.waiting.iter().cloned());
+                    }
+                    held
                 };
                 let Some(runner) = self.runner(agent) else {
                     if !held.waiting.is_empty() {
@@ -4618,15 +4663,6 @@ impl Supervisor for RunnerSupervisor {
                 info!(agent = %agent, turns = held.waiting.len(), "the quota hold ended");
                 if runner.status() == AgentStatus::Idle {
                     self.emit_status(agent, AgentStatus::Idle, "quota hold ended");
-                }
-                let sub = self.stream_sub(agent);
-                if held.waiting.is_empty() || self.stream_take(agent, sub.as_deref()) {
-                    for text in held.waiting {
-                        type_detached(agent, &runner, text);
-                    }
-                } else if let Some(slot) = lock(&self.inner.slots).get_mut(&agent) {
-                    // No free stream: the turns wait for one.
-                    slot.turns.extend(held.waiting);
                 }
                 self.deliver_pending(agent);
                 return Ok(());

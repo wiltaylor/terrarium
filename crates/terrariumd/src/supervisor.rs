@@ -258,6 +258,11 @@ pub trait Supervisor: Send + Sync + 'static {
         resume: Option<HarnessSessionId>,
     ) -> BoxFuture<'_, Result<(), SupervisorError>>;
     fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>>;
+    /// Stop only if no turn is running or being handed to the harness.
+    /// Implementations must claim the stop atomically with turn delivery.
+    fn stop_idle(&self, _agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        Box::pin(async { Err(SupervisorError::Unsupported("atomic idle stop".into())) })
+    }
     /// [`Supervisor::stop`] for a caller that is not the operator: `by`
     /// goes into `runner-exit.json` (`stopped_by`). The default ignores
     /// `by`.
@@ -1181,6 +1186,24 @@ mod fake {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 }
+                Ok(())
+            })
+        }
+
+        fn stop_idle(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            Box::pin(async move {
+                {
+                    let mut inner = self.lock();
+                    let a = inner.agents.get_mut(&agent)
+                        .ok_or(SupervisorError::NotRunning(agent))?;
+                    if !a.status.is_resting() || !a.early.is_empty() || a.compacting.is_some() {
+                        return Err(SupervisorError::NotReady("the agent has work; no idle stop".into()));
+                    }
+                    a.epoch += 1;
+                    a.status = AgentStatus::Stopped;
+                }
+                self.emit(agent, SupervisorEventKind::Harness(Event::Exit { code: Some(0) }));
+                self.set_status(agent, AgentStatus::Stopped, Some("stopped"));
                 Ok(())
             })
         }

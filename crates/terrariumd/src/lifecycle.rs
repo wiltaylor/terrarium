@@ -587,7 +587,7 @@ async fn idle_stop(state: &Shared, id: AgentId) {
     info!(agent = %id, "the agent rested for its idle stop; stopping it");
     if let Err(e) = state
         .supervisor
-        .stop_by(id, terrarium_runner::StoppedBy::Operator)
+        .stop_idle(id)
         .await
     {
         state.lifecycle.forget_stop(id);
