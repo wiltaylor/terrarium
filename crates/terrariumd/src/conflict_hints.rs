@@ -69,26 +69,53 @@ async fn files(dir: &std::path::Path, base: &str, branch: &str) -> Option<BTreeS
 }
 
 async fn local_head(dir: &std::path::Path, branch: &str) -> Option<String> {
-    let out = tokio::time::timeout(Duration::from_secs(10),
-        tokio::process::Command::new("git").arg("--git-dir").arg(dir)
+    let out = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(dir)
             .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
-            .kill_on_drop(true).output()).await.ok()?.ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-async fn remote_heads(state: &Shared, repo: &repos::Repo, branch: &str) -> Option<(Option<String>, Option<String>)> {
-    let secret = crate::secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await.ok()?;
+async fn remote_heads(
+    state: &Shared,
+    repo: &repos::Repo,
+    branch: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let secret = crate::secrets::secret_of(state, repo.owner(), repo.credential.as_deref())
+        .await
+        .ok()?;
     let c = crate::git::Checkout {
-        url: repo.url.clone(), dest: crate::api::repo_trees::mirror_dir(state, repo),
-        branch: None, depth: None, secret: secret.map(|(_, s)| s),
+        url: repo.url.clone(),
+        dest: crate::api::repo_trees::mirror_dir(state, repo),
+        branch: None,
+        depth: None,
+        secret: secret.map(|(_, s)| s),
         store: crate::secrets::RunDirs::new(&state.state_dir),
         deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
-        timeout: Duration::from_secs(20), hooks: Default::default(), origin: Default::default(), fetch_from: None,
+        timeout: Duration::from_secs(20),
+        hooks: Default::default(),
+        origin: Default::default(),
+        fetch_from: None,
     };
     let branch = branch.to_owned();
     tokio::task::spawn_blocking(move || {
-        Some((crate::git::ls_remote(&c, "next").ok()?, crate::git::ls_remote(&c, &branch).ok()?))
-    }).await.ok()?
+        Some((
+            crate::git::ls_remote(&c, "next").ok()?,
+            crate::git::ls_remote(&c, &branch).ok()?,
+        ))
+    })
+    .await
+    .ok()?
 }
 
 async fn note(state: &Shared, card: &Card, message: &str) -> ApiResult<()> {
@@ -129,7 +156,9 @@ async fn check(state: &Shared) -> ApiResult<()> {
             note(state, &card, "Conflict hints unavailable: no integration branch configured for this repo in delivery.next_repos.").await?;
             continue;
         }
-        let Some((base, head)) = remote_heads(state, &repo, &card.branch).await else { continue };
+        let Some((base, head)) = remote_heads(state, &repo, &card.branch).await else {
+            continue;
+        };
         let Some(base) = base else {
             note(state, &card, "Conflict hints unavailable: configured integration branch next is missing on the remote.").await?;
             continue;
@@ -139,7 +168,10 @@ async fn check(state: &Shared) -> ApiResult<()> {
         let dir = crate::api::repo_trees::mirror_dir(state, &repo);
         if (local_head(&dir, "next").await.as_ref() != Some(&base)
             || local_head(&dir, &card.branch).await.as_ref() != Some(&head))
-            && crate::api::repo_trees::ensure_mirror(state, &repo, true).await.is_err() {
+            && crate::api::repo_trees::ensure_mirror(state, &repo, true)
+                .await
+                .is_err()
+        {
             continue;
         }
         if let Some(paths) = files(&dir, "next", &card.branch).await {
@@ -149,7 +181,10 @@ async fn check(state: &Shared) -> ApiResult<()> {
     publish_overlaps(&state.db, scanned).await
 }
 
-async fn publish_overlaps(db: &crate::db::Db, scanned: Vec<(Card, String, BTreeSet<String>)>) -> ApiResult<()> {
+async fn publish_overlaps(
+    db: &crate::db::Db,
+    scanned: Vec<(Card, String, BTreeSet<String>)>,
+) -> ApiResult<()> {
     for (i, (a, repo, paths)) in scanned.iter().enumerate() {
         for (b, other_repo, other_paths) in &scanned[i + 1..] {
             if a.project != b.project || repo != other_repo {
@@ -161,8 +196,7 @@ async fn publish_overlaps(db: &crate::db::Db, scanned: Vec<(Card, String, BTreeS
             }
             let a = a.clone();
             let b = b.clone();
-            db
-                .write("system", move |t| publish(t, &a, &b, &common))
+            db.write("system", move |t| publish(t, &a, &b, &common))
                 .await?;
         }
     }
@@ -176,19 +210,44 @@ fn publish(t: &mut crate::db::Tx<'_>, a: &Card, b: &Card, common: &[String]) -> 
     let key = serde_json::json!({"cards": pair, "paths": paths});
     // Persisted deduplication also survives daemon restarts.
     let seen = {
-        let mut q = t.prepare("SELECT payload FROM events WHERE card = ?1 AND kind = 'card.conflict_hint'")?;
-        let values = q.query_map([pair[0]], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        values.iter().any(|v| serde_json::from_str::<serde_json::Value>(v).ok().as_ref() == Some(&key))
+        let mut q = t.prepare(
+            "SELECT payload FROM events WHERE card = ?1 AND kind = 'card.conflict_hint'",
+        )?;
+        let values = q
+            .query_map([pair[0]], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        values
+            .iter()
+            .filter_map(|v| serde_json::from_str::<serde_json::Value>(v).ok())
+            .any(|v| v["cards"] == key["cards"] && v["paths"] == key["paths"])
     };
     if seen {
         return Ok(());
     }
-    let body = format!("Conflict hint: {} and {} share {} files: {}{}. Advisory only. Coordinate work or merge order. Based on branch changes against next.",
-        a.id, b.id, paths.len(), paths.iter().take(20).cloned().collect::<Vec<_>>().join(", "),
-        if paths.len() > 20 { " (first 20 shown)" } else { "" });
+    let body = format!(
+        "Conflict hint: {} and {} share {} files: {}{}. Advisory only. Coordinate work or merge order. Based on branch changes against next.",
+        a.id,
+        b.id,
+        paths.len(),
+        paths
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
+        if paths.len() > 20 {
+            " (first 20 shown)"
+        } else {
+            ""
+        }
+    );
     board::system_comment(t, &a.id, &body, None)?;
     board::system_comment(t, &b.id, &body, None)?;
-    t.emit(crate::events::EventDraft::new("card.conflict_hint", "Shared branch files", key).project(&a.project).card(pair[0]))?;
+    t.emit(
+        crate::events::EventDraft::new("card.conflict_hint", "Shared branch files", key)
+            .project(&a.project)
+            .card(pair[0]),
+    )?;
     let recipients = crate::question_guard::leads(t, &a.project, "")?;
     if recipients.is_empty() {
         tracing::warn!(project = %a.project, "conflict hint has no project lead; cards annotated only");
@@ -275,8 +334,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mirror = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(dir.path()).args(args).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         run(&["init", "-b", "next"]);
         run(&["config", "user.name", "Test"]);
@@ -290,7 +358,12 @@ mod tests {
         std::fs::write(dir.path().join("next-only.rs"), "integration").unwrap();
         run(&["add", "."]);
         run(&["commit", "-m", "next advanced"]);
-        let out = std::process::Command::new("git").args(["clone", "--bare"]).arg(dir.path()).arg(mirror.path()).output().unwrap();
+        let out = std::process::Command::new("git")
+            .args(["clone", "--bare"])
+            .arg(dir.path())
+            .arg(mirror.path())
+            .output()
+            .unwrap();
         assert!(out.status.success());
         run(&["checkout", "-b", "unpushed"]);
         let paths = files(mirror.path(), "next", "card").await.unwrap();
@@ -305,13 +378,27 @@ mod tests {
         let mut conn = crate::db::open(&dir.path().join("test.db")).unwrap();
         crate::db::migrate(&mut conn).unwrap();
         let db = crate::db::Db::new(conn, crate::events::EventHub::default());
-        let card = |id: &str, project: &str| Card { id: id.into(), project: project.into(), repo: "r".into(), branch: id.into() };
+        let card = |id: &str, project: &str| Card {
+            id: id.into(),
+            project: project.into(),
+            repo: "r".into(),
+            branch: id.into(),
+        };
         // These IDs deliberately do not exist. Any attempted publish would fail.
-        publish_overlaps(&db, vec![
-            (card("A-1", "a"), "r".into(), ["same.rs".into()].into()),
-            (card("B-1", "b"), "r".into(), ["same.rs".into()].into()),
-            (card("A-2", "a"), "other-repo".into(), ["same.rs".into()].into()),
-        ]).await.unwrap();
+        publish_overlaps(
+            &db,
+            vec![
+                (card("A-1", "a"), "r".into(), ["same.rs".into()].into()),
+                (card("B-1", "b"), "r".into(), ["same.rs".into()].into()),
+                (
+                    card("A-2", "a"),
+                    "other-repo".into(),
+                    ["same.rs".into()].into(),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
