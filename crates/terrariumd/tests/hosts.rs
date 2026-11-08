@@ -2596,7 +2596,14 @@ async fn a_lease_end_leaves_a_target_that_a_policy_holder_uses() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["lifecycle"]["state"], "running", "{}", r.body);
-    assert!(r.body.get("lifecycle_error").is_none(), "{}", r.body);
+    assert!(
+        r.body["lifecycle_error"]
+            .as_str()
+            .unwrap()
+            .contains("must not replace a running container"),
+        "{}",
+        r.body
+    );
     let log = lab.log();
     let last_run = log.lines().rfind(|l| l.starts_with("docker run")).unwrap();
     assert!(last_run.contains(":/work/terra/owner"), "{last_run}");
