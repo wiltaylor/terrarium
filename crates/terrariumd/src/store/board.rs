@@ -554,7 +554,7 @@ fn unmet(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
     Ok(rows)
 }
 
-fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
+fn render(conn: &Connection, row: CardRow, estimates: &mut super::card_history::ReviewEstimates) -> ApiResult<Card> {
     let mut stmt = conn.prepare(
         "SELECT id, author, body, created_at, session_id FROM card_comments WHERE card = ?1
          ORDER BY created_at, id",
@@ -624,18 +624,12 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
     let job = crate::store::jobs::card_job(conn, &row.id)?;
     let review = row.column_role.as_deref() == Some(REVIEW)
         || (row.column_role.is_none() && row.column == REVIEW);
-    let review_eta = if review && !row.archived {
-        crate::store::card_history::review_eta(
-            conn,
-            &row.project,
-            &row.id,
-            job.as_ref()
-                .is_some_and(|j| j.kind == crate::store::jobs::JobKind::Merge),
-        )?
+    let review_eta = if review && !row.archived && job.is_none() {
+        estimates.eta(conn, &row.project, &row.id)?
     } else {
         None
     };
-    let (eta_at, eta_set_at, eta_set_by, eta_set_by_name) = if review {
+    let (eta_at, eta_set_at, eta_set_by, eta_set_by_name) = if review && job.is_none() {
         (
             review_eta.as_ref().map(|v| v.0.clone()),
             review_eta.map(|v| v.1),
@@ -684,7 +678,7 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
 
 pub fn get_card(conn: &Connection, id: &str) -> ApiResult<Card> {
     let row = find_row(conn, id)?;
-    render(conn, row)
+    render(conn, row, &mut Default::default())
 }
 
 pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
@@ -706,9 +700,10 @@ pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
     let rows = stmt
         .query_map([project], card_row)?
         .collect::<Result<Vec<_>, _>>()?;
+    let mut estimates = super::card_history::ReviewEstimates::default();
     let cards = rows
         .into_iter()
-        .map(|r| render(conn, r))
+        .map(|r| render(conn, r, &mut estimates))
         .collect::<ApiResult<Vec<_>>>()?;
     Ok(Board {
         project: project.to_owned(),
@@ -799,8 +794,9 @@ pub fn list_cards(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::new();
+    let mut estimates = super::card_history::ReviewEstimates::default();
     for (place, row) in rows {
-        out.push((place, render(conn, row)?));
+        out.push((place, render(conn, row, &mut estimates)?));
     }
     let paged = Paged::from_rows(out, limit, |((k, p, n), _)| format!("{k}.{p}.{n}"));
     Ok(Paged {
@@ -897,6 +893,7 @@ pub fn active_cards(
         .query_map(params![wanted_json, projects_json], card_row)?
         .collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::with_capacity(rows.len());
+    let mut estimates = super::card_history::ReviewEstimates::default();
     for row in rows {
         let kind = match row.column_role.as_deref() {
             Some(WORKING) => WORKING.to_owned(),
@@ -904,7 +901,7 @@ pub fn active_cards(
             _ => row.column.to_lowercase(),
         };
         // The card has the assignee's status (`Card::assignee_status`).
-        let card = render(conn, row)?;
+        let card = render(conn, row, &mut estimates)?;
         let (blocked_since, blocked_reason) = if kind == BLOCKED {
             let (since, reason) = blocked_info(conn, &card)?;
             (Some(since), reason)
