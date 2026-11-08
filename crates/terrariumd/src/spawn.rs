@@ -291,13 +291,22 @@ pub async fn spawn_with(
     policy::spawn_for(actor, &owner.id, &owner.project)?;
     let helper_card = {
         let oid = owner.id.clone();
-        state.db.read(move |c| {
-            let helper: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM research_helpers WHERE id = ?1)", [&oid], |r| r.get(0))?;
-            if helper {
-                return Err(ApiError::forbidden("research helpers cannot spawn children"));
-            }
-            crate::research_helpers::card(c, &oid)
-        }).await?
+        state
+            .db
+            .read(move |c| {
+                let helper: bool = c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM research_helpers WHERE id = ?1)",
+                    [&oid],
+                    |r| r.get(0),
+                )?;
+                if helper {
+                    return Err(ApiError::forbidden(
+                        "research helpers cannot spawn children",
+                    ));
+                }
+                crate::research_helpers::card(c, &oid)
+            })
+            .await?
     };
     if helper_card.is_some() && body.bind.is_some() {
         return Err(ApiError::forbidden("a research helper cannot be bound"));
@@ -380,8 +389,15 @@ pub async fn spawn_with(
         .db
         .read(move |c| templates::resolve(c, &p, &key))
         .await?;
-    if helper_card.is_some() && !matches!(template.name.as_str(), "card-research" | "card-research-alt") {
-        return Err(ApiError::forbidden("card agents may spawn only card-research or card-research-alt helpers"));
+    if helper_card.is_some()
+        && !matches!(
+            template.name.as_str(),
+            "card-research" | "card-research-alt"
+        )
+    {
+        return Err(ApiError::forbidden(
+            "card agents may spawn only card-research or card-research-alt helpers",
+        ));
     }
     if let Some(sp) = &rules {
         let t = SpawnTemplate {
