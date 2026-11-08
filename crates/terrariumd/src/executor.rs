@@ -3329,13 +3329,16 @@ async fn attach_set(
 
 /// Why the daemon may not make a new container (or lab instance) for a
 /// new set of workspaces, or `None` when it may: an ephemeral target with
-/// no live session.
+/// no live session. Docker containers are never replaced for mount changes:
+/// processes can outlive the exec session that started them.
 fn recreate_refusal(state: &Shared, def: &TargetDef) -> Option<String> {
     if !def.ephemeral {
         return Some("it is permanent: a new container would lose its files".into());
     }
-    if def.kind == TargetKind::Docker && def.image.is_none() {
-        return Some("it has no `image` to run again".into());
+    if def.kind == TargetKind::Docker {
+        return Some(
+            "a workspace change must not replace a running container or stop its processes".into(),
+        );
     }
     let n = state.executor.live_on(&def.name);
     (n > 0).then(|| format!("{n} exec session(s) are live on it"))
@@ -3998,8 +4001,9 @@ pub async fn maybe_down_as(
 }
 
 /// A holder joins a target that other running agents hold: its workspace
-/// must be attached. A running ephemeral target with no live session gets
-/// a new container (or lab instance) with it; else the answer has
+/// must be attached. A running ephemeral lab instance with no live session
+/// gets a new instance with it; Docker containers are never replaced for
+/// workspace changes. Otherwise the answer has
 /// `attach_error`. A target that is not running, or takes no workspace, is
 /// not touched: the next `up` attaches it.
 pub async fn attach_join(
@@ -4048,8 +4052,8 @@ pub async fn attach_join(
 
 /// A holder leaves a target that other running agents still hold: its
 /// workspace goes out of the target. Docker and vmlab cannot unmount from a
-/// running container or lab, so a running ephemeral target with no live
-/// session gets a new one without it. Else the workspace stays attached
+/// running container or lab. An ephemeral lab instance with no live
+/// session gets a new one without it. Otherwise the workspace stays attached
 /// until the target runs again (a log line says so).
 pub async fn detach(
     state: &Shared,
