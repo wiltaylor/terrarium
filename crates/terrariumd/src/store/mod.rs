@@ -41,6 +41,7 @@ pub mod threads;
 pub mod tools;
 pub mod transcripts;
 pub mod usage;
+pub mod version_groups;
 pub mod waits;
 pub mod webhooks;
 pub mod wiki;

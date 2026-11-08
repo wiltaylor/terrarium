@@ -6,7 +6,9 @@
 // `board_flow = "code"` (the default) the daemon runs the same flow in
 // code and this pack does not run.
 //
-// The pack does what the coded flow does (jobs.rs, api/jobs.rs, bound.rs),
+// Version cuts are rules-only: they require board_flow = "rules" (or
+// explicitly copying the rule into rules.wcl). There is no coded version cut.
+// Otherwise the pack does what the coded flow does (jobs.rs, api/jobs.rs, bound.rs),
 // with the same labels, comments, moves, and mails. One change: a red
 // merge group gets a fix card first and splits only after three fix cards
 // (the operator's rule of 2026-11-07, MEM-84). The texts of the job queue
@@ -53,6 +55,15 @@ rule "triage-hourly" {
 }
 
 // ------------------------------------------------------------ the queue
+
+rule "version-cut" {
+  description = "Freeze accepted cards for a version and mail the lead at 6 cards or 4 hours. Git and release numbering stay with the lead."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to_role" { eq = "accepted" }
+  version_cut { min_cards = 6 max_wait_minutes = 240 }
+}
 
 rule "merge-queued" {
   description = "A new merge job: the label and the queue comment on each card. No move."

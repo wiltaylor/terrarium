@@ -8271,6 +8271,36 @@ agent, validated, or merged, and do not count toward WIP. Card listings
 for pulling work omit them. The board includes their home headers and
 shows a header in each column containing members, without moving members.
 
+Version groups (TER-182) require `board_flow = rules` for the default pack
+(or explicitly copying the rule into the project's `rules.wcl`).
+The default `version-cut` rule reacts only to moves into the accepted role and runs
+`version_cut { min_cards = 6 max_wait_minutes = 240 }`. Either threshold
+freezes all active, unheld `version:vnext` cards in the accepted role
+that have no open group. Cards in an open merge group wait until it closes.
+The age is time since the last move (creation for cards created in accepted).
+The timer checks eligibility again, including after a merge group closes.
+Override the rule by name in `rules.wcl` to change the thresholds or disable it.
+Each cut opens a project-scoped unique `version:<ULID>` group, records
+gathering, cut, version branch e2e, pre-release, and done steps, and mails
+the project lead (the operator if no lead exists). No Git work is done.
+The lead chooses the version, relabels only the snapshot members, branches,
+tests, and publishes. Later accepted cards are not added to that snapshot.
+
+| endpoint | body | result |
+|---|---|---|
+| `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A closed group rejects updates. |
+| `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, group}`. Explicit acknowledgement after release CI publishes. Moves only the snapshot's accepted members to done, clears assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
+| `POST /api/projects/{project}/version-groups/{key}/remove` | `{card}` | `{changed, group}`. Explicitly drops a member from an open snapshot without moving or editing that card. Use for a card returned for a fix, archived, or held. Removal is audited. Duplicate removal is a no-op. Closed groups reject removal. |
+
+All three endpoints require project admin. Keys are project-scoped. A successful
+pipeline poll is never a built acknowledgement. The `version.built` event
+contains `key`, `version`, and `members` and names the group card.
+
+Lead CLI (uses `--project`, else the agent's project):
+`terrarium group status <key> --step "version branch e2e" --state running --eta 10m`,
+`terrarium group remove <key> <card>`, and
+`terrarium group built <key> vX.Y.Z`. Removed cards do not count in that build.
+
 - `group_open`: required `key`, `title`, `column`, and `done_when`. The key
   is project-scoped. Repeating an open is a no-op, even after closure.
   `done_when` is a column or `@role` anchor: members there or later in

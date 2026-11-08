@@ -244,6 +244,28 @@ pub fn perform(
     let a = Args { action, ctx };
     let mut effects = Vec::new();
     let done = match verb {
+        "version.cut" => {
+            let key = crate::store::version_groups::cut(
+                t,
+                actor,
+                &ctx.project,
+                &ctx.rule,
+                a.action
+                    .args
+                    .get("min_cards")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(6),
+                a.action
+                    .args
+                    .get("max_wait_minutes")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(240),
+            )?;
+            Done {
+                changed: key.is_some(),
+                detail: json!({"key":key}),
+            }
+        }
         "group.open" | "group.add" | "group.remove" | "group.status" | "group.close" => {
             group_verb(t, actor, ctx, &a)?
         }
