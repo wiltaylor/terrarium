@@ -8252,9 +8252,11 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
   repo in `next_repos`). `batch` queues one merge of the cards of column
   `from` in board order, at most `limit` (absent: all; the daemon has no
   batch limit of its own, TER-162 D9); a held card or one with an open
-  job is left out (`left_out` in the detail). With `min_cards` the batch
-  goes only when that many cards wait (held cards and cards with a job
-  do not count), or, with `max_wait_minutes`, when the first of them came
+  job is left out (`left_out` in the detail). A batch is one repo: the
+  repo of the first card that waits; a card of another repo is left out
+  and goes in a later batch, so it does not block the queue (TER-227).
+  With `min_cards` the batch goes only when that many cards wait (held
+  cards, cards with a job and cards of another repo do not count), or, with `max_wait_minutes`, when the first of them came
   into the column that many minutes ago (its newest move, else its
   creation); until then the verb is a no-op whose detail has `waiting`,
   `due` (the time the wait ends), and the reason. A card with an open
@@ -8297,9 +8299,12 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
 
 Timers (TER-172): the engine checks the batch rules (`job_queue` of kind
 `batch` with `min_cards` and `max_wait_minutes`) about every 10 seconds.
-When cards wait in the rule's `from` column, fewer than `min_cards`, and
-the first came `max_wait_minutes` ago, it writes one `rule.timer` event
-(actor `system`, `data: {rule, due, waiting}`) for that wait. A
+When cards wait in the rule's `from` column and the first came
+`max_wait_minutes` ago, it writes one `rule.timer` event (actor
+`system`, `data: {rule, due, waiting}`) for that wait. It does so also
+when `min_cards` or more wait: then no card move ran the batch (a held
+card was released in place) or that run failed, and the timer runs it
+once more (TER-227). A
 `rule.timer` event plans a run of the rule it names only, without a card;
 `on` and `when` do not apply to it, and a rule with an `if_card` does not
 run for it. The verb checks the time again. A daemon restart may write
