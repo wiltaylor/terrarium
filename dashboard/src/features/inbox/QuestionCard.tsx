@@ -24,6 +24,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
   const notice = () => q().kind === "notice";
   const [option, setOption] = createSignal<number | null>(null);
   const [text, setText] = createSignal("");
+  const [skip, setSkip] = createSignal(false);
   const [reason, setReason] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
@@ -47,7 +48,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
       if ("error" in t) return setError(t.error);
       return void run(() => api.questions.ack(q().id, t.text));
     }
-    const b = answerBody(q(), text(), option());
+    const b = answerBody(q(), text(), option(), skip());
     if ("error" in b) return setError(b.error);
     void run(() => api.questions.answer(q().id, b.body));
   };
@@ -104,26 +105,29 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
             <div class="row" style={{ "flex-wrap": "wrap", gap: "6px" }} role="group" aria-label="Options">
               <For each={q().options}>
                 {(o, i) => (
-                  <button type="button" class={option() === i() ? "primary" : ""} aria-pressed={option() === i()} onClick={() => setOption(option() === i() ? null : i())}>
+                  <button type="button" class={option() === i() ? "primary" : ""} aria-pressed={option() === i()} onClick={() => { setSkip(false); setOption(option() === i() ? null : i()); }}>
                     {o}
                   </button>
                 )}
               </For>
             </div>
           </Show>
+          <Show when={!notice()}>
+            <button type="button" aria-pressed={skip()} onClick={() => { setSkip(!skip()); setOption(null); }}>Skip question</button>
+          </Show>
           <textarea
             rows={2}
-            placeholder={notice() ? "A reply to the agent (optional)" : q().options.length ? "An answer in your own words (optional with an option)" : "Your answer"}
+            placeholder={skip() ? "Why are you skipping this question? (required)" : notice() ? "A reply to the agent (optional)" : q().options.length ? "An answer in your own words (optional with an option)" : "Your answer"}
             value={text()}
             onInput={(e) => setText(e.currentTarget.value)}
-            aria-label={notice() ? "Reply text" : "Answer text"}
+            aria-label={skip() ? "Skip reason" : notice() ? "Reply text" : "Answer text"}
           />
           <div class="row" style={{ "flex-wrap": "wrap", gap: "6px" }}>
             <Show
               when={notice()}
               fallback={
                 <button class="primary" type="submit" disabled={busy() || (!text().trim() && option() === null)}>
-                  Send answer
+                  {skip() ? "Send skip reason" : "Send answer"}
                 </button>
               }
             >
