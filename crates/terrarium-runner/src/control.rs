@@ -145,6 +145,10 @@ pub struct EventsParams {
 pub struct WriteParams {
     /// The bytes, base64.
     pub data: String,
+    /// The keys of a person ([`crate::Runner::write_person`]). An older
+    /// runner ignores it and an older daemon leaves it out (TER-224).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub person: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
