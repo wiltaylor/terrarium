@@ -722,7 +722,11 @@ pub fn set_host_aliases(
             )));
         }
         let pinned: String = t
-            .query_row("SELECT host_key FROM job_host_keys WHERE hostname = ?1", [&key], |r| r.get(0))
+            .query_row(
+                "SELECT host_key FROM job_host_keys WHERE hostname = ?1",
+                [&key],
+                |r| r.get(0),
+            )
             .optional()?
             .unwrap_or_else(|| key.clone());
         check_alias_pin(t, &agent.id, &pinned)?;
@@ -797,15 +801,19 @@ pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
     for (hostname, key) in keys {
         let exists: bool = t.query_row(
             "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)",
-            [&hostname], |r| r.get(0),
+            [&hostname],
+            |r| r.get(0),
         )?;
         if exists {
             continue;
         }
-        let owner: Option<String> = t.query_row(
-            "SELECT host_id FROM job_host_aliases WHERE alias = ?1",
-            [&hostname], |r| r.get(0),
-        ).optional()?;
+        let owner: Option<String> = t
+            .query_row(
+                "SELECT host_id FROM job_host_aliases WHERE alias = ?1",
+                [&hostname],
+                |r| r.get(0),
+            )
+            .optional()?;
         if let Some(owner) = owner {
             check_alias_pin(t, &owner, &key)?;
         }
@@ -816,16 +824,21 @@ pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
 
 /// An effective address key must not identify two host agents.
 fn check_alias_pin(conn: &Connection, owner: &str, key: &str) -> ApiResult<()> {
-    let clash: Option<String> = conn.query_row(
-        "SELECT h.name FROM job_host_aliases a
+    let clash: Option<String> = conn
+        .query_row(
+            "SELECT h.name FROM job_host_aliases a
          JOIN hosts h ON h.id = a.host_id
          LEFT JOIN job_host_keys k ON k.hostname = a.alias
          WHERE a.host_id != ?1 AND (a.alias = ?2 OR COALESCE(k.host_key, a.alias) = ?2)
          LIMIT 1",
-        params![owner, key], |r| r.get(0),
-    ).optional()?;
+            params![owner, key],
+            |r| r.get(0),
+        )
+        .optional()?;
     if let Some(name) = clash {
-        return Err(ApiError::conflict(format!("pinned key `{key}` belongs to host agent `{name}`")));
+        return Err(ApiError::conflict(format!(
+            "pinned key `{key}` belongs to host agent `{name}`"
+        )));
     }
     Ok(())
 }
@@ -2191,32 +2204,53 @@ mod tests {
             set_host_aliases(t, "First", &["one.lan".into(), "10.0.0.1".into()])?;
             set_host_aliases(t, "Second", &["two.lan".into()])?;
             pin_hosts(t, vec![("one.lan".into(), "10.0.0.1".into())])
-        }).await.unwrap();
-        assert!(db.write("operator", |t| {
-            pin_hosts(t, vec![("two.lan".into(), "10.0.0.1".into())])
-        }).await.is_err());
+        })
+        .await
+        .unwrap();
+        assert!(
+            db.write("operator", |t| {
+                pin_hosts(t, vec![("two.lan".into(), "10.0.0.1".into())])
+            })
+            .await
+            .is_err()
+        );
         db.write("operator", |t| {
             pin_hosts(t, vec![("free.lan".into(), "10.0.0.1".into())])
-        }).await.unwrap();
-        assert!(db.write("operator", |t| {
-            set_host_aliases(t, "Second", &["free.lan".into()])
-        }).await.is_err());
-        assert!(db.write("operator", |t| {
-            set_host_aliases(t, "Second", &["FIRST".into()])
-        }).await.is_err());
-        assert!(db.write("operator", |t| {
-            hosts::create(t, "ONE.LAN", false)
-        }).await.is_err());
+        })
+        .await
+        .unwrap();
+        assert!(
+            db.write("operator", |t| {
+                set_host_aliases(t, "Second", &["free.lan".into()])
+            })
+            .await
+            .is_err()
+        );
+        assert!(
+            db.write("operator", |t| {
+                set_host_aliases(t, "Second", &["FIRST".into()])
+            })
+            .await
+            .is_err()
+        );
+        assert!(
+            db.write("operator", |t| { hosts::create(t, "ONE.LAN", false) })
+                .await
+                .is_err()
+        );
         // Failed writes leave the previous aliases and pins untouched.
         db.read_now(|c| {
             assert_eq!(canonical_key(c, "two.lan")?, hosts::get(c, "Second")?.id);
             assert_eq!(canonical_key(c, "free.lan")?, hosts::get(c, "First")?.id);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         // A repeated resolution must preserve the first pin, even if the new key clashes.
         db.write("operator", |t| {
             pin_hosts(t, vec![("one.lan".into(), "two.lan".into())])
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
