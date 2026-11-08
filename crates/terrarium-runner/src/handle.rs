@@ -35,6 +35,10 @@ pub trait RunnerHandle: Send + Sync + 'static {
     fn attach(&self) -> BoxFuture<'_, Result<(ScreenSnapshot, AttachStream)>>;
     /// Write raw bytes to the PTY, as keystrokes.
     fn write<'a>(&'a self, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>>;
+    /// Write the keys of a person (the terminal, `agent keys`): the
+    /// input-box watchdog does not flag text that they leave
+    /// ([`Runner::write_person`]).
+    fn write_person<'a>(&'a self, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>>;
     fn resize(&self, rows: u16, cols: u16) -> BoxFuture<'_, Result<()>>;
     /// Queue a user turn (see `docs/runner.md`, "Typing a turn").
     fn type_turn(&self, text: String) -> Delivery;
@@ -84,6 +88,9 @@ impl RunnerHandle for Runner {
     }
     fn write<'a>(&'a self, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
         Box::pin(Runner::write(self, bytes))
+    }
+    fn write_person<'a>(&'a self, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
+        Box::pin(Runner::write_person(self, bytes))
     }
     fn resize(&self, rows: u16, cols: u16) -> BoxFuture<'_, Result<()>> {
         let r = Runner::resize(self, rows, cols);
