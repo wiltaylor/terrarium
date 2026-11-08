@@ -19,7 +19,6 @@ use crate::store::audit::AuditEntry;
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "migrations/"]
-#[include = "*.sql"]
 struct NamedMigrations;
 
 /// Frozen legacy migrations. Index + 1 is the schema version.
@@ -3162,7 +3161,9 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
 /// Run pending legacy migrations, then named migrations in filename order.
 pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
     let legacy = migrate_with(conn, MIGRATIONS)?;
-    let mut names: Vec<_> = <NamedMigrations as rust_embed::RustEmbed>::iter().collect();
+    let mut names: Vec<_> = <NamedMigrations as rust_embed::RustEmbed>::iter()
+        .filter(|name| name.ends_with(".sql"))
+        .collect();
     names.sort();
     let files: Vec<_> = names
         .iter()
