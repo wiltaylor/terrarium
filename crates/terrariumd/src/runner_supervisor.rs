@@ -4003,8 +4003,11 @@ impl RunnerSupervisor {
         idle: bool,
     ) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(async move {
-            let stop_lock = lock(&self.inner.slots).get(&agent)
-                .ok_or(SupervisorError::NotRunning(agent))?.stop_lock.clone();
+            let stop_lock = lock(&self.inner.slots)
+                .get(&agent)
+                .ok_or(SupervisorError::NotRunning(agent))?
+                .stop_lock
+                .clone();
             let _stop = stop_lock.lock().await;
             let (runner, def) = {
                 let mut slots = lock(&self.inner.slots);
@@ -4053,7 +4056,9 @@ impl RunnerSupervisor {
                     }
                     return match claimed {
                         Err(e) => Err(other(e)),
-                        _ => Err(SupervisorError::NotReady("the runner has work; no idle stop".into())),
+                        _ => Err(SupervisorError::NotReady(
+                            "the runner has work; no idle stop".into(),
+                        )),
                     };
                 }
             }

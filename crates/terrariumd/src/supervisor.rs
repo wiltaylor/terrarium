@@ -811,7 +811,10 @@ mod fake {
         ) -> Result<(), SupervisorError> {
             let epoch = {
                 let mut inner = self.lock();
-                let a = inner.agents.get_mut(&agent).filter(|a| a.status.is_live())
+                let a = inner
+                    .agents
+                    .get_mut(&agent)
+                    .filter(|a| a.status.is_live())
                     .ok_or(SupervisorError::NotRunning(agent))?;
                 a.prompts.push(prompt.clone());
                 a.status = AgentStatus::Working;

@@ -300,9 +300,15 @@ async fn idle_stop_claim_excludes_queued_and_running_turns() {
     let mut h = start(Opts::default()).await;
     until_idle(&mut h).await;
     let delivery = h.runner.type_turn("/hold");
-    assert!(!h.runner.claim_idle_stop(), "queued work must win over an idle stop");
+    assert!(
+        !h.runner.claim_idle_stop(),
+        "queued work must win over an idle stop"
+    );
     delivery.wait().await.expect("delivered");
-    assert!(!h.runner.claim_idle_stop(), "running work must win over an idle stop");
+    assert!(
+        !h.runner.claim_idle_stop(),
+        "running work must win over an idle stop"
+    );
     h.runner.kill().expect("kill");
     h.runner.wait().await;
     let mut h = start(Opts::default()).await;

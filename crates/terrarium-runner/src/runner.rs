@@ -632,8 +632,13 @@ impl Runner {
     /// The caller must finish the stop with exit keys or `kill`.
     pub fn claim_idle_stop(&self) -> bool {
         let mut state = lock(&self.inner.state);
-        if state.exited || state.stop_requested || !state.status.is_resting()
-            || state.turn_open || state.in_flight.is_some() || !state.queue.is_empty() {
+        if state.exited
+            || state.stop_requested
+            || !state.status.is_resting()
+            || state.turn_open
+            || state.in_flight.is_some()
+            || !state.queue.is_empty()
+        {
             return false;
         }
         state.stop_requested = true;

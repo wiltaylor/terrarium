@@ -491,7 +491,10 @@ async fn idle_stop_refuses_a_pending_push_pointer() {
     // Hold the pointer before typing, while the live runner is idle.
     td.sup.reset_gate(agent, true);
     td.sup.lease_granted(agent, "box".into(), "lease".into());
-    assert!(matches!(td.sup.stop_idle(agent).await, Err(SupervisorError::NotReady(_))));
+    assert!(matches!(
+        td.sup.stop_idle(agent).await,
+        Err(SupervisorError::NotReady(_))
+    ));
     td.sup.stop(agent).await.unwrap();
     td.wait_status(&id, "stopped").await;
     assert!(td.sup.send_turn(agent, "too late".into()).await.is_err());
