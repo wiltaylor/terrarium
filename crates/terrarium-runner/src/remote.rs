@@ -793,6 +793,22 @@ async fn forward_attach(
 }
 
 impl RunnerHandle for RemoteRunner {
+    fn list_pending(&self) -> BoxFuture<'_, Result<Vec<crate::WaitingTurn>>> {
+        Box::pin(async move {
+            let value = self.inner.shared.call("list_pending", json!({})).await?;
+            serde_json::from_value(value).map_err(|e| RunnerError::Other(e.to_string()))
+        })
+    }
+    fn cancel_pending(&self, id: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move {
+            let value = self
+                .inner
+                .shared
+                .call("cancel_pending", json!({"delivery": id}))
+                .await?;
+            serde_json::from_value(value).map_err(|e| RunnerError::Other(e.to_string()))
+        })
+    }
     fn hold(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             self.inner

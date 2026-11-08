@@ -17,12 +17,12 @@ export const AGENT_STATUSES = [
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
 /** The queue of a queued turn. */
-export type QueuedSource = "store";
+export type QueuedSource = "store" | "supervisor" | "runner";
 
-/** One turn that waits in the store for its agent's wake (`GET /api/agents/{id}/queued`, TER-54). */
+/** One untouched queued turn (`GET /api/agents/{id}/queued`). */
 export interface QueuedTurn {
-  id: number;
-  /** Where the turn waits: `store` (the daemon's queue for an agent that does not run). TER-66 adds the live queues. */
+  id: number | string;
+  /** Where the turn waits. Live queue IDs are opaque strings. */
   source: QueuedSource;
   /** The turn as it will be typed, with its tag (`[User] ...`). */
   text: string;

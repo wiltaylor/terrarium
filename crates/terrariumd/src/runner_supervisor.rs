@@ -982,7 +982,7 @@ struct Slot {
     /// queued turns of a wake, PLAN §18). They go out at the first idle,
     /// after the recap turn. A stop before then keeps them for the next
     /// launch.
-    turns: Vec<String>,
+    turns: Vec<crate::supervisor::PendingTurn>,
     /// The harness version that the last launch resolved; `None` when the
     /// harness came from `PATH`.
     harness_version: Option<String>,
@@ -1926,7 +1926,7 @@ impl RunnerSupervisor {
         slot.start_reason = Some(plan.reason);
         slot.recap = plan.recap;
         if let Some(then) = plan.then {
-            slot.turns.insert(0, then);
+            slot.turns.insert(0, then.into());
         }
         slot.reset_gate = false;
     }
@@ -2774,7 +2774,7 @@ impl RunnerSupervisor {
             };
             let deliveries: Vec<_> = turns
                 .into_iter()
-                .map(|text| runner.type_turn(text))
+                .map(|turn| runner.type_turn(turn.text))
                 .collect();
             if let Some(delivery) = recap
                 && let Err(e) = delivery.wait().await
@@ -2823,7 +2823,7 @@ impl RunnerSupervisor {
             let c = slot.compacting.take()?;
             // The prompt of the actor that asked goes first.
             if let Some(then) = &c.then {
-                slot.turns.insert(0, then.turn(&end));
+                slot.turns.insert(0, then.turn(&end).into());
             }
             end.work = !slot.turns.is_empty() || slot.recap.is_some() || !slot.pointer.is_empty();
             (c.done, slot.runner.clone())
@@ -4165,6 +4165,82 @@ impl RunnerSupervisor {
 }
 
 impl Supervisor for RunnerSupervisor {
+    fn list_pending(
+        &self,
+        agent: AgentId,
+    ) -> BoxFuture<'_, Result<crate::supervisor::PendingTurns, SupervisorError>> {
+        Box::pin(async move {
+            let runner = {
+                let slots = lock(&self.inner.slots);
+                let Some(slot) = slots.get(&agent) else {
+                    return Ok(crate::supervisor::PendingTurns::default());
+                };
+                slot.runner.clone()
+            };
+            let mut turns = Vec::new();
+            let mut runner_status = None;
+            if let Some(runner) = runner {
+                match runner.list_pending().await {
+                    Ok(pending) => {
+                        turns = pending
+                            .into_iter()
+                            .map(|t| crate::supervisor::PendingTurn {
+                                id: t.id,
+                                text: t.text,
+                                source: "runner",
+                            })
+                            .collect()
+                    }
+                    Err(terrarium_runner::RunnerError::Control(e))
+                        if e.code == "method_not_found" =>
+                    {
+                        runner_status = Some("unsupported");
+                    }
+                    Err(_) => runner_status = Some("unavailable"),
+                }
+            }
+            // Read the upstream queue last so a handoff cannot appear twice.
+            // As with dispatch itself, an item may leave between snapshots.
+            if let Some(slot) = lock(&self.inner.slots).get(&agent) {
+                turns.extend(slot.turns.clone());
+            }
+            Ok(crate::supervisor::PendingTurns {
+                items: turns,
+                runner: runner_status,
+            })
+        })
+    }
+
+    fn cancel_pending(
+        &self,
+        agent: AgentId,
+        source: &str,
+        id: String,
+    ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+        let source = source.to_owned();
+        Box::pin(async move {
+            let runner = {
+                let mut slots = lock(&self.inner.slots);
+                let Some(slot) = slots.get_mut(&agent) else {
+                    return Ok(false);
+                };
+                if source == "supervisor" {
+                    let Some(index) = slot.turns.iter().position(|t| t.id == id) else {
+                        return Ok(false);
+                    };
+                    slot.turns.remove(index);
+                    return Ok(true);
+                }
+                slot.runner.clone()
+            };
+            match runner {
+                Some(runner) if source == "runner" => {
+                    runner.cancel_pending(id).await.map_err(other)
+                }
+                _ => Ok(false),
+            }
+        })
+    }
     fn harness_versions(&self, refresh: bool) -> BoxFuture<'_, HarnessReport> {
         Box::pin(async move {
             let mut harnesses = Vec::new();
@@ -4361,7 +4437,7 @@ impl Supervisor for RunnerSupervisor {
                     .get_mut(&agent)
                     .filter(|s| !s.reached_idle || s.compacting.is_some() || s.reset_gate)
                 {
-                    slot.turns.push(text);
+                    slot.turns.push(text.into());
                     return Ok(());
                 }
                 // The stream limit (`crate::stream_limit`): with no free
@@ -4370,7 +4446,7 @@ impl Supervisor for RunnerSupervisor {
                 if let Some(slot) = slots.get_mut(&agent) {
                     let sub = slot.agent.subscription.clone();
                     if !self.stream_take(agent, sub.as_deref()) {
-                        slot.turns.push(text);
+                        slot.turns.push(text.into());
                         return Ok(());
                     }
                     slot.turns_in_flight += 1;
@@ -4796,7 +4872,12 @@ impl Supervisor for RunnerSupervisor {
                     };
                     let runner = slots.get(&agent).and_then(|s| s.runner.clone());
                     if let Some(slot) = slots.get_mut(&agent).filter(|_| runner.is_some()) {
-                        slot.turns.extend(held.waiting.iter().cloned());
+                        slot.turns.extend(
+                            held.waiting
+                                .iter()
+                                .cloned()
+                                .map(crate::supervisor::PendingTurn::from),
+                        );
                     }
                     (held, runner)
                 };
@@ -5205,6 +5286,7 @@ mod tests {
 
     struct ClaimRunner {
         id: AgentId,
+        pending_error: Option<bool>,
         entered: tokio::sync::Notify,
         reply: tokio::sync::Notify,
         lost: bool,
@@ -5214,6 +5296,19 @@ mod tests {
     }
 
     impl RunnerHandle for ClaimRunner {
+        fn list_pending(
+            &self,
+        ) -> BoxFuture<'_, terrarium_runner::Result<Vec<terrarium_runner::WaitingTurn>>> {
+            Box::pin(async move {
+                Err(if self.pending_error == Some(true) {
+                    terrarium_runner::RunnerError::Control(
+                        terrarium_runner::RpcError::method_not_found("list_pending"),
+                    )
+                } else {
+                    terrarium_runner::RunnerError::Exited
+                })
+            })
+        }
         fn agent(&self) -> AgentId {
             self.id
         }
@@ -5303,6 +5398,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_runner_errors_keep_supervisor_items() {
+        for (unsupported, expected) in [(true, "unsupported"), (false, "unavailable")] {
+            let tmp = tempfile::tempdir().unwrap();
+            let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+                tmp.path().join("state"),
+                tmp.path().join("run"),
+                tmp.path().join("prompts"),
+                SandboxConfig::default(),
+                HashMap::new(),
+            ));
+            let agent: Agent = serde_json::from_value(serde_json::json!({
+                "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
+            })).unwrap();
+            let id = agent.id;
+            let runner = Arc::new(ClaimRunner {
+                id,
+                pending_error: Some(unsupported),
+                entered: tokio::sync::Notify::new(),
+                reply: tokio::sync::Notify::new(),
+                lost: false,
+                claimed: AtomicBool::new(false),
+                typed: Mutex::default(),
+                typed_ready: tokio::sync::Notify::new(),
+            });
+            let mut slot = Slot::new(agent);
+            slot.runner = Some(runner);
+            slot.turns.push(String::from("still waiting").into());
+            lock(&sup.inner.slots).insert(id, slot);
+            let pending = sup.list_pending(id).await.unwrap();
+            assert_eq!(pending.runner, Some(expected));
+            assert_eq!(pending.items.len(), 1);
+            assert_eq!(pending.items[0].text, "still waiting");
+            assert_eq!(pending.items[0].source, "supervisor");
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_slot_turns_keep_ids_order_and_refuse_after_handoff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        ));
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
+        })).unwrap();
+        let id = agent.id;
+        let mut slot = Slot::new(agent);
+        slot.turns = ["first", "second", "third"]
+            .into_iter()
+            .map(|s| crate::supervisor::PendingTurn::from(s.to_owned()))
+            .collect();
+        lock(&sup.inner.slots).insert(id, slot);
+        let pending = sup.list_pending(id).await.unwrap().items;
+        assert_eq!(
+            pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+        assert!(
+            sup.cancel_pending(id, "supervisor", pending[1].id.clone())
+                .await
+                .unwrap()
+        );
+        let remaining = sup.list_pending(id).await.unwrap().items;
+        assert_eq!(
+            remaining.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            [pending[0].id.as_str(), pending[2].id.as_str()]
+        );
+        // Dispatch takes the queue under this same lock before typing.
+        lock(&sup.inner.slots).get_mut(&id).unwrap().turns.clear();
+        assert!(
+            !sup.cancel_pending(id, "supervisor", pending[0].id.clone())
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn idle_stop_claim_rpc_keeps_a_turn_retryable_on_refusal_and_lost_reply() {
         for (lost, timeout, pointer) in [
             (false, false, false),
@@ -5326,6 +5502,7 @@ mod tests {
             let id = agent.id;
             let runner = Arc::new(ClaimRunner {
                 id,
+                pending_error: None,
                 entered: tokio::sync::Notify::new(),
                 reply: tokio::sync::Notify::new(),
                 lost,
@@ -5355,7 +5532,7 @@ mod tests {
                     .get_mut(&id)
                     .unwrap()
                     .turns
-                    .push("pending hand-over".into());
+                    .push(String::from("pending hand-over").into());
                 sup.deliver_pending(id);
             }
             assert!(lock(&runner.typed).is_empty());

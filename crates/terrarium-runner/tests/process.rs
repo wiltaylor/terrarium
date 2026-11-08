@@ -227,6 +227,47 @@ fn seqs(path: &Path) -> Vec<u64> {
 }
 
 #[tokio::test]
+async fn pending_turns_remote_cancel_keeps_order_and_refuses_typed() {
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    r.type_turn("/hold".into()).wait().await.expect("holding");
+    let first = r.type_turn("first".into());
+    let second = r.type_turn("second".into());
+    let third = r.type_turn("third".into());
+    // Remote delivery handles use local IDs. Queue controls use runner IDs.
+    let pending = r.list_pending().await.expect("list");
+    assert_eq!(
+        pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+    assert!(
+        r.cancel_pending(pending[1].id.clone())
+            .await
+            .expect("cancel")
+    );
+    assert!(
+        !r.cancel_pending(pending[1].id.clone())
+            .await
+            .expect("cancel again")
+    );
+    assert!(second.wait().await.is_err());
+    let pending = r.list_pending().await.expect("remaining");
+    assert_eq!(
+        pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+        ["first", "third"]
+    );
+    let first_id = pending[0].id.clone();
+    r.write(b"\r").await.expect("release hold");
+    first.wait().await.expect("first typed");
+    assert!(!r.cancel_pending(first_id).await.expect("refuse typed"));
+    third.wait().await.expect("third typed");
+    r.kill().await.expect("kill");
+    r.wait().await;
+}
+
+#[tokio::test]
 async fn idle_stop_claim_uses_the_remote_turn_state() {
     let env = Env::new();
     let r = env.spawn().await;
