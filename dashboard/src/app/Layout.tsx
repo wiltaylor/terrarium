@@ -12,6 +12,7 @@ import { agents, api, auth, events, inbox, pins, projectFolders, projects, signO
 import { badge } from "../features/inbox/model";
 import { SETTINGS_ITEMS, TOP_ITEMS } from "./nav";
 import { ProjectTree } from "./ProjectTree";
+import { Bookmarks } from "./Bookmarks";
 import { projectFromPath } from "./treeModel";
 import { LoginScreen } from "./LoginScreen";
 import { PinnedBar } from "./PinnedBar";
@@ -94,6 +95,7 @@ export function Layout(props: RouteSectionProps) {
         </div>
 
         <ProjectTree />
+        <Bookmarks />
 
         {/* At the bottom, above the footer. The link is active on every /settings/... tab. */}
         <div class="nav-section nav-settings">
