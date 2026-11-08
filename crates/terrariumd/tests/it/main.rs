@@ -84,6 +84,8 @@ mod pins;
 mod pipelines;
 #[path = "../policy_writes.rs"]
 mod policy_writes;
+#[path = "../preferences.rs"]
+mod preferences;
 #[path = "../project_actions.rs"]
 mod project_actions;
 #[path = "../project_folders.rs"]
