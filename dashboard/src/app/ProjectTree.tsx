@@ -58,6 +58,8 @@ import {
   sortAgents,
 } from "./treeModel";
 import { createRovingTree } from "./treeNav";
+import { Bookmarks, BOOKMARKS_KEY, bookmarkKey } from "./Bookmarks";
+import { bookmarks } from "../stores";
 
 // The template chooser loads with the dialog, not with the sidebar.
 const NewAgentDialog = lazy(() => import("../features/agents/NewAgentDialog").then((m) => ({ default: m.NewAgentDialog })));
@@ -250,8 +252,8 @@ export function ProjectTree() {
       reposOf: (p) => visibleRepos(p).map((r) => r.name),
     });
   const keys = createMemo(() => {
-    if (!rootOpen() || !useTree()) return treeKeys(rootOpen(), visible().map((p) => p.name));
-    return [ROOT_KEY, ...folderTreeKeys(tree(), expanded.isOpen, (p) => treeKeys(true, [p]).slice(1))];
+    const base = !rootOpen() || !useTree() ? treeKeys(rootOpen(), visible().map((p) => p.name)) : [ROOT_KEY, ...folderTreeKeys(tree(), expanded.isOpen, (p) => treeKeys(true, [p]).slice(1))];
+    return rootOpen() ? [...base, BOOKMARKS_KEY, ...(expanded.isOpen(BOOKMARKS_KEY) ? bookmarks.items().map((b) => bookmarkKey(b.href)) : [])] : base;
   });
   // Tab reaches the last focused row, else the URL agent, else the URL project, else the root.
   const nav = createRovingTree({
@@ -285,6 +287,11 @@ export function ProjectTree() {
     nav.onKeyDown(e, (target) => {
       const key = target.dataset.key;
       if (!key) return null;
+      if (key === BOOKMARKS_KEY) return {
+        key, parent: ROOT_KEY, button: true, open: expanded.isOpen(BOOKMARKS_KEY),
+        onOpen: () => expanded.open(BOOKMARKS_KEY), onClose: () => expanded.close(BOOKMARKS_KEY), onActivate: () => expanded.toggle(BOOKMARKS_KEY),
+      };
+      if (key.startsWith("bookmark:")) return { key, parent: BOOKMARKS_KEY };
       if (key === ROOT_KEY)
         return {
           key,
@@ -581,6 +588,7 @@ export function ProjectTree() {
               <li class="tree-empty muted small">No projects.</li>
             </Show>
           </Show>
+          <Bookmarks nav={nav} />
         </TreeRoot>
       </ul>
       <ErrorBanner error={projectFolders.error()} onDismiss={projectFolders.clearError} />
