@@ -17,7 +17,8 @@ async fn setup() -> (TestDaemon, String, String, String) {
     let lead = id(&td
         .agent("p", "lead", json!({"roles": ["project_admin"]}))
         .await);
-    let worker = id(&td.agent("p", "worker", json!({})).await);
+    // These tests exercise trouble notices, not the separate card reminder.
+    let worker = id(&td.agent("p", "worker", json!({"card_reminder": false})).await);
     let card = id(td
         .post_as(
             &worker,
