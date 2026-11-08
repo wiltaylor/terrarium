@@ -71,11 +71,11 @@ async fn operator_schedule_comments_are_system_authored() {
         .ok()
         .clone();
     let sid = id(&s);
-    for trigger in ["manual", "cron"] {
-        terrariumd::api::schedules::run_schedule(&state(&td), &sid, trigger, "operator".into())
-            .await
-            .unwrap();
-    }
+    td.post_empty(&format!("/api/schedules/{sid}/run"))
+        .await
+        .ok();
+    let runs = tick(&td, hours(2)).await;
+    assert_eq!(runs.len(), 1);
     let cards = td.get("/api/projects/terra/cards").await;
     let cid = id(&cards.ok()[0]);
     let card = td.get(&format!("/api/cards/{cid}")).await;
