@@ -364,9 +364,9 @@ fn resolved_env(config: &Value, service: &str) -> Res<Vec<String>> {
         .collect()
 }
 
-fn with_environment(spec: &Container, env: Vec<String>) -> Container {
+fn with_environment(spec: &Container, env: Vec<String>, image_config: &Value) -> Container {
     let old = env_map(&spec.spec["container"]["Config"]["Env"]);
-    let mut new = env_map(&spec.spec["image"]["Env"]);
+    let mut new = env_map(&image_config["Env"]);
     new.extend(env_map(&json!(env)));
     let keys: BTreeSet<_> = old.keys().chain(new.keys()).collect();
     let changed: Vec<_> = keys
@@ -528,7 +528,7 @@ impl Engine for Docker {
         })
     }
 
-    fn prepare<'a>(&'a self, spec: &'a Container) -> BoxFut<'a, Res<Container>> {
+    fn prepare<'a>(&'a self, spec: &'a Container, image: &'a Image) -> BoxFut<'a, Res<Container>> {
         Box::pin(async move {
             let me = std::env::var("HOSTNAME").map_err(|_| {
                 "cannot inspect updater deployment mounts (values hidden)".to_owned()
@@ -606,7 +606,18 @@ impl Engine for Docker {
             }
             let config: Value = serde_json::from_slice(&output.stdout)
                 .map_err(|_| "invalid Compose configuration (values hidden)".to_owned())?;
-            Ok(with_environment(spec, resolved_env(&config, service)?))
+            let destination = self
+                .inspect_image(&image.reference)
+                .await
+                .map_err(|_| {
+                    "cannot inspect destination image environment (values hidden)".to_owned()
+                })?
+                .ok_or_else(|| "destination image is missing (values hidden)".to_owned())?;
+            Ok(with_environment(
+                spec,
+                resolved_env(&config, service)?,
+                &destination["Config"],
+            ))
         })
     }
 
@@ -825,6 +836,26 @@ mod tests {
     }
 
     #[test]
+    fn changed_keys_use_destination_image_defaults_and_compose_overrides() {
+        let original = Container {
+            id: "old".into(),
+            name: "scratch".into(),
+            image: image_of(&Value::Null, "old:1"),
+            spec: json!({
+                "container": {"Config": {"Env": ["CHANGED=old", "SAME=kept", "OVERRIDE=explicit"]}},
+                "image": {"Env": ["CHANGED=old", "SAME=old-default", "OVERRIDE=old-default"]}
+            }),
+        };
+        let prepared = with_environment(
+            &original,
+            vec!["OVERRIDE=explicit".into()],
+            &json!({"Env": ["CHANGED=new", "SAME=kept", "OVERRIDE=new-default"]}),
+        );
+        assert_eq!(prepared.spec["changed_env_keys"], json!(["CHANGED"]));
+        assert_eq!(prepared.spec["compose_env"], json!(["OVERRIDE=explicit"]));
+    }
+
+    #[test]
     fn fresh_environment_replaces_removed_keys_and_preserves_explicit_image_defaults() {
         let original = Container {
             id: "old".into(),
@@ -835,7 +866,11 @@ mod tests {
         let config = json!({"services": {"terrarium": {"environment": {
             "TERRARIUM_MAIL_LOOP_LIMIT": "30", "HOME": "/home/terrarium"
         }}}});
-        let prepared = with_environment(&original, resolved_env(&config, SERVICE).unwrap());
+        let prepared = with_environment(
+            &original,
+            resolved_env(&config, SERVICE).unwrap(),
+            &original.spec["image"],
+        );
         let body = create_body(&prepared.spec, "new:2");
         assert_eq!(
             env_map(&body["Env"]),

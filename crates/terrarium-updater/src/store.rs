@@ -115,19 +115,20 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let tmp = dir.join(format!(".{name}.tmp"));
+    let mode = if name == IMAGE { 0o644 } else { 0o600 };
     {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(mode);
         }
         let mut f = options.open(&tmp)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
         }
         f.write_all(bytes)?;
         f.sync_all()?;
@@ -203,6 +204,14 @@ mod tests {
                     .mode()
                     & 0o777,
                 0o600
+            );
+            assert_eq!(
+                std::fs::metadata(s.dir().join(IMAGE))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o644
             );
         }
         // A bad file reads as empty.

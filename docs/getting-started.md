@@ -1872,8 +1872,10 @@ updater has it.
    not the updater's old service environment.
    Explicit rollback uses the recorded old container spec and backup without
    resolving Compose again, so a broken `.env` does not prevent rollback.
-   Switches made before container specs were recorded cannot be rolled back
-   by the updater. The recorded spec contains environment values and is stored
+   For switches made before container specs were recorded, rollback falls back
+   to the currently inspected container spec, so it cannot restore historical
+   environment settings. Automatic recovery after a failed update always uses
+   the spec inspected before that update. The recorded spec contains environment values and is stored
    in the updater state directory with owner-only file permissions.
 
    **Existing server installs: one-time updater migration.** This is a deploy

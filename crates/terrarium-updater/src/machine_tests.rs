@@ -93,7 +93,7 @@ fn old_image() -> Image {
 }
 
 impl Engine for Fake {
-    fn prepare<'a>(&'a self, spec: &'a Container) -> BoxFut<'a, Res<Container>> {
+    fn prepare<'a>(&'a self, spec: &'a Container, _image: &'a Image) -> BoxFut<'a, Res<Container>> {
         Box::pin(async move {
             if self.0.lock().unwrap().fail.contains("environment") {
                 return Err("Compose environment resolution failed (values hidden)".into());
@@ -510,12 +510,21 @@ async fn a_failed_drain_or_backup_resumes_the_old_daemon() {
 #[tokio::test]
 async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
     let r = rig();
+    // First self-update: there is no recorded previous spec yet.
+    assert_eq!(r.store.previous(), None);
+    let original = r.fake.0.lock().unwrap().containers["terrarium"]
+        .spec
+        .clone();
     r.fake.fail(&format!("health:{}", new_ref()));
     let run = r
         .updater
         .run_now(RunKind::Update, "latest", "operator")
         .await;
     assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
+    assert_eq!(
+        r.fake.0.lock().unwrap().containers["terrarium"].spec,
+        original
+    );
     assert!(
         r.fake.0.lock().unwrap().containers["terrarium"]
             .spec
@@ -641,7 +650,7 @@ async fn a_rollback_restores_the_backup_of_the_last_switch() {
 }
 
 #[tokio::test]
-async fn legacy_rollback_without_a_recorded_spec_stops_before_drain() {
+async fn legacy_rollback_uses_the_inspected_spec_without_resolving_environment() {
     let r = rig();
     r.updater
         .run_now(RunKind::Update, "latest", "operator")
@@ -649,19 +658,20 @@ async fn legacy_rollback_without_a_recorded_spec_stops_before_drain() {
     let mut previous = r.store.previous().unwrap();
     previous.spec = None;
     r.store.set_previous(&previous).unwrap();
+    let inspected = r.fake.0.lock().unwrap().containers["terrarium"]
+        .spec
+        .clone();
+    r.fake.fail("environment");
     let run = r
         .updater
         .run_now(RunKind::Rollback, "previous", "operator")
         .await;
-    assert_eq!(run.outcome, Outcome::Failed);
-    assert!(
-        run.error
-            .as_deref()
-            .unwrap()
-            .contains("no recorded container spec")
+    assert_eq!(run.outcome, Outcome::Succeeded, "{run:#?}");
+    assert_eq!(
+        r.fake.0.lock().unwrap().containers["terrarium"].spec,
+        inspected
     );
-    assert_eq!(steps(&run), ["inspect"]);
-    assert_eq!(r.fake.running_image().as_deref(), Some(new_ref().as_str()));
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
 }
 
 #[tokio::test]

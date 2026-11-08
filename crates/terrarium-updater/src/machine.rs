@@ -441,9 +441,9 @@ impl Updater {
                         "the last switch made no backup; a rollback cannot restore the data".into(),
                     )));
                 };
-                let spec = prev.spec.clone().ok_or_else(|| failed(Fail(
-                    "the last switch has no recorded container spec; rollback cannot safely restore its environment".into(),
-                )))?;
+                // Legacy records have no saved spec. Use the inspected
+                // container, never resolve a potentially broken deployment.
+                let spec = prev.spec.clone().unwrap_or_else(|| cur.spec.clone());
                 let to = self.local_or_pull(&prev).await.map_err(failed)?;
                 self.skip("verify", "the image ran here before");
                 (to, Some(backup), Some(spec))
@@ -460,7 +460,7 @@ impl Updater {
                         saved.spec = spec;
                         Ok(saved)
                     } else {
-                        self.engine.prepare(&cur).await
+                        self.engine.prepare(&cur, &to).await
                     }
                 },
                 |c| {
