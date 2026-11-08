@@ -805,11 +805,16 @@ pub fn board_summary(
     let mut cards: Vec<Value> = raw.iter().map(|s| json_col(s)).collect();
     let mut estimates = super::card_history::ReviewEstimates::default();
     for card in &mut cards {
-        let role = card.as_object_mut().unwrap().remove("_column_role");
+        let role = card
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("board summary is not an object"))?
+            .remove("_column_role");
         let review = role.as_ref().and_then(Value::as_str) == Some(REVIEW)
             || (role.as_ref().is_none_or(Value::is_null) && card["column"] == REVIEW);
         if review {
-            let id = card["id"].as_str().unwrap();
+            let id = card["id"]
+                .as_str()
+                .ok_or_else(|| ApiError::internal("board summary has no card id"))?;
             let job = super::jobs::card_job(conn, id)?;
             if job.is_none()
                 || job
