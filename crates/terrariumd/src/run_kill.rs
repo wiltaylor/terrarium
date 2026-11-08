@@ -52,6 +52,8 @@ const PID_DIR: &str = "/tmp";
 /// half-written one. The clean-up removes the files of the runs that
 /// ended, and the ones whose PID now names a process with another start
 /// time (TER-123).
+/// Missing PIDs are only dead when the proc mount proves unrestricted
+/// visibility. Without that proof (including no proc), retain the file.
 pub const WRAP: &str = r#"f=$1; shift
 st() { s=; { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 0; s=${s##*) }; set -- $s; echo "${20}"; }
 visible=
@@ -655,9 +657,10 @@ mod tests {
             }
             let file = dir.path().join("terrarium-run-dead.pid");
             std::fs::write(&file, "12345\n").unwrap();
-            let script = WRAP
-                .replace("/proc", &proc.display().to_string())
-                .replace("/tmp/terrarium-run-", &format!("{}/terrarium-run-", dir.path().display()));
+            let script = WRAP.replace("/proc", &proc.display().to_string()).replace(
+                "/tmp/terrarium-run-",
+                &format!("{}/terrarium-run-", dir.path().display()),
+            );
             let out = std::process::Command::new("sh")
                 .args(["-c", &script, "test"])
                 .arg(dir.path().join("own.pid"))
@@ -665,7 +668,10 @@ mod tests {
                 .output()
                 .unwrap();
             assert!(out.status.success());
-            assert_eq!(file.exists(), !matches!(options, Some("rw" | "rw,hidepid=0")));
+            assert_eq!(
+                file.exists(),
+                !matches!(options, Some("rw" | "rw,hidepid=0"))
+            );
         }
     }
 
