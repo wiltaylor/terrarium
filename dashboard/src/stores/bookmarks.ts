@@ -19,7 +19,7 @@ export function bookmarkHref(value: string, origin: string): string | null {
 }
 
 export function createBookmarksStore(storage: Pick<Storage, "getItem" | "setItem"> | null, origin: string) {
-  let initial: Bookmark[] = [];
+  const initial: Bookmark[] = [];
   try {
     const raw: unknown = JSON.parse(storage?.getItem(KEY) ?? "[]");
     if (Array.isArray(raw)) {
