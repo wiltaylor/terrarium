@@ -244,7 +244,10 @@ async fn research_helpers_daily_admission_is_atomic_and_project_scoped() {
         Ok(())
     }).await.unwrap();
     let body = json!({"template": "card-research", "task": "research"});
-    let (a, b) = tokio::join!(spawn_as(&td, &parent, body.clone()), spawn_as(&td, &parent, body));
+    let (a, b) = tokio::join!(
+        spawn_as(&td, &parent, body.clone()),
+        spawn_as(&td, &parent, body)
+    );
     let mut codes = [a.status, b.status];
     codes.sort();
     assert_eq!(codes, [201, 409], "{} {}", a.body, b.body);
@@ -253,13 +256,27 @@ async fn research_helpers_daily_admission_is_atomic_and_project_scoped() {
 #[tokio::test]
 async fn research_card_moves_count_live_helpers() {
     let (td, parent, _) = research_setup().await;
-    spawn_as(&td, &parent, json!({"template": "card-research", "task": "research"})).await.ok();
+    spawn_as(
+        &td,
+        &parent,
+        json!({"template": "card-research", "task": "research"}),
+    )
+    .await
+    .ok();
     state(&td).db.write("system", |t| {
         t.execute("UPDATE board_columns SET name = 'research', wip_limit = 1 WHERE project = 'p' AND name = 'ready'", [])?;
         Ok(())
     }).await.unwrap();
-    let card = id(td.post("/api/projects/p/cards", json!({"title": "Research queued"})).await.ok());
-    td.post(&format!("/api/cards/{card}/move"), json!({"column": "research"})).await.err(409, "wip_limit");
+    let card = id(td
+        .post("/api/projects/p/cards", json!({"title": "Research queued"}))
+        .await
+        .ok());
+    td.post(
+        &format!("/api/cards/{card}/move"),
+        json!({"column": "research"}),
+    )
+    .await
+    .err(409, "wip_limit");
 }
 
 async fn spawn_ok(td: &TestDaemon, owner: &str, task: &str) -> Value {

@@ -1716,9 +1716,13 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
     if new.is_some() && card.assignee.is_none() && card.column.eq_ignore_ascii_case("research") {
         let column = column(t, &card.project, &card.column)?;
         if let Some(limit) = column.wip_limit
-            && active_count(t, column.id)? + crate::research_helpers::running(t, &card.project)? > limit
+            && active_count(t, column.id)? + crate::research_helpers::running(t, &card.project)?
+                > limit
         {
-            return Err(ApiError::new(Code::WipLimit, "research helpers occupy the remaining research capacity"));
+            return Err(ApiError::new(
+                Code::WipLimit,
+                "research helpers occupy the remaining research capacity",
+            ));
         }
     }
     t.execute(
