@@ -1,0 +1,6 @@
+child output {not JSON} {"type":"suite","event":"started","test_count":2}
+{"type":"test","event":"started","name":"first"}
+child output without newline{"type":"test","event":"ok","name":"first","exec_time":0.1}
+{"type":"test","event":"started","name":"second"}
+output with { braces } and Unicode café {"type":"test","event":"ok","name":"second","stdout":"literal { braces }"}
+{"type":"suite","event":"ok","passed":2,"failed":0}

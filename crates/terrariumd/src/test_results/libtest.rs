@@ -57,6 +57,16 @@ struct Pending {
     suite: usize,
 }
 
+/// Find an event even when a child wrote a prefix without a newline.
+pub(super) fn event_on_line(line: &str) -> Option<Value> {
+    line.match_indices('{').find_map(|(offset, _)| {
+        let v: Value = serde_json::from_str(&line[offset..]).ok()?;
+        let ty = v.get("type")?.as_str()?;
+        v.get("event")?.as_str()?;
+        matches!(ty, "suite" | "test").then_some(v)
+    })
+}
+
 pub fn parse(text: &str, mut sink: Sink) -> Result<ParsedRun, ParseError> {
     let mut bad_lines = 0usize;
     let mut objects = 0usize;
@@ -71,7 +81,7 @@ pub fn parse(text: &str, mut sink: Sink) -> Result<ParsedRun, ParseError> {
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+        let Some(v) = event_on_line(line) else {
             bad_lines += 1;
             continue;
         };
@@ -160,7 +170,7 @@ pub fn parse(text: &str, mut sink: Sink) -> Result<ParsedRun, ParseError> {
         let name = key.split_once('\u{0}').map_or(key.as_str(), |(_, n)| n);
         let mut k = Case::new(name, Status::Errored);
         k.classname = name.rsplit_once("::").map(|(m, _)| m.to_owned());
-        k.message = Some("the test started but did not finish (the test binary stopped)".into());
+        k.message = Some("incomplete: no end event in the output".into());
         sink.case(p.suite, k)?;
     }
     if bad_lines > 0 {
