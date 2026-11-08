@@ -2231,7 +2231,11 @@ async fn artifacts_and_labels() {
     ] {
         let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
             .unwrap_err();
-        assert_eq!(e.kind(), clap::error::ErrorKind::UnknownArgument, "{args:?}");
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
     // Removed artifact --version flags are rejected by the parser.
     for args in [
@@ -2240,7 +2244,11 @@ async fn artifacts_and_labels() {
     ] {
         let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
             .unwrap_err();
-        assert_eq!(e.kind(), clap::error::ErrorKind::UnknownArgument, "{args:?}");
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
     // `artifact ls --label` sends `label` to the daemon (TER-129), and keeps
     // the artifacts with that label also when a daemon from before ignores
@@ -8808,7 +8816,11 @@ async fn test_runs() {
     ] {
         let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
             .unwrap_err();
-        assert_eq!(e.kind(), clap::error::ErrorKind::UnknownArgument, "{args:?}");
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
     let r = exec(true, &["test", "link", "01RUN"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), 2);
