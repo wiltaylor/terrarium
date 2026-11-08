@@ -57,5 +57,24 @@ async fn inbox_live_and_tenfold_load() {
             println!("scale={scale} {path} median={:?} max={:?}", times[2], times[4]);
             assert!(times[2] < Duration::from_secs(2), "{path}: {times:?}");
         }
+        for action in ["ack", "answer"] {
+            let mut times = Vec::new();
+            for i in 0..5 {
+                let index = i * 3 + usize::from(action == "answer");
+                let path = format!("/api/questions/question-{index:06}/{action}");
+                let body = if action == "answer" {
+                    serde_json::json!({"answer": "Accepted"})
+                } else {
+                    serde_json::json!({})
+                };
+                let start = Instant::now();
+                let response = td.post(&path, body).await;
+                assert_eq!(response.status, 200, "{}", response.body);
+                times.push(start.elapsed());
+            }
+            times.sort();
+            println!("scale={scale} POST {action} median={:?} max={:?}", times[2], times[4]);
+            assert!(times[2] < Duration::from_secs(2), "{action}: {times:?}");
+        }
     }
 }
