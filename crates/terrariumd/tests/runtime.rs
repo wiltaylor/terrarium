@@ -1213,6 +1213,17 @@ async fn board_changes_nudge_the_project_leads() {
     let olead = td
         .agent("other", "olead", json!({"roles": ["project_admin"]}))
         .await;
+    // Isolate the rate-limited nudge turns from immediate human-comment
+    // mail, which would otherwise be the second turn before the interval.
+    let (status, body) = td
+        .req(
+            Method::PATCH,
+            "/api/projects/demo",
+            Some(json!({"human_comment_notifications": false})),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
     for id in [&lead, &bob, &olead] {
         td.post(&format!("/api/agents/{id}/start"), None).await;
     }

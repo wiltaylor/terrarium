@@ -2528,7 +2528,11 @@ const MIGRATIONS: &[&str] = &[
         default_agent TEXT REFERENCES agents(id) ON DELETE SET NULL
     );
     "#,
-    // 96: Agent RPC restart journal (TER-260). A NULL answer is never replayed
+    // 96: built-in human card comment delivery (TER-254).
+    r#"
+    ALTER TABLE projects ADD COLUMN human_comment_notifications INTEGER NOT NULL DEFAULT 1;
+    "#,
+    // 97: Agent RPC restart journal (TER-260). A NULL answer is never replayed
     // after a crash. Append after concurrent migrations without changing them.
     r#"
     CREATE TABLE agent_rpc_answers (
