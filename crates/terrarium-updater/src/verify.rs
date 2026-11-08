@@ -270,10 +270,10 @@ mod tests {
         let staging = dir.path().join("gh.tmp");
         let mut script = std::fs::File::create(&staging).unwrap();
         let contents = format!(
-                "#!/bin/sh\necho \"$* token=$GH_TOKEN ref=$TERRARIUM_UPDATE_REF\" > {}\n\
+            "#!/bin/sh\necho \"$* token=$GH_TOKEN ref=$TERRARIUM_UPDATE_REF\" > {}\n\
                  [ \"$3\" = oci://{REF} ]\n",
-                log.display()
-            );
+            log.display()
+        );
         script.write_all(contents.as_bytes()).unwrap();
         script
             .set_permissions(std::fs::Permissions::from_mode(0o755))
