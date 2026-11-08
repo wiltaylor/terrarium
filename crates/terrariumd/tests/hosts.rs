@@ -97,7 +97,7 @@ impl Lab {
         Client::new(o)
     }
 
-    /// Register `name`, run its host agent, and wait for it to be online.
+    /// Register `name`, run its host agent, and wait for admission readiness.
     async fn host(&self, name: &str) -> tokio::task::JoinHandle<()> {
         self.host_with(name, None).await
     }
@@ -118,11 +118,26 @@ impl Lab {
         for _ in 0..300 {
             let r = self.td.get(&format!("/api/hosts/{name}")).await;
             if r.body["online"] == online {
+                if online {
+                    self.wait_admission_ready(name).await;
+                }
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("host {name} never became online={online}");
+    }
+
+    async fn wait_admission_ready(&self, name: &str) {
+        // The link becomes online before reservation reconciliation opens
+        // admission. Target verbs must wait for both, including on reconnect.
+        for _ in 0..300 {
+            if !self.state().executor.resource_pending(name) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("host {name} admission never became ready");
     }
 
     async fn target(&self, def: Value) {
