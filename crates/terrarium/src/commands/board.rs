@@ -550,11 +550,15 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                 .or(body.as_deref())
                 .or(text.as_deref())
                 .unwrap_or_default();
+            let mut request = json!({"body": ctx.text(text)?});
+            if let Some(reply) = reply_to {
+                request["reply_to"] = json!(reply);
+            }
             let k = ctx
                 .api
                 .post(
                     &format!("{}/comments", card_path(id)),
-                    Some(json!({"body": ctx.text(text)?, "reply_to": reply_to})),
+                    Some(request),
                 )
                 .await?;
             ctx.emit(&k, |c, k| {

@@ -2217,6 +2217,7 @@ pub fn reply_comment(
     card_event(t, &card, "commented", json!({"comment": body}))?;
     let mut recipients = Vec::new();
     if actor.is_operator()
+        && author == "operator"
         && crate::store::projects::get(t, &card.project)?.human_comment_notifications
     {
         recipients = crate::question_guard::leads(t, &card.project, "")?;
