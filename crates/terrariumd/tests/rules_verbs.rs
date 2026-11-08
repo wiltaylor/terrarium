@@ -815,7 +815,12 @@ async fn default_merge_group_returned_members_leave_and_last_abandons() {
     settle(&td).await;
     assert!(card(&td, &b).await.get("group").is_none());
     assert_eq!(card(&td, &gid).await["archived"], false);
-    move_to(&td, &c, "blocked").await;
+    td.post(
+        &format!("/api/cards/{c}/move"),
+        json!({"column":"blocked", "comment":"Needs a corrected branch."}),
+    )
+    .await
+    .ok();
     settle(&td).await;
     assert!(card(&td, &c).await.get("group").is_none());
     let group = card(&td, &gid).await;

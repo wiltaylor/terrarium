@@ -433,9 +433,14 @@ fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
                 [member],
                 |r| r.get(0),
             )?;
+            // A repair card joins before it is worked, rather than being
+            // sent back from the queue. Preserve that deliberate membership.
+            let repair = card.labels.iter().any(|l| l.starts_with("merge-fix:"));
             if card.archived
-                || matches!(role.as_deref(), Some("working" | "blocked"))
-                || matches!(card.column.as_str(), "ready" | "backlog")
+                || role.as_deref() == Some("blocked")
+                || (!repair
+                    && (role.as_deref() == Some("working")
+                        || matches!(card.column.as_str(), "ready" | "backlog")))
             {
                 remove(t, &g, member)?;
             }

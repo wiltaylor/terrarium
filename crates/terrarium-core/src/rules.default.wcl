@@ -116,6 +116,7 @@ rule "merge-group-returned" {
   on = ["card"]
   max_per_hour = 600
   when "data.change" { eq = "moved" }
+  when "data.from_role" { one_of = ["merge_queue", "accepted", "review"] }
   if_card { group_key_prefix = "merge:" column = ["@working", "ready", "@blocked", "backlog"] }
   group_remove { key = "{{group.key}}" }
 }
