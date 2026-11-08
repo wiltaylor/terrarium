@@ -29,13 +29,30 @@ pub async fn lock(agent: &str) -> tokio::sync::OwnedMutexGuard<()> {
     mutex.lock_owned().await
 }
 
-pub async fn lock_card(state: &Shared, actor: &Actor, target: &str)
-    -> ApiResult<Option<tokio::sync::OwnedMutexGuard<()>>> {
-    let Some(a) = actor.agent() else { return Ok(None); };
+pub async fn lock_card(
+    state: &Shared,
+    actor: &Actor,
+    target: &str,
+) -> ApiResult<Option<tokio::sync::OwnedMutexGuard<()>>> {
+    let Some(a) = actor.agent() else {
+        return Ok(None);
+    };
     let id = a.id.clone();
-    let card = state.db.read(move |c| Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM spawns WHERE id=?1 AND bound_kind='card')", [&id], |r| r.get::<_, bool>(0))?)).await?;
-    if card { Ok(Some(lock(&format!("{}:{target}", a.id)).await)) } else { Ok(None) }
+    let card = state
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM spawns WHERE id=?1 AND bound_kind='card')",
+                [&id],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })
+        .await?;
+    if card {
+        Ok(Some(lock(&format!("{}:{target}", a.id)).await))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn check_base(base: &str) -> ApiResult<()> {
@@ -66,10 +83,16 @@ fn base(def: &TargetDef) -> &str {
 /// Only machine/path identity matters. Credentials and limits may be rotated
 /// without stranding roots or preventing live agents from starting work.
 fn same_location(old: &str, def: &TargetDef) -> bool {
-    let Ok(old) = serde_json::from_str::<TargetDef>(old) else { return false; };
-    old.kind == def.kind && old.host == def.host && old.address == def.address
-        && old.port == def.port && old.container == def.container
-        && old.username == def.username && base(&old) == base(def)
+    let Ok(old) = serde_json::from_str::<TargetDef>(old) else {
+        return false;
+    };
+    old.kind == def.kind
+        && old.host == def.host
+        && old.address == def.address
+        && old.port == def.port
+        && old.container == def.container
+        && old.username == def.username
+        && base(&old) == base(def)
 }
 
 fn inside(root: &str, path: &str) -> bool {
@@ -281,7 +304,9 @@ pub async fn prepare(
                 |r| r.get(0),
             )?;
             if !same_location(&old, &location) {
-                return Err(ApiError::conflict("owned target machine or work_root changed"));
+                return Err(ApiError::conflict(
+                    "owned target machine or work_root changed",
+                ));
             }
             Ok(())
         })
@@ -361,12 +386,22 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             }
         };
         if !same_location(&definition, &row.def) {
-            refusal(state, &id, &project, &target, "target machine or work_root changed").await?;
+            refusal(
+                state,
+                &id,
+                &project,
+                &target,
+                "target machine or work_root changed",
+            )
+            .await?;
             tracing::warn!(%id, %target, "target cleanup refused: definition changed");
             continue;
         }
-        let measured = match start_cmd(state, &row.def,
-            &command("measure", base(&row.def), &project, &name, &id, "")?) {
+        let measured = match start_cmd(
+            state,
+            &row.def,
+            &command("measure", base(&row.def), &project, &name, &id, "")?,
+        ) {
             Ok(run) => run.collect(4096).await,
             Err(e) => {
                 refusal(state, &id, &project, &target, &e.to_string()).await?;
@@ -377,7 +412,9 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             refusal(state, &id, &project, &target, &measured.stderr_tail()).await?;
             continue;
         }
-        let size = String::from_utf8_lossy(&measured.stdout).trim().parse::<u64>()
+        let size = String::from_utf8_lossy(&measured.stdout)
+            .trim()
+            .parse::<u64>()
             .map_err(|_| ApiError::internal("target measurement returned no size"))?;
         let path = root(base(&row.def), &project, &name)?;
         let (audit_id, audit_project, audit_target, audit_path) =
@@ -426,8 +463,19 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
 
 /// Audit a new refusal once, retaining its state for operator inspection and
 /// retry. The started audit keeps the original size even after a partial delete.
-async fn refusal(state: &Shared, id: &str, project: &str, target: &str, error: &str) -> ApiResult<()> {
-    let (id, project, target, error) = (id.to_owned(), project.to_owned(), target.to_owned(), error.to_owned());
+async fn refusal(
+    state: &Shared,
+    id: &str,
+    project: &str,
+    target: &str,
+    error: &str,
+) -> ApiResult<()> {
+    let (id, project, target, error) = (
+        id.to_owned(),
+        project.to_owned(),
+        target.to_owned(),
+        error.to_owned(),
+    );
     state.db.write("system", move |t| {
         let changed = t.execute("UPDATE agent_target_roots SET last_error=?3 WHERE agent=?1 AND target=?2 AND (last_error IS NULL OR last_error<>?3)",
             params![id, target, error])?;
@@ -495,6 +543,21 @@ mod tests {
     }
 
     #[test]
+    fn swapped_root_is_not_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(run(tmp.path(), "prepare", "repo"));
+        let owned = tmp.path().join("src/terrarium/p/a");
+        let injection = "os.rename(name, name + '.old', src_dir_fd=parent, dst_dir_fd=parent)\n            os.mkdir(name, dir_fd=parent)\n            replacement = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)\n            keep = os.open('keep', os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=replacement)\n            os.close(keep)\n            os.close(replacement)\n            walk(fd, True, meta.st_dev, mount_id(fd), keep_owner=True)";
+        let script = SCRIPT.replace("walk(fd, True, meta.st_dev, mount_id(fd), keep_owner=True)", injection);
+        let script = script.replace("os.open('/',", &format!("os.open({:?},", tmp.path().to_str().unwrap()));
+        let out = Command::new("python3").args(["-c", &script, "delete", "/src/terrarium", "p", "a", "agent-id", ""])
+            .output().unwrap();
+        assert!(!out.status.success());
+        assert!(owned.join("keep").exists());
+        assert!(owned.with_file_name("a.old").join(".terrarium-owner").exists());
+    }
+
+    #[test]
     fn mounted_subtree_is_refused_before_any_deletion() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(run(tmp.path(), "prepare", "repo"));
@@ -504,9 +567,23 @@ mod tests {
         // Model a bind mount with the same device but a different mount ID.
         let script = SCRIPT.replace("if mount_id(child) != mount:",
             "if os.readlink('/proc/self/fd/' + str(child)).endswith('/mounted') or mount_id(child) != mount:");
-        let script = script.replace("os.open('/',", &format!("os.open({:?},", tmp.path().to_str().unwrap()));
-        let out = Command::new("python3").args(["-c", &script, "delete", "/src/terrarium", "p", "a", "agent-id", ""])
-            .output().unwrap();
+        let script = script.replace(
+            "os.open('/',",
+            &format!("os.open({:?},", tmp.path().to_str().unwrap()),
+        );
+        let out = Command::new("python3")
+            .args([
+                "-c",
+                &script,
+                "delete",
+                "/src/terrarium",
+                "p",
+                "a",
+                "agent-id",
+                "",
+            ])
+            .output()
+            .unwrap();
         assert!(!out.status.success());
         assert!(owned.join("mounted/keep").exists());
         assert!(owned.join(".terrarium-owner").exists());
