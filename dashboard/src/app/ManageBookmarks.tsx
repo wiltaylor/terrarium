@@ -35,7 +35,7 @@ export default function ManageBookmarks() {
         }}>
           <label>Name<input aria-label="Bookmark title" required value={title()} onInput={(e) => setTitle(e.currentTarget.value)} /></label>
           <label>Link<input aria-label="Bookmark URL" required value={url()} onInput={(e) => setUrl(e.currentTarget.value)} /></label>
-          <Show when={error()}><p role="alert">Enter a wiki page URL or an HTTP(S) URL and a title (up to 500 bytes, URL up to 8192 bytes).</p></Show>
+          <Show when={error()}><p role="alert">Enter a wiki page URL or an HTTP(S) URL and a title (up to 500 bytes, URL up to 8192 bytes). The URL must not belong to another bookmark.</p></Show>
           <div class="row"><button type="submit">Save</button><button type="button" onClick={() => setEditing(undefined)}>Cancel</button></div>
         </form>
       </Modal>
