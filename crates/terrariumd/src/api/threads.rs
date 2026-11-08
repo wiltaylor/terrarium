@@ -361,6 +361,7 @@ async fn close(
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TrackBody {
+    monitor: Option<String>,
     /// Cards to link first (TER-146): `<project>:<card>` or `<card>`.
     #[serde(default)]
     cards: Vec<String>,
@@ -398,6 +399,9 @@ async fn track(
                     Actor::Agent(a) if th.agent.as_deref() == Some(a.id.as_str()) => {
                         for c in &b.cards {
                             threads::link_card(t, &actor, &th.id, c)?;
+                        }
+                        if let Some(monitor) = &b.monitor {
+                            threads::link_monitor(t, &actor, &th.id, monitor)?;
                         }
                         threads::track(t, &th.id, &by).map(|th| threads::visible(&actor, th))
                     }

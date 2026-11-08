@@ -219,6 +219,9 @@ pub struct Thread {
     /// the agent. `None`: the thread does not track.
     #[serde(default)]
     pub tracking_at: Option<String>,
+    /// Optional ops monitor, as `project:name`.
+    #[serde(default)]
+    pub monitor: Option<String>,
 }
 
 /// Why a thread closed.
@@ -323,6 +326,7 @@ fn row_named(r: &Row<'_>, mut name: impl FnMut(&str) -> String) -> rusqlite::Res
         session_id: r.get("session_id")?,
         reminded_at: r.get("reminded_at")?,
         tracking_at: r.get("tracking_at")?,
+        monitor: r.get("monitor")?,
     })
 }
 
@@ -360,6 +364,11 @@ pub fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
 /// (TER-146): a link never shows a card, or its project, to a reader of
 /// the thread who cannot read that project.
 pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
+    if th.monitor.as_ref().is_some_and(|m| {
+        m.split_once(':').is_none_or(|(p, _)| policy::read_project(actor, p).is_err())
+    }) {
+        th.monitor = None;
+    }
     if let Some(cards) = th.cards.as_mut() {
         cards.retain(|c| policy::read_project(actor, &c.project).is_ok());
     }
@@ -549,11 +558,48 @@ pub fn linked_states(conn: &Connection, thread: &str) -> ApiResult<Vec<LinkedSta
 /// True when thread `thread` links at least one card that is not archived,
 /// and each of them is in review or later.
 fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
+    let monitor = get_bare(conn, thread)?.monitor;
+    if let Some(key) = &monitor {
+        let m = crate::store::monitors::find(conn, &key.replace(':', "/"))?;
+        if !m.last.is_some_and(|r| r.status == crate::monitors::parse::Status::Ok) {
+            return Ok(false);
+        }
+    }
     let live: Vec<LinkedState> = linked_states(conn, thread)?
         .into_iter()
         .filter(|s| !s.archived)
         .collect();
-    Ok(!live.is_empty() && live.iter().all(|s| s.review_or_later))
+    Ok((monitor.is_some() || !live.is_empty()) && live.iter().all(|s| s.review_or_later))
+}
+
+/// Link only monitors in a project the caller can read. The API transaction
+/// rolls back the link if tracking or another link fails.
+pub fn link_monitor(t: &mut Tx<'_>, actor: &Actor, id: &str, key: &str) -> ApiResult<()> {
+    let (project, name) = key.split_once(':').filter(|(p, n)| !p.is_empty() && !n.is_empty())
+        .ok_or_else(|| ApiError::invalid("monitor must be PROJECT:MONITOR"))?;
+    policy::read_project(actor, project)?;
+    crate::store::monitors::find(t, &format!("{project}/{name}"))?;
+    t.execute("UPDATE threads SET monitor = ?2, monitor_done = 0 WHERE id = ?1 AND monitor IS NOT ?2", params![id, key])?;
+    Ok(())
+}
+
+/// Monitor transitions reuse tracking wakes, never operator notices.
+pub fn on_monitor_status(t: &mut Tx<'_>, project: &str, name: &str, status: crate::monitors::parse::Status) -> ApiResult<()> {
+    use crate::monitors::parse::Status;
+    let ids: Vec<(String, bool)> = {
+        let mut st = t.prepare("SELECT id, monitor_done FROM threads WHERE monitor = ?1 AND tracking_at IS NOT NULL AND status != 'closed'")?;
+        st.query_map([format!("{project}:{name}")], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?
+    };
+    for (id, done) in ids {
+        if status == Status::Ok && all_review_or_later(t, &id)? {
+            wake(t, &id, WAKE_REVIEW)?;
+        } else if status == Status::Crit && done {
+            t.execute("UPDATE threads SET monitor_done = 0 WHERE id = ?1", [&id])?;
+            wake(t, &id, "monitor_red")?;
+        }
+    }
+    Ok(())
 }
 
 /// Card `card` of `project` moved from column `from` to column `to` (role
@@ -618,7 +664,15 @@ pub fn on_card_moved(
 /// carries only the reason, not the card: a reader of the thread's events
 /// need not read the card's project (TER-146).
 fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
+    if reason == WAKE_REVIEW {
+        t.execute("UPDATE threads SET monitor_done = 1 WHERE id = ?1 AND monitor IS NOT NULL", [id])?;
+    }
     let th = get_bare(t, id)?;
+    let reason = if reason == WAKE_REVIEW && th.monitor.is_some() {
+        "monitor_green"
+    } else {
+        reason
+    };
     let at = now();
     if th.status == ThreadStatus::WaitingOperator {
         t.execute(

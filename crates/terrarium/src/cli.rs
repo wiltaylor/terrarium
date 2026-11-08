@@ -2685,6 +2685,9 @@ pub enum ThreadCmd {
         /// (repeat for more)
         #[arg(long = "card", value_name = "PROJECT:CARD")]
         cards: Vec<String>,
+        /// Wait for this monitor to be green too
+        #[arg(long, value_name = "PROJECT:MONITOR")]
+        monitor: Option<String>,
     },
     /// List the threads: the open ones (an agent: its own)
     Ls {

@@ -240,6 +240,10 @@ pub fn cards_turn(
 ) -> String {
     let mut text = if reason == threads::WAKE_BLOCKED {
         "A card that this thread tracks went to blocked.".to_owned()
+    } else if reason == "monitor_red" {
+        "The monitor that this thread tracks turned red after the work was ready.".to_owned()
+    } else if reason == "monitor_green" {
+        "The linked cards are ready and the monitor that this thread tracks is green.".to_owned()
     } else {
         "All cards that this thread tracks are in review or later.".to_owned()
     };
@@ -279,7 +283,7 @@ pub fn cards_turn(
             "\n- {hidden} more linked card(s) in projects that you cannot read"
         ));
     }
-    if reason == threads::WAKE_BLOCKED {
+    if reason == threads::WAKE_BLOCKED || reason == "monitor_red" {
         text.push_str(&format!(
             "\n\nTell the operator in the thread what is stuck and what happens next \
              (`terrarium thread post {thread} -m -`). Ask your report-to lead by mail when you \

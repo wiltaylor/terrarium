@@ -295,8 +295,10 @@ pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
                 ));
             })
         }
-        ThreadCmd::Track { id, cards } => {
-            let body = (!cards.is_empty()).then(|| json!({"cards": cards}));
+        ThreadCmd::Track { id, cards, monitor } => {
+            let mut body = json!({"cards": cards});
+            super::set_opt(&mut body, "monitor", monitor.clone());
+            let body = Some(body);
             let v = ctx.api.post(&format!("{}/track", path(id)), body).await?;
             ctx.emit(&v, |c, v| {
                 c.line(format!(

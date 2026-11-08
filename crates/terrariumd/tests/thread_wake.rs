@@ -58,6 +58,48 @@ async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl Fn
 const BLOCKED_TURN: &str = "A card that this thread tracks went to blocked.";
 const REVIEW_TURN: &str = "All cards that this thread tracks are in review or later.";
 
+#[tokio::test]
+async fn ops_monitor_gates_ready_and_wakes_on_green_and_red() {
+    use terrariumd::monitors::parse::{Parsed, Status};
+    use terrariumd::store::monitors;
+    let lab = lab().await;
+    let monitor = state(&lab.td).db.write("system", |t| {
+        let def = serde_json::from_value(json!({
+            "name": "health", "target": "unused", "script": "true",
+            "schedule": {"kind": "interval", "every": "1m"},
+            "kind": "status", "enabled": false
+        })).unwrap();
+        Ok(monitors::create(t, "p", &def, terrariumd::owner::Owner::Actor, "operator", chrono::Utc::now())?.id)
+    }).await.unwrap();
+    let (tid, eph) = lab.started("consult", "Ops health").await;
+    let card = lab.card("p", "Ops change").await;
+    let r = lab.td.post_as(&eph, &format!("/api/threads/{tid}/track"),
+        json!({"cards": [format!("p:{card}")], "monitor": "p:missing"})).await;
+    assert_eq!(r.status, 404, "{}", r.body);
+    assert!(lab.thread(&tid).await["cards"].as_array().unwrap().is_empty());
+    let r = lab.td.post_as(&eph, &format!("/api/threads/{tid}/track"),
+        json!({"cards": [format!("p:{card}")], "monitor": "p:health"})).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["monitor"], "p:health");
+    lab.parked(&eph).await;
+    lab.mv(&card, "review", None).await;
+    assert!(lab.wakes(&tid).await.is_empty());
+    for (status, expected) in [
+        (Status::Crit, vec![]),
+        (Status::Ok, vec!["monitor_green"]),
+        (Status::Ok, vec!["monitor_green"]),
+        (Status::Crit, vec!["monitor_green", "monitor_red"]),
+    ] {
+        let mid = monitor.clone();
+        state(&lab.td).db.write("system", move |t| {
+            monitors::record(t, &mid, &Parsed { status, value: None, text: None, json: None, error: None }, chrono::Utc::now(), 1)?;
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(lab.wakes(&tid).await, expected);
+    }
+    assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
+}
+
 struct Lab {
     td: TestDaemon,
     /// `p/lead`, the report-to lead of the `p` threads.
