@@ -25,7 +25,7 @@ use terrarium_host::{Client, ClientOptions};
 
 /// How long a poll waits before the test fails. A bound for a hung test
 /// only: each poll returns as soon as its state is there.
-const DEADLINE: Duration = Duration::from_secs(90);
+const DEADLINE: Duration = Duration::from_secs(300);
 
 /// Run the test `$name(flow)` once with each board flow (TER-170): the
 /// tests `$name::code` and `$name::rules`.
@@ -2246,6 +2246,13 @@ case "$1" in
   exec) shift
     while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;; *) break ;; esac; done
     shift
+    # Recovery tests can hold kills before execution, rather than race
+    # the five-second TERM grace on a loaded host.
+    gate="${0%/*}/kill-gate"
+    if [ "$4" = terrarium-kill ] && [ -d "$gate" ]; then
+      touch "$gate/${5##*/}"
+      while [ -d "$gate" ]; do sleep 0.02; done
+    fi
     # An async list gets /dev/null on stdin: keep the real one (`-i`, the
     # bundle of a job) on fd 3 and hand it on.
     exec 3<&0
@@ -3206,13 +3213,12 @@ fn orphan(job: &str) -> (std::process::Child, u32) {
     (leader, child)
 }
 
-/// Wait until the kills of lost jobs `ids` started: KILL removes the job
-/// PID file before its first signal.
-async fn until_kills_run(ids: &[&str]) {
+/// Wait until the fake docker has held every kill before execution.
+async fn until_kills_held(gate: &Path, ids: &[&str]) {
     let start = Instant::now();
     for id in ids {
         let f = terrariumd::run_kill::job_pidfile(id);
-        while Path::new(&f).exists() {
+        while !gate.join(Path::new(&f).file_name().unwrap()).exists() {
             assert!(start.elapsed() < DEADLINE, "the kill of {id} never started");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -3229,7 +3235,13 @@ both_flows!(lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slot
 /// keep their slots: a validation queued meanwhile (two slots) does not
 /// start, also not on a tick.
 async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots(flow: &'static str) {
-    let (lab, _bins, children) = docker_lab_flow(2, 600, flow).await;
+    let (lab, bins, children) = docker_lab_flow(2, 600, flow).await;
+    let gate = tempfile::Builder::new()
+        .prefix("kill-gate-owner")
+        .tempdir_in(bins.path())
+        .unwrap();
+    let kill_gate = bins.path().join("kill-gate");
+    std::os::unix::fs::symlink(gate.path(), &kill_gate).unwrap();
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
     // The running job runs again after its requeue: it needs its branch.
     lab.branch("ter-l1", "next", &[("OK", "1")]);
@@ -3323,11 +3335,10 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots(f
 
     // TER-160 holds a queued job while its host agent is offline, so the
     // check above alone does not prove the slots are held (review 2,
-    // minor 3). Check again with the host agent back, while the kills run:
-    // they removed the PID files, and the orphans ignore `TERM` for the
-    // grace of the kill.
+    // minor 3). Check again with the host agent back, while the fake
+    // docker holds both kills. No scheduling delay can finish them early.
     lab.agent_up().await;
-    until_kills_run(&[&run_id, &cancel_id]).await;
+    until_kills_held(&kill_gate, &[&run_id, &cancel_id]).await;
     terrariumd::jobs::tick(&state).await.unwrap();
     let q = lab
         .td
@@ -3342,6 +3353,7 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots(f
     for p in [lr.id(), lc.id()] {
         assert!(alive(p), "the kill of {p} ended before the check");
     }
+    drop(gate);
     tokio::time::timeout(DEADLINE, recovery)
         .await
         .unwrap()
@@ -3410,7 +3422,13 @@ both_flows!(a_lost_job_cancelled_during_its_kill_keeps_its_slot);
 /// slot stays taken until the kill ended (one slot): a queued validation
 /// does not start while the kill runs, and starts after it.
 async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot(flow: &'static str) {
-    let (lab, _bins, children) = docker_lab_flow(1, 600, flow).await;
+    let (lab, bins, children) = docker_lab_flow(1, 600, flow).await;
+    let gate = tempfile::Builder::new()
+        .prefix("kill-gate-owner")
+        .tempdir_in(bins.path())
+        .unwrap();
+    let kill_gate = bins.path().join("kill-gate");
+    std::os::unix::fs::symlink(gate.path(), &kill_gate).unwrap();
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
     let cr = lab.card("lost-run", "ter-m1").await;
     let run_id = ulid::Ulid::new().to_string();
@@ -3460,7 +3478,7 @@ async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot(flow: &'static str)
 
     // The host agent is back and the kill runs: the slot is still taken.
     lab.agent_up().await;
-    until_kills_run(&[&run_id]).await;
+    until_kills_held(&kill_gate, &[&run_id]).await;
     terrariumd::jobs::tick(&state).await.unwrap();
     let q = lab
         .td
@@ -3474,6 +3492,7 @@ async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot(flow: &'static str)
     );
     assert!(alive(lr.id()), "the kill ended before the check");
 
+    drop(gate);
     tokio::time::timeout(DEADLINE, recovery)
         .await
         .unwrap()
