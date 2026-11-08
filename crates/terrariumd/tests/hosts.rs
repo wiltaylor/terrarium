@@ -719,7 +719,11 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
             "env": {"CARGO_TARGET_DIR": cache}});
         let r = match caller {
             None => lab.td.post("/api/targets/terra-box/exec", body).await,
-            Some(caller) => lab.td.post_as(caller, "/api/targets/terra-box/exec", body).await,
+            Some(caller) => {
+                lab.td
+                    .post_as(caller, "/api/targets/terra-box/exec", body)
+                    .await
+            }
         };
         assert_eq!(r.status, 201, "{}", r.body);
         let out = drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
@@ -840,9 +844,14 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
         .td
         .get("/api/audit?action=agent.target_cleanup_refused")
         .await;
-    assert!(refused.ok().as_array().unwrap().iter().any(|row| {
-        row["detail"]["error"] == "target machine or work_root changed"
-    }));
+    assert!(
+        refused
+            .ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| { row["detail"]["error"] == "target machine or work_root changed" })
+    );
     lab.td
         .patch("/api/targets/terra-box", json!({"work_root": base}))
         .await
