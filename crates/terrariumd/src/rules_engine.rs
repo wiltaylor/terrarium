@@ -1269,7 +1269,9 @@ fn timer_rules(projects: &[ProjectRules]) -> Vec<TimerRule> {
 /// again. `fired` holds the due time of
 /// each timer written, so one wait writes one event (a restart may write
 /// it once more; the verb is then a no-op or queues the batch, as it
-/// should). Returns the events written.
+/// should). An error of one rule (for example a board that cannot be
+/// read) is logged, and the other rules and projects go on (TER-227
+/// review). Returns the events written.
 pub async fn fire_timers(
     db: &Db,
     projects: &[ProjectRules],
@@ -1280,57 +1282,74 @@ pub async fn fire_timers(
     fired.retain(|(p, r), _| timers.iter().any(|t| t.project == *p && t.rule == *r));
     let mut written = 0;
     for t in timers {
-        let (project, from, limit) = (t.project.clone(), t.from.clone(), t.limit);
-        let pick = db
-            .read(move |c| {
-                let columns: Vec<BoardColumn> = board::column_roles(c, &project)?
-                    .into_iter()
-                    .map(|(name, role)| BoardColumn { name, role })
-                    .collect();
-                let Some(col) = rules_file::resolve_column(&columns, &from) else {
-                    return Ok(None);
-                };
-                Ok(Some(rules_verbs::pick_batch(
-                    c, &project, &col.name, limit,
-                )?))
-            })
-            .await?;
-        let Some(pick) = pick.filter(|p| p.waiting > 0) else {
-            continue;
-        };
-        let Some(due) = pick
-            .first_since
-            .map(|f| f + chrono::Duration::minutes(t.wait))
-        else {
-            continue;
-        };
-        if due > now {
-            continue;
+        match fire_timer(db, &t, fired, now).await {
+            Ok(true) => written += 1,
+            Ok(false) => {}
+            Err(e) => warn!(
+                "the rule engine cannot check the timer of rule {} of project {}: {e}",
+                t.rule, t.project
+            ),
         }
-        let due = schedules::stamp(due);
-        let key = (t.project.clone(), t.rule.clone());
-        if fired.get(&key) == Some(&due) {
-            continue;
-        }
-        let (project, rule, waiting, d) =
-            (t.project.clone(), t.rule.clone(), pick.waiting, due.clone());
-        db.write(TIMER_ACTOR, move |tx| {
-            let summary = format!("the wait of rule {rule} ended: {waiting} cards wait");
-            tx.emit(
-                events::EventDraft::new(
-                    TIMER_KIND,
-                    summary,
-                    json!({"rule": rule, "due": d, "waiting": waiting}),
-                )
-                .project(project),
-            )?;
-            Ok(())
-        })
-        .await?;
-        fired.insert(key, due);
-        written += 1;
     }
     Ok(written)
+}
+
+/// [`fire_timers`] for one rule: `true` when it wrote the timer.
+async fn fire_timer(
+    db: &Db,
+    t: &TimerRule,
+    fired: &mut HashMap<(String, String), String>,
+    now: DateTime<Utc>,
+) -> ApiResult<bool> {
+    let (project, from, limit) = (t.project.clone(), t.from.clone(), t.limit);
+    let pick = db
+        .read(move |c| {
+            let columns: Vec<BoardColumn> = board::column_roles(c, &project)?
+                .into_iter()
+                .map(|(name, role)| BoardColumn { name, role })
+                .collect();
+            let Some(col) = rules_file::resolve_column(&columns, &from) else {
+                return Ok(None);
+            };
+            Ok(Some(rules_verbs::pick_batch(
+                c, &project, &col.name, limit,
+            )?))
+        })
+        .await?;
+    let Some(pick) = pick.filter(|p| p.waiting > 0) else {
+        return Ok(false);
+    };
+    let Some(due) = pick
+        .first_since
+        .map(|f| f + chrono::Duration::minutes(t.wait))
+    else {
+        return Ok(false);
+    };
+    if due > now {
+        return Ok(false);
+    }
+    let due = schedules::stamp(due);
+    let key = (t.project.clone(), t.rule.clone());
+    if fired.get(&key) == Some(&due) {
+        return Ok(false);
+    }
+    let (project, rule, waiting, d) =
+        (t.project.clone(), t.rule.clone(), pick.waiting, due.clone());
+    db.write(TIMER_ACTOR, move |tx| {
+        let summary = format!("the wait of rule {rule} ended: {waiting} cards wait");
+        tx.emit(
+            events::EventDraft::new(
+                TIMER_KIND,
+                summary,
+                json!({"rule": rule, "due": d, "waiting": waiting}),
+            )
+            .project(project),
+        )?;
+        Ok(())
+    })
+    .await?;
+    fired.insert(key, due);
+    Ok(true)
 }
 
 // ------------------------------------------------------------ the engine

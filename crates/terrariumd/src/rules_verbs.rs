@@ -38,7 +38,7 @@ use crate::actor::Actor;
 use crate::api::Shared;
 use crate::api::jobs as api_jobs;
 use crate::db::Tx;
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
 use crate::rules_engine::{Done, RunCtx, lookup};
 use crate::store::board::{self, Card, CardPatch, NewCard, NewLink};
@@ -524,8 +524,8 @@ pub struct BatchPick {
 }
 
 /// The cards of column `from` of `project` that a batch takes, in board
-/// order, at most `limit` (`None`: all). A card that is held or has an
-/// open job is left out. A batch is one repo: the repo of the first card
+/// order, at most `limit` (`None`: all). A card that is held, has an
+/// open job, or has no usable repo is left out. A batch is one repo: the repo of the first card
 /// that waits. A card of another repo is left out and does not count as
 /// waiting, so it does not block the queue; it goes in a later batch
 /// (TER-227). There is no limit of the daemon's own: the rule sets it
@@ -548,7 +548,18 @@ pub fn pick_batch(
                 .push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
             continue;
         }
-        let r = api_jobs::repo_of(conn, c, None)?;
+        // A card without a usable repo (none in a project of several
+        // repos, or one that is not the project's) is left out, so it
+        // does not stop the batch or the timers (TER-227 review).
+        let r = match api_jobs::repo_of(conn, c, None) {
+            Ok(r) => r,
+            Err(e) if e.code == Code::Invalid => {
+                out.left_out
+                    .push(json!({"card": c.id, "reason": e.message}));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         match &out.repo {
             Some(have) if *have != r => {
                 out.left_out.push(json!({
