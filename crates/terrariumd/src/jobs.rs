@@ -3656,7 +3656,9 @@ mod tests {
         .await
         .unwrap();
         let id = card.clone();
-        db.write("system", move |t| comment(t, &id, "Job queue: a comment."))
+        // API queueing also runs inside an operator transaction. Its
+        // generated notes must still be authored by system.
+        db.write("operator", move |t| comment(t, &id, "Job queue: a comment."))
             .await
             .unwrap();
         let id = card.clone();

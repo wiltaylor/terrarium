@@ -984,7 +984,13 @@ fn insert_comment(t: &mut Tx<'_>, card: &str, author: &str, body: &str) -> ApiRe
     insert_reply(t, card, author, body, false)
 }
 
-fn insert_reply(t: &mut Tx<'_>, card: &str, author: &str, body: &str, human_reply: bool) -> ApiResult<()> {
+fn insert_reply(
+    t: &mut Tx<'_>,
+    card: &str,
+    author: &str,
+    body: &str,
+    human_reply: bool,
+) -> ApiResult<()> {
     let session = session_refs::current_of(t, author)?;
     t.execute(
         "INSERT INTO card_comments (id, card, author, body, created_at, session_id)
@@ -1001,7 +1007,13 @@ fn insert_reply(t: &mut Tx<'_>, card: &str, author: &str, body: &str, human_repl
     notify_comment(t, &find_row(t, card)?, author, body, human_reply)
 }
 
-fn notify_comment(t: &mut Tx<'_>, card: &CardRow, author: &str, body: &str, human_reply: bool) -> ApiResult<()> {
+fn notify_comment(
+    t: &mut Tx<'_>,
+    card: &CardRow,
+    author: &str,
+    body: &str,
+    human_reply: bool,
+) -> ApiResult<()> {
     let mut recipients = Vec::new();
     if author == "operator"
         && crate::store::projects::get(t, &card.project)?.human_comment_notifications
@@ -1014,11 +1026,13 @@ fn notify_comment(t: &mut Tx<'_>, card: &CardRow, author: &str, body: &str, huma
                 recipients.push(address);
             }
         }
-    } else if matches!(mail::resolve(t, author, Some(&card.project)), Ok(Address::Agent { .. }))
-        && (human_reply
-            || body
-                .split(|c: char| !c.is_alphanumeric() && c != '@' && c != '_')
-                .any(|word| word.eq_ignore_ascii_case("@operator")))
+    } else if matches!(
+        mail::resolve(t, author, Some(&card.project)),
+        Ok(Address::Agent { .. })
+    ) && (human_reply
+        || body
+            .split(|c: char| !c.is_alphanumeric() && c != '@' && c != '_')
+            .any(|word| word.eq_ignore_ascii_case("@operator")))
     {
         recipients.push(Address::Operator);
     }
