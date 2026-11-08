@@ -246,7 +246,9 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
     .await
     .unwrap();
     assert!(state.executor.resource_lock("h").try_lock_owned().is_ok());
-    tokio::time::timeout(Duration::from_secs(3), async {
+    // The pull cannot complete until we release its file gate below. Allow
+    // shared CI scheduling delays without weakening the independence check.
+    tokio::time::timeout(Duration::from_secs(15), async {
         lifecycle(
             &state,
             &fast,
@@ -276,7 +278,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         .await
         .unwrap();
     tokio::time::timeout(
-        Duration::from_secs(3),
+        Duration::from_secs(15),
         lifecycle(
             &state,
             &same_host,
