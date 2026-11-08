@@ -23,24 +23,37 @@ pub struct WorkSample {
 /// clears, open work and invalid timestamps. The first subsequent ETA or
 /// move closes an estimate, but only a move supplies a completed sample.
 pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSample>> {
+    read_work_samples(conn, project, false)
+}
+
+/// One query for the dashboard, bounded by the latest 2000 project moves.
+pub fn dashboard_work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSample>> {
+    read_work_samples(conn, project, true)
+}
+
+fn read_work_samples(conn: &Connection, project: &str, bounded: bool) -> ApiResult<Vec<WorkSample>> {
     let mut stmt = conn.prepare(
-        "WITH recent AS MATERIALIZED (
-           SELECT * FROM events WHERE project = ?1 AND kind = 'card'
-           ORDER BY seq DESC LIMIT 2000
-         ) SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
+        "SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
                 coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]'), e.seq, x.seq, e.card
-         FROM recent e JOIN recent x ON x.seq = (
-           SELECT min(n.seq) FROM recent n WHERE n.card = e.card AND n.seq > e.seq
+         FROM events e INDEXED BY events_project JOIN events x ON x.seq = (
+           SELECT min(n.seq) FROM events n INDEXED BY events_card WHERE n.card = e.card AND n.seq > e.seq
              AND n.kind = 'card' AND json_extract(n.payload, '$.change') IN ('eta','moved'))
          LEFT JOIN cards c ON c.id = e.card
          WHERE e.project = ?1 AND e.kind = 'card'
+           AND e.seq >= CASE WHEN ?2 THEN coalesce((
+             SELECT min(seq) FROM (
+               SELECT seq FROM events INDEXED BY events_project
+               WHERE project = ?1 AND kind = 'card' AND json_extract(payload, '$.change') = 'moved'
+               ORDER BY seq DESC LIMIT 2000
+             )
+           ), 0) ELSE 0 END
            AND json_extract(e.payload, '$.change') = 'eta'
            AND coalesce(json_extract(e.payload, '$.column_role'), json_extract(e.payload, '$.column')) IN ('working', 'in_progress')
            AND coalesce(json_extract(e.payload, '$.job'), 0) = 0
            AND json_extract(x.payload, '$.change') = 'moved'
          ORDER BY x.seq DESC",
     )?;
-    let rows = stmt.query_map([project], |r| {
+    let rows = stmt.query_map(params![project, bounded], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, Option<String>>(1)?,
@@ -82,6 +95,25 @@ pub struct WorkAccuracy {
     pub samples: usize,
     pub on_time_pct: Option<f64>,
     pub within_half_to_double_pct: Option<f64>,
+}
+
+#[derive(serde::Serialize)]
+pub struct AccuracyView {
+    pub raw: WorkAccuracy,
+    pub calibrated: WorkAccuracy,
+}
+
+/// Backtest each recent card against only work completed before its guess.
+/// Missing calibration history is excluded, not counted as a raw prediction.
+pub fn accuracy_view(samples: &[WorkSample]) -> AccuracyView {
+    let mut seen = std::collections::HashSet::new();
+    let predictions: Vec<_> = samples.iter()
+        .filter(|s| seen.insert(&s.card)).take(30)
+        .filter_map(|s| {
+            let older: Vec<_> = samples.iter().filter(|h| h.end_seq < s.start_seq).cloned().collect();
+            calibrated_ms(&older, &s.labels, Some(s.guess_ms)).map(|guess_ms| WorkSample { guess_ms, ..s.clone() })
+        }).collect();
+    AccuracyView { raw: work_accuracy(samples), calibrated: work_accuracy(&predictions) }
 }
 
 pub fn work_accuracy(samples: &[WorkSample]) -> WorkAccuracy {
@@ -282,7 +314,7 @@ mod tests {
 
     fn db() -> Connection {
         let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, project TEXT, card TEXT, kind TEXT, at TEXT, payload TEXT); CREATE TABLE cards(id TEXT, labels TEXT);").unwrap();
+        c.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, project TEXT, card TEXT, kind TEXT, at TEXT, payload TEXT); CREATE INDEX events_project ON events(project, seq); CREATE INDEX events_card ON events(card, seq); CREATE TABLE cards(id TEXT, labels TEXT);").unwrap();
         c
     }
 
@@ -391,15 +423,37 @@ mod tests {
     }
 
     #[test]
-    fn worker_history_is_bounded_by_project_card_events() {
+    fn calibrated_accuracy_uses_only_completions_before_each_guess() {
+        let samples: Vec<_> = (0..10).rev().map(|n| WorkSample {
+            card: n.to_string(), start_seq: n * 2, end_seq: n * 2 + 1,
+            actual_ms: 100.0, guess_ms: 1000.0, labels: vec!["type:impl".into()],
+        }).collect();
+        let view = accuracy_view(&samples);
+        assert_eq!(view.raw.samples, 10);
+        assert_eq!(view.raw.within_half_to_double_pct, Some(0.0));
+        assert_eq!(view.calibrated.samples, 5);
+        assert_eq!(view.calibrated.on_time_pct, Some(100.0));
+        assert_eq!(view.calibrated.within_half_to_double_pct, Some(100.0));
+        let overlapping: Vec<_> = samples.iter().cloned().map(|s| WorkSample { start_seq: 0, ..s }).collect();
+        assert_eq!(accuracy_view(&overlapping).calibrated.samples, 0);
+        assert_eq!(accuracy_view(&overlapping).calibrated.on_time_pct, None);
+    }
+
+    #[test]
+    fn dashboard_history_is_move_bounded_without_shortening_worker_history() {
         let c = db();
         c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES ('p','old','card','2026-11-08T00:00:00Z',?1)", [serde_json::json!({"change":"eta","column_role":"working","eta_at":"2026-11-08T00:10:00Z"}).to_string()]).unwrap();
         moved(&c, "p", "old", 5, "working", "review");
         assert_eq!(work_samples(&c, "p").unwrap().len(), 1);
         for _ in 0..2000 {
+            c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES ('p','noise','card','2026-11-08T00:06:00Z','{\"change\":\"comment\"}')", []).unwrap();
+        }
+        assert_eq!(dashboard_work_samples(&c, "p").unwrap().len(), 1);
+        for _ in 0..2000 {
             moved(&c, "p", "noise", 6, "ready", "working");
         }
-        assert!(work_samples(&c, "p").unwrap().is_empty());
+        assert!(dashboard_work_samples(&c, "p").unwrap().is_empty());
+        assert_eq!(work_samples(&c, "p").unwrap().len(), 1);
     }
 
     #[test]

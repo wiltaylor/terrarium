@@ -485,12 +485,12 @@ async fn dashboard(
         .read(move |c| {
             crate::store::projects::get(c, &p)?;
             let (l, meta) = monitors::layout_of(c, &p)?;
-            let samples = crate::store::card_history::work_samples(c, &p)?;
+            let samples = crate::store::card_history::dashboard_work_samples(c, &p)?;
             Ok((
                 l,
                 meta,
                 monitors::list(c, &p)?,
-                crate::store::card_history::work_accuracy(&samples),
+                crate::store::card_history::accuracy_view(&samples),
             ))
         })
         .await?;

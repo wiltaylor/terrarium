@@ -373,7 +373,7 @@ async fn runs_status_events_and_the_dashboard() {
     assert_eq!(d.ok()["blocks"], json!([]));
     assert_eq!(
         d.body["eta_accuracy"],
-        json!({"samples": 0, "on_time_pct": null, "within_half_to_double_pct": null})
+        json!({"raw": {"samples": 0, "on_time_pct": null, "within_half_to_double_pct": null}, "calibrated": {"samples": 0, "on_time_pct": null, "within_half_to_double_pct": null}})
     );
     assert_eq!(d.body["monitors"].as_array().unwrap().len(), 3);
     let layout = json!({"blocks": [
