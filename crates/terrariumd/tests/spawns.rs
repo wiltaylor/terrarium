@@ -112,6 +112,66 @@ async fn spawn_as(td: &TestDaemon, owner: &str, body: Value) -> common::Resp {
         .await
 }
 
+async fn research_setup() -> (TestDaemon, String, String) {
+    let (td, _, root) = setup().await;
+    td.patch(&format!("/api/agents/{root}"), json!({"policy": {"spawn": {
+        "templates": ["*"], "max_concurrent": 10, "may_spawn_children": true, "bound": true
+    }}})).await.ok();
+    td.post("/api/templates", json!({"name": "card-research", "project": "p", "spec": {"harness": "claude"}})).await.ok();
+    let card = id(td.post("/api/projects/p/cards", json!({"title": "Research this"})).await.ok());
+    let parent = id(spawn_as(&td, &root, json!({"template": "worker", "task": "implement", "bind": format!("card:{card}")})).await.ok());
+    td.post(&format!("/api/cards/{card}/assign"), json!({"assignee": parent})).await.ok();
+    (td, parent, card)
+}
+
+#[tokio::test]
+async fn research_helpers_are_bounded_one_level_and_report_on_card() {
+    let (td, parent, card) = research_setup().await;
+    let body = json!({"template": "card-research", "task": "answer a bounded question"});
+    spawn_as(&td, &parent, json!({"template": "worker", "task": "not research"})).await.err(403, "forbidden");
+    let a = id(spawn_as(&td, &parent, body.clone()).await.ok());
+    let b = id(spawn_as(&td, &parent, body.clone()).await.ok());
+    spawn_as(&td, &a, body.clone()).await.err(403, "forbidden");
+    for _ in 0..2 {
+        spawn_as(&td, &parent, body.clone()).await.err(409, "conflict");
+    }
+    let alerts: i64 = state(&td).db.read(move |c| Ok(c.query_row("SELECT count(*) FROM events WHERE kind = 'card.research_helper_limit'", [], |r| r.get(0))?)).await.unwrap();
+    assert_eq!(alerts, 1);
+    td.post_as(&a, &format!("/api/agents/{a}/done"), json!({"result": "The answer is in spawn.rs"})).await.ok();
+    finished(&td, &a).await;
+    let c = card.clone();
+    let comments: String = state(&td).db.read(move |db| Ok(db.query_row("SELECT body FROM card_comments WHERE card = ?1 AND body LIKE '%The answer is in spawn.rs%'", [c], |r| r.get(0))?)).await.unwrap();
+    assert!(comments.contains("Research helper"));
+    spawn_as(&td, &parent, body).await.ok();
+    assert!(spawn_row(&td, &b).await["finished_at"].is_null());
+}
+
+#[tokio::test]
+async fn research_helpers_daily_history_and_research_wip() {
+    let (td, parent, card) = research_setup().await;
+    let body = json!({"template": "card-research", "task": "research"});
+    state(&td).db.write("system", |t| {
+        // Occupied research cards share capacity with helpers.
+        t.execute("UPDATE board_columns SET name = 'research', wip_limit = 1 WHERE project = 'p' AND name = 'backlog'", [])?;
+        Ok(())
+    }).await.unwrap();
+    spawn_as(&td, &parent, body.clone()).await.err(409, "conflict");
+    state(&td).db.write("system", move |t| {
+        t.execute("UPDATE board_columns SET name = 'backlog' WHERE project = 'p' AND name = 'research'", [])?;
+        for n in 0..20 {
+            // Finished and removed helper agents still count today.
+            t.execute("INSERT INTO research_helpers(id, card, project, spawned_at, finished_at) VALUES (?1, ?2, 'p', ?3, ?3)", rusqlite::params![format!("history-{n}"), card, terrariumd::db::now()])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    spawn_as(&td, &parent, body.clone()).await.err(409, "conflict");
+    state(&td).db.write("system", |t| {
+        t.execute("UPDATE research_helpers SET spawned_at = '2000-01-01T00:00:00Z'", [])?;
+        Ok(())
+    }).await.unwrap();
+    spawn_as(&td, &parent, body).await.ok();
+}
+
 async fn spawn_ok(td: &TestDaemon, owner: &str, task: &str) -> Value {
     let r = spawn_as(td, owner, json!({"template": "worker", "task": task})).await;
     assert_eq!(r.status, 201, "{}", r.body);

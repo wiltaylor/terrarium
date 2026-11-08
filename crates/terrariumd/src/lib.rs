@@ -50,6 +50,7 @@ pub mod quota_notices;
 pub mod quota_policy;
 pub mod repo_browse;
 pub mod reservations;
+pub mod research_helpers;
 pub mod reset;
 pub mod rules_engine;
 pub mod rules_verbs;

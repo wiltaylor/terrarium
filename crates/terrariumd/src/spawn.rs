@@ -289,6 +289,19 @@ pub async fn spawn_with(
         }
     };
     policy::spawn_for(actor, &owner.id, &owner.project)?;
+    let helper_card = {
+        let oid = owner.id.clone();
+        state.db.read(move |c| {
+            let helper: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM research_helpers WHERE id = ?1)", [&oid], |r| r.get(0))?;
+            if helper {
+                return Err(ApiError::forbidden("research helpers cannot spawn children"));
+            }
+            crate::research_helpers::card(c, &oid)
+        }).await?
+    };
+    if helper_card.is_some() && body.bind.is_some() {
+        return Err(ApiError::forbidden("a research helper cannot be bound"));
+    }
     let task = body.task.trim().to_owned();
     if task.is_empty() {
         return Err(ApiError::invalid("the task is empty"));
@@ -367,6 +380,9 @@ pub async fn spawn_with(
         .db
         .read(move |c| templates::resolve(c, &p, &key))
         .await?;
+    if helper_card.is_some() && !matches!(template.name.as_str(), "card-research" | "card-research-alt") {
+        return Err(ApiError::forbidden("card agents may spawn only card-research or card-research-alt helpers"));
+    }
     if let Some(sp) = &rules {
         let t = SpawnTemplate {
             name: &template.name,
@@ -417,6 +433,9 @@ pub async fn spawn_with(
         .as_ref()
         .filter(|sp| sp.may_spawn_children)
         .map(|sp| Box::new(sp.for_child()));
+    if helper_card.is_some() {
+        def.policy.spawn = None;
+    }
     spawn_rights::inherit_pool(&mut def, owner.view.as_ref());
     spawn_rights::limit_thread_open(
         &mut def.policy,
@@ -457,6 +476,11 @@ pub async fn spawn_with(
     let (view, wait_row) = state
         .db
         .write(actor.label(), move |t| {
+            if let Some(card) = &helper_card
+                && let Some(reason) = crate::research_helpers::admit(t, &oid, &def.project, card)?
+            {
+                return Ok(Err(ApiError::conflict(reason)));
+            }
             if let Some(sp) = &rules2
                 && !who.is_operator()
             {
@@ -533,6 +557,9 @@ pub async fn spawn_with(
                     bound: bound.as_ref(),
                 },
             )?;
+            if let Some(card) = &helper_card {
+                crate::research_helpers::record(t, &id, &def.project, card)?;
+            }
             if let Some(f) = after_create {
                 f(t, &id)?;
             }
@@ -578,9 +605,9 @@ pub async fn spawn_with(
             } else {
                 None
             };
-            Ok((agents::get(t, &id)?, w))
+            Ok(Ok((agents::get(t, &id)?, w)))
         })
-        .await?;
+        .await??;
     let id = view.agent.id;
     let key = id.to_string();
     info!(agent = %id, name = %view.agent.name, owner = %owner.name, "spawned an ephemeral agent");
@@ -818,6 +845,7 @@ pub async fn close(
                 return spawns::get(t, &key);
             }
             let sp = spawns::get(t, &key)?;
+            crate::research_helpers::finish(t, &sp)?;
             let thread = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:"));
             if let Some(thread) = thread {
                 crate::store::threads::agent_ended(t, thread, &sp.id, outcome)?;
