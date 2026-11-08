@@ -66,9 +66,9 @@ pub fn cut(
     {
         return Ok(None);
     }
-    // The first card cannot join a second live group. Together with the
-    // transaction this makes competing runs and replay no-ops.
-    let key = format!("version:{}", pick.cards[0].id);
+    // Eligibility is checked under the write lock. Once added, members
+    // cannot be picked again. A new lifecycle gets its own immutable key.
+    let key = format!("version:{}", ulid::Ulid::new());
     let accepted = board::role_name(t, project, "accepted", "accepted")?;
     let done = board::role_name(t, project, "done", "done")?;
     if !groups::open(
@@ -119,7 +119,7 @@ pub fn cut(
         .unwrap_or(mail::Address::Operator);
     let members = groups::get(t, &g.id)?.members;
     let body = format!(
-        "Version group {} (key {key}) freezes these accepted cards: {}. Pick the version number, relabel only these members, create the release branch, run e2e and publish the pre-release. Record steps with POST /api/projects/{project}/version-groups/{key}/status. After release CI publishes, acknowledge with POST /api/projects/{project}/version-groups/{key}/built and JSON {{\"version\":\"vX.Y.Z\"}}. No Git work has been performed by this rule.",
+        "Version group {} (key {key}) freezes these accepted cards: {}. Pick the version number, relabel only these members, create the release branch, run e2e and publish the pre-release. Record steps with terrarium group status {key} --step 'version branch e2e' --state running. Remove excluded members with terrarium group remove {key} CARD. After release CI publishes, acknowledge with terrarium group built {key} vX.Y.Z. Use --project {project} if needed. No Git work has been performed by this rule.",
         g.id,
         members.join(", ")
     );
