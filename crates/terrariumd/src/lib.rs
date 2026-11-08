@@ -326,16 +326,21 @@ pub async fn start_with_usage(
     })
 }
 
-
 // Aborting probation activation also stops the services it owns.
 struct ActivationTasks(Vec<JoinHandle<()>>);
 impl Drop for ActivationTasks {
     fn drop(&mut self) {
-        for task in &self.0 { task.abort(); }
+        for task in &self.0 {
+            task.abort();
+        }
     }
 }
 
-async fn activate(state: Shared, defs: Definitions, errors: Vec<String>) -> anyhow::Result<Vec<JoinHandle<()>>> {
+async fn activate(
+    state: Shared,
+    defs: Definitions,
+    errors: Vec<String>,
+) -> anyhow::Result<Vec<JoinHandle<()>>> {
     // The secret store (PLAN §16b): the master key, then the move of the
     // old credential files.
     state

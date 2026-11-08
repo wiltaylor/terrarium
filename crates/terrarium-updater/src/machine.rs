@@ -640,7 +640,9 @@ impl Updater {
                     backup: Some(backup.clone()),
                 })
                 .map_err(|e| Fail(e.to_string()))?;
-            self.store.set_image(&to.reference).map_err(|e| Fail(e.to_string()))?;
+            self.store
+                .set_image(&to.reference)
+                .map_err(|e| Fail(e.to_string()))?;
             Ok::<_, Fail>(())
         }
         .await;
@@ -671,7 +673,9 @@ impl Updater {
                     self.exec_ok(&cur.id, hot_argv("start", &[old.trim()]))
                         .await?;
                     self.wait_hot_healthy(&cur.id).await?;
-                    self.store.set_image(&cur.image.reference).map_err(|e| e.to_string())?;
+                    self.store
+                        .set_image(&cur.image.reference)
+                        .map_err(|e| e.to_string())?;
                     self.exec_ok(&cur.id, hot_argv("commit", &[])).await?;
                     Ok::<_, String>(())
                 }

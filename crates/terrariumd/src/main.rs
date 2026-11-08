@@ -106,9 +106,10 @@ async fn main() -> anyhow::Result<()> {
             info!("agents run in the daemon process: they end when the daemon stops");
         }
     }
-    let probation = terrariumd::agent_rpc::CallGate::with_probation(
-        Some(settings.state_dir.join("releases/probation")),
-    ).in_probation();
+    let probation = terrariumd::agent_rpc::CallGate::with_probation(Some(
+        settings.state_dir.join("releases/probation"),
+    ))
+    .in_probation();
     if let Some(t) = &tools {
         if settings.no_harness_install {
             info!(tools = %t.dir.display(), "harness install skipped (--no-harness-install)");
@@ -181,7 +182,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         if let Some(t) = &tools {
-            if !settings.no_harness_install { log_install(&t.install().await); }
+            if !settings.no_harness_install {
+                log_install(&t.install().await);
+            }
         }
         seed_config_repo(&settings);
     }

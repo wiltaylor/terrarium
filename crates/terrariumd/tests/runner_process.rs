@@ -756,16 +756,35 @@ async fn hot_swap_probation(rollback: bool) {
         );
     };
     control("snapshot");
+    let audit_count = || {
+        rusqlite::Connection::open(state.join("terrarium.db"))
+            .unwrap()
+            .query_row("SELECT count(*) FROM audit", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    let before_probation = audit_count();
     td.boot().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let (health, _) = td.req_as(None, Method::GET, "/api/health", None).await;
-    assert_eq!(health, 200, "health reads remain available during probation");
+    assert_eq!(
+        health, 200,
+        "health reads remain available during probation"
+    );
     let write = json!({"name": "probation-dashboard"});
-    let (status, response) = td.req_as(None, Method::POST, "/api/projects", Some(write.clone())).await;
+    let (status, response) = td
+        .req_as(None, Method::POST, "/api/projects", Some(write.clone()))
+        .await;
     assert_eq!(status, 503);
     assert_eq!(response["error"], "upgrade_probation");
-    let (status, _) = td.req_as(None, Method::GET, "/api/projects/probation-dashboard", None).await;
+    let (status, _) = td
+        .req_as(None, Method::GET, "/api/projects/probation-dashboard", None)
+        .await;
     assert_eq!(status, 404, "refused dashboard write has no effect to lose");
+    assert_eq!(
+        audit_count(),
+        before_probation,
+        "definition sync, reconciliation, jobs and background writers must not run during probation"
+    );
     assert!(
         !calls.is_finished(),
         "healthy probation must not admit held calls"
@@ -793,9 +812,13 @@ async fn hot_swap_probation(rollback: bool) {
     }
     std::fs::remove_file(&probation).unwrap();
     timeout(WAIT, calls).await.unwrap().unwrap();
-    let (status, _) = td.req_as(None, Method::POST, "/api/projects", Some(write)).await;
+    let (status, _) = td
+        .req_as(None, Method::POST, "/api/projects", Some(write))
+        .await;
     assert_eq!(status, 201, "dashboard retry succeeds after commit");
-    let (status, _) = td.req_as(None, Method::GET, "/api/projects/probation-dashboard", None).await;
+    let (status, _) = td
+        .req_as(None, Method::GET, "/api/projects/probation-dashboard", None)
+        .await;
     assert_eq!(status, 200);
     assert_eq!(
         td.runner_pid(&bob),

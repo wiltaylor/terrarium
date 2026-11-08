@@ -16,8 +16,12 @@ import time
 
 
 def paths():
+    runtime = os.environ.get("TERRARIUM_RUNTIME_DIR")
+    if not runtime:
+        xdg = os.environ.get("XDG_RUNTIME_DIR")
+        runtime = str(Path(xdg) / "terrarium") if xdg else "/run/terrarium"
     return (Path(os.environ.get("TERRARIUM_STATE_DIR", "/state")) / "releases",
-            Path(os.environ.get("TERRARIUM_RUNTIME_DIR", "/run/terrarium")))
+            Path(runtime))
 
 
 def select(root, release):
@@ -64,6 +68,7 @@ def main(argv):
     root, run = paths()
     command = argv[0]
     if command == "init":
+        run.mkdir(parents=True, exist_ok=True)
         # A container replacement always boots ITS image, not the last hot swap.
         # Docker restart of this same container preserves the selected release.
         initialized = run / "upgrade-initialized"

@@ -356,7 +356,10 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         );
     }
     app.fallback(crate::assets::serve)
-        .layer(middleware::from_fn_with_state(state.clone(), upgrade_probation))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            upgrade_probation,
+        ))
         .with_state(state)
 }
 
@@ -364,8 +367,10 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
 /// automatic rollback could erase. WebSockets can carry terminal writes too.
 async fn upgrade_probation(State(state): State<Shared>, req: Request, next: Next) -> Response {
     if state.agent_calls.in_probation()
-        && (!matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS)
-            || req.headers().contains_key(header::UPGRADE))
+        && (!matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+        ) || req.headers().contains_key(header::UPGRADE))
     {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
