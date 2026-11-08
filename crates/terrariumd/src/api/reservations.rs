@@ -31,6 +31,7 @@ struct CapacityBody { percentage: u8, #[serde(default)] io: BTreeMap<String, IoA
 
 async fn configure(State(state): State<Shared>, actor: Actor, Path(host): Path<String>, ApiJson(body): ApiJson<CapacityBody>) -> ApiResult<Json<Value>> {
     policy::sysadmin(&actor, "configure reservable host capacity")?;
+    let _guard = state.executor.resource_lock.lock().await;
     state.db.write(actor.label(), move |t| store::configure(t, &host, body.percentage, body.io)).await?;
     Ok(Json(json!({"ok":true})))
 }

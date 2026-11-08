@@ -91,7 +91,7 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
         let names = rows.iter().map(|r| r.def.name.clone()).collect::<Vec<_>>();
         let sessions = state.executor.resource_sessions(&names, Some(agent));
         if !sessions.is_empty() {
-            return Err(ApiError::conflict("finish existing host sessions before granting an agent reservation; live scopes cannot be reparented"))
+            return Err(ApiError::conflict("finish existing host sessions before granting an agent reservation; live scopes cannot be reparented")
                 .with_details(json!({"sessions":sessions,"host":r.host,"holder":agent})));
         }
     }

@@ -1477,8 +1477,10 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
         _ => {
             let host = host_of(def)?;
             let caps = ex.hosts.capabilities(host);
-            let limits = crate::reservations::exec_budget(state, def, cmd.holder.as_deref())?
-                .or(exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?);
+            let limits = match crate::reservations::exec_budget(state, def, cmd.holder.as_deref())? {
+                Some(limits) => Some(limits),
+                None => exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?,
+            };
             let shell = caps.and_then(|c| c.shell);
             let make = host_frame(def, shell.as_deref(), cmd, limits)?;
             Ok(pump_host(ex.hosts.open(host, make)?))
