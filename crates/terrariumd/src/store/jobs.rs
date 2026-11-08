@@ -664,7 +664,11 @@ pub fn host_aliases(conn: &Connection) -> ApiResult<HashMap<String, Vec<String>>
             OR b.alias = COALESCE(k.host_key, a.alias)",
     )?;
     for clash in clashes.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
     })? {
         let (host, other, key) = clash?;
         tracing::warn!(%host, %other, %key, "stored job-host alias pin clash");
@@ -836,7 +840,10 @@ pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
                 if error.code != crate::error::Code::Conflict {
                     return Err(error);
                 }
-                let host: String = t.query_row("SELECT name FROM hosts WHERE id = ?1", [&owner], |r| r.get(0))?;
+                let host: String =
+                    t.query_row("SELECT name FROM hosts WHERE id = ?1", [&owner], |r| {
+                        r.get(0)
+                    })?;
                 tracing::warn!(%host, %hostname, %key, clash = %error.message, "skipping clashing job-host pin");
                 continue;
             }
@@ -2232,20 +2239,31 @@ mod tests {
         .await
         .unwrap();
         db.write("system", |t| {
-            pin_hosts(t, vec![
-                ("two.lan".into(), "10.0.0.1".into()),
-                ("unrelated.lan".into(), "10.0.0.9".into()),
-            ])
-        }).await.unwrap();
+            pin_hosts(
+                t,
+                vec![
+                    ("two.lan".into(), "10.0.0.1".into()),
+                    ("unrelated.lan".into(), "10.0.0.9".into()),
+                ],
+            )
+        })
+        .await
+        .unwrap();
         db.read_now(|c| {
             let unrelated = canonical_key(c, "unrelated.lan")?;
             assert_eq!(unrelated, "10.0.0.9");
             let q = queues(&[("p", 1, &unrelated)]);
-            let picked = pick(vec![job("J1", "p", JobKind::Validate, "r", "b")], &[], &q, &HashMap::new());
+            let picked = pick(
+                vec![job("J1", "p", JobKind::Validate, "r", "b")],
+                &[],
+                &q,
+                &HashMap::new(),
+            );
             assert_eq!(ids(&picked), ["J1"]);
             assert_eq!(picked[0].1, "10.0.0.9");
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         db.write("operator", |t| {
             pin_hosts(t, vec![("free.lan".into(), "10.0.0.1".into())])
         })
@@ -2256,7 +2274,9 @@ mod tests {
                 set_host_aliases(t, "second", &["free.lan".into()])
             })
             .await
-            .unwrap_err().code.status(),
+            .unwrap_err()
+            .code
+            .status(),
             axum::http::StatusCode::CONFLICT
         );
         assert_eq!(
@@ -2264,13 +2284,17 @@ mod tests {
                 set_host_aliases(t, "second", &["FIRST".into()])
             })
             .await
-            .unwrap_err().code.status(),
+            .unwrap_err()
+            .code
+            .status(),
             axum::http::StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(
             db.write("operator", |t| { hosts::create(t, "one-lan", false) })
                 .await
-                .unwrap_err().code.status(),
+                .unwrap_err()
+                .code
+                .status(),
             axum::http::StatusCode::CONFLICT
         );
         // Failed writes leave the previous aliases and pins untouched.
