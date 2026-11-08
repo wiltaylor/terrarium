@@ -3723,6 +3723,10 @@ renames that URL, and returns the list. DELETE accepts `{href}` and returns
 the list, including when the URL was absent. Mutations write `bookmark.add`
 or `bookmark.remove` audit rows.
 
+PUT also accepts an optional `previous_href` to edit an existing bookmark's
+title and URL atomically, preserving its position. A missing source or a URL
+already used by another bookmark returns `422 invalid` without changing the list.
+
 Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
 without credentials, or a relative `/p/<project>/knowledge/wiki` path.
 URLs are normalized and deduplicated, and are limited to 8192 bytes on add.
