@@ -843,6 +843,18 @@ impl RunnerHandle for RemoteRunner {
         Box::pin(async move {
             let p = serde_json::to_value(WriteParams {
                 data: encode(bytes),
+                person: false,
+            })
+            .unwrap_or(Value::Null);
+            self.call_unit("write", p).await
+        })
+    }
+
+    fn write_person<'a>(&'a self, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let p = serde_json::to_value(WriteParams {
+                data: encode(bytes),
+                person: true,
             })
             .unwrap_or(Value::Null);
             self.call_unit("write", p).await

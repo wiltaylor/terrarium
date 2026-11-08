@@ -2549,9 +2549,9 @@ async fn a_grant_to_a_running_agent_brings_an_ephemeral_target_up() {
 
 /// A running agent that holds the target in its policy keeps it up when
 /// another agent's lease ends. The lease to a running agent attaches its
-/// workspace: the ephemeral container, with no live session, runs again
-/// with both workspaces. The end of the lease detaches it the same way. The
-/// target is never down.
+/// workspace only when it can be attached safely. Even with no live exec
+/// session, joining and leaving must not replace the running container:
+/// it may still contain background processes (TER-203).
 #[tokio::test]
 async fn a_lease_end_leaves_a_target_that_a_policy_holder_uses() {
     let lab = Lab::start().await;
@@ -2596,11 +2596,26 @@ async fn a_lease_end_leaves_a_target_that_a_policy_holder_uses() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["lifecycle"]["state"], "running", "{}", r.body);
-    assert!(r.body.get("lifecycle_error").is_none(), "{}", r.body);
+    assert!(
+        r.body["lifecycle_error"]
+            .as_str()
+            .unwrap()
+            .contains("must not replace a running container"),
+        "{}",
+        r.body
+    );
     let log = lab.log();
     let last_run = log.lines().rfind(|l| l.starts_with("docker run")).unwrap();
     assert!(last_run.contains(":/work/terra/owner"), "{last_run}");
-    assert!(last_run.contains(":/work/terra/worker"), "{last_run}");
+    assert!(!last_run.contains(":/work/terra/worker"), "{last_run}");
+    assert!(
+        r.body["lifecycle"]["attach_error"]
+            .as_str()
+            .unwrap()
+            .contains("must not replace a running container"),
+        "{}",
+        r.body
+    );
     assert_eq!(
         last_audit(&lab.td, "target.attach").await["detail"]["reason"],
         "lease_grant"
@@ -2613,14 +2628,13 @@ async fn a_lease_end_leaves_a_target_that_a_policy_holder_uses() {
     let last_run = log.lines().rfind(|l| l.starts_with("docker run")).unwrap();
     assert!(last_run.contains(":/work/terra/owner"), "{last_run}");
     assert!(!last_run.contains("worker"), "{last_run}");
-    assert_eq!(
-        last_audit(&lab.td, "target.detach").await["detail"]["reason"],
-        "lease_end"
-    );
+    assert_eq!(log.matches("docker run ").count(), 1, "{log}");
+    assert!(!log.contains("docker rm "), "{log}");
+    assert!(!log.contains("docker stop "), "{log}");
     let t = lab.td.get("/api/targets/terra-dbox").await;
     assert_eq!(t.ok()["state"], "running");
     assert_eq!(t.body["runtime"]["attached"], json!(["terra/owner"]));
-    // No destroy for a lease end: the container ran again, it did not go.
+    // No destroy or replacement for a lease end.
     assert!(!lab.log().contains("target.destroy"));
 }
 
@@ -2902,10 +2916,9 @@ async fn stop_agent(lab: &Lab, id: &str) {
 
 /// PLAN §11 "mode 1": an agent's workspace is `<work>/<project>/<agent>`,
 /// and a docker target binds the workspaces of its running holders at the
-/// same path. A holder that joins a running ephemeral container with no
-/// live session gets a new container; with a live session the start says
-/// "attach needs a restart of the target". A holder that leaves is
-/// detached the same way.
+/// same path. A holder that joins a running container gets an explicit
+/// attach error, even without a live exec session. Neither joining nor
+/// leaving replaces the container while another holder uses it.
 #[tokio::test]
 async fn docker_targets_attach_the_workspaces_of_their_holders() {
     use terrariumd::executor::{on_agent_start, on_agent_stop};
@@ -2951,27 +2964,23 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
     assert!(r[0].contains(" -u "), "{}", r[0]);
     assert!(work.join("terra/w1").is_dir());
 
-    // A second holder joins: no live session, so a new container with both.
+    // A second holder joins with no live session: background processes
+    // may remain, so the container must not be replaced.
     start_agent(&lab, &w2).await;
+    let errs = on_agent_start(&state, &w2, &["terra-dbox".into()]).await;
+    assert_eq!(errs.len(), 1, "{errs:?}");
     assert!(
-        on_agent_start(&state, &w2, &["terra-dbox".into()])
-            .await
-            .is_empty()
+        errs[0]
+            .1
+            .message
+            .contains("must not replace a running container")
     );
     let r = runs(&lab);
-    assert_eq!(r.len(), 2, "{r:?}");
-    assert!(lab.log().contains("docker rm -f -v terrarium-terra-dbox"));
-    assert!(r[1].contains(&v1), "{}", r[1]);
-    assert!(
-        r[1].contains(&format!("-v {}:/work/terra/w2", ws("w2").display())),
-        "{}",
-        r[1]
-    );
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(!lab.log().contains("docker rm "));
+    assert!(!lab.log().contains("docker stop "));
     let t = lab.td.get("/api/targets/terra-dbox").await;
-    assert_eq!(
-        t.ok()["runtime"]["attached"],
-        json!(["terra/w1", "terra/w2"])
-    );
+    assert_eq!(t.ok()["runtime"]["attached"], json!(["terra/w1"]));
 
     // A live session: the third holder cannot join. The fake `sleeper`
     // runs until the test writes `sleeper.end` (at most 60 s), not for a
@@ -2990,11 +2999,14 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
         errs[0].1.message
     );
     assert!(
-        errs[0].1.message.contains("exec session(s) are live"),
+        errs[0]
+            .1
+            .message
+            .contains("must not replace a running container"),
         "{}",
         errs[0].1.message
     );
-    assert_eq!(runs(&lab).len(), 2, "no new container");
+    assert_eq!(runs(&lab).len(), 1, "no new container");
     std::fs::write(lab.bins.path().join("sleeper.end"), "").unwrap();
     let _ = drain(&lab.td, "terra-dbox", &sid).await;
     stop_agent(&lab, &w3).await;
@@ -3005,11 +3017,11 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
     );
     assert_eq!(
         runs(&lab).len(),
-        2,
+        1,
         "w3 was not attached: nothing to detach"
     );
 
-    // A holder leaves: a new container without its workspace.
+    // A holder leaves: the original container remains untouched.
     stop_agent(&lab, &w2).await;
     assert!(
         on_agent_stop(&state, &w2, &["terra-dbox".into()])
@@ -3017,8 +3029,9 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
             .is_empty()
     );
     let r = runs(&lab);
-    assert_eq!(r.len(), 3, "{r:?}");
-    assert!(r[2].contains(&v1) && !r[2].contains("w2"), "{}", r[2]);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(!lab.log().contains("docker rm "));
+    assert!(!lab.log().contains("docker stop "));
     // The last holder leaves: the ephemeral target goes.
     stop_agent(&lab, &w1).await;
     assert!(
