@@ -4052,10 +4052,10 @@ pub enum AdminTargetCmd {
     Edit(Box<AdminTargetEditArgs>),
     /// Remove a target
     Rm { name: String },
-    /// Run a lifecycle verb: up, down, snapshot, restore, or status
+    /// Run a lifecycle verb: up, down, snapshot, restore, status, or recreate
     Verb {
         name: String,
-        /// `up`, `down`, `snapshot`, `restore`, or `status`
+        /// `up`, `down`, `snapshot`, `restore`, `status`, or `recreate`
         verb: String,
         /// The snapshot name for `snapshot` and `restore`
         #[arg(long)]

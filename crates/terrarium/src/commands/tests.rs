@@ -3882,6 +3882,29 @@ async fn target_edit_patches_only_the_flags_given() {
     }
 }
 
+#[tokio::test]
+async fn target_edit_reports_explicit_recreate_and_sends_the_verb() {
+    let out = ok(
+        true,
+        &["admin", "target", "edit", "dbox", "--image", "alpine:latest"],
+        vec![(200, json!({"name": "dbox", "recreate_note": "New image requires recreate; writable layer is lost, volumes are kept"}))],
+        vec![(Patch, "/api/targets/dbox", vec![], Some(json!({"image": "alpine:latest"})))],
+    ).await;
+    assert!(out.contains("writable layer is lost"));
+    assert!(out.contains("terrarium admin target verb dbox recreate"));
+    let out = ok(
+        true,
+        &["admin", "target", "verb", "dbox", "recreate"],
+        vec![(
+            200,
+            json!({"target": "dbox", "verb": "recreate", "state": "running"}),
+        )],
+        vec![(Post, "/api/targets/dbox/recreate", vec![], None)],
+    )
+    .await;
+    assert!(out.contains("dbox: recreate: running"));
+}
+
 /// One body flag for every command with a body: `--body`/`-b`, `-` for
 /// stdin, and a value that starts with `-` (a log line `- 10:00 ...`).
 /// The positional stays where it was there before.

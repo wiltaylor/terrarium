@@ -276,7 +276,7 @@ pub fn on_agent_deleted(t: &mut Tx<'_>, id: &str, who: &str) -> ApiResult<()> {
 
 /// The leads of `project` (agents with `project_admin`) other than
 /// `except`.
-fn leads(conn: &Connection, project: &str, except: &str) -> ApiResult<Vec<Address>> {
+pub(crate) fn leads(conn: &Connection, project: &str, except: &str) -> ApiResult<Vec<Address>> {
     let mut st = conn.prepare(
         "SELECT a.id, a.name FROM agents a JOIN roles r ON r.agent_id = a.id
          WHERE a.project = ?1 AND r.role = 'project_admin' AND a.id <> ?2

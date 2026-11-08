@@ -2532,7 +2532,15 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE projects ADD COLUMN human_comment_notifications INTEGER NOT NULL DEFAULT 1;
     "#,
-    // 97: Agent RPC restart journal (TER-260). A NULL answer is never replayed
+    // 97: Card wakes held while an Inbox thread waits on the operator (TER-219).
+    r#"
+    CREATE TABLE thread_pending_wakes (
+        thread TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        reason TEXT NOT NULL CHECK(reason IN ('blocked', 'review')),
+        PRIMARY KEY(thread, reason)
+    );
+    "#,
+    // 98: Agent RPC restart journal (TER-260). A NULL answer is never replayed
     // after a crash. Append after concurrent migrations without changing them.
     r#"
     CREATE TABLE agent_rpc_answers (
