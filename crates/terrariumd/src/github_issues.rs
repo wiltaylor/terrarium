@@ -76,22 +76,28 @@ pub async fn import(
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|_| ApiError::internal("cannot build GitHub client"))?;
-    let mut request = client
+    let request = client
         .get(url)
         .header("User-Agent", "terrarium")
         .header("Accept", "application/vnd.github+json");
-    if let Some(name) = &repo.credential
-        && let Ok(Secret::Token { token, .. }) = secrets::load(state, repo.owner(), name).await
-    {
-        request = request.bearer_auth(token.as_str());
-    }
-    let issue = fetch_issue(request, number).await?;
+    let credential = match &repo.credential {
+        Some(name) => secrets::load(state, repo.owner(), name).await.ok(),
+        None => None,
+    };
+    let issue = fetch_issue(token_auth(request, credential), number).await?;
     state
         .db
         .write(actor.label(), move |t| {
             import_verified(t, &actor, &project, &repo.name, &repository, issue)
         })
         .await
+}
+
+fn token_auth(request: reqwest::RequestBuilder, credential: Option<Secret>) -> reqwest::RequestBuilder {
+    match credential {
+        Some(Secret::Token { token, .. }) => request.bearer_auth(token.as_str()),
+        _ => request,
+    }
 }
 
 async fn fetch_issue(request: reqwest::RequestBuilder, number: u64) -> ApiResult<Issue> {
@@ -230,6 +236,9 @@ mod tests {
             fetch_issue(request("ok"), 7).await.unwrap().user.login,
             "eve"
         );
+        let ssh = Secret::SshKey(zeroize::Zeroizing::new("test deploy key".into()));
+        assert_eq!(fetch_issue(token_auth(request("ok"), Some(ssh)), 7).await.unwrap().number, 7);
+        assert!(fetch_issue(token_auth(request("missing"), None), 7).await.err().unwrap().message.contains("private repository"));
         assert!(fetch_issue(request("ok"), 8).await.is_err());
         for path in ["bad", "pr", "redirect", "missing", "large"] {
             assert!(fetch_issue(request(path), 7).await.is_err(), "{path}");
