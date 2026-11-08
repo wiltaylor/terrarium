@@ -24,6 +24,7 @@
 // ------------------------------------------------------------ triage
 
 rule "triage-new-backlog" {
+  max_per_hour = 600
   on = ["card"]
   when "data.change" { eq = "created" }
   if_card { column = ["@backlog"] }
@@ -35,6 +36,7 @@ rule "triage-new-backlog" {
 }
 
 rule "triage-moved-backlog" {
+  max_per_hour = 600
   on = ["card"]
   when "data.change" { eq = "moved" }
   if_card { column = ["@backlog"] }
@@ -46,6 +48,7 @@ rule "triage-moved-backlog" {
 }
 
 rule "triage-hourly" {
+  max_per_hour = 600
   on = ["rule.hourly"]
   mail {
     to = ["@leads"]
