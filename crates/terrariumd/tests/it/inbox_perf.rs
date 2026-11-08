@@ -85,7 +85,8 @@ async fn inbox_live_and_tenfold_load() {
             );
             assert!(times[2] < Duration::from_secs(2), "{action}: {times:?}");
         }
-        let counts = td.get("/api/inbox/counts?project=p").await.ok();
+        let response = td.get("/api/inbox/counts?project=p").await;
+        let counts = response.ok();
         assert_eq!(counts["mail"], 257 * scale);
         assert_eq!(counts["thread"], 100 * scale);
         assert_eq!(counts["open"], (257 + 100 + 30) * scale - 10);
