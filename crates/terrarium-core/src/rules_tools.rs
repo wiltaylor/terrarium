@@ -378,7 +378,21 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
             match v {
                 Value::String(r) if !resolves(columns, r) => {
                     if a.verb == "card.move" && key == "to" {
+                        // A comment has no `from`: it would reach the
+                        // cards that the move skips, so a move with a
+                        // `from` is dropped (TER-226).
+                        let from = a.args.get("from").is_some_and(|f| match f {
+                            Value::Array(items) => !items.is_empty(),
+                            Value::Null => false,
+                            _ => true,
+                        });
                         match a.args.get("comment").and_then(Value::as_str) {
+                            Some(_) if from => {
+                                reasons.push(format!(
+                                    "the board has no column `{r}`: the move has a `from`, which a comment cannot keep, so it is dropped"
+                                ));
+                                keep = false;
+                            }
                             Some(text) if !text.is_empty() => {
                                 let mut args = Map::new();
                                 args.insert("text".to_owned(), Value::String(text.to_owned()));
@@ -1028,6 +1042,27 @@ mod tests {
         );
         let kept = m.changes.iter().find(|c| c.rule == "merge-pass");
         assert!(kept.is_none(), "merge-pass resolves @accepted by role here");
+        parse(&m.text, "rules.wcl", &ctx(&board)).expect("checks");
+    }
+
+    #[test]
+    fn a_move_with_from_to_a_missing_column_is_dropped_not_commented() {
+        let pack = parse(
+            "rule \"m\" {\n  on = [\"card\"]\n  card_move { to = \"@accepted\"  from = [\"review\"]  comment = \"moved\" }\n  card_label { add = [\"x\"] }\n}\nrule \"n\" {\n  on = [\"card\"]\n  card_move { to = \"@accepted\"  comment = \"moved\" }\n}\n",
+            "rules.wcl",
+            &Context::default(),
+        )
+        .unwrap();
+        let board = default_board();
+        let m = migrate(&pack, "", &RuleSet::default(), &board);
+        let o = |n: &str| m.overrides.iter().find(|r| r.name == n).unwrap();
+        let verbs: Vec<&str> = o("m").actions.iter().map(|a| a.verb.as_str()).collect();
+        assert_eq!(verbs, vec!["card.label"]);
+        let reasons = &m.changes.iter().find(|c| c.rule == "m").unwrap().reasons;
+        assert!(reasons.iter().any(|r| r.contains("`from`")), "{reasons:?}");
+        // Without `from`, the move still becomes its comment.
+        let verbs: Vec<&str> = o("n").actions.iter().map(|a| a.verb.as_str()).collect();
+        assert_eq!(verbs, vec!["card.comment"]);
         parse(&m.text, "rules.wcl", &ctx(&board)).expect("checks");
     }
 

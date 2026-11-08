@@ -1730,3 +1730,383 @@ async fn the_merge_queue_batch_goes_30_minutes_after_the_first_card() {
         .unwrap();
     assert_eq!(n, 0);
 }
+
+// TER-227 (the TER-172 review minors): the timer runs the batch again when
+// enough cards wait but no move ran it, a card of another repo is left
+// out, and the engine's own pass writes one timer for each wait.
+
+/// Set the time of each `card` event of each `(card, minutes ago)`.
+async fn backdate(td: &TestDaemon, cards: &[(&str, i64)]) {
+    let rows: Vec<(String, String)> = cards
+        .iter()
+        .map(|(c, m)| {
+            let at = (chrono::Utc::now() - chrono::Duration::minutes(*m))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            ((*c).to_owned(), at)
+        })
+        .collect();
+    state(td)
+        .db
+        .write("operator", move |t| {
+            for (c, at) in &rows {
+                t.execute(
+                    "UPDATE events SET at = ?2 WHERE card = ?1 AND kind = 'card'",
+                    rusqlite::params![c, at],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// Add repo `name` to project `p`.
+async fn add_repo(td: &TestDaemon, name: &str) {
+    let r = td
+        .post(
+            "/api/projects/p/repos",
+            json!({"name": name, "url": format!("https://git.example/x/{name}.git")}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+}
+
+/// The `rule.timer` events of project `p`: (actor, data).
+async fn timer_events(td: &TestDaemon) -> Vec<(Option<String>, Value)> {
+    state(td)
+        .db
+        .read(|c| {
+            let mut st = c.prepare(
+                "SELECT actor, payload FROM events WHERE kind = ?1 AND project = 'p' ORDER BY seq",
+            )?;
+            let rows = st
+                .query_map([rules_engine::TIMER_KIND], |r| {
+                    Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows
+                .into_iter()
+                .map(|(a, p)| (a, serde_json::from_str(&p).unwrap()))
+                .collect())
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_timer_runs_the_batch_when_a_hold_is_released_in_place() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    let mut ids = Vec::new();
+    for i in 0..7 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    let held = new_card(
+        &td,
+        "p",
+        json!({"title": "From GitHub", "column": "review", "labels": ["github", "hold"]}),
+    )
+    .await;
+    ids.push(held.clone());
+    settle(&td).await;
+    for id in &ids {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    assert!(open_jobs(&td).await.is_empty(), "7 cards wait, 1 is held");
+
+    // The hold goes in place: 8 cards wait, and no move runs the batch.
+    let r = td
+        .patch(&format!("/api/cards/{held}"), json!({"labels": ["github"]}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    settle(&td).await;
+    assert!(open_jobs(&td).await.is_empty(), "no move: no batch yet");
+
+    let st = state(&td);
+    let projects = rules_engine::load(&st.db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
+    let mut fired = std::collections::HashMap::new();
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "the wait has not ended");
+
+    // 31 minutes later: the timer runs the batch of the 8 cards.
+    let back: Vec<(&str, i64)> = ids.iter().map(|c| (c.as_str(), 31)).collect();
+    backdate(&td, &back).await;
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "8 cards wait and the wait ended");
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    let cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
+    let want: Vec<&str> = ids.iter().map(String::as_str).collect();
+    assert_eq!(cards, want);
+}
+
+#[tokio::test]
+async fn a_card_of_another_repo_does_not_block_the_merge_queue() {
+    let td = queue_lab().await;
+    add_repo(&td, "lib").await;
+    let r = td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-build", "recipe": "true", "next_repos": ["app", "lib"]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title": "a", "column": "review", "repo": "app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title": "b", "column": "review", "repo": "lib"}),
+    )
+    .await;
+    let c = new_card(
+        &td,
+        "p",
+        json!({"title": "c", "column": "review", "repo": "app"}),
+    )
+    .await;
+    settle(&td).await;
+    for id in [&a, &b, &c] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    assert!(open_jobs(&td).await.is_empty());
+
+    // The wait ends: one batch of the repo of the first card, b left out.
+    backdate(&td, &[(&a, 40), (&b, 35), (&c, 31)]).await;
+    let st = state(&td);
+    let projects = rules_engine::load(&st.db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
+    let mut fired = std::collections::HashMap::new();
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].repo, "app");
+    let cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
+    assert_eq!(cards, vec![a.as_str(), c.as_str()]);
+    let r = runs_of(&td, "p", "merge-queue-batch").await;
+    let done = r
+        .iter()
+        .find(|x| x["state"] == "done" && x["card"].is_null())
+        .unwrap_or_else(|| panic!("{r:?}"));
+    let left = &done["steps"][0]["detail"]["left_out"];
+    assert_eq!(left[0]["card"], json!(b), "{done}");
+    assert_eq!(left[0]["reason"], "repo `lib`, the batch is repo `app`");
+
+    // b's own wait ended too: the next timer queues it alone.
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "the wait of b");
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 2, "{open:?}");
+    assert_eq!(open[1].repo, "lib");
+    assert_eq!(open[1].card, b);
+}
+
+#[tokio::test]
+async fn the_engine_pass_writes_one_timer_for_a_wait_with_a_failed_batch() {
+    let td = queue_lab().await;
+    // Repo `lib` has no `next`: each batch run of its cards fails.
+    add_repo(&td, "lib").await;
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    let mut ids = Vec::new();
+    for i in 0..8 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review", "repo": "lib"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    for id in &ids {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    let r = runs_of(&td, "p", "merge-queue-batch").await;
+    let last = r.last().unwrap();
+    assert_eq!(last["state"], "failed", "the 8th move: {last}");
+    assert!(timer_events(&td).await.is_empty());
+
+    // The wait ends. No direct call: the engine's own pass (at most every
+    // 10 s) writes the timer, as `system`, and its run fails again.
+    let back: Vec<(&str, i64)> = ids.iter().map(|c| (c.as_str(), 31)).collect();
+    backdate(&td, &back).await;
+    let td_ref = &td;
+    until("the engine's timer", || async move {
+        !timer_events(td_ref).await.is_empty()
+    })
+    .await;
+    settle(&td).await;
+    let t = timer_events(&td).await;
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert_eq!(t[0].0.as_deref(), Some("system"));
+    assert_eq!(t[0].1["rule"], "merge-queue-batch");
+    assert_eq!(t[0].1["waiting"], 8);
+    let r = runs_of(&td, "p", "merge-queue-batch").await;
+    let timed: Vec<&Value> = r.iter().filter(|x| x["card"].is_null()).collect();
+    let timed: Vec<&str> = timed.iter().map(|x| x["state"].as_str().unwrap()).collect();
+    assert_eq!(timed, vec!["failed"], "{r:?}");
+
+    // The next checks of the same wait write no second timer.
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    settle(&td).await;
+    assert_eq!(timer_events(&td).await.len(), 1);
+    assert!(open_jobs(&td).await.is_empty());
+}
+
+// TER-227 review round 2: a card whose repo cannot be resolved does not
+// stop the batch, and an error in one project does not stop the timers of
+// the others.
+
+#[tokio::test]
+async fn a_card_without_a_usable_repo_is_left_out_of_the_batch() {
+    let td = queue_lab().await;
+    add_repo(&td, "lib").await;
+    let r = td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-build", "recipe": "true", "next_repos": ["app", "lib"]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    // No repo in a project of two repos: the repo of x cannot be resolved.
+    let x = new_card(&td, "p", json!({"title": "x", "column": "review"})).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title": "a", "column": "review", "repo": "app"}),
+    )
+    .await;
+    settle(&td).await;
+    for id in [&x, &a] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    backdate(&td, &[(&x, 40), (&a, 31)]).await;
+    let st = state(&td);
+    let projects = rules_engine::load(&st.db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
+    let mut fired = std::collections::HashMap::new();
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "a waits; x is left out");
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].card, a);
+    assert_eq!(open[0].repo, "app");
+    assert!(open[0].batch.is_empty(), "{open:?}");
+    let r = runs_of(&td, "p", "merge-queue-batch").await;
+    let done = r
+        .iter()
+        .find(|x| x["state"] == "done" && x["card"].is_null())
+        .unwrap_or_else(|| panic!("{r:?}"));
+    let left = &done["steps"][0]["detail"]["left_out"];
+    assert_eq!(left[0]["card"], json!(x), "{done}");
+    let reason = left[0]["reason"].as_str().unwrap();
+    assert!(reason.contains("more than one repo"), "{reason}");
+}
+
+#[tokio::test]
+async fn an_error_in_one_project_does_not_stop_the_timers_of_another() {
+    let td = queue_lab().await;
+    // Project q, set up as p.
+    td.project("q").await;
+    let r = td
+        .post(
+            "/api/projects/q/repos",
+            json!({"name": "app", "url": "https://git.example/x/qapp.git"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    td.post(
+        "/api/targets",
+        json!({"name": "q-build", "kind": "host", "host": "helios", "project": "q"}),
+    )
+    .await
+    .ok();
+    let r = td
+        .put(
+            "/api/projects/q/delivery",
+            json!({"target": "q-build", "recipe": "true", "next_repos": ["app"]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    for p in ["p", "q"] {
+        put_rules(&td, p, terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    }
+    let y = new_card(&td, "p", json!({"title": "y", "column": "review"})).await;
+    let z = new_card(&td, "q", json!({"title": "z", "column": "review"})).await;
+    settle(&td).await;
+    move_to(&td, &y, "merge_queue").await;
+    move_to(&td, &z, "merge_queue").await;
+    settle(&td).await;
+    backdate(&td, &[(&y, 31), (&z, 31)]).await;
+    // The board of p cannot be read: the move events of y are not JSON,
+    // so the time of its last move fails. p comes first (by name).
+    let yy = y.clone();
+    state(&td)
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE events SET payload = 'not json' WHERE card = ?1 AND kind = 'card'",
+                [&yy],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let st = state(&td);
+    let projects = rules_engine::load(&st.db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
+    let mut fired = std::collections::HashMap::new();
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "the timer of q");
+    assert_eq!(fired.len(), 1, "{fired:?}");
+    assert!(fired.contains_key(&("q".to_owned(), "merge-queue-batch".to_owned())));
+    settle(&td).await;
+    let jobs_q = state(&td)
+        .db
+        .read(|c| jobs::list(c, "q", None))
+        .await
+        .unwrap();
+    assert_eq!(jobs_q.len(), 1, "{jobs_q:?}");
+    assert_eq!(jobs_q[0].card, z);
+    assert!(open_jobs(&td).await.is_empty(), "no job in p");
+}

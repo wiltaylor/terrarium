@@ -1514,6 +1514,20 @@ pub fn requeue_lost(t: &mut Tx<'_>, id: &str) -> ApiResult<Option<Job>> {
     requeue_with(t, id, LOST_TAIL)
 }
 
+/// Put job `id` back in the queue: the infrastructure lost its recipe run
+/// (TER-196), for example the host agent no longer holds the session. As
+/// [`requeue`]: it keeps its attempt and its place, so a batch reruns
+/// whole, and `tail` says why. `None` when it is not running (any more).
+pub fn requeue_infra(t: &mut Tx<'_>, id: &str, why: &str) -> ApiResult<Option<Job>> {
+    requeue_with(
+        t,
+        id,
+        &format!(
+            "the infrastructure lost the run after the recipe started ({why}); no attempt is used, and the job waits in the queue again"
+        ),
+    )
+}
+
 fn requeue_with(t: &mut Tx<'_>, id: &str, tail: &str) -> ApiResult<Option<Job>> {
     let n = t.execute(
         "UPDATE jobs SET state = 'queued', started_at = NULL, host = NULL, slot = NULL, tail = ?2
