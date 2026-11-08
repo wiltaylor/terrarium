@@ -3,7 +3,7 @@
 //! trip through a restore.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::process::Command;

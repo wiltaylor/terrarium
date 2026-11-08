@@ -5,7 +5,7 @@
 //! `noop` (the TER-168 review asked for that path).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

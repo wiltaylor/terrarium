@@ -3,7 +3,7 @@
 //! would, and let the daemon's trigger engine read them.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

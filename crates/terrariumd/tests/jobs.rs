@@ -13,7 +13,7 @@
 //! two boards of one scenario field by field.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -2179,7 +2179,8 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
 
 /// TER-103: the target holds no credential and no push repo. The recipe
 /// of a merge finds no `.ssh` or `.push` dir beside its clone, no git
-/// credential env, and no remote in its clone. It deletes the job ref in
+/// credential env, and no remote in its clone. `TERRARIUM_GIT_REF` is a
+/// public build stamp, not a credential. It deletes the job ref in
 /// its clone, and the merge still pushes the recorded commit: the push
 /// runs from the daemon's repo.
 #[tokio::test]
@@ -2188,7 +2189,7 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
     let before = git(&lab.origin, &["rev-parse", "next"]);
     let recipe = "test -f OK \
          && ! ls -a .. | grep -E '[.](ssh|push)$' \
-         && ! env | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
+         && ! env | grep -v '^TERRARIUM_GIT_REF=' | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
          && test -z \"$(git remote)\" \
          && test \"$(git rev-parse refs/job/merge)\" = \"$(git rev-parse HEAD)\" \
          && git update-ref -d refs/job/merge \

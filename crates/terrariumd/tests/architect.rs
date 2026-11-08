@@ -3,7 +3,7 @@
 //! its own project. With the fake supervisor; no harness runs.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use serde_json::{Value, json};

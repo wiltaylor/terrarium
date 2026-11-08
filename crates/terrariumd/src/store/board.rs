@@ -988,6 +988,16 @@ fn author_of(t: &Tx<'_>, actor: &Actor) -> String {
 /// The comment of an agent links to the agent's current session (PLAN
 /// §13), so the operator can read the work behind it.
 fn insert_comment(t: &mut Tx<'_>, card: &str, author: &str, body: &str) -> ApiResult<()> {
+    insert_reply(t, card, author, body, false)
+}
+
+fn insert_reply(
+    t: &mut Tx<'_>,
+    card: &str,
+    author: &str,
+    body: &str,
+    human_reply: bool,
+) -> ApiResult<()> {
     let session = session_refs::current_of(t, author)?;
     t.execute(
         "INSERT INTO card_comments (id, card, author, body, created_at, session_id)
@@ -1001,6 +1011,60 @@ fn insert_comment(t: &mut Tx<'_>, card: &str, author: &str, body: &str) -> ApiRe
             session
         ],
     )?;
+    notify_comment(t, &find_row(t, card)?, author, body, human_reply)
+}
+
+fn notify_comment(
+    t: &mut Tx<'_>,
+    card: &CardRow,
+    author: &str,
+    body: &str,
+    human_reply: bool,
+) -> ApiResult<()> {
+    let mut recipients = Vec::new();
+    if author == "operator"
+        && crate::store::projects::get(t, &card.project)?.human_comment_notifications
+    {
+        recipients = crate::question_guard::leads(t, &card.project, "")?;
+        let full = get_card(t, &card.id)?;
+        for id in [full.assignee, full.agent].into_iter().flatten() {
+            if let Ok(address @ Address::Agent { .. }) = mail::resolve(t, &id, Some(&card.project))
+            {
+                recipients.push(address);
+            }
+        }
+    } else if matches!(
+        mail::resolve(t, author, Some(&card.project)),
+        Ok(Address::Agent { .. })
+    ) && (human_reply
+        || body
+            .split(|c: char| !c.is_alphanumeric() && c != '@' && c != '_')
+            .any(|word| word.eq_ignore_ascii_case("@operator")))
+    {
+        recipients.push(Address::Operator);
+    }
+    let mut sent = HashSet::new();
+    let subject = format!("{} comment: {}", card.id, card.title);
+    let by = name_of(t, author)?;
+    let message = format!(
+        "{by} commented on {}: {}\n\n{body}\n\n[Open card](/p/{}/board?card={})",
+        card.id, card.title, card.project, card.id
+    );
+    for to in recipients {
+        if sent.insert(to.key()) {
+            mail::send(
+                t,
+                Outgoing {
+                    from: &Address::System,
+                    to: &to,
+                    subject: &subject,
+                    body: &message,
+                    thread: None,
+                    in_reply_to: None,
+                },
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1763,6 +1827,10 @@ pub fn create_card(
         }
         return get_card(t, &id);
     }
+    // Include the requested assignee in delivery of the initial comment.
+    if let Some(who) = &new.assignee {
+        assign_card(t, actor, &id, Some(who))?;
+    }
     // A role alias (`working`, `blocked`) names the column with that role.
     let to = new
         .column
@@ -1781,9 +1849,6 @@ pub fn create_card(
     } else if let Some(c) = new.comment.as_deref().filter(|c| !c.trim().is_empty()) {
         let author = author_of(t, actor);
         insert_comment(t, &id, &author, c.trim())?;
-    }
-    if let Some(who) = &new.assignee {
-        assign_card(t, actor, &id, Some(who))?;
     }
     if let Some(eta) = new.eta_at.as_deref() {
         set_eta(t, actor, &id, Some(eta))?;
@@ -2207,6 +2272,18 @@ pub fn archive_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
 }
 
 pub fn add_comment(t: &mut Tx<'_>, actor: &Actor, id: &str, body: &str) -> ApiResult<Card> {
+    reply_comment(t, actor, id, body, None)
+}
+
+/// An explicit reply must refer to a comment on this card. Replies to a
+/// human, and standalone @operator mentions, also reach the operator's Inbox.
+pub fn reply_comment(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    id: &str,
+    body: &str,
+    reply_to: Option<&str>,
+) -> ApiResult<Card> {
     let card = find_row(t, id)?;
     policy::write_project(actor, &card.project)?;
     if card.kind == "group" {
@@ -2218,8 +2295,21 @@ pub fn add_comment(t: &mut Tx<'_>, actor: &Actor, id: &str, body: &str) -> ApiRe
     if body.is_empty() {
         return Err(ApiError::invalid("the comment is empty"));
     }
+    let human_reply = if let Some(reply) = reply_to {
+        let author: Option<String> = t
+            .query_row(
+                "SELECT author FROM card_comments WHERE id = ?1 AND card = ?2",
+                params![reply, card.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        author.ok_or_else(|| ApiError::invalid("reply_to must name a comment on this card"))?
+            == "operator"
+    } else {
+        false
+    };
     let author = author_of(t, actor);
-    insert_comment(t, &card.id, &author, body)?;
+    insert_reply(t, &card.id, &author, body, human_reply)?;
     touch(t, &card.id)?;
     card_event(t, &card, "commented", json!({"comment": body}))?;
     get_card(t, &card.id)

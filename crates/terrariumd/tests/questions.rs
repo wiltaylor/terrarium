@@ -2,7 +2,7 @@
 //! supervisor. No harness and no model turn runs.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

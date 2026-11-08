@@ -6,7 +6,7 @@
 //! `terrariumd::store::github_gate` cover the title and list rules.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::{TestDaemon, write};
 use serde_json::{Value, json};

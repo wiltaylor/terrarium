@@ -1,10 +1,31 @@
 [package]
 name = "terrariumd"
+autotests = false
 description = "The Terrarium daemon: API, supervisor, and embedded dashboard"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+# Most integration modules share one binary and one common helper instance.
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+
+# Keep the cheap cross-crate source guard independently selectable.
+[[test]]
+name = "no_token_endpoint"
+path = "tests/no_token_endpoint.rs"
+
+# This target re-executes itself using exact, unqualified test names.
+[[test]]
+name = "settings_env"
+path = "tests/settings_env.rs"
+
+# Opt-in tests of a real Claude installation retain their documented command.
+[[test]]
+name = "e2e_claude"
+path = "tests/e2e_claude.rs"
 
 [features]
 # Build `supervisor::InMemorySupervisor`, the fake for the integration tests.

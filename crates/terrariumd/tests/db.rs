@@ -2,7 +2,7 @@
 //! rights of each caller, revisions, refs, events, and audit rows.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use hyper::Method;
