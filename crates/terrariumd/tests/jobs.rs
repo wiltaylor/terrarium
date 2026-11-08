@@ -2237,7 +2237,7 @@ async fn delivery_secrets_reach_only_merge_recipes_and_are_audited_and_redacted(
     assert!(!text.contains(SENTINEL));
     // Revocation is checked at the next recipe, not cached in delivery config.
     lab.td.delete("/api/secrets/p/merge-key/grants?grantee=delivery:p").await.ok();
-    lab.branch("secret-revoked", "next", &[("OK", "yes\n")]);
+    lab.branch("secret-revoked", "next", &[("revoked", "yes\n")]);
     let card = lab.card("revoked merge", "secret-revoked").await;
     lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({})).await.ok();
     let jobs = lab.until_idle().await;
