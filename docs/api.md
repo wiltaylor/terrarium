@@ -6744,17 +6744,18 @@ gets a lease while it runs, its workspace joins the target:
 |---|---|
 | No other running holder | The ephemeral target comes up (§17.6) with the workspaces of its running holders: `docker run -v` for each, or `vmlab.prepare` with an `@dev` decorator (one workspace for each machine). |
 | The target runs, the workspace is attached | Nothing. |
-| The target runs without it, ephemeral, no live exec session | A new container (or lab instance) with the new set: `docker rm`, `docker run`; or `vmlab destroy`, `vmlab.prepare`, `vmlab up`. Audit row `target.attach`. |
-| The target runs without it, and it is permanent or a session is live | Nothing runs. The agent gets the notification "target `<t>`: attach needs a restart of the target: ...", and a grant answers it in `lifecycle_error`. |
+| The target runs without it, ephemeral lab instance, no live exec session | A new lab instance with the new set: `vmlab destroy`, `vmlab.prepare`, `vmlab up`. Audit row `target.attach`. |
+| The target runs without it, and it is Docker, permanent, or a session is live | Nothing runs. The agent gets the notification "target `<t>`: attach needs a restart of the target: ...". A Docker workspace change never replaces a running container, since background processes may outlive tracked exec sessions. |
 
 A docker target with `container` (an existing container) and a vmlab target
 with `lab` take no workspace.
 
 **Detach.** When a holder stops, or its lease ends, and other running agents
-still hold the target, a new container (or lab instance) without its
+still hold the target, a new lab instance without its
 workspace runs, with the same rule (ephemeral, no live session; audit row
 `target.detach`). Else the workspace stays attached until the target runs
-again. When the last holder goes, the destroy of §17.6 removes it all.
+again. Docker containers are not replaced to detach workspaces. When the
+last holder goes, the destroy of §17.6 removes it all.
 
 **Lab instances.** A `lab_repo` target has one instance, named after the
 target, in a git worktree of the repo on the host. A `lab_from_workspace`
