@@ -86,7 +86,12 @@ async fn list(
     }
     let (rows, c) = state
         .db
-        .read(move |c| Ok((inbox::page(c, &f, q.cursor.as_deref(), limit)?, inbox::counts(c, project.as_deref())?)))
+        .read(move |c| {
+            Ok((
+                inbox::page(c, &f, q.cursor.as_deref(), limit)?,
+                inbox::counts(c, project.as_deref())?,
+            ))
+        })
         .await?;
     let mut resp = Json(rows).into_response();
     for (k, v) in [

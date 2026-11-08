@@ -8,9 +8,17 @@ use std::time::{Duration, Instant};
 async fn inbox_pages_reach_every_item_across_projects() {
     use terrariumd::store::inbox::{self, Filter};
     let td = TestDaemon::start().await;
-    for p in ["p", "other"] { td.project(p).await; }
-    let agent = td.agent("p", "lead", serde_json::json!({})).await["id"].as_str().unwrap().to_owned();
-    let other = td.agent("other", "lead", serde_json::json!({})).await["id"].as_str().unwrap().to_owned();
+    for p in ["p", "other"] {
+        td.project(p).await;
+    }
+    let agent = td.agent("p", "lead", serde_json::json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other = td.agent("other", "lead", serde_json::json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let db = &td.daemon.as_ref().unwrap().state.db;
     db.write("operator", move |t| {
         for i in 0..2400 {
@@ -30,25 +38,39 @@ async fn inbox_pages_reach_every_item_across_projects() {
     td.get("/api/inbox?limit=0").await.err(422, "invalid");
     td.get("/api/inbox?cursor=broken").await.err(422, "invalid");
     db.read(|c| {
-        let f = Filter { project: Some("p".into()), ..Filter::default() };
+        let f = Filter {
+            project: Some("p".into()),
+            ..Filter::default()
+        };
         let mut cursor = None;
         let mut ids = std::collections::HashSet::new();
         loop {
             let rows = inbox::page(c, &f, cursor.as_deref(), 37)?;
-            if rows.is_empty() { break; }
+            if rows.is_empty() {
+                break;
+            }
             for row in &rows {
                 assert_eq!(row.project.as_deref(), Some("p"));
                 assert!(ids.insert(row.id.clone()), "duplicate {}", row.id);
-                if let Some(m) = &row.message { assert_eq!(m.body, "Full body"); }
+                if let Some(m) = &row.message {
+                    assert_eq!(m.body, "Full body");
+                }
             }
             let last = rows.last().unwrap();
-            cursor = Some(serde_json::to_string(&(last.open, last.critical, last.urgent, &last.at, &last.id)).unwrap());
+            cursor = Some(
+                serde_json::to_string(&(last.open, last.critical, last.urgent, &last.at, &last.id))
+                    .unwrap(),
+            );
             // Deleting the boundary item must not invalidate the cursor.
-            if let Some(m) = &last.message { c.execute("DELETE FROM messages WHERE id = ?1", [&m.id])?; }
+            if let Some(m) = &last.message {
+                c.execute("DELETE FROM messages WHERE id = ?1", [&m.id])?;
+            }
         }
         assert_eq!(ids.len(), 1450);
         Ok(())
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

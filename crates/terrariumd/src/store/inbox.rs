@@ -335,8 +335,7 @@ fn watch_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Watch> {
 /// Every watch, newest first.
 pub fn watches(conn: &Connection) -> ApiResult<Vec<Watch>> {
     let mut st = conn.prepare(&format!(
-        "{WATCH_SELECT} ORDER BY w.created_at DESC, w.thread_id DESC LIMIT {}",
-        KIND_MAX * 5
+        "{WATCH_SELECT} ORDER BY w.created_at DESC, w.thread_id DESC"
     ))?;
     let rows = st
         .query_map([], watch_row)?
@@ -650,9 +649,15 @@ fn key(i: &InboxItem) -> Cursor {
 
 /// Keyset pagination, independent of whether the previous item still exists.
 /// Only mail in the selected page loads bodies and resolves thread state.
-pub fn page(conn: &Connection, f: &Filter, cursor: Option<&str>, limit: usize) -> ApiResult<Vec<InboxItem>> {
-    let cursor: Option<Cursor> = cursor.map(|s| serde_json::from_str(s)
-        .map_err(|_| ApiError::invalid("invalid Inbox cursor"))).transpose()?;
+pub fn page(
+    conn: &Connection,
+    f: &Filter,
+    cursor: Option<&str>,
+    limit: usize,
+) -> ApiResult<Vec<InboxItem>> {
+    let cursor: Option<Cursor> = cursor
+        .map(|s| serde_json::from_str(s).map_err(|_| ApiError::invalid("invalid Inbox cursor")))
+        .transpose()?;
     let mut items = Vec::new();
     if wants(f, InboxKind::Question) {
         items.extend(question_items(conn, f, QuestionKind::Question)?);
@@ -674,13 +679,23 @@ pub fn page(conn: &Connection, f: &Filter, cursor: Option<&str>, limit: usize) -
                AND NOT (m.from_kind = 'system' AND coalesce(m.subject,'') LIKE ?1)
                AND (?2 IS NULL OR
                     (m.from_kind = 'project' AND m.from_agent = 'project:' || ?2) OR
-                    (m.from_kind = 'agent' AND coalesce(a.project, old.project) = ?2))"
+                    (m.from_kind = 'agent' AND coalesce(a.project, old.project) = ?2))",
         )?;
         let rows = st.query_map(params![mail::PAUSE_SUBJECT_LIKE, f.project], |r| {
-            Ok(InboxItem { id: format!("mail:{}", r.get::<_, String>(0)?),
-                at: r.get(1)?, open: r.get(2)?, project: r.get(3)?,
-                kind: InboxKind::Mail, urgent: false, critical: false,
-                question: None, message: None, system: None, watch: None, thread: None })
+            Ok(InboxItem {
+                id: format!("mail:{}", r.get::<_, String>(0)?),
+                at: r.get(1)?,
+                open: r.get(2)?,
+                project: r.get(3)?,
+                kind: InboxKind::Mail,
+                urgent: false,
+                critical: false,
+                question: None,
+                message: None,
+                system: None,
+                watch: None,
+                thread: None,
+            })
         })?;
         for row in rows {
             let item = row?;
@@ -721,8 +736,10 @@ pub fn page(conn: &Connection, f: &Filter, cursor: Option<&str>, limit: usize) -
     items.retain(|i| cursor.as_ref().is_none_or(|c| key(i) < *c));
     items.truncate(limit);
     if items.iter().any(|i| i.kind == InboxKind::Mail) {
-        let by_thread: HashMap<String, Watch> = watches(conn)?.into_iter()
-            .map(|w| (w.thread_id.clone(), w)).collect();
+        let by_thread: HashMap<String, Watch> = watches(conn)?
+            .into_iter()
+            .map(|w| (w.thread_id.clone(), w))
+            .collect();
         for i in items.iter_mut().filter(|i| i.kind == InboxKind::Mail) {
             let m = mail::get(conn, &i.id[5..])?;
             let watch = by_thread.get(&m.thread_id).cloned();
