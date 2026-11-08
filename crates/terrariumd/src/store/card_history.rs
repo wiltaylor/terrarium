@@ -159,14 +159,22 @@ mod tests {
         let c = db();
         history(&c);
         assert_eq!(
-            ReviewEstimates::default().eta(&c, "p", "open").unwrap().unwrap().0,
+            ReviewEstimates::default()
+                .eta(&c, "p", "open")
+                .unwrap()
+                .unwrap()
+                .0,
             "2026-11-08T00:14:00+00:00"
         );
         moved(&c, "p", "open", 10, "review", "working");
         moved(&c, "p", "open", 20, "working", "review");
         // Re-entry completes a zero-minute visit: {0, 2, 4, 12} has median 3.
         assert_eq!(
-            ReviewEstimates::default().eta(&c, "p", "open").unwrap().unwrap().0,
+            ReviewEstimates::default()
+                .eta(&c, "p", "open")
+                .unwrap()
+                .unwrap()
+                .0,
             "2026-11-08T00:23:00+00:00"
         );
     }
@@ -174,9 +182,19 @@ mod tests {
     #[test]
     fn no_history_means_no_review_eta() {
         let c = db();
-        assert!(ReviewEstimates::default().eta(&c, "p", "open").unwrap().is_none());
+        assert!(
+            ReviewEstimates::default()
+                .eta(&c, "p", "open")
+                .unwrap()
+                .is_none()
+        );
         history(&c);
-        assert!(ReviewEstimates::default().eta(&c, "other", "open").unwrap().is_none());
+        assert!(
+            ReviewEstimates::default()
+                .eta(&c, "other", "open")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -203,7 +221,10 @@ mod tests {
         // Non-card traffic must not evict review history from the window.
         c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,kind,payload) SELECT 'p','other','{}' FROM n;").unwrap();
         c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,kind,payload) SELECT 'p','card','{\"change\":\"comment\"}' FROM n;").unwrap();
-        assert_eq!(ReviewEstimates::default().eta(&c, "p", "open").unwrap(), first);
+        assert_eq!(
+            ReviewEstimates::default().eta(&c, "p", "open").unwrap(),
+            first
+        );
         // New card moves evict history, but this response reuses its cached median.
         c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,card,kind,payload) SELECT 'p','noise','card','{\"change\":\"moved\"}' FROM n;").unwrap();
         assert_eq!(cache.eta(&c, "p", "open").unwrap(), first);
