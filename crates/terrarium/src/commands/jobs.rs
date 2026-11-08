@@ -434,7 +434,10 @@ mod tests {
     fn planned_accepts_only_bounded_positive_durations() {
         assert_eq!(planned(&None).unwrap(), None);
         for value in ["20m", "1h30m", "30d"] {
-            assert_eq!(planned(&Some(format!(" {value} "))).unwrap(), Some(value.into()));
+            assert_eq!(
+                planned(&Some(format!(" {value} "))).unwrap(),
+                Some(value.into())
+            );
         }
         for value in ["", "0m", "-1m", "31d", "2026-11-08T15:00:00Z"] {
             assert!(planned(&Some(value.into())).is_err(), "{value}");

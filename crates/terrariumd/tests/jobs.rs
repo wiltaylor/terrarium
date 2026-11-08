@@ -444,7 +444,10 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
         .await
         .unwrap();
     let c = card(ids[0].clone()).await;
-    assert_eq!(secs_between(&json!(restarted.started_at.unwrap()), &c["eta_at"]), 1200);
+    assert_eq!(
+        secs_between(&json!(restarted.started_at.unwrap()), &c["eta_at"]),
+        1200
+    );
 
     // Cancelling a running planned job must not leave an overdue ETA.
     let rid = rerun.id.clone();
@@ -523,17 +526,20 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     let halves = db
         .write("system", move |t| {
             jobs::cancel(t, &jid)?;
-            let parent = jobs::create(t, NewJob {
-                project: "p".into(),
-                card: batch[0].card.clone(),
-                kind: JobKind::Merge,
-                repo: "app".into(),
-                branch: "b".into(),
-                commit: None,
-                by_agent: Some("w".into()),
-                batch: batch.clone(),
-                planned_secs: Some(1200),
-            })?;
+            let parent = jobs::create(
+                t,
+                NewJob {
+                    project: "p".into(),
+                    card: batch[0].card.clone(),
+                    kind: JobKind::Merge,
+                    repo: "app".into(),
+                    branch: "b".into(),
+                    commit: None,
+                    by_agent: Some("w".into()),
+                    batch: batch.clone(),
+                    planned_secs: Some(1200),
+                },
+            )?;
             jobs::start(t, &parent.id, "machine", Some(1))?;
             let red = jobs::finish(t, &parent.id, &JobEnd::default())?.unwrap();
             jobs::split(t, &red, &batch)
@@ -544,12 +550,18 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
         assert_eq!(half.planned_secs, Some(1200));
         assert!(card(half.card.clone()).await.get("eta_at").is_none());
         let hid = half.id.clone();
-        let started = db.write("system", move |t| {
-            assert!(jobs::start(t, &hid, "machine", Some(1))?);
-            jobs::get(t, &hid)
-        }).await.unwrap();
+        let started = db
+            .write("system", move |t| {
+                assert!(jobs::start(t, &hid, "machine", Some(1))?);
+                jobs::get(t, &hid)
+            })
+            .await
+            .unwrap();
         let c = card(half.card.clone()).await;
-        assert_eq!(secs_between(&json!(started.started_at.unwrap()), &c["eta_at"]), 1200);
+        assert_eq!(
+            secs_between(&json!(started.started_at.unwrap()), &c["eta_at"]),
+            1200
+        );
     }
 }
 
