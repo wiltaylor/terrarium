@@ -629,7 +629,8 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
             conn,
             &row.project,
             &row.id,
-            job.as_ref().is_some_and(|j| j.kind == crate::store::jobs::JobKind::Merge),
+            job.as_ref()
+                .is_some_and(|j| j.kind == crate::store::jobs::JobKind::Merge),
         )?
     } else {
         None

@@ -37,7 +37,8 @@ pub fn completed_visits(
         if let (Ok(start), Ok(end)) = (
             DateTime::parse_from_rfc3339(&start),
             DateTime::parse_from_rfc3339(&end),
-        ) && end >= start && samples.len() < limit
+        ) && end >= start
+            && samples.len() < limit
         {
             samples.push(end - start);
         }
@@ -78,7 +79,9 @@ pub fn review_eta(
         [card], |r| r.get(0),
     ).optional()?;
     Ok(start.and_then(|start| {
-        let at = DateTime::parse_from_rfc3339(&start).ok()?.checked_add_signed(median)?;
+        let at = DateTime::parse_from_rfc3339(&start)
+            .ok()?
+            .checked_add_signed(median)?;
         Some((at.to_rfc3339(), start))
     }))
 }
@@ -96,7 +99,16 @@ mod tests {
     }
 
     fn moved(c: &Connection, project: &str, card: &str, minute: u32, from: &str, to: &str) {
-        c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES (?1,?2,'card',?3,?4)", params![project, card, format!("2026-11-08T00:{minute:02}:00Z"), json!({"change":"moved", "from":from,"to":to}).to_string()]).unwrap();
+        c.execute(
+            "INSERT INTO events(project,card,kind,at,payload) VALUES (?1,?2,'card',?3,?4)",
+            params![
+                project,
+                card,
+                format!("2026-11-08T00:{minute:02}:00Z"),
+                json!({"change":"moved", "from":from,"to":to}).to_string()
+            ],
+        )
+        .unwrap();
     }
 
     fn history(c: &Connection) {
@@ -111,27 +123,40 @@ mod tests {
     fn review_median_starts_at_entry_and_resets_on_reentry() {
         let c = db();
         history(&c);
-        assert_eq!(review_eta(&c,"p","open",false).unwrap().unwrap().0, "2026-11-08T00:14:00+00:00");
-        moved(&c,"p","open",10,"review","working");
-        moved(&c,"p","open",20,"working","review");
+        assert_eq!(
+            review_eta(&c, "p", "open", false).unwrap().unwrap().0,
+            "2026-11-08T00:14:00+00:00"
+        );
+        moved(&c, "p", "open", 10, "review", "working");
+        moved(&c, "p", "open", 20, "working", "review");
         // Even sample median: (2 + 4) / 2 = 3 minutes.
-        assert_eq!(review_eta(&c,"p","open",false).unwrap().unwrap().0, "2026-11-08T00:23:00+00:00");
+        assert_eq!(
+            review_eta(&c, "p", "open", false).unwrap().unwrap().0,
+            "2026-11-08T00:23:00+00:00"
+        );
     }
 
     #[test]
     fn no_history_or_merge_means_no_review_eta() {
         let c = db();
-        assert!(review_eta(&c,"p","open",false).unwrap().is_none());
+        assert!(review_eta(&c, "p", "open", false).unwrap().is_none());
         history(&c);
-        assert!(review_eta(&c,"p","open",true).unwrap().is_none());
-        assert!(review_eta(&c,"other","open",false).unwrap().is_none());
+        assert!(review_eta(&c, "p", "open", true).unwrap().is_none());
+        assert!(review_eta(&c, "other", "open", false).unwrap().is_none());
     }
 
     #[test]
     fn history_is_project_scoped_recent_and_bounded() {
         let c = db();
         history(&c);
-        assert_eq!(completed_visits(&c,"p","review",2).unwrap(), vec![Duration::minutes(12),Duration::minutes(4)]);
-        assert!(completed_visits(&c,"other","review",20).unwrap().is_empty());
+        assert_eq!(
+            completed_visits(&c, "p", "review", 2).unwrap(),
+            vec![Duration::minutes(12), Duration::minutes(4)]
+        );
+        assert!(
+            completed_visits(&c, "other", "review", 20)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
