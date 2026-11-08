@@ -8403,7 +8403,7 @@ expression. No manual close endpoint exists.
   an open card with that label, or a group that had `max` fix cards of
   earlier jobs: a no-op. The fix cards of a group are the cards with a
   `merge-fix:` label of another job with exactly the same linked cards
-  (fix cards excluded), done
+  (fix cards excluded), or of an explicit split ancestor, done
   and archived ones too. The fix card is how a red merge group gets a fix
   before a split (MEM-84); the rule does not spawn the agent for it.
 - `agent_park`, `agent_unpark`, `agent_end`: act on the open agent bound
@@ -8543,8 +8543,9 @@ One change from the coded flow, by the operator's rule of 2026-11-07
 (MEM-84): a red merge group gets a fix card first, and splits in halves
 only after three fix cards. The fix cards of a group are the cards with a
 `merge-fix:` label of an earlier job whose linked cards (fix cards left
-out) are exactly the cards of this job: those of its reruns count, those
-of a different group (including a superset or subset) do not.
+out) are exactly the cards of this job or an explicit split ancestor:
+those of its reruns and its split parents count. Those of an unrelated
+group (including a superset or subset) do not.
 Set another number with your own `merge-red-group` rule. The pack
 does not spawn the fix agent or queue the group again (TER-256).
 
