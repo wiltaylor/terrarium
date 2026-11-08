@@ -353,7 +353,14 @@ async fn input_needs_an_exclusive_lease_and_is_audited_without_the_text() {
 #[tokio::test]
 async fn input_is_rate_limited_on_each_target() {
     let (lab, ..) = setup().await;
-    let limiter = &lab.td.daemon.as_ref().unwrap().state.executor.display_limiter;
+    let limiter = &lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .executor
+        .display_limiter;
     let start = std::time::Instant::now();
     // Host subprocesses and HTTP requests can take more than a second under
     // load. Keep all requests in one rate window regardless of wall time.
