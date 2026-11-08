@@ -753,7 +753,8 @@ pub fn mail_to(sender: &AgentActor, to: &Address) -> ApiResult<()> {
             return Ok(());
         }
         return Err(ApiError::forbidden(format!(
-            "your policy.mail_to does not include `{name}`"
+            "your policy.mail_to does not include `{name}`; reply on an existing shared thread, \
+             or ask your lead to review the mail policy"
         )));
     }
     let wildcard = format!("{project}/*");
@@ -767,7 +768,8 @@ pub fn mail_to(sender: &AgentActor, to: &Address) -> ApiResult<()> {
     }
     Err(ApiError::forbidden(format!(
         "`{full}` is outside project `{}`; add \"{full}\" to policy.cross_project, \
-         or write to the project inbox `project:{project}`",
+         or write to the project inbox `project:{project}`. You can also reply on an existing \
+         shared thread or ask your lead to review the mail policy",
         sender.project
     )))
 }

@@ -4210,6 +4210,18 @@ POST /api/mail                      (X-Terrarium-Agent: terrarium/worker)
 
 ### 7.3 Project inboxes
 
+Mail to `project:<name>` stays addressed to the inbox and queues a turn for
+its non-ephemeral project-admin `lead`, or its oldest non-ephemeral project
+admin if no admin is named `lead`. A project with no such admin rejects the
+send. Queued inbox mail counts as waiting work for that admin, including
+after a daemon restart. The inbox message and thread are not copied.
+
+The live event targets the admin selected at send time. Mail listing,
+`mail check`, and queued-work recovery select the responsible admin at query
+time. If the project's admins change before delivery, recovery and visibility
+follow the current selection. Previously delivered messages are not replayed
+automatically.
+
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
 | `GET /api/projects/{name}/inbox?unread=&state=&thread=&wait=` | | `200` messages | inbox right |
