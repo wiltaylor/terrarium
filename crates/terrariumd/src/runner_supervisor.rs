@@ -1076,9 +1076,15 @@ fn hold_reason(h: &TurnHold) -> String {
     }
 }
 
+#[cfg(test)]
+struct PointerDeliveryPause {
+    reached: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
 struct Inner {
     #[cfg(test)]
-    pointer_delivery_pause: Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
+    pointer_delivery_pause: Mutex<Option<PointerDeliveryPause>>,
     cfg: RunnerSupervisorConfig,
     /// The installed harness versions ([`crate::harness_versions`]).
     versions: VersionCache,
@@ -3243,7 +3249,7 @@ impl RunnerSupervisor {
             #[cfg(test)]
             {
                 let pause = lock(&me.inner.pointer_delivery_pause).take();
-                if let Some((reached, resume)) = pause {
+                if let Some(PointerDeliveryPause { reached, resume }) = pause {
                     let _ = reached.send(());
                     let _ = resume.await;
                 }
@@ -5019,7 +5025,9 @@ mod tests {
     async fn pointer_is_re_pushed_after_idle_during_busy_delivery() {
         struct PointerAdapter;
         impl Adapter for PointerAdapter {
-            fn id(&self) -> HarnessId { HarnessId::Claude }
+            fn id(&self) -> HarnessId {
+                HarnessId::Claude
+            }
             fn detect_version(&self) -> terrarium_core::Result<semver::Version> {
                 Ok(semver::Version::new(1, 0, 0))
             }
@@ -5038,32 +5046,50 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let cfg = RunnerSupervisorConfig::new(
-            tmp.path().join("state"), tmp.path().join("run"),
-            tmp.path().join("prompts"), SandboxConfig::default(), HashMap::new(),
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
         );
         let adapter = Arc::new(PointerAdapter);
         let sup = RunnerSupervisor::new(cfg);
         let agent: Agent = serde_json::from_value(serde_json::json!({
             "id": AgentId::new(), "name": "a", "project": "p",
             "harness": "claude", "workspace": tmp.path()
-        })).unwrap();
+        }))
+        .unwrap();
         let id = agent.id;
         let mut rc = RunnerConfig::new(id, &sup.inner.cfg.state_dir, &sup.inner.cfg.runtime_dir);
         rc.ready_detector = Some(Arc::new(terrarium_runner::DefaultReadyDetector {
-            quiet: Duration::from_millis(100), pattern: None,
+            quiet: Duration::from_millis(100),
+            pattern: None,
         }));
         let spec = LaunchSpec::new("python3", tmp.path()).arg(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../terrarium-runner/tests/fake_tui/fake_tui.py").display().to_string()
+                .join("../terrarium-runner/tests/fake_tui/fake_tui.py")
+                .display()
+                .to_string(),
         );
-        let runner = Runner::spawn(rc, adapter, spec, sup.rpc_handler()).await.unwrap();
+        let runner = Runner::spawn(rc, adapter, spec, sup.rpc_handler())
+            .await
+            .unwrap();
+        struct StopRunner(Runner);
+        impl Drop for StopRunner {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+            }
+        }
+        let _stop = StopRunner(runner.clone());
         let status = runner.watch_status();
         let wait_idle = |mut status: watch::Receiver<AgentStatus>| async move {
             tokio::time::timeout(Duration::from_secs(45), async {
                 while *status.borrow_and_update() != AgentStatus::Idle {
                     status.changed().await.unwrap();
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
         };
         wait_idle(status.clone()).await;
         let mut slot = Slot::new(agent);
@@ -5073,26 +5099,41 @@ mod tests {
         lock(&sup.inner.slots).insert(id, slot);
         let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
-        *lock(&sup.inner.pointer_delivery_pause) = Some((reached_tx, resume_rx));
-        sup.add_pointer(id, |p| p.add_mail(MailItem::new("m1".into(), "p/b".into(), "T1".into())));
-        tokio::time::timeout(Duration::from_secs(45), reached_rx).await.unwrap().unwrap();
+        *lock(&sup.inner.pointer_delivery_pause) = Some(PointerDeliveryPause {
+            reached: reached_tx,
+            resume: resume_rx,
+        });
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new("m1".into(), "p/b".into(), "T1".into()))
+        });
+        tokio::time::timeout(Duration::from_secs(45), reached_rx)
+            .await
+            .unwrap()
+            .unwrap();
         // The delivery succeeded. Let its turn end before releasing busy.
         wait_idle(status.clone()).await;
         assert!(lock(&sup.inner.slots)[&id].pointer_busy);
         sup.maybe_push(id); // The idle notification cannot push while busy.
-        sup.add_pointer(id, |p| p.add_mail(MailItem::new("m2".into(), "p/b".into(), "T2".into())));
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new("m2".into(), "p/b".into(), "T2".into()))
+        });
         assert!(!lock(&sup.inner.slots)[&id].pointer.is_empty());
         let mut events = runner.subscribe_events();
         resume_tx.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 let record = events.recv().await.unwrap();
-                if let Event::TurnStart { prompt: Some(prompt) } = record.event
-                    && prompt.contains("m2") {
+                if let Event::TurnStart {
+                    prompt: Some(prompt),
+                } = record.event
+                    && prompt.contains("m2")
+                {
                     break;
                 }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
         runner.kill().unwrap();
         runner.wait().await;
