@@ -20,6 +20,14 @@ const q = (id: string, over: Partial<Question> = {}): Question => ({
 });
 
 describe("questions model", () => {
+  it("skips with an explicit reason and no selected option", () => {
+    const question = q("skip", { options: ["yes", "no"] });
+    expect(answerBody(question, "  Need more context  ", 1, true)).toEqual({ body: { answer: "Skipped question: Need more context" } });
+    expect(answerBody(question, "  ", 1, true)).toHaveProperty("error");
+    expect(answerBody(question, "x".repeat(8000), null, true)).toHaveProperty("error");
+    expect(answerBody(q("closed", { status: "answered" }), "reason", null, true)).toHaveProperty("error");
+  });
+
   it("sorts open first, urgent first, oldest first; then the others newest first", () => {
     const list = [
       q("done-old", { status: "answered", answered_at: "2026-10-28T08:00:00.000Z" }),
