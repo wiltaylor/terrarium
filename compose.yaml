@@ -164,5 +164,8 @@ services:
       TERRARIUM_UPDATER_STATE: /updater
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock                  # root on the host: only this service has it
+      # Fresh Compose configuration for each self-update. Read-only, updater only.
+      - .:/compose:ro
+      - ${TERRARIUM_DATA_DIR:-.}:/deployment:ro
       - ${TERRARIUM_DATA_DIR:-.}/updater/run:/run/terrarium-updater  # the socket, shared with the daemon
       - ${TERRARIUM_DATA_DIR:-.}/updater/state:/updater              # the history, the rollback target, and the image file

@@ -448,6 +448,16 @@ impl Updater {
         };
         self.with_run(|r| r.to = Some(to.clone()));
 
+        let prepared = self
+            .step("environment", self.engine.prepare(&cur), |c| {
+                let keys = c.spec["changed_env_keys"].as_array();
+                format!("resolved deployment environment; changed keys (values hidden): {}",
+                    keys.map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default())
+            })
+            .await
+            .map_err(failed)?;
+
         // Drain and back up. A failure here changes nothing.
         if let Err(f) = self
             .step(
@@ -480,7 +490,7 @@ impl Updater {
         self.with_run(|r| r.backup = Some(backup.clone()));
 
         // From here the container changes: a failure goes back.
-        match self.replace(&cur, &to, restore.as_deref()).await {
+        match self.replace(&prepared, &to, restore.as_deref()).await {
             Ok(()) => {
                 let prev = Previous {
                     image: cur.image.clone(),

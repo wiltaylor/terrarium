@@ -69,6 +69,11 @@ pub trait Engine: Send + Sync {
     /// The terrarium container (the service `terrarium` of the compose
     /// project of the updater, or `TERRARIUM_UPDATER_TARGET`).
     fn target(&self) -> BoxFut<'_, Res<Container>>;
+    /// Resolve deployment settings before any destructive step. Keep the
+    /// original container unchanged for recovery after a failed switch.
+    fn prepare<'a>(&'a self, spec: &'a Container) -> BoxFut<'a, Res<Container>> {
+        Box::pin(async move { Ok(spec.clone()) })
+    }
     /// A local image, by ID or reference; `None` when it is not here.
     fn image<'a>(&'a self, reference: &'a str) -> BoxFut<'a, Res<Option<Image>>>;
     /// Pull `reference` (`<repo>@sha256:...`).

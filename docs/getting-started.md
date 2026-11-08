@@ -1858,6 +1858,39 @@ updater has it.
 
 2. Start it: `docker compose up -d` (on a server:
    `<dir>/terrarium-compose up -d`).
+
+   Self-updates resolve the daemon service's environment from the current
+   Compose files and `.env` before draining or stopping the daemon. The updater
+   needs its read-only `/compose` (project directory) and `/deployment` (data
+   directory) mounts and the Docker Compose CLI included in the new image.
+   It logs changed key names, never values. Missing mounts, unreadable files,
+   or failed Compose interpolation stop the update before the swap. Automatic
+   recovery after a failed swap uses the original container environment.
+
+   **Existing server installs: one-time updater migration.** This is a deploy
+   step for the deployment owner, not a self-update. Schedule a maintenance
+   window and retain the current image reference and deployment files for undo.
+   Install the release's `compose.yaml` in `<dir>/src/compose.yaml` through the
+   normal deployment process, then run these commands on the deployment host:
+
+   ```bash
+   cd <dir>
+   ./terrarium-compose exec -T terrarium terrariumd backup create --full
+   # Confirm the backup command succeeded and retain its reported backup path.
+   # Use the release image containing the Compose CLI for the updater too.
+   # Set TERRARIUM_UPDATER_IMAGE=<release-image> in .env before proceeding.
+   ./terrarium-compose pull terrarium-updater
+   ./terrarium-compose up -d --no-deps --force-recreate terrarium-updater
+   ./terrarium-compose exec -T terrarium-updater docker compose version
+   ./terrarium-compose exec -T terrarium-updater sh -c 'test -r /compose/compose.yaml && test -r /deployment/.env'
+   ./terrarium-compose exec -T terrarium terrarium admin update status
+   ```
+
+   Do not run an update until these checks pass. If recreation fails, restore
+   the retained updater image reference and Compose files and recreate only
+   `terrarium-updater` again. Do not restore daemon data unless the normal
+   backup recovery procedure calls for it. Source checkouts use the same
+   migration with `docker compose` instead of `./terrarium-compose`.
 3. Look at the state:
 
    ```bash

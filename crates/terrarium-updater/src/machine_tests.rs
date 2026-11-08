@@ -93,6 +93,14 @@ fn old_image() -> Image {
 }
 
 impl Engine for Fake {
+    fn prepare<'a>(&'a self, spec: &'a Container) -> BoxFut<'a, Res<Container>> {
+        Box::pin(async move {
+            if self.0.lock().unwrap().fail.contains("environment") {
+                return Err("Compose environment resolution failed (values hidden)".into());
+            }
+            Ok(spec.clone())
+        })
+    }
     fn target(&self) -> BoxFut<'_, Res<Container>> {
         Box::pin(async move {
             self.0
@@ -335,7 +343,7 @@ async fn an_update_drains_backs_up_and_switches_the_image() {
     assert_eq!(
         steps(&run),
         [
-            "inspect", "resolve", "verify", "pull", "drain", "backup", "stop", "remove", "start",
+            "inspect", "resolve", "verify", "pull", "environment", "drain", "backup", "stop", "remove", "start",
             "health"
         ]
     );
@@ -381,6 +389,17 @@ async fn the_same_digest_is_current_and_changes_nothing() {
         .await;
     assert_eq!(run.outcome, Outcome::Current, "{run:#?}");
     assert_eq!(r.fake.calls().len(), before, "no drain, no pull");
+}
+
+#[tokio::test]
+async fn unresolved_environment_stops_before_drain_backup_or_swap() {
+    let r = rig();
+    r.fake.fail("environment");
+    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    assert_eq!(run.outcome, Outcome::Failed);
+    assert_eq!(steps(&run), ["inspect", "resolve", "verify", "pull", "!environment"]);
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
+    assert!(r.fake.calls().iter().all(|c| c.starts_with("pull")));
 }
 
 #[tokio::test]
@@ -445,7 +464,7 @@ async fn a_failed_drain_or_backup_resumes_the_old_daemon() {
     assert_eq!(
         steps(&run),
         [
-            "inspect", "resolve", "verify", "pull", "drain", "!backup", "resume"
+            "inspect", "resolve", "verify", "pull", "environment", "drain", "!backup", "resume"
         ]
     );
     assert!(run.error.unwrap().contains("backup broke"));
@@ -477,7 +496,7 @@ async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
     assert_eq!(
         steps(&run),
         [
-            "inspect", "resolve", "verify", "pull", "drain", "backup", "stop", "remove", "start",
+            "inspect", "resolve", "verify", "pull", "environment", "drain", "backup", "stop", "remove", "start",
             "!health", "rollback", "remove", "restore", "start", "health"
         ]
     );
@@ -540,7 +559,7 @@ async fn a_rollback_restores_the_backup_of_the_last_switch() {
     assert_eq!(
         steps(&run),
         [
-            "inspect", "pull", "-verify", "drain", "backup", "stop", "restore", "remove", "start",
+            "inspect", "pull", "-verify", "environment", "drain", "backup", "stop", "restore", "remove", "start",
             "health"
         ]
     );

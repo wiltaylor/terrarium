@@ -1,8 +1,9 @@
 //! Docker on `docker.sock` (the Engine API, HTTP/1.1 over the Unix
-//! socket). No docker CLI and no compose files: the new container gets the
+//! socket). Compose resolves the current service environment before a swap.
+//! The new container gets the remaining
 //! settings of the old one from its inspect record, so the binds, ports,
 //! networks, labels (the compose project too), and the seccomp profile stay
-//! the same. Only the image changes.
+//! the same. Recovery uses the original environment, not the edited deployment.
 //!
 //! The env, the command, the entrypoint, the labels, and the user of the
 //! old *image* are not copied: Docker merges the ones of the new image at
@@ -12,8 +13,8 @@
 //! project and service labels too, and the release image does not, so
 //! without them the next update cannot find the container (TER-55).
 
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Full};
@@ -319,6 +320,54 @@ fn is_compose_label(key: &str) -> bool {
     key.starts_with("com.docker.compose.")
 }
 
+/// Map Compose's host paths through the updater's read-only bind mounts.
+/// Refuse paths outside the mounted directories rather than reading a different
+/// file with the same name. Mounts come from Docker, not from process env.
+fn mounted_path(host: &str, mounts: &Value) -> Res<PathBuf> {
+    mounts.as_array().into_iter().flatten()
+        .filter_map(|m| {
+            let source = Path::new(m["Source"].as_str()?);
+            let dest = m["Destination"].as_str()?;
+            if !matches!(dest, "/compose" | "/deployment") { return None; }
+            let relative = Path::new(host).strip_prefix(source).ok()?;
+            if relative.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                return None;
+            }
+            Some((source.components().count(), Path::new(dest).join(relative)))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, p)| p)
+        .ok_or_else(|| "deployment configuration is not mounted; recreate the updater with the current compose.yaml (environment values hidden)".into())
+}
+
+fn env_map(env: &Value) -> BTreeMap<String, String> {
+    env.as_array().into_iter().flatten().filter_map(|v| {
+        let (k, v) = v.as_str()?.split_once('=')?;
+        Some((k.to_owned(), v.to_owned()))
+    }).collect()
+}
+
+fn resolved_env(config: &Value, service: &str) -> Res<Vec<String>> {
+    let env = config["services"][service]["environment"].as_object()
+        .ok_or_else(|| "Compose returned no service environment (values hidden)".to_owned())?;
+    env.iter().map(|(key, value)| {
+        value.as_str().map(|v| format!("{key}={v}"))
+            .ok_or_else(|| "Compose returned an unresolved environment value (values hidden)".to_owned())
+    }).collect()
+}
+
+fn with_environment(spec: &Container, env: Vec<String>) -> Container {
+    let old = env_map(&create_body(&spec.spec, &spec.image.reference)["Env"]);
+    let new = env_map(&json!(env));
+    let keys: BTreeSet<_> = old.keys().chain(new.keys()).collect();
+    let changed: Vec<_> = keys.into_iter().filter(|k| old.get(*k) != new.get(*k)).collect();
+    tracing::info!(keys = ?changed, "deployment environment changes (values hidden)");
+    let mut prepared = spec.clone();
+    prepared.spec["changed_env_keys"] = json!(changed);
+    prepared.spec["compose_env"] = json!(env);
+    prepared
+}
+
 /// The body of `POST /containers/create` for a container like `spec`
 /// (`{container, image}`: the inspect record and the config of its image)
 /// with the image `reference`.
@@ -331,6 +380,11 @@ pub fn create_body(spec: &Value, reference: &str) -> Value {
     let image_env = strings(&img["Env"]);
     if let Some(env) = cfg.get_mut("Env").and_then(Value::as_array_mut) {
         env.retain(|e| e.as_str().is_none_or(|s| !image_env.contains(s)));
+    }
+    // This is a complete Compose service environment, not a patch. In
+    // particular, removed keys disappear and explicit image defaults stay.
+    if let Some(env) = spec.get("compose_env") {
+        cfg.insert("Env".into(), env.clone());
     }
     for key in [
         "Cmd",
@@ -449,6 +503,62 @@ impl Engine for Docker {
         Box::pin(async move {
             let id = self.target_id().await?;
             self.container(&id).await
+        })
+    }
+
+    fn prepare<'a>(&'a self, spec: &'a Container) -> BoxFut<'a, Res<Container>> {
+        Box::pin(async move {
+            let me = std::env::var("HOSTNAME")
+                .map_err(|_| "cannot inspect updater deployment mounts (values hidden)".to_owned())?;
+            let own = self.inspect(&me).await?;
+            let mounts = &own["Mounts"];
+            let labels = &spec.spec["container"]["Config"]["Labels"];
+            let work = labels["com.docker.compose.project.working_dir"].as_str()
+                .ok_or_else(|| "missing Compose working directory (values hidden)".to_owned())?;
+            let directory = mounted_path(work, mounts)?;
+            let files = labels["com.docker.compose.project.config_files"].as_str()
+                .ok_or_else(|| "missing Compose configuration paths (values hidden)".to_owned())?;
+            let project = labels[LABEL_PROJECT].as_str()
+                .ok_or_else(|| "missing Compose project (values hidden)".to_owned())?;
+            let service = labels[LABEL_SERVICE].as_str()
+                .ok_or_else(|| "missing Compose service (values hidden)".to_owned())?;
+            let mut cmd = tokio::process::Command::new("docker");
+            // Never inherit the updater's old interpolated environment.
+            cmd.env_clear().env("PATH", "/usr/local/bin:/usr/bin:/bin")
+                .args(["compose", "--project-name", project, "--project-directory"])
+                .arg(&directory).current_dir(&directory);
+            for file in files.split(',') {
+                cmd.arg("--file").arg(mounted_path(file, mounts)?);
+            }
+            // Compose records explicit --env-file paths. With no explicit
+            // override, the project .env is the source (source checkouts).
+            if let Some(files) = labels["com.docker.compose.project.environment_file"].as_str()
+                .filter(|s| !s.is_empty()) {
+                for file in files.split(',') {
+                    cmd.arg("--env-file").arg(mounted_path(file, mounts)?);
+                }
+            } else {
+                cmd.arg("--env-file").arg(directory.join(".env"));
+            }
+            // The deploy wrapper supplies these independently of .env.
+            if let Some(root) = mounts.as_array().into_iter().flatten()
+                .find(|m| m["Destination"] == "/deployment")
+                .and_then(|m| m["Source"].as_str()) {
+                cmd.env("TERRARIUM_DATA_DIR", root);
+            }
+            cmd.env("TERRARIUM_IMAGE", &spec.image.reference);
+            cmd.args(["config", "--format", "json"]);
+            let output = tokio::time::timeout(Duration::from_secs(60), cmd.kill_on_drop(true).output())
+                .await.map_err(|_| "Compose environment resolution timed out (values hidden)".to_owned())?
+                .map_err(|_| "cannot run Compose environment resolution (values hidden)".to_owned())?;
+            // Compose diagnostics and parse errors can contain secrets. Do not
+            // include stdout, stderr, or serde's error in logs or run history.
+            if !output.status.success() {
+                return Err("Compose environment resolution failed; update stopped before swap; differing keys unavailable (values hidden)".into());
+            }
+            let config: Value = serde_json::from_slice(&output.stdout)
+                .map_err(|_| "invalid Compose configuration (values hidden)".to_owned())?;
+            Ok(with_environment(spec, resolved_env(&config, service)?))
         })
     }
 
@@ -649,6 +759,41 @@ mod tests {
                 "Labels": {"org.opencontainers.image.version": "0.1.0"}
             }
         })
+    }
+
+    #[test]
+    fn fresh_environment_replaces_removed_keys_and_preserves_explicit_image_defaults() {
+        let original = Container {
+            id: "old".into(), name: "scratch".into(),
+            image: image_of(&Value::Null, "old:1"), spec: spec(),
+        };
+        let config = json!({"services": {"terrarium": {"environment": {
+            "TERRARIUM_MAIL_LOOP_LIMIT": "30", "HOME": "/home/terrarium"
+        }}}});
+        let prepared = with_environment(&original, resolved_env(&config, SERVICE).unwrap());
+        let body = create_body(&prepared.spec, "new:2");
+        assert_eq!(env_map(&body["Env"]), BTreeMap::from([
+            ("HOME".into(), "/home/terrarium".into()),
+            ("TERRARIUM_MAIL_LOOP_LIMIT".into(), "30".into()),
+        ]));
+        assert_eq!(prepared.spec["changed_env_keys"], json!([
+            "HOME", "TERRARIUM_MAIL_LOOP_LIMIT", "TERRARIUM_TOKEN"
+        ]));
+        assert_eq!(create_body(&original.spec, "old:1")["Env"], json!(["TERRARIUM_TOKEN=t"]));
+        assert!(resolved_env(&json!({"services": {"terrarium": {"environment": {"SECRET": null}}}}), SERVICE).is_err());
+    }
+
+    #[test]
+    fn deployment_paths_must_be_inside_the_read_only_mounts() {
+        let mounts = json!([
+            {"Source": "/srv/install", "Destination": "/deployment"},
+            {"Source": "/srv/install/src", "Destination": "/compose"}
+        ]);
+        assert_eq!(mounted_path("/srv/install/src/compose.yaml", &mounts).unwrap(), PathBuf::from("/compose/compose.yaml"));
+        assert_eq!(mounted_path("/srv/install/.env", &mounts).unwrap(), PathBuf::from("/deployment/.env"));
+        assert!(mounted_path("/other/.env", &mounts).is_err());
+        assert!(mounted_path("/srv/install/../secret", &mounts).is_err());
+        assert!(mounted_path("/srv/install/.env", &json!([])).is_err());
     }
 
     #[test]
