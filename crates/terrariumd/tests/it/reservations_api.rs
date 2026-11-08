@@ -269,7 +269,22 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
     .unwrap();
     td.put("/api/hosts/h/capacity", json!({"percentage":50}))
         .await
-        .err(409, "conflict");
+        .err(409, "resource_busy");
+    let same_host = state.db.read(|c| Ok(terrariumd::store::targets::get(c, "p-box2")?.def)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), lifecycle(
+        &state, &same_host, LifecycleVerb::Status, &LifecycleOpts::default(),
+    )).await.unwrap().unwrap();
+    // The completed Status must not clear the still-running Up marker.
+    assert!(state.executor.resource_verb_idle("h").is_err());
+    td.post("/api/hosts/h/reservations", json!({
+        "target":"p-box2", "amounts":{"cpu_millis":1000}, "until":"30m"
+    })).await.err(409, "resource_busy");
+    let queued = td.post("/api/hosts/h/reservations", json!({
+        "target":"p-box2", "amounts":{"cpu_millis":1000}, "until":"30m", "queue":true
+    })).await;
+    assert_eq!(queued.ok()["state"], "queued");
+    td.patch("/api/targets/p-box", json!({"keep":true})).await.ok();
+    td.patch("/api/targets/p-box", json!({"limits":{"cpu":1}})).await.err(409, "resource_busy");
     std::fs::write(directory.join("pull-release"), "").unwrap();
     tokio::time::timeout(Duration::from_secs(5), pull)
         .await
@@ -281,6 +296,31 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
     server.abort();
     client_b.abort();
     server_b.abort();
+}
+
+#[tokio::test]
+async fn command_waits_briefly_for_admission_and_lock_keys_do_not_collide() {
+    use terrariumd::executor::{RemoteCmd, start_cmd};
+    let (td, server, client) = setup().await;
+    td.post("/api/targets", json!({"name":"p-host","kind":"host","host":"h","project":"p"})).await.ok();
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let def = state.db.read(|c| Ok(terrariumd::store::targets::get(c, "p-host")?.def)).await.unwrap();
+    let lock = state.executor.resource_lock("h");
+    let guard = lock.lock_owned().await;
+    let mut hostless = def.clone();
+    hostless.host = None;
+    hostless.name = "h".to_owned();
+    assert!(state.executor.target_resource_lock(&hostless).try_lock_owned().is_ok());
+    let cmd = RemoteCmd { argv: vec!["true".into()], ..Default::default() };
+    let run = start_cmd(&state, &def, &cmd).unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    drop(guard);
+    assert!(run.collect(1024).await.end.unwrap().success());
+    let _guard = state.executor.resource_lock("h").lock_owned().await;
+    let run = start_cmd(&state, &def, &cmd).unwrap();
+    assert!(matches!(run.collect(1024).await.end.unwrap(), terrariumd::executor::End::Error { code, .. } if code == "resource_busy"));
+    client.abort();
+    server.abort();
 }
 
 #[tokio::test]

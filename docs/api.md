@@ -6245,8 +6245,11 @@ The `used` object includes charged `cpu_millis`, `memory_bytes`, the summed
 per-device `io` map, and sorted `exclusive_cores` CPU IDs. Queued and terminal
 reservations are excluded. Admission locks are per host agent. Docker lifecycle
 verbs publish an in-progress intent, then release admission while pulling or
-creating a container. Resource changes on that host return 409 until the verb
-finishes, and expiry cleanup retries afterward. Other hosts remain independent.
+creating a container. Verbs may overlap on the same host. Resource changes on
+that host return `409 resource_busy` until all verbs finish, except a grant
+with `queue: true`, which enters the FIFO. Metadata-only target patches remain
+allowed. Expiry cleanup retries afterward. Commands wait up to 500 ms for a
+short admission write before reporting `resource_busy`. Other hosts remain independent.
 
 `POST /api/hosts/{host}/reservations` accepts `target`, optional `agent`,
 `amounts`, `until`, optional `reason`, `exclusive`, `queue` and

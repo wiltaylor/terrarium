@@ -1231,7 +1231,7 @@ async fn pull_via_cat(
 pub struct Executor {
     /// Serialize reservation enforcement and cleanup across API calls/timers.
     resource_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    resource_verbs: Mutex<HashMap<String, String>>,
+    resource_verbs: Mutex<HashMap<String, usize>>,
     resource_pending: Mutex<HashMap<String, String>>,
     pub hosts: Arc<HostRegistry>,
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
@@ -1267,37 +1267,49 @@ struct ResourceVerb {
 
 impl Drop for ResourceVerb {
     fn drop(&mut self) {
-        self.executor
+        let mut verbs = self.executor
             .resource_verbs
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.host);
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = verbs.get_mut(&self.host) {
+            *count -= 1;
+            if *count == 0 {
+                verbs.remove(&self.host);
+            }
+        }
     }
 }
 
 impl Executor {
     pub fn resource_lock(&self, host: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.resource_lock_key(format!("host:{host}"))
+    }
+
+    fn resource_lock_key(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
         self.resource_locks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(host.to_owned())
+            .entry(key)
             .or_default()
             .clone()
     }
 
     pub fn target_resource_lock(&self, def: &TargetDef) -> Arc<tokio::sync::Mutex<()>> {
-        self.resource_lock(def.host.as_deref().unwrap_or(&def.name))
+        match def.host.as_deref() {
+            Some(host) => self.resource_lock(host),
+            None => self.resource_lock_key(format!("target:{}", def.name)),
+        }
     }
 
     pub fn resource_verb_idle(&self, host: &str) -> ApiResult<()> {
-        if let Some(target) = self
+        if let Some(count) = self
             .resource_verbs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(host)
         {
-            return Err(ApiError::conflict(format!(
-                "target `{target}` has a lifecycle verb in progress on host `{host}`; retry the resource change"
+            return Err(ApiError::resource_busy(format!(
+                "{count} lifecycle verbs in progress on host `{host}`; retry the resource change"
             )));
         }
         Ok(())
@@ -1305,11 +1317,10 @@ impl Executor {
 
     fn begin_resource_verb(self: &Arc<Self>, def: &TargetDef) -> ApiResult<ResourceVerb> {
         let host = host_of(def)?.to_owned();
-        self.resource_verb_idle(&host)?;
-        self.resource_verbs
+        *self.resource_verbs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(host.clone(), def.name.clone());
+            .entry(host.clone()).or_default() += 1;
         Ok(ResourceVerb {
             executor: self.clone(),
             host,
@@ -1577,15 +1588,61 @@ pub(crate) fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
 
 /// Start a command on a target.
 pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
-    let _resources = state
-        .executor
-        .target_resource_lock(def)
-        .try_lock_owned()
-        .map_err(|_| {
-            ApiError::conflict("resource reservations are being updated; retry the command")
-        })?;
-    let run = start_cmd_locked(state, def, cmd)?;
-    track_resource_run(state, def, cmd, run, None)
+    let lock = state.executor.target_resource_lock(def);
+    if let Ok(_resources) = lock.clone().try_lock_owned() {
+        let run = start_cmd_locked(state, def, cmd)?;
+        return track_resource_run(state, def, cmd, run, None);
+    }
+    // This entry point is synchronous (also used by process-tree wrappers).
+    // Wait asynchronously rather than blocking the runtime or rejecting a
+    // command merely because a short admission write is in flight.
+    let (tx, events) = mpsc::channel(16);
+    let (ctl, mut controls) = mpsc::unbounded_channel();
+    let state = state.clone();
+    let def = def.clone();
+    let cmd = cmd.clone();
+    tokio::spawn(async move {
+        let guard = tokio::select! {
+            _ = tx.closed() => return,
+            result = tokio::time::timeout(Duration::from_millis(500), lock.lock_owned()) => {
+                match result {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        let _ = tx.send(Ev::End(End::error("resource_busy", "host admission is busy; retry the command"))).await;
+                        return;
+                    }
+                }
+            }
+        };
+        let run = start_cmd_locked(&state, &def, &cmd)
+            .and_then(|run| track_resource_run(&state, &def, &cmd, run, None));
+        drop(guard);
+        let mut run = match run {
+            Ok(run) => run,
+            Err(error) => {
+                let code = serde_json::to_value(error.code).unwrap_or_default();
+                let _ = tx.send(Ev::End(End::error(code.as_str().unwrap_or("internal"), error.message))).await;
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                _ = tx.closed() => { let _ = run.ctl.send(Control::Kill); break; }
+                control = controls.recv() => match control {
+                    Some(control) => { let _ = run.ctl.send(control); }
+                    None => { let _ = run.ctl.send(Control::Kill); break; }
+                },
+                event = run.events.recv() => match event {
+                    Some(event) => {
+                        let ended = matches!(event, Ev::End(_));
+                        if tx.send(event).await.is_err() || ended { break; }
+                    }
+                    None => break,
+                },
+            }
+        }
+    });
+    Ok(Running { events, ctl })
 }
 
 /// Internal jobs and probes must participate in reservation admission and

@@ -25,6 +25,8 @@ pub enum Code {
     MethodNotAllowed,
     /// The object exists already, or its state does not allow the change.
     Conflict,
+    /// Host admission is temporarily busy with lifecycle or limit changes.
+    ResourceBusy,
     /// The object is declared in a file. Edit the file and reload.
     FileManaged,
     /// A destructive action needs `?confirm=true`.
@@ -71,6 +73,7 @@ impl Code {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::Conflict
+            | Self::ResourceBusy
             | Self::FileManaged
             | Self::ConfirmRequired
             | Self::WipLimit
@@ -125,6 +128,9 @@ impl ApiError {
     }
     pub fn conflict(m: impl Into<String>) -> Self {
         Self::new(Code::Conflict, m)
+    }
+    pub fn resource_busy(m: impl Into<String>) -> Self {
+        Self::new(Code::ResourceBusy, m)
     }
     pub fn invalid(m: impl Into<String>) -> Self {
         Self::new(Code::Invalid, m)

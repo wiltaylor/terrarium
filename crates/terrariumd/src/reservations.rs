@@ -306,7 +306,11 @@ pub async fn grant(
     body: NewBody,
 ) -> ApiResult<Reservation> {
     let _guard = state.executor.resource_lock(host).lock_owned().await;
-    state.executor.resource_verb_idle(host)?;
+    let busy = state.executor.resource_verb_idle(host);
+    let deferred = busy.is_err();
+    if !body.queue {
+        busy?;
+    }
     ready(state, host)?;
     let target = body.target.clone();
     let key = body.agent.clone();
@@ -365,7 +369,7 @@ pub async fn grant(
     // marks the reservation active until the host acknowledges it.
     let r = state
         .db
-        .write(actor.label(), move |tx| store::request(tx, req, at))
+        .write(actor.label(), move |tx| store::request_deferred(tx, req, at, deferred))
         .await?;
     if let Err(e) = preflight(state, &r).await {
         let id = r.id.clone();
