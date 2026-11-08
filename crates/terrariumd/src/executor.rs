@@ -179,13 +179,13 @@ pub struct Collected {
 }
 
 impl Collected {
-    fn end(&self) -> End {
+    pub(crate) fn end(&self) -> End {
         self.end
             .clone()
             .unwrap_or_else(|| End::error("lost", "the run ended without an end"))
     }
 
-    fn stderr_tail(&self) -> String {
+    pub(crate) fn stderr_tail(&self) -> String {
         let s = String::from_utf8_lossy(&self.stderr);
         let start = s.len().saturating_sub(2000);
         let mut i = start;
