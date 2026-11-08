@@ -31,6 +31,7 @@ pub mod harness_tools;
 pub mod harness_versions;
 pub mod hosts;
 pub mod idle_alert;
+pub mod trouble;
 pub mod ingest;
 pub mod input_watchdog;
 pub mod jobs;

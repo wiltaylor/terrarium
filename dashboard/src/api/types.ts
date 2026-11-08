@@ -2535,6 +2535,8 @@ export interface UsagePoint extends UsageTotals {
 
 /** `GET /api/cards/{id}/usage` (docs/api.md §16.4): the samples attributed to one card. */
 export interface CardUsage {
+  working_seconds?: number;
+  signals?: string[];
   card: string;
   title: string;
   project: string;
