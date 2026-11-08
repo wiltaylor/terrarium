@@ -258,6 +258,22 @@ fn refuse(
     if let Some(card_id) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:")) {
         drop_return_turns(t, &sp.id, card_id)?;
     }
+    // Reconcile may retry the same refusal at every start or event lag.
+    // An assignment change or a new park starts a new refusal state.
+    let repeated: bool = t.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events e
+         WHERE e.agent_id = ?1 AND e.kind = 'agent.unpark_refused'
+           AND e.at >= ?2 AND json_extract(e.payload, '$.assignee') = ?3
+           AND NOT EXISTS(SELECT 1 FROM events a WHERE a.seq > e.seq
+             AND a.card = ?4 AND a.kind = 'card'
+             AND json_extract(a.payload, '$.change') = 'assigned'))",
+        rusqlite::params![sp.id, sp.parked_at, other,
+            sp.bound.as_deref().and_then(|b| b.strip_prefix("card:"))],
+        |r| r.get(0),
+    )?;
+    if repeated {
+        return Ok(());
+    }
     let who = crate::store::agents::display_name(t, other)?.unwrap_or_else(|| other.to_owned());
     t.emit(
         EventDraft::new(
@@ -581,6 +597,9 @@ fn action_of(ev: &StoredEvent, parked: bool) -> Option<Action> {
     match ev.kind.as_str() {
         "card" => match s("change")? {
             "moved" => on_move(s("from")?, s("to")?, parked),
+            "assigned" if parked && ev.data.get("assignee") == Some(&Value::Null) => {
+                Some(Action::Unpark)
+            }
             "archived" => Some(Action::End(
                 spawns::CANCELLED,
                 "the card was archived".into(),
@@ -621,6 +640,9 @@ fn data_block(what: &str, text: &str) -> String {
 /// The unpark turn of a card that came back. The move comment and the
 /// card body are data: quoted, between markers.
 pub(crate) fn return_turn(card: &board::Card, ev: &StoredEvent) -> String {
+    if ev.data.get("change").and_then(Value::as_str) == Some("assigned") {
+        return return_text(card, "the other worker left the card", None, false);
+    }
     let s = |k: &str| ev.data.get(k).and_then(Value::as_str).unwrap_or("?");
     let comment = ev.data.get("comment").and_then(Value::as_str);
     return_text(
@@ -686,12 +708,17 @@ async fn handle(state: &Shared, ev: StoredEvent) {
     let b = Bound::new(KIND_CARD, &card_id);
     let key = b.clone();
     let project = ev.project.clone();
+    // Assignment release is shared by both board flows. The move rules
+    // do not run when a worker unassigns a card without moving it.
+    let released = ev.kind == "card"
+        && ev.data.get("change").and_then(Value::as_str) == Some("assigned")
+        && ev.data.get("assignee") == Some(&Value::Null);
     let open = match state
         .db
         .read(move |c| {
             // With `board_flow = rules` the board rules park, unpark, and
             // end the agent (TER-170).
-            if let Some(p) = &project
+            if !released && let Some(p) = &project
                 && crate::store::projects::rules_flow(c, p)?
             {
                 return Ok(None);
@@ -716,7 +743,12 @@ async fn handle(state: &Shared, ev: StoredEvent) {
         Action::Unpark => {
             let id = card_id.clone();
             let turn = match state.db.read(move |c| board::get_card(c, &id)).await {
-                Ok(card) => Some(return_turn(&card, &ev)),
+                Ok(card) => {
+                    if released && WAIT_COLUMNS.contains(&card.column.as_str()) {
+                        return;
+                    }
+                    Some(return_turn(&card, &ev))
+                }
                 Err(e) => {
                     warn!(card = %card_id, "cannot read the card for the unpark turn: {e}");
                     None

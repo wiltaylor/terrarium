@@ -868,6 +868,28 @@ async fn an_unpark_is_refused_when_another_agent_has_the_card(flow: &str) {
     // The reconcile keeps it parked too.
     assert_eq!(terrariumd::bound::reconcile(&state(&td)).await, 0);
     assert!(spawn_row(&td, &ea).await["parked_at"].is_string());
+    for _ in 0..3 {
+        assert_eq!(terrariumd::bound::reconcile(&state(&td)).await, 0);
+    }
+    let repeated = td
+        .get(&format!("/api/agents/{ea}/events?kind=agent.unpark_refused"))
+        .await;
+    assert_eq!(repeated.ok().as_array().unwrap().len(), ev.as_array().unwrap().len());
+
+    // Releasing the assignment in place wakes A without a reconcile.
+    let r = td.post(&format!("/api/cards/{a}/assign"), json!({"assignee": null})).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let key = ea.clone();
+    until("unpark after unassign", || async {
+        spawn_row(&td, &key).await["parked_at"].is_null()
+    }).await;
+    td.wait_status(&ea, "idle").await;
+    until("the release turn", || async {
+        !return_turns(&td, &ea, &a).is_empty()
+    }).await;
+    assert_eq!(return_turns(&td, &ea, &a).len(), 1);
+    mv(&td, &a, "review", None).await;
+    parked(&td, &ea).await;
 
     // A direct move with another assignee: review -> in_progress by a claim.
     let w2 = worker(&td, "w2").await;
@@ -1003,6 +1025,47 @@ async fn a_park_stop_spares_an_unparked_agent() {
     let s = sessions(&td, &eph).await;
     assert_eq!(s.len(), 1, "{s:?}");
     assert_eq!(s[0]["resumes"], 0, "{s:?}");
+}
+
+/// TER-183: the unpark reaches the stop while it owns the WakeGuard.
+/// Its Busy wake must be retried after stop, preserving the session.
+#[tokio::test]
+async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
+    let (td, lead) = setup().await;
+    let s = state(&td);
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    let agent_id = eph.parse().unwrap();
+    td.wait_status(&eph, "idle").await;
+    let before = sessions(&td, &eph).await;
+    let hold = terrariumd::lifecycle::WakeGuard::take(&s.lifecycle, agent_id).unwrap();
+    terrariumd::bound::park(&s, &eph, "test stop race").await.unwrap();
+    let (entered, release) = td.sup.gate_stop(agent_id);
+    td.sup.settle_stops(true);
+    drop(hold);
+    let stopping = tokio::spawn({
+        let s = s.clone();
+        async move { terrariumd::lifecycle::park_stop(&s, agent_id).await }
+    });
+    tokio::time::timeout(Duration::from_secs(60), entered).await.unwrap().unwrap();
+    assert!(s.lifecycle.waking(agent_id));
+    let turn = format!("[System:card {c}] unpark inside stop");
+    assert_eq!(terrariumd::bound::unpark(&s, &eph, Some(turn.clone()), "test race").await.unwrap(),
+        terrariumd::bound::Unparked::Woken);
+    assert_eq!(terrariumd::lifecycle::wake(&s, agent_id, "test race").await,
+        terrariumd::lifecycle::Woke::Busy);
+    assert_eq!(agent(&td, &eph).await["status"], "idle");
+    release.send(()).unwrap();
+    stopping.await.unwrap();
+    until("the resumed return turn", || async {
+        td.sup.prompts(agent_id).contains(&turn)
+    }).await;
+    td.wait_status(&eph, "idle").await;
+    let after = sessions(&td, &eph).await;
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0]["id"], before[0]["id"]);
+    assert_eq!(after[0]["resumes"], 1, "{after:?}");
+    assert_eq!(td.sup.prompts(agent_id).iter().filter(|p| **p == turn).count(), 1);
 }
 
 /// TER-111 (R2-2): a parked agent whose harness still runs holds its
