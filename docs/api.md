@@ -26,6 +26,19 @@ Sections: [1 Transports](#1-transports-and-callers) ·
 
 ## 1. Transports and callers
 
+### Operator preferences
+
+`GET /api/preferences` reads the operator's server-side preferences.
+`PUT /api/preferences` replaces them with `{"default_agent":"meta/lead"}`
+or `{"default_agent":null}` to clear the default. Both are operator-only
+(`403 forbidden` for agents) and return the same object. The PUT accepts
+an existing agent's ULID or `project/name` (`404 not_found` otherwise).
+The response uses `project/name`. The preference is stored in SQLite,
+survives daemon and browser restarts, and becomes null if the agent is deleted.
+Ask an agent and Message an agent preselect this recipient, while allowing
+an override. With no default they retain the empty picker. Home and Inbox
+use the same dialogs.
+
 The daemon serves one router on two listeners.
 
 | Listener | Address | Authentication |

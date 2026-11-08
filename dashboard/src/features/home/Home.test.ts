@@ -43,6 +43,8 @@ it("asks from Home with the default agent", async () => {
   expect(navigate).toHaveBeenCalledWith("/inbox?status=asked");
 });
 it("messages from Home", async () => {
+  const a = api.world.agents.find((a) => !a.ephemeral)!;
+  await api.account.setPreferences({ default_agent: `${a.project}/${a.name}` });
   const send = vi.spyOn(api.mail, "send");
   mount(); button("Message an agent").click(); await settle();
   input("textarea", "Hello"); button("Send").click(); await settle();
@@ -50,8 +52,13 @@ it("messages from Home", async () => {
   expect(navigate).toHaveBeenCalledWith("/inbox");
 });
 it("opens New thread from Home with the shared dialog", async () => {
+  const open = vi.spyOn(api.threads, "open");
   mount(); button("New thread").click(); await settle();
   expect(document.querySelector("form[aria-label='New thread']")).not.toBeNull();
-  button("Cancel").click();
+  input("input[aria-label=Topic]", "A new topic");
+  input("textarea", "First message");
+  button("Open the thread").click(); await settle();
+  expect(open).toHaveBeenCalledWith({ scope: "global", topic: "A new topic", text: "First message" });
+  expect(navigate).toHaveBeenCalledWith(expect.stringContaining("/inbox/threads/"));
   expect(document.querySelector("form[aria-label='New thread']")).toBeNull();
 });
