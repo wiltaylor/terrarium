@@ -652,6 +652,23 @@ const MAX_ALIASES: usize = 32;
 
 /// The aliases of each host agent, by host-agent ID, sorted.
 pub fn host_aliases(conn: &Connection) -> ApiResult<HashMap<String, Vec<String>>> {
+    let mut clashes = conn.prepare(
+        "SELECT DISTINCT h.name, other.name, COALESCE(k.host_key, a.alias)
+         FROM job_host_aliases a JOIN hosts h ON h.id = a.host_id
+         LEFT JOIN job_host_keys k ON k.hostname = a.alias
+         JOIN job_host_aliases b ON b.host_id > a.host_id
+         JOIN hosts other ON other.id = b.host_id
+         LEFT JOIN job_host_keys kb ON kb.hostname = b.alias
+         WHERE COALESCE(k.host_key, a.alias) = COALESCE(kb.host_key, b.alias)
+            OR a.alias = COALESCE(kb.host_key, b.alias)
+            OR b.alias = COALESCE(k.host_key, a.alias)",
+    )?;
+    for clash in clashes.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+    })? {
+        let (host, other, key) = clash?;
+        tracing::warn!(%host, %other, %key, "stored job-host alias pin clash");
+    }
     let mut st = conn.prepare("SELECT host_id, alias FROM job_host_aliases ORDER BY alias")?;
     let rows = st
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
@@ -815,7 +832,14 @@ pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
             )
             .optional()?;
         if let Some(owner) = owner {
-            check_alias_pin(t, &owner, &key)?;
+            if let Err(error) = check_alias_pin(t, &owner, &key) {
+                if error.code != crate::error::Code::Conflict {
+                    return Err(error);
+                }
+                let host: String = t.query_row("SELECT name FROM hosts WHERE id = ?1", [&owner], |r| r.get(0))?;
+                tracing::warn!(%host, %hostname, %key, clash = %error.message, "skipping clashing job-host pin");
+                continue;
+            }
         }
         t.execute("INSERT INTO job_host_keys (hostname, host_key) VALUES (?1, ?2) ON CONFLICT(hostname) DO NOTHING", params![hostname, key])?;
     }
@@ -2207,36 +2231,47 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(
-            db.write("operator", |t| {
-                pin_hosts(t, vec![("two.lan".into(), "10.0.0.1".into())])
-            })
-            .await
-            .is_err()
-        );
+        db.write("system", |t| {
+            pin_hosts(t, vec![
+                ("two.lan".into(), "10.0.0.1".into()),
+                ("unrelated.lan".into(), "10.0.0.9".into()),
+            ])
+        }).await.unwrap();
+        db.read_now(|c| {
+            let unrelated = canonical_key(c, "unrelated.lan")?;
+            assert_eq!(unrelated, "10.0.0.9");
+            let q = queues(&[("p", 1, &unrelated)]);
+            let picked = pick(vec![job("J1", "p", JobKind::Validate, "r", "b")], &[], &q, &HashMap::new());
+            assert_eq!(ids(&picked), ["J1"]);
+            assert_eq!(picked[0].1, "10.0.0.9");
+            Ok(())
+        }).unwrap();
         db.write("operator", |t| {
             pin_hosts(t, vec![("free.lan".into(), "10.0.0.1".into())])
         })
         .await
         .unwrap();
-        assert!(
+        assert_eq!(
             db.write("operator", |t| {
                 set_host_aliases(t, "second", &["free.lan".into()])
             })
             .await
-            .is_err()
+            .unwrap_err().code.status(),
+            axum::http::StatusCode::CONFLICT
         );
-        assert!(
+        assert_eq!(
             db.write("operator", |t| {
                 set_host_aliases(t, "second", &["FIRST".into()])
             })
             .await
-            .is_err()
+            .unwrap_err().code.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
         );
-        assert!(
+        assert_eq!(
             db.write("operator", |t| { hosts::create(t, "one-lan", false) })
                 .await
-                .is_err()
+                .unwrap_err().code.status(),
+            axum::http::StatusCode::CONFLICT
         );
         // Failed writes leave the previous aliases and pins untouched.
         db.read_now(|c| {
