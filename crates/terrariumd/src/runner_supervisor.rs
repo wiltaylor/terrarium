@@ -4052,7 +4052,9 @@ impl RunnerSupervisor {
             if idle {
                 // The cached remote status can lag its delivery reply.
                 // Claim against the runner's real queue and turn state too.
-                let claimed = r.claim_idle_stop().await;
+                let claimed = tokio::time::timeout(Duration::from_secs(5), r.claim_idle_stop())
+                    .await
+                    .unwrap_or_else(|_| Err(terrarium_runner::RunnerError::Other("idle-stop claim timed out".into())));
                 if !matches!(claimed, Ok(true)) {
                     if let Err(e) = &claimed {
                         if matches!(e, terrarium_runner::RunnerError::Control(e) if e.code == "method_not_found")
@@ -4074,6 +4076,10 @@ impl RunnerSupervisor {
                     if let Some(slot) = lock(&self.inner.slots).get_mut(&agent) {
                         slot.stop_requested = false;
                     }
+                    // These paths deferred their hand-over while the
+                    // claim RPC held the stop flag. No new idle event is
+                    // guaranteed after a refusal, so resume them now.
+                    self.deliver_pending(agent);
                     if let Some(state) = self.state() {
                         tokio::spawn(async move {
                             crate::lifecycle::wake(&state, agent, "idle_stop_refused").await;
@@ -5126,6 +5132,7 @@ mod tests {
         lost: bool,
         claimed: AtomicBool,
         typed: Mutex<Vec<String>>,
+        typed_ready: tokio::sync::Notify,
     }
 
     impl RunnerHandle for ClaimRunner {
@@ -5194,6 +5201,7 @@ mod tests {
         fn type_turn(&self, text: String) -> terrarium_runner::Delivery {
             assert!(!self.claimed.load(Ordering::SeqCst));
             lock(&self.typed).push(text);
+            self.typed_ready.notify_one();
             terrarium_runner::test_support::delivered_turn()
         }
         fn claim_idle_stop(&self) -> BoxFuture<'_, terrarium_runner::Result<bool>> {
@@ -5218,7 +5226,10 @@ mod tests {
 
     #[tokio::test]
     async fn idle_stop_claim_rpc_keeps_a_turn_retryable_on_refusal_and_lost_reply() {
-        for lost in [false, true] {
+        for (lost, timeout, pointer) in [
+            (false, false, false), (true, false, false), (true, true, false),
+            (false, false, true), (true, false, true), (true, true, true),
+        ] {
             let tmp = tempfile::tempdir().unwrap();
             let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
                 tmp.path().join("state"),
@@ -5238,6 +5249,7 @@ mod tests {
                 lost,
                 claimed: AtomicBool::new(false),
                 typed: Mutex::default(),
+                typed_ready: tokio::sync::Notify::new(),
             });
             let mut slot = Slot::new(agent);
             slot.runner = Some(runner.clone());
@@ -5254,10 +5266,23 @@ mod tests {
                 sup.send_turn(id, "queued turn".into()).await,
                 Err(SupervisorError::NotRunning(_))
             ));
-            runner.reply.notify_one();
+            if pointer {
+                sup.lease_granted(id, "box".into(), "lease".into());
+            } else {
+                lock(&sup.inner.slots).get_mut(&id).unwrap().turns.push("pending hand-over".into());
+                sup.deliver_pending(id);
+            }
+            assert!(lock(&runner.typed).is_empty());
+            if !timeout {
+                runner.reply.notify_one();
+            }
             assert!(stop.await.unwrap().is_err());
+            tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified()).await.unwrap();
+            let pending = lock(&runner.typed)[0].clone();
+            if pointer { assert!(pending.contains("box"), "{pending}"); }
+            else { assert_eq!(pending, "pending hand-over"); }
             sup.send_turn(id, "queued turn".into()).await.unwrap();
-            assert_eq!(&*lock(&runner.typed), &["queued turn"]);
+            assert_eq!(lock(&runner.typed)[1], "queued turn");
             assert!(!runner.claimed.load(Ordering::SeqCst));
         }
     }
