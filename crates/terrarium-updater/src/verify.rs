@@ -262,20 +262,26 @@ mod tests {
     /// its arguments and env: exit 0 accepts, any other exit refuses.
     #[tokio::test]
     async fn the_gh_command_runs_as_built_and_fails_closed() {
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("log");
         let fake = dir.path().join("gh");
-        std::fs::write(
-            &fake,
-            format!(
+        let staging = dir.path().join("gh.tmp");
+        let mut script = std::fs::File::create(&staging).unwrap();
+        let contents = format!(
                 "#!/bin/sh\necho \"$* token=$GH_TOKEN ref=$TERRARIUM_UPDATE_REF\" > {}\n\
                  [ \"$3\" = oci://{REF} ]\n",
                 log.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            );
+        script.write_all(contents.as_bytes()).unwrap();
+        script
+            .set_permissions(std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        script.sync_all().unwrap();
+        // Publish only after closing the writable handle, before executing it.
+        drop(script);
+        std::fs::rename(&staging, &fake).unwrap();
         let env = check_env(&Mode::Gh, false);
         let mut a = argv(&Mode::Gh, DEFAULT_REPO, DEFAULT_WORKFLOW, REF).unwrap();
         a[0] = fake.display().to_string();
