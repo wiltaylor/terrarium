@@ -54,13 +54,25 @@ const PID_DIR: &str = "/tmp";
 /// time (TER-123).
 pub const WRAP: &str = r#"f=$1; shift
 st() { s=; { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 0; s=${s##*) }; set -- $s; echo "${20}"; }
+visible=
+if [ -d /proc/self ] && [ -r /proc/mounts ]; then
+  while read -r dev mount kind opts rest; do
+    [ "$mount" = /proc ] || continue
+    [ "$kind" = proc ] || { visible=; break; }
+    visible=yes
+    case ,$opts, in
+      *,hidepid=0,*) ;;
+      *,hidepid=*) visible=; break ;;
+    esac
+  done < /proc/mounts
+fi
 for o in /tmp/terrarium-run-*.pid; do
   [ -f "$o" ] || continue
   q= t=
   read -r q t < "$o" 2>/dev/null
   case $q in ''|*[!0-9]*) continue ;; esac
   u=$(st "$q")
-  if { [ -d /proc/self ] && [ ! -d "/proc/$q" ]; } || { [ -n "$t" ] && [ -n "$u" ] && [ "$u" != "$t" ]; }; then
+  if { [ "$visible" = yes ] && [ ! -d "/proc/$q" ]; } || { [ -n "$t" ] && [ -n "$u" ] && [ "$u" != "$t" ]; }; then
     rm -f "$o" 2>/dev/null
   fi
 done
@@ -81,7 +93,7 @@ pub const KILL: &str = r#"f=$1; g=${2:-5}; p= t=
 [ -f "$f" ] || sleep 1
 [ -f "$f" ] && read -r p t < "$f"
 case $p in ''|*[!0-9]*) echo none; exit 0 ;; esac
-[ "$p" -gt 1 ] 2>/dev/null || { echo none; exit 0; }
+[ "$p" -gt 1 ] 2>/dev/null || { rm -f "$f"; echo none; exit 0; }
 rm -f "$f"
 if [ -n "$t" ]; then
   s=
@@ -624,6 +636,36 @@ mod tests {
                 .unwrap();
             assert!(out.status.success());
             assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "none");
+            assert!(!file.exists());
+        }
+    }
+
+    #[test]
+    fn wrapper_removes_dead_pidfiles_only_with_known_visibility() {
+        for options in [None, Some("rw,hidepid=2"), Some("rw,hidepid=0"), Some("rw")] {
+            let dir = tempfile::tempdir().unwrap();
+            let proc = dir.path().join("proc");
+            std::fs::create_dir_all(proc.join("self")).unwrap();
+            if let Some(options) = options {
+                std::fs::write(
+                    proc.join("mounts"),
+                    format!("proc {} proc {options} 0 0\n", proc.display()),
+                )
+                .unwrap();
+            }
+            let file = dir.path().join("terrarium-run-dead.pid");
+            std::fs::write(&file, "12345\n").unwrap();
+            let script = WRAP
+                .replace("/proc", &proc.display().to_string())
+                .replace("/tmp/terrarium-run-", &format!("{}/terrarium-run-", dir.path().display()));
+            let out = std::process::Command::new("sh")
+                .args(["-c", &script, "test"])
+                .arg(dir.path().join("own.pid"))
+                .arg("true")
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            assert_eq!(file.exists(), !matches!(options, Some("rw" | "rw,hidepid=0")));
         }
     }
 
