@@ -85,7 +85,7 @@ export default function InboxPage() {
       const boundary = append ? undefined : list().at(-1);
       const target = params.item;
       let nextCursor = append ? cursor : undefined;
-      let rows: InboxItem[] = [];
+      const rows: InboxItem[] = [];
       let more = false;
       do {
         const page = await api.inbox.list({ ...inboxQuery(tab(), status(), project()), limit: FETCH_SIZE, cursor: nextCursor });
