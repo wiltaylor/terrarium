@@ -414,13 +414,7 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
     tokio::time::sleep(Duration::from_millis(30)).await;
     let count: i64 = state
         .db
-        .read(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM messages",
-                [],
-                |r| r.get(0),
-            )?)
-        })
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?))
         .await
         .unwrap();
     assert_eq!(count, before, "native admission must not generate any mail");
