@@ -10,6 +10,20 @@ use terrarium_core::{
 use terrarium_host::{Client, ClientOptions};
 
 #[tokio::test]
+async fn old_reconciliation_cannot_open_a_new_connection_gate() {
+    let td = TestDaemon::start().await;
+    let executor = &td.daemon.as_ref().unwrap().state.executor;
+    executor.set_resource_pending("h", true);
+    let old = executor.resource_epoch("h");
+    executor.set_resource_pending("h", true);
+    assert!(!executor.finish_resource_reconcile("h", old.as_deref()));
+    assert!(executor.resource_pending("h"));
+    let current = executor.resource_epoch("h");
+    assert!(executor.finish_resource_reconcile("h", current.as_deref()));
+    assert!(!executor.resource_pending("h"));
+}
+
+#[tokio::test]
 async fn internal_commands_participate_in_reservation_cleanup() {
     let (td, client, server) = setup().await;
     let state = td.daemon.as_ref().unwrap().state.clone();

@@ -740,11 +740,31 @@ pub async fn reconcile_host(state: &Shared, host: &str) -> ApiResult<()> {
 }
 
 async fn reconcile_host_locked(state: &Shared, host: &str) -> ApiResult<()> {
+    let epoch = state.executor.resource_epoch(host);
     if !state.executor.hosts.is_online(host) {
         return Err(ApiError::conflict("host is offline"));
     }
     let name = host.to_owned();
     let rows = state.db.read(move |c| store::list(c, &name)).await?;
+    if rows.iter().any(|r| managed(r) && r.exclusive) {
+        let physical = state
+            .executor
+            .hosts
+            .capabilities(host)
+            .and_then(|c| c.capacity)
+            .ok_or_else(|| {
+                ApiError::conflict("exclusive reservation host capacity is unavailable")
+            })?;
+        if rows
+            .iter()
+            .filter(|r| managed(r) && r.exclusive)
+            .any(|r| r.cores.iter().any(|core| !physical.cpu_ids.contains(core)))
+        {
+            return Err(ApiError::conflict(
+                "reserved CPUs are missing after host reconnect; admission remains closed",
+            ));
+        }
+    }
     if rows.iter().any(|r| managed(r) && r.exclusive) {
         isolate(state, host, None).await?;
     }
@@ -765,7 +785,14 @@ async fn reconcile_host_locked(state: &Shared, host: &str) -> ApiResult<()> {
             apply(state, r, false).await?;
         }
     }
-    state.executor.set_resource_pending(host, false);
+    if !state
+        .executor
+        .finish_resource_reconcile(host, epoch.as_deref())
+    {
+        return Err(ApiError::conflict(
+            "host reconnected during reservation reconciliation; retry required",
+        ));
+    }
     Ok(())
 }
 

@@ -23,7 +23,7 @@
 //! limit, the session stops taking events, and the backpressure goes back
 //! to the process.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1231,7 +1231,7 @@ async fn pull_via_cat(
 pub struct Executor {
     /// Serialize reservation enforcement and cleanup across API calls/timers.
     pub resource_lock: tokio::sync::Mutex<()>,
-    resource_pending: Mutex<HashSet<String>>,
+    resource_pending: Mutex<HashMap<String, String>>,
     pub hosts: Arc<HostRegistry>,
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
     pub max_per_agent: usize,
@@ -1265,7 +1265,7 @@ impl Executor {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if pending {
-            hosts.insert(host.to_owned());
+            hosts.insert(host.to_owned(), ulid::Ulid::new().to_string());
         } else {
             hosts.remove(host);
         }
@@ -1275,7 +1275,27 @@ impl Executor {
         self.resource_pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .contains(host)
+            .contains_key(host)
+    }
+
+    pub fn resource_epoch(&self, host: &str) -> Option<String> {
+        self.resource_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(host)
+            .cloned()
+    }
+
+    pub fn finish_resource_reconcile(&self, host: &str, epoch: Option<&str>) -> bool {
+        let mut pending = self
+            .resource_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if pending.get(host).map(String::as_str) != epoch {
+            return false;
+        }
+        pending.remove(host);
+        true
     }
 
     fn table(&self) -> MutexGuard<'_, HashMap<String, Arc<ExecSession>>> {
