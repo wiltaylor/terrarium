@@ -453,6 +453,47 @@ async fn rpc(socket: &Path, method: &str, params: Value) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_runner_api_merges_queues_and_refuses_after_real_handoff() {
+    use terrariumd::supervisor::Supervisor;
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    hold(&td, &id).await;
+    td.post(&format!("/api/agents/{id}/send"), Some(json!({"text": "runner first"}))).await;
+    let agent = id.parse().unwrap();
+    td.sup.reset_gate(agent, true);
+    td.post(&format!("/api/agents/{id}/send"), Some(json!({"text": "slot second"}))).await;
+    let queued = td.get(&format!("/api/agents/{id}/queued")).await;
+    let items = queued["items"].as_array().unwrap();
+    assert_eq!(items.iter().map(|t| t["source"].as_str().unwrap()).collect::<Vec<_>>(), ["runner", "supervisor"]);
+    assert_eq!(items[0]["body"], "runner first");
+    assert_eq!(items[1]["body"], "slot second");
+    let runner_id = items[0]["id"].as_str().unwrap();
+    let slot_id = items[1]["id"].as_str().unwrap();
+    let path = format!("/api/agents/{id}/queued/{runner_id}?source=runner");
+    assert_eq!(td.req(Method::DELETE, &path, None, None).await.0, 204);
+    assert_eq!(td.req(Method::DELETE, &path, None, None).await.0, 404);
+    // Opening the gate runs deliver_pending and transfers the slot turn to the real runner.
+    td.sup.reset_gate(agent, false);
+    let path = format!("/api/agents/{id}/queued/{slot_id}?source=supervisor");
+    assert_eq!(td.req(Method::DELETE, &path, None, None).await.0, 404);
+    let queued = td.get(&format!("/api/agents/{id}/queued")).await;
+    let live_id = queued["items"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(queued["items"][0]["source"], "runner");
+    end_hold(&td, &id).await;
+    td.wait_status(&id, "idle").await;
+    let start = Instant::now();
+    while !prompts(&td, &id).await.iter().any(|t| t == "[User] slot second") {
+        assert!(start.elapsed() < WAIT);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let path = format!("/api/agents/{id}/queued/{live_id}?source=runner");
+    assert_eq!(td.req(Method::DELETE, &path, None, None).await.0, 404);
+    assert!(!prompts(&td, &id).await.iter().any(|t| t == "[User] runner first"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn idle_stop_refuses_a_turn_handed_over_after_the_idle_check() {
     use terrarium_core::AgentStatus;
     use terrariumd::supervisor::{Supervisor, SupervisorError};

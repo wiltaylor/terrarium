@@ -108,6 +108,33 @@ function mountConversation(initial: Agent) {
 }
 
 describe("the queued turns", () => {
+  it("keeps store items visible when the runner queue is unavailable", async () => {
+    sessions.mockResolvedValue({ items: [] });
+    queued.mockResolvedValue({ items: [turn(1, "stored")], queues: { runner: "unavailable" } });
+    const { el, items } = mountConversation(agent("working"));
+    await vi.waitFor(() => expect(items()).toEqual(["stored"]));
+    expect(el.textContent).toContain("Runner queue: unavailable");
+  });
+
+  it("does not poll an empty idle queue", async () => {
+    vi.useFakeTimers();
+    try {
+      sessions.mockResolvedValue({ items: [] });
+      queued.mockResolvedValue({ items: [] });
+      mountConversation(agent("idle"));
+      await Promise.resolve();
+      await Promise.resolve();
+      const calls = queued.mock.calls.length;
+      expect(calls).toBe(1);
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(queued).toHaveBeenCalledTimes(calls);
+    } finally {
+      dispose?.();
+      dispose = undefined;
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["runner", "supervisor"] as const)("edits opaque %s IDs even without a store queue count", async (source) => {
     sessions.mockResolvedValue({ items: [] });
     queued.mockResolvedValue({ items: [{ ...turn(1, "live"), id: "opaque-id", source }] });

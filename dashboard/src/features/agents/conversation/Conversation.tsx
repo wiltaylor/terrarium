@@ -151,6 +151,7 @@ export function LiveLine(props: { agent: Agent }) {
  */
 export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => void }) {
   const [items, setItems] = createSignal<QueuedTurn[]>([]);
+  const [runnerStatus, setRunnerStatus] = createSignal<string | null>(null);
   const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal<number | string | null>(null);
   let gen = 0;
@@ -158,7 +159,10 @@ export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => voi
     const mine = ++gen;
     try {
       const r = await api.agents.queued(props.agent.id);
-      if (mine === gen) setItems(r.items);
+      if (mine === gen) {
+        setItems(r.items);
+        setRunnerStatus(r.queues?.runner && r.queues.runner !== "available" ? r.queues.runner : null);
+      }
     } catch (e) {
       if (mine === gen) setError(e);
     }
@@ -170,11 +174,12 @@ export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => voi
       else {
         gen++;
         setItems([]);
+        setRunnerStatus(null);
       }
     }),
   );
   const timer = setInterval(() => {
-    if (!["stopped", "error"].includes(props.agent.status)) void load();
+    if (["working", "blocked"].includes(props.agent.status) || items().length > 0) void load();
   }, 2000);
   onCleanup(() => { clearInterval(timer); gen++; });
   const take = async (turn: QueuedTurn, edit: boolean) => {
@@ -193,9 +198,10 @@ export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => voi
     }
   };
   return (
-    <Show when={items().length || error()}>
+    <Show when={items().length || error() || runnerStatus()}>
       <section class="convo-queued" aria-label="Queued turns">
         <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+        <Show when={runnerStatus()}><p class="small muted">Runner queue: {runnerStatus()}. Other queued turns are shown below.</p></Show>
         <Show when={items().length}>
           <p class="small muted convo-queued-head">Queued: these turns go to the agent in this order when it wakes.</p>
           <ol class="convo-queued-list">

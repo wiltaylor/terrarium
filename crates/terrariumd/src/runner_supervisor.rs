@@ -4168,35 +4168,38 @@ impl Supervisor for RunnerSupervisor {
     fn list_pending(
         &self,
         agent: AgentId,
-    ) -> BoxFuture<'_, Result<Vec<crate::supervisor::PendingTurn>, SupervisorError>> {
+    ) -> BoxFuture<'_, Result<crate::supervisor::PendingTurns, SupervisorError>> {
         Box::pin(async move {
             let runner = {
                 let slots = lock(&self.inner.slots);
                 let Some(slot) = slots.get(&agent) else {
-                    return Ok(Vec::new());
+                    return Ok(crate::supervisor::PendingTurns::default());
                 };
                 slot.runner.clone()
             };
             let mut turns = Vec::new();
+            let mut runner_status = None;
             if let Some(runner) = runner {
-                turns = runner
-                    .list_pending()
-                    .await
-                    .map_err(other)?
-                    .into_iter()
+                match runner.list_pending().await {
+                    Ok(pending) => turns = pending.into_iter()
                     .map(|t| crate::supervisor::PendingTurn {
                         id: t.id,
                         text: t.text,
                         source: "runner",
                     })
-                    .collect();
+                    .collect(),
+                    Err(terrarium_runner::RunnerError::Control(e)) if e.code == "method_not_found" => {
+                        runner_status = Some("unsupported");
+                    }
+                    Err(_) => runner_status = Some("unavailable"),
+                }
             }
             // Read the upstream queue last so a handoff cannot appear twice.
             // As with dispatch itself, an item may leave between snapshots.
             if let Some(slot) = lock(&self.inner.slots).get(&agent) {
                 turns.extend(slot.turns.clone());
             }
-            Ok(turns)
+            Ok(crate::supervisor::PendingTurns { items: turns, runner: runner_status })
         })
     }
 
@@ -5275,6 +5278,7 @@ mod tests {
 
     struct ClaimRunner {
         id: AgentId,
+        pending_error: Option<bool>,
         entered: tokio::sync::Notify,
         reply: tokio::sync::Notify,
         lost: bool,
@@ -5284,6 +5288,13 @@ mod tests {
     }
 
     impl RunnerHandle for ClaimRunner {
+        fn list_pending(&self) -> BoxFuture<'_, terrarium_runner::Result<Vec<terrarium_runner::WaitingTurn>>> {
+            Box::pin(async move {
+                Err(if self.pending_error == Some(true) {
+                    terrarium_runner::RunnerError::Control(terrarium_runner::RpcError::method_not_found("list_pending"))
+                } else { terrarium_runner::RunnerError::Exited })
+            })
+        }
         fn agent(&self) -> AgentId {
             self.id
         }
@@ -5373,6 +5384,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_runner_errors_keep_supervisor_items() {
+        for (unsupported, expected) in [(true, "unsupported"), (false, "unavailable")] {
+            let tmp = tempfile::tempdir().unwrap();
+            let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+                tmp.path().join("state"), tmp.path().join("run"),
+                tmp.path().join("prompts"), SandboxConfig::default(), HashMap::new(),
+            ));
+            let agent: Agent = serde_json::from_value(serde_json::json!({
+                "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
+            })).unwrap();
+            let id = agent.id;
+            let runner = Arc::new(ClaimRunner {
+                id, pending_error: Some(unsupported),
+                entered: tokio::sync::Notify::new(), reply: tokio::sync::Notify::new(),
+                lost: false, claimed: AtomicBool::new(false), typed: Mutex::default(),
+                typed_ready: tokio::sync::Notify::new(),
+            });
+            let mut slot = Slot::new(agent);
+            slot.runner = Some(runner);
+            slot.turns.push(String::from("still waiting").into());
+            lock(&sup.inner.slots).insert(id, slot);
+            let pending = sup.list_pending(id).await.unwrap();
+            assert_eq!(pending.runner, Some(expected));
+            assert_eq!(pending.items.len(), 1);
+            assert_eq!(pending.items[0].text, "still waiting");
+            assert_eq!(pending.items[0].source, "supervisor");
+        }
+    }
+
+    #[tokio::test]
     async fn pending_slot_turns_keep_ids_order_and_refuse_after_handoff() {
         let tmp = tempfile::tempdir().unwrap();
         let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
@@ -5392,7 +5433,7 @@ mod tests {
             .map(|s| crate::supervisor::PendingTurn::from(s.to_owned()))
             .collect();
         lock(&sup.inner.slots).insert(id, slot);
-        let pending = sup.list_pending(id).await.unwrap();
+        let pending = sup.list_pending(id).await.unwrap().items;
         assert_eq!(
             pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
             ["first", "second", "third"]
@@ -5402,7 +5443,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let remaining = sup.list_pending(id).await.unwrap();
+        let remaining = sup.list_pending(id).await.unwrap().items;
         assert_eq!(
             remaining.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
             [pending[0].id.as_str(), pending[2].id.as_str()]
@@ -5440,6 +5481,7 @@ mod tests {
             let id = agent.id;
             let runner = Arc::new(ClaimRunner {
                 id,
+                pending_error: None,
                 entered: tokio::sync::Notify::new(),
                 reply: tokio::sync::Notify::new(),
                 lost,

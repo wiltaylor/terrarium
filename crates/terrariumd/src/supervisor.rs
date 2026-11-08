@@ -267,12 +267,19 @@ impl From<String> for PendingTurn {
 }
 
 /// Runs agents. Work happens in the background and shows up as events.
+#[derive(Default)]
+pub struct PendingTurns {
+    pub items: Vec<PendingTurn>,
+    /// Only the runner queue failed. Other queues are still usable.
+    pub runner: Option<&'static str>,
+}
+
 pub trait Supervisor: Send + Sync + 'static {
     fn list_pending(
         &self,
         _agent: AgentId,
-    ) -> BoxFuture<'_, Result<Vec<PendingTurn>, SupervisorError>> {
-        Box::pin(async { Ok(Vec::new()) })
+    ) -> BoxFuture<'_, Result<PendingTurns, SupervisorError>> {
+        Box::pin(async { Ok(PendingTurns::default()) })
     }
     fn cancel_pending(
         &self,
@@ -634,6 +641,7 @@ mod fake {
         compact: FakeCompact,
         /// The compactions that started. For tests.
         compactions: usize,
+        pending_error: Option<bool>,
     }
 
     #[derive(Default)]
@@ -1057,6 +1065,11 @@ mod fake {
                 .unwrap_or_default()
         }
 
+        /// Fail queue listing, as an old or disconnected runner does. For tests.
+        pub fn fail_pending(&self, agent: AgentId, unsupported: bool) {
+            self.lock().agents.entry(agent).or_default().pending_error = Some(unsupported);
+        }
+
         /// True while the reset gate of `agent` is closed. For tests.
         pub fn gated(&self, agent: AgentId) -> bool {
             self.lock().agents.get(&agent).is_some_and(|a| a.gated)
@@ -1128,14 +1141,18 @@ mod fake {
         fn list_pending(
             &self,
             agent: AgentId,
-        ) -> BoxFuture<'_, Result<Vec<super::PendingTurn>, SupervisorError>> {
+        ) -> BoxFuture<'_, Result<super::PendingTurns, SupervisorError>> {
             Box::pin(async move {
-                Ok(self
+                if let Some(unsupported) = self.lock().agents.get(&agent).and_then(|a| a.pending_error) {
+                    return Err(if unsupported { SupervisorError::Unsupported("list_pending".into()) }
+                        else { SupervisorError::Other("runner exiting".into()) });
+                }
+                Ok(super::PendingTurns { items: self
                     .lock()
                     .agents
                     .get(&agent)
                     .map(|a| a.early.clone())
-                    .unwrap_or_default())
+                    .unwrap_or_default(), runner: None })
             })
         }
 

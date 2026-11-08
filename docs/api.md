@@ -2190,6 +2190,13 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/subscription` | `{"subscription": "anthropic-max-20x-2"}` | `200 {"agent", "from"?, "to", "applied"}` (below) |
 
+The queued-turn response also includes `queues.runner`: `available`,
+`unsupported` (an older runner without `list_pending`), or `unavailable`
+(for example an exiting runner or lost control connection). A runner-list
+failure does not hide the supervisor or store items. The dashboard shows
+the marker and still allows editing those items. Empty idle queues are not
+polled repeatedly.
+
 All need project_admin; an agent may `compact` and `new-session`
 itself. The work happens in the background. A `send` writes a row to the
 delivery log first (§6.6).

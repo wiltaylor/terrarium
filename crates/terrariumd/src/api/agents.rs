@@ -1483,13 +1483,18 @@ async fn queued(
             }
         })
         .collect();
-    let live = state
+    let live = match state
         .supervisor
         .list_pending(agent_id(&a))
-        .await
-        .map_err(supervisor_error)?;
+        .await {
+            Ok(live) => live,
+            Err(e) => crate::supervisor::PendingTurns {
+                items: Vec::new(),
+                runner: Some(if matches!(e, SupervisorError::Unsupported(_)) { "unsupported" } else { "unavailable" }),
+            },
+        };
     let mut live_items = Vec::new();
-    for turn in live {
+    for turn in live.items {
         let text = redactor.redact_string_as(turn.text, &view).0;
         live_items.push(QueuedView {
             id: json!(turn.id),
@@ -1501,7 +1506,7 @@ async fn queued(
     }
     live_items.append(&mut items);
     let items = live_items;
-    Ok(Json(json!({"items": items})))
+    Ok(Json(json!({"items": items, "queues": {"runner": live.runner.unwrap_or("available")}})))
 }
 
 /// `DELETE /api/agents/{id}/queued/{turn}` (TER-54): drop one queued turn

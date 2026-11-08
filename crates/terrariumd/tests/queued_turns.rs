@@ -79,6 +79,20 @@ fn bodies(items: &[Value]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn runner_list_errors_preserve_store_items_with_a_marker() {
+    for (unsupported, expected) in [(true, "unsupported"), (false, "unavailable")] {
+        let (td, w) = setup().await;
+        td.sup.fail_pending(aid(&w), unsupported);
+        let response = td.get(&format!("/api/agents/{w}/queued")).await;
+        let response = response.ok();
+        assert_eq!(response["queues"]["runner"], expected);
+        let items = response["items"].as_array().unwrap();
+        assert_eq!(bodies(items), ["first", "second", "third"]);
+        assert!(items.iter().all(|t| t["source"] == "store"));
+    }
+}
+
+#[tokio::test]
 async fn live_queue_remove_keeps_order_and_refuses_a_turn_that_started() {
     use terrariumd::supervisor::Supervisor;
     let td = TestDaemon::start().await;
