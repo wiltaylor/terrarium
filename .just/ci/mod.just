@@ -73,16 +73,27 @@ install-nextest: require-cargo
 		*) cargo install cargo-nextest --version 0.9.103 --locked ;;
 	esac
 
-# Parallel unit/integration tests and separate doctests. RESULTS_DIR retains rust.xml and doctests.json.
+# Default Rust gate. Cargo test was faster in the TER-239 contention comparison.
 [group('ci')]
 test: require-cargo
 	#!/usr/bin/env bash
 	set -euo pipefail
 	if [ -n "${RESULTS_DIR:-}" ]; then
 		mkdir -p "$RESULTS_DIR"
-		rm -f "$RESULTS_DIR"/rust*.xml "$RESULTS_DIR/doctests.json"
+		: > "$RESULTS_DIR/rust.json"
 	fi
 	python3 scripts/rust_tests.py --workspace --no-fail-fast
+
+# Opt-in parallel runner. RESULTS_DIR retains rust.xml and doctests.json.
+[group('ci')]
+test-nextest: require-cargo
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [ -n "${RESULTS_DIR:-}" ]; then
+		mkdir -p "$RESULTS_DIR"
+		rm -f "$RESULTS_DIR"/rust*.xml "$RESULTS_DIR/doctests.json"
+	fi
+	python3 scripts/rust_tests.py --nextest --workspace --no-fail-fast
 
 # Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer, the deploy, the CI workflow)
 [group('ci')]

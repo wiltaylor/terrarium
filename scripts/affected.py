@@ -454,7 +454,7 @@ def main(argv: list[str]) -> int:
         if os.environ.get("RESULTS_DIR"):
             if not pl.full:
                 directory = Path(os.environ["RESULTS_DIR"])
-                for p in [*directory.glob("rust*.xml"), directory / "doctests.json"]:
+                for p in [directory / "rust.json"]:
                     if p.exists():
                         p.unlink()
         return run(cmds)

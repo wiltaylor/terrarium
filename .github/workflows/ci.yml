@@ -44,7 +44,6 @@ jobs:
           toolchain: 1.97.1
           components: rustfmt, clippy
       - uses: taiki-e/install-action@0b43677d266e02f8bd34a2096b57e23a01a92aff # just
-      - run: just ci::install-nextest
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       # harnesses.toml [node] pins the image's Node; the dashboard needs 22.19+.

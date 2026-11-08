@@ -356,9 +356,7 @@ class Cli(unittest.TestCase):
             changed.write_text("docs/api.md\n")
             results = Path(d, "results")
             results.mkdir()
-            Path(results, "doctests.json").write_text("stale\n")
-            Path(results, "rust.xml").write_text("stale\n")
-            Path(results, "rust-2.xml").write_text("stale\n")
+            Path(results, "rust.json").write_text("stale\n")
             calls = []
             meta = json.dumps({"packages": [], "workspace_members": []})
             with mock.patch.object(affected.subprocess, "run",
@@ -368,8 +366,7 @@ class Cli(unittest.TestCase):
                     mock.patch.dict(os.environ, {"RESULTS_DIR": str(results)}), \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(affected.main(["--files", str(changed), "--run"]), 0)
-            self.assertFalse(Path(results, "doctests.json").exists())
-            self.assertEqual(list(results.glob("rust*.xml")), [])
+            self.assertFalse(Path(results, "rust.json").exists())
             self.assertEqual(calls, [["just", "ci::fmt-check"]])
 
     def test_plan_json_shape(self):

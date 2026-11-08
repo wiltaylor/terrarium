@@ -42,7 +42,7 @@ It runs, in this order, the same parts as the GitHub CI `check` job
 
 1. `ci::fmt-check`: `cargo fmt --all --check`
 2. `ci::lint`: clippy over the workspace, warnings fail
-3. `ci::test`: `cargo nextest run --profile ci --workspace --no-fail-fast`, then `cargo test --doc --workspace --no-fail-fast`
+3. `ci::test`: `cargo test --workspace --no-fail-fast`
 4. `ci::scripts-test`: the Python tests under `scripts/`
 5. `ci::dashboard-check`: `npm run check`, then the dashboard unit tests (`npm run test -- --run`) in `dashboard/`
 
@@ -50,10 +50,14 @@ The merge queue (a batch merge job) runs it on the merged result. Run it
 yourself only when your change touches the build (see above).
 
 When `RESULTS_DIR` is set to an absolute path, `ci::test` also writes libtest
-JUnit XML to `$RESULTS_DIR/rust.xml` (additional affected invocations use
-`rust-2.xml`, and so on), doctest libtest JSON to `$RESULTS_DIR/doctests.json`,
-and `ci::dashboard-check` writes JUnit XML to
+JSON to `$RESULTS_DIR/rust.json`, and `ci::dashboard-check` writes JUnit XML to
 `$RESULTS_DIR/dashboard.xml`. Without `RESULTS_DIR` the output is the plain console output.
+
+`just ci::test-nextest` is opt-in: it installs pinned cargo-nextest 0.9.103,
+runs the bounded `ci` profile, then runs doctests separately. With `RESULTS_DIR`,
+it writes nextest JUnit to `rust.xml` and doctest libtest JSON to `doctests.json`.
+Cargo test remains the default because the TER-239 matched-load comparison
+was 642.2s for cargo test versus 791.1s for this nextest profile (2495 passed each).
 
 The recipes set `RUSTUP_TOOLCHAIN=1.97.1` (the toolchain CI pins) and the
 CI cargo env: `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`,

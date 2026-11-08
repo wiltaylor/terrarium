@@ -1,4 +1,4 @@
-"""Run CI's Rust tests with nextest JUnit and separate doctest JSON."""
+"""Stream CI Rust results, with an opt-in nextest/JUnit runner."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import subprocess
 import sys
 
 
-def reported(cmd: list[str], results: str, env: dict[str, str]) -> int:
+def reported(cmd: list[str], results: str, env: dict[str, str], filename: str = "doctests.json") -> int:
     """Tee this invocation, not previous appended results, and keep its status."""
-    with Path(results, "doctests.json").open("a", encoding="utf-8") as out:
+    with Path(results, filename).open("a", encoding="utf-8") as out:
         with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8",
                               errors="replace", env=env) as child:
             assert child.stdout is not None
@@ -41,7 +41,7 @@ def copy_junit(results: str, source: Path) -> None:
         shutil.copyfile(source, dest)
 
 
-def run(args: list[str]) -> int:
+def run_nextest(args: list[str]) -> int:
     code = subprocess.call(["just", "ci::install-nextest"])
     if code:
         return code
@@ -67,6 +67,18 @@ def run(args: list[str]) -> int:
             doc_code = subprocess.call(doc)
         code = code or doc_code
     return code
+
+
+def run(args: list[str]) -> int:
+    if args and args[0] == "--nextest":
+        return run_nextest(args[1:])
+    cmd = ["cargo", "test", *args]
+    results = os.environ.get("RESULTS_DIR")
+    if not results:
+        return subprocess.call(cmd)
+    Path(results).mkdir(parents=True, exist_ok=True)
+    return reported(cmd + ["--", "-Z", "unstable-options", "--format", "json", "--report-time"],
+                    results, dict(os.environ, RUSTC_BOOTSTRAP="1"), "rust.json")
 
 
 if __name__ == "__main__":
