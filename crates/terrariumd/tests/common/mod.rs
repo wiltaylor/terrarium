@@ -22,6 +22,24 @@ pub const DELAY: Duration = Duration::from_millis(20);
 /// The longest time a helper waits for a state before the test fails.
 pub const WAIT: Duration = Duration::from_secs(15);
 
+/// Each test gets its own database, but pays for schema creation only once
+/// per test binary. Close the connection before copying so WAL is checkpointed.
+pub fn seed_database(state: &Path) {
+    static TEMPLATE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let path = state.join("terrarium.db");
+    if path.exists() {
+        return; // Restart tests must keep their existing data.
+    }
+    let template = TEMPLATE.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = terrariumd::db::open(&dir.path().join("template.db")).unwrap();
+        conn.close().unwrap();
+        dir
+    });
+    std::fs::create_dir_all(state).unwrap();
+    std::fs::copy(template.path().join("template.db"), path).unwrap();
+}
+
 pub struct TestDaemon {
     pub daemon: Option<Daemon>,
     pub dir: tempfile::TempDir,
@@ -179,6 +197,7 @@ impl TestDaemon {
         if let Some(d) = self.daemon.take() {
             d.shutdown();
         }
+        seed_database(&self.state);
         let daemon = terrariumd::start(DaemonConfig {
             socket: self.socket.clone(),
             listen: listen.map(str::to_owned),
