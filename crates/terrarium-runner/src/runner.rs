@@ -198,10 +198,13 @@ pub const RESUBMIT_AFTER: Duration = Duration::from_secs(1);
 /// empties the input box and types the turn again.
 pub const MAX_RESUBMITS: u32 = 2;
 
-/// Text that shows in the input box this soon after a write of a person
-/// ([`Runner::write_person`]: the terminal of the agent, or `agent keys`)
-/// is the text of that person, not a lost turn: the watchdog does not flag it
-/// (TER-224). It covers the redraw of the harness and the runner's tick.
+/// After a write of a person ([`Runner::write_person`]: the terminal of
+/// the agent, or `agent keys`), the text in the input box is that
+/// person's, and the watchdog does not flag it, also when the agent was
+/// busy at the write and goes idle later (TER-224). The mark ends when the
+/// box of the agent that does not work reads empty for
+/// [`INPUT_CLEAR_DEBOUNCE`], counted from this long after the last write:
+/// the harness may draw the text late.
 pub const PERSON_INPUT_SLACK: Duration = Duration::from_secs(2);
 
 /// The input box of an agent that the watchdog blocked must read empty
@@ -239,8 +242,10 @@ struct State {
     /// input box ([`Adapter::input_pending`]), and whether the runner
     /// flagged it. No turn can go out while the box holds text.
     pending_input: Option<(Instant, bool)>,
-    /// The last write of a person ([`Runner::write_person`]).
-    person_write: Option<Instant>,
+    /// The input box holds text of a person ([`Runner::write_person`]):
+    /// the last write of the person, and since when the box reads empty
+    /// ([`PERSON_INPUT_SLACK`]).
+    person_text: Option<(Instant, Option<Instant>)>,
     /// Since when the input box of the agent that the watchdog blocked
     /// reads empty ([`INPUT_CLEAR_DEBOUNCE`]).
     input_cleared: Option<Instant>,
@@ -366,7 +371,7 @@ impl Runner {
                 spawned: now,
                 interrupt: None,
                 pending_input: None,
-                person_write: None,
+                person_text: None,
                 input_cleared: None,
             }),
             status_tx: watch::Sender::new(AgentStatus::Starting),
@@ -512,7 +517,7 @@ impl Runner {
     /// theirs, and the watchdog does not flag it ([`PERSON_INPUT_SLACK`],
     /// TER-224).
     pub async fn write_person(&self, bytes: &[u8]) -> Result<()> {
-        lock(&self.inner.state).person_write = Some(Instant::now());
+        lock(&self.inner.state).person_text = Some((Instant::now(), None));
         self.write(bytes).await
     }
 
@@ -1239,6 +1244,22 @@ impl Inner {
                 to_type = Some(text);
             }
 
+            // The mark of a person's text ends when the box of an agent
+            // that does not work reads empty for INPUT_CLEAR_DEBOUNCE,
+            // from PERSON_INPUT_SLACK after the last write (TER-224).
+            if let Some((wrote, empty)) = state.person_text {
+                if pending
+                    || state.status == AgentStatus::Working
+                    || now.duration_since(wrote) < PERSON_INPUT_SLACK
+                {
+                    state.person_text = Some((wrote, None));
+                } else {
+                    let empty = empty.unwrap_or(now);
+                    state.person_text = (now.duration_since(empty) < INPUT_CLEAR_DEBOUNCE)
+                        .then_some((wrote, Some(empty)));
+                }
+            }
+
             // The watchdog: an idle agent with text left in its input box
             // takes no turn, and nothing wakes it (TER-194). Flag it once:
             // a warning, and `blocked` with INPUT_PENDING_REASON, so the
@@ -1263,9 +1284,7 @@ impl Inner {
                 }
             } else if pending && state.in_flight.is_none() && state.status == AgentStatus::Idle {
                 let (since, flagged) = *state.pending_input.get_or_insert((now, false));
-                let typed = state
-                    .person_write
-                    .is_some_and(|w| w + PERSON_INPUT_SLACK >= since);
+                let typed = state.person_text.is_some();
                 if !flagged && !typed && now.duration_since(since) >= self.config.submit_timeout {
                     state.pending_input = Some((since, true));
                     let secs = now.duration_since(since).as_secs();

@@ -9,7 +9,7 @@
 //! stuck agent is seen.
 //!
 //! The runner flags each stuck box once, does not flag text that a person
-//! typed (a raw write), and unblocks only after the box stays empty for
+//! typed (`write_person`: the terminal, `agent keys`), and unblocks only after the box stays empty for
 //! `INPUT_CLEAR_DEBOUNCE`. The event pump drops a replayed runner event.
 //! So one stuck box gives one mail. The caller runs [`notify`] in a
 //! savepoint ([`crate::db::Tx::savepoint`]): all of its mails and its event

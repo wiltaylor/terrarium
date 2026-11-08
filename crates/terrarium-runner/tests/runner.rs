@@ -751,6 +751,40 @@ async fn text_typed_by_a_person_is_not_flagged() {
     );
 }
 
+/// TER-224, review round 2: a draft that a person types while the agent
+/// works (the fake TUI reads it after the turn) is still that person's
+/// when the agent goes idle, more than `PERSON_INPUT_SLACK` after the
+/// write. The watchdog does not flag it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_draft_typed_during_a_turn_is_not_flagged() {
+    let mut h = start(Opts {
+        env: env(&[
+            ("FAKE_TUI_PASTE_NEEDS_PAUSE", "1"),
+            ("FAKE_TUI_DELAY_MS", "3000"),
+        ]),
+        submit: ms(500),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    h.runner.write(b"work\r").await.expect("type");
+    until_status(&mut h.events, AgentStatus::Working).await;
+    h.runner
+        .write_person(b"\x1b[200~a draft\nfor later\x1b[201~")
+        .await
+        .expect("paste");
+    until_status(&mut h.events, AgentStatus::Idle).await;
+    until_screen(&h, "[Pasted text #1 +2 lines]").await;
+    tokio::time::sleep(ms(2_000)).await;
+    assert_eq!(h.runner.status(), AgentStatus::Idle);
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+    assert_eq!(
+        blocked_reasons(h.runner.events_path()),
+        Vec::<Option<String>>::new()
+    );
+}
+
 /// TER-224: a redraw that hides the stuck text for a frame (the fake TUI
 /// shows an empty prompt for 50 ms every 300 ms) does not unblock the
 /// agent. One stuck box gives one flag, so the daemon sends one mail. The

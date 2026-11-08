@@ -2821,14 +2821,16 @@ impl<'c> Tx<'c> {
 
     /// Run `f` in a SQLite savepoint. On an error of `f`, its writes roll
     /// back, the events, audit rows and staged files that it added are
-    /// dropped, and the rest of the transaction stays: all of `f` or none
-    /// of it. The error goes to the caller.
+    /// dropped, a redactor rebuild that it asked for is undone, and the
+    /// rest of the transaction stays: all of `f` or none of it. The error
+    /// goes to the caller.
     pub fn savepoint<T>(&mut self, f: impl FnOnce(&mut Self) -> ApiResult<T>) -> ApiResult<T> {
         let marks = (
             self.events.len(),
             self.audits.borrow().len(),
             self.files.len(),
         );
+        let rebuild = self.rebuild.clone();
         self.tx.execute_batch("SAVEPOINT tx_savepoint")?;
         match f(self) {
             Ok(v) => {
@@ -2841,6 +2843,7 @@ impl<'c> Tx<'c> {
                 self.events.truncate(marks.0);
                 self.audits.borrow_mut().truncate(marks.1);
                 self.files.truncate(marks.2);
+                self.rebuild = rebuild;
                 Err(e)
             }
         }
@@ -4659,9 +4662,11 @@ mod tests {
         insert(&mut t, "before").unwrap();
         let r: ApiResult<()> = t.savepoint(|t| {
             insert(t, "lost")?;
+            t.rebuild_redactor(Path::new("/state"));
             Err(ApiError::internal("the second step fails"))
         });
         assert!(r.is_err());
+        assert_eq!(t.rebuild, None, "the rebuild of the failed savepoint is undone");
         t.savepoint(|t| insert(t, "kept")).unwrap();
         let names: Vec<String> = t
             .prepare("SELECT name FROM projects ORDER BY name")
