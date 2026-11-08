@@ -1,7 +1,8 @@
 //! SQLite storage and schema migrations.
 //!
-//! Each migration runs once, in order. `PRAGMA user_version` records how many
-//! have run. Never edit a migration that has shipped; add a new one.
+//! The frozen legacy migrations use `PRAGMA user_version`. New migrations
+//! live in `migrations/*.sql` and are tracked by filename, not position.
+//! Never edit a migration that has shipped; add a uniquely named file.
 
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
@@ -16,7 +17,11 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::{EventDraft, EventHub, StoredEvent};
 use crate::store::audit::AuditEntry;
 
-/// The migrations, in order. Index + 1 is the schema version.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "migrations/"]
+struct NamedMigrations;
+
+/// Frozen legacy migrations. Index + 1 is the schema version.
 const MIGRATIONS: &[&str] = &[
     // 1: core tables. Board, memory, wiki, artifact, version, and usage
     // tables (PLAN §12-§16) come in later migrations.
@@ -3172,9 +3177,59 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
-/// Run every migration newer than the database's `user_version`.
+/// Run pending legacy migrations, then named migrations in filename order.
 pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
-    migrate_with(conn, MIGRATIONS)
+    let legacy = migrate_with(conn, MIGRATIONS)?;
+    Ok(legacy + migrate_embedded::<NamedMigrations>(conn)?)
+}
+
+fn migrate_embedded<E: rust_embed::RustEmbed>(conn: &mut Connection) -> anyhow::Result<usize> {
+    let mut names: Vec<_> = E::iter().filter(|name| name.ends_with(".sql")).collect();
+    names.sort();
+    let files: Vec<_> = names
+        .iter()
+        .map(|name| {
+            let file = E::get(name).with_context(|| format!("missing migration {name}"))?;
+            let sql = String::from_utf8(file.data.into_owned())?;
+            Ok((name.as_ref(), sql))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    let borrowed: Vec<_> = files
+        .iter()
+        .map(|(name, sql)| (*name, sql.as_str()))
+        .collect();
+    migrate_named(conn, &borrowed)
+}
+
+fn migrate_named(conn: &mut Connection, migrations: &[(&str, &str)]) -> anyhow::Result<usize> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY NOT NULL,
+            applied_at TEXT NOT NULL
+        );",
+    )?;
+    let mut applied = 0;
+    for (name, sql) in migrations {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )?;
+        if exists {
+            continue;
+        }
+        tx.execute_batch(sql)
+            .with_context(|| format!("migration {name} failed"))?;
+        tx.execute(
+            "INSERT INTO schema_migrations (name, applied_at) VALUES (?1, ?2)",
+            rusqlite::params![name, now()],
+        )?;
+        tx.commit()?;
+        tracing::info!(name, "applied migration");
+        applied += 1;
+    }
+    Ok(applied)
 }
 
 fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> anyhow::Result<usize> {
@@ -3210,6 +3265,84 @@ fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> anyhow::Result<us
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_migration_list_is_frozen() {
+        assert_eq!(
+            MIGRATIONS.len(),
+            97,
+            "add a named migration under migrations/ instead"
+        );
+    }
+
+    #[test]
+    fn embedded_sql_migration_is_loaded_and_applied() {
+        #[derive(rust_embed::RustEmbed)]
+        #[folder = "tests/fixtures/named-migrations/"]
+        struct Fixture;
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert_eq!(migrate_embedded::<Fixture>(&mut conn).unwrap(), 1);
+        assert!(
+            conn.table_exists(None, "embedded_migration_fixture")
+                .unwrap()
+        );
+        assert_eq!(migrate_embedded::<Fixture>(&mut conn).unwrap(), 0);
+        let name: String = conn
+            .query_row("SELECT name FROM schema_migrations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "ter-284-embedded.sql");
+    }
+
+    #[test]
+    fn named_migrations_upgrade_legacy_and_allow_earlier_names() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        conn.execute(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('preserved', ?1, ?1)",
+            [now()],
+        )
+        .unwrap();
+        let later = ("ter-300-later.sql", "CREATE TABLE later (id INTEGER);");
+        let earlier = ("ter-284-earlier.sql", "CREATE TABLE earlier (id INTEGER);");
+        assert_eq!(migrate_named(&mut conn, &[later]).unwrap(), 1);
+        assert_eq!(migrate_named(&mut conn, &[earlier, later]).unwrap(), 1);
+        assert_eq!(migrate_named(&mut conn, &[earlier, later]).unwrap(), 0);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+        let version: usize = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len());
+        let project: String = conn
+            .query_row("SELECT name FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(project, "preserved");
+    }
+
+    #[test]
+    fn named_migrations_roll_back_failed_schema_and_record() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let good = ("good.sql", "CREATE TABLE good (id INTEGER);");
+        let err = migrate_named(
+            &mut conn,
+            &[
+                good,
+                ("bad.sql", "CREATE TABLE bad (id INTEGER); invalid SQL"),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("migration bad.sql failed"));
+        assert!(conn.table_exists(None, "good").unwrap());
+        assert!(!conn.table_exists(None, "bad").unwrap());
+        assert_eq!(
+            migrate_named(
+                &mut conn,
+                &[good, ("bad.sql", "CREATE TABLE bad (id INTEGER);")]
+            )
+            .unwrap(),
+            1
+        );
+    }
 
     #[test]
     fn fresh_migrations_roll_back_together() {
