@@ -706,17 +706,33 @@ async fn the_pack_matches_code_flow_after_ten_runs_for_one_card() {
         td.post(
             &format!("/api/projects/{project}/repos"),
             json!({"name": "app", "url": "https://git.example/x/app.git"}),
-        ).await.ok();
+        )
+        .await
+        .ok();
         let target = format!("{project}-build");
-        td.post("/api/targets", json!({
-            "name": target, "kind": "host", "host": "offline", "project": project
-        })).await.ok();
-        td.put(&format!("/api/projects/{project}/delivery"), json!({
-            "target": target, "recipe": "true", "next_repos": ["app"]
-        })).await.ok();
+        td.post(
+            "/api/targets",
+            json!({
+                "name": target, "kind": "host", "host": "offline", "project": project
+            }),
+        )
+        .await
+        .ok();
+        td.put(
+            &format!("/api/projects/{project}/delivery"),
+            json!({
+                "target": target, "recipe": "true", "next_repos": ["app"]
+            }),
+        )
+        .await
+        .ok();
         if project == "ruled" {
-            td.patch(&format!("/api/projects/{project}"), json!({"board_flow": "rules"}))
-                .await.ok();
+            td.patch(
+                &format!("/api/projects/{project}"),
+                json!({"board_flow": "rules"}),
+            )
+            .await
+            .ok();
         }
         cards.push(new_card(&td, project, json!({"title": "busy", "column": "review"})).await);
     }
@@ -724,7 +740,9 @@ async fn the_pack_matches_code_flow_after_ten_runs_for_one_card() {
     for _ in 0..11 {
         let mut jobs = Vec::new();
         for card in &cards {
-            let r = td.post(&format!("/api/cards/{card}/merge"), json!({})).await;
+            let r = td
+                .post(&format!("/api/cards/{card}/merge"), json!({}))
+                .await;
             jobs.push(r.ok()["job"]["id"].as_str().unwrap().to_owned());
         }
         settle(&td).await;
