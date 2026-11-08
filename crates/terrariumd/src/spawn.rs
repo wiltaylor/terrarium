@@ -381,8 +381,11 @@ pub async fn spawn_with(
                     })
             };
             if !allowed(&first) {
-                let allowed = selection_rules.as_ref().map(|sp| sp.templates.join(", "))
-                    .filter(|s| !s.is_empty()).unwrap_or_else(|| "none".to_owned());
+                let allowed = selection_rules
+                    .as_ref()
+                    .map(|sp| sp.templates.join(", "))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "none".to_owned());
                 return Err(ApiError::forbidden(format!(
                     "template `{}` is not in spawn.templates (allowed: {allowed})",
                     first.use_key()
@@ -413,7 +416,8 @@ pub async fn spawn_with(
             }
             Err(ApiError::conflict(format!(
                 "template `{}` and its allowed alternative have no subscription headroom: {}",
-                first.use_key(), refusals.join("; ")
+                first.use_key(),
+                refusals.join("; ")
             )))
         })
         .await?;

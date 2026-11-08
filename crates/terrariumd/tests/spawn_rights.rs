@@ -453,28 +453,43 @@ async fn the_child_takes_the_owner_pool() {
     assert_eq!(r.status, 409, "{}", r.body);
     assert!(message(&r).contains("max-a: active usage limit"));
     runtime.usage.limits.clear("max-b");
-    runtime.usage.limits.mark("max-a", Some(chrono::Utc::now() - chrono::Duration::seconds(1)));
+    runtime.usage.limits.mark(
+        "max-a",
+        Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+    );
     let r = spawn_as(&td, &o, &o, json!({})).await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["agent"]["subscription"], "max-a");
 
-    runtime.db.write("system", |t| {
-        terrariumd::store::subscriptions::set_enabled(t, "max-a", false)?;
-        Ok(())
-    }).await.unwrap();
+    runtime
+        .db
+        .write("system", |t| {
+            terrariumd::store::subscriptions::set_enabled(t, "max-a", false)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let r = spawn_as(&td, &o, &o, json!({})).await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["agent"]["subscription"], "max-b");
-    runtime.db.write("system", |t| {
-        terrariumd::store::subscriptions::set_enabled(t, "max-a", true)?;
-        terrariumd::store::subscriptions::set_login_status(t, "max-a", "expired")
-    }).await.unwrap();
+    runtime
+        .db
+        .write("system", |t| {
+            terrariumd::store::subscriptions::set_enabled(t, "max-a", true)?;
+            terrariumd::store::subscriptions::set_login_status(t, "max-a", "expired")
+        })
+        .await
+        .unwrap();
     let r = spawn_as(&td, &o, &o, json!({})).await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["agent"]["subscription"], "max-b");
-    runtime.db.write("system", |t| {
-        terrariumd::store::subscriptions::set_login_status(t, "max-a", "unknown")
-    }).await.unwrap();
+    runtime
+        .db
+        .write("system", |t| {
+            terrariumd::store::subscriptions::set_login_status(t, "max-a", "unknown")
+        })
+        .await
+        .unwrap();
     terrariumd::accounts::remove(&runtime.state_dir, "max-a").unwrap();
     let r = spawn_as(&td, &o, &o, json!({})).await;
     assert_eq!(r.status, 201, "{}", r.body);
