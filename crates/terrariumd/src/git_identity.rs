@@ -84,7 +84,7 @@ impl Provenance {
         format!(
             "#!/bin/sh\nset -eu\nrepo_hook=$(dirname \"$0\")/prepare-commit-msg.repo\nif [ -x \"$repo_hook\" ]; then \"$repo_hook\" \"$@\"; fi\n\
              trailers=${{TERRARIUM_GIT_TRAILERS-}}\n\
-             if [ -n \"${{TERRARIUM_GIT_TRAILERS_FILE-}}\" ]; then\n\
+             if [ -n \"${{TERRARIUM_GIT_TRAILERS_FILE-}}\" ] && [ -r \"$TERRARIUM_GIT_TRAILERS_FILE\" ]; then\n\
                trailers=$(cat -- \"$TERRARIUM_GIT_TRAILERS_FILE\")\n\
              elif [ -z \"$trailers\" ]; then trailers={}; fi\n\
              printf '%s\\n' \"$trailers\" | while IFS= read -r trailer; do\n\
@@ -100,16 +100,152 @@ impl Provenance {
 pub async fn refresh(state: &Shared, id: &str) -> ApiResult<()> {
     let p = provenance(state, id).await?;
     let id = id.to_owned();
-    let workspace = state.db.read(move |c| Ok(agents::get(c, &id)?.agent.workspace)).await?;
-    if workspace.is_dir() {
+    let workspace = state
+        .db
+        .read(move |c| Ok(agents::get(c, &id)?.agent.workspace))
+        .await?;
+    if std::fs::symlink_metadata(&workspace).is_ok_and(|m| m.is_dir()) {
         use std::io::Write as _;
         let save = || -> std::io::Result<()> {
             let mut temp = tempfile::NamedTempFile::new_in(&workspace)?;
             temp.write_all(p.trailers.as_bytes())?;
-            temp.persist(workspace.join(TRAILERS_FILE)).map_err(|e| e.error)?;
+            temp.persist(workspace.join(TRAILERS_FILE))
+                .map_err(|e| e.error)?;
             Ok(())
         };
         save().map_err(|e| crate::error::ApiError::internal(e.to_string()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    fn git(dir: &Path, args: &[&str], p: &Provenance) -> String {
+        let mut env = BTreeMap::new();
+        p.identity.env(&mut env);
+        let o = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .envs(env)
+            .env_remove("TERRARIUM_GIT_TRAILERS")
+            .env_remove("TERRARIUM_GIT_TRAILERS_FILE")
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8(o.stdout).unwrap()
+    }
+
+    #[test]
+    fn instance_identity_from_env() {
+        if std::env::var_os("TERRARIUM_TEST_IDENTITY").is_some() {
+            assert_eq!(
+                Identity::from_env(),
+                Identity {
+                    name: "Instance Bot".into(),
+                    email: "bot@example.test".into()
+                }
+            );
+            return;
+        }
+        assert!(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "git_identity::tests::instance_identity_from_env"])
+                .env("TERRARIUM_TEST_IDENTITY", "1")
+                .env("TERRARIUM_GIT_NAME", "Instance Bot")
+                .env("TERRARIUM_GIT_EMAIL", "bot@example.test")
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    fn hook_parses_provenance_preserves_release_and_composes_repo_hook() {
+        use std::io::Write as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let p = Provenance {
+            identity: Identity { name: "Instance Bot".into(), email: "bot@example.test".into() },
+            trailers: "Terrarium-Session: 01SESSION\nTerrarium-Agent: proj/agent\nTerrarium-Harness: codex 1.2.3\nTerrarium-Model: model-'$(false)'\nTerrarium-Card: TER-258\n".into(),
+        };
+        git(d, &["init", "-q", "-b", "main"], &p);
+        let hooks = d.join(".git/hooks");
+        std::fs::write(hooks.join("prepare-commit-msg"), p.hook()).unwrap();
+        std::fs::write(
+            hooks.join("prepare-commit-msg.repo"),
+            "#!/bin/sh\nprintf 'Repo-Note: yes\\n' >> \"$1\"\n",
+        )
+        .unwrap();
+        for name in ["prepare-commit-msg", "prepare-commit-msg.repo"] {
+            std::fs::set_permissions(hooks.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        git(
+            d,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "release: test",
+                "-m",
+                "pre-release: true\nbump: minor",
+            ],
+            &p,
+        );
+        let message = git(d, &["show", "-s", "--format=%B"], &p);
+        assert!(message.contains("Repo-Note: yes"));
+        let mut parse = Command::new("git")
+            .args(["interpret-trailers", "--parse"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        parse
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(message.as_bytes())
+            .unwrap();
+        let out = parse.wait_with_output().unwrap();
+        assert!(out.status.success());
+        let parsed = String::from_utf8(out.stdout).unwrap();
+        for trailer in p.trailers.lines() {
+            assert!(parsed.contains(trailer), "{parsed}");
+        }
+        assert!(parsed.contains("pre-release: true"), "{parsed}");
+        assert!(parsed.contains("bump: minor"), "{parsed}");
+        assert!(!message.to_lowercase().contains("co-authored"));
+        assert_eq!(
+            git(d, &["show", "-s", "--format=%an <%ae>%n%cn <%ce>"], &p),
+            "Instance Bot <bot@example.test>\nInstance Bot <bot@example.test>\n"
+        );
+
+        // Merge messages also run prepare-commit-msg, while the daemon's
+        // hardened merge jobs intentionally bypass all checkout hooks.
+        git(d, &["checkout", "-q", "-b", "feature"], &p);
+        git(
+            d,
+            &["commit", "-q", "--allow-empty", "-m", "feat: branch"],
+            &p,
+        );
+        git(d, &["checkout", "-q", "main"], &p);
+        git(
+            d,
+            &["merge", "-q", "--no-ff", "feature", "-m", "chore: merge"],
+            &p,
+        );
+        let parsed = git(d, &["show", "-s", "--format=%(trailers:only)"], &p);
+        assert!(parsed.contains("Terrarium-Session: 01SESSION"), "{parsed}");
+    }
 }

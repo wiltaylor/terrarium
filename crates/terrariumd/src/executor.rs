@@ -4521,8 +4521,10 @@ pub async fn checkout_on_target(
     if let Some(a) = actor.agent() {
         let p = crate::git_identity::provenance(state, &a.id).await?;
         cmd.env.insert("TERRARIUM_COMMIT_HOOK".into(), p.hook());
-        cmd.env.insert("TERRARIUM_COMMIT_NAME".into(), p.identity.name);
-        cmd.env.insert("TERRARIUM_COMMIT_EMAIL".into(), p.identity.email);
+        cmd.env
+            .insert("TERRARIUM_COMMIT_NAME".into(), p.identity.name);
+        cmd.env
+            .insert("TERRARIUM_COMMIT_EMAIL".into(), p.identity.email);
     }
     if let Some(k) = git_known_hosts(state) {
         cmd.env.insert("TERRARIUM_GIT_KNOWN_HOSTS".into(), k);

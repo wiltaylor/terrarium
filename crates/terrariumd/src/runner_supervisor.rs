@@ -1822,8 +1822,13 @@ impl RunnerSupervisor {
         crate::git_identity::Identity::from_env().env(&mut spec.env);
         spec.env.insert(
             "TERRARIUM_GIT_TRAILERS_FILE".into(),
-            layout.workspace_mount.as_ref().unwrap_or(&layout.workspace)
-                .join(crate::git_identity::TRAILERS_FILE).display().to_string(),
+            layout
+                .workspace_mount
+                .as_ref()
+                .unwrap_or(&layout.workspace)
+                .join(crate::git_identity::TRAILERS_FILE)
+                .display()
+                .to_string(),
         );
         let env = cfg
             .sandbox

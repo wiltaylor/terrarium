@@ -988,7 +988,8 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
                 SupervisorEventKind::NewSession { .. }
                     | SupervisorEventKind::Status { .. }
                     | SupervisorEventKind::Harness(Event::SessionStarted { .. })
-            ).then_some(ev.agent);
+            )
+            .then_some(ev.agent);
             let ended = matches!(
                 &ev.kind,
                 SupervisorEventKind::Status {

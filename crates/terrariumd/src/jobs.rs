@@ -1880,6 +1880,7 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
 /// of the changed files. No credential goes in here.
 fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
+    crate::git_identity::Identity::from_env().env(&mut env);
     env.insert("TERRARIUM_JOB_KIND".into(), job.kind.as_str().to_owned());
     env.insert("TERRARIUM_JOB_ID".into(), job.id.clone());
     env.insert("TERRARIUM_HEAD".into(), head.to_owned());
@@ -2600,6 +2601,8 @@ sync() {
   rm -rf -- "$dir/.git/info" "$dir/.git/hooks" "$dir/.git/refs/replace" \
     "$dir/.git/objects/info/commit-graphs" "$dir/.git/worktrees"
   T init -q && T config core.logAllRefUpdates false || return 1
+  T config user.name "${GIT_COMMITTER_NAME:-Terrarium}" || return 1
+  T config user.email "${GIT_COMMITTER_EMAIL:-terrarium@localhost}" || return 1
   T for-each-ref --format='delete %(refname)' refs/replace/ | T update-ref --stdin || return 1
   T fetch -q --no-tags -- "$b" "+$r:$r" || return 1
   got=$(T rev-parse --verify -q "$r^{commit}")

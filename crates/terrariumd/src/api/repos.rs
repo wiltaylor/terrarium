@@ -221,7 +221,8 @@ async fn checkout_inner(
         None
     };
     let mut hooks = repo.hooks();
-    hooks.provenance = Some(crate::git_identity::provenance(state, &agent.agent.id.to_string()).await?);
+    hooks.provenance =
+        Some(crate::git_identity::provenance(state, &agent.agent.id.to_string()).await?);
     let c = Checkout {
         url: repo.url.clone(),
         dest: workspace.join(&dir),
