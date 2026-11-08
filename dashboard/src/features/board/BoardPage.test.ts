@@ -6,10 +6,11 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createMockApi } from "../../api/mock";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
-let onEvent: (e: import("../../api/types").AgentEvent) => void;
+const listeners = new Set<(e: import("../../api/types").AgentEvent) => void>();
+const onEvent = (e: import("../../api/types").AgentEvent) => listeners.forEach(fn => fn(e));
 vi.mock("../../stores", () => ({
   api,
-  events: { on: (fn: typeof onEvent) => { onEvent = fn; return () => {}; } },
+  events: { on: (fn: typeof onEvent) => { listeners.add(fn); return () => listeners.delete(fn); } },
   inbox: { refresh: async () => {} },
   agents: { inProject: () => [], byId: () => undefined },
 }));
