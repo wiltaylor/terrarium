@@ -433,6 +433,7 @@ class CommitTrailers(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
         os.environ.pop("TERRARIUM_BASE_REF", None)
+        os.environ.pop("TERRARIUM_BASE", None)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.old = Path.cwd()
@@ -521,6 +522,25 @@ class CommitTrailers(unittest.TestCase):
 
     def test_invalid_explicit_base_fails_closed(self):
         os.environ["TERRARIUM_BASE_REF"] = "missing"
+        self.assertEqual(self.check()[0], 1)
+
+    def test_merge_job_layout_uses_recipe_base(self):
+        os.environ["TERRARIUM_BASE"] = self.git("rev-parse", "HEAD").strip()
+        self.git("update-ref", "-d", "refs/remotes/origin/next")
+        self.commit("fix: bad\n\nCo-authored-by: Test")
+        self.git("checkout", "-B", "next")
+        self.assertEqual(self.check()[0], 1)
+
+    def test_local_next_at_head_skips_visibly(self):
+        self.git("update-ref", "-d", "refs/remotes/origin/next")
+        self.git("checkout", "-B", "next")
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(self.check(), (0, ""))
+        self.assertIn("skipped", output.getvalue())
+
+    def test_auto_base_without_merge_base_fails_closed(self):
+        self.git("checkout", "--orphan", "unrelated")
+        self.commit("unrelated root")
         self.assertEqual(self.check()[0], 1)
 
     def test_run_stops_before_metadata_or_tests(self):

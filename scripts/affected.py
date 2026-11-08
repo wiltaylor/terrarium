@@ -8,11 +8,12 @@ the full suite (`just ci::validate`), not this plan.
 
 Before running any plan, the commit gate rejects case-insensitive lines
 starting with `Co-authored-by:` anywhere in commit messages since the
-merge-base of HEAD and the first available base: TERRARIUM_BASE_REF,
+merge-base of HEAD and the first available base: TERRARIUM_BASE_REF, TERRARIUM_BASE,
 origin/next, job/next, then next. Ordinary body mentions and Terrarium-*
 provenance trailers are allowed. Full validation runs the same gate via
 `--check-commit-trailers`. Without any base it visibly skips the check
-(main/tag CI has no card range). An explicit invalid base or Git error
+(main/tag CI has no card range). Local next equal to HEAD is not a base.
+An explicit invalid base or Git error
 fails closed. Full plans delegate the gate to ci::validate. Plan-only mode
 does not run the gate.
 
@@ -470,7 +471,7 @@ def run(cmds: list[list[str]]) -> int:
 def check_commit_trailers() -> int:
     """Reject co-author lines in the available card commit range."""
     try:
-        ref = os.environ.get("TERRARIUM_BASE_REF")
+        ref = os.environ.get("TERRARIUM_BASE_REF") or os.environ.get("TERRARIUM_BASE")
         if not ref:
             for candidate in ("origin/next", "job/next", "next"):
                 probe = subprocess.run(
@@ -478,6 +479,12 @@ def check_commit_trailers() -> int:
                      "refs/heads/next" if candidate == "next" else f"refs/remotes/{candidate}"],
                     capture_output=True, text=True)
                 if probe.returncode == 0:
+                    if candidate == "next":
+                        tips = subprocess.run(
+                            ["git", "rev-parse", "next", "HEAD"],
+                            check=True, capture_output=True, text=True).stdout.splitlines()
+                        if tips[0] == tips[1]:
+                            continue
                     ref = candidate
                     break
                 if probe.returncode != 1:
