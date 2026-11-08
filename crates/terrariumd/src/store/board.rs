@@ -761,6 +761,12 @@ pub fn board_summary(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut cards: Vec<Value> = raw.iter().map(|s| json_col(s)).collect();
+    // Preserve the card API's absent-when-unset optional metadata contract.
+    for card in &mut cards {
+        if let Some(fields) = card.as_object_mut() {
+            fields.retain(|key, value| key == "last_comment_at" || !value.is_null());
+        }
+    }
     let next = if done && cards.len() > limit {
         cards.truncate(limit);
         Some((u64::from(offset) + limit as u64).to_string())
