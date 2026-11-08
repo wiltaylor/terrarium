@@ -1,7 +1,7 @@
 //! The memory graph and its rules (PLAN §14).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use hyper::Method;

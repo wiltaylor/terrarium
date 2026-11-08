@@ -3,7 +3,7 @@
 //! `thread:open` and the rights check of agent-opened threads (TER-93, A1).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use serde_json::{Value, json};

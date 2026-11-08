@@ -3,7 +3,7 @@
 //! real clock, so the daemon's own timer never runs these schedules.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use chrono::{DateTime, Duration, Utc};
 use common::{TestDaemon, write};
