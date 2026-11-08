@@ -52,6 +52,7 @@ rule "job-started" {
   on = ["job"]
   max_per_hour = 600
   when "data.change" { eq = "started" }
+  when "data.kind" { eq = "merge" }
   card_label {
     remove = ["validation:queued"]
     add = ["validation:running"]
@@ -79,6 +80,7 @@ rule "job-requeued" {
   on = ["job"]
   max_per_hour = 600
   when "data.change" { eq = "requeued" }
+  when "data.kind" { eq = "merge" }
   card_label {
     remove = ["validation:running"]
     add = ["validation:queued"]

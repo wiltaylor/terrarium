@@ -881,12 +881,25 @@ fn is_fix_card(conn: &Connection, card: &str) -> ApiResult<bool> {
 
 /// The fix cards of this group from earlier jobs (TER-170, MEM-84): the
 /// cards with a `merge-fix:` label of another job whose linked cards, fix
-/// cards left out, include every card of `j` that is not a fix card. So
+/// cards left out, equal the cards of `j` or an explicit split ancestor. So
 /// the fix cards of the group count for its rerun (the fix card first in
 /// it) and for its split halves, and a fix card of another group that
 /// shared a card with this one does not. Done and archived ones count:
 /// each was an attempt.
 fn earlier_fixes(conn: &Connection, j: &Job) -> ApiResult<i64> {
+    let mut ancestors = Vec::new();
+    let mut parent = j.parent.clone();
+    while let Some(id) = parent {
+        let job = jobs::get(conn, &id)?;
+        let mut cards = Vec::new();
+        for c in job.cards() {
+            if !is_fix_card(conn, &c.card)? {
+                cards.push(c.card);
+            }
+        }
+        ancestors.push(cards);
+        parent = job.parent;
+    }
     let mut group: Vec<String> = Vec::new();
     for c in j.cards() {
         if !is_fix_card(conn, &c.card)? {
@@ -916,7 +929,18 @@ fn earlier_fixes(conn: &Connection, j: &Job) -> ApiResult<i64> {
             st.query_map([&fix], |r| r.get(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        if group.iter().all(|c| linked.contains(c)) {
+        let linked = linked
+            .into_iter()
+            .filter_map(|c| match is_fix_card(conn, &c) {
+                Ok(false) => Some(Ok(c)),
+                Ok(true) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<ApiResult<Vec<_>>>()?;
+        if std::iter::once(&group)
+            .chain(&ancestors)
+            .any(|cards| cards.len() == linked.len() && cards.iter().all(|c| linked.contains(c)))
+        {
             n += 1;
         }
     }
