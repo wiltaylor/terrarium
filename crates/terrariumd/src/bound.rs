@@ -106,6 +106,9 @@ pub fn check(conn: &rusqlite::Connection, project: &str, text: &str) -> ApiResul
     let b = match kind {
         KIND_CARD => {
             let card = board::get_card(conn, &board::normalise_id(id.trim()))?;
+            if card.kind == "group" {
+                return Err(ApiError::invalid("group cards cannot have a bound agent"));
+            }
             if card.project != project {
                 return Err(ApiError::invalid(format!(
                     "card {} is in project `{}`; a bound agent goes in `{project}`",

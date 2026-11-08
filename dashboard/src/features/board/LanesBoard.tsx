@@ -8,6 +8,7 @@ import type { Board, Card, Column } from "../../api/types";
 import { cardsIn } from "../../stores/board";
 import { columnTitle, overLimit } from "./columns";
 import { alsoIn, isPlain, type Lane, laneCells, NO_VERSION_LANE } from "./lanes";
+import { groupSections } from "./groups";
 
 export interface LaneDrag {
   draggable: boolean;
@@ -87,7 +88,20 @@ export function LanesBoard(props: {
             {cards().length}
           </span>
         </Show>
-        <For each={cards()}>
+        <For each={groupSections(cards(), p.col.name)}>
+          {(section) => <section classList={{ "board-group": !!section.group }}>
+            <Show when={section.group}>{(group) => (
+              <header class="board-group-head">
+                <strong>{group().title}</strong>
+                <Show when={group().column === p.col.name}>
+                  <span>{group().done}/{group().total}</span>
+                  <progress aria-label={`${group().title} progress`} value={group().done} max={Math.max(1, group().total)} />
+                  <Show when={group().eta_at}>{(eta) => <time dateTime={eta()}>ETA {new Date(eta()).toLocaleString()}</time>}</Show>
+                  <Show when={group().status}><span>{group().status}</span></Show>
+                </Show>
+              </header>
+            )}</Show>
+        <For each={section.cards}>
           {(c) => (
             <>
               <Show when={isDrop() && dragging()?.id !== c.id && cards().filter((x) => x.id !== dragging()?.id).findIndex((x) => x.id === c.id) === drop()?.index}>
@@ -113,6 +127,8 @@ export function LanesBoard(props: {
               )}
             </>
           )}
+        </For>
+          </section>}
         </For>
         <Show when={isDrop() && drop()!.index >= cards().filter((x) => x.id !== dragging()?.id).length}>
           <div class="drop-marker" />
@@ -141,7 +157,7 @@ export function LanesBoard(props: {
   );
 
   const ColumnHead = (p: { col: Column }) => {
-    const n = () => cardsIn(props.board, p.col.name).length;
+    const n = () => cardsIn(props.board, p.col.name).filter((c) => c.kind !== "group").length;
     const over = () => overLimit(p.col, n());
     return (
       <div class="column-head lanes-col-head" classList={{ "over-limit": over() }} data-column-head={p.col.name}>

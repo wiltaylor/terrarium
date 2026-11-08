@@ -1734,6 +1734,8 @@ export interface CardFileUploaded extends CardFile {
 }
 
 export interface Card {
+  kind?: "card" | "group";
+  group?: BoardGroup;
   id: string;
   project: string;
   column: string;
@@ -1777,6 +1779,19 @@ export interface Card {
   job?: CardJob;
   /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
   assignee_status?: string;
+}
+
+export interface BoardGroup {
+  id: string;
+  key: string;
+  title: string;
+  column: string;
+  status: string;
+  done: number;
+  total: number;
+  members: string[];
+  eta_at: string | null;
+  closed_at: string | null;
 }
 
 /** The open job of a card: the tile reads its state chip from it, not from labels. */

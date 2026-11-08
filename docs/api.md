@@ -8230,6 +8230,38 @@ Verbs (TER-169). Each verb goes through the store functions of the API
 as the rule actor, so the same checks hold. A verb whose precondition
 does not hold changes nothing (a no-op, `changed: false` in `steps`).
 
+Board groups (TER-180) are rule-owned cards with `kind = "group"`. A
+member's JSON has `group` with `id`, `key`, `title`, `column`, `status`,
+`members` (in membership order), `done`, `total`, `eta_at`, and `closed_at`.
+Groups have no assignee, cannot be claimed, edited manually, bound to an
+agent, validated, or merged, and do not count toward WIP. Card listings
+for pulling work omit them. The board includes their home headers and
+shows a header in each column containing members, without moving members.
+
+- `group_open`: required `key`, `title`, `column`, and `done_when`. The key
+  is project-scoped. Repeating an open is a no-op, even after closure.
+  `done_when` is a column or `@role` anchor: members there or later in
+  board order count as done, except the blocked column (TER-147).
+  Optional `eta` is a duration from now or `"jobs"` (latest running
+  member job ETA). Optional `close_after` is a duration safeguard.
+- `group_add` and `group_remove`: `key` identifies the group. Add or
+  remove the event's card. Adding to a second open group fails in the
+  rule log. A group cannot contain a group, a held card, an archived card,
+  or a card of another project. Duplicate membership is a no-op.
+- `group_status`: `key`, optional `text`, optional `eta` as above.
+- `group_close`: `key`, optional `comment`. Archives the header, retains
+  historical membership, and frees members to join their next group.
+  Repeated close and mutations of a closed group are no-ops.
+
+`{{group.id|key|title|column|status|done|total|eta_at}}` (one field per
+placeholder) reads the open group of the event's card, or the group card
+itself. Each action reads fresh state, so templates after `group_add`
+see the new membership. A `close_after` deadline survives rule removal
+and daemon restart. The engine closes it with a comment and a rule-log
+row. Lint code `group_without_close` warns when an enabled opening rule
+has neither a timeout nor an enabled closing rule with the same key
+expression. No manual close endpoint exists.
+
 - `card_move`: move the run's card to `to`. A card not in `from` (when
   given), or in `to` already, is a no-op. `position = "top"` puts it at
   the top. The board invariants hold (a move to the blocked column needs

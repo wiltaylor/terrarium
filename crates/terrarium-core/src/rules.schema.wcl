@@ -45,6 +45,11 @@ type Rule {
   @children("if_job") if_job: list<IfJob>
 
   // The verbs, run in the order of the file.
+  @children("group_open") group_open: list<GroupOpen>
+  @children("group_add") group_add: list<GroupAdd>
+  @children("group_remove") group_remove: list<GroupRemove>
+  @children("group_status") group_status: list<GroupStatus>
+  @children("group_close") group_close: list<GroupClose>
   @children("card_move") card_move: list<CardMove>
   @children("card_label") card_label: list<CardLabel>
   @children("card_comment") card_comment: list<CardComment>
@@ -59,6 +64,37 @@ type Rule {
   @children("agent_park") agent_park: list<AgentPark>
   @children("agent_unpark") agent_unpark: list<AgentUnpark>
   @children("agent_end") agent_end: list<AgentEnd>
+}
+
+// Group keys are scoped to the project. Membership uses the event's card.
+// done_when names a column or role. eta is a duration or "jobs".
+@block("group_open")
+type GroupOpen {
+  key: utf8
+  title: utf8
+  column: utf8
+  done_when: utf8
+  eta: utf8?
+  close_after: utf8?
+}
+
+@block("group_add")
+type GroupAdd { key: utf8 }
+
+@block("group_remove")
+type GroupRemove { key: utf8 }
+
+@block("group_status")
+type GroupStatus {
+  key: utf8
+  text: utf8?
+  eta: utf8?
+}
+
+@block("group_close")
+type GroupClose {
+  key: utf8
+  comment: utf8?
 }
 
 // One condition on the event: `project`, `kind`, `actor`, `summary`, or

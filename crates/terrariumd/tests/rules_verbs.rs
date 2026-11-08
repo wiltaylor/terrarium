@@ -110,6 +110,121 @@ async fn put_rules(td: &TestDaemon, project: &str, text: &str) {
     assert_eq!(r.status, 200, "{}", r.body);
 }
 
+const GROUPS: &str = r#"
+rule "open-group" {
+  on = ["test.ping"]
+  when "data.n" { eq = "1" }
+  group_open { key = "batch" title = "Batch" column = "review" done_when = "review" close_after = "1h" }
+  group_add { key = "batch" }
+  group_status { key = "batch" text = "{{group.done}}/{{group.total}}" }
+}
+rule "other-group" {
+  on = ["test.ping"]
+  when "data.n" { eq = "2" }
+  group_open { key = "other" title = "Other" column = "review" done_when = "done" }
+  group_add { key = "other" }
+}
+rule "remove-group" {
+  on = ["test.ping"]
+  when "data.n" { eq = "3" }
+  group_remove { key = "batch" }
+}
+rule "close-group" {
+  on = ["test.ping"]
+  when "data.n" { eq = "4" }
+  group_close { key = "batch" comment = "Finished" }
+}
+"#;
+
+#[tokio::test]
+async fn group_lifecycle_is_rule_only_and_members_keep_their_columns() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    let b = new_card(&td, "p", json!({"title":"b", "column":"review"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    ping(&td, "p", &b, 1).await;
+    settle(&td).await;
+    let ca = card(&td, &a).await;
+    assert_eq!(ca["column"], "backlog");
+    let g = &ca["group"];
+    let id = g["id"].as_str().unwrap();
+    assert_eq!(g["done"], 1);
+    assert_eq!(g["total"], 2);
+    assert_eq!(g["status"], "`1`/`2`");
+    assert_eq!(g["members"], json!([a, b]));
+    let gc = card(&td, id).await;
+    assert_eq!(gc["kind"], "group");
+    assert!(gc.get("assignee").is_none());
+    for (path, body) in [
+        (format!("/api/cards/{id}/claim"), json!({})),
+        (format!("/api/cards/{id}/move"), json!({"column":"ready"})),
+    ] {
+        let response = td.post(&path, body).await;
+        assert!(response.status >= 400, "{}", response.body);
+    }
+    let board = td.get("/api/projects/p/board").await;
+    assert_eq!(board.status, 200, "{}", board.body);
+    let review = board.body["columns"].as_array().unwrap().iter().find(|c| c["name"] == "review").unwrap();
+    assert_eq!(review["count"], 1);
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["group"]["total"], 2);
+    ping(&td, "p", &a, 3).await;
+    settle(&td).await;
+    assert!(card(&td, &a).await.get("group").is_none());
+    ping(&td, "p", &b, 4).await;
+    settle(&td).await;
+    assert!(card(&td, &b).await.get("group").is_none());
+    assert_eq!(card(&td, id).await["archived"], true);
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    assert!(card(&td, &a).await.get("group").is_none(), "closed key cannot reopen");
+}
+
+#[tokio::test]
+async fn groups_refuse_second_membership_then_allow_the_next_lifecycle_group() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    ping(&td, "p", &a, 2).await;
+    settle(&td).await;
+    let logs = runs_of(&td, "p", "other-group").await;
+    assert_eq!(logs[0]["state"], "failed");
+    assert!(logs[0]["reason"].as_str().unwrap().contains("already in open group"));
+    ping(&td, "p", &a, 4).await;
+    settle(&td).await;
+    ping(&td, "p", &a, 2).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["group"]["key"], "other");
+}
+
+#[tokio::test]
+async fn group_timeout_closes_once_and_records_comment_and_rule_log() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    let id = card(&td, &a).await["group"]["id"].as_str().unwrap().to_owned();
+    state(&td).db.write("test", |t| {
+        t.execute("UPDATE card_groups SET close_at = '2000-01-01T00:00:00Z'", [])?;
+        terrariumd::store::groups::expire(t)?;
+        terrariumd::store::groups::expire(t)
+    }).await.unwrap();
+    let closed = card(&td, &id).await;
+    assert_eq!(closed["archived"], true);
+    assert_eq!(bodies(&closed), vec!["Group closed by the close_after safeguard."]);
+    assert_eq!(runs(&td, "p").await.iter().filter(|r| r["reason"] == "close_after safeguard").count(), 1);
+    assert!(card(&td, &a).await.get("group").is_none());
+}
+
 async fn new_card(td: &TestDaemon, project: &str, body: Value) -> String {
     let r = td
         .post(&format!("/api/projects/{project}/cards"), body)
@@ -992,6 +1107,26 @@ rule "h-unpark" {
 rule "h-end" {
   on = ["test.ping"]
   agent_end { outcome = "cancelled" }
+}
+rule "h-group-open" {
+  on = ["test.ping"]
+  group_open { key = "held" title = "Held" column = "review" done_when = "done" }
+}
+rule "h-group-add" {
+  on = ["test.ping"]
+  group_add { key = "held" }
+}
+rule "h-group-remove" {
+  on = ["test.ping"]
+  group_remove { key = "held" }
+}
+rule "h-group-status" {
+  on = ["test.ping"]
+  group_status { key = "held" text = "waiting" }
+}
+rule "h-group-close" {
+  on = ["test.ping"]
+  group_close { key = "held" }
 }
 "#;
 

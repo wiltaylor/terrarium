@@ -127,6 +127,43 @@ impl Verb {
 /// The verbs, in the order of the schema.
 pub const VERBS: &[Verb] = &[
     Verb {
+        kind: "group_open",
+        name: "group.open",
+        args: &[
+            ("key", Arg::Text),
+            ("title", Arg::Text),
+            ("column", Arg::Column),
+            ("done_when", Arg::Column),
+            ("eta", Arg::Text),
+            ("close_after", Arg::Text),
+        ],
+        required: &["key", "title", "column", "done_when"],
+    },
+    Verb {
+        kind: "group_add",
+        name: "group.add",
+        args: &[("key", Arg::Text)],
+        required: &["key"],
+    },
+    Verb {
+        kind: "group_remove",
+        name: "group.remove",
+        args: &[("key", Arg::Text)],
+        required: &["key"],
+    },
+    Verb {
+        kind: "group_status",
+        name: "group.status",
+        args: &[("key", Arg::Text), ("text", Arg::Text), ("eta", Arg::Text)],
+        required: &["key"],
+    },
+    Verb {
+        kind: "group_close",
+        name: "group.close",
+        args: &[("key", Arg::Text), ("comment", Arg::Text)],
+        required: &["key"],
+    },
+    Verb {
         kind: "card_move",
         name: "card.move",
         args: &[
@@ -250,6 +287,8 @@ pub const JOB_OUTCOMES: &[&str] = &["red", "conflict", "error", "none"];
 
 /// The placeholders after `card.`.
 pub const CARD_FIELDS: &[&str] = &["id", "title", "column", "assignee", "labels", "project"];
+/// The group containing the event's card (or the group card itself).
+pub const GROUP_FIELDS: &[&str] = &["id", "key", "title", "column", "status", "done", "total", "eta_at"];
 /// The placeholders after `job.`.
 pub const JOB_FIELDS: &[&str] = &[
     "id",
@@ -660,15 +699,18 @@ pub fn check_template(template: &str) -> Result<(), String> {
             CARD_FIELDS.contains(&f)
         } else if let Some(f) = inner.strip_prefix("job.") {
             JOB_FIELDS.contains(&f)
+        } else if let Some(f) = inner.strip_prefix("group.") {
+            GROUP_FIELDS.contains(&f)
         } else {
             inner == "rule.name"
         };
         if !known {
             return Err(format!(
                 "unknown placeholder `{{{{{inner}}}}}`: use event.<kind|summary|project|seq|actor|data.path>, \
-                 card.<{}>, job.<{}>, or rule.name",
+                 card.<{}>, job.<{}>, group.<{}>, or rule.name",
                 CARD_FIELDS.join("|"),
-                JOB_FIELDS.join("|")
+                JOB_FIELDS.join("|"),
+                GROUP_FIELDS.join("|")
             ));
         }
         rest = &after[close + 2..];

@@ -6,6 +6,7 @@ pub mod agents;
 pub mod artifacts;
 pub mod audit;
 pub mod board;
+pub mod groups;
 pub mod calendar;
 pub mod card_files;
 pub mod event_sources;
