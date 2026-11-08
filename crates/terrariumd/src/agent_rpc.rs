@@ -5,14 +5,17 @@
 //! own router, as the agent that owns the socket. The caller cannot choose
 //! the actor: it comes from the socket, through [`RequestContext`].
 
-use std::collections::BTreeMap;
-use std::sync::Weak;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, header};
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use rusqlite::OptionalExtension;
+use sha2::{Digest, Sha256};
 use terrarium_runner::{BoxFuture, RequestContext, RequestHandler, RpcError};
 use tower::ServiceExt;
 
@@ -22,10 +25,79 @@ use crate::api::{self, AppState, NEXT_CURSOR};
 /// The largest response body that the tunnel returns.
 const MAX_BODY: usize = 16 * 1024 * 1024;
 
+/// Admission and draining are shared by all runner connections of one daemon.
+pub struct CallGate {
+    draining: tokio::sync::watch::Sender<bool>,
+    active: tokio::sync::RwLock<()>,
+    keys: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+}
+
+impl Default for CallGate {
+    fn default() -> Self {
+        Self {
+            draining: tokio::sync::watch::Sender::new(false),
+            active: Default::default(),
+            keys: Default::default(),
+        }
+    }
+}
+
+impl CallGate {
+    fn key(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
+        let mut keys = self.keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        keys.retain(|_, v| v.strong_count() != 0);
+        let entry = keys.entry(key).or_default();
+        if let Some(lock) = entry.upgrade() { return lock; }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        *entry = Arc::downgrade(&lock);
+        lock
+    }
+}
+
+fn retry() -> RpcError {
+    RpcError::new("retry", "the daemon is restarting; retry this request with the same request ID")
+}
+
+fn internal(e: crate::error::ApiError) -> RpcError {
+    RpcError::new("internal", e.message)
+}
+
+/// Stop admission before holding runners, cancel reads/long polls, then wait
+/// for admitted writes and their journal answers. Never cancel a write merely
+/// because the normal 30-second drain interval has elapsed.
+pub async fn drain(state: &Arc<AppState>, limit: Duration) -> crate::error::ApiResult<()> {
+    let start = tokio::time::Instant::now();
+    state.agent_calls.draining.send_replace(true);
+    state.supervisor.hold_agent_calls().await;
+    let drained = state.agent_calls.active.write();
+    tokio::pin!(drained);
+    if tokio::time::timeout_at(start + Duration::from_secs(30).min(limit), &mut drained).await.is_ok() {
+        return Ok(());
+    }
+    tracing::warn!("deferring daemon restart for admitted agent writes");
+    state.db.write("system", |t| t.audit("agent_rpc.drain_deferred", "daemon", None, json!({}))).await?;
+    if tokio::time::timeout_at(start + limit, &mut drained).await.is_err() {
+        // The NULL entries remain durable. The next daemon refuses to execute
+        // them, even if their side effect happened before this process exited.
+        state.db.write("system", |t| {
+            let rows: Vec<(String, String)> = t.prepare("SELECT agent, request_id FROM agent_rpc_answers WHERE answer IS NULL")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+            for (agent, id) in rows {
+                tracing::warn!(agent, request_id = id, "agent write indeterminate at drain cap");
+                t.audit("agent_rpc.indeterminate", &id, None, json!({"agent": agent, "reason": "drain_cap"}))?;
+            }
+            Ok(())
+        }).await?;
+    }
+    Ok(())
+}
+
 /// The `params` of method `http`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HttpParams {
+    #[serde(default)]
+    request_id: Option<String>,
     method: String,
     path: String,
     #[serde(default)]
@@ -99,6 +171,61 @@ fn percent_encode(s: &str) -> String {
 
 impl AgentRpc {
     async fn http(&self, ctx: &RequestContext, params: Value) -> Result<Value, RpcError> {
+        let state = self.state.upgrade().ok_or_else(retry)?;
+        let mut draining = state.agent_calls.draining.subscribe();
+        let _admitted = state.agent_calls.active.read().await;
+        if *draining.borrow() { return Err(retry()); }
+        let p: HttpParams = serde_json::from_value(params.clone())
+            .map_err(|e| bad_params(format!("bad `http` params: {e}")))?;
+        if p.method.eq_ignore_ascii_case("GET") || p.method.eq_ignore_ascii_case("HEAD") {
+            return tokio::select! {
+                result = self.execute_http(ctx, params) => result,
+                _ = draining.wait_for(|v| *v) => Err(retry()),
+            };
+        }
+        let Some(id) = p.request_id else {
+            // Legacy clients cannot replay, but are still included in the drain.
+            return self.execute_http(ctx, params).await;
+        };
+        if id.is_empty() || id.len() > 128 {
+            return Err(bad_params("request_id must contain 1..128 bytes"));
+        }
+        let agent = ctx.agent.to_string();
+        let lock = state.agent_calls.key(format!("{agent}:{id}"));
+        let _unique = lock.lock().await;
+        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&params).map_err(|e| bad_params(e.to_string()))?));
+        let key = agent.clone();
+        let request_id = id.clone();
+        let project = ctx.project.clone();
+        let cached = state.db.write(format!("agent:{agent}"), move |t| {
+            let old: Option<(String, Option<String>)> = t.query_row(
+                "SELECT fingerprint, answer FROM agent_rpc_answers WHERE agent = ?1 AND request_id = ?2",
+                rusqlite::params![key, request_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if let Some((hash, answer)) = old {
+                if hash != fingerprint {
+                    return Ok(Some(Err(bad_params("request_id was already used for a different request"))));
+                }
+                if let Some(answer) = answer {
+                    return Ok(Some(serde_json::from_str::<Result<Value, RpcError>>(&answer)?));
+                }
+                tracing::warn!(agent = key, request_id, "agent write has an indeterminate outcome");
+                t.audit("agent_rpc.indeterminate", &request_id, Some(&project), json!({"agent": key, "reason": "unresolved_journal"}))?;
+                return Ok(Some(Err(RpcError::new("indeterminate", "the previous daemon did not record this write's answer; it will not be executed again"))));
+            }
+            t.execute("INSERT INTO agent_rpc_answers(agent, request_id, fingerprint) VALUES (?1, ?2, ?3)", rusqlite::params![key, request_id, fingerprint])?;
+            Ok(None)
+        }).await.map_err(internal)?;
+        if let Some(answer) = cached { return answer; }
+        let answer = self.execute_http(ctx, params).await;
+        let stored = serde_json::to_string(&answer).map_err(|e| RpcError::new("internal", e.to_string()))?;
+        state.db.write(format!("agent:{agent}"), move |t| {
+            t.execute("UPDATE agent_rpc_answers SET answer = ?3 WHERE agent = ?1 AND request_id = ?2", rusqlite::params![agent, id, stored])?;
+            Ok(())
+        }).await.map_err(internal)?;
+        answer
+    }
+
+    async fn execute_http(&self, ctx: &RequestContext, params: Value) -> Result<Value, RpcError> {
         let p: HttpParams = serde_json::from_value(params)
             .map_err(|e| bad_params(format!("bad `http` params: {e}")))?;
         if !p.path.starts_with("/api/") {

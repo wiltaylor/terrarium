@@ -206,14 +206,18 @@ impl RunnerTunnelTransport {
 
     async fn round_trip(&self, req: ApiRequest) -> anyhow::Result<ApiResponse> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut frame = Self::frame(id, &req);
+        frame["params"]["request_id"] = json!(ulid::Ulid::new().to_string());
+        let mut line = serde_json::to_vec(&frame)?;
+        line.push(b'\n');
+        let mut retry_until = None;
+        'retry: loop {
         let stream = tokio::net::UnixStream::connect(&self.socket)
             .await
             .with_context(|| {
                 format!("cannot connect to the runner at {}", self.socket.display())
             })?;
         let (read, mut write) = stream.into_split();
-        let mut line = serde_json::to_vec(&Self::frame(id, &req))?;
-        line.push(b'\n');
         write
             .write_all(&line)
             .await
@@ -234,8 +238,17 @@ impl RunnerTunnelTransport {
             if reply.get("id").and_then(Value::as_u64) == Some(id)
                 || reply.get("id").is_none_or(Value::is_null)
             {
+                if reply["error"]["code"] == "retry" {
+                    let until = *retry_until.get_or_insert_with(|| tokio::time::Instant::now() + std::time::Duration::from_secs(15 * 60));
+                    if tokio::time::Instant::now() >= until {
+                        anyhow::bail!("the agent RPC tunnel is down: restart exceeded 15 minutes");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue 'retry;
+                }
                 return Self::unframe(&reply);
             }
+        }
         }
     }
 }

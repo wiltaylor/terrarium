@@ -4936,6 +4936,18 @@ impl Supervisor for RunnerSupervisor {
     /// Drop every runner handle. A runner process keeps its harness: only
     /// the control connection closes, and the next daemon connects again.
     /// An in-process harness ends.
+    fn hold_agent_calls(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let runners: Vec<_> = lock(&self.inner.slots).values()
+                .filter_map(|s| s.runner.clone()).collect();
+            for runner in runners {
+                if let Err(e) = runner.hold().await {
+                    warn!(agent = %runner.agent(), "cannot hold agent calls: {e}");
+                }
+            }
+        })
+    }
+
     fn shutdown(&self) {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
         self.inner.stop_tx.send_replace(true);

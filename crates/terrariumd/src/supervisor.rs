@@ -527,6 +527,9 @@ pub trait Supervisor: Send + Sync + 'static {
     /// runner process keeps running, and the next daemon start connects to
     /// it again. An in-process harness ends, and the next daemon start
     /// launches it again with resume (PLAN §18).
+    fn hold_agent_calls(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
     fn shutdown(&self) {}
 }
 

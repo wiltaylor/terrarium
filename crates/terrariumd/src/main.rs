@@ -254,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
 
     shutdown_signal().await;
     info!("shutting down");
+    terrariumd::agent_rpc::drain(&daemon.state, std::time::Duration::from_secs(settings.rpc_drain_secs)).await?;
     if let Some(t) = host_task {
         t.abort();
     }

@@ -2488,6 +2488,16 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (owner, href)
     );
     "#,
+    // Agent RPC restart journal. A NULL answer is never replayed after a crash.
+    r#"
+    CREATE TABLE agent_rpc_answers (
+        agent TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        answer TEXT,
+        PRIMARY KEY (agent, request_id)
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

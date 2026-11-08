@@ -44,6 +44,7 @@ fn unavailable(m: impl Into<String>) -> RpcError {
 #[derive(Clone)]
 struct Link {
     epoch: u64,
+    held: bool,
     out: Out,
     close: Arc<Notify>,
 }
@@ -77,6 +78,7 @@ impl Hub {
         let close = Arc::new(Notify::new());
         let old = self.link.send_replace(Some(Link {
             epoch,
+            held: false,
             out,
             close: close.clone(),
         }));
@@ -102,6 +104,17 @@ impl Hub {
             }
         });
         self.fail_epoch(epoch, "the daemon disconnected before it answered");
+    }
+
+    fn hold(&self, epoch: u64) {
+        self.link.send_if_modified(|link| {
+            if let Some(link) = link.as_mut().filter(|l| l.epoch == epoch) {
+                link.held = true;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     fn fail_epoch(&self, epoch: u64, message: &str) {
@@ -146,11 +159,16 @@ impl Hub {
         params: Value,
     ) -> Result<Value, RpcError> {
         let mut rx = self.link.subscribe();
-        let link =
-            match tokio::time::timeout(self.queue_timeout, rx.wait_for(Option::is_some)).await {
-                Ok(Ok(l)) => l.clone(),
-                _ => None,
-            };
+        // Only identified HTTP calls are safe to replay after losing an answer.
+        // Older callers and other methods retain the fail-on-disconnect behavior.
+        let replay = method == "http" && params["request_id"].is_string();
+        let mut deadline = None;
+        loop {
+        let until = *deadline.get_or_insert_with(|| tokio::time::Instant::now() + self.queue_timeout);
+        let link = match tokio::time::timeout_at(until, rx.wait_for(|l| l.as_ref().is_some_and(|l| !l.held))).await {
+            Ok(Ok(l)) => l.clone(),
+            _ => None,
+        };
         let Some(link) = link else {
             return Err(unavailable(format!(
                 "the agent RPC tunnel is down: no daemon connected to the runner within {} ms; \
@@ -164,16 +182,28 @@ impl Hub {
         let frame = ServerFrame::RpcRequest {
             id,
             method: method.to_owned(),
-            params,
+            params: params.clone(),
             context: ctx.clone(),
         };
         if link.out.send(frame).await.is_err() {
             lock(&self.pending).remove(&id);
+            self.release(link.epoch);
+            if replay { continue; }
             return Err(unavailable("the daemon disconnected"));
         }
-        answer
-            .await
-            .unwrap_or_else(|_| Err(unavailable("the daemon disconnected")))
+        let outcome = tokio::select! {
+            answer = answer => answer.unwrap_or_else(|_| Err(unavailable("the daemon disconnected"))),
+            _ = rx.wait_for(|l| l.as_ref().is_none_or(|l| l.epoch != link.epoch)) => Err(unavailable("the daemon disconnected")),
+        };
+        lock(&self.pending).remove(&id);
+        if replay && outcome.as_ref().is_err_and(|e| e.code == codes::UNAVAILABLE) {
+            // The queue budget starts when the connection is lost, not when a
+            // potentially long-running command was first sent.
+            deadline = Some(tokio::time::Instant::now() + self.queue_timeout);
+            continue;
+        }
+        return outcome;
+        }
     }
 }
 
@@ -332,6 +362,11 @@ impl Conn {
             return;
         }
         match serde_json::from_str::<ClientFrame>(text) {
+            Ok(ClientFrame::Hold) => {
+                if let Some((epoch, _)) = &self.claim {
+                    self.ctx.hub.hold(*epoch);
+                }
+            }
             Ok(ClientFrame::Call { id, method, params }) => {
                 if let Some(outcome) = self.call(id, &method, params).await {
                     self.send(ServerFrame::reply(id, outcome)).await;

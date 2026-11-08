@@ -11579,3 +11579,32 @@ line of the end. `failure_block` is the `Validation failed:` block for
 `red`, `conflict`, and `error`, else `null`. The verdict says what the run
 found, not what the queue does next: the rerun and the split stay as
 above.
+# Agent calls during daemon restarts
+
+The agent CLI assigns a stable `request_id` to each tunneled HTTP call. The
+runner holds new calls after a daemon `hold` control frame and resumes them
+after the next daemon's `hello`. The default queue limit is 15 minutes. At
+that limit the caller receives `unavailable` (the tunnel is down).
+
+Graceful shutdown stops admission before draining calls. Reads and long
+polls receive `retry`, which the CLI resends with the same request ID. Writes
+already admitted finish, including saving their answers. After 30 seconds
+the daemon logs and audits a restart deferral. It waits up to
+`--rpc-drain-secs` / `TERRARIUM_RPC_DRAIN_SECS` (default 600, range 30..899),
+measured from the start of the drain, before exiting. New calls remain held
+during this interval.
+
+Write request IDs are scoped to the agent and bound to a fingerprint of the
+request. A reused ID with different parameters is rejected. Completed write
+answers are stored in SQLite and returned without executing the write again,
+including after a daemon restart. Concurrent copies wait for the first call.
+Legacy callers without request IDs are drained but cannot safely replay.
+
+An unresolved journal entry after a crash or the drain cap yields
+`indeterminate`, never another execution. The caller must inspect the effect
+before deciding on a new operation. Each indeterminate outcome is logged and
+audited. External effects and the answer journal are not one transaction:
+this policy prevents duplicate execution, but cannot promise a successful
+answer for an interrupted external write. Journal records have no automatic
+expiry, so an old request ID cannot silently become executable again.
+

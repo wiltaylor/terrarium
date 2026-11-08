@@ -1376,6 +1376,43 @@ async fn daemon_restart_relaunches_with_resume() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_write_answers_survive_restart_without_duplicate_mail() {
+    use sha2::{Digest, Sha256};
+    let mut td = Td::start_with(false).await;
+    let bob = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{bob}/start"), None).await;
+    td.wait_status(&bob, "idle").await;
+    let sock = td.runner_socket(&bob);
+    let params = json!({"method":"POST", "path":"/api/mail", "request_id":"replay-mail",
+        "body":{"to":"demo/bob", "body":"exactly one copy"}});
+    let (a, b) = tokio::join!(rpc(&sock, "http", params.clone()), rpc(&sock, "http", params.clone()));
+    assert_eq!(a["result"]["status"], 201, "{a}");
+    assert_eq!(a, b);
+    let mut changed = params.clone();
+    changed["body"]["body"] = json!("different");
+    assert_eq!(rpc(&sock, "http", changed).await["error"]["code"], "invalid_params");
+    td.restart_daemon().await;
+    td.wait_status(&bob, "idle").await;
+    assert_eq!(rpc(&sock, "http", params).await, a);
+    let mail = rpc(&sock, "http", json!({"method":"GET", "path":"/api/mail"})).await;
+    assert_eq!(mail["result"]["body"].as_array().unwrap().iter().filter(|m| m["body"] == "exactly one copy").count(), 1);
+
+    // Simulate a crash after admitting a write but before persisting its answer.
+    let pending = json!({"method":"POST", "path":"/api/mail", "request_id":"unresolved",
+        "body":{"to":"demo/bob", "body":"must not run"}});
+    let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&pending).unwrap()));
+    td.daemon.as_ref().unwrap().state.db.write("test", move |t| {
+        t.execute("INSERT INTO agent_rpc_answers(agent, request_id, fingerprint) VALUES (?1, 'unresolved', ?2)", rusqlite::params![bob, hash])?;
+        Ok(())
+    }).await.unwrap();
+    td.restart_daemon().await;
+    let answer = rpc(&sock, "http", pending).await;
+    assert_eq!(answer["error"]["code"], "indeterminate", "{answer}");
+    let mail = rpc(&sock, "http", json!({"method":"GET", "path":"/api/mail"})).await;
+    assert!(!mail["result"]["body"].as_array().unwrap().iter().any(|m| m["body"] == "must not run"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_rpc_tunnel_and_long_poll() {
     let td = Td::start_with(false).await;
     let bob = td.agent("demo", "bob", json!({})).await;
