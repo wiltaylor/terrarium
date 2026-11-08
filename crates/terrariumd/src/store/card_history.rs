@@ -319,9 +319,12 @@ mod tests {
         // Repeated visits of one card do not satisfy the five-card minimum.
         let repeats = vec![samples[0].clone(); 10];
         assert_eq!(calibrated_ms(&repeats, &labels, None), None);
-        let mut recent: Vec<_> = (0..30).map(|n| WorkSample {
-            card: format!("new{n}"), ..samples[0].clone()
-        }).collect();
+        let mut recent: Vec<_> = (0..30)
+            .map(|n| WorkSample {
+                card: format!("new{n}"),
+                ..samples[0].clone()
+            })
+            .collect();
         recent.extend((0..40).map(|n| WorkSample {
             card: format!("old{n}"),
             start_seq: 0,
@@ -331,7 +334,10 @@ mod tests {
             labels: labels.clone(),
         }));
         assert_eq!(calibrated_ms(&recent, &labels, None), Some(10000.0));
-        assert_eq!(calibrated_ms(&recent, &labels, Some(10000.0)), Some(10000.0));
+        assert_eq!(
+            calibrated_ms(&recent, &labels, Some(10000.0)),
+            Some(10000.0)
+        );
     }
 
     #[test]
