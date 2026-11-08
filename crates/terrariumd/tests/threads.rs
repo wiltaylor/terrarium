@@ -63,6 +63,32 @@ impl Lab {
 }
 
 #[tokio::test]
+async fn one_open_question_or_bundle_per_thread_and_notice_replies() {
+    let lab = lab().await;
+    let t = lab.open(json!({"topic": "Decision", "scope": "p", "agent": "lead", "text": "Please investigate"})).await;
+    let path = format!("/api/agents/{}/questions", lab.p_lead);
+    let tid = t["id"].as_str().unwrap();
+    let q = lab.td.post_as(&lab.p_lead, &path, json!({"text": "Choose A?", "thread": tid})).await;
+    assert_eq!(q.status, 201, "{}", q.body);
+    for body in [
+        json!({"text": "Choose B?", "thread": tid}),
+        json!({"kind": "bundle", "text": "Choices", "thread": tid,
+            "items": [{"text": "C?"}, {"text": "D?"}]}),
+    ] {
+        let r = lab.td.post_as(&lab.p_lead, &path, body).await;
+        r.err(409, "conflict");
+        assert_eq!(r.body["error"]["details"]["question"], q.body["id"]);
+    }
+    let r = lab.td.post_as(&lab.p_lead, &path, json!({"kind": "notice", "text": "Answer to your request", "reply_to": t["messages"][0]["id"]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let other = lab.open(json!({"topic": "Other decision", "scope": "p", "agent": "lead"})).await;
+    let r = lab.td.post_as(&lab.p_lead, &path, json!({"kind": "bundle", "text": "Other choices", "thread": other["id"],
+        "items": [{"text": "E?"}, {"text": "F?"}]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    lab.td.post_as(&lab.p_lead, &path, json!({"text": "Another?", "thread": other["id"]})).await.err(409, "conflict");
+}
+
+#[tokio::test]
 async fn a_thread_opens_talks_responds_and_closes() {
     let lab = lab().await;
     // A global thread reports to the lead of `meta`; with a first message

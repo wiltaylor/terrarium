@@ -7063,6 +7063,18 @@ async fn question_bundles_ask_show_update_and_answer() {
 
 #[tokio::test]
 async fn notify_and_the_admin_inbox() {
+    let r = exec(true, &["notify", "Unsolicited update"], vec![], None).await;
+    let error = r.result.unwrap_err().to_string();
+    for flag in ["--card", "--reply-to", "--urgent"] {
+        assert!(error.contains(flag), "{error}");
+    }
+    ok(
+        true,
+        &["notify", "Your answer", "--reply-to", "M1"],
+        vec![(201, json!({"id": "N1", "priority": "normal", "thread_id": "T1"}))],
+        vec![(Post, Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()), vec![],
+            Some(json!({"kind": "notice", "text": "Your answer", "reply_to": "M1"})))],
+    ).await;
     let mine = || Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()) as &str;
     let n = json!({"id": "N1", "kind": "notice", "status": "open", "priority": "normal",
                    "agent_name": "terra/lead", "text": "v2 is deployed.", "options": [],
