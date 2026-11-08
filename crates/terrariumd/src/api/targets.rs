@@ -46,6 +46,7 @@ pub fn routes() -> Router<Shared> {
         .route("/targets/{name}", get(show).patch(update).delete(remove))
         .route("/targets/{name}/test", post(test))
         .route("/targets/{name}/up", post(up))
+        .route("/targets/{name}/recreate", post(recreate))
         .route("/targets/{name}/down", post(down))
         .route("/targets/{name}/snapshot", post(snapshot))
         .route("/targets/{name}/restore", post(restore))
@@ -80,6 +81,8 @@ pub fn routes() -> Router<Shared> {
 /// A target with its state, as the API shows it.
 #[derive(Debug, Clone, Serialize)]
 pub struct TargetView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recreate_note: Option<&'static str>,
     /// The target name. Targets have no other ID.
     pub id: String,
     #[serde(flatten)]
@@ -248,6 +251,9 @@ pub fn view(state: &Shared, actor: &Actor, r: TargetRow, mine: &[LeaseRow]) -> T
         usable,
         access,
         lease: if access == Some("lease") { lease } else { None },
+        recreate_note: r.runtime.recreate_required.then_some(
+            "New image or limits take effect only after explicit recreate: the writable layer is lost, volumes are kept",
+        ),
         runtime: r.runtime,
         credential_info: None,
         limits_info,
@@ -444,6 +450,21 @@ async fn update(
     } else {
         false
     };
+    let baseline = if current.def.kind == TargetKind::Docker
+        && !current.def.ephemeral
+        && current.def.container.is_none()
+        && current.runtime.docker_settings.is_none()
+        && (patch.get("image").is_some() || patch.get("limits").is_some())
+        && (state
+            .executor
+            .hosts
+            .is_online(current.def.host.as_deref().unwrap_or(""))
+            || matches!(current.state.as_str(), "stopped" | "running"))
+    {
+        Some(executor::docker_baseline(&state, &current.def).await?)
+    } else {
+        None
+    };
     let expected = current.clone();
     let r = state
         .db
@@ -452,6 +473,12 @@ async fn update(
                 return Err(ApiError::conflict(
                     "target changed during limits update; retry",
                 ));
+            }
+            if let Some(settings) = baseline {
+                let mut rt = targets::get(t, &name)?.runtime;
+                rt.docker_settings = settings;
+                rt.recreate_required = false;
+                targets::set_runtime(t, &name, &rt)?;
             }
             let r = targets::update_with_live_limits(t, &name, &patch, live)?;
             t.audit("target.update", &name, r.def.project.as_deref(), patch)?;
@@ -565,6 +592,29 @@ async fn snapshot_delete(
     Ok(Json(
         executor::delete_snapshot(&state, &actor, &r, &snap, &q).await?,
     ))
+}
+
+async fn recreate(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let r = load(&state, &actor, name).await?;
+    policy::define_target(&actor, r.def.project.as_deref())?;
+    let out = executor::recreate(&state, &r.def).await?;
+    let detail = out.clone();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit(
+                "target.recreate",
+                &r.def.name,
+                r.def.project.as_deref(),
+                detail,
+            )
+        })
+        .await?;
+    Ok(Json(out))
 }
 
 /// Lifecycle verbs: an actor that may use the target, or one that may

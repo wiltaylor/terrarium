@@ -47,11 +47,27 @@ pub fn has_display(def: &TargetDef) -> bool {
 #[derive(Debug, Default)]
 pub struct Limiter {
     windows: Mutex<HashMap<String, (Instant, u32)>>,
+    #[cfg(feature = "fake-supervisor")]
+    test_time: Mutex<Option<Instant>>,
 }
 
 impl Limiter {
+    /// Drive only the display rate window in integration tests, without
+    /// changing the clocks used by the host transport or daemon timers.
+    #[cfg(feature = "fake-supervisor")]
+    pub fn set_test_time(&self, now: Instant) {
+        *self.test_time.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
+    }
+
     pub fn check(&self, target: &str) -> ApiResult<()> {
-        self.check_at(target, Instant::now())
+        let now = Instant::now();
+        #[cfg(feature = "fake-supervisor")]
+        let now = self
+            .test_time
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or(now);
+        self.check_at(target, now)
     }
 
     fn check_at(&self, target: &str, now: Instant) -> ApiResult<()> {

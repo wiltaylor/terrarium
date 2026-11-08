@@ -5,7 +5,7 @@
 // The Threads tab lists the Inbox threads themselves (`GET /api/threads`).
 
 import { A, useNavigate, useSearchParams } from "@solidjs/router";
-import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
@@ -24,6 +24,7 @@ import { ThreadsView } from "./ThreadsView";
 import { threadHref } from "./threads";
 
 const TAB_IDS = INBOX_TABS.map((t) => t.id) as string[];
+const PAGE_SIZE = 40;
 
 export default function InboxPage() {
   const now = useNow(30_000);
@@ -44,6 +45,8 @@ export default function InboxPage() {
   // the focus). Only new and gone items change the DOM.
   const [items, setItems] = createStore<{ list: InboxItem[] }>({ list: [] });
   const list = () => items.list;
+  const [visibleCount, setVisibleCount] = createSignal(PAGE_SIZE);
+  const visible = createMemo(() => list().slice(0, visibleCount()));
   const setList = (next: InboxItem[] | ((cur: InboxItem[]) => InboxItem[])) => {
     const rows = typeof next === "function" ? next(items.list) : next;
     keepView(() => setItems("list", reconcile(rows, { key: "id", merge: true })));
@@ -81,7 +84,10 @@ export default function InboxPage() {
       if (mine === gen) setLoading(false);
     }
   };
-  createEffect(on([tab, status, project], () => void reload()));
+  createEffect(on([tab, status, project], () => {
+    setVisibleCount(PAGE_SIZE);
+    void reload();
+  }));
 
   onMount(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
@@ -97,7 +103,11 @@ export default function InboxPage() {
   let scrolledTo: string | null = null;
   createEffect(() => {
     const target = params.item;
-    if (!target || target === scrolledTo || !list().some((i) => i.id === target)) return;
+    if (!target || target === scrolledTo) return;
+    const index = list().findIndex((i) => i.id === target);
+    if (index < 0) return;
+    // A critical banner or question link must still reach an item beyond the first page.
+    setVisibleCount((n) => Math.max(n, index + 1));
     scrolledTo = target;
     requestAnimationFrame(() => document.getElementById(inboxItemDomId(target))?.scrollIntoView({ block: "center", behavior: "smooth" }));
   });
@@ -200,7 +210,7 @@ export default function InboxPage() {
       </Show>
       <Show when={!threadsTab() && list().length} fallback={<Show when={!threadsTab()}><Empty>{loading() ? "Loading…" : emptyText(tab(), status())}</Empty></Show>}>
         <div class="stack" ref={listEl}>
-          <For each={list()}>
+          <For each={visible()}>
             {(item) => (
               <div id={inboxItemDomId(item.id)} classList={{ "inbox-target": params.item === item.id }}>
                 <Switch>
@@ -234,6 +244,11 @@ export default function InboxPage() {
             )}
           </For>
         </div>
+        <Show when={visibleCount() < list().length}>
+          <button onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}>
+            Load more ({list().length - visibleCount()} remaining)
+          </button>
+        </Show>
       </Show>
       <Show when={newThread()}>
         <NewThreadDialog

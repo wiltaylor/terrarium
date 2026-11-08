@@ -2694,6 +2694,9 @@ pub struct NotifyArgs {
     /// The card that the notice is about
     #[arg(long)]
     pub card: Option<String>,
+    /// Answer an operator message or an answered question of yours
+    #[arg(long)]
+    pub reply_to: Option<String>,
     /// Mark the notice urgent
     #[arg(long, conflicts_with = "critical")]
     pub urgent: bool,
@@ -4120,10 +4123,10 @@ pub enum AdminTargetCmd {
     Edit(Box<AdminTargetEditArgs>),
     /// Remove a target
     Rm { name: String },
-    /// Run a lifecycle verb: up, down, snapshot, restore, or status
+    /// Run a lifecycle verb: up, down, snapshot, restore, status, or recreate
     Verb {
         name: String,
-        /// `up`, `down`, `snapshot`, `restore`, or `status`
+        /// `up`, `down`, `snapshot`, `restore`, `status`, or `recreate`
         verb: String,
         /// The snapshot name for `snapshot` and `restore`
         #[arg(long)]

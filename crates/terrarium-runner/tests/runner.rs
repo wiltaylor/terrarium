@@ -967,13 +967,16 @@ async fn no_startup_hook_falls_back_to_the_screen() {
         ..Opts::default()
     })
     .await;
+    // No session argument means the fake harness never sends SessionStart.
+    // A wake queued during startup must survive the timeout, not just a
+    // turn sent after the fallback has already made the runner idle.
+    let d = h.runner.type_turn("hello");
     let seen = until_status(&mut h.events, AgentStatus::Idle).await;
     assert!(
         seen.iter()
             .any(|e| matches!(e, Event::Warning { message } if message.contains("startup hook"))),
         "{seen:?}"
     );
-    let d = h.runner.type_turn("hello");
     timeout(wait(), d.wait())
         .await
         .expect("delivery in time")

@@ -294,6 +294,8 @@ gives them to the routers and the mail code.
 | Env | Flag | Default | Use |
 |---|---|---|---|
 | `TERRARIUM_PUBLIC_URL` | `--public-url` | unset (mail: `http://localhost:8080`) | Mail links, `Version.url`, the cookie `Origin` check, CORS on `/a/...`. |
+| `TERRARIUM_GIT_NAME` | none | `Terrarium` | Author and committer name for agent commits, independent of forge authentication. Set in the deployment `.env` to override per instance. |
+| `TERRARIUM_GIT_EMAIL` | none | `terrarium@localhost` | Author and committer email for agent commits, independent of forge authentication. Set in the deployment `.env` to override per instance. |
 | `TERRARIUM_MAIL_LOOP_LIMIT` | none | `6` | The mail loop guard (§6, PLAN §12): the agent-to-agent messages a thread can have since the last operator or project-inbox message before new agent mail on it types no pointer. The daemon reads it once. |
 | `TERRARIUM_HARNESS_AUTO_UPDATE` | `--harness-auto-update` | `daily` | The background check for harness updates (§4, "Auto-update and pins"): `daily`, `off`, or a duration of `1h` or more (`6h`). A value that does not parse stops the daemon at start. |
 | `TERRARIUM_HARNESS_UPDATE_MAIL` | `--harness-update-mail` | `off` | An Inbox mail for each update that the auto-update installs (§4, "Auto-update and pins"): `off` or `on`. A failed install sends one mail for each failed version with both values. |
@@ -3224,6 +3226,15 @@ The rights:
 
 The rules:
 
+- A notice needs `card`, `reply_to`, or an urgent (or critical) `priority`.
+  Otherwise it is `422 invalid`: only answers, one done per request, and
+  real problems belong in the Inbox. `reply_to` (notices only) names an
+  operator mail or Inbox-thread message to the sender, or an answered
+  question owned by the sender. Invalid references are `422 invalid`.
+  The reply reference is recorded in the ask audit event.
+- A question or bundle is `409 conflict` while the same agent has an open
+  question or bundle on the same card or Inbox thread. `details.question`
+  names it and the error points to `terrarium question update <id>`.
 - An agent has at most 50 open questions (`429 rate_limited`). A question
   whose text is the same as an open question of the agent (case and
   spaces do not count) is `409 conflict`; `details.question` names the
@@ -3720,6 +3731,10 @@ across browsers. All methods are operator-only. GET returns an array of
 renames that URL, and returns the list. DELETE accepts `{href}` and returns
 the list, including when the URL was absent. Mutations write `bookmark.add`
 or `bookmark.remove` audit rows.
+
+PUT also accepts an optional `previous_href` to edit an existing bookmark's
+title and URL atomically, preserving its position. A missing source or a URL
+already used by another bookmark returns `422 invalid` without changing the list.
 
 Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
 without credentials, or a relative `/p/<project>/knowledge/wiki` path.
@@ -6222,6 +6237,27 @@ field with its current value is no change. `terrarium admin target edit`
 sends this `PATCH`. Exception: the `limits` of a `host` target change at
 any time ("Resource limits", below).
 
+For a permanent managed Docker target, changing `image` or `limits` sets
+`runtime.recreate_required` and returns `recreate_note`. The next `up` of
+an existing stopped container starts it with its old settings and a clear
+`recreate_note` warning. Editing both image and limits back to the container's
+original settings clears the pending flag, without discarding any data.
+When no container exists, an edit only stores the definition, without marking
+recreation pending. Use normal `up` to create it with the holder workspaces.
+`recreate` refuses an absent container with `no container yet; up creates it`.
+For a legacy container without a saved baseline, the first edit reads its
+actual image and limits from Docker inspect rather than the definition.
+Run `terrarium admin target verb NAME recreate` (`POST
+/api/targets/{name}/recreate`) explicitly to apply the settings. This requires
+the rights to define the target (project admin or global sysadmin), refuses
+running containers and live exec sessions, and removes the stopped container
+without force or volume deletion before starting the new image. **The old
+writable layer is lost.** Recreation preserves exactly the Terrarium workspace
+binds recorded for the container and verified against the host's work root.
+Foreign binds and named or anonymous volumes refuse recreation. Older host
+agents that cannot verify mounts also refuse mounted containers. Existing-container targets (`container`)
+cannot be recreated. Ephemeral targets keep their existing behavior.
+
 An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values
 that go onto a command line (`host`, `address`, `image`, `container`,
 `machine`, `credential`, `username`, `domain`) must not be empty, must not
@@ -8493,7 +8529,8 @@ expression. No manual close endpoint exists.
   A job that is not red (a conflict, an error, a cancelled or cut run),
   an open card with that label, or a group that had `max` fix cards of
   earlier jobs: a no-op. The fix cards of a group are the cards with a
-  `merge-fix:` label of another job that link to a card of the job, done
+  `merge-fix:` label of another job with exactly the same linked cards
+  (fix cards excluded), or of an explicit split ancestor, done
   and archived ones too. The fix card is how a red merge group gets a fix
   before a split (MEM-84); the rule does not spawn the agent for it.
 - `agent_park`, `agent_unpark`, `agent_end`: act on the open agent bound
@@ -8621,7 +8658,7 @@ Its rules, in order:
 | Rule | On | Does |
 |---|---|---|
 | `merge-queued` | a new merge job | `validation:queued` and the queue comment on each card; no move |
-| `job-started`, `job-requeued` | a job starts, or waits again | `validation:queued` <-> `validation:running` |
+| `job-started`, `job-requeued` | a merge job starts, or waits again | `validation:queued` <-> `validation:running` |
 | `validate-pass`, `merge-pass` | a passed verdict | labels off, move to `@review` or `@accepted` with the end comment, unassign |
 | `job-rerun-error`, `job-rerun-red`, `job-rerun-note` | an `error` verdict, or a `red` one of a job that is not a split half and not a group of two or more merged cards | `job_rerun` (attempt 2), then labels back to queued and the rerun comment |
 | `merge-red-group`, `merge-red-split-note`, `merge-red-fix-note` | a red merge with two or more merged cards | `job_fix` (at most 3 fix cards), then `job_split` after 3; the split comment, or the labels off and a note of the fix card |
@@ -8633,9 +8670,10 @@ One change from the coded flow, by the operator's rule of 2026-11-07
 (MEM-84): a red merge group gets a fix card first, and splits in halves
 only after three fix cards. The fix cards of a group are the cards with a
 `merge-fix:` label of an earlier job whose linked cards (fix cards left
-out) include every card of this job: those of its reruns and of the group
-it was split from count, those of another group that shared a card do
-not. Set another number with your own `merge-red-group` rule. The pack
+out) are exactly the cards of this job or an explicit split ancestor:
+those of its reruns and its split parents count. Those of an unrelated
+group (including a superset or subset) do not.
+Set another number with your own `merge-red-group` rule. The pack
 does not spawn the fix agent or queue the group again (TER-256).
 
 Queued merge jobs open a board group in `@review`, with `@accepted`
@@ -8688,6 +8726,23 @@ the engine. A job that ended under `rules` but whose events the engine
 had not run yet (a window of about one pass) then gets no flow from
 either side: its cards keep their column and job labels. Switch while the
 queue is idle, or move and relabel those cards by hand.
+
+The default delivery pack also mails the project's leads on a new backlog
+card, a move to backlog, and hourly (`triage-new-backlog`,
+`triage-moved-backlog`, `triage-hourly`). These reminders ask for constant
+triage into ready without theme or scope approval. They do not move cards.
+`mail.to = ["@leads"]` resolves all current project_admin agents of the
+rule's project at execution time. No lead means no recipient.
+The engine emits `rule.hourly` once per UTC hour for a rules project with
+an enabled rule explicitly listening to it. The event has `data.hour`
+(`YYYY-MM-DDTHH`), no card, and actor `system`. The event is persisted to
+avoid duplicate ticks after a restart. Missed hours are not replayed.
+Projects may override or disable these rules by name. Code-flow projects
+do not run them. Version cuts reuse the version-cut rule and its count
+and age parameters rather than adding a second cut rule. Its timer checks
+every engine tick (10 seconds), which is more frequent than the former
+hourly cut schedule. Moves into accepted check immediately. Either six
+eligible cards or an oldest accepted age of 240 minutes opens the cut.
 
 ### 19.12 Migration, lint, and the rule tools
 

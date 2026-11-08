@@ -39,6 +39,12 @@ pub struct TargetRow {
 /// The runtime record of a target (docs/api.md §17.2, "Workspaces").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Runtime {
+    /// Settings used by the existing managed container, retained across edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_settings: Option<DockerSettings>,
+    /// Create-time settings changed. Replacing a permanent container needs consent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recreate_required: bool,
     /// The agent workspaces (`<project>/<agent>`) that the running
     /// container or lab instance has attached.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -53,6 +59,37 @@ pub struct Runtime {
     /// agent ULID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub instances: BTreeMap<String, Instance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockerSettings {
+    pub image: Option<String>,
+    pub limits: Option<terrarium_core::limits::TargetLimits>,
+}
+
+impl DockerSettings {
+    pub fn equivalent(&self, other: &Self) -> bool {
+        let normalized = |settings: &Self| {
+            let mut limits = settings
+                .limits
+                .as_ref()
+                .and_then(|l| l.resolve().ok())
+                .unwrap_or_default();
+            limits.swap_bytes = limits.swap_bytes.filter(|v| *v > 0);
+            limits.io_weight = limits.io_weight.map(|w| {
+                let w = u32::from(w);
+                u16::try_from(10 + ((w - 1) * 990 + 9999 / 2) / 9999).unwrap_or(1000)
+            });
+            limits
+        };
+        self.image == other.image && normalized(self) == normalized(other)
+    }
+    pub fn of(def: &TargetDef) -> Self {
+        Self {
+            image: def.image.clone(),
+            limits: def.limits.clone(),
+        }
+    }
 }
 
 /// One lab instance of a `lab_from_workspace` target.
@@ -538,6 +575,24 @@ pub fn update_with_live_limits(
     live: bool,
 ) -> ApiResult<TargetRow> {
     let (def, admin) = prepare_update(t, name, patch, live)?;
+    let current = get(t, name)?;
+    if def.kind == TargetKind::Docker
+        && !def.ephemeral
+        && def.container.is_none()
+        && (def.image != current.def.image || def.limits != current.def.limits)
+    {
+        let mut rt = current.runtime.clone();
+        if live
+            && let Some(baseline) = &mut rt.docker_settings
+        {
+            baseline.limits = DockerSettings::of(&def).limits;
+        }
+        rt.recreate_required = rt
+            .docker_settings
+            .as_ref()
+            .is_some_and(|baseline| !baseline.equivalent(&DockerSettings::of(&def)));
+        set_runtime(t, name, &rt)?;
+    }
     t.execute(
         "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5,
                             credential_admin = ?6
@@ -599,7 +654,7 @@ pub fn prepare_update(
             .with_details(json!({"state": "running", "fields": changed})));
         }
     }
-    if !live && p.contains_key("limits") {
+    if !live && p.contains_key("limits") && current.def.container.is_some() {
         refuse_docker_limits(&current, p.get("limits"), o.get("limits"))?;
     }
     for (k, val) in p {

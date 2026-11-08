@@ -95,7 +95,7 @@ describe("ProjectTree", () => {
   });
   it("has a cog on each project row that links the project settings screen", () => {
     const el = mount("/projects");
-    const cogs = Array.from(el.querySelectorAll<HTMLAnchorElement>("a.tree-cog"));
+    const cogs = Array.from(el.querySelectorAll<HTMLAnchorElement>('a.tree-cog[aria-label^="Settings of "]'));
     expect(cogs.map((a) => a.getAttribute("href"))).toEqual(["/p/alpha/settings", "/p/my%20app/settings"]);
     expect(cogs.map((a) => a.getAttribute("aria-label"))).toEqual(["Settings of alpha", "Settings of my app"]);
     expect(cogs.map((a) => a.title)).toEqual(["Settings of alpha", "Settings of my app"]);

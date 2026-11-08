@@ -325,7 +325,11 @@ pub fn plan_rm(req: &DockerRm, bin: &str) -> Result<VerbPlan, BuildError> {
     Ok(VerbPlan::plain(base(bin, a, req.timeout_secs)))
 }
 
-pub fn plan_inspect(req: &DockerInspect, bin: &str) -> Result<VerbPlan, BuildError> {
+pub fn plan_inspect(
+    req: &DockerInspect,
+    bin: &str,
+    work_dir: &std::path::Path,
+) -> Result<VerbPlan, BuildError> {
     let a = vec![
         s("inspect"),
         s("--type"),
@@ -334,7 +338,7 @@ pub fn plan_inspect(req: &DockerInspect, bin: &str) -> Result<VerbPlan, BuildErr
     ];
     Ok(VerbPlan::parsed(
         base(bin, a, req.timeout_secs),
-        ResultParser::DockerInspect,
+        ResultParser::DockerInspect(work_dir.to_owned()),
     ))
 }
 
@@ -407,12 +411,51 @@ pub fn parse_inspect(stdout: &str, code: Option<i32>) -> Value {
         "id": first["Id"],
         "name": first["Name"].as_str().map(|n| n.trim_start_matches('/')),
         "image": first["Config"]["Image"],
+        "container_limits": first.get("HostConfig").map(|h| json!({
+            "cpu": h["NanoCpus"], "cpu_quota": h["CpuQuota"], "cpu_period": h["CpuPeriod"],
+            "memory": h["Memory"], "memory_swap": h["MemorySwap"],
+            "pids": h["PidsLimit"], "blkio_weight": h["BlkioWeight"],
+        })),
+        "mounts": first["Mounts"],
         "status": status,
         "running": st["Running"],
         "exit_code": st["ExitCode"],
         "started_at": st["StartedAt"],
         "finished_at": st["FinishedAt"],
     })
+}
+
+/// Identify only exact workspace binds resolved against this host's work root.
+pub fn parse_inspect_workspaces(
+    stdout: &str,
+    code: Option<i32>,
+    work_dir: &std::path::Path,
+) -> Value {
+    let mut result = parse_inspect(stdout, code);
+    let mut workspaces = serde_json::Map::new();
+    if let Some(mounts) = result["mounts"].as_array() {
+        for mount in mounts {
+            let Some(path) = mount["Destination"]
+                .as_str()
+                .and_then(|s| s.strip_prefix("/work/"))
+            else {
+                continue;
+            };
+            let workspace = crate::protocol::WorkspaceMount {
+                path: path.to_owned(),
+            };
+            if mount["Type"] == "bind"
+                && mount["RW"] == true
+                && mount["Propagation"] == "rprivate"
+                && let Ok(source) = crate::workspace::resolve(work_dir, &workspace)
+                && mount["Source"].as_str() == source.to_str()
+            {
+                workspaces.insert(path.to_owned(), mount.clone());
+            }
+        }
+    }
+    result["workspace_mounts"] = Value::Object(workspaces);
+    result
 }
 
 /// `docker ps --format json` prints one JSON object per line.
@@ -684,7 +727,7 @@ mod tests {
         );
         let ins: DockerInspect =
             serde_json::from_value(json!({"session":1,"container":"c1"})).unwrap();
-        let p = plan_inspect(&ins, "/usr/bin/docker").unwrap();
+        let p = plan_inspect(&ins, "/usr/bin/docker", std::path::Path::new("/work")).unwrap();
         assert_eq!(p.exec.program, "/usr/bin/docker");
         assert_eq!(p.exec.args, ["inspect", "--type", "container", "c1"]);
         assert!(p.exec.capture_stdout);
@@ -725,6 +768,12 @@ mod tests {
         assert_eq!(v["state"], "running");
         assert_eq!(v["name"], "t-buildbox");
         assert_eq!(v["id"], "abc123");
+        assert!(v["mounts"].is_null());
+        let mounted = out.replace("\"State\":", "\"Mounts\":[{\"Type\":\"volume\",\"Name\":\"data\",\"Destination\":\"/data\"}],\"State\":");
+        assert_eq!(
+            parse_inspect(&mounted, Some(0))["mounts"][0]["Name"],
+            "data"
+        );
         assert_eq!(parse_inspect("[]\n", Some(1))["state"], "absent");
         let exited = out.replace("\"running\"", "\"exited\"");
         assert_eq!(parse_inspect(&exited, Some(0))["state"], "stopped");
