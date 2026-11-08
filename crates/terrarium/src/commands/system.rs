@@ -726,6 +726,9 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             let v = ctx.api.post(&path, body).await?;
             ctx.emit(&v, |c, v| {
                 c.line(format!("{name}: {verb}: {}", field(v, "state")));
+                if let Some(note) = v["recreate_note"].as_str() {
+                    c.line(format!("warning: {note}"));
+                }
                 if let Some(e) = v["attach_error"].as_str() {
                     c.line(format!("warning: {e}"));
                 }

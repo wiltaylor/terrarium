@@ -39,6 +39,9 @@ pub struct TargetRow {
 /// The runtime record of a target (docs/api.md §17.2, "Workspaces").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Runtime {
+    /// Settings used by the existing managed container, retained across edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_settings: Option<DockerSettings>,
     /// Create-time settings changed. Replacing a permanent container needs consent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recreate_required: bool,
@@ -56,6 +59,18 @@ pub struct Runtime {
     /// agent ULID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub instances: BTreeMap<String, Instance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockerSettings {
+    pub image: Option<String>,
+    pub limits: Option<terrarium_core::limits::TargetLimits>,
+}
+
+impl DockerSettings {
+    pub fn of(def: &TargetDef) -> Self {
+        Self { image: def.image.clone(), limits: def.limits.clone() }
+    }
 }
 
 /// One lab instance of a `lab_from_workspace` target.
@@ -600,7 +615,8 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
         && (def.image != current.def.image || def.limits != current.def.limits)
     {
         let mut rt = current.runtime.clone();
-        rt.recreate_required = true;
+        let baseline = rt.docker_settings.get_or_insert_with(|| DockerSettings::of(&current.def));
+        rt.recreate_required = *baseline != DockerSettings::of(&def);
         set_runtime(t, name, &rt)?;
     }
     t.execute(

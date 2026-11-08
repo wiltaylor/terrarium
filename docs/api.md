@@ -6200,15 +6200,18 @@ any time ("Resource limits", below).
 
 For a permanent managed Docker target, changing `image` or `limits` sets
 `runtime.recreate_required` and returns `recreate_note`. The next `up` of
-an existing stopped container refuses rather than silently using old settings.
+an existing stopped container starts it with its old settings and a clear
+`recreate_note` warning. Editing both image and limits back to the container's
+original settings clears the pending flag, without discarding any data.
 Run `terrarium admin target verb NAME recreate` (`POST
 /api/targets/{name}/recreate`) explicitly to apply the settings. This requires
 the rights to define the target (project admin or global sysadmin), refuses
 running containers and live exec sessions, and removes the stopped container
 without force or volume deletion before starting the new image. **The old
-writable layer is lost.** Recreation refuses any mounted container, because
-mount-preserving recreation is not yet supported. Older host agents that do
-not report mounts also refuse. Existing-container targets (`container`)
+writable layer is lost.** Recreation preserves exactly the Terrarium workspace
+binds recorded for the container and verified against the host's work root.
+Foreign binds and named or anonymous volumes refuse recreation. Older host
+agents that cannot verify mounts also refuse mounted containers. Existing-container targets (`container`)
 cannot be recreated. Ephemeral targets keep their existing behavior.
 
 An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values

@@ -2281,6 +2281,9 @@ fn sess_shadow(s: &ExecSession) -> (Arc<ExecSession>, mpsc::UnboundedReceiver<Co
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleOpts {
+    /// Explicit recreation retains the verified original workspace binds.
+    #[serde(skip)]
+    pub recreate_workspaces: Option<Vec<String>>,
     /// The snapshot name for `snapshot` and `restore`. Default `terrarium`.
     #[serde(default)]
     pub name: Option<String>,
@@ -2395,6 +2398,7 @@ async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> A
     .await?;
     let mut rt = runtime_of(state, &def.name).await?;
     rt.recreate_required = false;
+    rt.docker_settings = Some(targets::DockerSettings::of(def));
     store_runtime(state, &def.name, rt).await?;
     Ok(())
 }
@@ -2471,6 +2475,7 @@ pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
     // Check capability and capacity before discarding the old writable layer.
     docker_limits(state, def)?;
     check_running_cap(state, def, None).await?;
+    let mut preserved = Vec::new();
     if st == "stopped" {
         let container = container_name(def);
         let inspect_container = container.clone();
@@ -2491,11 +2496,18 @@ pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
                     "recreate refused: host did not report container mounts; update the host agent",
                 )
             })?;
-        if !mounts.is_empty() {
+        let rt = runtime_of(state, &def.name).await?;
+        let verified = inspected.result.as_ref().and_then(|r| r["workspace_mounts"].as_object());
+        if mounts.len() != rt.attached.len() || rt.attached.iter().any(|path| {
+            !verified.and_then(|v| v.get(path)).is_some_and(|mount| mounts.contains(mount))
+        }) || mounts.iter().any(|mount| {
+            !rt.attached.iter().any(|path| verified.and_then(|v| v.get(path)) == Some(mount))
+        }) {
             return Err(ApiError::conflict(
-                "recreate refused: container has mounts; mount-preserving recreation is not supported",
+                "recreate refused: container has foreign mounts or volumes; only verified Terrarium workspace binds can be preserved",
             ));
         }
+        preserved = rt.attached;
         verb_ok(state, def, "docker.rm", move |session| {
             DaemonFrame::DockerRm(DockerRm {
                 session,
@@ -2507,7 +2519,8 @@ pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
         })
         .await?;
     }
-    let mut out = lifecycle(state, def, LifecycleVerb::Up, &LifecycleOpts::default()).await?;
+    let opts = LifecycleOpts { recreate_workspaces: Some(preserved), ..LifecycleOpts::default() };
+    let mut out = lifecycle(state, def, LifecycleVerb::Up, &opts).await?;
     out["verb"] = "recreate".into();
     Ok(out)
 }
@@ -2644,7 +2657,9 @@ pub async fn lifecycle(
                     if bare {
                         workspace_note = Some(no_workspace_note(def));
                     }
-                    let want = if def.container.is_none() && !bare {
+                    let want = if let Some(preserved) = &opts.recreate_workspaces {
+                        preserved.clone()
+                    } else if def.container.is_none() && !bare {
                         attach_set(
                             state,
                             &def.name,
@@ -2683,12 +2698,6 @@ pub async fn lifecycle(
                         }
                         // A permanent target keeps its files over down and up.
                         "stopped" => {
-                            if runtime_of(state, &def.name).await?.recreate_required {
-                                return Err(ApiError::conflict(
-                                    "image or limits changed: explicitly recreate the target to apply them; \
-                                     the writable layer will be lost, volumes are kept",
-                                ));
-                            }
                             check_running_cap(state, def, None).await?;
                             docker_start(state, def).await?;
                             if !fits && def.container.is_none() {
@@ -2836,6 +2845,9 @@ pub async fn lifecycle(
         })
         .await?;
     let mut out = json!({"target": def.name, "verb": verb_kind, "state": new_state});
+    if verb_kind == V::Up && runtime_of(state, &def.name).await?.recreate_required {
+        out["recreate_note"] = "Started the existing container with its old image and limits; recreate is pending. Explicit recreation loses the writable layer and refuses foreign mounts or volumes".into();
+    }
     if let Some(e) = attach_error {
         out["attach_error"] = e.into();
     }

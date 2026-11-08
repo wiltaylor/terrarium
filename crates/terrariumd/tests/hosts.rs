@@ -3854,10 +3854,9 @@ async fn docker_limits_go_on_the_container() {
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.body["runtime"]["recreate_required"], true);
-    lab.td
-        .post_empty("/api/targets/dbox/up")
-        .await
-        .err(409, "conflict");
+    let old = lab.td.post_empty("/api/targets/dbox/up").await.ok().clone();
+    assert!(old["recreate_note"].as_str().unwrap().contains("old image and limits"));
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
     lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
     assert!(lab.log().contains("--cpus=2 "), "{}", lab.log());
     // The same limits are no change.
@@ -3929,10 +3928,9 @@ async fn docker_image_edit_needs_explicit_recreate_without_volume_deletion() {
         .ok()
         .clone();
     assert_eq!(edited["runtime"]["recreate_required"], true);
-    lab.td
-        .post_empty("/api/targets/dbox/up")
-        .await
-        .err(409, "conflict");
+    let old = lab.td.post_empty("/api/targets/dbox/up").await.ok().clone();
+    assert!(old["recreate_note"].as_str().unwrap().contains("old image and limits"));
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
     let recreated = lab
         .td
         .post_empty("/api/targets/dbox/recreate")
@@ -4022,6 +4020,92 @@ async fn docker_recreate_refuses_mounts_and_unknown_mount_metadata() {
         assert!(!lab.log().contains("docker rm"));
         assert_eq!(lab.log().matches("docker run ").count(), 1);
     }
+}
+
+#[tokio::test]
+async fn docker_pending_edits_can_be_undone_after_recreate_refusal() {
+    let lab = Lab::start().await;
+    let _h = lab.host_with("lab1", Some(full_limits_cap())).await;
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3", "limits": {"cpu": 1}})).await;
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    std::fs::write(lab.bins.path().join("docker.mounts"), r#"[{"Type":"volume","Name":"data","Destination":"/data"}]"#).unwrap();
+    lab.td.patch("/api/targets/dbox", json!({"image": "alpine:latest", "limits": {"cpu": 2}})).await.ok();
+    lab.td.post_empty("/api/targets/dbox/recreate").await.err(409, "conflict");
+    let old = lab.td.post_empty("/api/targets/dbox/up").await.ok().clone();
+    assert!(old["recreate_note"].as_str().unwrap().contains("old image and limits"));
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    let partial = lab.td.patch("/api/targets/dbox", json!({"image": "alpine:3"})).await.ok().clone();
+    assert_eq!(partial["runtime"]["recreate_required"], true);
+    let undone = lab.td.patch("/api/targets/dbox", json!({"limits": {"cpu": 1}})).await.ok().clone();
+    assert!(undone["recreate_note"].is_null());
+    let old = lab.td.post_empty("/api/targets/dbox/up").await.ok().clone();
+    assert!(old["recreate_note"].is_null());
+    assert!(!lab.log().contains("docker rm"));
+    assert_eq!(lab.log().matches("docker run ").count(), 1);
+}
+
+#[tokio::test]
+async fn docker_recreate_preserves_verified_workspace_binds() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3"})).await;
+    let state = lab.state();
+    let workspace = state.work_dir.join("terra/worker");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace = std::fs::canonicalize(workspace).unwrap();
+    state.db.write("test", |t| {
+        let mut rt = terrariumd::store::targets::get(t, "dbox")?.runtime;
+        rt.attached = vec!["terra/worker".into()];
+        terrariumd::store::targets::set_runtime(t, "dbox", &rt)
+    }).await.unwrap();
+    // Fake inspect describes the existing stopped container and its exact bind.
+    std::fs::write(lab.bins.path().join("docker.state.terrarium-dbox"), "exited").unwrap();
+    let mounts = json!([{"Type":"bind", "Source":workspace, "Destination":"/work/terra/worker", "RW":true, "Propagation":"rprivate"}]);
+    std::fs::write(lab.bins.path().join("docker.mounts"), mounts.to_string()).unwrap();
+    lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
+    let run = runs(&lab);
+    assert_eq!(run.len(), 1);
+    assert!(run[0].contains(&format!("-v {}:/work/terra/worker", workspace.display())), "{run:?}");
+    assert_eq!(lab.td.get("/api/targets/dbox").await.ok()["runtime"]["attached"], json!(["terra/worker"]));
+}
+
+/// Opt-in evidence on the leased throwaway Docker VM, never on shared build Docker.
+#[tokio::test]
+#[ignore = "requires the leased terrarium-docker-scratch VM with Docker"]
+async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
+    let name = "ter-202-image-check";
+    let lab = Lab::start().await;
+    // Map the test daemon's managed name to this card's permitted container prefix.
+    std::fs::write(lab.bins.path().join("docker"), format!(
+        "#!/usr/bin/python3\nimport subprocess,sys\nsys.exit(subprocess.call(['docker'] + ['{name}' if a == 'terrarium-dbox' else a for a in sys.argv[1:]]))\n"
+    )).unwrap();
+    let _h = lab.host("lab1").await;
+    lab.target(json!({"name":"dbox", "kind":"docker", "host":"lab1", "image":"alpine:3.20"})).await;
+    let state = lab.state();
+    std::fs::create_dir_all(state.work_dir.join("terra/worker")).unwrap();
+    let def = state.db.read(|c| terrariumd::store::targets::get(c, "dbox")).await.unwrap().def;
+    terrariumd::executor::lifecycle(&state, &def, terrarium_core::protocol::LifecycleVerb::Up,
+        &terrariumd::executor::LifecycleOpts { recreate_workspaces: Some(vec!["terra/worker".into()]), ..Default::default() }).await.unwrap();
+    let inspect = || {
+        let out = std::process::Command::new("docker").args(["inspect", name]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()[0].clone()
+    };
+    let before = inspect();
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    lab.td.patch("/api/targets/dbox", json!({"image":"alpine:3.21"})).await.ok();
+    lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
+    let after = inspect();
+    println!("docker inspect before: {}", json!({"Id":before["Id"],"Image":before["Image"],"Mounts":before["Mounts"]}));
+    println!("docker inspect after: {}", json!({"Id":after["Id"],"Image":after["Image"],"Mounts":after["Mounts"]}));
+    // Remove only this test's container, without volume deletion.
+    assert!(std::process::Command::new("docker").args(["rm", "-f", name]).status().unwrap().success());
+    assert_ne!(before["Image"], after["Image"]);
+    assert_ne!(before["Id"], after["Id"]);
+    assert_eq!(after["Config"]["Image"], "alpine:3.21");
+    assert_eq!(before["Mounts"], after["Mounts"]);
+    assert_eq!(after["Mounts"].as_array().unwrap().len(), 1);
 }
 
 /// The whole path on this machine: the daemon sends the limits and the

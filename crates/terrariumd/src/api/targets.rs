@@ -505,8 +505,6 @@ async fn snapshot_delete(
     ))
 }
 
-/// Lifecycle verbs: an actor that may use the target, or one that may
-/// define it.
 async fn recreate(
     State(state): State<Shared>,
     actor: Actor,
@@ -530,6 +528,8 @@ async fn recreate(
     Ok(Json(out))
 }
 
+/// Lifecycle verbs: an actor that may use the target, or one that may
+/// define it.
 async fn run_verb(
     state: Shared,
     actor: Actor,
