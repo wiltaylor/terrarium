@@ -569,7 +569,8 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         }
         case "turn": {
           const ag = c.agent(a.agent);
-          if (ag.status === "stopped" && !a.start_if_stopped) return { status: "skipped", summary: `skipped: ${a.agent} is stopped`, output: { agent: a.agent, started: false }, error: null };
+          // A stopped agent gets the turn as a send gives it: queued, and a wake starts it (TER-210, docs/api.md §19 turn).
+          if (ag.status === "stopped" && !a.start_if_stopped) return { status: "ok", summary: `woke ${a.agent} and sent the turn`, output: { agent: a.agent, started: true, delivery: "queued" }, error: null };
           return { status: "ok", summary: `turn to ${a.agent}`, output: { agent: a.agent, started: ag.status === "stopped", delivery: "accepted" }, error: null };
         }
         case "exec": {
