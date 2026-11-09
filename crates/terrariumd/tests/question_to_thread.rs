@@ -473,6 +473,54 @@ async fn an_in_thread_question_keeps_the_thread_on_the_operator() {
     assert_eq!(th["status"], "tracking");
 }
 
+/// TER-514: the operator moved the question into the thread and decides
+/// there. Its `waiting_agent` passes the `in_thread` question, the agent's
+/// stays refused, and the question stays in the thread.
+#[tokio::test]
+async fn the_operator_sets_waiting_agent_past_an_in_thread_question() {
+    let lab = lab().await;
+    let q = lab.ask(json!({"text": "Drop the old index?"})).await;
+    let qid = id(&q);
+    let r = lab
+        .td
+        .post_empty(&format!("/api/questions/{qid}/to-thread"))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let tid = id(&r.body["thread"]);
+    lab.td
+        .post_as(
+            &lab.lead,
+            &format!("/api/threads/{tid}/messages"),
+            json!({"text": "It is unused since March."}),
+        )
+        .await
+        .ok();
+    assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
+    assert_eq!(lab.counts().await["thread"], 1);
+
+    let th = lab
+        .td
+        .post(
+            &format!("/api/threads/{tid}/status"),
+            json!({"status": "waiting_agent"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(th["status"], "waiting_agent");
+    assert_eq!(lab.counts().await["thread"], 0);
+    assert_eq!(lab.question(&qid).await["status"], "in_thread");
+
+    lab.td
+        .post_as(
+            &lab.lead,
+            &format!("/api/threads/{tid}/status"),
+            json!({"status": "waiting_agent"}),
+        )
+        .await
+        .err(409, "conflict");
+}
+
 /// TER-495: the quotes of the first message can make it longer than a
 /// thread message while each part passes its own limit. The refusal says
 /// why and what to do, and nothing moves.
