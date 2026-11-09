@@ -115,7 +115,13 @@ async fn dispatch_candidate_query_uses_only_indexed_searches() {
             let queries: [(&str, &[&dyn rusqlite::ToSql]); 2] = [
                 (
                     terrariumd::card_dispatcher::CANDIDATES,
-                    rusqlite::params!["p", "ready", 0],
+                    rusqlite::params![
+                        "p",
+                        "ready",
+                        0,
+                        -1,
+                        terrariumd::card_dispatcher::CANDIDATE_PAGE
+                    ],
                 ),
                 (
                     terrariumd::card_dispatcher::WORKING_WIP,
@@ -133,6 +139,54 @@ async fn dispatch_candidate_query_uses_only_indexed_searches() {
         .unwrap();
     assert!(plan.iter().any(|s| s.contains("cards_column")), "{plan:?}");
     assert!(plan.iter().all(|s| !s.contains("SCAN")), "{plan:?}");
+}
+
+async fn ready_card(td: &TestDaemon, body: Value) -> String {
+    td.post("/api/projects/p/cards", body)
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .into()
+}
+
+/// A held GitHub card above an eligible card is skipped, not dispatched.
+#[tokio::test]
+async fn held_card_is_skipped_and_next_card_dispatched() {
+    let td = setup(2, 3, 10).await;
+    let held = ready_card(
+        &td,
+        json!({"title": "GitHub #7: held", "labels": ["github", "hold"],
+               "column": "ready"}),
+    )
+    .await;
+    let next = card(&td, "small").await;
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    let c = get(&td, &held).await;
+    assert_eq!(c["column"], "ready");
+    assert!(c["agent"].is_null());
+    assert_eq!(get(&td, &next).await["column"], "coding");
+}
+
+/// Held cards and cards without a usable type label must not starve the
+/// bounded page: the card after a full page of skips is still dispatched.
+#[tokio::test]
+async fn skips_beyond_one_page_do_not_starve_a_later_card() {
+    let td = setup(2, 4, 20).await;
+    for i in 0..terrariumd::card_dispatcher::CANDIDATE_PAGE + 1 {
+        let body = if i % 2 == 0 {
+            json!({"title": format!("GitHub #{i}: held"),
+                   "labels": ["github", "hold"], "column": "ready"})
+        } else {
+            json!({"title": "No type label", "column": "ready"})
+        };
+        ready_card(&td, body).await;
+    }
+    let last = card(&td, "small").await;
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    assert_eq!(get(&td, &last).await["column"], "coding");
 }
 
 #[tokio::test]

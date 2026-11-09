@@ -60,11 +60,16 @@ SELECT k.wip_limit,
 FROM board_columns k WHERE k.project = ?1 AND k.role = 'working'
 ORDER BY k.position LIMIT 1";
 
+/// Page size of [`CANDIDATES`]: held cards and cards with no usable type
+/// label stay in ready, so pages are walked by position until one is not
+/// full and a later dispatchable card cannot be starved (TER-408).
+pub const CANDIDATE_PAGE: i64 = 16;
+
 /// Bounded ready-column lookup: cards with no assignee, no open bound
-/// agent, no unmet dependency and no cooldown, in board order. Keep the
-/// indexed query public for plan regression tests.
+/// agent, no unmet dependency and no cooldown, in board order, one page
+/// after `?4`. Keep the indexed query public for plan regression tests.
 pub const CANDIDATES: &str = "
-SELECT c.id, c.title, c.labels FROM cards c INDEXED BY cards_column
+SELECT c.id, c.position, c.title, c.labels FROM cards c INDEXED BY cards_column
 WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
   AND c.archived = 0 AND c.kind = 'card' AND c.assignee IS NULL
   AND NOT EXISTS (SELECT 1 FROM spawns s WHERE s.bound_kind = 'card'
@@ -74,7 +79,8 @@ WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = 
       JOIN board_columns k ON k.id = dc.column_id
       WHERE e.card = c.id AND dc.archived = 0
         AND coalesce(k.role, k.name) NOT IN ('accepted', 'done'))
-ORDER BY c.position LIMIT 16";
+  AND c.position > ?4
+ORDER BY c.position LIMIT ?5";
 
 fn working_wip(r: &rusqlite::Row<'_>) -> rusqlite::Result<(Option<i64>, i64)> {
     Ok((r.get(0)?, r.get(1)?))
@@ -90,28 +96,44 @@ fn candidate(c: &Connection, project: &str) -> ApiResult<Option<(String, String)
         return Ok(None);
     }
     let ready = board::role_name(c, project, "ready", "ready")?;
+    let now = chrono::Utc::now().timestamp();
     let mut q = c.prepare(CANDIDATES)?;
-    let rows = q.query_map(
-        params![project, ready, chrono::Utc::now().timestamp()],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        },
-    )?;
-    for row in rows {
-        let (id, title, labels) = row?;
-        let labels = crate::store::json_col::<Vec<String>>(&labels);
-        if crate::store::github_gate::is_held(&title, &labels) {
-            continue;
+    // Positions are dense per column, so `> last seen` pages without gaps.
+    // Held cards and cards with no usable type label are skips in Rust, so
+    // a full page of them continues with the next page instead of starving
+    // an eligible card at position 17 or lower.
+    let mut after: i64 = -1;
+    loop {
+        let mut rows: Vec<(String, i64, String, String)> = Vec::new();
+        {
+            let it = q.query_map(params![project, ready, now, after, CANDIDATE_PAGE], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in it {
+                rows.push(row?);
+            }
         }
-        if let Some(template) = template(&labels) {
-            return Ok(Some((id, template)));
+        let full = rows.len() == CANDIDATE_PAGE as usize;
+        for (id, position, title, labels) in rows {
+            after = position;
+            let labels = crate::store::json_col::<Vec<String>>(&labels);
+            if crate::store::github_gate::is_held(&title, &labels) {
+                continue;
+            }
+            if let Some(template) = template(&labels) {
+                return Ok(Some((id, template)));
+            }
+        }
+        // A page that is not full is the end of the ready column.
+        if !full {
+            return Ok(None);
         }
     }
-    Ok(None)
 }
 
 /// Try one card. The timer repeats after a successful claim to fill free WIP.
