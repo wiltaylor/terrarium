@@ -165,26 +165,6 @@ async fn agent(td: &TestDaemon, id: &str) -> Value {
     td.get(&format!("/api/agents/{id}")).await.ok().clone()
 }
 
-/// Wait until the new agent `eph` ran its task turn and is idle. The
-/// `idle` of the start can come before the task turn, so
-/// `wait_status(idle)` alone may return while the task turn is still to
-/// run (TER-452). The status event `working -> idle` is written in the
-/// same write as the status.
-async fn task_done(td: &TestDaemon, eph: &str) {
-    let key = eph.to_owned();
-    until("the end of the task turn", || async {
-        td.get(&format!("/api/agents/{key}/events?kind=status"))
-            .await
-            .ok()
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["data"]["from"] == "working" && e["data"]["status"] == "idle")
-    })
-    .await;
-    td.wait_status(eph, "idle").await;
-}
-
 async fn parked(td: &TestDaemon, eph: &str) {
     let key = eph.to_owned();
     until("the park stop", || async {
@@ -1155,7 +1135,8 @@ async fn a_park_stop_spares_an_unparked_agent() {
     let (td, lead) = setup().await;
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
-    td.wait_status(&eph, "idle").await;
+    // The task turn first: else the check below can see it `working`.
+    td.wait_task_done(&eph).await;
     // The idle pass saw it parked; the unpark landed before the stop.
     terrariumd::lifecycle::park_stop(&state(&td), eph.parse().unwrap()).await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -1278,7 +1259,7 @@ async fn a_parked_agent_holds_its_place_until_it_stops() {
     let s = state(&td);
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
-    task_done(&td, &eph).await;
+    td.wait_task_done(&eph).await;
     // A wake on the way keeps the parked agent running.
     let hold = terrariumd::lifecycle::WakeGuard::take(&s.lifecycle, eph.parse().unwrap()).unwrap();
     mv(&td, &c, "review", None).await;
@@ -1368,7 +1349,7 @@ async fn a_parked_agent_that_still_runs_unparks_in_its_own_place() {
     let s = state(&td);
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
-    task_done(&td, &eph).await;
+    td.wait_task_done(&eph).await;
     // A wake on the way keeps the parked agent running (max_concurrent 1).
     let hold = terrariumd::lifecycle::WakeGuard::take(&s.lifecycle, eph.parse().unwrap()).unwrap();
     mv(&td, &c, "review", None).await;
