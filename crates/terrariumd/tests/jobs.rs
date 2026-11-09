@@ -2263,18 +2263,37 @@ echo real-tunnel-large-log-ok
 "#;
     let marker = lab._dirs.path().join("live-recipe-started");
     let mut config = json!({"target":"p-box", "recipe":format!("touch '{}'\n{recipe}", marker.display()), "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm.private_key", "DOCKER_CI_RESET_KEY":"@secret:reset.private_key"}, "docker_ci":{"destination":"root@127.0.0.1", "port":port, "known_hosts":pin, "reset_destination":"root@127.0.0.1", "reset_port":port,"reset_known_hosts":pin}});
-    let wrong_pin = std::fs::read_to_string(std::env::var("TER363_SCRATCH_WRONG_PIN").unwrap()).unwrap();
-    for (branch, reset_pin) in [("reset-unknown-host", pin.replace("127.0.0.1", "unknown-host")), ("reset-wrong-key", wrong_pin)] {
+    let wrong_pin =
+        std::fs::read_to_string(std::env::var("TER363_SCRATCH_WRONG_PIN").unwrap()).unwrap();
+    for (branch, reset_pin) in [
+        (
+            "reset-unknown-host",
+            pin.replace("127.0.0.1", "unknown-host"),
+        ),
+        ("reset-wrong-key", wrong_pin),
+    ] {
         config["docker_ci"]["reset_known_hosts"] = json!(reset_pin);
-        lab.td.put("/api/projects/p/delivery", config.clone()).await.ok();
+        lab.td
+            .put("/api/projects/p/delivery", config.clone())
+            .await
+            .ok();
         lab.branch(branch, "next", &[(branch, "yes\n")]);
         let card = lab.card(branch, branch).await;
-        lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({})).await.ok();
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .await
+            .ok();
         let jobs = lab.until_idle().await;
         let job = jobs.iter().find(|j| j["card"] == card).unwrap();
         assert_ne!(job["state"], "passed", "{job:#}");
-        assert!(!marker.exists(), "reset pin failure must prevent the recipe");
-        let detail = lab.td.get(&format!("/api/jobs/{}", job["id"].as_str().unwrap())).await;
+        assert!(
+            !marker.exists(),
+            "reset pin failure must prevent the recipe"
+        );
+        let detail = lab
+            .td
+            .get(&format!("/api/jobs/{}", job["id"].as_str().unwrap()))
+            .await;
         assert!(detail.ok().to_string().contains("reset failed"));
     }
     config["docker_ci"]["reset_known_hosts"] = json!(pin);
@@ -2304,7 +2323,9 @@ async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes(
     struct Trace(std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>);
     impl std::io::Write for Trace {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if let Some(buffer) = self.0.lock().unwrap().as_mut() { buffer.extend_from_slice(bytes); }
+            if let Some(buffer) = self.0.lock().unwrap().as_mut() {
+                buffer.extend_from_slice(bytes);
+            }
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
