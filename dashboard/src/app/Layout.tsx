@@ -1,4 +1,4 @@
-// The app shell: sidebar with Home, Inbox, Logs, and Schedules, the project
+// The app shell: sidebar with Home, Inbox, Threads, Logs, and Schedules, the project
 // tree, the Settings section, and the footer; on the right, the side bar of
 // pinned conversations (./PinnedBar).
 
@@ -10,6 +10,7 @@ import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
 import { agents, api, auth, events, inbox, pins, projectFolders, projects, signOutNow, subscriptions, theme } from "../stores";
 import { badge } from "../features/inbox/model";
+import { threadsBadge } from "../features/inbox/threads";
 import { SETTINGS_ITEMS, TOP_ITEMS } from "./nav";
 import { ProjectTree } from "./ProjectTree";
 import { bookmarks } from "../stores";
@@ -61,6 +62,9 @@ export function Layout(props: RouteSectionProps) {
   });
 
   const inboxBadge = () => badge(inbox.counts());
+  const threadBadge = () => threadsBadge(inbox.counts());
+  /** The badge of a top item: the Inbox, or the Threads (TER-466). */
+  const navBadge = (href: string) => (href === "/inbox" ? inboxBadge() : href === "/threads" ? threadBadge() : null);
 
   return (
     <div class="shell" classList={{ "has-pins": pins.pins().length > 0, "pins-collapsed": pins.collapsed() }}>
@@ -84,7 +88,7 @@ export function Layout(props: RouteSectionProps) {
             {(item) => (
               <A href={item.href} activeClass="active" end={"end" in item}>
                 <span>{item.label}</span>
-                <Show when={item.href === "/inbox" && inboxBadge()}>
+                <Show when={navBadge(item.href)}>
                   {(b) => (
                     <span class={b().cls} title={b().title}>
                       {b().n}

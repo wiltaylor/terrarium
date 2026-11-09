@@ -474,7 +474,27 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
     // message); no question counts on its own.
     assert_eq!(counts["thread"], 2, "{counts}");
     assert_eq!(counts["question"], 0, "{counts}");
-    assert_eq!(counts["urgent"], 1, "{counts}");
+    // The threads have their own badge (TER-466): the Inbox totals leave
+    // them out, and `thread_urgent` counts the urgent one.
+    let kinds: i64 = ["question", "notice", "mail", "system"]
+        .iter()
+        .map(|k| counts[*k].as_i64().unwrap())
+        .sum();
+    assert_eq!(counts["open"].as_i64().unwrap(), kinds, "{counts}");
+    assert_eq!(counts["urgent"], 0, "{counts}");
+    assert_eq!(counts["critical"], 0, "{counts}");
+    assert_eq!(counts["thread_urgent"], 1, "{counts}");
+    assert_eq!(counts["thread_critical"], 0, "{counts}");
+    // Nor do the open, All, and default lists show them; `kind=thread` does.
+    for q in ["", "?status=open", "?status=all"] {
+        let r = lab.td.get(&format!("/api/inbox{q}")).await;
+        assert_eq!(r.headers["x-inbox-open"], kinds.to_string(), "{q}");
+        let rows = r.ok().as_array().unwrap().clone();
+        assert!(
+            !rows.iter().any(|i| i["kind"] == "thread"),
+            "{q}: {rows:?}"
+        );
+    }
 
     // Answering the bundle makes the thread wait for the agent.
     lab.td
@@ -559,7 +579,8 @@ async fn an_open_question_keeps_the_item_open_and_a_close_retracts_it() {
     assert_eq!(it["urgent"], true);
     let counts = lab.td.get("/api/inbox/counts").await.ok().clone();
     assert_eq!(counts["thread"], 1, "{counts}");
-    assert_eq!(counts["urgent"], 1, "{counts}");
+    assert_eq!(counts["thread_urgent"], 1, "{counts}");
+    assert_eq!(counts["urgent"], 0, "{counts}");
 
     // The operator's close retracts the open question: nothing stays open
     // and hidden in a closed thread.
