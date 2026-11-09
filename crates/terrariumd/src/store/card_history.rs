@@ -55,25 +55,42 @@ fn work_history(samples: &[WorkSample], labels: &[String]) -> WorkHistory {
         p70_ms: (n > 0).then(|| values[(n * 7).div_ceil(10) - 1]),
     }
 }
+const WORK_SAMPLES_SQL: &str = "WITH recent AS (
+           SELECT DISTINCT card FROM (
+             SELECT card FROM events WHERE project = ?1
+               AND kind = 'card'
+               AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
+             ORDER BY seq DESC LIMIT 2000)
+         ), steps AS (
+           SELECT e.seq, e.card, e.project, e.at, e.payload,
+             json_extract(e.payload, '$.change') AS change,
+             lead(e.seq) OVER w AS next_seq,
+             lead(e.at) OVER w AS next_at,
+             lead(json_extract(e.payload, '$.change')) OVER w AS next_change
+           FROM events e
+           WHERE e.card IN (SELECT card FROM recent) AND e.kind = 'card'
+             AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.change') END IN ('eta', 'moved')
+           WINDOW w AS (PARTITION BY e.card ORDER BY e.seq)
+         )
+         SELECT s.at, json_extract(s.payload, '$.eta_at'), s.next_at,
+                coalesce(json_extract(s.payload, '$.labels'), c.labels, '[]'), s.seq, s.next_seq, s.card
+         FROM steps s LEFT JOIN cards c ON c.id = s.card
+         WHERE s.project = ?1 AND s.change = 'eta' AND s.next_change = 'moved'
+           AND coalesce(json_extract(s.payload, '$.column_role'), json_extract(s.payload, '$.column')) IN ('working', 'in_progress')
+           AND coalesce(json_extract(s.payload, '$.job'), 0) = 0
+         ORDER BY s.next_seq DESC";
 
 /// Most recent completed estimates, excluding jobs, superseded guesses,
 /// clears, open work and invalid timestamps. The first subsequent ETA or
 /// move closes an estimate, but only a move supplies a completed sample.
+///
+/// Bounded (TER-394): only cards with one of the latest 2000 project card
+/// moves (the `events_card_moves` index) count, and their ETA and move
+/// events come by `events_card`. A window function pairs each ETA with the
+/// next ETA or move, so no subquery runs per event. The query runs under
+/// the database lock on every card list, so it must not scan the event log.
 pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSample>> {
-    let mut stmt = conn.prepare(
-        "SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
-                coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]'), e.seq, x.seq, e.card
-         FROM events e JOIN events x ON x.seq = (
-           SELECT min(n.seq) FROM events n WHERE n.card = e.card AND n.seq > e.seq
-             AND n.kind = 'card' AND json_extract(n.payload, '$.change') IN ('eta','moved'))
-         LEFT JOIN cards c ON c.id = e.card
-         WHERE e.project = ?1 AND e.kind = 'card'
-           AND json_extract(e.payload, '$.change') = 'eta'
-           AND coalesce(json_extract(e.payload, '$.column_role'), json_extract(e.payload, '$.column')) IN ('working', 'in_progress')
-           AND coalesce(json_extract(e.payload, '$.job'), 0) = 0
-           AND json_extract(x.payload, '$.change') = 'moved'
-         ORDER BY x.seq DESC",
-    )?;
+    let mut stmt = conn.prepare(WORK_SAMPLES_SQL)?;
     let rows = stmt.query_map([project], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -417,6 +434,64 @@ mod tests {
         assert_eq!(samples[0].actual_ms, 240000.0);
         assert_eq!(samples[0].guess_ms, 540000.0);
         assert_eq!(samples[0].labels, vec!["type:impl"]);
+    }
+
+    /// TER-394: worker samples come from the cards of the latest 2000
+    /// project moves, through the move index, with no per-event subquery,
+    /// and malformed payloads do not fail the read.
+    #[test]
+    fn worker_samples_are_bounded_by_recent_moves_and_use_the_index() {
+        let c = db();
+        c.execute_batch(
+            "CREATE INDEX events_project ON events(project, seq);
+             CREATE INDEX events_card ON events(card, seq);
+             CREATE INDEX events_card_moves ON events(project, seq)
+               WHERE kind = 'card'
+                 AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved';",
+        )
+        .unwrap();
+        const ETA: &str =
+            r#"{"change":"eta","column_role":"working","eta_at":"2026-11-08T00:30:00Z"}"#;
+        let eta = |card: &str, minute: u32| {
+            c.execute(
+                "INSERT INTO events(project,card,kind,at,payload) VALUES ('p',?1,'card',?2,?3)",
+                params![card, format!("2026-11-08T00:{minute:02}:00Z"), ETA],
+            )
+            .unwrap();
+        };
+        eta("old", 0);
+        moved(&c, "p", "old", 5, "working", "review");
+        c.execute(
+            "INSERT INTO events(project,card,kind,at,payload) VALUES ('p','old','card','x','not JSON')",
+            [],
+        )
+        .unwrap();
+        eta("new", 1);
+        moved(&c, "p", "new", 6, "working", "review");
+        assert_eq!(work_samples(&c, "p").unwrap().len(), 2);
+        // 2000 newer moves of another card push `old` out of the window;
+        // `new` stays because it moves again inside it.
+        c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1999) INSERT INTO events(project,card,kind,at,payload) SELECT 'p','noise','card','2026-11-08T00:07:00Z','{\"change\":\"moved\"}' FROM n;").unwrap();
+        moved(&c, "p", "new", 8, "review", "accepted");
+        let samples = work_samples(&c, "p").unwrap();
+        assert_eq!(
+            samples.iter().map(|s| s.card.as_str()).collect::<Vec<_>>(),
+            vec!["new"]
+        );
+        assert_eq!(samples[0].actual_ms, 300000.0);
+        let mut stmt = c
+            .prepare(&format!("EXPLAIN QUERY PLAN {WORK_SAMPLES_SQL}"))
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(["p"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|p| p.contains("events_card_moves")),
+            "{plan:?}"
+        );
+        assert!(!plan.iter().any(|p| p.contains("CORRELATED")), "{plan:?}");
     }
 
     /// Run against a read-API export, never the daemon's live database.
