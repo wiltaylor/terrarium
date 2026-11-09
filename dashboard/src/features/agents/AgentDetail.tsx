@@ -16,6 +16,7 @@ import { AgentForm } from "./AgentForm";
 import { SaveAsTemplateDialog } from "../templates/TemplateDialog";
 import { Conversation } from "./conversation/Conversation";
 import { PinButton } from "../../app/PinnedBar";
+import { ProjectTabs } from "../projects/ProjectTabs";
 import { QuotaLine } from "./QuotaLine";
 import { SessionsPanel } from "./SessionsPanel";
 import { AGENT_TABS, agentViewQuery, parseAgentView, waitsTabLabel, type AgentTab } from "./sessions";
@@ -164,6 +165,13 @@ export default function AgentDetail() {
     >
       {(a) => (
         <div class="stack">
+          {/* The agent page is outside /p (O4a, TER-153): it shows the project and its tabs with Agents active. */}
+          <div class="agent-project">
+            <A class="small" href={`/p/${encodeURIComponent(a().project)}/agents`} title={`Back to the agents of ${a().project}`}>
+              ‹ {a().project}
+            </A>
+            <ProjectTabs base={`/p/${encodeURIComponent(a().project)}`} active={(t) => t === "agents"} />
+          </div>
           <PageHead
             title={
               <span class="row">

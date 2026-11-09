@@ -432,14 +432,20 @@ async fn untouched_threads_get_a_reminder_then_close_as_stale() {
     .await;
     lab.parked(&eph).await;
 
-    // Short settings: the reminder after 300 ms, the stale close after 3 s.
-    state(&lab.td)
-        .lifecycle
-        .threads
-        .set_tuning(terrariumd::thread_close::Tuning {
-            reminder_after: Duration::from_millis(300),
-            stale_after: Duration::from_secs(3),
-        });
+    // The reminder after 300 ms, and no stale close until the reminder is
+    // seen. A sweep closes stale threads before it reminds (TER-471): with
+    // both short at once, a loaded machine can reach the first sweep after
+    // the stale time, and the thread closes with no reminder ever sent.
+    let tune = |stale_after| {
+        state(&lab.td)
+            .lifecycle
+            .threads
+            .set_tuning(terrariumd::thread_close::Tuning {
+                reminder_after: Duration::from_millis(300),
+                stale_after,
+            });
+    };
+    tune(Duration::ZERO);
     let reminders = || async {
         lab.td
             .get("/api/mail?to=operator&from=system")
@@ -470,6 +476,7 @@ async fn untouched_threads_get_a_reminder_then_close_as_stale() {
     assert!(lab.thread(&busy).await["reminded_at"].is_null());
 
     // The stale close, with a mail to the report-to lead.
+    tune(Duration::from_secs(3));
     until("the stale close", || async {
         lab.thread(&tid).await["status"] == "closed"
     })

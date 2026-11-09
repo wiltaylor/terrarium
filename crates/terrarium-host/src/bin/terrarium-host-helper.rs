@@ -26,8 +26,10 @@ struct Args {
     check: bool,
 }
 
-/// The path and every parent: root-owned, not writable by group or others.
-fn root_chain(path: &Path) -> anyhow::Result<()> {
+/// The path and every parent, and each symlink on the way: root-owned,
+/// not writable by group or others. Returns the resolved path, which the
+/// helper uses from then on.
+fn root_chain(path: &Path) -> anyhow::Result<PathBuf> {
     native::check_root_chain(path).map_err(anyhow::Error::msg)
 }
 
@@ -43,9 +45,9 @@ fn main() -> anyhow::Result<()> {
     if !nix::unistd::geteuid().is_root() {
         bail!("terrarium-host-helper must run as root");
     }
-    root_chain(&args.config)?;
-    let text = std::fs::read_to_string(&args.config)
-        .with_context(|| format!("read {}", args.config.display()))?;
+    let config = root_chain(&args.config)?;
+    let text =
+        std::fs::read_to_string(&config).with_context(|| format!("read {}", config.display()))?;
     let cfg = HelperConfig::parse(&text).map_err(anyhow::Error::msg)?;
 
     let agent = User::from_name(&cfg.agent_user)
@@ -68,19 +70,28 @@ fn main() -> anyhow::Result<()> {
         pool.push(id);
     }
 
-    for bin in [&cfg.systemd_run, &cfg.systemctl] {
-        root_chain(bin)?;
-    }
-    // GPU sessions need a verified nvidia-smi: the helper runs it as root.
-    let gpu = if cfg.gpu.nvidia_smi.exists() {
-        native::check_root_chain(&cfg.gpu.nvidia_smi)
+    // The helper runs these as root: through the verified real path, so
+    // the path as written in the config does not matter after this.
+    let systemd_run = root_chain(&cfg.systemd_run)?;
+    let systemctl = root_chain(&cfg.systemctl)?;
+    // GPU sessions need a verified nvidia-smi.
+    let (nvidia_smi, gpu) = if cfg.gpu.nvidia_smi.exists() {
+        match native::check_root_chain(&cfg.gpu.nvidia_smi) {
+            Ok(real) => (real, Ok(())),
+            Err(e) => (cfg.gpu.nvidia_smi.clone(), Err(e)),
+        }
     } else {
-        Err(format!("{} is missing", cfg.gpu.nvidia_smi.display()))
+        (
+            cfg.gpu.nvidia_smi.clone(),
+            Err(format!("{} is missing", cfg.gpu.nvidia_smi.display())),
+        )
     };
     if let Err(e) = &gpu {
         tracing::warn!(error = %e, "GPU sessions are off");
     }
-    let version = std::process::Command::new(&cfg.systemctl)
+    // A stop is confirmed from the unit's cgroup v2 `cgroup.events`.
+    native::check_cgroup_v2(Path::new(native::CGROUP_ROOT)).map_err(anyhow::Error::msg)?;
+    let version = std::process::Command::new(&systemctl)
         .arg("--version")
         .output()
         .context("systemctl --version")?;
@@ -90,18 +101,22 @@ fn main() -> anyhow::Result<()> {
     }
     let workspace_root = std::fs::canonicalize(&cfg.workspace_root)
         .with_context(|| format!("workspace_root {}", cfg.workspace_root.display()))?;
+    native::check_workspace_root(&workspace_root).map_err(anyhow::Error::msg)?;
     let socket_dir = cfg
         .socket
         .parent()
         .context("the socket needs a directory")?;
     root_chain(socket_dir)?;
+    // Before the helper creates or chmods it: a symlinked state_dir or a
+    // writable parent would let another user aim root's writes.
+    native::check_state_dir(&cfg.state_dir).map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("create {}", cfg.state_dir.display()))?;
     std::fs::set_permissions(
         &cfg.state_dir,
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
     )?;
-    root_chain(&cfg.state_dir)?;
+    let state_dir = root_chain(&cfg.state_dir)?;
     if args.check {
         println!(
             "ok: agent uid {agent_uid}, workload pool {:?}, workspace root {}, rights {:?}, GPU sessions {}",
@@ -121,7 +136,7 @@ fn main() -> anyhow::Result<()> {
     let helper = Arc::new(Helper {
         ctx: Ctx {
             workspace_root,
-            state_dir: cfg.state_dir.clone(),
+            state_dir,
             dev_dir: cfg.gpu.dev_dir.clone(),
             support_nodes: cfg.gpu.support_nodes.clone(),
         },
@@ -129,9 +144,10 @@ fn main() -> anyhow::Result<()> {
         rights: cfg.rights.clone(),
         pool,
         checker: Box::new(HostWorkloadCheck { agent_uid }),
-        systemd_run: cfg.systemd_run.clone(),
-        systemctl: cfg.systemctl.clone(),
-        nvidia_smi: cfg.gpu.nvidia_smi.clone(),
+        systemd_run,
+        systemctl,
+        nvidia_smi,
+        cgroup_root: PathBuf::from(native::CGROUP_ROOT),
         gpu,
         nodes: Box::new(HostDevices),
         sessions: Mutex::new(Sessions::default()),

@@ -7,6 +7,7 @@ import { createEffect, createResource, createSignal, For, on, Show } from "solid
 import { isMissingEndpoint } from "../../api/http";
 import type { Repo, Target } from "../../api/types";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
+import { decodePathParam } from "../../lib/url";
 import { api, repos as reposStore } from "../../stores";
 import { AddRepoForm } from "./AddRepoForm";
 
@@ -14,11 +15,13 @@ export const repoHref = (project: string, repo: string) => `/p/${encodeURICompon
 
 export default function ReposPage() {
   const params = useParams<{ project: string }>();
-  const [repos, { refetch }] = createResource(() => params.project, (p) => api.projects.repos(p));
-  const [targets] = createResource(() => params.project, (p) => api.projects.targets(p).catch((): Target[] => []));
+  // Router params keep their URL encoding: "my app" arrives as "my%20app".
+  const project = () => decodePathParam(params.project);
+  const [repos, { refetch }] = createResource(() => project(), (p) => api.projects.repos(p));
+  const [targets] = createResource(() => project(), (p) => api.projects.targets(p).catch((): Target[] => []));
   const [adding, setAdding] = createSignal(false);
-  // An add here or from the "+" of the sidebar Repos node changes the repos store: read the list again.
-  createEffect(on(() => reposStore.inProject(params.project).length, () => void refetch(), { defer: true }));
+  // An add here, or one from another view, changes the repos store: read the list again.
+  createEffect(on(() => reposStore.inProject(project()).length, () => void refetch(), { defer: true }));
 
   return (
     <>
@@ -29,7 +32,7 @@ export default function ReposPage() {
       </PageHead>
       <Show when={adding()}>
         <AddRepoForm
-          project={params.project}
+          project={project()}
           onAdded={() => setAdding(false)}
         />
       </Show>

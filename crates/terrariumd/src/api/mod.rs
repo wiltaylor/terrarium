@@ -152,6 +152,10 @@ pub struct AppState {
     pub lifecycle: Arc<crate::lifecycle::Lifecycle>,
     /// The rate buckets of the tool runs (`crate::tool_run`).
     pub tool_rates: Arc<crate::tool_run::Rates>,
+    /// The interval of the lease sweep (`crate::leases`).
+    pub lease_sweep: Arc<crate::leases::Sweep>,
+    /// The hold of the rule engine timers (`crate::rules_engine`).
+    pub rule_timers: Arc<crate::rules_engine::TimerHold>,
     /// The monitor runs: which run now, and the parallel slots
     /// (`crate::monitors`).
     pub monitors: Arc<crate::monitors::Runtime>,
@@ -972,6 +976,8 @@ mod tests {
             config_repo: Arc::default(),
             lifecycle: Arc::default(),
             tool_rates: Arc::default(),
+            lease_sweep: Arc::default(),
+            rule_timers: Arc::default(),
             monitors: Arc::default(),
             webhooks: Arc::default(),
             pipelines: Arc::default(),

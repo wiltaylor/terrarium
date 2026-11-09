@@ -1368,8 +1368,8 @@ CLI is `terrarium admin subscription disable|enable <name>` and
 ### 2.13d Test runs: proof that the tests pass
 
 An agent uploads the result file of a test run with `terrarium test
-push`. You see each test case on the Tests tab of the Board screen
-(`/p/<project>/board/tests`) and on the card (PLAN §15.5). A run with a
+push`. You see each test case on the Tests tab of the project
+(`/p/<project>/tests`) and on the card (PLAN §15.5). A run with a
 version label (`--label version:1.4.0`) shows the label, which opens the
 board filtered by that version.
 

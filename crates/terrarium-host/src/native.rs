@@ -450,14 +450,119 @@ pub fn check_root_owned(path: &Path, meta: &std::fs::Metadata) -> Result<(), Str
     Ok(())
 }
 
-/// [`check_root_owned`] for the path and each of its parent directories:
-/// a writable parent could swap the file.
-pub fn check_root_chain(path: &Path) -> Result<(), String> {
-    let mut p = Some(path);
-    while let Some(dir) = p {
-        let meta = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        check_root_owned(dir, &meta)?;
-        p = dir.parent();
+/// The most symlinks that [`check_root_chain`] follows in one path.
+pub const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Resolve `path` one component at a time and check each step: every
+/// directory and the final file must pass [`check_root_owned`], and every
+/// symlink on the way (also one in the middle of a chain, or a directory
+/// symlink) must be owned by root and sit in a directory that passed. So
+/// no step can be repointed by another user. Returns the resolved path:
+/// the helper runs and reads through it, not through the path as written.
+pub fn check_root_chain(path: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+    if !path.is_absolute() {
+        return Err(format!("{} must be an absolute path", path.display()));
+    }
+    let root = Path::new("/");
+    let meta = std::fs::symlink_metadata(root).map_err(|e| format!("/: {e}"))?;
+    check_root_owned(root, &meta)?;
+    // The checked real path so far, and the components still to resolve.
+    let mut done = PathBuf::from("/");
+    let mut todo: std::collections::VecDeque<std::ffi::OsString> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_owned()),
+            Component::ParentDir => Some("..".into()),
+            _ => None,
+        })
+        .collect();
+    let mut hops = 0;
+    while let Some(name) = todo.pop_front() {
+        if name == ".." {
+            // `done` holds no symlink, so its parent is the real parent.
+            done.pop();
+            continue;
+        }
+        let next = done.join(&name);
+        let meta =
+            std::fs::symlink_metadata(&next).map_err(|e| format!("{}: {e}", next.display()))?;
+        if meta.file_type().is_symlink() {
+            hops += 1;
+            if hops > MAX_SYMLINK_HOPS {
+                return Err(format!(
+                    "{}: more than {MAX_SYMLINK_HOPS} symlinks",
+                    path.display()
+                ));
+            }
+            if meta.uid() != 0 {
+                return Err(format!(
+                    "{}: symlink {} must be owned by root",
+                    path.display(),
+                    next.display()
+                ));
+            }
+            let target =
+                std::fs::read_link(&next).map_err(|e| format!("{}: {e}", next.display()))?;
+            if target.is_absolute() {
+                done = PathBuf::from("/");
+            }
+            let rest: Vec<std::ffi::OsString> = target
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(n) => Some(n.to_owned()),
+                    Component::ParentDir => Some("..".into()),
+                    _ => None,
+                })
+                .collect();
+            for c in rest.into_iter().rev() {
+                todo.push_front(c);
+            }
+            continue;
+        }
+        if !todo.is_empty() && !meta.is_dir() {
+            return Err(format!("{}: not a directory", next.display()));
+        }
+        check_root_owned(&next, &meta).map_err(|e| {
+            if next == path {
+                e
+            } else {
+                format!("{} resolves through {e}", path.display())
+            }
+        })?;
+        done = next;
+    }
+    Ok(done)
+}
+
+/// Check the helper's state directory before it is created or changed:
+/// the existing part of its parent chain must be root-owned, and the
+/// directory itself must not be a symlink (the helper would chmod and
+/// write through it).
+pub fn check_state_dir(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("{} must be an absolute path", path.display()));
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!("{} must not be a symlink", path.display()));
+        }
+        Ok(meta) if !meta.is_dir() => {
+            return Err(format!("{} must be a directory", path.display()));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    }
+    // The nearest parent that exists: create_dir_all makes the rest as
+    // root, under it.
+    let mut parent = path.parent();
+    while let Some(p) = parent {
+        match std::fs::symlink_metadata(p) {
+            Ok(_) => return check_root_chain(p).map(|_| ()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => parent = p.parent(),
+            Err(e) => return Err(format!("{}: {e}", p.display())),
+        }
     }
     Ok(())
 }
@@ -759,6 +864,20 @@ pub fn plan_start(
         l.validate().map_err(Refusal::invalid)?;
     }
     let cwd = safe_cwd(&ctx.workspace_root, &req.cwd)?;
+    // `safe_cwd` checks the working directory for WorkingDirectory=; the
+    // path list rules below are only for the mount properties.
+    systemd_path(&ctx.workspace_root)?;
+    // Each session sees only the workspace scope of its holder (see
+    // [`holder_workspace`]): its working directory is in it, or is the
+    // empty workspace root itself.
+    let own = holder_workspace(&ctx.workspace_root, &req.holder)?;
+    if cwd != ctx.workspace_root && !own.as_ref().is_some_and(|w| cwd.starts_with(w)) {
+        return Err(Refusal::invalid(format!(
+            "working directory {} is outside the workspace of holder {}",
+            cwd.display(),
+            req.holder
+        )));
+    }
 
     let mut devices = Vec::new();
     if !req.gpus.is_empty() {
@@ -821,6 +940,20 @@ pub fn plan_start(
         "CapabilityBoundingSet=",
         "AmbientCapabilities=",
         "RestrictSUIDSGID=yes",
+        // A pool UID passes to another holder when its holder's last
+        // session ends. What the UID can reach from one holder to the next:
+        // /tmp and /var/tmp are private to the unit; systemd removes the
+        // UID's System V and POSIX IPC (also /dev/shm) when the last unit
+        // of the UID stops; the rest of the tree is read-only, so no
+        // world-writable directory (/run/lock, /var/crash, ...) keeps a
+        // file of the UID. The workspace root is an empty read-only tmpfs
+        // with only this holder's workspace scope bound in (below,
+        // [`holder_workspace`]): a file that an earlier holder of the UID
+        // left in another trust domain, also a 0600 one, does not exist in
+        // the unit.
+        "PrivateTmp=yes",
+        "RemoveIPC=yes",
+        "ProtectSystem=strict",
         "KillMode=control-group",
         "DevicePolicy=closed",
         "DeviceAllow=char-pts rw",
@@ -831,6 +964,26 @@ pub fn plan_start(
     for d in &devices {
         args.push("-p".into());
         args.push(format!("DeviceAllow={} rw", d.display()));
+    }
+    match &own {
+        // The operator: the whole workspace root, as it is.
+        Some(w) if *w == ctx.workspace_root => {
+            args.push("-p".into());
+            args.push(format!("ReadWritePaths={}", w.display()));
+        }
+        own => {
+            args.push("-p".into());
+            args.push(format!(
+                "TemporaryFileSystem={}:ro",
+                ctx.workspace_root.display()
+            ));
+            if let Some(w) = own {
+                args.push("-p".into());
+                args.push(format!("BindPaths={}", w.display()));
+                args.push("-p".into());
+                args.push(format!("ReadWritePaths={}", w.display()));
+            }
+        }
     }
     args.push("-p".into());
     args.push(format!("WorkingDirectory={}", cwd.display()));
@@ -892,6 +1045,106 @@ pub fn safe_cwd(root: &Path, cwd: &str) -> Result<PathBuf, Refusal> {
         return Err(Refusal::invalid("bad working directory"));
     }
     Ok(real)
+}
+
+/// A path that goes into a systemd property as one entry of a
+/// space-separated list (`TemporaryFileSystem=`, `BindPaths=`,
+/// `ReadWritePaths=`): absolute, UTF-8, and no character that systemd
+/// would read as a separator, a quote, a specifier, or an option.
+fn systemd_path(p: &Path) -> Result<(), Refusal> {
+    match p.to_str() {
+        Some(t)
+            if t.starts_with('/')
+                && !t.contains(|c: char| {
+                    c.is_whitespace()
+                        || c.is_control()
+                        || matches!(c, '%' | '"' | '\'' | '\\' | ':')
+                }) =>
+        {
+            Ok(())
+        }
+        _ => Err(Refusal::new(
+            ErrorKind::Unsupported,
+            format!(
+                "{} cannot be a path in a systemd property (whitespace, quotes, %, :, or \\)",
+                p.display()
+            ),
+        )),
+    }
+}
+
+/// The project services. Their holder is `<project>/@<service>`
+/// ([`service_holder`]): they run in the project's trust domain, not as
+/// one agent. No agent name can contain `@` (the daemon's name check), so
+/// an agent can never take a service's holder; an agent named `jobs` is
+/// the holder `<project>/jobs` and gets only its own directory.
+pub const PROJECT_SERVICES: &[&str] = &["jobs", "pipelines", "monitors", "schedules"];
+
+/// The holder of a project service: `<project>/@<service>`.
+pub fn service_holder(project: &str, service: &str) -> String {
+    format!("{project}/@{service}")
+}
+
+/// The workspace scope of a holder, by its trust domain (the host agent's
+/// layout is `<root>/<project>/<agent>`):
+/// - `operator`: the whole `root` (trusted);
+/// - a project service `<project>/@jobs`, `@pipelines`, `@monitors`,
+///   `@schedules` ([`service_holder`]): the project's directory
+///   `<root>/<project>`, never another project's;
+/// - an agent `<project>/<agent>`: only `<root>/<project>/<agent>`.
+///
+/// `None` for any other holder, or a scope directory that is not there
+/// yet: the session then gets no workspace (the empty root). A scope that
+/// is a symlink, leads out of `root`, or is not a directory is refused.
+pub fn holder_workspace(root: &Path, holder: &str) -> Result<Option<PathBuf>, Refusal> {
+    if holder == "operator" {
+        return Ok(Some(root.to_path_buf()));
+    }
+    let mut parts = holder.split('/');
+    let (Some(project), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Ok(None);
+    };
+    for part in [project, name] {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(Refusal::invalid(format!("bad holder {holder:?}")));
+        }
+    }
+    let dir = match name.strip_prefix('@') {
+        Some(service) if PROJECT_SERVICES.contains(&service) => root.join(project),
+        // An `@` holder that is no known service: no workspace.
+        Some(_) => return Ok(None),
+        None => root.join(project).join(name),
+    };
+    match std::fs::canonicalize(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Refusal::invalid(format!(
+            "workspace {}: {e}",
+            dir.display()
+        ))),
+        Ok(real) if real != dir || !real.is_dir() => Err(Refusal::invalid(format!(
+            "workspace {} must be a directory, not a symlink",
+            dir.display()
+        ))),
+        Ok(real) => {
+            systemd_path(&real)?;
+            Ok(Some(real))
+        }
+    }
+}
+
+/// `workspace_root` at helper start: not under /tmp or /var/tmp, which
+/// `PrivateTmp=yes` replaces in each unit (every session would fail).
+pub fn check_workspace_root(root: &Path) -> Result<(), String> {
+    for tmp in ["/tmp", "/var/tmp"] {
+        if root.starts_with(tmp) {
+            return Err(format!(
+                "workspace_root {} is under {tmp}, which each session gets a private copy of \
+                 (PrivateTmp=yes): put the workspace elsewhere, for example /srv/terrarium/work",
+                root.display()
+            ));
+        }
+    }
+    systemd_path(root).map_err(|r| r.message)
 }
 
 /// The slice of a holder for `apply` and `stop`. `stop` never takes the
@@ -1028,6 +1281,8 @@ pub struct Helper {
     pub systemd_run: PathBuf,
     pub systemctl: PathBuf,
     pub nvidia_smi: PathBuf,
+    /// The cgroup v2 mount ([`CGROUP_ROOT`]; a fake tree in tests).
+    pub cgroup_root: PathBuf,
     /// `Ok` when `nvidia_smi` was verified root-owned at start. Otherwise
     /// GPU sessions are refused with the reason.
     pub gpu: Result<(), String>,
@@ -1037,6 +1292,59 @@ pub struct Helper {
     pub stop_timeout: Duration,
     /// How often to try again for a stuck unit.
     pub stop_retry: Duration,
+}
+
+/// Where the cgroup v2 tree is mounted.
+pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// Fail unless `root` is a cgroup v2 tree (`cgroup.controllers` at its
+/// top). On v1 or hybrid hosts the unit cgroups are not under it, and a
+/// stop could not be confirmed from `cgroup.events`.
+pub fn check_cgroup_v2(root: &Path) -> Result<(), String> {
+    if root.join("cgroup.controllers").is_file() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is not a cgroup v2 tree (no cgroup.controllers): the helper needs cgroup v2",
+            root.display()
+        ))
+    }
+}
+
+/// True when the cgroup `cgroup` (a `ControlGroup` value, relative to
+/// `root`) holds no process: no cgroup value, a cgroup directory that is
+/// gone, or `populated 0` in its `cgroup.events`. Fails closed: a root that
+/// is not cgroup v2, a cgroup directory without `cgroup.events`, or a value
+/// that is not a clean absolute path is an error, not "empty".
+pub fn cgroup_empty(root: &Path, cgroup: &str) -> Result<bool, String> {
+    if cgroup.is_empty() {
+        return Ok(true);
+    }
+    let rel = Path::new(cgroup);
+    if !rel.is_absolute()
+        || rel
+            .components()
+            .skip(1)
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(format!("bad ControlGroup {cgroup:?}"));
+    }
+    check_cgroup_v2(root)?;
+    let dir = root.join(rel.strip_prefix("/").unwrap_or(rel));
+    match std::fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+        Ok(m) if !m.is_dir() => return Err(format!("{} is not a cgroup", dir.display())),
+        Ok(_) => {}
+    }
+    let events = dir.join("cgroup.events");
+    let text =
+        std::fs::read_to_string(&events).map_err(|e| format!("{}: {e}", events.display()))?;
+    let populated = text
+        .lines()
+        .find_map(|l| l.strip_prefix("populated "))
+        .ok_or_else(|| format!("{}: no populated line", events.display()))?;
+    Ok(populated.trim() == "0")
 }
 
 /// The default [`Helper::stop_timeout`].
@@ -1120,20 +1428,33 @@ impl Helper {
         })
     }
 
-    /// True when systemd reports the unit inactive, failed, or unknown.
-    async fn unit_stopped(&self, unit: &str) -> Result<bool, String> {
-        let state = call(
+    /// One property of a unit, as `systemctl show` prints it.
+    async fn unit_property(&self, unit: &str, property: &str) -> Result<String, String> {
+        call(
             &self.systemctl,
             &[
                 "show".to_owned(),
-                "--property=ActiveState".to_owned(),
+                format!("--property={property}"),
                 "--value".to_owned(),
                 "--".to_owned(),
                 unit.to_owned(),
             ],
         )
-        .await?;
-        Ok(matches!(state.trim(), "inactive" | "failed" | ""))
+        .await
+        .map(|v| v.trim().to_owned())
+    }
+
+    /// True when systemd reports the unit inactive, failed, or unknown,
+    /// and its cgroup holds no process. A failed unit can keep processes
+    /// (a stop that timed out): it counts as stopped only once its cgroup
+    /// is empty.
+    async fn unit_stopped(&self, unit: &str) -> Result<bool, String> {
+        let state = self.unit_property(unit, "ActiveState").await?;
+        if !matches!(state.as_str(), "inactive" | "failed" | "") {
+            return Ok(false);
+        }
+        let cgroup = self.unit_property(unit, "ControlGroup").await?;
+        cgroup_empty(&self.cgroup_root, &cgroup)
     }
 
     /// SIGKILL the unit and wait until systemd reports it stopped, at most
@@ -1881,7 +2202,11 @@ pub fn start_request(
 /// `terrarium-host native`: send the request in [`REQUEST_ENV`] to the
 /// helper. For `start`, relay stdio, signals, and the terminal size until
 /// the session ends. Returns the exit code of the process.
-pub async fn shim(socket: &Path) -> i32 {
+///
+/// With `user_slice`, a `stop` also stops the holder's slice in the agent
+/// user's manager first: the holder can have sessions in both (see
+/// `Client::slice_stop_plan`). It exits 0 only when both stops succeed.
+pub async fn shim(socket: &Path, user_slice: bool) -> i32 {
     let Some(text) = std::env::var_os(REQUEST_ENV) else {
         eprintln!("terrarium-host native: {REQUEST_ENV} is not set");
         return 125;
@@ -1893,6 +2218,14 @@ pub async fn shim(socket: &Path) -> i32 {
             return 125;
         }
     };
+    let mut user_failed = false;
+    if user_slice
+        && let Request::Stop(s) = &req
+        && let Err(e) = crate::limits::stop_user_slice(&s.target, &s.holder).await
+    {
+        eprintln!("terrarium-host native: {e}");
+        user_failed = true;
+    }
     let pty = matches!(&req, Request::Start(s) if s.pty.is_some());
     let stream = match UnixStream::connect(socket).await {
         Ok(s) => s,
@@ -1917,7 +2250,7 @@ pub async fn shim(socket: &Path) -> i32 {
     }
     match read_frame(&mut rd).await {
         Ok(Some((Kind::Reply, body))) => match serde_json::from_slice::<Reply>(&body) {
-            Ok(Reply::Ok | Reply::Hello { .. }) => return 0,
+            Ok(Reply::Ok | Reply::Hello { .. }) => return if user_failed { 125 } else { 0 },
             Ok(Reply::Started { .. }) => {}
             Ok(Reply::Error { code, message }) => {
                 eprintln!("terrarium-host native: refused ({code:?}): {message}");
@@ -2059,6 +2392,17 @@ pub fn parse_stty_size(text: &str) -> Option<(u16, u16)> {
     let rows = w.next()?.parse().ok()?;
     let cols = w.next()?.parse().ok()?;
     (rows > 0 && cols > 0).then_some((rows, cols))
+}
+
+/// [`verb_plan`] of a `stop` that also stops the holder's user slice
+/// (`--user-slice`, see [`shim`]).
+pub fn stop_plan(
+    opts: &NativeOptions,
+    request: &SliceRequest,
+) -> Result<crate::verb::VerbPlan, crate::verb::BuildError> {
+    let mut plan = verb_plan(opts, &Request::Stop(request.clone()))?;
+    plan.exec.args.push("--user-slice".into());
+    Ok(plan)
 }
 
 /// Ask the helper for one `apply` or `stop`, as a plan for the session

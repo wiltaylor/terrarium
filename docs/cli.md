@@ -1125,7 +1125,7 @@ command prints the counts and the dashboard link of the run, for example:
 
 ```
 pushed 01JB7… unit (junit, cargo-nextest): 120 passed, 2 failed, 1 errored, 3 skipped in 5.3s
-dashboard: /p/demo/board/tests/01JB7…
+dashboard: /p/demo/tests/01JB7…
 ```
 
 `test push` exits with 0 also when tests fail: it uploads, it does not
