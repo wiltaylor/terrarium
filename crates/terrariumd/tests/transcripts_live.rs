@@ -125,6 +125,7 @@ async fn live_transcripts() {
         lifecycle: Arc::default(),
         tool_rates: Arc::default(),
         lease_sweep: Arc::default(),
+        rule_timers: Arc::default(),
         monitors: Arc::default(),
         webhooks: Arc::default(),
         pipelines: Arc::default(),
