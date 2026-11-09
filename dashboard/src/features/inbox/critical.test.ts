@@ -63,7 +63,7 @@ describe("criticalBanner", () => {
     // A thread that only waits (no critical question) is no banner; the newest critical item wins.
     expect(criticalBanner([{ ...thread("T3", "2026-10-28T13:00:00.000Z"), urgent: false, critical: false }, item("n", "2026-10-28T10:00:00.000Z")])!.item.id).toBe("notice:n");
     // A global thread with no agent: who opened it.
-    expect(criticalBanner([{ ...thread("G", "2026-10-28T12:00:00.000Z", { scope: "global", agent_name: null, opened_by: "A9", opened_by_name: "meta/lead" }), project: undefined }])!.from).toBe("meta/lead");
+    expect(criticalBanner([{ ...thread("G", "2026-10-28T12:00:00.000Z", { scope: "global", agent_name: null, opened_by: "A9", opened_by_name: "meta/lead" }), project: null }])!.from).toBe("meta/lead");
   });
 
   it("hides after the acknowledgement: a closed item is not critical", () => {
