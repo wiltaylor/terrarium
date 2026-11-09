@@ -38,11 +38,11 @@ WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = 
   AND NOT EXISTS (SELECT 1 FROM card_dispatch_retries d WHERE d.card = c.id AND d.retry_at > ?3)
   AND NOT EXISTS (SELECT 1 FROM card_reviews r WHERE r.card = c.id
       AND (r.applied = 2 OR r.cap_notified = 1))
-  AND NOT ((EXISTS (SELECT 1 FROM json_each(c.labels) g
-               WHERE trim(lower(g.value)) = 'github')
+  AND NOT ((EXISTS (SELECT 1 FROM json_each(c.labels) github_label
+               WHERE trim(lower(github_label.value)) = 'github')
         OR glob('github#[0-9][0-9]*:*', replace(lower(ltrim(c.title)), ' ', '')))
-       AND EXISTS (SELECT 1 FROM json_each(c.labels) h
-               WHERE trim(lower(h.value)) = 'hold'))
+       AND EXISTS (SELECT 1 FROM json_each(c.labels) hold_label
+               WHERE trim(lower(hold_label.value)) = 'hold'))
 ORDER BY c.position LIMIT 16";
 
 fn candidate(c: &Connection, project: &str) -> ApiResult<Option<String>> {

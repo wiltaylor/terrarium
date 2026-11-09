@@ -100,12 +100,12 @@ async fn review_candidate_query_uses_only_indexed_searches() {
         .await
         .unwrap();
     assert!(plan.iter().any(|s| s.contains("cards_column")), "{plan:?}");
-    // Only the per-card label `json_each` may scan; every table access,
-    // the cards lookup included, must stay an index search.
+    // Only the per-card label `json_each` virtual tables may scan; every
+    // table access, the cards lookup included, must stay an index search.
     assert!(
         plan.iter()
             .filter(|s| s.contains("SCAN"))
-            .all(|s| s.starts_with("SCAN json_each")),
+            .all(|s| s.starts_with("SCAN github_label") || s.starts_with("SCAN hold_label")),
         "{plan:?}"
     );
 }
@@ -164,7 +164,6 @@ async fn review_held_cards_cannot_starve_the_candidate_list() {
             .await
             .unwrap()
     );
-    let key = free.clone();
     let picked: String = state(&td)
         .db
         .read(move |c| Ok(c.query_row("SELECT card FROM card_reviews", [], |r| r.get(0))?))
