@@ -952,6 +952,9 @@ pub fn finished_object(
     if let Some(thread) = text.strip_prefix("thread:") {
         return crate::thread_agent::finished(conn, thread);
     }
+    if let Some(card) = text.strip_prefix("review:") {
+        return crate::review_dispatcher::finished(conn, card);
+    }
     let Some(card_id) = text.strip_prefix("card:") else {
         return Ok(None);
     };

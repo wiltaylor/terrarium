@@ -937,6 +937,9 @@ pub struct ProjectDef {
     /// Opt-in ready-card dispatcher owner (a project admin). `off` disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card_dispatcher: Option<String>,
+    /// Opt-in admin owner for review dispatch, or `off` to disable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_dispatcher: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

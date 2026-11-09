@@ -232,7 +232,7 @@ export default function CalendarPage() {
 
   return (
     <>
-      <PageHead title={project() ? "Calendar" : "Calendar: every project"}>
+      <PageHead title={project() ? "Calendar" : "Calendar: every project"} level={project() ? 2 : 1}>
         <button onClick={() => void toggleWatch()} title="A mail in the Inbox for each add, change, and removal">
           {watching() ? "Stop watching" : project() === null ? "Watch the global calendar" : "Watch in the Inbox"}
         </button>

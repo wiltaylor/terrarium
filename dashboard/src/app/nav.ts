@@ -1,7 +1,20 @@
 // The sidebar items and the routes that moved. Pure, so tests can read them.
 
+/** The project shell tabs, in order. The first path segment selects the tab. */
+export const PROJECT_TABS = [
+  { path: "board", label: "Board" },
+  { path: "dashboard", label: "Dashboard" },
+  { path: "agents", label: "Agents" },
+  { path: "repos", label: "Repos" },
+  { path: "knowledge", label: "Knowledge" },
+  { path: "pipelines", label: "Pipelines" },
+  { path: "calendar", label: "Calendar" },
+  { path: "logs", label: "Logs" },
+  { path: "settings", label: "Settings" },
+] as const;
+
 export const PROJECT_ITEMS = [
-  // The monitors of the project as blocks (docs/api.md §30); the first item, and the page of /p/:project.
+  // The monitors of the project as blocks (docs/api.md §30); the first item in the tree.
   { path: "dashboard", label: "Dashboard" },
   // The CI/CD pipelines of the project and their runs (docs/api.md §31).
   { path: "pipelines", label: "Pipelines" },
