@@ -1,5 +1,5 @@
 // Schedules (docs/api.md §19). Two views: a project view
-// (`/p/:project/board/schedules`, the Schedules tab of the board screen;
+// (`/p/:project/schedules`, the Schedules tab of the project;
 // `GET /api/schedules?project=`: the project's schedules and the global
 // ones, with a scope filter), and the view of all
 // schedules (`/schedules`, grouped by scope). Two tabs, kept in the URL
@@ -163,7 +163,7 @@ export default function SchedulesPage() {
 
   return (
     <>
-      {/* In a project it is a tab of the board screen, under the screen title. */}
+      {/* In a project it is a project tab, under the project tab row. */}
       <PageHead title={project() ? "Schedules" : "Schedules · all"} level={project() ? 2 : 1}>
         <button class="primary" onClick={() => setDialog({})}>
           {triggers() ? "New trigger" : actions() ? "New action" : "New schedule"}

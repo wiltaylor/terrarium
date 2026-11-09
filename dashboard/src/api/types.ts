@@ -4135,7 +4135,7 @@ export interface TestRunSummary {
   created_by: string;
   created_by_name: string;
   created_at: string;
-  /** The dashboard page: `/p/<project>/board/tests/<id>`. */
+  /** The dashboard page: `/p/<project>/board/tests/<id>`; the dashboard redirects it to `/p/<project>/tests/<id>`. */
   url: string;
 }
 

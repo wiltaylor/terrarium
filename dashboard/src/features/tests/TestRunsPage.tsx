@@ -1,7 +1,7 @@
-// The Tests tab of the board screen (app/nav.ts BOARD_TABS): the test runs of
+// The Tests tab of the project (app/nav.ts PROJECT_TABS): the test runs of
 // the project, newest first (docs/api.md, test runs). Agents push them with
 // `terrarium test push`. The filters are in the URL (`?name=&status=&card=&label=`),
-// so a filtered list has a link. A row opens the run (/p/:project/board/tests/:id).
+// so a filtered list has a link. A row opens the run (/p/:project/tests/:id).
 // A run links to labels, such as the version label `version:1.4.0` (TER-58).
 
 import { A, useParams, useSearchParams } from "@solidjs/router";
