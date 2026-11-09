@@ -224,12 +224,19 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   every `host` target command on that host is a `409` that names the
   reservation and the reason. Any native process there could open the
   reserved GPU. Docker targets keep their create-time allowlist.
-- `resource.apply` and `resource.stop` go to the helper's `apply` and
-  `stop` when the helper answered with enforcement at the last `hello`,
-  and to the user slices otherwise. The host agent routes by that answer,
-  not by its config, so a host agent whose helper is down keeps managing
-  the user slices where its sessions then run. `stop` waits for the units
-  to stop: the daemon keeps the reservation `ending` until then.
+- `resource.apply` goes to the helper's `apply` when the helper answered
+  with enforcement at the last `hello`, and to the user slices otherwise.
+  The host agent routes it by that answer, not by its config, so a host
+  agent whose helper is down keeps managing the user slices where its
+  sessions then run.
+- `resource.stop` goes through the shim whenever `[native_gpu]` is in the
+  config, whatever the helper answered: the shim stops the user slice and
+  the helper's slice, and fails when the helper cannot be reached. Native
+  units can still run after the helper stopped answering, or after the
+  host agent restarted, so a stop never reports success without the
+  helper. Without `[native_gpu]`, only the user slice stops. `stop` waits
+  for the units to stop: the daemon keeps the reservation `ending` until
+  then.
 
 ### Attribution
 

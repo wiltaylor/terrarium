@@ -2018,12 +2018,28 @@ pub fn bind(socket: &Path, agent_uid: u32) -> std::io::Result<UnixListener> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let old = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o177));
-    let listener = UnixListener::bind(socket);
-    nix::sys::stat::umask(old);
-    let listener = listener?;
-    std::os::unix::fs::chown(socket, Some(agent_uid), None)?;
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    // Bind in a private 0700 directory next to the socket, give the socket
+    // its owner and mode there, then rename it into place. Nobody else can
+    // reach it before it has mode 0600, and the process umask stays as it
+    // is (it is per process: other threads would create files with it).
+    // The short names keep the temporary path near the length of `socket`
+    // (a socket path has a limit of about 108 bytes).
+    let parent = match socket.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let private = tempfile::Builder::new().prefix(".b").tempdir_in(parent)?;
+    std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700))?;
+    let tmp = private.path().join("s");
+    let listener = UnixListener::bind(&tmp)?;
+    std::os::unix::fs::chown(&tmp, Some(agent_uid), None)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&tmp, socket)?;
+    // The socket is in place: a failed removal of the empty directory is
+    // not a failed bind.
+    if let Err(e) = private.close() {
+        tracing::warn!(error = %e, "cannot remove the private bind directory");
+    }
     Ok(listener)
 }
 

@@ -262,10 +262,6 @@ struct Shared {
     /// (`capabilities.native_gpu.enforced`). Native routing follows it,
     /// not the config.
     native_enforced: std::sync::atomic::AtomicBool,
-    /// The helper answered with enforcement at some `hello` of this
-    /// process: native units may still be in the helper's slices, also
-    /// after the helper stopped answering.
-    native_seen: std::sync::atomic::AtomicBool,
     /// The last offered version that this process refused or failed to
     /// install: it does not try that version again.
     update_refused: Mutex<Option<String>>,
@@ -305,12 +301,6 @@ impl Client {
             remotes: crate::display::remote::Remotes::new(opts.display.rdp_known_hosts_path()),
             updating: std::sync::atomic::AtomicBool::new(false),
             native_enforced: std::sync::atomic::AtomicBool::new(
-                opts.capabilities
-                    .native_gpu
-                    .as_ref()
-                    .is_some_and(|n| n.enforced),
-            ),
-            native_seen: std::sync::atomic::AtomicBool::new(
                 opts.capabilities
                     .native_gpu
                     .as_ref()
@@ -441,9 +431,6 @@ impl Client {
             self.shared
                 .native_enforced
                 .store(cap.enforced, std::sync::atomic::Ordering::SeqCst);
-            self.shared
-                .native_seen
-                .fetch_or(cap.enforced, std::sync::atomic::Ordering::SeqCst);
             capabilities.native_gpu = Some(cap);
         }
         let token = self.token().clone();
@@ -1369,21 +1356,19 @@ impl Client {
         crate::limits::reservation_plan(&r.target, &r.holder, &r.limits)
     }
 
-    /// `resource.stop` of a holder slice. Once the helper has enforced in
-    /// this process, the holder can have native units in the helper's
-    /// system slice and sessions in the user slice (from a time the
-    /// helper did not answer): the stop goes through the shim, which
-    /// stops both and fails when the helper cannot be reached. Before
-    /// that, only the user slice.
+    /// `resource.stop` of a holder slice. With `[native_gpu]` in the
+    /// config, the holder can have native units in the helper's system
+    /// slice (also from before a restart of this process) and sessions in
+    /// the user slice (from a time the helper did not answer): the stop
+    /// always goes through the shim, which stops both and fails when the
+    /// helper cannot be reached. The helper's answer at `hello` does not
+    /// matter here: a stop never reports success while native units can
+    /// still run. Without `[native_gpu]`, only the user slice.
     pub(crate) fn slice_stop_plan(
         &self,
         r: &crate::protocol::ResourceStop,
     ) -> Result<VerbPlan, BuildError> {
-        let seen = self
-            .shared
-            .native_seen
-            .load(std::sync::atomic::Ordering::SeqCst);
-        match self.opts.native.as_ref().filter(|_| seen) {
+        match self.opts.native.as_ref() {
             Some(native) => crate::native::stop_plan(
                 native,
                 &crate::native::SliceRequest {
@@ -1776,8 +1761,10 @@ mod tests {
             target: "box".into(),
             holder: "p/a".into(),
         };
-        // [native_gpu] on, but the helper does not answer: user slices, and
-        // a native exec is refused rather than run without device policy.
+        // [native_gpu] on, but the helper does not answer: apply goes to
+        // the user slice, a stop still goes to the helper (see
+        // `a_restarted_client_with_the_helper_down_stops_through_the_helper`),
+        // and a native exec is refused rather than run without device policy.
         let client = native_client(&socket);
         let hello = client.hello().await;
         assert!(!hello.capabilities.native_gpu.unwrap().enforced);
@@ -1787,7 +1774,7 @@ mod tests {
         );
         assert_eq!(
             client.slice_stop_plan(&stop).unwrap().exec.program,
-            "systemctl"
+            "/opt/terrarium-host"
         );
         let (plan, l) = native_exec();
         let e = client.native(plan, &l, 3).err().unwrap();
@@ -1840,6 +1827,54 @@ mod tests {
         assert_eq!(plan.exec.args.last().unwrap(), "--user-slice");
         let (plan, l) = native_exec();
         assert!(client.native(plan, &l, 3).is_err());
+    }
+
+    /// TER-503: a host agent that restarts while the helper is down has no
+    /// memory of an earlier enforcement, but native units of the holder
+    /// may still run in the helper's system slice. The stop goes to the
+    /// shim with `--user-slice`, which fails when the helper cannot be
+    /// reached (`a_shim_stop_also_stops_the_user_slice` in
+    /// `tests/native_helper.rs`), so the stop never reports success.
+    #[tokio::test]
+    async fn a_restarted_client_with_the_helper_down_stops_through_the_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("helper.sock");
+        let stop = crate::protocol::ResourceStop {
+            session: 1,
+            target: "box".into(),
+            holder: "p/a".into(),
+        };
+        // A new process: the helper never answered with enforcement here.
+        let client = native_client(&socket);
+        assert!(
+            !client
+                .hello()
+                .await
+                .capabilities
+                .native_gpu
+                .unwrap()
+                .enforced
+        );
+        let plan = client.slice_stop_plan(&stop).unwrap();
+        assert_eq!(plan.exec.program, "/opt/terrarium-host");
+        assert_eq!(plan.exec.args[0], "native");
+        assert_eq!(plan.exec.args.last().unwrap(), "--user-slice");
+        let req: crate::native::Request =
+            serde_json::from_str(&plan.exec.env[crate::native::REQUEST_ENV]).unwrap();
+        assert_eq!(
+            req,
+            crate::native::Request::Stop(crate::native::SliceRequest {
+                target: "box".into(),
+                holder: "p/a".into(),
+            })
+        );
+
+        // Without [native_gpu], only the user slice.
+        let plain = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
+        assert_eq!(
+            plain.slice_stop_plan(&stop).unwrap().exec.program,
+            "systemctl"
+        );
     }
 
     #[test]
