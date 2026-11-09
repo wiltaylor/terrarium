@@ -17,9 +17,9 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::{EventDraft, EventHub, StoredEvent};
 use crate::store::audit::AuditEntry;
 
-#[derive(rust_embed::RustEmbed)]
-#[folder = "migrations/"]
-struct NamedMigrations;
+// `NAMED_MIGRATIONS`: `migrations/*.sql` in filename order, compiled in by
+// build.rs (TER-492).
+include!(concat!(env!("OUT_DIR"), "/named_migrations.rs"));
 
 /// Frozen legacy migrations. Index + 1 is the schema version.
 const MIGRATIONS: &[&str] = &[
@@ -3180,25 +3180,7 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
 /// Run pending legacy migrations, then named migrations in filename order.
 pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
     let legacy = migrate_with(conn, MIGRATIONS)?;
-    Ok(legacy + migrate_embedded::<NamedMigrations>(conn)?)
-}
-
-fn migrate_embedded<E: rust_embed::RustEmbed>(conn: &mut Connection) -> anyhow::Result<usize> {
-    let mut names: Vec<_> = E::iter().filter(|name| name.ends_with(".sql")).collect();
-    names.sort();
-    let files: Vec<_> = names
-        .iter()
-        .map(|name| {
-            let file = E::get(name).with_context(|| format!("missing migration {name}"))?;
-            let sql = String::from_utf8(file.data.into_owned())?;
-            Ok((name.as_ref(), sql))
-        })
-        .collect::<anyhow::Result<_>>()?;
-    let borrowed: Vec<_> = files
-        .iter()
-        .map(|(name, sql)| (*name, sql.as_str()))
-        .collect();
-    migrate_named(conn, &borrowed)
+    Ok(legacy + migrate_named(conn, NAMED_MIGRATIONS)?)
 }
 
 fn migrate_named(conn: &mut Connection, migrations: &[(&str, &str)]) -> anyhow::Result<usize> {
@@ -3269,10 +3251,7 @@ mod tests {
     use crate::store::card_history::RECENT_PROJECT_MOVES_SQL;
 
     fn migration_count() -> usize {
-        MIGRATIONS.len()
-            + <NamedMigrations as rust_embed::RustEmbed>::iter()
-                .filter(|name| name.ends_with(".sql"))
-                .count()
+        MIGRATIONS.len() + NAMED_MIGRATIONS.len()
     }
 
     #[test]
@@ -3456,21 +3435,50 @@ mod tests {
 
     #[test]
     fn embedded_sql_migration_is_loaded_and_applied() {
-        #[derive(rust_embed::RustEmbed)]
-        #[folder = "tests/fixtures/named-migrations/"]
-        struct Fixture;
+        let fixture = [(
+            "ter-284-embedded.sql",
+            include_str!("../tests/fixtures/named-migrations/ter-284-embedded.sql"),
+        )];
 
         let mut conn = Connection::open_in_memory().unwrap();
-        assert_eq!(migrate_embedded::<Fixture>(&mut conn).unwrap(), 1);
+        assert_eq!(migrate_named(&mut conn, &fixture).unwrap(), 1);
         assert!(
             conn.table_exists(None, "embedded_migration_fixture")
                 .unwrap()
         );
-        assert_eq!(migrate_embedded::<Fixture>(&mut conn).unwrap(), 0);
+        assert_eq!(migrate_named(&mut conn, &fixture).unwrap(), 0);
         let name: String = conn
             .query_row("SELECT name FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "ter-284-embedded.sql");
+    }
+
+    /// The named migrations are compiled into the binary, in filename order,
+    /// and match `migrations/` (TER-492: a debug `rust-embed` read them from
+    /// the source tree at run time, so a copied test binary had none).
+    #[test]
+    fn named_migrations_are_compiled_in_and_complete() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut on_disk: Vec<(String, String)> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "sql"))
+            .map(|p| {
+                let name = p.file_name().unwrap().to_str().unwrap().to_owned();
+                (name, std::fs::read_to_string(&p).unwrap())
+            })
+            .collect();
+        on_disk.sort();
+        let compiled: Vec<(String, String)> = NAMED_MIGRATIONS
+            .iter()
+            .map(|(n, sql)| ((*n).to_owned(), (*sql).to_owned()))
+            .collect();
+        assert!(
+            compiled
+                .iter()
+                .any(|(n, _)| n == "ter-249-resource-reservations.sql")
+        );
+        assert_eq!(compiled, on_disk);
     }
 
     #[test]

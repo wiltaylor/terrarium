@@ -4141,6 +4141,39 @@ async fn target_edit_patches_only_the_flags_given() {
         )],
     )
     .await;
+    let out = ok(
+        true,
+        &[
+            "admin",
+            "target",
+            "edit",
+            "terra-dev",
+            "--work-root",
+            "/home/build/work",
+        ],
+        vec![(200, json!({"name": "terra-dev"}))],
+        vec![(
+            Patch,
+            "/api/targets/terra-dev",
+            vec![],
+            Some(json!({"work_root": "/home/build/work"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "changed target terra-dev: work_root\n");
+    // `null` removes the field in the merge patch.
+    ok(
+        true,
+        &["admin", "target", "edit", "terra-dev", "--clear-work-root"],
+        vec![(200, json!({"name": "terra-dev"}))],
+        vec![(
+            Patch,
+            "/api/targets/terra-dev",
+            vec![],
+            Some(json!({"work_root": null})),
+        )],
+    )
+    .await;
     let r = exec(
         true,
         &["admin", "target", "edit", "terra-dev"],
@@ -4153,6 +4186,15 @@ async fn target_edit_patches_only_the_flags_given() {
     for bad in [
         vec!["admin", "target", "edit", "t", "--keep", "--no-keep"],
         vec!["admin", "target", "edit", "t", "--ephemeral", "--permanent"],
+        vec![
+            "admin",
+            "target",
+            "edit",
+            "t",
+            "--work-root",
+            "/w",
+            "--clear-work-root",
+        ],
     ] {
         assert!(Cli::try_parse_from(std::iter::once("terrarium").chain(bad)).is_err());
     }

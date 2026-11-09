@@ -995,7 +995,15 @@ async fn wait_admission(td: &TestDaemon, name: &str) {
     let state = td.daemon.as_ref().unwrap().state.clone();
     let start = Instant::now();
     while state.executor.resource_pending(name) {
-        assert!(start.elapsed() < DEADLINE, "{name} admission never opened");
+        if start.elapsed() >= DEADLINE {
+            // The reconcile error is only in the daemon log (TER-492).
+            let trace = TRACE_CAPTURE
+                .get()
+                .and_then(|c| c.0.lock().unwrap().clone())
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_else(|| "(no trace capture in this test)".into());
+            panic!("{name} admission never opened; daemon trace:\n{trace}");
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -2167,7 +2175,11 @@ test -f OK"#;
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     dirs.sort();
-    assert_eq!(dirs, ["logs", "slot-1", "slot-2"]);
+    // TER-448: each slot also has its lock file, a sibling of its tree.
+    assert_eq!(
+        dirs,
+        ["logs", "slot-1", "slot-1.lock", "slot-2", "slot-2.lock"]
+    );
     // Logs belong to jobs, not slots, and survive later slot checkouts.
     for job in &jobs {
         let id = job["id"].as_str().unwrap();
@@ -2183,6 +2195,106 @@ test -f OK"#;
     .await;
     assert_eq!(job["state"], "passed", "{job:#}");
     assert_eq!(job["slot"], 0, "{job:#}");
+}
+
+/// TER-448: two daemons on one host with the same project name and the
+/// same work dir (for both, the default is `/tmp/terrarium-jobs/<project>`)
+/// cannot replace each other's slot trees. While one daemon's recipe runs
+/// in a slot, the other daemon's job on the same slot is refused with a
+/// clear error, twice (a failure is rerun once), without touching the
+/// tree, and the first job is unaffected.
+#[tokio::test]
+async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
+    let a = lab(1).await;
+    let wd = a._dirs.path().join("jobs");
+    let marker = wd.join("p/recipe-of-a");
+    // Daemon A's recipe holds the slot's lock until the gate appears (not a
+    // fixed sleep: under load daemon B's two attempts may start late).
+    let gate = a._dirs.path().join("gate");
+    let recipe = format!(
+        "test -f OK && touch '{}' && while ! test -f '{}'; do sleep 0.05; done",
+        marker.display(),
+        gate.display()
+    );
+    a.td.put(
+        "/api/projects/p/delivery",
+        json!({"target": "p-box", "recipe": recipe, "slots": 1,
+                   "next_repos": ["app"], "work_dir": wd.display().to_string()}),
+    )
+    .await
+    .ok();
+    // Daemon B: another daemon, the same project name, the same work dir.
+    let b = lab(1).await;
+    b.td.put(
+        "/api/projects/p/delivery",
+        json!({"target": "p-box", "recipe": "test -f OK", "slots": 1,
+                   "next_repos": ["app"], "work_dir": wd.display().to_string()}),
+    )
+    .await
+    .ok();
+    // A's job first: wait until its recipe runs, so it holds the lock.
+    let head_a = a.branch("ter-a1", "next", &[("OK", "a1\n")]);
+    let ca = a.card("a1", "ter-a1").await;
+    let r =
+        a.td.post_as(
+            &a.w1,
+            &format!("/api/cards/{ca}/validate"),
+            json!({"commit": head_a}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let start = Instant::now();
+    while !marker.is_file() {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "daemon A's recipe never started"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        wd.join("p/slot-1.lock").is_file(),
+        "no slot lock next to the tree"
+    );
+    // B's job on the same slot: refused with the clear error, twice.
+    let head_b = b.branch("ter-b1", "next", &[("OK", "b1\n")]);
+    let cb = b.card("b1", "ter-b1").await;
+    let r =
+        b.td.post_as(
+            &b.w1,
+            &format!("/api/cards/{cb}/validate"),
+            json!({"commit": head_b}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    // Wait for the whole flow, not just an idle queue: the rerun job is
+    // made in a second write after the failed end, and the card goes back
+    // to `ready` only after the second failure.
+    b.until_card(&cb, "back from validating", |c| c["column"] == "ready")
+        .await;
+    let jobs = b.until_idle().await;
+    let mut jobs: Vec<Value> = jobs.iter().filter(|j| j["card"] == cb).cloned().collect();
+    jobs.sort_by_key(|j| j["attempt"].as_i64().unwrap_or(0));
+    assert_eq!(jobs.len(), 2, "a clash is rerun once: {jobs:#?}");
+    for job in &jobs {
+        assert_eq!(job["state"], "failed", "{job:#}");
+        let id = job["id"].as_str().unwrap();
+        let full = b.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+        let tail = full["tail"].as_str().unwrap_or_default();
+        assert!(tail.contains("held by another job or daemon"), "{tail}");
+    }
+    let job = jobs.last().unwrap();
+    assert_eq!(job["attempt"], 2, "a clash is rerun once: {job:#}");
+    // B never touched A's tree: it is still at A's head, with A's file.
+    assert_eq!(git(&wd.join("p/slot-1"), &["rev-parse", "HEAD"]), head_a);
+    assert_eq!(
+        std::fs::read_to_string(wd.join("p/slot-1/OK")).unwrap(),
+        "a1\n"
+    );
+    // Let A's recipe end: it held the slot for the whole clash above.
+    std::fs::write(&gate, "go\n").unwrap();
+    // A's job is unaffected: it passes and its card moves to review.
+    a.until_card(&ca, "review", |c| c["column"] == "review")
+        .await;
 }
 
 #[tokio::test]
@@ -2560,6 +2672,7 @@ while True:
                 "TERRARIUM_JOB_ID",
                 "TERRARIUM_JOB_SLOT",
                 "TERRARIUM_HEAD",
+                "TERRARIUM_SLOT_LOCK",
                 "TERRARIUM_BASE",
                 "TERRARIUM_CHANGED_FILES",
                 "PWD",

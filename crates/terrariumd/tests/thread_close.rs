@@ -718,3 +718,79 @@ async fn handoff_cards_get_the_link_only_when_the_reader_may_read_them() {
     assert!(!has_system_comment(&lab, &other).await);
     assert_eq!(skipped_cards(&lab, &tid2).await, vec![other]);
 }
+
+/// The thread counts of the Inbox badge and the Inbox item of `tid`.
+async fn badge_and_item(lab: &Lab, tid: &str) -> (Value, Value) {
+    let counts = lab.td.get("/api/inbox/counts").await.ok().clone();
+    let items = lab.td.get("/api/inbox?kind=thread").await.ok().clone();
+    let item = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == format!("inbox-thread:{tid}"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    (counts, item)
+}
+
+#[tokio::test]
+async fn a_proposal_on_a_tracking_thread_waits_on_the_operator() {
+    let lab = lab().await;
+    let (tid, eph, _sid) = lab.started("Tracking close").await;
+    let r = lab
+        .td
+        .post_empty_as(&eph, &format!("/api/threads/{tid}/track"))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let th = lab.propose(&eph, &tid, json!({"summary": "Done."})).await;
+    assert_eq!(th["status"], "waiting_operator", "{th:#}");
+    // The agent posts without a status: the thread goes back to tracking
+    // (TER-488 R1 path a), and the proposal stays.
+    let r = lab
+        .td
+        .post_as(
+            &eph,
+            &format!("/api/threads/{tid}/messages"),
+            json!({"text": "One more note."}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["status"], "tracking", "{}", r.body);
+    assert_eq!(r.body["close_proposal"]["summary"], "Done.", "{}", r.body);
+    // The pending proposal waits on the operator: in the badge and as an
+    // open Inbox item.
+    let (counts, item) = badge_and_item(&lab, &tid).await;
+    assert_eq!(counts["thread"], 1, "{counts}");
+    assert_eq!(item["open"], true, "{item}");
+}
+
+#[tokio::test]
+async fn a_proposal_after_a_retracted_question_waits_on_the_operator() {
+    let lab = lab().await;
+    let (tid, eph, _sid) = lab.started("Retracted ask").await;
+    let r = lab
+        .td
+        .post_as(
+            &eph,
+            &format!("/api/agents/{eph}/questions"),
+            json!({"text": "Keep 30 days?", "options": ["yes", "no"], "thread": tid}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let qid = id(&r.body);
+    let th = lab.propose(&eph, &tid, json!({"summary": "Done."})).await;
+    assert_eq!(th["close_proposal"]["summary"], "Done.");
+    // The last open question is retracted: the thread waits on the agent
+    // (TER-488 R1 path b), and the proposal stays.
+    let r = lab
+        .td
+        .post_empty(&format!("/api/questions/{qid}/retract"))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let th = lab.thread(&tid).await;
+    assert_eq!(th["status"], "waiting_agent", "{th:#}");
+    assert_eq!(th["close_proposal"]["summary"], "Done.", "{th:#}");
+    let (counts, item) = badge_and_item(&lab, &tid).await;
+    assert_eq!(counts["thread"], 1, "{counts}");
+    assert_eq!(item["open"], true, "{item}");
+}

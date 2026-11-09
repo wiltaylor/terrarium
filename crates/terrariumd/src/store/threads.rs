@@ -806,9 +806,13 @@ fn questions_of(conn: &Connection, thread: &str) -> ApiResult<Vec<Question>> {
     ids.iter().map(|id| questions::get(conn, id)).collect()
 }
 
+/// The unsettled questions of `thread`: `open`, and `in_thread` (a
+/// question that the operator moved into this thread, TER-469). Both keep
+/// the thread on the operator: the agent sets no other status until they
+/// are settled (TER-495).
 fn open_questions(conn: &Connection, thread: &str) -> ApiResult<i64> {
     Ok(conn.query_row(
-        "SELECT count(*) FROM questions WHERE thread = ?1 AND status = 'open'",
+        "SELECT count(*) FROM questions WHERE thread = ?1 AND status IN ('open', 'in_thread')",
         [thread],
         |r| r.get(0),
     )?)
@@ -826,6 +830,8 @@ pub fn inbox_urgency(conn: &Connection) -> ApiResult<HashMap<String, (bool, bool
 }
 
 /// Inbox badge counts need neither thread bodies nor per-thread name/summary queries.
+/// A pending close proposal waits on the operator whatever the status
+/// (the same rule as the Inbox thread item).
 pub fn inbox_counts(conn: &Connection, project: Option<&str>) -> ApiResult<(usize, usize, usize)> {
     Ok(conn.query_row(
         "SELECT count(*), coalesce(sum(q.urgent > 0), 0), coalesce(sum(q.critical > 0), 0)
@@ -835,7 +841,8 @@ pub fn inbox_counts(conn: &Connection, project: Option<&str>) -> ApiResult<(usiz
                            sum(priority = 'critical') AS critical
                     FROM questions WHERE status = 'open' AND thread IS NOT NULL
                     GROUP BY thread) q ON q.thread = t.id
-         WHERE t.status != 'closed' AND (t.status = 'waiting_operator' OR q.open > 0)
+         WHERE t.status != 'closed'
+           AND (t.status = 'waiting_operator' OR t.close_proposal IS NOT NULL OR q.open > 0)
            AND (?1 IS NULL OR (t.scope != 'global' AND t.scope = ?1))",
         [project],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),

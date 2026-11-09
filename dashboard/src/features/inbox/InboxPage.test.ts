@@ -231,3 +231,26 @@ describe("the threads leave the Inbox (TER-466)", () => {
     await waitFor(() => expect(history.get()).toBe("/threads"));
   });
 });
+
+describe("the To thread action (TER-495)", () => {
+  it("sends the optional message for the thread with the move", async () => {
+    const toThread = vi.spyOn(api.questions, "toThread");
+    try {
+      const el = mount("/inbox?tab=question");
+      await waitFor(() => expect(el.querySelector("article[aria-label^='Question '] input[aria-label='Thread message']")).not.toBeNull());
+      const card = [...el.querySelectorAll<HTMLElement>("article[aria-label^='Question ']")].find((a) => a.querySelector("input[aria-label='Thread message']"))!;
+      const id = card.getAttribute("aria-label")!.replace("Question ", "");
+      const box = card.querySelector<HTMLInputElement>("input[aria-label='Thread message']")!;
+      box.value = "  Which logs fill the disk?  ";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      [...card.querySelectorAll("button")].find((b) => b.textContent === "To thread")!.click();
+      await waitFor(() => expect([...card.querySelectorAll("button")].some((b) => b.textContent === "Yes, open a thread")).toBe(true));
+      [...card.querySelectorAll("button")].find((b) => b.textContent === "Yes, open a thread")!.click();
+      await waitFor(() => expect(toThread).toHaveBeenCalledWith(id, "Which logs fill the disk?"));
+      const { thread } = await toThread.mock.results[0]!.value;
+      expect(thread.messages[0].text).toContain("Which logs fill the disk?");
+    } finally {
+      toThread.mockRestore();
+    }
+  });
+});

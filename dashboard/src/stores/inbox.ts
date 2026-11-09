@@ -7,7 +7,7 @@
 // thread still belongs in the queue and the banner (TER-488): while the counts
 // give `thread_critical > 0`, the refresh also reads the open thread items
 // (`kind=thread`) and keeps the critical ones. With no critical thread it
-// sends no extra request.
+// sends no extra request. Overlapping refreshes apply only the newest one.
 
 import { createSignal } from "solid-js";
 import type { Api } from "../api/client";
@@ -22,9 +22,14 @@ export function createInboxStore(api: Pick<Api, "inbox">, events?: Pick<EventsSt
   const [loaded, setLoaded] = createSignal(false);
   const open = () => (threads().length ? sortItems([...items(), ...threads()]) : items());
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // The generation of the newest refresh: an older read that resolves later
+  // is dropped, so it cannot restore a stale (critical) item.
+  let generation = 0;
 
   const refresh = async () => {
+    const gen = ++generation;
     const [c, list] = await Promise.allSettled([api.inbox.counts(), api.inbox.list({ status: "open" })]);
+    if (gen !== generation) return;
     // A failed read keeps the last value.
     if (c.status === "fulfilled") setCounts(c.value);
     if (list.status === "fulfilled") setItems(list.value);
@@ -35,7 +40,9 @@ export function createInboxStore(api: Pick<Api, "inbox">, events?: Pick<EventsSt
       return;
     }
     try {
-      setThreads((await api.inbox.list({ status: "open", kind: "thread" })).filter(isCritical));
+      const critical = (await api.inbox.list({ status: "open", kind: "thread" })).filter(isCritical);
+      if (gen !== generation) return;
+      setThreads(critical);
     } catch {
       // A failed read keeps the last value.
     }

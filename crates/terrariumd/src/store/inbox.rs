@@ -599,12 +599,13 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
         .collect())
 }
 
-/// The item of an Inbox thread: open while it waits for the operator or
-/// has an open question (its questions are no items of their own); urgent
+/// The item of an Inbox thread: open while it waits for the operator, has
+/// a pending close proposal, or has an open question (its questions are no items of their own); urgent
 /// or critical by its open questions.
 fn thread_item(th: Thread, urgency: (bool, bool)) -> InboxItem {
     let open = th.status == ThreadStatus::WaitingOperator
-        || (th.status != ThreadStatus::Closed && th.open_questions.unwrap_or(0) > 0);
+        || (th.status != ThreadStatus::Closed
+            && (th.close_proposal.is_some() || th.open_questions.unwrap_or(0) > 0));
     let (urgent, critical) = if open { urgency } else { (false, false) };
     InboxItem {
         id: th.item_id(),

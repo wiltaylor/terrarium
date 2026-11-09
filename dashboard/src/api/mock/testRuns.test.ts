@@ -16,7 +16,7 @@ describe("mock test runs", () => {
     expect([...times].sort((a, b) => b - a)).toEqual(times);
     const r = page.items[0]!;
     for (const k of ["id", "project", "name", "format", "tool", "status", "counts", "duration_ms", "started_at", "commit", "branch", "file_name", "raw_size", "notes", "cards", "labels", "created_by", "created_by_name", "created_at", "url"]) expect(r).toHaveProperty(k);
-    expect(r.url).toBe(`/p/terrarium/board/tests/${r.id}`);
+    expect(r.url).toBe(`/p/terrarium/tests/${r.id}`);
     expect(r.counts.total).toBe(r.counts.passed + r.counts.failed + r.counts.errored + r.counts.skipped);
     expect(page.items.some((x) => x.status === "passed")).toBe(true);
     expect(page.items.some((x) => x.status === "failed")).toBe(true);

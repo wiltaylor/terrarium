@@ -197,7 +197,7 @@ export function createTestRunMock(ctx: TestRunMockContext) {
       created_by: r.by,
       created_by_name: r.byName,
       created_at: r.at,
-      url: `/p/${r.project}/board/tests/${id}`,
+      url: `/p/${r.project}/tests/${id}`,
     };
     const s: Stored = {
       summary,

@@ -3377,10 +3377,16 @@ To thread (GitHub #30, TER-469):
   `from_question` set to the question. Its first message, by the operator,
   quotes the question, its options, and its context, and then gives the
   optional `message`. It is `waiting_agent`. A question with a card links
-  the card to the thread (an archived card is not linked).
+  the card to the thread (an archived card is not linked). The quotes add
+  to the size: when the first message has more than 32 KiB, the move is
+  `422 invalid`, with `bytes` and `max` in the details, and nothing moves
+  (TER-495).
 - The question becomes `in_thread`, with `thread` set: it is not open, so
   it leaves the open counts, the Inbox, and the `X-Open-Questions` count,
   and the thread item stands for it. Its `question` waits stay open.
+  In its thread it counts as an open question (TER-495): the agent sets no
+  `waiting_agent` or `tracking` (`409 conflict`), a message of the agent
+  makes the thread `waiting_operator`, and a close retracts it.
 - The agent gets one mail from the operator on the mail thread of the
   question (`In a thread: ...`), with the commands to read the thread and
   reply there. The agent is not bound to the thread, so each later
@@ -6397,7 +6403,7 @@ all projects. Targets are project targets by default: a global target
 
 | Field | Meaning |
 |---|---|
-| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Keep project shared caches outside each agent root. |
+| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. A `work_root` that is set never falls back: its failure names it. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
 | `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. A snapshot delete removes a name. A snapshot list removes the names that the host no longer has (§17.3, "Snapshots"). |
@@ -12064,6 +12070,7 @@ for a merge job. It never receives the repository credential:
 | `TERRARIUM_JOB_ID`        | the job ID                                                            |
 | `TERRARIUM_HEAD`          | the tested commit: the card commit, or the merge commit               |
 | `TERRARIUM_JOB_SLOT`      | the slot of the job (TER-190): `1` to `slots` for a validate job, `0` for a merge |
+| `TERRARIUM_SLOT_LOCK`     | the absolute path of the slot's lock file (`<slot>.lock`, TER-448): the recipe holds it, with the clone step, for its whole run |
 | `TERRARIUM_BASE`          | the base of the change: for a validate job the merge-base of the card commit and `next`, for a merge job `next` before the merge |
 | `TERRARIUM_CHANGED_FILES` | the absolute path of a file in the clone (`.git/terrarium/changed-files`) with the paths that differ between the base and the head, one per line (`git diff --name-only --no-renames`, so a rename lists both paths) |
 
@@ -12123,7 +12130,18 @@ Each slot has one work tree on the target, `<work_dir>/<project>/slot-<n>`
 jobs before. A job takes a slot when it starts: the lowest of `1` to
 `slots` that no running job of its project holds, and `0` for a merge,
 so merges have a tree of their own. A cancelled job holds its slot until
-its processes are gone, and no two jobs use one tree at once. The job
+its processes are gone, and no two jobs use one tree at once. The clone
+step and the recipe also hold an exclusive lock on `<slot>.lock` next
+to the tree (TER-448), so a second daemon on the same target with the
+same project name and work dir (two daemons share the default
+`/tmp/terrarium-jobs/<project>`) cannot replace the tree of a running
+job: its job fails with a clear error, and the recipe checks the tested
+head again under the lock. Only the job's own wrapper shell holds the
+lock: the recipe runs as its child without the lock's file descriptor,
+so a process that the recipe leaves running does not keep the slot
+locked after the job. The lock needs `flock` on the target; without
+it the steps run unlocked, as before TER-448, and each step prints
+`no flock on the target: slot not locked`. The job
 row has `slot` while it runs. The step checks out the commit with
 `git checkout -f` and removes every file that the commit does not track,
 ignored ones too, except `target/` at the root (`git clean -ffdx -e

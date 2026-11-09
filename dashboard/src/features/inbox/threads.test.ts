@@ -1,7 +1,7 @@
 // The pure helpers of the Inbox threads (docs/api.md §6.13).
 import { describe, expect, it } from "vitest";
 import type { Question, Thread, ThreadMessage } from "../../api/types";
-import { closeBody, inThreadsView, newThreadBody, pendingProposal, safeUrl, sortThreads, threadChip, threadIcon, threadListStatus, threadHref, threadsBadge, threadsViewOf, threadText, THREAD_MESSAGE_MAX, THREAD_SUMMARY_MAX, timeline, waitsOnYou, whoName } from "./threads";
+import { closeBody, inThreadsView, newThreadBody, openQuestionCount, pendingProposal, retractedOnClose, safeUrl, sortThreads, threadChip, threadIcon, threadListStatus, threadHref, threadsBadge, threadsViewOf, threadText, THREAD_MESSAGE_MAX, THREAD_SUMMARY_MAX, timeline, waitsOnYou, whoName } from "./threads";
 
 const thread = (over: Partial<Thread> = {}): Thread => ({
   id: "T1",
@@ -39,6 +39,13 @@ describe("Inbox threads", () => {
     // A question in a thread that tracks still waits on the operator.
     expect(threadChip(thread({ status: "tracking", open_questions: 1 })).label).toBe("waiting on you");
     expect(threadHref("01M7/x")).toBe("/threads/01M7%2Fx");
+  });
+
+  it("counts an in_thread question among the ones that a close retracts, not as an open one (TER-495)", () => {
+    const t = thread({ questions: [question("Q1", "x", "in_thread"), question("Q2", "y"), question("Q3", "z", "answered")] });
+    expect(retractedOnClose(t)).toBe(2);
+    expect(openQuestionCount(t)).toBe(1);
+    expect(retractedOnClose(thread({ open_questions: 3 }))).toBe(3);
   });
 
   it("shows the agent's close proposal only on an open thread, with its own chip (TER-95)", () => {

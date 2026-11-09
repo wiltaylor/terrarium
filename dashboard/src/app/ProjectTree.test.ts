@@ -124,7 +124,7 @@ describe("ProjectTree", () => {
   });
 
   it("marks the project row on the project index and every deep project path", () => {
-    for (const path of ["/p/alpha", "/p/alpha/board/schedules", "/p/alpha/knowledge/wiki/a/b", "/p/alpha/repos/infra", "/p/alpha/settings/secrets"]) {
+    for (const path of ["/p/alpha", "/p/alpha/schedules", "/p/alpha/knowledge/wiki/a/b", "/p/alpha/repos/infra", "/p/alpha/settings/secrets"]) {
       const el = mount(path);
       expect(projectRow(el, "alpha").getAttribute("aria-selected")).toBe("true");
       expect(projectRow(el, "alpha").querySelector(".tree-row")?.classList.contains("current")).toBe(true);

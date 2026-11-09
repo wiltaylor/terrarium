@@ -255,17 +255,19 @@ same: it has a tab for each of General, Secrets, and Templates of
 the project, under `/p/<project>/settings`. The screens use
 `components/TabScreen.tsx`. The Logs item is active on each of its tabs.
 The project items are Board, Repos, Logs, Knowledge, and Agents.
-The **Board** item (`features/board/BoardScreen.tsx`) has a tab for each of
-Cards, Artifacts, Tests, and Schedules (`BOARD_TABS`). The Cards tab is the board
-at `/p/<project>/board`, so a `?card=` link keeps its path. The Cards tab
-filters and groups the cards by their version label; there is no
-Versions tab. The other tabs are under `/p/<project>/board/artifacts`,
-`/p/<project>/board/tests`, and `/p/<project>/board/schedules`. The
+The **Board** has no tab row of its own (TER-507): the project has one tab
+row. The board is at `/p/<project>/board`, so a `?card=` link keeps its
+path. It filters and groups the cards by their version label; there is no
+Versions tab. Its former tabs Tests, Schedules, and Rules are project tabs
+at `/p/<project>/tests`, `/p/<project>/schedules`, and
+`/p/<project>/rules`, and the old `/p/<project>/board/<tab>` paths
+redirect. The Artifacts tab is gone; its page stays at
+`/p/<project>/board/artifacts/:id?` with no tab, so old links open it. The
 Schedules tab keeps its Schedules and Triggers sub-tabs (`?tab=triggers`).
 The **Knowledge** item (`features/knowledge/KnowledgePage.tsx`) has a tab
 for each of Wiki, Memory, and DB (`KNOWLEDGE_TABS`), under
-`/p/<project>/knowledge`. The Board and Knowledge items are active on each
-of their tabs.
+`/p/<project>/knowledge`. The Knowledge item is active on each of its
+tabs, and the Board item on each `/p/<project>/board/...` path.
 The **DB** tab (`features/db`, docs/api.md §27) shows the record types of
 the project (`DbTypesPage`). A type opens its records
 (`/p/<project>/knowledge/db/<type>`, `DbRecordsPage`): a query box that
@@ -918,11 +920,12 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 ## Pages and the API
 
 Every `/p/:project/...` page sits in the project shell
-(`features/projects/ProjectScreen.tsx`). Its route tabs are Board, Dashboard,
-Agents, Repos, Knowledge, Pipelines, Calendar, Logs, and Settings, in that
-order (`app/nav.ts` `PROJECT_TABS`). `/p/:project` opens Board. The first path
-segment selects the tab, including on deep links. Board, Knowledge, Logs, and
-Settings keep their own tab row below the project tabs.
+(`features/projects/ProjectScreen.tsx`). Its route tabs are Board, Tests,
+Schedules, Rules, Dashboard, Agents, Repos, Knowledge, Pipelines, Calendar,
+Logs, and Settings, in that order (`app/nav.ts` `PROJECT_TABS`).
+`/p/:project` opens Board. The first path segment selects the tab, including
+on deep links. Knowledge, Logs, and Settings keep their own tab row below the
+project tabs. The board has none (TER-507).
 
 | Route | View | API calls |
 |---|---|---|
@@ -949,20 +952,20 @@ Settings keep their own tab row below the project tabs.
 | `/p/:project/pipelines` | Pipelines: each CI/CD pipeline with the state of its newest run, the last poll, on/off, Refresh, Edit, Delete; a row opens the recent runs, a run opens its steps; the dialog (GitHub Actions or a script) has a Test poll; see "Pipelines". | `GET`, `POST .../pipelines`, `POST .../pipelines/test`, `PATCH`, `DELETE /api/pipelines/{id}`, `POST .../refresh`, `GET .../runs`, `GET .../runs/{run}` |
 | `/p/:project/calendar` | Calendar: the project's events and the global ones in a month grid, a week, or an agenda; an occurrence opens the event (Edit, Remove, Skip); the dialog makes or changes an event; see "Calendar". | `GET .../calendar`, `POST .../calendar/events`, `GET`, `PATCH`, `DELETE /api/calendar/events/{id}`, `POST .../skip`, `GET`, `POST`, `DELETE .../calendar/watches` |
 | `/calendar` | The combined calendar of every project and the global calendar (the operator). | `GET /api/calendar`, `GET /api/calendar/global`, `POST /api/calendar/global/events` |
-| `/p/:project/board` | Board, Cards tab: drag and drop, New card dialog (the "+" of the backlog column), Edit columns dialog, ETA countdowns, question badges, the version filter (`?version=<name>`) and the version lanes (`?group=version`), card drawer with its questions (see "The board") | `GET .../board`, `PATCH .../board`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
+| `/p/:project/board` | Board: drag and drop, New card dialog (the "+" of the backlog column), Edit columns dialog, ETA countdowns, question badges, the version filter (`?version=<name>`) and the version lanes (`?group=version`), card drawer with its questions (see "The board") | `GET .../board`, `PATCH .../board`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
 | `/p/:project/versions/:id?`, `/p/:project/board/versions/:id?` | Gone: redirect in one hop to `/p/:project/board` (`app/nav.ts` `MOVED_ROUTES`). Version objects are removed (TER-58), so the old version ID does not go along. The redirect adds the old query (`withQuery`). Old mail can still link `/p/<project>/versions/<id>`. | none |
-| `/p/:project/board/tests`, `/p/:project/board/tests/:id` | Board, Tests tab: the test runs (filters, counts bar, links) and one run (counts, compare with the previous run, suites and cases, Failed only, search, output, Download original, link and unlink, delete); see "Test runs" | `GET .../test-runs?card=&label=&name=&status=&cursor=`, `GET /api/test-runs/{id}?status=&q=&cursor=`, `GET .../compare?with=previous`, `GET .../raw`, `PATCH .../links`, `DELETE /api/test-runs/{id}` |
-| `/p/:project/board/artifacts/:id?` | Board, Artifacts tab: artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
+| `/p/:project/tests`, `/p/:project/tests/:id` | Tests tab: the test runs (filters, counts bar, links) and one run (counts, compare with the previous run, suites and cases, Failed only, search, output, Download original, link and unlink, delete); see "Test runs" | `GET .../test-runs?card=&label=&name=&status=&cursor=`, `GET /api/test-runs/{id}?status=&q=&cursor=`, `GET .../compare?with=previous`, `GET .../raw`, `PATCH .../links`, `DELETE /api/test-runs/{id}` |
+| `/p/:project/board/artifacts/:id?` | Artifacts, with no tab since TER-507 (old links open it): artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/knowledge/wiki/*path` | Knowledge, Wiki tab: page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
 | `/p/:project/knowledge/memory` | Knowledge, Memory tab: memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
 | `/p/:project/knowledge/db` | Knowledge, DB tab: the record types, New type | `GET`, `POST .../db/types` |
 | `/p/:project/knowledge/db/:type` | The records of a type: query box, table, record dialog, schema editor | `GET .../db/query`, `.../db/records`, `PATCH`, `DELETE .../db/types/{type}` |
-| `/p/:project/artifacts/:id?`, `/p/:project/wiki/*path`, `/p/:project/memory`, `/p/:project/knowledge` | Gone: redirect to the Board and Knowledge tabs (`app/nav.ts` `MOVED_ROUTES`). The wiki redirect keeps the page path, and each redirect keeps the query. `/p/:project/knowledge` opens the Wiki tab. | none |
-| `/p/:project/schedules` | Gone: redirects to `/p/:project/board/schedules` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query (`?open=`, `?tab=triggers`). | none |
+| `/p/:project/artifacts/:id?`, `/p/:project/wiki/*path`, `/p/:project/memory`, `/p/:project/knowledge` | Gone: redirect to the Artifacts page and the Knowledge tabs (`app/nav.ts` `MOVED_ROUTES`). The wiki redirect keeps the page path, and each redirect keeps the query. `/p/:project/knowledge` opens the Wiki tab. | none |
+| `/p/:project/board/tests`, `/p/:project/board/tests/:id`, `/p/:project/board/schedules`, `/p/:project/board/rules` | Gone (TER-507): redirect in one hop to `/p/:project/tests`, `/p/:project/tests/:id`, `/p/:project/schedules`, and `/p/:project/rules` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query (`?open=`, `?tab=triggers`). The daemon still gives a test run the URL `/p/<project>/board/tests/<id>`. | none |
 | `/p/:project/spend` | Gone: redirects to `/` (`app/nav.ts` `MOVED_ROUTES`). The daemon's budget alert mail still links it. | none |
-| `/p/:project/board/schedules` | Board, Schedules tab: schedules of the project and the global ones, scope filter, run history, run now, enable, create, edit, delete | `GET /api/schedules?project=`, `POST /api/schedules`, `PATCH`, `DELETE /api/schedules/{id}`, `POST .../run\|enable\|disable`, `GET .../runs?limit=&cursor=` (docs/api.md §19) |
+| `/p/:project/schedules` | Schedules tab: schedules of the project and the global ones, scope filter, run history, run now, enable, create, edit, delete | `GET /api/schedules?project=`, `POST /api/schedules`, `PATCH`, `DELETE /api/schedules/{id}`, `POST .../run\|enable\|disable`, `GET .../runs?limit=&cursor=` (docs/api.md §19) |
 | `/schedules` | All schedules, grouped by scope | `GET /api/schedules` and the calls above |
-| `/p/:project/board/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; webhook deliveries, redeliver, and test send; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET .../deliveries`, `POST .../deliveries/{id}/redeliver`, `POST .../test`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §19.5, §20) |
+| `/p/:project/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; webhook deliveries, redeliver, and test send; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET .../deliveries`, `POST .../deliveries/{id}/redeliver`, `POST .../test`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §19.5, §20) |
 | `/settings/targets` | Settings, Targets tab: targets, lifecycle, snapshots (list, take, restore, delete), exec console, leases (grant, extend, revoke, history), the resource limits chip (`limits_info.summary`, for example `2 CPU · 4G`; red with the host agent's `problem`), and the limit fields of the New target dialog for `host` and `docker` targets | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `GET .../snapshots`, `DELETE .../snapshots/{snap}`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/settings/hosts` | Settings, Hosts tab: host agents: status, the version with a `stale` chip for a host agent of another build than the daemon (`stale`, docs/api.md §17.1), capabilities (also the `limits` or `no limits` chip of `capabilities.limits`, with the controllers or the reason as the tooltip), add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/logs/events` | Logs, Events tab: event log with history; all projects or the selected one, kind and agent filters | `GET /api/events?since=&kind=&project=&agent=`, events socket |
@@ -1270,7 +1273,7 @@ The **Tests** tab of the board (`features/tests`) shows the test runs that
 agents push with `terrarium test push` (docs/api.md, test runs). The daemon
 parses JUnit XML, TRX, CTRF, libtest JSON, Vitest and Jest JSON, and TAP.
 
-- **The list** (`TestRunsPage.tsx`, `/p/<project>/board/tests`): newest
+- **The list** (`TestRunsPage.tsx`, `/p/<project>/tests`): newest
   first, with the status (icon and word), the name, the format and tool,
   who pushed it and when, the branch and the commit, the duration, the
   counts as a stacked bar and as text, and the linked cards and labels. A
@@ -1278,7 +1281,7 @@ parses JUnit XML, TRX, CTRF, libtest JSON, Vitest and Jest JSON, and TAP.
   The filters (name, status, card, label) are in the URL
   (`?name=&status=&card=&label=`). **Load more** reads the next page. A
   `test_run` event of the project reloads the list.
-- **The run** (`TestRunPage.tsx`, `/p/<project>/board/tests/<id>`): the
+- **The run** (`TestRunPage.tsx`, `/p/<project>/tests/<id>`): the
   big counts (passed, failed, errored, skipped) with an icon each, the
   duration, the format, the tool, the file, the commit, the branch, and the
   linked cards and labels (unlink with ×, link a card by ID). **Compare

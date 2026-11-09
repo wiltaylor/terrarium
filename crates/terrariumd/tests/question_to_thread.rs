@@ -400,3 +400,118 @@ async fn a_deleted_agent_retracts_its_moved_questions() {
         .ok();
     assert_eq!(lab.question(&qid).await["status"], "retracted");
 }
+
+/// TER-495: an `in_thread` question keeps its thread on the operator, as an
+/// open one does. The asking agent sets no `waiting_agent` or `tracking`
+/// until it is settled, so the thread does not drop out of the Inbox.
+#[tokio::test]
+async fn an_in_thread_question_keeps_the_thread_on_the_operator() {
+    let lab = lab().await;
+    let q = lab.ask(json!({"text": "Drop the old index?"})).await;
+    let qid = id(&q);
+    let r = lab
+        .td
+        .post_empty(&format!("/api/questions/{qid}/to-thread"))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let tid = id(&r.body["thread"]);
+
+    for status in ["waiting_agent", "tracking"] {
+        lab.td
+            .post_as(
+                &lab.lead,
+                &format!("/api/threads/{tid}/status"),
+                json!({"status": status}),
+            )
+            .await
+            .err(409, "conflict");
+        lab.td
+            .post_as(
+                &lab.lead,
+                &format!("/api/threads/{tid}/messages"),
+                json!({"text": "On it.", "status": status}),
+            )
+            .await
+            .err(409, "conflict");
+    }
+    lab.td
+        .post_empty_as(&lab.lead, &format!("/api/threads/{tid}/track"))
+        .await
+        .err(409, "conflict");
+
+    // A plain reply of the agent: the thread waits on the operator, and the
+    // Inbox counts it.
+    lab.td
+        .post_as(
+            &lab.lead,
+            &format!("/api/threads/{tid}/messages"),
+            json!({"text": "It is unused since March."}),
+        )
+        .await
+        .ok();
+    assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
+    assert_eq!(lab.counts().await["thread"], 1);
+
+    // Settled, the agent sets its status again.
+    lab.td
+        .post(
+            &format!("/api/questions/{qid}/answer"),
+            json!({"answer": "yes"}),
+        )
+        .await
+        .ok();
+    let th = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/threads/{tid}/status"),
+            json!({"status": "tracking"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(th["status"], "tracking");
+}
+
+/// TER-495: the quotes of the first message can make it longer than a
+/// thread message while each part passes its own limit. The refusal says
+/// why and what to do, and nothing moves.
+#[tokio::test]
+async fn a_first_message_over_the_thread_limit_is_explained() {
+    let lab = lab().await;
+    // Each line of the context gets a "> ": 16000 bytes quote to 32000.
+    let q = lab
+        .ask(json!({"text": "x".repeat(1500), "context": "a\n".repeat(8000)}))
+        .await;
+    let qid = id(&q);
+    let r = lab
+        .td
+        .post_empty(&format!("/api/questions/{qid}/to-thread"))
+        .await;
+    r.err(422, "invalid");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("first message of the thread"), "{msg}");
+    assert!(msg.contains("answer it in the Inbox"), "{msg}");
+    assert!(!msg.contains("your message"), "{msg}");
+    assert_eq!(lab.question(&qid).await["status"], "open");
+
+    // A message within its own limit that does not fit with the quote.
+    let q = lab
+        .ask(json!({"text": "Rotate now?", "context": "c".repeat(16000)}))
+        .await;
+    let qid = id(&q);
+    let r = lab
+        .td
+        .post(
+            &format!("/api/questions/{qid}/to-thread"),
+            json!({"message": "\u{20ac}".repeat(8000)}),
+        )
+        .await;
+    r.err(422, "invalid");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("your message"), "{msg}");
+    assert!(msg.contains("send a shorter message"), "{msg}");
+    assert_eq!(lab.question(&qid).await["status"], "open");
+    let threads = lab.td.get("/api/threads").await.ok().clone();
+    assert!(threads.as_array().unwrap().is_empty(), "{threads}");
+}
