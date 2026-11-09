@@ -22,12 +22,14 @@
 //! | `jwt` | `eyJ...` `.` `eyJ...` `.` (a JWT, as the CLI session tokens) |
 //! | `terrarium-host-token` | `thk_...` (a host agent token), `the_...` (an enrol token) |
 //! | `credential-key` | a key named like `token`, `secret`, `password`, `api_key`, or `authorization`, with a value of 16 characters or more |
-//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) or sits inside the quoted value of a non-secret repo field of the daemon-written export ([`exempt_export_value_span`], issue #27); a run that ends at the `@` of a URL user part keeps the rule (`ssh://<token>@host/r.git`, the scp form `<token>@host:r.git`) |
+//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) or sits inside the quoted value of a non-secret repo field of the daemon-written export ([`exempt_export_value_span`], issue #27); a run that overlaps the user part of a URL keeps the rule (`ssh://<token>@host/r.git`, the scp form `<token>@host:r.git`, [`url_user_parts`]) |
 //! | `url-userinfo` | a repo URL of the export with a credential in its user part (`https://token@x/y`, `https://user:pass@x/y`, `ssh://user:pass@x/y`), on the same exempt lines (issue #27) |
 //! | `credential-file` | a file name that holds credentials: `.env`, `auth.json`, `.credentials.json`, `id_rsa`, `*.pem`, `*.key`, ... |
 //!
 //! A line with the marker `terrarium-scan: allow` skips the
-//! `credential-key` and `high-entropy` rules (a false hit). The token
+//! `credential-key` and `high-entropy` rules (a false hit), but not a
+//! run in the user part of a URL of an exempt line: like
+//! `url-userinfo` it is not a rule for a false hit there. The token
 //! patterns, `url-userinfo`, and the file names have no such marker.
 //!
 //! The daemon writes the export of the config repo, so no marker can
@@ -45,12 +47,14 @@
 //! `url-userinfo` on the same lines: the daemon drops the user part of
 //! a repo URL before it writes the export, so one there is a hand
 //! edit. A user part with no password (`ssh://<token>@host/r.git`, the
-//! scp form `<token>@host:r.git`) is not one, so its run keeps
-//! `high-entropy` ([`url_user_part`]). A table header inside a
+//! scp form `<token>@host:r.git`) is not one, so a run that overlaps
+//! the user part keeps `high-entropy` ([`url_user_parts`]), whatever
+//! byte sits between the run and the `@`. A table header inside a
 //! multi-line string of the file is text of that string and opens no
-//! exemption ([`multiline_open_after`]): the export writer escapes
-//! newlines, so a multi-line string in an export file is a hand edit
-//! too.
+//! exemption ([`multiline_open_after`]): a `"""` or `'''` in a
+//! comment, in a one-line string, or escaped in a basic string opens
+//! nothing, and the export writer escapes newlines and quotes, so a
+//! multi-line string in an export file is a hand edit too.
 
 use std::sync::OnceLock;
 
@@ -150,15 +154,71 @@ fn url_userinfo() -> Option<&'static Regex> {
         .as_ref()
 }
 
-/// Does the run that ends at `end` end at the `@` of a URL user part
-/// (`ssh://<token>@host/r.git`, the scp form `<token>@host:r.git`,
-/// `https://user:<token>@host`)? Those forms carry the credential in
-/// the user part, where [`url_userinfo`] sees only a `user:password@`,
-/// so their run keeps the `high-entropy` rule even on an exempt line.
-/// The user part of a repo URL that the daemon writes is a word
-/// (`git`, `oauth2`), never a high-entropy run.
-fn url_user_part(line: &str, end: usize) -> bool {
-    line.as_bytes().get(end) == Some(&b'@')
+/// The spans of the user parts of the URLs of `line`: after the `//`
+/// of a `scheme://` URL up to the first `@` of its authority
+/// (`ssh://<token>@host/r.git`, `https://user:<token>@host`), and from
+/// the start of an scp value up to its `@` (`<token>@host:r.git`).
+/// Those forms carry the credential in the user part, where
+/// [`url_userinfo`] sees only a `user:password@`, so a run that
+/// overlaps one keeps the `high-entropy` rule even on an exempt line,
+/// whatever byte sits between the run and the `@` (`<token>.@`,
+/// `<token>~x@`, `<token>%2B@`). The user part of a repo URL that
+/// the daemon writes is a word (`git`, `oauth2`), never a
+/// high-entropy run.
+fn url_user_parts(line: &str) -> Vec<std::ops::Range<usize>> {
+    let b = line.as_bytes();
+    let mut spans = Vec::new();
+    // `scheme://user@host`: the user part runs from the `//` of the
+    // authority to its first `@`. The authority ends at the first
+    // path, query, fragment, quote, or space.
+    let mut from = 0;
+    while let Some(p) = line[from..].find("://") {
+        let p = from + p;
+        let start = p + 3;
+        let end = start
+            + b[start..]
+                .iter()
+                .position(|&c| matches!(c, b'/' | b'?' | b'#' | b'"' | b'\'' | b' ' | b'\t'))
+                .unwrap_or(b.len() - start);
+        if let Some(at) = b[start..end].iter().position(|&c| c == b'@') {
+            spans.push(start..start + at);
+        }
+        from = start;
+    }
+    // The scp form `user@host:path`: the host holds a `:` (the path
+    // separator) before a `/`, a quote, or a space, and the user part
+    // runs back from the `@` to the first byte that is not part of it.
+    for (at, c) in b.iter().enumerate() {
+        if *c != b'@'
+            || b[at + 1..]
+                .iter()
+                .find(|&&c| matches!(c, b'/' | b':' | b'"' | b'\'' | b' ' | b'\t' | b'?' | b'#'))
+                != Some(&b':')
+        {
+            continue;
+        }
+        let start = b[..at]
+            .iter()
+            .rposition(|&c| {
+                !matches!(
+                    c,
+                    b'A'..=b'Z'
+                        | b'a'..=b'z'
+                        | b'0'..=b'9'
+                        | b'+'
+                        | b'/'
+                        | b'='
+                        | b'.'
+                        | b'_'
+                        | b'~'
+                        | b'-'
+                        | b'%'
+                )
+            })
+            .map_or(0, |p| p + 1);
+        spans.push(start..at);
+    }
+    spans
 }
 
 /// A value that names a secret and is not one: an env reference, a
@@ -277,23 +337,83 @@ fn table_header(line: &str) -> Option<&str> {
 }
 
 /// The multi-line TOML string (`"""` or `'''`) that is open at the end
-/// of `line`, from the one open before it: a line with an odd number of
-/// the same three-quote delimiter opens or closes one. A
-/// `[[projects.repos]]` line inside such a string is text of the
-/// string, not a table header, so [`scan`] takes no header from it: a
-/// hand edit with example fleet TOML in a multi-line string must not
-/// exempt the lines in or after it. The daemon-written export holds no
-/// multi-line string (its writer escapes newlines), so one in an
-/// export fleet file is a hand edit.
+/// of `line`, from the one open before it: a character scan of the
+/// line, not a count of its delimiters. A `"""` or `'''` inside a
+/// comment, inside a one-line `'...'` or `"..."` string, or escaped
+/// in a basic string (`\"""`) opens and closes nothing, and a run of
+/// four or more quotes closes at its last three (the TOML spec holds
+/// up to two of them as content). A `[[projects.repos]]` line inside
+/// such a string is text of the string, not a table header, so
+/// [`scan`] takes no header from it: a hand edit with example fleet
+/// TOML in a multi-line string must not exempt the lines in or after
+/// it. The daemon-written export holds no multi-line string (its
+/// writer escapes newlines and quotes, so one in an export fleet
+/// file is a hand edit.
 fn multiline_open_after(line: &str, open: Option<char>) -> Option<char> {
+    let b = line.as_bytes();
     let mut open = open;
-    for (delim, quote) in [("\"\"\"", '"'), ("'''", '\'')] {
-        if line.matches(delim).count() % 2 == 1 {
-            open = if open == Some(quote) {
-                None
-            } else {
-                open.or(Some(quote))
-            };
+    let mut i = 0;
+    while i < b.len() {
+        match open {
+            // A basic multi-line string: an escape holds its char, and
+            // a run of 3 or more quotes closes it at its last three.
+            Some('"') if b[i] == b'\\' => i += 2,
+            Some('"') if b[i] == b'"' => {
+                let run = b[i..].iter().take_while(|&&c| c == b'"').count();
+                if run >= 3 {
+                    open = None;
+                }
+                i += run;
+            }
+            // A literal multi-line string has no escapes; a run of 3
+            // or more quotes closes it at its last three.
+            Some('\'') if b[i] == b'\'' => {
+                let run = b[i..].iter().take_while(|&&c| c == b'\'').count();
+                if run >= 3 {
+                    open = None;
+                }
+                i += run;
+            }
+            // Any other byte of an open multi-line string is content.
+            Some(_) => i += 1,
+            None => match b[i] {
+                // A comment holds no string delimiter.
+                b'#' => break,
+                b'"' if b[i..].starts_with(b"\"\"\"") => {
+                    open = Some('"');
+                    i += 3;
+                }
+                b'\'' if b[i..].starts_with(b"'''") => {
+                    open = Some('\'');
+                    i += 3;
+                }
+                // A one-line basic string: an escape holds its char, a
+                // quote closes it, and one that never closes holds the
+                // rest of the line.
+                b'"' => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == b'\\' {
+                            i += 2;
+                        } else {
+                            i += 1;
+                            if b[i - 1] == b'"' {
+                                break;
+                            }
+                        }
+                    }
+                }
+                // A one-line literal string: to its closing quote, or
+                // to the end of the line when there is none.
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                _ => i += 1,
+            },
         }
     }
     open
@@ -430,25 +550,27 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
         // non-secret repo field of the export fleet files skip the
         // high-entropy rule; the token patterns above, the
         // credential-key rule below, and `url-userinfo` still run on
-        // the line. `url-userinfo` runs before the marker check: like
-        // the token patterns it is not a rule for a false hit, and the
-        // daemon writes the export, so a credential in the user part of
-        // a repo URL is a hand edit that no marker lets through.
+        // the line. `url-userinfo` and the user-part runs of
+        // `high-entropy` run before the marker check: like the token
+        // patterns they are not rules for a false hit on an exempt
+        // line, and the daemon writes the export, so a credential in
+        // the user part of a repo URL, and a marker on that line, are
+        // hand edits.
         let exempt = exempt_export_value_span(path, header.as_deref(), line);
+        let user_parts = url_user_parts(line);
         if exempt.is_some()
             && let Some(re) = url_userinfo()
             && re.is_match(line)
         {
             hit("url-userinfo");
         }
-        if line.contains(ALLOW_MARKER) {
-            continue;
-        }
+        let marked = line.contains(ALLOW_MARKER);
         if let Some(re) = key_value() {
             for c in re.captures_iter(line) {
                 if let Some(v) = c.get(1)
                     && v.as_str().len() >= KEY_VALUE_MIN_LEN
                     && !is_reference(v.as_str())
+                    && !marked
                 {
                     hit("credential-key");
                 }
@@ -459,10 +581,12 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
                 if m.as_str().len() >= ENTROPY_MIN_LEN
                     && shannon_entropy(m.as_str()) > ENTROPY_THRESHOLD
                     && !is_word_path(m.as_str())
-                    && (url_user_part(line, m.end())
-                        || !exempt
-                            .as_ref()
-                            .is_some_and(|e| m.start() >= e.start && m.end() <= e.end))
+                    && (exempt.is_some()
+                        && user_parts.iter().any(|u| m.start() < u.end && u.start < m.end)
+                        || !marked
+                            && !exempt
+                                .as_ref()
+                                .is_some_and(|e| m.start() >= e.start && m.end() <= e.end))
                 {
                     hit("high-entropy");
                 }
@@ -834,6 +958,27 @@ mod tests {
             "[[projects]]\nname = \"p1\"\ndescription = '''\nsee [[projects.repos]] below\n'''\n\n[[projects.repos]]\nname = \"app\"\nurl = \"{url}\"\n"
         );
         assert!(!rules(export, &real).contains(&he), "{real}");
+        // Round 4, the reviewer's spoofs: a `\"\"\"` or `'''` that is
+        // escaped in a basic string, inside a one-line string, or
+        // inside a comment opens and closes nothing, so the header
+        // line inside the string exempts nothing (round 3 counted
+        // every three-quote run on the line and took each of these for
+        // the delimiter).
+        for text in [
+            // `\"""` on its own line inside the open basic string: the
+            // escape holds its quote, so the string stays open.
+            format!("d = \"\"\"\n\\\"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"),
+            // A one-line literal string before it holds three quotes.
+            format!("name = 'p\"\"\"'\nd = \"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"),
+            // A one-line basic string with three escaped quotes.
+            format!("name = \"p\\\"\\\"\\\"\"\nd = \"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"),
+            // A comment holds three quotes, of both kinds.
+            format!("name = \"p\" # \"\"\"\nd = \"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"),
+            format!("name = \"p\" # '''\nd = '''\n[[projects.repos]]\nurl = \"https://x/{random}\"\n'''\n"),
+        ] {
+            let text = format!("[[projects]]\n{text}");
+            assert!(rules(export, &text).contains(&he), "{text}");
+        }
     }
 
     /// A high-entropy user part of a repo URL keeps the rule on an
@@ -857,6 +1002,16 @@ mod tests {
         ] {
             assert!(at(&url).contains(&he), "{url}: {:?}", at(&url));
         }
+        // Round 4: whatever byte sits between the token and the `@`,
+        // the whole user part keeps the rule, not only a run that ends
+        // at the `@`.
+        for url in [
+            format!("ssh://{random}.@git.example/o/r.git"),
+            format!("ssh://{random}%2B@git.example/o/r.git"),
+            format!("{random}~x@git.example:o/r.git"),
+        ] {
+            assert!(at(&url).contains(&he), "{url}: {:?}", at(&url));
+        }
         // A word user part stays a plain URL.
         for url in [
             "ssh://git@git.example/o/r.git",
@@ -867,20 +1022,32 @@ mod tests {
         }
     }
 
-    /// The allow marker does not skip `url-userinfo` (round 3): like the
-    /// token patterns it is not a rule for a false hit, and the daemon
-    /// writes the export lines, so a marker on one is a hand edit too.
+    /// The allow marker does not skip `url-userinfo` (round 3) nor a
+    /// high-entropy run in the user part of a URL (round 4): like the
+    /// token patterns they are not rules for a false hit on an exempt
+    /// line, and the daemon writes the export lines, so a marker on
+    /// one is a hand edit too. In a file that a user writes the marker
+    /// keeps its meaning for the soft rules.
     #[test]
     fn the_allow_marker_does_not_skip_url_userinfo() {
+        let he = "high-entropy"to_owned();
         let export = "export/projects/p1.fleet.toml";
         let text = format!(
             "[[projects.repos]]\nurl = \"https://bot:password123@git.example/o/r.git\" # {ALLOW_MARKER}\n"
         );
         assert_eq!(rules(export, &text), ["url-userinfo"].map(str::to_owned));
+        // The scp form carries the credential with no password, so the
+        // run itself is the rule that blocks it, marker or not.
+        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+        let text = format!(
+            "[[projects.repos]]\nurl = \"ssh://{random}@git.example/o/r.git\" # {ALLOW_MARKER}\n"
+        );
+        assert_eq!(rules(export, &text), [he]);
         // In a file that a user writes the marker keeps its meaning for
         // the soft rules, and `url-userinfo` never runs there.
-        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
         let text = format!("url = \"https://bot:{random}@x/y\" # {ALLOW_MARKER}\n");
+        assert!(rules("fleets/prod.fleet.toml", &text).is_empty());
+        let text = format!("url = \"ssh://{random}@x/y\" # {ALLOW_MARKER}\n");
         assert!(rules("fleets/prod.fleet.toml", &text).is_empty());
     }
 
