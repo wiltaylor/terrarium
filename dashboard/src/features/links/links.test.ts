@@ -15,7 +15,7 @@ describe("links (docs/api.md §36)", () => {
     expect(again.code).not.toBe(made.code);
     await api.links.revoke(made.link.id);
     expect(await api.links.list()).toHaveLength(0);
-    expect((await api.links.list({ revoked: true }))[0].status).toBe("revoked");
+    expect((await api.links.list({ revoked: true }))[0]?.status).toBe("revoked");
     await expect(api.links.revoke(made.link.id)).rejects.toThrow();
   });
 
