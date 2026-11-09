@@ -2543,10 +2543,13 @@ async fn every_verb_refuses_a_held_card() {
     assert_eq!(got, want, "one run for each verb");
     for run in &r {
         // The move mails only notify: the hold does not stop them
-        // (TER-536). With `board_flow = code` they do nothing.
+        // (TER-536). A `test.ping` is not a `card` event, so they fail
+        // for that.
         let verb = run["steps"][0]["verb"].as_str().unwrap();
         if matches!(verb, "card.blocked_mail" | "card.done_mail") {
-            assert_eq!(run["state"], "noop", "{run}");
+            assert_eq!(run["state"], "failed", "{run}");
+            let reason = run["reason"].as_str().unwrap();
+            assert!(reason.contains("needs a `card` event"), "{run}");
             continue;
         }
         assert_eq!(run["state"], "failed", "{run}");
@@ -2653,14 +2656,14 @@ async fn move_mail_verbs_in_rules_flow() {
     let m = sent(&td, &format!("{held} blocked: From GitHub")).await;
     assert_eq!(m.len(), 1, "{m:?}");
     assert_eq!(m[0].0, "operator");
-    assert!(m[0].1.contains("by w1."), "{m:?}");
+    assert!(m[0].1.contains("by p/w1."), "{m:?}");
 
     assert_eq!(card(&td, &late).await["column"], "backlog");
     let m = sent(&td, &format!("{late} blocked: Late")).await;
     assert_eq!(m.len(), 1, "{m:?}");
     assert!(
         m[0].1.starts_with(&format!(
-            "Card {late} \"Late\" moved to blocked (the blocked column) by w1."
+            "Card {late} \"Late\" moved to blocked (the blocked column) by p/w1."
         )),
         "{m:?}"
     );
