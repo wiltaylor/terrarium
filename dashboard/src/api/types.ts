@@ -1786,6 +1786,8 @@ export interface Card {
   tests?: CardTests;
   /** The idle mark (docs/api.md §6.2 "Idle alert", TER-67): the assignee rests with no wait since this time, past the project's idle alert, and the leads were told. */
   idle_since?: string | null;
+  /** Active trouble signals, also shown on the card's usage view. */
+  trouble?: string[];
   /** The open (queued or running) job of the card (docs/api.md §8, TER-158). Absent when the card has no open job. */
   job?: CardJob;
   /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
@@ -2597,6 +2599,8 @@ export interface UsagePoint extends UsageTotals {
 
 /** `GET /api/cards/{id}/usage` (docs/api.md §16.4): the samples attributed to one card. */
 export interface CardUsage {
+  working_seconds?: number;
+  signals?: string[];
   card: string;
   title: string;
   project: string;

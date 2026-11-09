@@ -85,6 +85,7 @@ pub mod time_param;
 pub mod tool_run;
 pub mod transcripts;
 pub mod trash;
+pub mod trouble;
 pub mod usage_collector;
 pub mod usage_limit;
 pub mod waits;

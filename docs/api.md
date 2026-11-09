@@ -5740,6 +5740,80 @@ Agents with no usage are in the list with zero totals and no `share_pct`.
 `models` and `agents` are biggest spender (input plus output tokens)
 first. `since` and `until` are in the answer when the query gives them.
 
+The card usage answer also includes `working_seconds` and active
+trouble `signals` (arrays of signal names). The card and board summary expose
+the same active names as `trouble`. Working time is replayed from card
+assignment, status and wait events: only an agent working on this card in a
+working/research column counts. Idle time, open waits and time in other
+columns do not count. Usage query date filters apply to token/turn totals,
+not the working clock or current marks. To avoid a deploy-time burst, only
+cards entering the working-role or research column after the trouble baseline migration
+are monitored, including cards assigned by a lead. The
+baseline survives daemon restarts. Clock/history replay starts at the first
+such entry and reads only explicit assignees' status, wait and reset events,
+not the lifetime history of agents who commented on the card. Card and agent
+histories use separate indexed sequence ranges after entry. Only one prior
+status per assignee is fetched, by an indexed descending seek with LIMIT 1.
+The query plans are tested after ANALYZE with 100,000 historical events.
+Budget usage
+starts at that entry. Interactive token usage totals retain their existing
+all-time/date-filtered meaning.
+
+`GET /api/projects/{name}/trouble` reads the project's trouble thresholds.
+`PUT` replaces them and requires project admin rights. Omitted fields use
+defaults. Unknown fields and negative limits are rejected. Example:
+
+```json
+{"time_seconds":{"small":2700,"impl":7200,"impl-hard":14400},
+ "tokens":{},"turns":{},"red_streak":3,"red_same_commit":2,
+ "review_rounds":2,"eta_delays":3,"timer_polls":3,"compactions":3,
+ "review_wait_seconds":3600}
+```
+
+Time, token and turn maps are keyed by the suffix of the card's `type:` label
+(untyped cards use `impl`). Token/turn budgets are off until set. Time budgets
+use four times the project's type-specific p70 from completed card history
+(TER-316), requiring at least five distinct cards. Calibration reuses
+TER-394's shared work_samples implementation and existing indexes: it selects
+cards from the newest 2000 project moves, then pairs their ETA/move events
+with a window function. With too few samples,
+they use the fixed fallbacks above (`hard` also uses four hours). Explicit
+project time overrides take precedence. A zero threshold disables that check.
+An ETA at or before now produces `eta_overdue`. The other signal names are
+`time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
+`validation_red`, `timer_polls`, `compactions` and `review_wait`. Review wait
+starts at the most recent entry into review and clears on return to work.
+Assignment changes while the card stays in review do not reset its age.
+Job-set ETAs do not count as agent ETA extensions.
+
+Validation counts linked test runs uploaded by the current assignee, or the
+bound card agent while unassigned. Each suite name has its own streak. A
+green/empty run breaks that suite's streak. The latest 128 linked runs are
+examined per card. Three consecutive red runs, or
+two red runs on the same nonempty commit within the streak, trigger the mark.
+Short timer waits (at most one minute) and compaction requests use a rolling
+one-hour window. Review rounds and ETA extensions count the card's history.
+
+The lifecycle tick plans in a read, using lightweight working/review/research
+card metadata and marked cards that need clearing. It opens a write only if
+signals changed. That write checks each card's event/linked-test revision
+and project threshold value, deferring only that card's stale plan. Unrelated
+events and audit traffic cannot starve notices. It does not replay history
+inside a write.
+On the lifecycle tick, each new signal sends one state request to the worker
+and one summary to each project lead, never to the operator. The worker-nudge
+exception is `eta_overdue`: when the worker's card reminder is enabled
+(agent override, otherwise the daemon default), the reminder owns its nudge.
+The trouble pass records the signal and mails the lead, but does not send a
+second worker mail that could delay the reminder. If reminders are disabled,
+the worker still gets the trouble state request. Other signals are unchanged.
+The once-per-card
+and signal record survives restarts, resolution and recurrence. A mark clears
+when its condition stops holding, its threshold is disabled, or the card
+leaves working/research/review or is archived. A recurrence can restore the
+mark but cannot send another notice. The existing idle alert is separate.
+No-push detection is deferred to successful remote-head tracking (TER-370).
+
 The CLI calls `GET /api/usage?agent=<me>` for `terrarium usage` and
 `GET /api/usage?project=<p>` for `terrarium usage project`. Both work;
 `/api/usage/me` and `/api/usage/project` are the richer answers for a later
