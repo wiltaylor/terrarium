@@ -7,11 +7,12 @@
 import { useParams, type RouteSectionProps } from "@solidjs/router";
 import { TabScreen } from "../../components/TabScreen";
 import { BOARD_TABS } from "../../app/nav";
+import { decodePathParam, projectBase } from "../../lib/url";
 
 export default function BoardScreen(props: RouteSectionProps) {
   const params = useParams<{ project: string }>();
   return (
-    <TabScreen title={`Board · ${params.project}`} label="Board" base={`/p/${encodeURIComponent(decodeURIComponent(params.project))}/board`} tabs={BOARD_TABS} level={2}>
+    <TabScreen title={`Board · ${decodePathParam(params.project)}`} label="Board" base={`${projectBase(params.project)}/board`} tabs={BOARD_TABS} level={2}>
       {props.children}
     </TabScreen>
   );

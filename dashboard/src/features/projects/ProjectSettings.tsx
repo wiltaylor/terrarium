@@ -2,6 +2,7 @@ import { A, useNavigate, useParams } from "@solidjs/router";
 import { createResource, createSignal, For, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";
+import { projectBase } from "../../lib/url";
 import { agents, api, projects } from "../../stores";
 import { ProjectForm } from "./ProjectsPage";
 import { ScopeChip } from "../targets/ScopeChip";
@@ -60,7 +61,7 @@ export default function ProjectSettings() {
       </Show>
       <TargetsPanel project={params.project} />
       <p class="small muted">
-        The repos of the project are on the <A href={`/p/${encodeURIComponent(params.project)}/repos`}>Repos</A> page.
+        The repos of the project are on the <A href={`${projectBase(params.project)}/repos`}>Repos</A> page.
       </p>
       <Show when={editing() && project()}>
         <ProjectForm project={project()!} onClose={() => setEditing(false)} onSaved={() => void refetch()} />

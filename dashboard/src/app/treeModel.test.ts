@@ -58,20 +58,19 @@ describe("the open set", () => {
 
   it("drops old project, Agents, and Repos open names, also before projects load", () => {
     const old = ["alpha", "alpha/agents", "alpha/repos", "gone"];
-    expect(prune(old, ["alpha", "beta"])).toEqual([]);
-    expect(prune(old, [])).toEqual([]);
-    expect(prune([ROOT_CLOSED, ...old, BOOKMARKS_KEY], ["alpha"])).toEqual([ROOT_CLOSED, BOOKMARKS_KEY]);
+    expect(prune(old)).toEqual([]);
+    expect(prune([ROOT_CLOSED, ...old, BOOKMARKS_KEY])).toEqual([ROOT_CLOSED, BOOKMARKS_KEY]);
   });
 
   it("keeps open folders while the folders are not loaded, and drops gone ones after", () => {
-    expect(prune(["alpha", "folder:F1", "folder:F2"], ["alpha"])).toEqual(["folder:F1", "folder:F2"]);
-    expect(prune(["alpha", "folder:F1", "folder:F2"], ["alpha"], ["F1"])).toEqual(["folder:F1"]);
-    expect(prune(["folder:F1"], [], [])).toEqual([]);
+    expect(prune(["alpha", "folder:F1", "folder:F2"])).toEqual(["folder:F1", "folder:F2"]);
+    expect(prune(["alpha", "folder:F1", "folder:F2"], ["F1"])).toEqual(["folder:F1"]);
+    expect(prune(["folder:F1"], [])).toEqual([]);
   });
 
   it("drops the old Agents root from a stored list", () => {
-    expect(prune(["alpha", OLD_AGENTS_ROOT], [])).toEqual([]);
-    expect(prune([OLD_AGENTS_ROOT, "alpha", ROOT_CLOSED], ["alpha"])).toEqual([ROOT_CLOSED]);
+    expect(prune(["alpha", OLD_AGENTS_ROOT])).toEqual([]);
+    expect(prune([OLD_AGENTS_ROOT, "alpha", ROOT_CLOSED])).toEqual([ROOT_CLOSED]);
   });
 
   it("reads only a JSON array of strings from storage", () => {
@@ -133,7 +132,7 @@ describe("createExpandedStore", () => {
   it("prunes old project state out of storage", () => {
     const s = memory({ [EXPANDED_KEY]: '["a","a/agents","a/repos","gone","folder:F1"]' });
     const st = createExpandedStore(s);
-    st.prune(["a", "b", "c"], ["F1"]);
+    st.prune(["F1"]);
     expect(st.list()).toEqual(["folder:F1"]);
     expect(JSON.parse(s.data[EXPANDED_KEY]!)).toEqual(["folder:F1"]);
   });
@@ -149,7 +148,7 @@ describe("createExpandedStore", () => {
     st.toggle(PROJECTS_ROOT);
     expect(st.isOpen(PROJECTS_ROOT)).toBe(false);
     expect(JSON.parse(s.data[EXPANDED_KEY]!)).toEqual([ROOT_CLOSED]);
-    st.prune(["a"]);
+    st.prune();
     expect(createExpandedStore(s).isOpen(PROJECTS_ROOT)).toBe(false);
     st.follow("/inbox");
     expect(st.isOpen(PROJECTS_ROOT)).toBe(false);
@@ -165,7 +164,7 @@ describe("createExpandedStore", () => {
   it("cleans the old Agents root and project names out of storage on the first prune", () => {
     const s = memory({ [EXPANDED_KEY]: JSON.stringify(["a", OLD_AGENTS_ROOT]) });
     const st = createExpandedStore(s);
-    st.prune([]);
+    st.prune();
     expect(st.list()).toEqual([]);
     expect(JSON.parse(s.data[EXPANDED_KEY]!)).toEqual([]);
   });

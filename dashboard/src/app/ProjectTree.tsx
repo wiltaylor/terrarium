@@ -72,12 +72,7 @@ export function ProjectTree() {
   // A project page or an agent page opens the Projects root.
   createEffect(() => expanded.follow(location.pathname, (id) => agents.byId(id)?.project));
   // Drop legacy project open names and folders that are gone.
-  createEffect(() =>
-    expanded.prune(
-      projects.projects().map((p) => p.name),
-      projectFolders.available() ? projectFolders.folders().map((f) => f.id) : null,
-    ),
-  );
+  createEffect(() => expanded.prune(projectFolders.available() ? projectFolders.folders().map((f) => f.id) : null));
 
   const visible = () => filterProjects(projects.projects(), query());
   const showFilter = () => projects.projects().length > FILTER_THRESHOLD;
@@ -214,7 +209,7 @@ export function ProjectTree() {
 
   const blocked = (name: string) => agents.inProject(name).filter((a) => a.status === "blocked" || a.status === "error").length;
 
-  /** Open the tabbed project page from Enter or Space on its tree row. */
+  /** Open the tabbed project page from Enter, Space, or a click on its tree row. */
   const activate = (name: string) => {
     setFocusKey(projectKey(name));
     navigate(projectHref(name));
@@ -297,6 +292,9 @@ export function ProjectTree() {
           draggable={folderUi()}
           onDragStart={dragStart({ kind: "project", name: p.name }, p.name)}
           onDragEnd={dragEnd}
+          onClick={(e) => {
+            if (!(e.target as HTMLElement).closest("a, button")) activate(p.name);
+          }}
         >
           <ProjectDot level={health().level} />
           <A

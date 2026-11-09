@@ -1001,10 +1001,9 @@ target. The mock applies the daemon's rules and merges a `PATCH` of
 
 ## The project dashboard
 
-`features/dashboard/` (docs/api.md §30). The Dashboard item is the first
-item of each project in the tree (`app/nav.ts` `PROJECT_ITEMS`). In the project
-shell, Board is the first tab and `/p/:project` opens it. The project name in
-the tree still only opens and closes the node.
+`features/dashboard/` (docs/api.md §30). Dashboard is a project tab. In the
+project shell, Board is the first tab and `/p/:project` opens it. The project
+row in the tree opens the project page.
 
 - **Job queue.** Above the grid, the strip of the job queue (TER-178,
   `JobQueuePanel.tsx`) shows the first-attempt pass rate of the project's
