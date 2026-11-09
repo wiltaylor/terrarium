@@ -25,6 +25,45 @@ struct Lab {
     td: TestDaemon,
     addr: SocketAddr,
     bins: tempfile::TempDir,
+    trace: TraceBuf,
+    _trace: tracing::subscriber::DefaultGuard,
+}
+
+/// The daemon trace of one lab (TER-497). The subscriber is the thread
+/// default, not the global one: `jobs.rs` owns the global subscriber of
+/// this test binary. A `#[tokio::test]` runs the daemon tasks on the test
+/// thread, so they log here.
+#[derive(Clone, Default)]
+struct TraceBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for TraceBuf {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl TraceBuf {
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        let writer = self.clone();
+        tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.clone())
+                .finish(),
+        )
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+    }
 }
 
 impl Lab {
@@ -33,6 +72,8 @@ impl Lab {
     }
 
     async fn with_config(f: impl FnOnce(&Path)) -> Self {
+        let trace = TraceBuf::default();
+        let guard = trace.install();
         let td = TestDaemon::with_config(f).await;
         let state = td.daemon.as_ref().unwrap().state.clone();
         let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
@@ -45,7 +86,13 @@ impl Lab {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        Self { td, addr, bins }
+        Self {
+            td,
+            addr,
+            bins,
+            trace,
+            _trace: guard,
+        }
     }
 
     fn state(&self) -> terrariumd::api::Shared {
@@ -131,13 +178,19 @@ impl Lab {
     async fn wait_admission_ready(&self, name: &str) {
         // The link becomes online before reservation reconciliation opens
         // admission. Target verbs must wait for both, including on reconnect.
+        let start = std::time::Instant::now();
         for _ in 0..300 {
             if !self.state().executor.resource_pending(name) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("host {name} admission never became ready");
+        // The reconcile error is only in the daemon log (TER-497).
+        panic!(
+            "host {name} admission never became ready after {:?}; daemon trace:\n{}",
+            start.elapsed(),
+            self.trace.text()
+        );
     }
 
     async fn target(&self, def: Value) {
