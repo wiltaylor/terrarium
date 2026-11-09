@@ -1163,6 +1163,11 @@ terrarium job host-alias <host-agent> <address>... | --clear  sysadmin
 terrarium project delivery show
 terrarium project delivery set [--target t] [--recipe cmd] [--slots n]
                                [--next-repo r]... [--work-dir d] [--timeout secs]
+                               [--merge-secret NAME=@secret:s[.f]]... | --clear-merge-secrets
+                               [--docker-ci-destination d] [--docker-ci-port p]
+                               [--docker-ci-known-hosts line] [--docker-ci-reset-destination d]
+                               [--docker-ci-reset-port p] [--docker-ci-reset-known-hosts line]
+                               | --clear-docker-ci
 ```
 
 `card validate` queues a validation of the card's pushed commit
@@ -1209,6 +1214,10 @@ off, the job counts in `test-step fails with no target`. `-p` picks another proj
 
 `project delivery set` keeps the flags that you leave out. `--target ""`
 or `--recipe ""` turns the queue off. `--next-repo` replaces the list.
+The `--docker-ci-*` flags set the Docker CI SSH endpoints and pins
+(docs/api.md §35.1); each flag left out keeps its stored value, the first
+set needs all six, and `--clear-docker-ci` removes the whole object.
+`project delivery show` prints the endpoints and both pins.
 
 ### Monitors and the dashboard
 
