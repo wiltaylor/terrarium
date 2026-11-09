@@ -374,6 +374,7 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
     // One data frame in flight per connection. Acknowledgement comes only
     // after the target socket has accepted it, not after enqueueing stdin.
     let mut credits = HashMap::<u64, mpsc::Sender<()>>::new();
+    let mut aborts = HashMap::<u64, tokio::task::AbortHandle>::new();
     while let Some(event) = run.events.recv().await {
         let Ev::Data(Stream::Stdout, data) = event else {
             if matches!(event, Ev::End(_)) {
@@ -408,22 +409,31 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
                 let (credit, credit_rx) = mpsc::channel(1);
                 credits.insert(id, credit);
                 connections.insert(id, tx);
-                tasks.spawn(connection(
+                let task = tasks.spawn(connection(
                     id,
                     socket.clone(),
                     run.ctl.clone(),
                     rx,
                     credit_rx,
                 ));
+                aborts.insert(id, task);
             } else if event["ack"] == true {
                 if let Some(credit) = credits.get(&id)
                     && credit.send(()).await.is_err()
                 {
                     credits.remove(&id);
                 }
+            } else if event["eof"] == true {
+                // The target client half-closed. Dropping the sender lets the
+                // write half drain the queued data, then shut down; the read
+                // half still forwards Docker's answer (TER-540).
+                connections.remove(&id);
             } else if event["close"] == true {
                 connections.remove(&id);
                 credits.remove(&id);
+                if let Some(task) = aborts.remove(&id) {
+                    task.abort();
+                }
             } else if let Some(data) = event["data"].as_str() {
                 let Ok(data) = STANDARD.decode(data) else {
                     return;
@@ -450,38 +460,62 @@ async fn connection(
     mut input: mpsc::Receiver<Vec<u8>>,
     mut credit: mpsc::Receiver<()>,
 ) {
-    if let Ok(socket) = tokio::net::UnixStream::connect(path).await {
-        let (mut reader, mut writer) = socket.into_split();
-        let write_ctl = ctl.clone();
-        let write = async move {
-            while let Some(data) = input.recv().await {
-                if writer.write_all(&data).await.is_err() {
-                    break;
-                }
-                if !send(&write_ctl, json!({"id":id,"ack":true})) {
-                    break;
-                }
+    let Ok(socket) = tokio::net::UnixStream::connect(path).await else {
+        send(&ctl, json!({"id":id,"close":true}));
+        return;
+    };
+    let (mut reader, mut writer) = socket.into_split();
+    let write_ctl = ctl.clone();
+    // Each half ends on its own. The input ends on the target's "eof": pass
+    // the half-close on to Docker and keep reading its answer.
+    let write = async move {
+        while let Some(data) = input.recv().await {
+            writer.write_all(&data).await.ok()?;
+            if !send(&write_ctl, json!({"id":id,"ack":true})) {
+                return None;
             }
-        };
-        let read = async {
-            let mut data = vec![0; 16384];
-            loop {
-                match reader.read(&mut data).await {
-                    Ok(n) if n > 0 => {
-                        if !send(&ctl, json!({"id":id,"data":STANDARD.encode(&data[..n])})) {
-                            break;
-                        }
-                        if credit.recv().await.is_none() {
-                            break;
-                        }
+        }
+        writer.shutdown().await.ok()
+    };
+    let read = async {
+        let mut data = vec![0; 16384];
+        loop {
+            match reader.read(&mut data).await {
+                Ok(0) => return send(&ctl, json!({"id":id,"eof":true})),
+                Ok(n) => {
+                    if !send(&ctl, json!({"id":id,"data":STANDARD.encode(&data[..n])})) {
+                        return false;
                     }
-                    _ => break,
+                    if credit.recv().await.is_none() {
+                        return false;
+                    }
                 }
+                Err(_) => return false,
             }
-        };
-        tokio::select! { _ = write => {}, _ = read => {} }
+        }
+    };
+    tokio::pin!(write, read);
+    let (mut wrote, mut drained) = (false, false);
+    while !(wrote && drained) {
+        tokio::select! {
+            done = &mut write, if !wrote => {
+                if done.is_none() {
+                    break;
+                }
+                wrote = true;
+            }
+            done = &mut read, if !drained => {
+                if !done {
+                    break;
+                }
+                drained = true;
+            }
+        }
     }
-    send(&ctl, json!({"id":id,"close":true}));
+    // After two clean half-closes the target closes and sends "close".
+    if !(wrote && drained) {
+        send(&ctl, json!({"id":id,"close":true}));
+    }
 }
 
 #[cfg(test)]
@@ -638,6 +672,79 @@ mod tests {
             server.await.unwrap();
             drop(events);
             bridge_task.await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    /// TER-540: `docker exec` half-closes the hijacked connection and then
+    /// reads the output. The half-close must reach Docker, and the answer
+    /// that Docker sends after it must still reach the target.
+    #[tokio::test]
+    async fn hijacked_exec_answer_after_client_half_close_is_forwarded() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let request = b"POST /exec/x/start HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n";
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut got = vec![0; request.len()];
+                socket.read_exact(&mut got).await.unwrap();
+                assert_eq!(&got, request);
+                socket
+                    .write_all(b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+                    .await
+                    .unwrap();
+                // The forwarded half-close: EOF on Docker's read side.
+                assert_eq!(socket.read(&mut [0; 16]).await.unwrap(), 0);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                socket.write_all(b"\x01\0\0\0\0\0\0\x04seed").await.unwrap();
+            });
+            let (events, rx) = mpsc::channel(8);
+            let (ctl, mut controls) = mpsc::unbounded_channel();
+            let (ready, _) = oneshot::channel();
+            let task = tokio::spawn(bridge(
+                crate::executor::Running { events: rx, ctl },
+                path,
+                ready,
+            ));
+            let frame = |event: Value| Ev::Data(Stream::Stdout, format!("{event}\n").into_bytes());
+            events.send(frame(json!({"id":7,"open":true}))).await.unwrap();
+            events
+                .send(frame(json!({"id":7,"data":STANDARD.encode(request)})))
+                .await
+                .unwrap();
+            events.send(frame(json!({"id":7,"eof":true}))).await.unwrap();
+            let mut answer = Vec::new();
+            loop {
+                let Control::Stdin(bytes) = controls.recv().await.unwrap() else {
+                    panic!("expected stdin");
+                };
+                let event: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(event["id"], 7);
+                assert_ne!(event["close"], true, "closed before the answer");
+                if let Some(data) = event["data"].as_str() {
+                    answer.extend(STANDARD.decode(data).unwrap());
+                    events.send(frame(json!({"id":7,"ack":true}))).await.unwrap();
+                } else if event["eof"] == true {
+                    break;
+                }
+            }
+            assert!(answer.starts_with(b"HTTP/1.1 101 UPGRADED\r\n"));
+            assert!(answer.ends_with(b"\x01\0\0\0\0\0\0\x04seed"));
+            server.await.unwrap();
+            // Both halves ended cleanly: the daemon leaves the close to the
+            // target and sends nothing more for this connection.
+            events.send(frame(json!({"id":7,"close":true}))).await.unwrap();
+            drop(events);
+            task.await.unwrap();
+            while let Ok(control) = controls.try_recv() {
+                if let Control::Stdin(bytes) = control {
+                    let event: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_ne!(event["close"], true);
+                }
+            }
         })
         .await
         .unwrap();

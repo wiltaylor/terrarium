@@ -51,8 +51,14 @@ relay.serve(directory)
                     line = child.stdout.readline()
                     if not line:
                         self.fail(child.stderr.read())
-                    if json.loads(line).get("threads_released"):
+                    event = json.loads(line)
+                    if event.get("threads_released"):
                         break
+                    if event.get("eof"):
+                        # The daemon's answer to a client close: Docker ends
+                        # its side too (TER-540 half-close).
+                        child.stdin.write(json.dumps({"id": event["id"], "eof": True}) + "\n")
+                        child.stdin.flush()
                 child.stdin.write('{"stop":true}\n')
                 child.stdin.flush()
                 self.assertEqual(child.wait(timeout=5), 0, child.stderr.read())
@@ -114,6 +120,52 @@ relay.serve(directory)
                     self.assertFalse(worker.is_alive())
                     self.assertEqual(errors, [])
                     self.assertEqual(bytes(received), payload)
+                send({"stop": True})
+                self.assertEqual(child.wait(timeout=5), 0, child.stderr.read())
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+                for stream in (child.stdin, child.stdout, child.stderr):
+                    stream.close()
+
+    def test_answer_after_client_half_close_reaches_the_client(self):
+        # TER-540: docker exec half-closes, then reads the exec output.
+        with tempfile.TemporaryDirectory(prefix="ter-540-halfclose-") as root:
+            directory = Path(root, "job")
+            child = subprocess.Popen([sys.executable, "-I", "-u", str(RELAY), str(directory), "10"],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+            def event():
+                self.assertTrue(select.select([child.stdout], [], [], 5)[0])
+                return json.loads(child.stdout.readline())
+            def send(value):
+                child.stdin.write(json.dumps(value) + "\n")
+                child.stdin.flush()
+            try:
+                self.assertEqual(event(), {"ready": True})
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(5)
+                    client.connect(str(directory / "docker.sock"))
+                    ident = event()["id"]
+                    client.sendall(b"POST /exec/x/start")
+                    client.shutdown(socket.SHUT_WR)
+                    self.assertEqual(base64.b64decode(event()["data"]), b"POST /exec/x/start")
+                    send({"id": ident, "ack": True})
+                    self.assertEqual(event(), {"id": ident, "eof": True})
+                    for part in (b"HTTP/1.1 101 UPGRADED\r\n\r\n", b"seed"):
+                        send({"id": ident, "data": base64.b64encode(part).decode()})
+                        self.assertEqual(event(), {"id": ident, "ack": True})
+                    send({"id": ident, "eof": True})
+                    received = b""
+                    while True:
+                        data = client.recv(1024)
+                        if not data:
+                            break
+                        received += data
+                    self.assertEqual(received, b"HTTP/1.1 101 UPGRADED\r\n\r\nseed")
+                    # Both directions ended: the relay closes on its own.
+                    self.assertEqual(event(), {"id": ident, "close": True})
                 send({"stop": True})
                 self.assertEqual(child.wait(timeout=5), 0, child.stderr.read())
             finally:
