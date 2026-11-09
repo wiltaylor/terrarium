@@ -24,12 +24,13 @@ export default function ProjectScreen(props: RouteSectionProps) {
     ),
   );
 
-  // Router params retain their URL encoding; encoding again would turn `%20`
-  // into `%2520` and leave the project on tab navigation.
-  const base = () => `/p/${params.project}`;
+  // Router params retain their URL encoding. Decode once for the title, then
+  // encode the name once for every tab URL (including names with spaces).
+  const project = () => decodeURIComponent(params.project);
+  const base = () => `/p/${encodeURIComponent(project())}`;
   return (
     <>
-      <PageHead title={params.project} />
+      <PageHead title={project()} />
       {/* Route links, not an ARIA tablist: every tab is a page. */}
       <nav ref={tabs} class="tabs project-tabs" aria-label="Project">
         <For each={PROJECT_TABS}>

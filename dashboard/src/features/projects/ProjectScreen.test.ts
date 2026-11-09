@@ -44,7 +44,7 @@ function active(root: HTMLElement) {
 describe("ProjectScreen", () => {
   it("shows the project title and every tab in order, with Settings last", () => {
     const { root } = mount("/p/my%20app/board");
-    expect(root.querySelector("h1")?.textContent).toBe("my%20app");
+    expect(root.querySelector("h1")?.textContent).toBe("my app");
     expect(links(root).map((a) => a.textContent)).toEqual(PROJECT_TABS.map((t) => t.label));
     expect(links(root).map((a) => a.getAttribute("href"))).toEqual(PROJECT_TABS.map((t) => `/p/my%20app/${t.path}`));
     expect(links(root).every((a) => a.tabIndex === 0)).toBe(true);
