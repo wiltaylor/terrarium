@@ -49,11 +49,17 @@
 //! edit. A user part with no password (`ssh://<token>@host/r.git`, the
 //! scp form `<token>@host:r.git`) is not one, so a run that overlaps
 //! the user part keeps `high-entropy` ([`url_user_parts`]), whatever
-//! byte sits between the run and the `@`. A table header inside a
-//! multi-line string of the file is text of that string and opens no
-//! exemption ([`multiline_open_after`]): a `"""` or `'''` in a
-//! comment, in a one-line string, or escaped in a basic string opens
-//! nothing. The export writer does write multi-line strings (a
+//! byte sits between the run and the `@`: the user part of a scheme
+//! URL runs to the last `@` of its authority (ssh splits the user
+//! from the host there, so `ssh://git@<token>@host` keeps the token
+//! in it), and the scp one runs from the start of the quoted value.
+//! A table header inside a multi-line string of the file is text of
+//! that string and opens no exemption
+//! ([`multiline_open_after`]): a `"""` or `'''` in a comment, in a
+//! one-line string, or escaped in a basic string opens nothing. A
+//! trailing comment after the brackets does not hide a header line
+//! either (`[[projects.schedules]] # note` is that header). The
+//! export writer does write multi-line strings (a
 //! prompt with newlines), but it escapes the quotes inside them, so
 //! the tracked state of its output is exact and no daemon-written
 //! commit takes a false hit on a repo URL after one
@@ -158,22 +164,29 @@ fn url_userinfo() -> Option<&'static Regex> {
 }
 
 /// The spans of the user parts of the URLs of `line`: after the `//`
-/// of a `scheme://` URL up to the first `@` of its authority
-/// (`ssh://<token>@host/r.git`, `https://user:<token>@host`), and from
-/// the start of an scp value up to its `@` (`<token>@host:r.git`).
-/// Those forms carry the credential in the user part, where
-/// [`url_userinfo`] sees only a `user:password@`, so a run that
-/// overlaps one keeps the `high-entropy` rule even on an exempt line,
-/// whatever byte sits between the run and the `@` (`<token>.@`,
-/// `<token>~x@`, `<token>%2B@`). The user part of a repo URL that
-/// the daemon writes is a word (`git`, `oauth2`), never a
-/// high-entropy run.
-fn url_user_parts(line: &str) -> Vec<std::ops::Range<usize>> {
+/// of a `scheme://` URL up to the last `@` of its authority
+/// (`ssh://<token>@host/r.git`, `ssh://git@<token>@host/r.git`,
+/// `https://user:<token>@host`: ssh splits the user from the host at
+/// the last `@`), and from the start of the quoted value up to its
+/// `@` for the scp form (`<token>@host:r.git`). Whatever byte sits
+/// between the run and the `@` (`<token>.@`, `<token>~x@`,
+/// `<token>%2B@`, `<token>!x@`), the user part covers the whole
+/// span, so a run that overlaps one keeps the `high-entropy` rule
+/// even on an exempt line: those forms carry the credential in the
+/// user part, where [`url_userinfo`] sees only a `user:password@`.
+/// The user part of a repo URL that the daemon writes is a word
+/// (`git`, `oauth2`), never a high-entropy run.
+fn url_user_parts(
+    line: &str,
+    exempt: Option<&std::ops::Range<usize>>,
+) -> Vec<std::ops::Range<usize>> {
     let b = line.as_bytes();
     let mut spans = Vec::new();
     // `scheme://user@host`: the user part runs from the `//` of the
-    // authority to its first `@`. The authority ends at the first
-    // path, query, fragment, quote, or space.
+    // authority to its LAST `@` (ssh splits the user from the host
+    // there, so `ssh://git@<token>@host` keeps the token in the user
+    // part). The authority ends at the first path, query, fragment,
+    // quote, or space.
     let mut from = 0;
     while let Some(p) = line[from..].find("://") {
         let p = from + p;
@@ -183,43 +196,28 @@ fn url_user_parts(line: &str) -> Vec<std::ops::Range<usize>> {
                 .iter()
                 .position(|&c| matches!(c, b'/' | b'?' | b'#' | b'"' | b'\'' | b' ' | b'\t'))
                 .unwrap_or(b.len() - start);
-        if let Some(at) = b[start..end].iter().position(|&c| c == b'@') {
+        if let Some(at) = b[start..end].iter().rposition(|&c| c == b'@') {
             spans.push(start..start + at);
         }
         from = start;
     }
     // The scp form `user@host:path`: the host holds a `:` (the path
     // separator) before a `/`, a quote, or a space, and the user part
-    // runs back from the `@` to the first byte that is not part of it.
-    for (at, c) in b.iter().enumerate() {
-        if *c != b'@'
-            || b[at + 1..]
-                .iter()
-                .find(|&&c| matches!(c, b'/' | b':' | b'"' | b'\'' | b' ' | b'\t' | b'?' | b'#'))
-                != Some(&b':')
-        {
-            continue;
+    // is the whole start of the quoted value up to the `@`, not a run
+    // back from it over URL bytes only (round 5: any other byte
+    // between the run and the `@` hid the run inside the exempt
+    // value).
+    if let Some(e) = exempt {
+        for (at, c) in b.iter().enumerate() {
+            if *c == b'@'
+                && at > e.start
+                && b[at + 1..].iter().find(|&&c| {
+                    matches!(c, b'/' | b':' | b'"' | b'\'' | b' ' | b'\t' | b'?' | b'#')
+                }) == Some(&b':')
+            {
+                spans.push(e.start..at);
+            }
         }
-        let start = b[..at]
-            .iter()
-            .rposition(|&c| {
-                !matches!(
-                    c,
-                    b'A'..=b'Z'
-                        | b'a'..=b'z'
-                        | b'0'..=b'9'
-                        | b'+'
-                        | b'/'
-                        | b'='
-                        | b'.'
-                        | b'_'
-                        | b'~'
-                        | b'-'
-                        | b'%'
-                )
-            })
-            .map_or(0, |p| p + 1);
-        spans.push(start..at);
     }
     spans
 }
@@ -331,12 +329,48 @@ const REPOS_TABLE: &str = "projects.repos";
 const EXPORT_EXEMPT_FIELDS: &[&str] = &["url", "default_branch", "credential"];
 
 /// The table header of `line` (`[[projects.repos]]`, `[defaults]`),
-/// without its brackets, or `None` when the line is not one.
+/// without its brackets, or `None` when the line is not one. A
+/// trailing comment after the brackets is part of the line but not
+/// of the header (`[[projects.schedules]] # note` is the schedules
+/// header, and `[[projects.repos]] # note` still opens the exemption):
+/// it is cut before the match, outside the quoted parts of the line.
 fn table_header(line: &str) -> Option<&str> {
-    let t = line.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let t = before_comment(line)
+        .trim()
+        .strip_prefix('[')?
+        .strip_suffix(']')?;
     let t = t.strip_prefix('[').unwrap_or(t);
     let t = t.strip_suffix(']').unwrap_or(t);
     Some(t.trim())
+}
+
+/// The part of `line` before the `#` that starts a comment outside a
+/// one-line string (`"x # y"` holds its `#`). The line has no open
+/// multi-line string on it when [`table_header`] calls this: a `"""`
+/// or `'''` line is not a header line.
+fn before_comment(line: &str) -> &str {
+    let b = line.as_bytes();
+    let mut i = 0;
+    let mut quote: Option<u8> = None;
+    while i < b.len() {
+        match quote {
+            // An escape holds its char in a one-line basic string.
+            Some(q) if q == b'"' && b[i] == b'\\' => i += 2,
+            Some(q) => {
+                if b[i] == q {
+                    quote = None;
+                }
+                i += 1;
+            }
+            None if b[i] == b'#' => return &line[..i],
+            None if b[i] == b'"' || b[i] == b'\'' => {
+                quote = Some(b[i]);
+                i += 1;
+            }
+            None => i += 1,
+        }
+    }
+    line
 }
 
 /// The multi-line TOML string (`"""` or `'''`) that is open at the end
@@ -561,7 +595,7 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
         // the user part of a repo URL, and a marker on that line, are
         // hand edits.
         let exempt = exempt_export_value_span(path, header.as_deref(), line);
-        let user_parts = url_user_parts(line);
+        let user_parts = url_user_parts(line, exempt.as_ref());
         if exempt.is_some()
             && let Some(re) = url_userinfo()
             && re.is_match(line)
@@ -859,11 +893,21 @@ mod tests {
         );
         assert!(rules(export, &text).contains(&he), "{text}");
         // The same line under a repos header is exempt, in both header
-        // forms.
-        for head in ["[[projects.repos]]", "[projects.repos]"] {
+        // forms, and a trailing comment after the brackets does not
+        // hide the header line (round 5): the schedules header with a
+        // comment is still not the repos table, and the repos header
+        // with a comment still opens the exemption.
+        for head in [
+            "[[projects.repos]]",
+            "[projects.repos]",
+            "[[projects.repos]] # round 5",
+            "[projects.repos]  # round 5",
+        ] {
             let text = format!("{head}\nurl = \"{hook}\"\n");
             assert!(!rules(export, &text).contains(&he), "{text}");
         }
+        let text = format!("[[projects.schedules]] # round 5\nurl = \"{hook}\"\n");
+        assert!(rules(export, &text).contains(&he), "{text}");
         // No table header above it: not a repo line.
         let text = format!("url = \"{hook}\"\n");
         assert!(rules(export, &text).contains(&he), "{text}");
@@ -1019,11 +1063,18 @@ mod tests {
         }
         // Round 4: whatever byte sits between the token and the `@`,
         // the whole user part keeps the rule, not only a run that ends
-        // at the `@`.
+        // at the `@`. Round 5: the scp user part is the whole start of
+        // the value (a run back over URL bytes only missed `!x@` and
+        // `$x@`), and the scheme user part runs to the LAST `@` of the
+        // authority, where ssh splits the user from the host.
         for url in [
             format!("ssh://{random}.@git.example/o/r.git"),
             format!("ssh://{random}%2B@git.example/o/r.git"),
             format!("{random}~x@git.example:o/r.git"),
+            format!("{random}!x@git.example:o/r.git"),
+            format!("{random}$x@git.example:o/r.git"),
+            format!("ssh://git@{random}@git.example/o/r.git"),
+            format!("git@{random}@git.example:o/r.git"),
         ] {
             assert!(at(&url).contains(&he), "{url}: {:?}", at(&url));
         }
@@ -1072,7 +1123,9 @@ mod tests {
     /// string-state scan tracks it exactly: a `[[projects.repos]]`
     /// line inside the prompt exempts nothing, and the repo URL after
     /// the prompt keeps the exemption of issue #27. A commit that the
-    /// daemon writes takes no false `high-entropy` hit on it.
+    /// daemon writes takes no false `high-entropy` hit on it. Round 5:
+    /// a prompt with newlines and a backslash and no `'''` is written
+    /// as a multi-line LITERAL string, which the scan tracks too.
     #[test]
     fn the_export_writer_output_keeps_the_exemption() {
         let text = r#"version = 1
@@ -1089,6 +1142,17 @@ Escaped quotes: "\"\"\" and literal ''' stay in the prompt.
 
 [[projects]]
 name = "p1"
+
+[[projects.agents]]
+name = "worker"
+harness = "pi"
+system_prompt = '''
+A backslash in the prompt (C:\src\repo) and newlines.
+Example fleet TOML:
+
+[[projects.repos]]
+url = "https://x/example-service"
+'''
 
 [[projects.repos]]
 name = "app"
@@ -1107,8 +1171,11 @@ url = "https://github.com/wiltaylor-daf/ExampleReportingService.git"
         let out = fleet.to_toml();
         // The prompt is written as a multi-line string: its own `"""`
         // becomes `""\"`, which no run of three quotes closes early.
+        // The agent prompt has a backslash and no `'''`, so the writer
+        // picks the multi-line LITERAL form for it (round 5).
         assert!(out.contains("system_prompt = \"\"\"\n"), "{out}");
         assert!(out.contains("\"\"\\\""), "{out}");
+        assert!(out.contains("system_prompt = '''\n"), "{out}");
         // The repo URL after it stays exempt: no false hit on a commit
         // that the daemon writes.
         let findings = scan("export/projects/p1.fleet.toml", out.as_bytes());
