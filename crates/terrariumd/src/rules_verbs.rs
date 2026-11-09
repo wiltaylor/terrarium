@@ -342,6 +342,22 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
             }
             "group.remove" => groups::remove(t, &g, &the_card(ctx, verb)?.id)?,
             "group.status" => match a.text("step") {
+                Some(step) if step.trim().is_empty() => {
+                    // A placeholder step that renders empty (`{{group.failed_step}}`
+                    // of the pack, on `merge-group-failed`): the run's card lost
+                    // its group before this lane ran (a red split re-groups the
+                    // batch, and per-card lanes race the teardown), so there is
+                    // no step to mark. Skip, as a key without a group skips. A
+                    // literal empty step stays invalid.
+                    if a.raw("step").is_some_and(|s| s.contains("{{")) {
+                        return Ok(noop(json!({
+                            "key": key,
+                            "reason": "the step placeholder has no value \
+                             (the card has no group)",
+                        })));
+                    }
+                    return Err(ApiError::invalid("group step name must not be empty"));
+                }
                 Some(step) => groups::step(
                     t,
                     &g,
