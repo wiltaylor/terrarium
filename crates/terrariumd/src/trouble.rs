@@ -466,9 +466,10 @@ fn desired(
     if limit > 0 && f.seconds >= limit {
         out.insert("time_budget".into());
     }
+    // Only working cards are watched: a research spike may have a repo and
+    // never push.
     if s.no_progress_seconds > 0
-        && (card.column_role.as_deref() == Some("working")
-            || card.column.eq_ignore_ascii_case("research"))
+        && card.column_role.as_deref() == Some("working")
         && let Some((baseline, checked)) = progress_baseline(c, &card.id)?
         && parse(&checked)
             .is_some_and(|at| (now - at).num_seconds() <= s.no_progress_seconds as i64)
@@ -740,8 +741,8 @@ const BRANCH_PAGE: usize = 32;
 const OBSERVE_PASS_CAP: std::time::Duration = std::time::Duration::from_secs(120);
 const LS_REMOTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
-const WATCH_COLUMNS_SQL: &str = "SELECT id FROM board_columns WHERE role = 'working'
-         UNION ALL SELECT id FROM board_columns WHERE lower(name) = 'research'";
+/// Only working-role columns: research spikes are not watched.
+const WATCH_COLUMNS_SQL: &str = "SELECT id FROM board_columns WHERE role = 'working'";
 
 /// One column's repo cards after the cursor (`?2`). The branch defaults to
 /// the lowercase card id, as for validation jobs.
@@ -890,9 +891,10 @@ pub async fn observe_remote_heads(state: &Shared) {
 }
 
 /// Observe real remote heads rather than proxy audit rows, which also covers
-/// direct pushes. Reads at most one page of working/research repo cards after
+/// direct pushes. Reads at most one page of working repo cards after
 /// `cursor`, wraps to the start, and stops at the pass cap. Moves the cursor
-/// past the cards it read. Writes all results in one transaction.
+/// past each card only after its read finishes, so a read cut by the pass cap
+/// is read first in the next pass. Writes all results in one transaction.
 pub async fn observe_remote_heads_from(state: &Shared, cursor: &mut String) {
     let from = cursor.clone();
     let cards = match state.db.read(move |c| branch_cards(c, &from)).await {
@@ -909,9 +911,15 @@ pub async fn observe_remote_heads_from(state: &Shared, cursor: &mut String) {
             tracing::warn!("card branch watch: pass cap reached at {}", card.id);
             break;
         }
+        let Ok(read) = tokio::time::timeout_at(deadline, remote_head(state, &card)).await else {
+            tracing::warn!(
+                "card branch watch: pass cap reached while reading {}",
+                card.id
+            );
+            break;
+        };
         cursor.clone_from(&card.id);
-        let read = tokio::time::timeout_at(deadline, remote_head(state, &card)).await;
-        if let Ok(Some(head)) = read {
+        if let Some(head) = read {
             seen.push((card, head, crate::db::now()));
         }
     }
@@ -1360,11 +1368,6 @@ mod tests {
                 "SEARCH board_columns USING COVERING INDEX board_columns_role_watch (role=?)",
             ),
             (
-                WATCH_COLUMNS_SQL,
-                0,
-                "SEARCH board_columns USING COVERING INDEX board_columns_name_watch (<expr>=?)",
-            ),
-            (
                 PROGRESS_BASELINE_SQL,
                 1,
                 "SEARCH h USING INDEX sqlite_autoindex_card_branch_heads_1 (card=?)",
@@ -1385,6 +1388,59 @@ mod tests {
             );
         }
         assert!(BRANCH_CARDS_SQL.contains("LIMIT ?3") && BRANCH_PAGE <= 64);
+    }
+
+    #[test]
+    fn branch_cards_page_from_a_mid_list_cursor_and_wrap() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE cards(id TEXT PRIMARY KEY, project TEXT, repo TEXT, branch TEXT,
+                archived INTEGER, column_id INTEGER);
+             CREATE TABLE board_columns(id INTEGER PRIMARY KEY, project TEXT, role TEXT, name TEXT);
+             INSERT INTO board_columns VALUES (1, 'p', 'working', 'in_progress'),
+                (2, 'p', NULL, 'research'), (3, 'q', 'working', 'doing');",
+        )
+        .unwrap();
+        c.execute_batch(include_str!("../migrations/ter-370-card-branch-head.sql"))
+            .unwrap();
+        // 40 watched cards over two working columns, plus cards that are never
+        // watched: research, archived, and without a repo.
+        for n in 10..50 {
+            c.execute(
+                "INSERT INTO cards VALUES (?1, 'p', 'r', NULL, 0, ?2)",
+                params![format!("P-{n}"), 1 + 2 * (n % 2)],
+            )
+            .unwrap();
+        }
+        c.execute_batch(
+            "INSERT INTO cards VALUES ('P-35a', 'p', 'r', NULL, 0, 2),
+                ('P-35b', 'p', 'r', NULL, 1, 1), ('P-35c', 'p', NULL, NULL, 0, 1);",
+        )
+        .unwrap();
+        let ids = |cursor: &str| -> Vec<String> {
+            branch_cards(&c, cursor)
+                .unwrap()
+                .into_iter()
+                .map(|b| b.id)
+                .collect()
+        };
+        let range = |a: u32, b: u32| (a..b).map(|n| format!("P-{n}")).collect::<Vec<_>>();
+        assert_eq!(ids(""), range(10, 42));
+        // From a mid-list cursor: the 14 cards after it, then 18 from the
+        // start, which stop before the cursor.
+        assert_eq!(ids("P-35"), [range(36, 50), range(10, 28)].concat());
+        // From the last card the page starts again at the first.
+        assert_eq!(ids("P-49"), range(10, 42));
+        assert_eq!(ids("P-20"), [range(21, 50), range(10, 13)].concat());
+        let first = branch_cards(&c, "").unwrap().remove(0);
+        assert_eq!(
+            (
+                first.project.as_str(),
+                first.repo.as_str(),
+                first.branch.as_str()
+            ),
+            ("p", "r", "p-10")
+        );
     }
 
     #[test]
