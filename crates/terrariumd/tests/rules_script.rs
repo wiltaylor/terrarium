@@ -20,6 +20,10 @@ fn state(td: &TestDaemon) -> Shared {
     td.daemon.as_ref().unwrap().state.clone()
 }
 
+/// The dry runs of this module share the one dry-run slot of the
+/// daemon (a static of the test binary): they run one after another.
+static DRY_RUNS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The children run the daemon binary: the test binary is not one.
 fn use_daemon_binary() {
     terrariumd::rule_script::set_runner(PathBuf::from(env!("CARGO_BIN_EXE_terrariumd")));
@@ -283,7 +287,7 @@ async fn a_slow_script_is_stopped_by_the_wall_clock() {
     assert_eq!(row["state"], "failed", "{row:?}");
     let why = row["reason"].as_str().unwrap();
     assert!(
-        why.contains("longer than 5 seconds") || why.contains("signal"),
+        why.contains("longer than 5000 ms") || why.contains("signal"),
         "{why}"
     );
 }
@@ -291,6 +295,7 @@ async fn a_slow_script_is_stopped_by_the_wall_clock() {
 #[tokio::test]
 async fn the_dry_run_runs_the_script_and_writes_nothing() {
     use_daemon_binary();
+    let _serial = DRY_RUNS.lock().await;
     let td = TestDaemon::start().await;
     td.project("sd").await;
     let card = new_card(&td, "sd", "Dry").await;
@@ -355,4 +360,137 @@ async fn the_dry_run_runs_the_script_and_writes_nothing() {
         before,
         "the dry run wrote nothing"
     );
+}
+
+#[tokio::test]
+async fn a_dry_run_with_a_script_needs_a_project_admin() {
+    use_daemon_binary();
+    let _serial = DRY_RUNS.lock().await;
+    let td = TestDaemon::start().await;
+    td.project("sr").await;
+    let lead = td
+        .agent("sr", "lead", json!({"roles": ["project_admin"]}))
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let worker = td.agent("sr", "worker", json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let card = new_card(&td, "sr", "Rights").await;
+    let seq = ping(&td, "sr", &card, 1).await;
+    settle(&td).await;
+
+    // A reader of the project plans plain rules, but runs no script.
+    let plain = "rule \"p\" {\n  on = [\"test.ping\"]\n  card_comment { text = \"x\" }\n}\n";
+    td.post_as(
+        &worker,
+        "/api/projects/sr/rules/dry-run",
+        json!({"seq": seq, "text": plain}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        &worker,
+        "/api/projects/sr/rules/dry-run",
+        json!({"seq": seq, "text": SCRIPTED}),
+    )
+    .await
+    .err(403, "forbidden");
+    // Stored rules with a script: the same.
+    td.put("/api/projects/sr/rules", json!({"text": SCRIPTED}))
+        .await
+        .ok();
+    td.post_as(
+        &worker,
+        "/api/projects/sr/rules/dry-run",
+        json!({"seq": seq}),
+    )
+    .await
+    .err(403, "forbidden");
+    let body = td
+        .post_as(
+            &lead,
+            "/api/projects/sr/rules/dry-run",
+            json!({"seq": seq, "text": SCRIPTED}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(body["plans"][0]["actions"][0]["returned"], 2, "{body}");
+}
+
+#[tokio::test]
+async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
+    use_daemon_binary();
+    let _serial = DRY_RUNS.lock().await;
+    let td = TestDaemon::start().await;
+    td.project("sb").await;
+    td.project("se").await;
+    let dry_card = new_card(&td, "sb", "Dry").await;
+    let seq = ping(&td, "sb", &dry_card, 1).await;
+    // The engine's project: a quick script.
+    let quick = "rule \"quick\" {\n  on = [\"test.ping\"]\n  script {\n    source = <<'WS'\nfn main() -> string { \"card_comment {{ text = \\\"quick\\\" }}\" }\nWS\n  }\n}\n";
+    td.put("/api/projects/se/rules", json!({"text": quick}))
+        .await
+        .ok();
+    let card = new_card(&td, "se", "Engine").await;
+    settle(&td).await;
+
+    // A script that runs to the wall clock holds the one dry-run slot.
+    let slow = failing(
+        "slow",
+        10_000_000,
+        "fn main() -> string {\n  let s = \"x\".repeat(8000000)\n  let i = 0\n  while i < 100000 {\n    let t = s.replace(\"x\", \"y\")\n    i = i + 1\n  }\n  \"\"\n}",
+    );
+    let started = std::time::Instant::now();
+    let slow_run = async {
+        let body = td
+            .post(
+                "/api/projects/sb/rules/dry-run",
+                json!({"seq": seq, "text": slow}),
+            )
+            .await
+            .ok()
+            .clone();
+        (body, started.elapsed())
+    };
+    let others = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // A second dry run finds no slot and is refused within its wait.
+        let t = std::time::Instant::now();
+        let body = td
+            .post(
+                "/api/projects/sb/rules/dry-run",
+                json!({"seq": seq, "text": SCRIPTED}),
+            )
+            .await
+            .ok()
+            .clone();
+        let refused_in = t.elapsed();
+        // The engine's lane of another project runs its script meanwhile.
+        ping(&td, "se", &card, 1).await;
+        settle(&td).await;
+        let c = comments(&td, &card).await;
+        (body, refused_in, c, started.elapsed())
+    };
+    let ((slow_body, slow_done), (busy, refused_in, c, engine_done)) =
+        tokio::join!(slow_run, others);
+
+    let plan = &busy["plans"][0];
+    assert_eq!(plan["outcome"], "failed", "{plan}");
+    assert!(
+        plan["reason"].as_str().unwrap().contains("slots are busy"),
+        "{plan}"
+    );
+    assert!(refused_in < Duration::from_secs(4), "{refused_in:?}");
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(c[0].1, "quick");
+    assert!(
+        engine_done < slow_done,
+        "the engine ran while the dry run held its slot: {engine_done:?} {slow_done:?}"
+    );
+    let why = slow_body["plans"][0]["reason"].as_str().unwrap();
+    assert!(why.contains("longer than 5000 ms"), "{why}");
 }

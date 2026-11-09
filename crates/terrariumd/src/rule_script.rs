@@ -20,8 +20,14 @@
 //!   [`rules_file::MAX_SCRIPT_FUEL`]), a call depth of [`CALL_DEPTH`],
 //!   an input of at most [`MAX_INPUT`] bytes, an output of at most
 //!   [`rules_file::MAX_SCRIPT_OUTPUT`] bytes, [`WALL_CLOCK`] from start
-//!   to result (then the child is killed), and at most [`MAX_RUNNING`]
-//!   children at a time.
+//!   to result (then the child is killed). The engine's runs share
+//!   [`MAX_RUNNING`] slots and wait at most [`ENGINE_ACQUIRE`] for one.
+//!   The dry runs have their own [`DRY_RUN_SLOTS`] (wait at most
+//!   [`DRY_RUN_ACQUIRE`], at most [`DRY_RUN_TOTAL`] for one dry run), so
+//!   a dry run never holds a slot of the engine.
+//! - **No inherited files.** The child closes each file from 3 up before
+//!   it reads its input, so an fd of the daemon without close-on-exec
+//!   does not reach the script.
 //! - **No database lock.** The engine takes the view in a write, then
 //!   runs the script after that write, then checks and records the
 //!   returned verbs in the next write (`crate::rules_engine`). The dry run
@@ -60,8 +66,19 @@ pub const WALL_CLOCK: Duration = Duration::from_secs(5);
 pub const MAX_INPUT: usize = 256 * 1024;
 /// The script call-depth limit.
 pub const CALL_DEPTH: usize = 200;
-/// The most children at a time.
+/// The most children of the engine's runs at a time.
 pub const MAX_RUNNING: usize = 4;
+/// The longest that a run waits for one of the [`MAX_RUNNING`] slots;
+/// then its step fails ("the script slots are busy"), so a lane never
+/// waits without limit.
+pub const ENGINE_ACQUIRE: Duration = Duration::from_secs(30);
+/// The children of the dry runs at a time: their own pool, so a dry run
+/// never takes a slot of the engine.
+pub const DRY_RUN_SLOTS: usize = 1;
+/// The longest that a dry run waits for its slot; then it is refused.
+pub const DRY_RUN_ACQUIRE: Duration = Duration::from_secs(2);
+/// The most time of all the scripts of one dry run, waits included.
+pub const DRY_RUN_TOTAL: Duration = Duration::from_secs(15);
 /// The most open files of a child (stdin, stdout, stderr, and the few
 /// that the C library may need).
 const MAX_FILES: u64 = 16;
@@ -296,10 +313,34 @@ fn limit_self() -> Result<(), String> {
     Err("scripts run on Unix only".into())
 }
 
-/// The child: set the limits, read the input from stdin, run the script,
-/// and write the [`Reply`] to stdout. The exit code is 0 when it wrote a
-/// reply.
+/// Close each file of this process (the child) from 3 up: the daemon's
+/// files have close-on-exec, and this makes sure (TER-173 review). The
+/// open files are read from `/proc/self/fd` (or `/dev/fd`); without
+/// either, 3 to 1023 are closed.
+#[cfg(unix)]
+fn close_inherited() {
+    let listed: Option<Vec<i32>> = ["/proc/self/fd", "/dev/fd"].iter().find_map(|d| {
+        let dir = std::fs::read_dir(d).ok()?;
+        Some(
+            dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
+                .collect(),
+        )
+    });
+    let fds = listed.unwrap_or_else(|| (3..1024).collect());
+    for fd in fds.into_iter().filter(|fd| *fd > 2) {
+        // The fd of the listing itself is already closed: EBADF.
+        let _ = nix::unistd::close(fd);
+    }
+}
+
+#[cfg(not(unix))]
+fn close_inherited() {}
+
+/// The child: close the inherited files, set the limits, read the input
+/// from stdin, run the script, and write the [`Reply`] to stdout. The
+/// exit code is 0 when it wrote a reply.
 pub fn child_main() -> i32 {
+    close_inherited();
     let reply = match limit_self() {
         Err(e) => Reply::failed(e),
         Ok(()) => {
@@ -344,16 +385,74 @@ fn runner() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("cannot find the daemon binary: {e}"))
 }
 
-fn running() -> &'static Semaphore {
-    static SLOTS: OnceLock<Semaphore> = OnceLock::new();
-    SLOTS.get_or_init(|| Semaphore::new(MAX_RUNNING))
+/// The slots of a pool.
+fn slots(pool: Pool) -> &'static Semaphore {
+    static ENGINE: OnceLock<Semaphore> = OnceLock::new();
+    static DRY: OnceLock<Semaphore> = OnceLock::new();
+    match pool {
+        Pool::Engine => ENGINE.get_or_init(|| Semaphore::new(MAX_RUNNING)),
+        Pool::DryRun => DRY.get_or_init(|| Semaphore::new(DRY_RUN_SLOTS)),
+    }
+}
+
+/// The pool of a script's child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pool {
+    /// The runs of the engine: [`MAX_RUNNING`] slots.
+    Engine,
+    /// The dry runs: [`DRY_RUN_SLOTS`] slots.
+    DryRun,
+}
+
+/// The time that one script may take: the wait for a slot, then the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub pool: Pool,
+    pub acquire: Duration,
+    pub wall: Duration,
+}
+
+impl Budget {
+    /// A step of a run of the engine.
+    pub fn engine() -> Budget {
+        Budget {
+            pool: Pool::Engine,
+            acquire: ENGINE_ACQUIRE,
+            wall: WALL_CLOCK,
+        }
+    }
+
+    /// A script of a dry run that has `left` of its [`DRY_RUN_TOTAL`].
+    pub fn dry_run(left: Duration) -> Budget {
+        Budget {
+            pool: Pool::DryRun,
+            acquire: DRY_RUN_ACQUIRE.min(left),
+            wall: WALL_CLOCK.min(left),
+        }
+    }
+}
+
+/// A slot of `sem` within `deadline`, else the reason.
+pub async fn acquire_within(
+    sem: &Semaphore,
+    deadline: Duration,
+) -> Result<tokio::sync::SemaphorePermit<'_>, String> {
+    match tokio::time::timeout(deadline, sem.acquire()).await {
+        Ok(Ok(p)) => Ok(p),
+        Ok(Err(_)) => Err("the script slots are closed".to_owned()),
+        Err(_) => Err(format!(
+            "the script slots are busy: no slot came free in {} ms; try again later",
+            deadline.as_millis()
+        )),
+    }
 }
 
 /// Run the script of `input` in a child process with the limits of the
-/// module docs. `Ok` is the reply of the child (which may hold an
-/// error); `Err` is a failure of the child itself (killed, crashed, the
-/// wall clock). Call it outside any database closure.
-pub async fn run(input: &Input) -> Result<Reply, String> {
+/// module docs, within `budget`. `Ok` is the reply of the child (which
+/// may hold an error); `Err` is a failure of the child itself (killed,
+/// crashed, the wall clock) or no free slot. Call it outside any
+/// database closure.
+pub async fn run(input: &Input, budget: Budget) -> Result<Reply, String> {
     let body = serde_json::to_vec(input).map_err(|e| format!("cannot write the input: {e}"))?;
     if body.len() > MAX_INPUT {
         return Err(format!(
@@ -361,10 +460,7 @@ pub async fn run(input: &Input) -> Result<Reply, String> {
             body.len()
         ));
     }
-    let _slot = running()
-        .acquire()
-        .await
-        .map_err(|_| "the script slots are closed".to_owned())?;
+    let _slot = acquire_within(slots(budget.pool), budget.acquire).await?;
     let mut child = tokio::process::Command::new(runner()?)
         .arg(CHILD_ARG)
         .env_clear()
@@ -396,13 +492,13 @@ pub async fn run(input: &Input) -> Result<Reply, String> {
             .map_err(|e| format!("cannot wait for the script process: {e}"))?;
         Ok::<_, String>((buf, status))
     };
-    let (buf, status) = match tokio::time::timeout(WALL_CLOCK, talk).await {
+    let (buf, status) = match tokio::time::timeout(budget.wall, talk).await {
         Ok(r) => r?,
         // Dropping `talk` drops the child: kill_on_drop kills it.
         Err(_) => {
             return Err(format!(
-                "the script ran longer than {} seconds and was stopped",
-                WALL_CLOCK.as_secs()
+                "the script ran longer than {} ms and was stopped",
+                budget.wall.as_millis()
             ));
         }
     };
@@ -436,8 +532,9 @@ fn ended(status: std::process::ExitStatus) -> String {
 pub async fn actions(
     input: &Input,
     ctx: &rules_file::Context,
+    budget: Budget,
 ) -> Result<(Vec<rules_file::Action>, u64), String> {
-    let reply = run(input).await?;
+    let reply = run(input, budget).await?;
     if let Some(e) = reply.error {
         return Err(e);
     }
@@ -562,6 +659,37 @@ fn main() -> string {
  "" }"#,
         ));
         assert_eq!(r.output.as_deref(), Some(""), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn a_busy_pool_refuses_after_its_deadline() {
+        let busy = Semaphore::new(0);
+        let started = std::time::Instant::now();
+        let e = acquire_within(&busy, Duration::from_millis(50))
+            .await
+            .err()
+            .unwrap_or_default();
+        assert!(e.contains("slots are busy"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let free = Semaphore::new(1);
+        assert!(
+            acquire_within(&free, Duration::from_millis(50))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_budgets_stay_in_their_limits() {
+        let e = Budget::engine();
+        assert_eq!(e.pool, Pool::Engine);
+        assert_eq!(e.acquire, ENGINE_ACQUIRE);
+        let d = Budget::dry_run(Duration::from_secs(1));
+        assert_eq!(d.pool, Pool::DryRun);
+        assert_eq!(d.wall, Duration::from_secs(1));
+        assert_eq!(d.acquire, Duration::from_secs(1));
+        let d = Budget::dry_run(DRY_RUN_TOTAL);
+        assert_eq!((d.acquire, d.wall), (DRY_RUN_ACQUIRE, WALL_CLOCK));
     }
 
     #[test]

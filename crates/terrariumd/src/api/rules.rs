@@ -234,6 +234,15 @@ async fn dry_run(
             }
         }
     };
+    // A script step is code: only an admin of the project runs one, also
+    // in a dry run (TER-173 review).
+    if set
+        .rules
+        .iter()
+        .any(|r| r.actions.iter().any(|a| a.verb == rules_file::SCRIPT_VERB))
+    {
+        policy::admin_project(&actor, &name, "dry-run a rule with a script step")?;
+    }
     let p = name.clone();
     let (events, mut plans) = state
         .db

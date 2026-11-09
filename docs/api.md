@@ -8971,29 +8971,36 @@ a brace is `{{` or `}}`.
 - The engine runs the program in a child process of the daemon binary
   (`terrariumd __rule-script`): an empty environment, `/` as its
   directory, its input (the source and the values, at most 256 KiB) on
-  stdin and its result on stdout. The child sets its own limits first:
-  256 MiB of data (`RLIMIT_DATA`), 10 s of CPU, no file writes, no core
-  file, 16 open files. The parent stops it after 5 s, with a call depth
-  of 200, and runs at most 4 children at a time. The program runs
-  between two writes of the run, never inside a database closure.
+  stdin and its result on stdout. The child first closes each file from
+  3 up, then sets its own limits: 256 MiB of data (`RLIMIT_DATA`), 10 s
+  of CPU, no file writes, no core file, 16 open files. The parent stops
+  it after 5 s, with a call depth of 200. The runs of the engine share 4
+  children at a time and wait at most 30 s for a slot (then the step
+  fails: "the script slots are busy"). The program runs between two
+  writes of the run, never inside a database closure.
 - The returned blocks are checked as the verbs of one rule (the schema,
   the arguments, the templates, the columns of the board): no rule, no
   condition, no field of the rule, and no script step. The step is then
   replaced by those verbs in the stored rule of the run, so a restart
   runs them and not the program again. Each runs as the rule actor,
   with the checks of a verb of the file; their `{{...}}` placeholders
-  are filled quoted. Each line of a quoted argument (`text`, `comment`,
-  `subject`, `body`, `turn`, `reason`, `result`) that starts with a turn
-  tag is defused (`[User]` becomes `[\User]`).
+  are filled quoted. Each line of each text argument (also a text in a
+  list) that starts with a turn tag is defused (`[User]` becomes
+  `[\User]`).
 - The step's result in `steps` is `{verb: "script.run", ok, changed:
   false, detail: {verbs, fuel_used}}`. A program that does not compile,
   fails, runs out of fuel, hits a limit, or returns blocks that do not
   check fails the run at the step (`action <n> (script.run) failed:
   <reason>`); the actions after it do not run.
-- The dry run runs the programs after its read (at most 20 in one dry
-  run) and shows `{verb: "script.run", fuel_used, returned}` followed by
-  the returned verbs, filled as the others. A program that fails makes
-  the plan `failed`, with the reason.
+- The dry run runs the programs after its read and shows `{verb:
+  "script.run", fuel_used, returned}` followed by the returned verbs,
+  filled as the others. A program that fails makes the plan `failed`,
+  with the reason. A dry run whose rules (stored or `text`) hold a
+  script step needs `project_admin` of the project (else `403`). The dry
+  runs have their own single child slot, never one of the engine's: a
+  dry run waits at most 2 s for it (then the plan fails: "the script
+  slots are busy"), runs at most 20 programs, and all its programs take
+  at most 15 s together; the ones after that are not run.
 
 Timers (TER-172): the engine checks the batch rules (`job_queue` of kind
 `batch` with `min_cards` and `max_wait_minutes`) about every 10 seconds.
