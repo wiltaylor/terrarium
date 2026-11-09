@@ -22,13 +22,13 @@
 //! | `jwt` | `eyJ...` `.` `eyJ...` `.` (a JWT, as the CLI session tokens) |
 //! | `terrarium-host-token` | `thk_...` (a host agent token), `the_...` (an enrol token) |
 //! | `credential-key` | a key named like `token`, `secret`, `password`, `api_key`, or `authorization`, with a value of 16 characters or more |
-//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) or sits inside the quoted value of a non-secret repo field of the daemon-written export ([`exempt_export_value_span`], issue #27) |
+//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) or sits inside the quoted value of a non-secret repo field of the daemon-written export ([`exempt_export_value_span`], issue #27); a run that ends at the `@` of a URL user part keeps the rule (`ssh://<token>@host/r.git`, the scp form `<token>@host:r.git`) |
 //! | `url-userinfo` | a repo URL of the export with a credential in its user part (`https://token@x/y`, `https://user:pass@x/y`, `ssh://user:pass@x/y`), on the same exempt lines (issue #27) |
 //! | `credential-file` | a file name that holds credentials: `.env`, `auth.json`, `.credentials.json`, `id_rsa`, `*.pem`, `*.key`, ... |
 //!
 //! A line with the marker `terrarium-scan: allow` skips the
 //! `credential-key` and `high-entropy` rules (a false hit). The token
-//! patterns and the file names have no such marker.
+//! patterns, `url-userinfo`, and the file names have no such marker.
 //!
 //! The daemon writes the export of the config repo, so no marker can
 //! stay on its lines (issue #27). Instead, only the runs inside the
@@ -43,7 +43,14 @@
 //! file that a user writes keeps the rule, with the marker as the way
 //! out. A credential in the user part of such a URL hits as
 //! `url-userinfo` on the same lines: the daemon drops the user part of
-//! a repo URL before it writes the export, so one there is a hand edit.
+//! a repo URL before it writes the export, so one there is a hand
+//! edit. A user part with no password (`ssh://<token>@host/r.git`, the
+//! scp form `<token>@host:r.git`) is not one, so its run keeps
+//! `high-entropy` ([`url_user_part`]). A table header inside a
+//! multi-line string of the file is text of that string and opens no
+//! exemption ([`multiline_open_after`]): the export writer escapes
+//! newlines, so a multi-line string in an export file is a hand edit
+//! too.
 
 use std::sync::OnceLock;
 
@@ -141,6 +148,17 @@ fn url_userinfo() -> Option<&'static Regex> {
     static R: OnceLock<Option<Regex>> = OnceLock::new();
     R.get_or_init(|| Regex::new(r"(?i)\bhttps?://[^\s/?#]*@|://[^\s/:@]+:[^\s/@]*@").ok())
         .as_ref()
+}
+
+/// Does the run that ends at `end` end at the `@` of a URL user part
+/// (`ssh://<token>@host/r.git`, the scp form `<token>@host:r.git`,
+/// `https://user:<token>@host`)? Those forms carry the credential in
+/// the user part, where [`url_userinfo`] sees only a `user:password@`,
+/// so their run keeps the `high-entropy` rule even on an exempt line.
+/// The user part of a repo URL that the daemon writes is a word
+/// (`git`, `oauth2`), never a high-entropy run.
+fn url_user_part(line: &str, end: usize) -> bool {
+    line.as_bytes().get(end) == Some(&b'@')
 }
 
 /// A value that names a secret and is not one: an env reference, a
@@ -258,6 +276,29 @@ fn table_header(line: &str) -> Option<&str> {
     Some(t.trim())
 }
 
+/// The multi-line TOML string (`"""` or `'''`) that is open at the end
+/// of `line`, from the one open before it: a line with an odd number of
+/// the same three-quote delimiter opens or closes one. A
+/// `[[projects.repos]]` line inside such a string is text of the
+/// string, not a table header, so [`scan`] takes no header from it: a
+/// hand edit with example fleet TOML in a multi-line string must not
+/// exempt the lines in or after it. The daemon-written export holds no
+/// multi-line string (its writer escapes newlines), so one in an
+/// export fleet file is a hand edit.
+fn multiline_open_after(line: &str, open: Option<char>) -> Option<char> {
+    let mut open = open;
+    for (delim, quote) in [("\"\"\"", '"'), ("'''", '\'')] {
+        if line.matches(delim).count() % 2 == 1 {
+            open = if open == Some(quote) {
+                None
+            } else {
+                open.or(Some(quote))
+            };
+        }
+    }
+    open
+}
+
 /// The span of the quoted value of `line`, when `line` is one of the
 /// [`EXPORT_EXEMPT_FIELDS`] of a repo table of the daemon-written
 /// export (issue #27): the key stands before the first `=`, and the
@@ -265,8 +306,9 @@ fn table_header(line: &str) -> Option<&str> {
 /// `high-entropy` rule, so a trailing comment on the line keeps it. The
 /// daemon writes the export, so the [`ALLOW_MARKER`] cannot stay on
 /// its lines. The scan is line-based: a `[[projects.repos]]` line
-/// inside a multi-line string counts as a header, and the token
-/// patterns still run on every line.
+/// inside a multi-line string is text of that string, not a header
+/// ([`multiline_open_after`]), and the token patterns still run on
+/// every line.
 fn exempt_export_value_span(
     path: &str,
     header: Option<&str>,
@@ -347,13 +389,24 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
         return out;
     }
     let text = String::from_utf8_lossy(text);
-    // The table header that the last `[...]` or `[[...]]` line opened:
-    // the export exemption below is scoped to the repos table.
+    // The table header that the last `[...]` or `[[...]]` line outside a
+    // multi-line string opened: the export exemption below is scoped to
+    // the repos table. A header line inside a `"""` or `'''` string is
+    // text of that string, so while one is open the header is `None`, and
+    // on its close the table before the string is back (round 3).
     let mut header: Option<String> = None;
+    let mut open: Option<char> = None;
+    let mut before_string: Option<String> = None;
     for (i, line) in text.lines().enumerate() {
-        if let Some(h) = table_header(line) {
+        let next = multiline_open_after(line, open);
+        if next.is_some() && open.is_none() {
+            before_string = header.take();
+        } else if next.is_none() && open.is_some() {
+            header = before_string.take();
+        } else if let Some(h) = table_header(line) {
             header = Some(h.to_owned());
         }
+        open = next;
         let mut hit = |rule: &str| {
             if !out.iter().any(|f| f.line == i + 1 && f.rule == rule) {
                 out.push(Finding {
@@ -368,15 +421,24 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
                 hit(p.rule);
             }
         }
+        // Issue #27: only the runs inside the quoted value of a
+        // non-secret repo field of the export fleet files skip the
+        // high-entropy rule; the token patterns above, the
+        // credential-key rule below, and `url-userinfo` still run on
+        // the line. `url-userinfo` runs before the marker check: like
+        // the token patterns it is not a rule for a false hit, and the
+        // daemon writes the export, so a credential in the user part of
+        // a repo URL is a hand edit that no marker lets through.
+        let exempt = exempt_export_value_span(path, header.as_deref(), line);
+        if exempt.is_some()
+            && let Some(re) = url_userinfo()
+            && re.is_match(line)
+        {
+            hit("url-userinfo");
+        }
         if line.contains(ALLOW_MARKER) {
             continue;
         }
-        // Issue #27: only the runs inside the quoted value of a
-        // non-secret repo field of the export fleet files skip the
-        // high-entropy rule; the token patterns above and the
-        // credential-key rule below still run on the line, and a
-        // credential in the user part of the URL hits as `url-userinfo`.
-        let exempt = exempt_export_value_span(path, header.as_deref(), line);
         if let Some(re) = key_value() {
             for c in re.captures_iter(line) {
                 if let Some(v) = c.get(1)
@@ -387,20 +449,15 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
                 }
             }
         }
-        if exempt.is_some()
-            && let Some(re) = url_userinfo()
-            && re.is_match(line)
-        {
-            hit("url-userinfo");
-        }
         if let Some(re) = long_runs() {
             for m in re.find_iter(line) {
                 if m.as_str().len() >= ENTROPY_MIN_LEN
                     && shannon_entropy(m.as_str()) > ENTROPY_THRESHOLD
                     && !is_word_path(m.as_str())
-                    && !exempt
-                        .as_ref()
-                        .is_some_and(|e| m.start() >= e.start && m.end() <= e.end)
+                    && (url_user_part(line, m.end())
+                        || !exempt
+                            .as_ref()
+                            .is_some_and(|e| m.start() >= e.start && m.end() <= e.end))
                 {
                     hit("high-entropy");
                 }
@@ -704,11 +761,10 @@ mod tests {
         ] {
             assert!(at(&url).contains(&rule), "{url}: {:?}", at(&url));
         }
-        // The token sits inside the quotes, so nothing else hits on the
-        // line: this rule alone blocks it.
+        // The token sits inside the quotes: `url-userinfo` and the
+        // user-part run of `high-entropy` (round 3) block it.
         let found = at(&format!("https://bot:{random}@git.example/o/r.git"));
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0], "url-userinfo");
+        assert_eq!(found, ["url-userinfo", "high-entropy"].map(str::to_owned));
         // A low-entropy user part (never a `high-entropy` hit) hits too.
         assert!(at("https://bot:password123@git.example/o/r.git").contains(&rule));
         for url in [
@@ -739,6 +795,88 @@ mod tests {
         let url = "https://github.com/wiltaylor-daf/ExampleReportingService.git";
         let text = format!("[[projects.repos]]\nurl = \"{url}\"\n");
         assert!(!rules(export, &text).contains(&he), "{text}");
+    }
+
+    /// A table header inside a multi-line string is text of that string,
+    /// not a header (round 3): a multi-line prompt that holds example
+    /// fleet TOML must not exempt the `url` line inside it, and the
+    /// header that only the string names must not exempt the lines
+    /// after the string closes. The export writer escapes newlines, so
+    /// a multi-line string in an export fleet file is a hand edit.
+    #[test]
+    fn a_table_header_inside_a_multiline_string_does_not_exempt() {
+        let he = "high-entropy".to_owned();
+        let export = "export/projects/p1.fleet.toml";
+        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+        // A multi-line prompt with example fleet TOML: the `url` line
+        // inside the string keeps the rule, in both quote forms.
+        for q in ["\"\"\"", "'''"] {
+            let prompt = format!(
+                "[[projects]]\nname = \"p1\"\nsystem_prompt = {q}\nExample fleet TOML:\n\n[[projects.repos]]\nurl = \"https://x/{random}\"\n{q}\n"
+            );
+            assert!(rules(export, &prompt).contains(&he), "{prompt}");
+        }
+        // The header that only the string names exempts nothing after
+        // the close: the line is under `projects`.
+        let spoof = format!(
+            "[[projects]]\nname = \"p1\"\ndescription = \"\"\"\n[[projects.repos]]\n\"\"\"\nurl = \"https://x/{random}\"\n"
+        );
+        assert!(rules(export, &spoof).contains(&he), "{spoof}");
+        // A real repos table after a multi-line string still exempts
+        // its own lines.
+        let url = "https://github.com/wiltaylor-daf/ExampleReportingService.git";
+        let real = format!(
+            "[[projects]]\nname = \"p1\"\ndescription = '''\nsee [[projects.repos]] below\n'''\n\n[[projects.repos]]\nname = \"app\"\nurl = \"{url}\"\n"
+        );
+        assert!(!rules(export, &real).contains(&he), "{real}");
+    }
+
+    /// A high-entropy user part of a repo URL keeps the rule on an
+    /// exempt line (round 3): `ssh://<token>@host/r.git` and the scp
+    /// form `<token>@host:r.git` have no password, so `url-userinfo`
+    /// alone misses them.
+    #[test]
+    fn a_high_entropy_user_of_an_ssh_or_scp_url_keeps_the_rule() {
+        let he = "high-entropy".to_owned();
+        let export = "export/projects/p1.fleet.toml";
+        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+        let at = |url: &str| {
+            let text = format!("[[projects.repos]]\nurl = \"{url}\"\n");
+            rules(export, &text)
+        };
+        for url in [
+            format!("ssh://{random}@git.example/o/r.git"),
+            format!("{random}@git.example:o/r.git"),
+            format!("ssh://git:{random}@git.example/o/r.git"),
+            format!("https://user:{random}@git.example/o/r.git"),
+        ] {
+            assert!(at(&url).contains(&he), "{url}: {:?}", at(&url));
+        }
+        // A word user part stays a plain URL.
+        for url in [
+            "ssh://git@git.example/o/r.git",
+            "git@github.com:wiltaylor-daf/terrarium.git",
+            "https://github.com/wiltaylor-daf/ExampleReportingService.git",
+        ] {
+            assert!(!at(url).contains(&he), "{url}: {:?}", at(url));
+        }
+    }
+
+    /// The allow marker does not skip `url-userinfo` (round 3): like the
+    /// token patterns it is not a rule for a false hit, and the daemon
+    /// writes the export lines, so a marker on one is a hand edit too.
+    #[test]
+    fn the_allow_marker_does_not_skip_url_userinfo() {
+        let export = "export/projects/p1.fleet.toml";
+        let text = format!(
+            "[[projects.repos]]\nurl = \"https://bot:password123@git.example/o/r.git\" # {ALLOW_MARKER}\n"
+        );
+        assert_eq!(rules(export, &text), ["url-userinfo"].map(str::to_owned));
+        // In a file that a user writes the marker keeps its meaning for
+        // the soft rules, and `url-userinfo` never runs there.
+        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+        let text = format!("url = \"https://bot:{random}@x/y\" # {ALLOW_MARKER}\n");
+        assert!(rules("fleets/prod.fleet.toml", &text).is_empty());
     }
 
     #[test]
