@@ -892,9 +892,14 @@ async fn owned_target_roots_fall_back_to_the_agent_home() {
         "{log}"
     );
     // The stored base is used directly: the default is tried one time only.
-    assert_eq!(log.matches("prepare /src/terrarium terra").count(), 1, "{log}");
     assert_eq!(
-        log.matches("prepare /home/agent/.terrarium-work terra").count(),
+        log.matches("prepare /src/terrarium terra").count(),
+        1,
+        "{log}"
+    );
+    assert_eq!(
+        log.matches("prepare /home/agent/.terrarium-work terra")
+            .count(),
         3,
         "{log}"
     );

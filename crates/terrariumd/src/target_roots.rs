@@ -440,7 +440,10 @@ pub async fn prepare(
     )?
     .collect(4096)
     .await;
-    if exit_code(&out) == Some(BASE_UNAVAILABLE) && def.work_root.is_none() && current == DEFAULT_BASE {
+    if exit_code(&out) == Some(BASE_UNAVAILABLE)
+        && def.work_root.is_none()
+        && current == DEFAULT_BASE
+    {
         // Exit 3 means the agent user cannot reach the default base, so no
         // root of this agent exists there: switching the row orphans nothing.
         current = home_fallback(state, def).await?;
@@ -473,7 +476,12 @@ pub async fn prepare(
     }
     if !out.end().success() {
         let unavailable = exit_code(&out) == Some(BASE_UNAVAILABLE);
-        return Err(prepare_error(def, &current, unavailable, &out.stderr_tail()));
+        return Err(prepare_error(
+            def,
+            &current,
+            unavailable,
+            &out.stderr_tail(),
+        ));
     }
     Ok(Some(path))
 }
@@ -493,8 +501,16 @@ async fn home_fallback(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     .await;
     let home = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     if !out.end().success() {
-        let tail = format!("cannot read the home of the agent user: {}", out.stderr_tail());
-        return Err(prepare_error(def, &format!("~/{FALLBACK_DIR}"), true, &tail));
+        let tail = format!(
+            "cannot read the home of the agent user: {}",
+            out.stderr_tail()
+        );
+        return Err(prepare_error(
+            def,
+            &format!("~/{FALLBACK_DIR}"),
+            true,
+            &tail,
+        ));
     }
     fallback_base(&home).map_err(|_| {
         prepare_error(
@@ -943,17 +959,28 @@ mod tests {
         let mut def: TargetDef = toml::from_str("kind = 'ssh'\naddress = 'user@box'\n").unwrap();
         def.name = "box".into();
         let msg = |e: ApiError| e.to_string();
-        let none = msg(prepare_error(&def, "/home/u/.terrarium-work", true, "denied"));
+        let none = msg(prepare_error(
+            &def,
+            "/home/u/.terrarium-work",
+            true,
+            "denied",
+        ));
         assert!(none.contains("has no work_root"), "{none}");
         assert!(none.contains(DEFAULT_BASE), "{none}");
         assert!(none.contains("/home/u/.terrarium-work"), "{none}");
-        assert!(none.contains("terrarium admin target edit box --work-root"), "{none}");
+        assert!(
+            none.contains("terrarium admin target edit box --work-root"),
+            "{none}"
+        );
         def.work_root = Some("/var/build".into());
         let set = msg(prepare_error(&def, "/var/build", true, "denied"));
         assert!(set.contains("work_root /var/build"), "{set}");
         assert!(set.contains("--work-root"), "{set}");
         let other = msg(prepare_error(&def, "/var/build", false, "owner"));
-        assert!(other.contains("cannot prepare owned target root under /var/build: owner"), "{other}");
+        assert!(
+            other.contains("cannot prepare owned target root under /var/build: owner"),
+            "{other}"
+        );
     }
 
     #[test]
@@ -988,7 +1015,10 @@ mod tests {
             std::os::unix::fs::symlink(outside.path(), &link).unwrap();
             // A symlink fails closed: never the unavailable code, so no fallback.
             let code = run_code(tmp.path(), "prepare", "repo");
-            assert!(code != Some(0) && code != Some(BASE_UNAVAILABLE), "{code:?}");
+            assert!(
+                code != Some(0) && code != Some(BASE_UNAVAILABLE),
+                "{code:?}"
+            );
             assert!(!run(tmp.path(), "delete", ""));
             assert!(link.is_symlink());
         }
@@ -1007,7 +1037,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src/terrarium/p/a")).unwrap();
         let code = run_code(tmp.path(), "prepare", "repo");
-        assert!(code != Some(0) && code != Some(BASE_UNAVAILABLE), "{code:?}");
+        assert!(
+            code != Some(0) && code != Some(BASE_UNAVAILABLE),
+            "{code:?}"
+        );
         assert!(!run(tmp.path(), "delete", ""));
     }
 }
