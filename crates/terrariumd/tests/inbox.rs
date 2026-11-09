@@ -747,16 +747,20 @@ async fn mail_handled_outside_the_inbox_closes_its_item() {
     let (rows, counts) = inbox(&td, "?kind=mail").await;
     assert!(rows.is_empty(), "{rows:?}");
     assert_eq!(counts["mail"], 0);
+    let changes = inbox_changes(&td, &format!("mail:{mid2}")).await;
+    assert!(
+        changes.contains(&"opened".to_owned()) && changes.contains(&"closed".to_owned()),
+        "{changes:?}"
+    );
     let ev = td.get("/api/events?kind=inbox&limit=200").await;
-    let item = ev
+    let closed = ev
         .ok()
         .as_array()
         .unwrap()
         .iter()
-        .find(|e| e["data"]["item"] == format!("mail:{mid2}"))
+        .find(|e| e["data"]["item"] == format!("mail:{mid2}") && e["data"]["change"] == "closed")
         .unwrap();
-    assert_eq!(item["data"]["change"], "closed");
-    assert_eq!(item["data"]["project"], "p");
+    assert_eq!(closed["data"]["project"], "p");
 
     // The agent reads its answer: no inbox event for mail that is not to
     // the operator.
