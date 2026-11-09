@@ -17,7 +17,7 @@ export default function ReposPage() {
   const [repos, { refetch }] = createResource(() => params.project, (p) => api.projects.repos(p));
   const [targets] = createResource(() => params.project, (p) => api.projects.targets(p).catch((): Target[] => []));
   const [adding, setAdding] = createSignal(false);
-  // An add here or from the "+" of the sidebar Repos node changes the repos store: read the list again.
+  // An add here, or one from another view, changes the repos store: read the list again.
   createEffect(on(() => reposStore.inProject(params.project).length, () => void refetch(), { defer: true }));
 
   return (
