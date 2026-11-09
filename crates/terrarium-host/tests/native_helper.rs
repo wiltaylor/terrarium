@@ -494,7 +494,11 @@ async fn a_shim_stop_also_stops_the_user_slice() {
             .unwrap()
             .code()
     };
-    let stops = || f.log("ctl.log").matches(&format!("stop -- {slice}")).count();
+    let stops = || {
+        f.log("ctl.log")
+            .matches(&format!("stop -- {slice}"))
+            .count()
+    };
     // A user slice that is not loaded has nothing to stop.
     assert_eq!(run(&f.socket), Some(0));
     assert_eq!(f.log("user.log"), format!("--user stop -- {slice}\n"));

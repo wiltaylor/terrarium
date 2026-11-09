@@ -473,8 +473,7 @@ pub fn check_root_chain(path: &Path) -> Result<(), String> {
 fn walk_root_chain(path: &Path) -> Result<(), String> {
     let mut p = Some(path);
     while let Some(dir) = p {
-        let meta =
-            std::fs::symlink_metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let meta = std::fs::symlink_metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         if meta.file_type().is_symlink() {
             if meta.uid() != 0 {
                 return Err(format!("symlink {} must be owned by root", dir.display()));
