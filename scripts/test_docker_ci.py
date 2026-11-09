@@ -79,6 +79,28 @@ class DockerGateTests(unittest.TestCase):
         self.assertEqual(len(calls), len(docker_ci.LIVE_TESTS))
         self.assertTrue(all("--ignored" in cmd for cmd in calls))
 
+    def test_gate_keeps_docker_env_out_of_the_suite(self):
+        # TER-518: the suite's own test daemons and recipes must not see the
+        # outer merge job's gate switch or socket; only `docker info` and the
+        # live tests get DOCKER_HOST.
+        endpoint = "unix:///tmp/job/docker.sock"
+        env = {"TERRARIUM_JOB_KIND": "merge", "TERRARIUM_DOCKER_CI": "1",
+               "TERRARIUM_DOCKER_HOST": endpoint, "DOCKER_HOST": endpoint,
+               "DOCKER_CONFIG": "/tmp/config", "KEEP": "1"}
+        with patch.object(subprocess, "run") as info, \
+             patch.object(subprocess, "call", return_value=0) as validate, \
+             patch.object(docker_ci, "live_tests", return_value=0) as live:
+            self.assertEqual(docker_ci.gate(dict(env)), 0)
+        self.assertEqual(info.call_args.kwargs["env"]["DOCKER_HOST"], endpoint)
+        validate.assert_called_once()
+        self.assertEqual(validate.call_args.args[0], ["just", "ci::validate"])
+        suite = validate.call_args.kwargs["env"]
+        for name in ("TERRARIUM_DOCKER_CI", "TERRARIUM_DOCKER_HOST", "DOCKER_HOST", "DOCKER_CONFIG"):
+            self.assertNotIn(name, suite)
+        self.assertEqual(suite["KEEP"], "1")
+        self.assertEqual(suite["TERRARIUM_JOB_KIND"], "merge")
+        self.assertEqual(live.call_args.args[0]["DOCKER_HOST"], endpoint)
+
     def test_enabled_gate_gets_only_unix_endpoint_and_isolated_client_config(self):
         endpoint = "unix:///tmp/job/docker.sock"
         env = {"TERRARIUM_JOB_KIND": "merge", "TERRARIUM_DOCKER_CI": "1",
