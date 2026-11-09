@@ -53,7 +53,8 @@
 //! multi-line string of the file is text of that string and opens no
 //! exemption ([`multiline_open_after`]): a `"""` or `'''` in a
 //! comment, in a one-line string, or escaped in a basic string opens
-//! nothing, and the export writer escapes newlines and quotes, so a
+//! nothing, and the export writer escapes newlines and quotes
+//! (`the_export_writer_writes_no_multiline_string` proves it), so a
 //! multi-line string in an export file is a hand edit too.
 
 use std::sync::OnceLock;
@@ -347,8 +348,9 @@ fn table_header(line: &str) -> Option<&str> {
 /// [`scan`] takes no header from it: a hand edit with example fleet
 /// TOML in a multi-line string must not exempt the lines in or after
 /// it. The daemon-written export holds no multi-line string (its
-/// writer escapes newlines and quotes, so one in an export fleet
-/// file is a hand edit.
+/// writer escapes newlines and quotes,
+/// `the_export_writer_writes_no_multiline_string`), so one in an
+/// export fleet file is a hand edit.
 fn multiline_open_after(line: &str, open: Option<char>) -> Option<char> {
     let b = line.as_bytes();
     let mut open = open;
@@ -1049,6 +1051,59 @@ mod tests {
         assert!(rules("fleets/prod.fleet.toml", &text).is_empty());
         let text = format!("url = \"ssh://{random}@x/y\" # {ALLOW_MARKER}\n");
         assert!(rules("fleets/prod.fleet.toml", &text).is_empty());
+    }
+
+    /// The export writer writes no multi-line string (round 4): a
+    /// fleet with a multi-line prompt (newlines, escaped quotes, a
+    /// `[[projects.repos]]` line, `'''`) is written with every value
+    /// on one line, so the scan of the export keeps the repo-table
+    /// exemption of issue #27 and a daemon-written commit has no false
+    /// `high-entropy` hit on the repo URL.
+    #[test]
+    fn the_export_writer_writes_no_multiline_string() {
+        let text = r#"version = 1
+name = "p1"
+
+[defaults]
+system_prompt = """
+Example fleet TOML:
+
+[[projects.repos]]
+url = "https://x/example-service"
+Escaped quotes: "\"\"\" and literal ''' stay in the prompt.
+"""
+
+[[projects]]
+name = "p1"
+
+[[projects.repos]]
+name = "app"
+url = "https://github.com/wiltaylor-daf/ExampleReportingService.git"
+"#;
+        let parsed = crate::fleet::parse(text, None);
+        assert!(
+            parsed.issues.iter().all(|i| i.level != crate::fleet::Level::Error),
+            "{:?}",
+            parsed.issues
+        );
+        let fleet = parsed.fleet.as_ref().expect("a fleet");
+        let out = fleet.to_toml();
+        // The prompt is one quoted line: no `\"\"\"` or `'''` value
+        // delimiter in the writer's output.
+        let prompt = out
+            .lines()
+            .find(|l| l.starts_with("system_prompt = "))
+            .expect("the prompt is written");
+        assert!(
+            !prompt.starts_with("system_prompt = \"\"\"")
+                && !prompt.starts_with("system_prompt = '''"),
+            "{out}"
+        );
+        // The repo URL after it stays exempt: no false hit on a commit
+        // that the daemon writes.
+        let findings = scan("export/projects/p1.fleet.toml", out.as_bytes());
+        assert!(findings.is_empty(), "{out}\n{findings:?}");
+        assert_eq!(crate::fleet::parse(&out, None).fleet, parsed.fleet);
     }
 
     #[test]
