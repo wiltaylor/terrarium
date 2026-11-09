@@ -46,8 +46,8 @@ the entrypoint stops the runners (see below) and the container exits.
 The Compose service runs the image CMD, which is the service command
 `--daemon-service terrariumd`. Only this mode initializes releases and supervises
 the daemon, so a pre-hot-swap image (whose CMD is plain `terrariumd`) works from
-the same Compose file. Direct `docker run` and older Compose files (which set
-the command explicitly) work too. Other commands (for example `bash`, backup
+the same Compose file. Direct `docker run` and Compose files that set
+`--daemon-service terrariumd` explicitly work too. Other commands (for example `bash`, backup
 subcommands, or `terrariumd --version`) run once using bundled binaries and
 never change the live release or probation marker. A state-volume lock rejects
 a second service, including an accidental `compose run terrarium` without a
