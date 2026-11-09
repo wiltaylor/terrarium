@@ -28,6 +28,11 @@
 //!      file it does not track but `target/` is removed. The tree stays
 //!      for the next job of the slot, so builds reuse `target/`. With a
 //!      base, the tree also gets the file of the changed paths (TER-100).
+//!      The receive step and the recipe hold an exclusive `flock` on
+//!      `<slot>.lock`, and the recipe checks the head again under it, so
+//!      a second daemon on the same work dir (the default depends only on
+//!      the project name) fails with a clear error instead of replacing
+//!      the slot's tree of the running job (TER-448).
 //!      Then the recipe (`sh -c <recipe>` in the tree) runs: the repo's
 //!      code, with no credential and no remote. Its env names the job
 //!      kind, the slot, and, when `next` gives a base, the file of the
@@ -1430,7 +1435,10 @@ async fn run_inner(
 
 /// The work tree of a slot on the target (TER-190):
 /// `<work_dir>/<project>/slot-<n>`, kept from job to job. Only one running
-/// job holds a slot ([`jobs::pick`]), so no two jobs share a tree.
+/// job holds a slot ([`jobs::pick`]), so no two jobs share a tree. The
+/// steps of the job hold an exclusive lock on `<dir>.lock` (TER-448), so
+/// a second daemon on the same work dir cannot take the tree; it fails
+/// with a clear error instead.
 pub fn slot_dir(def: &DeliveryDef, project: &str, slot: i64) -> String {
     format!(
         "{}/{project}/slot-{slot}",
@@ -2170,12 +2178,36 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
 /// Keep merged stdout/stderr outside the reusable slot, so the next checkout
 /// cannot clean it away. Only a bounded excerpt crosses the runner protocol.
 /// No pipeline wraps the recipe: its exact exit status remains the job status.
+///
+/// The slot's tree stays this job's alone (TER-448): the script holds the
+/// receive step's lock (`TERRARIUM_SLOT_LOCK`) for the whole recipe, and a
+/// head that is not `TERRARIUM_HEAD` (another daemon took the slot between
+/// the two steps and replaced the tree) ends the job before the recipe
+/// runs. Both fail with exit 125 and the reason on stderr; without `flock`
+/// on the target, the recipe runs as before this, unlocked.
 fn logged_recipe(recipe: String, log: &str) -> String {
     use crate::executor::sh_quote;
     format!(
         r#"log={log}
 mkdir -p -- "$(dirname -- "$log")" || exit 125
 (umask 077 && : > "$log") || exit 125
+lock=${{TERRARIUM_SLOT_LOCK:-}}
+if [ -n "$lock" ] && command -v flock >/dev/null 2>&1; then
+  exec 8>>"$lock" || {{ echo "cannot open the slot lock $lock"; exit 125; }}
+  flock -n 8 || {{
+    echo "the slot tree of this job is held by another job or daemon: $lock"
+    echo "stop it, or give this project its own work_dir"
+    exit 125
+  }}
+  if [ -n "${{TERRARIUM_HEAD:-}}" ]; then
+    got=$(git rev-parse -q --verify 'HEAD^{{commit}}' 2>/dev/null)
+    if [ "$got" != "$TERRARIUM_HEAD" ]; then
+      echo "another daemon replaced the slot tree between the steps of this job"
+      echo "(HEAD is ${{got:-nothing}}, not $TERRARIUM_HEAD); the recipe did not run"
+      exit 125
+    fi
+  fi
+fi
 exec sh -c {recipe} > "$log" 2>&1
 "#,
         log = sh_quote(log),
@@ -2211,7 +2243,8 @@ tail -c 1200 -- "$log"
 }
 
 /// The env of the recipe (TER-100, docs/api.md 35.2): the job kind and
-/// ID, the tested head, the slot (TER-190), and with a base, the base and the absolute path
+/// ID, the tested head, the slot (TER-190), the slot's lock file (TER-448),
+/// and with a base, the base and the absolute path
 /// of the changed files. No credential goes in here.
 fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
@@ -2222,6 +2255,13 @@ fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<
     if let Some(s) = job.slot {
         env.insert("TERRARIUM_JOB_SLOT".into(), s.to_string());
     }
+    // TER-448: the recipe holds this lock, the receive step's lock, for its
+    // whole run, so a second daemon on the same work dir cannot take the
+    // slot's tree while the recipe runs in it.
+    env.insert(
+        "TERRARIUM_SLOT_LOCK".into(),
+        format!("{}.lock", dir.trim_end_matches('/')),
+    );
     if let Some(b) = base {
         env.insert("TERRARIUM_BASE".into(), b.to_owned());
         env.insert(
@@ -2884,11 +2924,30 @@ res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 /// a base (an ancestor of `sha`, so in the bundle), it writes the changed
 /// files to [`CHANGED_FILES`] (TER-100); else that file is gone. Prints
 /// `outcome=ok head=<sha> base=<sha or empty>` or `outcome=error`.
+///
+/// The slot's tree belongs to one job of one daemon at a time (TER-448):
+/// the step holds an exclusive `flock` on `<dir>.lock`, a sibling of the
+/// dir that a wipe keeps, and refuses the job with a clear error when
+/// another job or daemon holds it. The recipe step holds the same lock
+/// ([`logged_recipe`]). Without `flock` on the target, both run as before
+/// this, unlocked.
 const RECEIVE_SCRIPT: &str = r#"dir=$1; sha=$2; kind=$3; base=${4:-}; tree=${5:-}; wipe_first=${6:-}
 case "$dir" in /*/*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
 case "$sha" in *[!0-9a-f]*|'') echo "bad commit"; res error; exit 2 ;; esac
 case "$base" in *[!0-9a-f]*) echo "bad base"; res error; exit 2 ;; esac
 case "$tree" in *[!0-9a-f]*|'') echo "bad tree"; res error; exit 2 ;; esac
+# TER-448: one job of one daemon at a time in the slot's tree. The lock
+# file sits next to the dir, so a wipe of the slot keeps it, and flock
+# lets go of it when this step and its children are gone.
+lock=$dir.lock
+if command -v flock >/dev/null 2>&1; then
+  mkdir -p -- "$(dirname -- "$dir")" || { echo "cannot make the dir of $lock"; res error; exit 2; }
+  exec 9>>"$lock" || { echo "cannot open the slot lock $lock"; res error; exit 2; }
+  flock -n 9 || {
+    echo "the slot $dir is held by another job or daemon; stop it, or give this project its own work_dir"
+    res error; exit 2
+  }
+fi
 b=$dir.bundle
 if [ "$kind" = merge ]; then r=refs/job/merge; else r=refs/job/head; fi
 # Git only ever sees this tree: never a repo above it.
@@ -3435,6 +3494,138 @@ mod tests {
                 &self.bundle(sha),
             )
         }
+    }
+
+    /// True when `flock` works here: the TER-448 lock tests need it.
+    fn flock_works() -> bool {
+        std::process::Command::new("sh")
+            .args(["-c", "command -v flock >/dev/null 2>&1 && flock -n /dev/null true"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// Hold the lock of `path` (as another daemon would) until the child
+    /// ends.
+    fn flock_holder(path: &std::path::Path) -> std::process::Child {
+        std::process::Command::new("flock")
+            .arg("-n")
+            .arg(path)
+            .arg("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap()
+    }
+
+    /// Wait until a holder holds `path`: a second non-blocking flock fails.
+    fn until_held(path: &std::path::Path) {
+        let start = std::time::Instant::now();
+        while std::process::Command::new("flock")
+            .arg("-n")
+            .arg(path)
+            .arg("true")
+            .output()
+            .unwrap()
+            .status
+            .success()
+        {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "the holder never took {}",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// TER-448: the receive step holds an exclusive lock on `<slot>.lock`,
+    /// so a second daemon on the same work dir cannot replace the tree of
+    /// a slot: its step fails with a clear error and leaves the tree as it
+    /// is. The lock goes when its holder ends.
+    #[test]
+    fn a_busy_slot_lock_refuses_the_receive_step() {
+        if !flock_works() {
+            return;
+        }
+        let s = Src::new();
+        let (one, t1) = s.commit("one");
+        let (ok, text) = s.receive(&one, &t1, "");
+        assert!(ok, "{text}");
+        let slot = s.slot();
+        let lock = slot.with_file_name("slot-1.lock");
+        assert!(lock.exists(), "the receive step leaves the slot lock");
+        let holder = flock_holder(&lock);
+        until_held(&lock);
+        let (two, t2) = s.commit("two");
+        let (ok, text) = s.receive(&two, &t2, "");
+        assert!(!ok, "{text}");
+        assert!(text.contains("held by another job or daemon"), "{text}");
+        // The tree of the running job is untouched.
+        assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]), one);
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        // The lock went with its holder: the next job of the slot passes.
+        let (ok, text) = s.receive(&two, &t2, "");
+        assert!(ok, "{text}");
+        assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]), two);
+    }
+
+    /// TER-448: the recipe holds the slot's lock for its whole run (its
+    /// own second flock fails), and a busy lock, or a head that is not the
+    /// job's head (another daemon replaced the tree between the steps),
+    /// ends the job before the recipe runs.
+    #[test]
+    fn the_recipe_holds_the_slot_lock_and_rechecks_the_head() {
+        if !flock_works() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let slot = tmp.path().join("slot-1");
+        std::fs::create_dir_all(&slot).unwrap();
+        git_in(&slot, &["init", "-q", "-b", "main"]);
+        std::fs::write(slot.join("OK"), "yes\n").unwrap();
+        git_in(&slot, &["add", "."]);
+        git_in(&slot, &["commit", "-q", "-m", "one"]);
+        let head = git_in(&slot, &["rev-parse", "HEAD"]);
+        let lock = tmp.path().join("slot-1.lock");
+        let log = tmp.path().join("logs/1-1.log");
+        let script = logged_recipe(
+            "flock -n \"$TERRARIUM_SLOT_LOCK\" true && exit 9; echo ran".into(),
+            log.to_str().unwrap(),
+        );
+        let run = |head: &str| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .current_dir(&slot)
+                .env("TERRARIUM_SLOT_LOCK", &lock)
+                .env("TERRARIUM_HEAD", head)
+                .output()
+                .unwrap()
+        };
+        // The recipe runs with the lock held: its own second flock fails.
+        let out = run(&head);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "ran\n");
+        // Another daemon replaced the tree between the steps.
+        let out = run("5555555555555555555555555555555555555555");
+        assert_eq!(out.status.code(), Some(125));
+        let text = String::from_utf8_lossy(&out.stderr);
+        assert!(text.contains("replaced the slot tree"), "{text}");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
+        // A busy lock: the recipe does not run either.
+        let holder = flock_holder(&lock);
+        until_held(&lock);
+        let out = run(&head);
+        assert_eq!(out.status.code(), Some(125));
+        let text = String::from_utf8_lossy(&out.stderr);
+        assert!(text.contains("held by another job or daemon"), "{text}");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
+        holder.kill().unwrap();
+        holder.wait().unwrap();
     }
 
     #[test]

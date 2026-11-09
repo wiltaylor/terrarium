@@ -11896,6 +11896,7 @@ for a merge job. It never receives the repository credential:
 | `TERRARIUM_JOB_ID`        | the job ID                                                            |
 | `TERRARIUM_HEAD`          | the tested commit: the card commit, or the merge commit               |
 | `TERRARIUM_JOB_SLOT`      | the slot of the job (TER-190): `1` to `slots` for a validate job, `0` for a merge |
+| `TERRARIUM_SLOT_LOCK`     | the absolute path of the slot's lock file (`<slot>.lock`, TER-448): the recipe holds it, with the clone step, for its whole run |
 | `TERRARIUM_BASE`          | the base of the change: for a validate job the merge-base of the card commit and `next`, for a merge job `next` before the merge |
 | `TERRARIUM_CHANGED_FILES` | the absolute path of a file in the clone (`.git/terrarium/changed-files`) with the paths that differ between the base and the head, one per line (`git diff --name-only --no-renames`, so a rename lists both paths) |
 
@@ -11955,7 +11956,14 @@ Each slot has one work tree on the target, `<work_dir>/<project>/slot-<n>`
 jobs before. A job takes a slot when it starts: the lowest of `1` to
 `slots` that no running job of its project holds, and `0` for a merge,
 so merges have a tree of their own. A cancelled job holds its slot until
-its processes are gone, and no two jobs use one tree at once. The job
+its processes are gone, and no two jobs use one tree at once. The clone
+step and the recipe also hold an exclusive lock on `<slot>.lock` next
+to the tree (TER-448), so a second daemon on the same target with the
+same project name and work dir (two daemons share the default
+`/tmp/terrarium-jobs/<project>`) cannot replace the tree of a running
+job: its job fails with a clear error, and the recipe checks the tested
+head again under the lock. The lock needs `flock` on the target; without
+it the steps run unlocked, as before TER-448. The job
 row has `slot` while it runs. The step checks out the commit with
 `git checkout -f` and removes every file that the commit does not track,
 ignored ones too, except `target/` at the root (`git clean -ffdx -e
