@@ -1221,7 +1221,8 @@ pub fn cgroup_empty(root: &Path, cgroup: &str) -> Result<bool, String> {
         Ok(_) => {}
     }
     let events = dir.join("cgroup.events");
-    let text = std::fs::read_to_string(&events).map_err(|e| format!("{}: {e}", events.display()))?;
+    let text =
+        std::fs::read_to_string(&events).map_err(|e| format!("{}: {e}", events.display()))?;
     let populated = text
         .lines()
         .find_map(|l| l.strip_prefix("populated "))

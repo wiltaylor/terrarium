@@ -46,8 +46,8 @@ fn main() -> anyhow::Result<()> {
         bail!("terrarium-host-helper must run as root");
     }
     let config = root_chain(&args.config)?;
-    let text = std::fs::read_to_string(&config)
-        .with_context(|| format!("read {}", config.display()))?;
+    let text =
+        std::fs::read_to_string(&config).with_context(|| format!("read {}", config.display()))?;
     let cfg = HelperConfig::parse(&text).map_err(anyhow::Error::msg)?;
 
     let agent = User::from_name(&cfg.agent_user)
