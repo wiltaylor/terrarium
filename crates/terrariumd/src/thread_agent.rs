@@ -494,6 +494,8 @@ async fn spawn_for(
         threads::set_agent(t, &tid, agent).map(|_| ())
     });
     let body = SpawnBody {
+        like: None,
+        like_skip_missing: false,
         template: template.to_owned(),
         task: first_turn_task(th),
         name: Some(name),

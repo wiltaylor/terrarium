@@ -226,6 +226,15 @@ fn io_err(what: &str, path: &Path, e: &std::io::Error) -> ApiError {
 }
 
 /// Write `bytes` to `path` with mode 0600, through a temp file and a rename.
+///
+/// The write fd is closed **before** the rename that publishes the file,
+/// so this process holds no fd on the published name. That does not close
+/// the ETXTBSY window: a fork of this process while the fd is open copies
+/// the fd table, its copy points at the inode that the rename then
+/// publishes, and it stays open until that child execs, so an exec of the
+/// name in that window still fails with ETXTBSY (Text file busy).
+/// O_CLOEXEC does not prevent it (TER-339, TER-415). A file that something
+/// execs must be run as `sh <path>` instead ([`RunDir::write_script`]).
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> ApiResult<()> {
     let tmp = path.with_extension(format!("tmp-{}", ulid::Ulid::new()));
     let result = (|| {
@@ -236,6 +245,13 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> ApiResult<()> {
             .open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
+        // Close the write fd before the rename, so that at least this
+        // process holds none on the published name. It does not help
+        // against a forked child's fd copy: a fork in flight keeps its
+        // copy on the inode, the rename publishes that inode, and execs
+        // of the name can still fail with ETXTBSY until the child execs
+        // (see [`write_private`]; `sh <path>` is the fix).
+        drop(f);
         fs::rename(&tmp, path)
     })();
     if let Err(e) = result {
@@ -271,7 +287,11 @@ impl RunDir {
         Ok(p)
     }
 
-    /// Write a 0700 script in the run dir.
+    /// Write a 0700 script in the run dir. Run such a script as
+    /// `sh <path>`: closing the write fd before the rename
+    /// ([`write_private`]) does not help against a forked child's fd copy,
+    /// so a script that something execs can still hit ETXTBSY while a
+    /// fork of this process is in flight.
     pub fn write_script(&self, name: &str, text: &str) -> ApiResult<PathBuf> {
         let p = self.write_private(name, text.as_bytes())?;
         fs::set_permissions(&p, fs::Permissions::from_mode(0o700))

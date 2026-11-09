@@ -13,6 +13,7 @@ import type { Repo, RepoCommit, RepoTree } from "../../api/types";
 import { DiffView } from "../../components/DiffView";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";
+import { projectBase } from "../../lib/url";
 import { api } from "../../stores";
 import { FilesTab } from "./FilesTab";
 
@@ -71,7 +72,7 @@ export default function RepoPage() {
         level={2}
         title={
           <>
-            <A href={`/p/${encodeURIComponent(params.project)}/repos`}>Repos</A> / {params.repo}
+            <A href={`${projectBase(params.project)}/repos`}>Repos</A> / {params.repo}
           </>
         }
       >

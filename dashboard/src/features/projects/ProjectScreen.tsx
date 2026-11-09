@@ -5,6 +5,7 @@ import { A, useLocation, useParams, type RouteSectionProps } from "@solidjs/rout
 import { createEffect, For, on } from "solid-js";
 import { PROJECT_TABS } from "../../app/nav";
 import { PageHead } from "../../components/ui";
+import { decodePath, decodePathParam, projectBase } from "../../lib/url";
 
 export default function ProjectScreen(props: RouteSectionProps) {
   const params = useParams<{ project: string }>();
@@ -26,11 +27,11 @@ export default function ProjectScreen(props: RouteSectionProps) {
 
   // Router params retain their URL encoding. Decode once for the title, then
   // encode the name once for every tab URL (including names with spaces).
-  const project = () => decodeURIComponent(params.project);
-  const base = () => `/p/${encodeURIComponent(project())}`;
+  const project = () => decodePathParam(params.project);
+  const base = () => projectBase(params.project);
   const active = (path: string) => {
-    const current = decodeURI(location.pathname).replace(/\/$/, "");
-    const target = decodeURI(`${base()}/${path}`);
+    const current = decodePath(location.pathname).replace(/\/$/, "");
+    const target = decodePath(`${base()}/${path}`);
     return current === target || current.startsWith(`${target}/`);
   };
   return (

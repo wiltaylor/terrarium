@@ -112,6 +112,13 @@ fn stub() -> axum::Router {
         .route("/api/skills/{name}", axum::routing::put(skill_update))
         .route("/api/agents/{id}/interrupt", post(interrupt))
         .route("/api/cards/{id}", axum::routing::patch(card_patch))
+        .route(
+            "/api/cards/{id}/claim",
+            post(|| async {
+                Json(json!({"id":"TER-1", "title":"B", "column":"working",
+                "eta_history":{"n":7,"median_ms":60000.0,"p70_ms":120000.0}}))
+            }),
+        )
         .fallback(missing)
 }
 
@@ -121,7 +128,11 @@ async fn card_patch(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(b): Json<Value>,
 ) -> Json<Value> {
-    Json(json!({"id": id, "title": "B", "column": "backlog", "sent": b}))
+    Json(
+        json!({"id": id, "title": "B", "column": "backlog", "sent": b,
+        "eta_at": b["eta_at"],
+        "eta_history":{"n":7,"median_ms":60000.0,"p70_ms":120000.0}}),
+    )
 }
 
 /// `POST /api/agents/{id}/interrupt` of the stub: `busy` runs a turn,
@@ -200,6 +211,29 @@ fn run(socket: &Path, args: &[&str]) -> Output {
         .args(args)
         .output()
         .unwrap()
+}
+
+#[test]
+fn claim_and_eta_print_similar_card_history() {
+    let dir = temp_dir("eta-history");
+    let socket = serve_unix(&dir);
+    for args in [
+        vec!["card", "claim", "TER-1"],
+        vec!["card", "claim", "TER-1", "--eta", "25m"],
+        vec!["card", "eta", "TER-1", "25m"],
+        vec!["card", "eta", "TER-1", "--clear"],
+    ] {
+        let o = run(&socket, &args);
+        assert!(o.status.success(), "{}", text(&o.stderr));
+        let out = text(&o.stdout);
+        assert!(
+            out.contains("Similar cards (same project and type): median 1.0m, p70 2.0m, n=7"),
+            "{out}"
+        );
+    }
+    let o = run(&socket, &["--json", "card", "claim", "TER-1"]);
+    let value: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(value["eta_history"]["n"], 7);
 }
 
 #[test]

@@ -16,6 +16,9 @@ const BACKUP: &str = "/state/backups/terrarium-backup-1.zip";
 
 #[derive(Default)]
 struct State {
+    fail_once: HashSet<String>,
+    hot: bool,
+    staged: Option<Image>,
     /// The containers by name.
     containers: HashMap<String, Container>,
     images: HashMap<String, Image>,
@@ -79,7 +82,7 @@ impl Fake {
             *remaining -= 1;
             return true;
         }
-        s.fail.contains(&key)
+        s.fail.contains(&key) || s.fail_once.remove(&key)
     }
 
     fn image_of(&self, id: &str) -> Option<String> {
@@ -101,6 +104,9 @@ fn old_image() -> Image {
 }
 
 impl Engine for Fake {
+    fn can_hot_swap<'a>(&'a self, _cur: &'a Container, _to: &'a Image) -> BoxFut<'a, Res<bool>> {
+        Box::pin(async { Ok(self.0.lock().unwrap().hot) })
+    }
     fn prepare<'a>(&'a self, spec: &'a Container, _image: &'a Image) -> BoxFut<'a, Res<Container>> {
         Box::pin(async move {
             if self.0.lock().unwrap().fail.contains("environment") {
@@ -150,6 +156,28 @@ impl Engine for Fake {
 
     fn exec<'a>(&'a self, id: &'a str, argv: Vec<String>) -> BoxFut<'a, Res<ExecOut>> {
         Box::pin(async move {
+            if argv[0] == "python3" {
+                let cmd = &argv[2];
+                let failed = self.call(format!("hot:{cmd}"));
+                if cmd == "start" && !failed {
+                    let mut s = self.0.lock().unwrap();
+                    let image = if argv[3] == "b".repeat(64) {
+                        s.staged.clone().unwrap()
+                    } else {
+                        old_image()
+                    };
+                    s.containers.get_mut("terrarium").unwrap().image = image;
+                }
+                return Ok(ExecOut {
+                    code: i64::from(failed),
+                    stdout: if cmd == "probe" {
+                        "a".repeat(64)
+                    } else {
+                        String::new()
+                    },
+                    stderr: "control failed".into(),
+                });
+            }
             let what = match (argv[0].as_str(), argv.get(3).map(String::as_str)) {
                 ("terrarium", Some("drain")) => "drain".to_owned(),
                 ("terrarium", Some("resume")) => "resume".to_owned(),
@@ -216,6 +244,34 @@ impl Engine for Fake {
         argv: Vec<String>,
     ) -> BoxFut<'a, Res<ExecOut>> {
         Box::pin(async move {
+            let argv = if argv.first().is_some_and(|s| s == "timeout") {
+                argv[3..].to_vec()
+            } else {
+                argv
+            };
+            if argv[0] == "python3" {
+                let command = &argv[2];
+                self.call(format!("hot:{command}"));
+                if command == "stage" {
+                    self.0.lock().unwrap().staged = Some(image.clone());
+                }
+                return Ok(ExecOut {
+                    stdout: if command == "stage" {
+                        "b".repeat(64)
+                    } else {
+                        String::new()
+                    },
+                    ..Default::default()
+                });
+            }
+            if argv[0] == "/opt/terrarium/bundled/bin/terrariumd" && argv[2] == "create" {
+                let failed = self.call("offline-backup".into());
+                return Ok(ExecOut {
+                    code: i64::from(failed),
+                    stdout: format!(r#"{{"path":"{BACKUP}"}}"#),
+                    ..Default::default()
+                });
+            }
             let failed = self.call(format!("restore {} {}", image.reference, argv[3]));
             Ok(ExecOut {
                 code: i64::from(failed),
@@ -323,6 +379,140 @@ fn rig() -> Rig {
     rig_with("gh", true)
 }
 
+#[tokio::test]
+async fn hot_swap_keeps_container_and_commits_only_after_health() {
+    let r = rig();
+    r.fake.0.lock().unwrap().hot = true;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded, "{run:#?}");
+    let calls = r.fake.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("drain") || c.starts_with("remove") || c.starts_with("stop"))
+    );
+    assert_eq!(calls.last().unwrap(), "hot:ready");
+    assert!(
+        calls.iter().position(|c| c == "hot:pause").unwrap()
+            < calls.iter().position(|c| c == "offline-backup").unwrap()
+    );
+    let rollback = r
+        .updater
+        .run_now(RunKind::Rollback, "previous", "operator")
+        .await;
+    assert_eq!(rollback.outcome, Outcome::Succeeded, "{rollback:#?}");
+    assert!(r.fake.calls().iter().any(|c| c == "stop c0"));
+}
+
+#[tokio::test]
+async fn hot_swap_failed_health_restores_before_old_release_admission() {
+    let r = rig();
+    r.fake.0.lock().unwrap().hot = true;
+    r.fake.fail(&format!("health:{}", new_ref()));
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
+    let calls = r.fake.calls();
+    assert_eq!(calls.iter().filter(|c| *c == "hot:pause").count(), 2);
+    assert_eq!(calls.iter().filter(|c| *c == "hot:commit").count(), 1);
+    assert!(
+        calls
+            .iter()
+            .position(|c| c == "hot:restore-database")
+            .unwrap()
+            < calls.iter().position(|c| c == "hot:commit").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_commit_never_rewinds_the_journal() {
+    let r = rig();
+    r.fake.0.lock().unwrap().hot = true;
+    r.fake.fail("hot:commit");
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Failed);
+    assert!(!r.fake.calls().iter().any(|c| c == "hot:restore-database"));
+    assert_eq!(
+        r.fake.calls().iter().filter(|c| *c == "hot:commit").count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn lost_commit_response_is_retried_without_rewinding() {
+    let r = rig();
+    r.fake.0.lock().unwrap().hot = true;
+    r.fake
+        .0
+        .lock()
+        .unwrap()
+        .fail_once
+        .insert("hot:commit".into());
+    let result = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(result.outcome, Outcome::Succeeded);
+    assert_eq!(
+        r.fake.calls().iter().filter(|c| *c == "hot:commit").count(),
+        2
+    );
+    assert!(!r.fake.calls().iter().any(|c| c == "hot:restore-database"));
+}
+
+#[tokio::test]
+async fn failed_post_commit_activation_reports_failure_without_rewind() {
+    let r = rig();
+    r.fake.0.lock().unwrap().hot = true;
+    r.fake.fail("hot:ready");
+    let result = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(result.outcome, Outcome::Failed);
+    assert!(r.fake.calls().iter().any(|c| c == "hot:commit"));
+    assert!(!r.fake.calls().iter().any(|c| c == "hot:restore-database"));
+}
+
+#[tokio::test]
+async fn failed_pause_is_cancelled_without_switching_or_restoring() {
+    let r = rig();
+    r.fake.0.lock().unwrap().hot = true;
+    r.fake.fail("hot:pause");
+    let result = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(result.outcome, Outcome::Failed);
+    assert!(r.fake.calls().iter().any(|c| c == "hot:cancel-pause"));
+    assert!(
+        !r.fake
+            .calls()
+            .iter()
+            .any(|c| c == "hot:start" || c == "hot:restore-database")
+    );
+}
+
+#[test]
+fn total_hold_budget_reserves_recovery_and_bounds_offline_work() {
+    let now = tokio::time::Instant::now();
+    assert!(budget_left(now + Duration::from_secs(50), HOT_SWAP_RECOVERY_RESERVE).is_err());
+    assert!(bounded_command(vec!["backup".into()], now + Duration::from_secs(4)).is_err());
+    let command = bounded_command(vec!["backup".into()], now + Duration::from_secs(100)).unwrap();
+    assert_eq!(&command[..2], ["timeout", "--kill-after=5"]);
+    assert_eq!(command[3], "backup");
+    assert!(command[2].trim_end_matches('s').parse::<f64>().unwrap() <= 95.0);
+}
+
 fn steps(run: &Run) -> Vec<String> {
     run.steps
         .iter()
@@ -358,6 +548,7 @@ async fn an_update_drains_backs_up_and_switches_the_image() {
             "verify",
             "pull",
             "environment",
+            "hot-swap-eligibility",
             "drain",
             "backup",
             "stop",
@@ -494,6 +685,7 @@ async fn a_failed_drain_or_backup_resumes_the_old_daemon() {
             "verify",
             "pull",
             "environment",
+            "hot-swap-eligibility",
             "drain",
             "!backup",
             "resume"
@@ -603,6 +795,7 @@ async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
             "verify",
             "pull",
             "environment",
+            "hot-swap-eligibility",
             "drain",
             "backup",
             "stop",

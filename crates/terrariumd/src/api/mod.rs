@@ -357,7 +357,30 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
             get(crate::hosts::connect),
         );
     }
-    app.fallback(crate::assets::serve).with_state(state)
+    app.fallback(crate::assets::serve)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            upgrade_probation,
+        ))
+        .with_state(state)
+}
+
+/// A probation daemon serves health/reads, but acknowledges no writes that an
+/// automatic rollback could erase. WebSockets can carry terminal writes too.
+async fn upgrade_probation(State(state): State<Shared>, req: Request, next: Next) -> Response {
+    if state.agent_calls.in_probation()
+        && (!matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+        ) || req.headers().contains_key(header::UPGRADE))
+    {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            Json(serde_json::json!({"error": "upgrade_probation", "message": "upgrade health check in progress; retry after commit"})),
+        ).into_response();
+    }
+    next.run(req).await
 }
 
 /// The routes for the Unix socket.

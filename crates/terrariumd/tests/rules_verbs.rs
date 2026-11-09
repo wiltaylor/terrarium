@@ -193,6 +193,21 @@ rule "close-group" {
   when "data.n" { eq = "4" }
   group_close { key = "batch" comment = "Finished" }
 }
+rule "fail-step" {
+  on = ["test.ping"]
+  when "data.n" { eq = "5" }
+  group_status { key = "batch" step = "{{group.failed_step}}" state = "failed" }
+}
+rule "literal-step" {
+  on = ["test.ping"]
+  when "data.n" { eq = "6" }
+  group_status { key = "batch" step = "" state = "failed" }
+}
+rule "own-step" {
+  on = ["test.ping"]
+  when "data.n" { eq = "7" }
+  group_status { key = "batch" step = "{{event.data.step}}" state = "failed" }
+}
 "#;
 
 const VERSION_CUT: &str = r#"
@@ -686,6 +701,97 @@ async fn group_timeout_closes_once_and_records_comment_and_rule_log() {
     assert!(card(&td, &a).await.get("group").is_none());
 }
 
+/// TER-404: the step placeholder of `group_status` can render empty
+/// (the run's card lost its group before its lane ran, as a red split
+/// re-groups a batch while the per-card lanes of the old verdict still
+/// mark the old group). The action skips, as a key without a group
+/// skips, instead of failing the run.
+#[tokio::test]
+async fn group_status_skips_when_the_step_placeholder_has_no_value() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    // The card leaves the group, which stays open (it is not a merge
+    // group): the key still resolves, only the step is empty.
+    ping(&td, "p", &a, 3).await;
+    settle(&td).await;
+    assert!(card(&td, &a).await.get("group").is_none());
+    let seq = ping(&td, "p", &a, 5).await;
+    settle(&td).await;
+    let fail: Vec<Value> = runs(&td, "p")
+        .await
+        .into_iter()
+        .filter(|r| r["event_seq"] == seq)
+        .collect();
+    assert_eq!(fail.len(), 1, "{fail:#?}");
+    assert_eq!(fail[0]["rule"], "fail-step", "{}", fail[0]);
+    assert_eq!(fail[0]["state"], "noop", "{}", fail[0]);
+    assert!(fail[0]["reason"].is_null(), "{}", fail[0]);
+    assert_eq!(
+        fail[0]["steps"][0]["detail"]["reason"],
+        "the step placeholder has no value (the card has no group)",
+        "{}",
+        fail[0]
+    );
+    // A closed group noops in `groups::step`, which runs before the empty
+    // step is judged: the same placeholder step now skips without the
+    // placeholder reason.
+    ping(&td, "p", &a, 4).await;
+    settle(&td).await;
+    assert!(card(&td, &a).await.get("group").is_none());
+    let seq = ping(&td, "p", &a, 5).await;
+    settle(&td).await;
+    let closed: Vec<Value> = runs(&td, "p")
+        .await
+        .into_iter()
+        .filter(|r| r["event_seq"] == seq)
+        .collect();
+    assert_eq!(closed.len(), 1, "{closed:#?}");
+    assert_eq!(closed[0]["rule"], "fail-step", "{}", closed[0]);
+    assert_eq!(closed[0]["state"], "noop", "{}", closed[0]);
+    assert_eq!(
+        closed[0]["steps"][0]["detail"],
+        json!({"key": "batch"}),
+        "{}",
+        closed[0]
+    );
+}
+
+/// TER-419: only a `{{group.*}}` step placeholder of a run whose card
+/// has no group skips. A literal empty step, and a step of the rule's
+/// own placeholder that renders empty while the card is in the group,
+/// fail the run as invalid.
+#[tokio::test]
+async fn group_status_fails_steps_the_rule_itself_left_empty() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["group"]["total"], 1);
+    for (n, rule) in [(6, "literal-step"), (7, "own-step")] {
+        let seq = ping(&td, "p", &a, n).await;
+        settle(&td).await;
+        let fail: Vec<Value> = runs(&td, "p")
+            .await
+            .into_iter()
+            .filter(|r| r["event_seq"] == seq)
+            .collect();
+        assert_eq!(fail.len(), 1, "{fail:#?}");
+        assert_eq!(fail[0]["rule"], rule, "{}", fail[0]);
+        assert_eq!(fail[0]["state"], "failed", "{}", fail[0]);
+        assert_eq!(
+            fail[0]["steps"][0]["error"], "Invalid: group step name must not be empty",
+            "{}",
+            fail[0]
+        );
+    }
+}
+
 async fn new_card(td: &TestDaemon, project: &str, body: Value) -> String {
     let r = td
         .post(&format!("/api/projects/{project}/cards"), body)
@@ -1176,12 +1282,30 @@ async fn merge_group_failure_tracks_the_phase_that_actually_started() {
     }
 }
 
+/// TER-419: the members sit in `review`, as the delivery flow has them
+/// while a merge job runs. New cards land in `backlog`, and the engine's
+/// 10 s `groups::expire` tick (`reconcile_merge_groups`) removes members
+/// of an open merge group that sit in `ready` or `backlog` — the group
+/// rule applied, yet card a read `group: null` after one settle when the
+/// tick landed between the retry job's lanes and the assertion (merge
+/// job 01M6YVG4NXJQCWH78GX6YM8WNZ). The fix card keeps its place: it is a
+/// repair card (`merge-fix:`), which the reconcile leaves alone.
 #[tokio::test]
 async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
-    let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
-    let b = new_card(&td, "p", json!({"title":"b", "repo":"app"})).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
     let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
@@ -1232,12 +1356,25 @@ async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     assert!(card(&td, &a).await.get("group").is_none());
 }
 
+/// The same setup as the rerun test above: the members (and the manual
+/// fix card) sit in `review`, or the 10 s `groups::expire` reconcile
+/// strips them from the open merge group as `backlog` members.
 #[tokio::test]
 async fn default_merge_group_finds_members_after_a_manual_fix_card() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
-    let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
-    let b = new_card(&td, "p", json!({"title":"b", "repo":"app"})).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
     let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
@@ -1245,7 +1382,12 @@ async fn default_merge_group_finds_members_after_a_manual_fix_card() {
         .unwrap()
         .to_owned();
     fail_job(&td, &job, "red").await;
-    let fix = new_card(&td, "p", json!({"title":"manual fix", "repo":"app"})).await;
+    let fix = new_card(
+        &td,
+        "p",
+        json!({"title":"manual fix", "column":"review", "repo":"app"}),
+    )
+    .await;
     assert!(card(&td, &fix).await.get("group").is_none());
     let retry = store_job(&td, JobKind::Merge, &[&fix, &a, &b]).await;
     settle(&td).await;

@@ -348,7 +348,7 @@ th {
   padding: 0 7px;
   color: var(--muted);
 }
-/* The project tree: a node per project, open to show its pages. */
+/* The project tree: one linked row per project. */
 .tree,
 .tree-group {
   list-style: none;
@@ -380,6 +380,14 @@ th {
 }
 .tree-row.current .tree-name {
   font-weight: 600;
+}
+.tree a.tree-project-link {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
+  color: inherit;
 }
 .tree li[role="treeitem"]:focus-visible > .tree-row,
 .tree div[role="treeitem"]:focus-visible,
@@ -3431,6 +3439,24 @@ pre.spawn-text {
   flex-wrap: wrap;
   gap: 6px 14px;
   margin: 10px 0 12px;
+}
+/* The job-queue strip of the project dashboard (TER-178): the first-attempt
+   pass rate over a window, with the window select at the end of the line. */
+.job-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 14px;
+  margin: 0 0 12px;
+  font-size: 0.85rem;
+}
+.job-strip .job-rate strong {
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+.job-strip .job-window {
+  margin-left: auto;
+  white-space: nowrap;
 }
 .mon-count.ok { color: var(--link); }
 .mon-count.warn { color: var(--warn); }

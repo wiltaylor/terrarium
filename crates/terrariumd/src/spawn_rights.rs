@@ -240,7 +240,7 @@ pub struct SecretGrant {
 /// The grants of one template (TER-88): read from the same row as the
 /// definition that the agent gets, so a later edit of the template does
 /// not mix into it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TemplateGrants {
     /// The template, as the messages name it.
     pub key: String,
