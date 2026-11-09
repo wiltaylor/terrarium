@@ -1934,7 +1934,11 @@ async fn steps(
             config,
         )
         .await?;
-        env.insert("DOCKER_HOST".into(), tunnel.endpoint.clone());
+        // Never `DOCKER_HOST` here: see [`crate::docker_tunnel::ENDPOINT_ENV`].
+        env.insert(
+            crate::docker_tunnel::ENDPOINT_ENV.into(),
+            tunnel.endpoint.clone(),
+        );
         Some(tunnel)
     } else {
         None

@@ -56,8 +56,10 @@ The switch controls only the recipe gate. Whenever merge secrets are configured,
 the daemon resets the VM and opens the tunnel, even if the recipe gate is off.
 The daemon consumes the configured `DOCKER_CI_KEY` and
 `DOCKER_CI_RESET_KEY` references
-from a `delivery:terrarium` run grant. The recipe receives only `DOCKER_HOST`
-for a job-scoped Unix socket, never a key or SSH agent. It runs
+from a `delivery:terrarium` run grant. The recipe receives only
+`TERRARIUM_DOCKER_HOST` for a job-scoped Unix socket, never a key or SSH
+agent; `scripts/docker_ci.py` sets `DOCKER_HOST` from it only when the gate
+is on, and removes both when it is off. It runs
 the full suite with the pinned remote Docker daemon, then explicitly runs
 the ignored lifecycle/workspace and reservation/release tests. A missing
 Docker backend, skipped test, or empty selection fails the gate. Workers
