@@ -2243,6 +2243,11 @@ async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
+    // Wait for the whole flow, not just an idle queue: the rerun job is
+    // made in a second write after the failed end, and the card goes back
+    // to `ready` only after the second failure.
+    b.until_card(&cb, "back from validating", |c| c["column"] == "ready")
+        .await;
     let jobs = b.until_idle().await;
     let mut jobs: Vec<Value> = jobs.iter().filter(|j| j["card"] == cb).cloned().collect();
     jobs.sort_by_key(|j| j["attempt"].as_i64().unwrap_or(0));
@@ -2598,6 +2603,7 @@ while True: time.sleep(1)
                 "TERRARIUM_JOB_ID",
                 "TERRARIUM_JOB_SLOT",
                 "TERRARIUM_HEAD",
+                "TERRARIUM_SLOT_LOCK",
                 "TERRARIUM_BASE",
                 "TERRARIUM_CHANGED_FILES",
                 "PWD",
