@@ -2104,6 +2104,9 @@ async fn merge_secrets(
 }
 
 fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
+    if !delivery.merge_secrets.is_empty() && delivery.docker_ci.is_none() {
+        return Err(ApiError::invalid("merge_secrets requires docker_ci with separate tunnel and reset pins"));
+    }
     if let Some(config) = &delivery.docker_ci {
         for destination in [&config.destination, &config.reset_destination] {
             if destination.is_empty()
@@ -3037,6 +3040,15 @@ mod tests {
             "DOCKER_CI_RESET_KEY".into(),
             "@secret:reset.private_key".into(),
         );
+        assert!(check_merge_refs(&delivery).is_err());
+        delivery.docker_ci = Some(terrarium_core::config::DockerCiDef {
+            destination: "root@vm".into(), port: 2250,
+            known_hosts: "vm ssh-ed25519 test-pin".into(),
+            reset_destination: "reset@host".into(), reset_port: 22,
+            reset_known_hosts: "".into(),
+        });
+        assert!(check_merge_refs(&delivery).is_err());
+        delivery.docker_ci.as_mut().unwrap().reset_known_hosts = "host ssh-ed25519 reset-pin".into();
         assert!(check_merge_refs(&delivery).is_ok());
     }
 

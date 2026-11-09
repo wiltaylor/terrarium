@@ -25,9 +25,11 @@ import importlib.util, json, pathlib, socket, sys, threading, time
 spec = importlib.util.spec_from_file_location('relay', sys.argv[1])
 relay = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(relay)
+directory = sys.argv[2]
+sys.argv = [sys.argv[0], directory, sys.argv[3]]
 base = threading.active_count()
 def exercise():
-    path = pathlib.Path(sys.argv[2]) / 'docker.sock'
+    path = pathlib.Path(directory) / 'docker.sock'
     while not path.exists(): time.sleep(0.01)
     for _ in range(200):
         with socket.socket(socket.AF_UNIX) as client:
@@ -40,7 +42,7 @@ def exercise():
     assert threading.active_count() == base + 2, threading.active_count()
     print(json.dumps({'threads_released': True}), flush=True)
 threading.Thread(target=exercise, daemon=True).start()
-relay.serve(sys.argv[2])
+relay.serve(directory)
 """
             child = subprocess.Popen([sys.executable, "-I", "-u", "-c", probe, str(RELAY), str(directory), "30"],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

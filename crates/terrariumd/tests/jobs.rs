@@ -2370,6 +2370,7 @@ while True: time.sleep(1)
         ("secret-revoked", 0, false),
     ] {
         std::fs::write(fixtures.path().join("status"), status.to_string()).unwrap();
+        let order_before = std::fs::read_to_string(fixtures.path().join("order")).unwrap_or_default().len();
         config["docker_ci"]["reset_known_hosts"] = match status {
             255 => json!("other-host ssh-ed25519 public-test-pin\n"),
             256 => json!("test-host ssh-ed25519 wrong-key\n"),
@@ -2404,7 +2405,16 @@ while True: time.sleep(1)
         if status == 1 {
             assert!(text.contains("reset failed"), "{text}");
         }
-        if status == 175 { assert!(text.contains("lock busy")); }
+        if status == 175 {
+            assert!(text.contains("lock busy"));
+            let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
+            let attempts = &order[order_before..];
+            assert!(!attempts.contains("tunnel"));
+            // Other failed cards may be retried in this queue cycle, but each
+            // job must finish after exactly three busy attempts.
+            assert!(attempts.lines().count() >= 3);
+            assert_eq!(attempts.lines().count() % 3, 0);
+        }
         if expected {
             assert!(text.contains("Full log on target"), "{text}");
             let env: std::collections::BTreeMap<String,String> = serde_json::from_slice(&std::fs::read(&environment).unwrap()).unwrap();
