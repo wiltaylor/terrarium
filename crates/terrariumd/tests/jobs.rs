@@ -1851,10 +1851,19 @@ async fn jobs_keep_to_the_slots_in_order() {
 both_flows!(a_cancel_ends_a_queued_job);
 async fn a_cancel_ends_a_queued_job(flow: &'static str) {
     let lab = lab_flow(1, flow).await;
+    // A work dir of this lab alone. The default `/tmp/terrarium-jobs` is
+    // shared by every daemon on the host, and the two flows of this test
+    // are two daemons of one project: their receives would wipe each
+    // other's `slot-1.bundle` (`rm -f` at the start of the receive step)
+    // and the job would end in the clone step with exit 2, before its
+    // recipe (seen in merge job 01M6Z0AWT2PTTGX20N688FSABA), so no wait
+    // could ever see job 1 run its recipe.
     lab.td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "p-box", "recipe": "sleep 30", "slots": 1}),
+            json!({"target": "p-box", "recipe": "sleep 30", "slots": 1,
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
         )
         .await
         .ok();
