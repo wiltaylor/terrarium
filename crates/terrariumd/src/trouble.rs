@@ -912,7 +912,10 @@ pub async fn observe_remote_heads_from(state: &Shared, cursor: &mut String) {
             break;
         }
         let Ok(read) = tokio::time::timeout_at(deadline, remote_head(state, &card)).await else {
-            tracing::warn!("card branch watch: pass cap reached while reading {}", card.id);
+            tracing::warn!(
+                "card branch watch: pass cap reached while reading {}",
+                card.id
+            );
             break;
         };
         cursor.clone_from(&card.id);
@@ -1431,7 +1434,11 @@ mod tests {
         assert_eq!(ids("P-20"), [range(21, 50), range(10, 13)].concat());
         let first = branch_cards(&c, "").unwrap().remove(0);
         assert_eq!(
-            (first.project.as_str(), first.repo.as_str(), first.branch.as_str()),
+            (
+                first.project.as_str(),
+                first.repo.as_str(),
+                first.branch.as_str()
+            ),
             ("p", "r", "p-10")
         );
     }
