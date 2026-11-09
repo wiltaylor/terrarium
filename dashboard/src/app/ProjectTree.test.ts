@@ -95,7 +95,7 @@ describe("ProjectTree", () => {
     for (const row of rows) {
       expect(row.hasAttribute("aria-expanded")).toBe(false);
       expect(row.querySelector(".tree-chevron")).toBeNull();
-      expect(row.querySelector("a.tree-project-link")?.tabIndex).toBe(-1);
+      expect(row.querySelector<HTMLAnchorElement>("a.tree-project-link")?.tabIndex).toBe(-1);
     }
     expect(el.querySelector('[data-key^="i:"]')).toBeNull();
     expect(el.querySelector('[data-key^="pa:"]')).toBeNull();
