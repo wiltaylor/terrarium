@@ -423,9 +423,7 @@ async fn like_harness_and_source_errors_name_the_cause() {
         login.as_bytes(),
     )
     .unwrap();
-    let hs = id(&td
-        .agent("p", "hs", json!({"subscription": "hsub"}))
-        .await);
+    let hs = id(&td.agent("p", "hs", json!({"subscription": "hsub"})).await);
     state(&td).usage.limits.mark("hsub", None);
     let r = spawn_as(&td, &w, &w, json!({"template": "altcase", "like": "hs"})).await;
     assert_eq!(r.status, 422, "{}", r.body);
