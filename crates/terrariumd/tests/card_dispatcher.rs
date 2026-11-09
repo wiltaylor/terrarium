@@ -202,14 +202,12 @@ async fn a_tie_at_a_page_boundary_does_not_drop_the_tied_card() {
     let td = setup(2, 4, 20).await;
     let mut skips = Vec::new();
     for _ in 0..terrariumd::card_dispatcher::CANDIDATE_PAGE {
-        skips.push(
-            ready_card(&td, json!({"title": "No type label", "column": "ready"})).await,
-        );
+        skips.push(ready_card(&td, json!({"title": "No type label", "column": "ready"})).await);
     }
     let tied = card(&td, "small").await;
     // The eligible card ties with the last skip of the first page, and its
     // id orders after that skip, so it is the first row of the next page.
-    let tied_to = skips[CANDIDATE_PAGE as usize - 1].clone();
+    let tied_to = skips[terrariumd::card_dispatcher::CANDIDATE_PAGE as usize - 1].clone();
     assert!(tied_to < tied, "{tied_to} must order before {tied}");
     let id = tied.clone();
     state(&td)
@@ -217,7 +215,7 @@ async fn a_tie_at_a_page_boundary_does_not_drop_the_tied_card() {
         .write("system", move |t| {
             t.execute(
                 "UPDATE cards SET position = ?2 WHERE id = ?1",
-                rusqlite::params![id, CANDIDATE_PAGE - 1],
+                rusqlite::params![id, terrariumd::card_dispatcher::CANDIDATE_PAGE - 1],
             )?;
             Ok(())
         })
