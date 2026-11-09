@@ -3409,8 +3409,8 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system\|watch\|thread`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
-| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system", "watch", "thread"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. `open` does not count `watch`: a watch waits for an agent. The dashboard badge shows `open`, red when `urgent` is not 0. |
+| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system\|watch\|thread`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. Thread items show only with `kind=thread`: a list with no `kind` leaves them out (TER-466). `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds but `watch` and `thread`). System items show only while they are open; the audit log keeps their history. |
+| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system", "watch", "thread", "thread_urgent", "thread_critical"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. `open` does not count `watch`: a watch waits for an agent. `open`, `urgent`, and `critical` do not count the threads either: `thread` counts the open thread items, `thread_urgent` the ones with an urgent or critical open question, and `thread_critical` the ones with a critical one (TER-466). The dashboard Inbox badge shows `open`, red when `urgent` is not 0; the Threads badge shows `thread`, red when `thread_urgent` is not 0. |
 | `POST /api/inbox/mail/{id}/ack` | `{"reply"?}`, or no body | `200` `{"message", "replies"}`. The mail becomes `read`. With `reply`, the reply goes as `operator` on the thread of the mail to its other participants (§7.2), and the mail becomes `replied`. A message that is not to the operator is `404`. One that is acknowledged already is `409 conflict`. A reply to a system mail that has nobody to answer is `422 invalid`. |
 
 | `POST /api/inbox/asks` | `{"to", "text"?, "question"?}` | `201` `{"message", "watch"}`: the mail (§7) and the new watch. Below. |
@@ -3933,9 +3933,9 @@ a `[Thread:<id>]` turn that ends with a note that the thread tracks; the
 agent's next message makes it `tracking` again, not `waiting_operator`, and
 parks the agent. A question that the agent asks makes it
 `waiting_operator` as usual; the agent's message after the answer puts it
-back into `tracking`. Only the close ends tracking. The dashboard Inbox
-lists these threads on the Threads tab under Tracking, between Open and
-Done.
+back into `tracking`. Only the close ends tracking. The Threads screen of
+the dashboard lists these threads under Open, with a tracking icon
+(TER-466).
 
 **Linked cards** (TER-146, TER-144 D2). A thread tracks cards of any
 project (table `thread_cards`: thread, project, card). The lead links a
@@ -4217,9 +4217,12 @@ thread of the loop guard). It is open while the thread is
 message or a response of the operator makes the thread `waiting_agent`, but
 its open questions still wait for the operator). The Inbox shows every
 thread, without the limit of 200 of the list. The item has `thread`: the thread as
-`GET /api/threads` lists it. `GET /api/inbox?kind=thread` filters them, and
-`/api/inbox/counts` has `thread`. An item is urgent when one of its open
-questions is urgent or critical.
+`GET /api/threads` lists it. Only `GET /api/inbox?kind=thread` lists them:
+the default list and `open` of `/api/inbox/counts` leave them out, because
+the dashboard shows the threads on their own Threads screen (TER-466).
+`/api/inbox/counts` has `thread`, `thread_urgent`, and `thread_critical`
+for its badge. An item is urgent when one of its open questions is urgent
+or critical.
 
 **Delivery.** The operator's messages and responses reach the attached
 agent as turns with TER-92 (`[Thread:<id>] ...`). Until then the agent
@@ -6551,9 +6554,18 @@ The top-level `exclusive` remains the CPU affinity option, independent of each
 GPU claim's `exclusive`. The CLI accepts the array through `reserve new --gpus
 '[...]'`. No MIG partitions are created.
 
-Exclusive GPUs require a managed **ephemeral Docker target**. Native host,
-SSH and vmlab exclusive GPU requests are refused, never granted as unenforced
-exclusive access. Shared claims are supported for native host targets and
+Exclusive GPUs require a managed **ephemeral Docker target**, or a native
+`host` target on a host agent whose `capabilities.native_gpu.enforced` is
+true (the root helper of docs/native-gpu-helper.md, TER-345). On any other
+native host the request is a `409` that gives the helper's reason. SSH and
+vmlab exclusive GPU requests are refused, never granted as unenforced
+exclusive access. On a host with native enforcement, every command of a
+`host` target runs in a device policy with only its reservation's GPUs,
+and a command with no GPU reservation gets no GPU. When the host agent
+stops reporting enforcement while a native exclusive GPU reservation is
+managed on the host, every command of a `host` target on that host is a
+`409` that names the reservation and the reason, until enforcement is
+back or the reservation ended. Shared claims are supported for native host targets and
 managed ephemeral Docker targets. Docker reservations belong to the target,
 not individual agents. SSH and vmlab GPU reservations are unsupported.
 

@@ -1490,8 +1490,12 @@ export interface InboxCounts {
   system: number;
   /** The open watches. Not in `open`: a watch waits for an agent. Absent on an older daemon. */
   watch?: number;
-  /** The open Inbox threads. Absent on an older daemon. */
+  /** The open Inbox threads: the Threads badge. Not in `open`, `urgent`, or `critical` (TER-466). Absent on an older daemon. */
   thread?: number;
+  /** The open threads with an urgent or critical open question. Absent on an older daemon. */
+  thread_urgent?: number;
+  /** The open threads with a critical open question. Absent on an older daemon. */
+  thread_critical?: number;
 }
 
 /** `POST /api/inbox/mail/{id}/ack`: the acknowledged message, and the replies (one for each participant). */

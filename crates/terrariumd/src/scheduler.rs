@@ -215,7 +215,15 @@ where
         .read(move |c| {
             let mut changes = Vec::new();
             let mut still = HashSet::new();
-            for s in schedules::day_starts(c)? {
+            let batch = schedules::day_starts(c)?;
+            if batch.len() >= schedules::DAY_START_BATCH {
+                warn!(
+                    "the start-of-day pass read a full batch of {} day_start schedules: \
+                     the schedules after it are not planned",
+                    schedules::DAY_START_BATCH
+                );
+            }
+            for s in batch {
                 let up = reachable(c, &s);
                 if s.next_run_at.is_some() {
                     if up && schedules::day_start_armed_valid(&s, now)? {

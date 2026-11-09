@@ -194,6 +194,28 @@ pub struct HostCapabilities {
     /// sends none: false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_workspaces: bool,
+    /// Native GPU enforcement through the root helper (TER-345,
+    /// docs/native-gpu-helper.md). An older host agent, or one without the
+    /// helper, sends none: the daemon refuses exclusive GPU reservations
+    /// for native `host` targets on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_gpu: Option<NativeGpuCapability>,
+}
+
+/// What the host agent can do for native GPU enforcement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeGpuCapability {
+    /// The helper answered with the same protocol version and grants the
+    /// `session` right: every native `host` session starts in a device
+    /// policy that allows only its granted GPUs.
+    #[serde(default)]
+    pub enforced: bool,
+    /// The helper protocol version of the host agent.
+    #[serde(default)]
+    pub version: u32,
+    /// Why `enforced` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// What the host agent can do for target displays (docs/host-protocol.md,

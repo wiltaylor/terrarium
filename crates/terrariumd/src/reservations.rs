@@ -212,9 +212,25 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
         if !caps.gpu_reservations {
             return Err(ApiError::conflict("host lacks GPU reservation support"));
         }
-        if r.gpus.iter().any(|g| g.exclusive) && target.def.kind != TargetKind::Docker {
+        if r.gpus.iter().any(|g| g.exclusive)
+            && target.def.kind == TargetKind::Host
+            && !caps.native_gpu.as_ref().is_some_and(|n| n.enforced)
+        {
+            // Native exclusivity needs the root helper on this host (TER-345).
+            let reason = caps
+                .native_gpu
+                .as_ref()
+                .and_then(|n| n.reason.clone())
+                .unwrap_or_else(|| "the host agent has no [native_gpu] helper".into());
+            return Err(ApiError::conflict(format!(
+                "exclusive GPU needs enforced native GPU support on a native host target: {reason}"
+            )));
+        }
+        if r.gpus.iter().any(|g| g.exclusive)
+            && !matches!(target.def.kind, TargetKind::Docker | TargetKind::Host)
+        {
             return Err(ApiError::invalid(
-                "exclusive GPU needs a managed ephemeral Docker target; native host, SSH and vmlab cannot enforce exclusive access",
+                "exclusive GPU needs a managed ephemeral Docker target or a native host target with enforced native GPU support; SSH and vmlab cannot enforce exclusive access",
             ));
         }
         if target.def.kind == TargetKind::Docker
@@ -1145,6 +1161,7 @@ pub fn exec_budget(
         let agent = holder.and_then(|h| agents::find(c, h, None).ok()).map(|a| a.agent.id.to_string());
         let rows = store::list(c, host)?;
         gpu_path_admission(def, &rows)?;
+        native_gpu_admission(state, c, host, def, &rows)?;
         let exclusive = rows.iter().any(|r| managed(r) && r.exclusive);
         if exclusive && (!matches!(def.kind, TargetKind::Host | TargetKind::Docker)
             || (def.kind == TargetKind::Docker && def.image.is_none())) {
@@ -1159,19 +1176,67 @@ pub fn exec_budget(
                 return Ok(None);
             }
             let limits = budget(&r)?;
+            // The grant of a native session (TER-345). The executor drops it
+            // unless the host agent enforces native GPU access.
+            let native_gpu = Some(terrarium_host::protocol::NativeGpu {
+                lease: Some(r.id.clone()),
+                exclusive: r.gpus.iter().filter(|g| g.exclusive).map(|g| g.uuid.clone()).collect(),
+            });
             return Ok(Some(terrarium_host::protocol::ExecLimits {
                 target: scope(&r, if matches!(r.holder, Holder::Agent(_)) { "_reservation" } else { &def.name }),
-                holder: holder.unwrap_or("operator").into(), limits: limits.limits, reservation: Some(limits),
+                holder: holder.unwrap_or("operator").into(), limits: limits.limits, reservation: Some(limits), native_gpu,
             }));
         }
         if exclusive && def.kind == TargetKind::Host {
             // Even an otherwise unlimited command must enter terrarium.slice,
             // whose AllowedCPUs excludes every exclusive allocation.
             let limits = def.limits.as_ref().map(|l| l.resolve()).transpose().map_err(ApiError::invalid)?.unwrap_or_default();
-            return Ok(Some(terrarium_host::protocol::ExecLimits { target: def.name.clone(), holder: holder.unwrap_or("operator").into(), limits, reservation: None }));
+            return Ok(Some(terrarium_host::protocol::ExecLimits { target: def.name.clone(), holder: holder.unwrap_or("operator").into(), limits, reservation: None, native_gpu: None }));
         }
         Ok(None)
     })
+}
+
+/// Fail closed when native enforcement is lost (TER-345): while a managed
+/// exclusive GPU reservation of a native `host` target is on the host and
+/// its host agent does not report enforced native GPU support (the helper
+/// is down, has another version, `[native_gpu]` is off, or the agent is
+/// older), every `host` target command on that host is refused. Any native
+/// process there could open the reserved GPU without a device policy.
+fn native_gpu_admission(
+    state: &Shared,
+    c: &rusqlite::Connection,
+    host: &str,
+    def: &TargetDef,
+    rows: &[Reservation],
+) -> ApiResult<()> {
+    if def.kind != TargetKind::Host {
+        return Ok(());
+    }
+    let native = state
+        .executor
+        .hosts
+        .capabilities(host)
+        .and_then(|caps| caps.native_gpu);
+    if native.as_ref().is_some_and(|n| n.enforced) {
+        return Ok(());
+    }
+    for r in rows
+        .iter()
+        .filter(|r| managed(r) && r.gpus.iter().any(|g| g.exclusive))
+    {
+        if targets::get(c, &r.target).is_ok_and(|t| t.def.kind == TargetKind::Host) {
+            let reason = native
+                .as_ref()
+                .and_then(|n| n.reason.clone())
+                .unwrap_or_else(|| "the host agent sends no native GPU capability".into());
+            return Err(ApiError::conflict(format!(
+                "exclusive GPU reservation {} of native target {} needs enforced native GPU support, and the host agent of {host} does not report it now ({reason}); host-target commands on this host are refused until it does",
+                r.id, r.target
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn gpu_path_admission(def: &TargetDef, rows: &[Reservation]) -> ApiResult<()> {

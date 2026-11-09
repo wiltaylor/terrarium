@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import app from "./App.tsx?raw";
 import layout from "./Layout.tsx?raw";
-import { BOARD_TABS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_TABS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
+import { BOARD_TABS, inboxRedirect, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_TABS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
 
 describe("navigation", () => {
   it("has no Spend item; the project has Logs, not Inbox or Mail, with a route", () => {
@@ -15,7 +15,7 @@ describe("navigation", () => {
 
   it("has one Logs item where Mail was, and the logs screen has the tabs Mail, Events, Audit, each with a route", () => {
     const hrefs = TOP_ITEMS.map((i) => i.href) as string[];
-    expect(hrefs.indexOf("/logs")).toBe(hrefs.indexOf("/inbox") + 1);
+    expect(hrefs.indexOf("/logs")).toBe(hrefs.indexOf("/threads") + 1);
     expect(TOP_ITEMS.find((i) => i.href === "/logs")?.label).toBe("Logs");
     for (const gone of ["/mail", "/events", "/audit"]) expect(hrefs).not.toContain(gone);
     expect(LOGS_TABS.map((t) => t.label)).toEqual(["Mail", "Events", "Audit"]);
@@ -118,8 +118,8 @@ describe("navigation", () => {
     expect(BOARD_TABS.map((t) => t.path)).toContain("schedules");
   });
 
-  it("has Home, Inbox, Logs, Schedules, then Calendar above the project tree, with a route, and no Questions item", () => {
-    expect(TOP_ITEMS.map((i) => i.href)).toEqual(["/", "/inbox", "/logs", "/schedules", "/calendar"]);
+  it("has Home, Inbox, Threads, Logs, Schedules, then Calendar above the project tree, with a route, and no Questions item", () => {
+    expect(TOP_ITEMS.map((i) => i.href)).toEqual(["/", "/inbox", "/threads", "/logs", "/schedules", "/calendar"]);
     expect(TOP_ITEMS.find((i) => i.href === "/inbox")?.label).toBe("Inbox");
     expect(TOP_ITEMS.map((i) => i.href)).not.toContain("/questions");
     expect(app).toMatch(/path="\/inbox" component=\{InboxPage\}/);
@@ -246,6 +246,7 @@ describe("navigation", () => {
       "/skills",
       "/skills/:name",
       "/targets",
+      "/inbox/threads/:id",
     ]);
   });
 
@@ -368,5 +369,28 @@ describe("navigation", () => {
     expect(app).not.toMatch(/SpendPage|features\/spend/);
     // The route answers with the redirect, not with "Page not found".
     expect(app).toMatch(/MOVED_ROUTES/);
+  });
+
+  it("has a Threads item below Inbox with its own badge, and the Threads routes (TER-466)", () => {
+    const hrefs = TOP_ITEMS.map((i) => i.href) as string[];
+    expect(hrefs.indexOf("/threads")).toBe(hrefs.indexOf("/inbox") + 1);
+    expect(TOP_ITEMS.find((i) => i.href === "/threads")?.label).toBe("Threads");
+    expect(app).toMatch(/path="\/threads" component=\{ThreadsPage\}/);
+    expect(app).toMatch(/path="\/threads\/:id" component=\{ThreadPage\}/);
+    expect(app).not.toMatch(/path="\/inbox\/threads\/:id" component=/);
+    expect(layout).toContain("threadsBadge(inbox.counts())");
+  });
+
+  it("redirects the old thread paths and the Threads tab of the Inbox to the Threads screen (TER-466)", () => {
+    expect(movedTo("/inbox/threads/01M7ABC")).toBe("/threads/01M7ABC");
+    expect(movedTo("/inbox/threads/01M7ABC/")).toBe("/threads/01M7ABC");
+    expect(movedTo("/threads/01M7ABC")).toBeUndefined();
+    expect(movedTo("/inbox")).toBeUndefined();
+    expect(inboxRedirect("?tab=thread")).toBe("/threads");
+    expect(inboxRedirect("tab=thread&project=web")).toBe("/threads?project=web");
+    expect(inboxRedirect("?tab=thread&status=done&project=web")).toBe("/threads?status=archived&project=web");
+    expect(inboxRedirect("?tab=thread&status=tracking")).toBe("/threads");
+    expect(inboxRedirect("")).toBeUndefined();
+    expect(inboxRedirect("?tab=question&status=done")).toBeUndefined();
   });
 });

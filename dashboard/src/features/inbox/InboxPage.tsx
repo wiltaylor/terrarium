@@ -1,10 +1,11 @@
 // The Inbox: everything that waits for the operator (`GET /api/inbox`).
-// Questions, bundles of questions, and notices of the leaders, mail to `operator`, threads that
-// the loop guard paused, and Inbox threads (docs/api.md §6.13). Tabs pick the kind and Open or Done; the project
+// Questions, bundles of questions, and notices of the leaders, mail to `operator`, and threads that
+// the loop guard paused. Tabs pick the kind and Open or Done; the project
 // filter picks one project. `inbox` and `question` events read the list again.
-// The Threads tab lists the Inbox threads themselves (`GET /api/threads`).
+// The Inbox threads (docs/api.md §6.13) have their own Threads screen (TER-466): an old
+// `?tab=thread` link redirects there.
 
-import { A, useNavigate, useSearchParams } from "@solidjs/router";
+import { A, Navigate, useLocation, useSearchParams } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";
@@ -13,15 +14,12 @@ import { api, events, inbox, projects } from "../../stores";
 import { MailItemCard, PausedThreadCard, WatchCard } from "./cards";
 import { AskDialog } from "./AskDialog";
 import { MessageDialog } from "./MessageDialog";
-import { canForward, emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, statusTabOf, statusTabsFor, threadsViewOf, type InboxStatusTab, type InboxTab } from "./model";
+import { canForward, emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, statusTabOf, type InboxStatusTab, type InboxTab } from "./model";
+import { inboxRedirect } from "../../app/nav";
 import { questionItemId } from "./questions";
 import { inboxItemDomId } from "./critical";
 import { BundleCard } from "./BundleCard";
 import { QuestionCard } from "./QuestionCard";
-import { NewThreadDialog } from "./NewThreadDialog";
-import { ThreadRow } from "./ThreadRow";
-import { ThreadsView } from "./ThreadsView";
-import { threadHref } from "./threads";
 import { byInboxOrder } from "./model";
 
 const TAB_IDS = INBOX_TABS.map((t) => t.id) as string[];
@@ -29,7 +27,17 @@ const PAGE_SIZE = 40;
 const FETCH_SIZE = 200;
 const cursorOf = (i: InboxItem) => JSON.stringify([i.open, !!i.critical, i.urgent, i.at, i.id]);
 
+/** The Inbox, or the redirect of an old `?tab=thread` link to the Threads screen. */
 export default function InboxPage() {
+  const location = useLocation();
+  return (
+    <Show when={inboxRedirect(location.search)} fallback={<InboxScreen />}>
+      {(to) => <Navigate href={to()} />}
+    </Show>
+  );
+}
+
+function InboxScreen() {
   const now = useNow(30_000);
   const [params, setParams] = useSearchParams<{ tab?: string; status?: string; project?: string; item?: string }>();
   // `?tab=watch` (the Asked kind tab of 0.1.0) opens the Asked status tab, or Done with the asks.
@@ -37,10 +45,6 @@ export default function InboxPage() {
   const tab = (): InboxTab => (TAB_IDS.includes(params.tab ?? "") ? (params.tab as InboxTab) : params.tab === "watch" && status() === "done" ? "watch" : "all");
   const project = () => params.project ?? "";
   const keep = (i: InboxItem) => matchesTabs(i, tab(), status(), project());
-  /** The Threads tab lists the threads (`GET /api/threads`), not the Inbox items. */
-  const threadsTab = () => tab() === "thread" && status() !== "asked";
-  const navigate = useNavigate();
-  const [newThread, setNewThread] = createSignal(false);
 
   // The items in a store, reconciled by `id` (TER-40): a reload after an
   // inbox event keeps the object, and so the DOM and the local state of
@@ -79,7 +83,6 @@ export default function InboxPage() {
   let gen = 0;
   const reload = async (append = false) => {
     const mine = ++gen;
-    if (threadsTab()) return;
     setLoading(true);
     try {
       const boundary = append ? undefined : list().at(-1);
@@ -204,9 +207,6 @@ export default function InboxPage() {
           </For>
         </select>
         <button onClick={() => void reload()}>Refresh</button>
-        <button onClick={() => setNewThread(true)} title="A conversation with one agent on one topic, with its questions inline">
-          New thread
-        </button>
         <button onClick={() => setMessaging(true)} title="Send one mail to an agent; nothing waits for an answer">
           Message an agent
         </button>
@@ -217,12 +217,12 @@ export default function InboxPage() {
       <p class="muted small" style={{ margin: 0 }}>
         Everything that waits for you. Leader agents ask questions and send notices with <code>terrarium question</code>. Agents and the daemon send you
         mail. The loop guard pauses a thread when agents write too many messages to each other. Ask an agent, or forward a question to one: the Asked tab
-        waits for its answer. A thread is a conversation with one agent on one topic. The text of each item is the sender's own words.
+        waits for its answer. Your conversations with agents are on the <A href="/threads">Threads</A> screen. The text of each item is the sender's own words.
       </p>
       <Show when={status() !== "asked"}>
         <Tabs tabs={INBOX_TABS} active={tab()} onChange={(t) => setParams({ tab: t === "all" ? undefined : t })} />
       </Show>
-      <Tabs tabs={statusTabsFor(tab())} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s, tab: params.tab === "watch" ? undefined : params.tab })} />
+      <Tabs tabs={STATUS_TABS} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s, tab: params.tab === "watch" ? undefined : params.tab })} />
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
       <Show when={sent()}>
         {(s) => (
@@ -236,10 +236,7 @@ export default function InboxPage() {
           {notice()}
         </p>
       </Show>
-      <Show when={threadsTab()}>
-        <ThreadsView view={threadsViewOf(status())} project={project()} now={now()} />
-      </Show>
-      <Show when={!threadsTab() && list().length} fallback={<Show when={!threadsTab()}><Empty>{loading() ? "Loading…" : emptyText(tab(), status())}</Empty></Show>}>
+      <Show when={list().length} fallback={<Empty>{loading() ? "Loading…" : emptyText(tab(), status())}</Empty>}>
         <div class="stack" ref={listEl}>
           <For each={visible()}>
             {(item) => (
@@ -269,7 +266,6 @@ export default function InboxPage() {
                   </Match>
                   <Match when={item.system}>{(s) => <PausedThreadCard system={s()} onChange={systemChanged} />}</Match>
                   <Match when={item.kind === "watch" && item.watch}>{(w) => <WatchCard watch={w()} now={now()} onChange={(next) => watchChanged(item, next)} />}</Match>
-                  <Match when={item.kind === "thread" && item.thread}>{(t) => <ThreadRow thread={t()} now={now()} onChange={systemChanged} />}</Match>
                 </Switch>
               </div>
             )}
@@ -280,16 +276,6 @@ export default function InboxPage() {
             Load more
           </button>
         </Show>
-      </Show>
-      <Show when={newThread()}>
-        <NewThreadDialog
-          scope={project() || undefined}
-          onClose={() => setNewThread(false)}
-          onOpened={(t) => {
-            setNewThread(false);
-            navigate(threadHref(t.id));
-          }}
-        />
       </Show>
       <Show when={messaging()}>
         <MessageDialog onClose={() => setMessaging(false)} onSent={messaged} />

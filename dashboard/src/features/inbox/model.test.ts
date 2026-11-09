@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { InboxItem, InboxWatch } from "../../api/types";
-import { answerLine, ASK_TEXT_MAX, askBody, badge, canForward, countItems, EMPTY_COUNTS, emptyText, INBOX_TABS, inboxQuery, isCritical, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, statusTabOf, statusTabsFor, systemMailLink, threadsViewOf, watchState, watchTitle } from "./model";
+import { answerLine, ASK_TEXT_MAX, askBody, badge, canForward, countItems, EMPTY_COUNTS, emptyText, INBOX_TABS, inboxQuery, isCritical, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, statusTabOf, systemMailLink, watchState, watchTitle } from "./model";
 
 const item = (id: string, over: Partial<InboxItem> = {}): InboxItem => ({
   id,
@@ -83,10 +83,17 @@ describe("inbox model", () => {
       item("s", { kind: "system" }),
       item("done", { open: false, kind: "mail" }),
     ]);
-    expect(c).toEqual({ open: 5, urgent: 1, critical: 0, question: 2, notice: 1, mail: 1, system: 1, watch: 0, thread: 0 });
+    expect(c).toEqual({ open: 5, urgent: 1, critical: 0, question: 2, notice: 1, mail: 1, system: 1, watch: 0, thread: 0, thread_urgent: 0, thread_critical: 0 });
     expect(badge(c)).toEqual({ n: 5, cls: "nav-count", title: "Waiting for you: 2 question, 1 notice, 1 mail, 1 paused thread. 1 urgent" });
     expect(badge({ ...c, urgent: 0 })!.cls).toBe("nav-count info");
     expect(badge(EMPTY_COUNTS)).toBeNull();
+  });
+
+  it("leaves the threads out of the Inbox badge: they count for the Threads badge (TER-466)", () => {
+    const c = countItems([item("m", { kind: "mail" }), item("t1", { kind: "thread", urgent: true }), item("t2", { kind: "thread", urgent: true, critical: true }), item("t3", { kind: "thread", open: false })]);
+    expect(c).toMatchObject({ open: 1, urgent: 0, critical: 0, thread: 2, thread_urgent: 2, thread_critical: 1 });
+    expect(badge(c)).toEqual({ n: 1, cls: "nav-count info", title: "Waiting for you: 1 mail" });
+    expect(badge({ ...EMPTY_COUNTS, thread: 3, thread_urgent: 1 })).toBeNull();
   });
 
   it("follows inbox and question events, and says why a list is empty", () => {
@@ -116,7 +123,6 @@ describe("ask and forward (GitHub #24)", () => {
   const watchItem = (over: Partial<InboxItem> = {}): InboxItem => ({ id: "watch:T1", kind: "watch", open: true, urgent: false, critical: false, project: "demo", at: "2026-11-05T10:00:00Z", watch: watch(), ...over });
 
   it("has an Asked status tab next to Done that lists only the waiting asks (TER-42)", () => {
-    expect(statusTabsFor("all").map((t) => t.id)).toEqual(["open", "done", "asked"]);
     expect(STATUS_TABS.find((t) => t.id === "asked")!.label).toBe("Asked");
     expect(INBOX_TABS.map((t) => t.id as string)).not.toContain("watch");
     // The query: the open watches, whatever the kind tab.
@@ -137,20 +143,11 @@ describe("ask and forward (GitHub #24)", () => {
     expect(emptyText("all", "asked")).toContain("Ask an agent");
   });
 
-  it("has a Tracking status tab between Open and Done, only on the Threads tab (TER-145)", () => {
-    expect(STATUS_TABS.map((t) => t.id)).toEqual(["open", "tracking", "done", "asked"]);
-    expect(STATUS_TABS.find((t) => t.id === "tracking")!.label).toBe("Tracking");
-    expect(statusTabsFor("thread").map((t) => t.id)).toEqual(["open", "tracking", "done", "asked"]);
-    for (const tab of ["all", "question", "notice", "mail", "system", undefined]) expect(statusTabsFor(tab).map((t) => t.id)).not.toContain("tracking");
-    expect(statusTabOf("tracking", "thread")).toBe("tracking");
-    // Another kind tab has no Tracking: Open.
-    expect(statusTabOf("tracking", "question")).toBe("open");
+  it("has no Threads tab and no Tracking tab: the threads have their own screen (TER-466)", () => {
+    expect(INBOX_TABS.map((t) => t.id as string)).not.toContain("thread");
+    expect(STATUS_TABS.map((t) => t.id)).toEqual(["open", "done", "asked"]);
+    expect(statusTabOf("tracking", "thread")).toBe("open");
     expect(statusTabOf("tracking", undefined)).toBe("open");
-    expect(threadsViewOf("open")).toBe("open");
-    expect(threadsViewOf("tracking")).toBe("tracking");
-    expect(threadsViewOf("done")).toBe("done");
-    // As Inbox items, tracking threads are not open.
-    expect(inboxQuery("thread", "tracking", "p")).toEqual({ status: "done", kind: "thread", project: "p" });
   });
 
   it("opens Asked for an old ?tab=watch link", () => {

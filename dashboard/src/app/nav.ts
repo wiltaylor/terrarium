@@ -60,6 +60,8 @@ export const TOP_ITEMS = [
   { href: "/", label: "Home", end: true },
   // Everything that waits for the operator; the badge counts the open items.
   { href: "/inbox", label: "Inbox" },
+  // The Inbox threads (TER-466): a forum table; the badge counts the threads that wait on you.
+  { href: "/threads", label: "Threads" },
   // The logs screen (LOGS_TABS): mail, events, and audit. Active on every /logs/... tab.
   { href: "/logs", label: "Logs" },
   { href: "/schedules", label: "Schedules" },
@@ -156,6 +158,9 @@ export const PROJECT_LOGS_TABS = [
  *   settings screen. A bookmark can have an old path, and a link can have a
  *   query (`/targets?project=...`), so the old paths stay as redirects. The
  *   skill redirect keeps the skill name.
+ * - The Inbox threads have their own Threads screen (TER-466): a thread
+ *   opens at `/threads/:id`. The Threads tab of the Inbox is gone: see
+ *   {@link inboxRedirect}.
  */
 export const MOVED_ROUTES = [
   { path: "/p/:project/spend", to: "/" },
@@ -192,6 +197,7 @@ export const MOVED_ROUTES = [
   { path: "/skills", to: "/settings/skills" },
   { path: "/skills/:name", to: "/settings/skills/:name" },
   { path: "/targets", to: "/settings/targets" },
+  { path: "/inbox/threads/:id", to: "/threads/:id" },
 ] as const;
 
 /**
@@ -230,4 +236,21 @@ export function movedTo(pathname: string): string | undefined {
     );
   }
   return undefined;
+}
+
+/**
+ * The Threads tab of the Inbox moved to the Threads screen (TER-466): the
+ * `/threads` target of an Inbox query with `tab=thread`, else undefined. The
+ * project filter goes along. The old Done tab is the Archived filter; the old
+ * Tracking tab is in Open.
+ */
+export function inboxRedirect(search: string): string | undefined {
+  const q = new URLSearchParams(search.replace(/^\?/, ""));
+  if (q.get("tab") !== "thread") return undefined;
+  const next = new URLSearchParams();
+  if (q.get("status") === "done") next.set("status", "archived");
+  const project = q.get("project");
+  if (project) next.set("project", project);
+  const rest = next.toString();
+  return rest ? `/threads?${rest}` : "/threads";
 }
