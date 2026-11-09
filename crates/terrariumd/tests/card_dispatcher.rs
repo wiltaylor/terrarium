@@ -147,9 +147,11 @@ async fn review_held_cards_cannot_starve_the_candidate_list() {
         .await
         .ok();
     }
-    assert!(!terrariumd::review_dispatcher::dispatch(&state(&td), "p")
-        .await
-        .unwrap());
+    assert!(
+        !terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+            .await
+            .unwrap()
+    );
     let free = card(&td, "small").await;
     td.post(
         &format!("/api/cards/{free}/move"),
@@ -157,9 +159,11 @@ async fn review_held_cards_cannot_starve_the_candidate_list() {
     )
     .await
     .ok();
-    assert!(terrariumd::review_dispatcher::dispatch(&state(&td), "p")
-        .await
-        .unwrap());
+    assert!(
+        terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+            .await
+            .unwrap()
+    );
     let key = free.clone();
     let picked: String = state(&td)
         .db
@@ -175,9 +179,11 @@ async fn review_owner_error_keeps_the_verdict_and_records_the_reason() {
     // the reviewer's comment: the findings stay on the card.
     for broken in ["demoted", "deleted"] {
         let (td, id) = review_setup().await;
-        assert!(terrariumd::review_dispatcher::dispatch(&state(&td), "p")
-            .await
-            .unwrap());
+        assert!(
+            terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+                .await
+                .unwrap()
+        );
         let agent = reviewer(&td, &id).await;
         if broken == "demoted" {
             let lead = lead_id(&td).await;
@@ -214,14 +220,10 @@ async fn review_owner_error_keeps_the_verdict_and_records_the_reason() {
             c["comments"]
         );
         assert!(
-            c["comments"]
-                .as_array()
+            c["comments"].as_array().unwrap().iter().any(|x| x["body"]
+                .as_str()
                 .unwrap()
-                .iter()
-                .any(|x| x["body"]
-                    .as_str()
-                    .unwrap()
-                    .contains("review dispatcher owner is no longer valid")),
+                .contains("review dispatcher owner is no longer valid")),
             "{broken}: {}",
             c["comments"]
         );
