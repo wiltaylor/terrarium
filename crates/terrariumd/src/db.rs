@@ -3473,7 +3473,11 @@ mod tests {
             .iter()
             .map(|(n, sql)| ((*n).to_owned(), (*sql).to_owned()))
             .collect();
-        assert!(compiled.iter().any(|(n, _)| n == "ter-249-resource-reservations.sql"));
+        assert!(
+            compiled
+                .iter()
+                .any(|(n, _)| n == "ter-249-resource-reservations.sql")
+        );
         assert_eq!(compiled, on_disk);
     }
 
