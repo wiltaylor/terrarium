@@ -3062,7 +3062,8 @@ case "$1" in
   inspect) echo '[{"Id":"abc","Name":"/terrarium-p-dbox","State":{"Status":"running"}}]' ;;
   run) echo abc ;;
   exec) shift
-    while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;; *) break ;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;;
+      --env-file) while IFS= read -r l; do export "$l"; done < "$2"; shift 2 ;; *) break ;; esac; done
     shift
     # Recovery tests can hold kills before execution, rather than race
     # the five-second TERM grace on a loaded host.
