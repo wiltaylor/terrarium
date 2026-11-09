@@ -1406,7 +1406,10 @@ pub fn script_actions(output: &str, ctx: &Context) -> Result<Vec<Action>, String
                 _ => p.message.clone(),
             })
             .collect();
-        format!("the script output is not verb blocks: {}", problems.join("; "))
+        format!(
+            "the script output is not verb blocks: {}",
+            problems.join("; ")
+        )
     })?;
     let [rule] = set.rules.as_slice() else {
         return Err("the script output holds a rule; it holds verb blocks only".into());
@@ -1537,10 +1540,19 @@ mod tests {
             ("card_comment { text = \"{{nope}}\" }", "line 1"),
             ("card_move { to = 3 }", "not verb blocks"),
             ("let x = 1", "not verb blocks"),
-            ("}\nrule \"two\" {\n on = [\"x\"]\n card_comment { text = \"t\" }", "not verb blocks"),
-            ("when \"kind\" { eq = \"x\" }\ncard_comment { text = \"t\" }", "verb blocks only"),
+            (
+                "}\nrule \"two\" {\n on = [\"x\"]\n card_comment { text = \"t\" }",
+                "not verb blocks",
+            ),
+            (
+                "when \"kind\" { eq = \"x\" }\ncard_comment { text = \"t\" }",
+                "verb blocks only",
+            ),
             ("enabled = false", "verb blocks only"),
-            ("description = \"d\"\ncard_comment { text = \"t\" }", "verb blocks only"),
+            (
+                "description = \"d\"\ncard_comment { text = \"t\" }",
+                "verb blocks only",
+            ),
             ("script { source = \"x\" }", "cannot return a script step"),
             ("card_comment { text = 1 2 }", "not verb blocks"),
         ];

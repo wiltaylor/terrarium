@@ -195,23 +195,19 @@ async fn a_failing_script_fails_its_run_and_not_the_daemon() {
     let td = TestDaemon::start().await;
     td.project("sf").await;
     let rules = [
-        failing("fuel", 10_000, "fn main() -> string {\n  loop { }\n  \"\"\n}"),
+        failing(
+            "fuel",
+            10_000,
+            "fn main() -> string {\n  loop { }\n  \"\"\n}",
+        ),
         // A string that doubles: about 30 rounds reach the memory limit.
         failing(
             "memory",
             10_000_000,
             "fn main() -> string {\n  let s = \"xxxxxxxx\"\n  loop {\n    s = s + s\n  }\n  s\n}",
         ),
-        failing(
-            "compile",
-            10_000,
-            "use fs\nfn main() -> string { \"\" }",
-        ),
-        failing(
-            "output",
-            10_000,
-            "fn main() -> string { \"rule {{ }}\" }",
-        ),
+        failing("compile", 10_000, "use fs\nfn main() -> string { \"\" }"),
+        failing("output", 10_000, "fn main() -> string { \"rule {{ }}\" }"),
         failing(
             "column",
             10_000,
@@ -237,7 +233,10 @@ async fn a_failing_script_fails_its_run_and_not_the_daemon() {
     };
     for rule in ["fuel", "memory", "compile", "output", "column"] {
         let why = reason(rule);
-        assert!(why.starts_with("action 1 (script.run) failed: "), "{rule}: {why}");
+        assert!(
+            why.starts_with("action 1 (script.run) failed: "),
+            "{rule}: {why}"
+        );
     }
     assert!(reason("fuel").contains("fuel"), "{}", reason("fuel"));
     let mem = reason("memory");
@@ -248,7 +247,9 @@ async fn a_failing_script_fails_its_run_and_not_the_daemon() {
 
     // The daemon still runs rules.
     let ok = "rule \"ok\" {\n  on = [\"test.ping\"]\n  card_comment { text = \"alive\" }\n}\n";
-    td.put("/api/projects/sf/rules", json!({"text": ok})).await.ok();
+    td.put("/api/projects/sf/rules", json!({"text": ok}))
+        .await
+        .ok();
     settle(&td).await;
     ping(&td, "sf", &card, 2).await;
     settle(&td).await;
@@ -343,8 +344,15 @@ async fn the_dry_run_runs_the_script_and_writes_nothing() {
         .clone();
     let plan = &body["plans"][0];
     assert_eq!(plan["outcome"], "failed", "{plan:?}");
-    assert!(plan["reason"].as_str().unwrap().contains("fuel"), "{plan:?}");
+    assert!(
+        plan["reason"].as_str().unwrap().contains("fuel"),
+        "{plan:?}"
+    );
     assert_eq!(plan["actions"].as_array().unwrap().len(), 1, "{plan:?}");
 
-    assert_eq!(comments(&td, &card).await, before, "the dry run wrote nothing");
+    assert_eq!(
+        comments(&td, &card).await,
+        before,
+        "the dry run wrote nothing"
+    );
 }

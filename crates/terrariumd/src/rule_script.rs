@@ -186,15 +186,19 @@ impl Reply {
 /// The line (1-based) of byte `offset` of `source`.
 fn line_of(source: &str, offset: u32) -> usize {
     let at = (offset as usize).min(source.len());
-    source.as_bytes()[..at].iter().filter(|b| **b == b'\n').count() + 1
+    source.as_bytes()[..at]
+        .iter()
+        .filter(|b| **b == b'\n')
+        .count()
+        + 1
 }
 
 /// The module `rule` of a script: the view, read-only.
 fn rule_module(input: &Arc<Input>) -> Module {
     let mut m = Module::new("rule");
     let view = Arc::clone(input);
-    m.fn_named("get", &["name"], move |name: &str| view.get(name));
-    m.fn_named("quote", &["text"], |text: &str| rules_tools::quote(text));
+    m.fn_named("get", ["name"], move |name: &str| view.get(name));
+    m.fn_named("quote", ["text"], |text: &str| rules_tools::quote(text));
     m
 }
 
@@ -512,9 +516,7 @@ fn main() -> string {
     #[test]
     fn the_stdlib_modules_are_not_there() {
         for m in ["fs", "process", "json", "env", "math"] {
-            let r = execute(input(&format!(
-                "use {m}\nfn main() -> string {{ \"\" }}"
-            )));
+            let r = execute(input(&format!("use {m}\nfn main() -> string {{ \"\" }}")));
             let e = r.error.unwrap_or_default();
             assert!(e.contains("does not compile"), "{m}: {e}");
         }

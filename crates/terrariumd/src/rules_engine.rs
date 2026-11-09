@@ -1603,7 +1603,13 @@ fn record_script(
     };
     let at = usize::try_from(step).unwrap_or(usize::MAX);
     if rule.actions.get(at).map(|a| a.verb.as_str()) != Some(rules_file::SCRIPT_VERB) {
-        fail_run(t, id, step, rules_file::SCRIPT_VERB, "the step is not a script")?;
+        fail_run(
+            t,
+            id,
+            step,
+            rules_file::SCRIPT_VERB,
+            "the step is not a script",
+        )?;
         return Ok(false);
     }
     let (actions, fuel_used) = match result {
