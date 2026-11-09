@@ -75,7 +75,7 @@ push() {
   local file=$1 name=$2 commit=$3
   shift 3
   local have
-  have=$(tj test ls --name "$name" | json "sum(1 for r in d if r.get('commit') == '$commit')")
+  have=$(tj test ls --all --name "$name" | json "sum(1 for r in d if r.get('commit') == '$commit')")
   if [ "$have" != "0" ]; then
     echo "run $name ($commit) exists: skip it"
     return
