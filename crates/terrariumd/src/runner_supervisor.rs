@@ -4556,15 +4556,9 @@ impl Supervisor for RunnerSupervisor {
                     // The API persists NotRunning turns for the next wake.
                     return Err(SupervisorError::NotRunning(agent));
                 }
-                if let Some(slot) = slots
-                    .get_mut(&agent)
-                    .filter(|s| {
-                        !s.reached_idle
-                            || s.restart_requested
-                            || s.compacting.is_some()
-                            || s.reset_gate
-                    })
-                {
+                if let Some(slot) = slots.get_mut(&agent).filter(|s| {
+                    !s.reached_idle || s.restart_requested || s.compacting.is_some() || s.reset_gate
+                }) {
                     slot.turns.push(text.into());
                     return Ok(());
                 }
