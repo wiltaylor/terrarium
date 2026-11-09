@@ -506,7 +506,7 @@ pub enum DeliveryCmd {
     Show,
     /// Change the queue config; flags that you leave out keep their value
     /// (project_admin; a global target needs sysadmin)
-    Set(DeliverySetArgs),
+    Set(Box<DeliverySetArgs>),
 }
 
 #[derive(Debug, Args)]
@@ -536,6 +536,34 @@ pub struct DeliverySetArgs {
     /// The most seconds a recipe may run (default 3600)
     #[arg(long)]
     pub timeout: Option<u64>,
+    /// Docker CI SSH destination, for example `root@vm` (docs/api.md 35.1)
+    #[arg(long)]
+    pub docker_ci_destination: Option<String>,
+    /// The SSH port of the Docker CI destination
+    #[arg(long)]
+    pub docker_ci_port: Option<u16>,
+    /// The administrator-verified known_hosts line of the destination
+    #[arg(long)]
+    pub docker_ci_known_hosts: Option<String>,
+    /// The forced-command reset SSH destination
+    #[arg(long)]
+    pub docker_ci_reset_destination: Option<String>,
+    /// The SSH port of the reset destination
+    #[arg(long)]
+    pub docker_ci_reset_port: Option<u16>,
+    /// The administrator-verified known_hosts line of the reset destination
+    #[arg(long)]
+    pub docker_ci_reset_known_hosts: Option<String>,
+    /// Remove the whole Docker CI SSH configuration (docs/api.md 35.1)
+    #[arg(long, conflicts_with_all = [
+        "docker_ci_destination",
+        "docker_ci_port",
+        "docker_ci_known_hosts",
+        "docker_ci_reset_destination",
+        "docker_ci_reset_port",
+        "docker_ci_reset_known_hosts",
+    ])]
+    pub clear_docker_ci: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2618,6 +2646,19 @@ pub enum ThreadCmd {
         /// The message, as Markdown (`-` reads stdin)
         #[arg(short = 'm', long = "message")]
         message: String,
+        /// The thread's status after the message (the attached agent):
+        /// `waiting_agent` when you start the work now, `tracking` when you
+        /// hand it off. Without it, your message waits on the operator
+        #[arg(long, value_parser = ["waiting_agent", "tracking"])]
+        status: Option<String>,
+    },
+    /// Set the status of your thread without a message (the attached
+    /// agent): `waiting_agent` while you work, `tracking` after the
+    /// handoff. An open question keeps it on the operator
+    Status {
+        id: String,
+        #[arg(value_parser = ["waiting_agent", "tracking"])]
+        status: String,
     },
     /// Ask the operator a question in your thread; with --bundle, several
     /// related questions as one bundle. The operator answers in the thread

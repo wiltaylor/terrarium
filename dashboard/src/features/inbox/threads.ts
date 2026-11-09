@@ -55,6 +55,18 @@ export const byThreadOrder = (a: Thread, b: Thread): number =>
 
 export const sortThreads = (ts: Thread[]): Thread[] => ts.slice().sort(byThreadOrder);
 
+/** A group of the Open list (GitHub #28): the threads that wait on the operator, then the work in progress (the agent works or tracks). */
+export type ThreadGroup = { id: "you" | "progress"; label: string; threads: Thread[] };
+
+/** The groups of the Open list, in order and without empty groups: a thread that waits on the agent is work in progress, not waiting on you. */
+export function threadGroups(ts: Thread[]): ThreadGroup[] {
+  const groups: ThreadGroup[] = [
+    { id: "you", label: "Waiting on you", threads: ts.filter((t) => waitsOnYou(t)) },
+    { id: "progress", label: "In progress", threads: ts.filter((t) => !waitsOnYou(t)) },
+  ];
+  return groups.filter((g) => g.threads.length > 0);
+}
+
 /** The scope as the page shows it. */
 export const scopeLabel = (scope: string): string => (scope === "global" ? "global" : `project ${scope}`);
 

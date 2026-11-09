@@ -167,7 +167,11 @@ pub fn first_turn(th: &Thread) -> String {
 /// first turn (TER-148, TER-144 D4, D5, D10).
 fn tracking_rules(id: &str) -> String {
     format!(
-        "\n\nAfter the handoff, link the handed-off cards and move the thread into tracking: \
+        "\n\nWhen you start work yourself, post with `--status waiting_agent` \
+         (`terrarium thread post {id} -m <text> --status waiting_agent`), so that the thread does \
+         not wait on the operator while you work; `terrarium thread status {id} waiting_agent` \
+         sets it without a message.\
+         \n\nAfter the handoff, link the handed-off cards and move the thread into tracking: \
          `terrarium thread track {id} --card <project>:<card>` (repeat `--card`). The daemon \
          stops you, and wakes you with a `[Thread:{id}]` turn when the operator writes, when a \
          linked card goes to blocked, and when all linked cards are in review or later. Then \
