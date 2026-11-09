@@ -104,6 +104,130 @@ async fn review_candidate_query_uses_only_indexed_searches() {
 }
 
 #[tokio::test]
+async fn dispatch_candidate_query_uses_only_indexed_searches() {
+    let td = setup(2, 4, 20).await;
+    enabled(&td).await;
+    card(&td, "small").await;
+    let plan = state(&td)
+        .db
+        .read(|c| {
+            let mut plan = Vec::new();
+            let queries: [(&str, &[&dyn rusqlite::ToSql]); 2] = [
+                (
+                    terrariumd::card_dispatcher::CANDIDATES,
+                    rusqlite::params![
+                        "p",
+                        "ready",
+                        0,
+                        -1,
+                        "",
+                        terrariumd::card_dispatcher::CANDIDATE_PAGE
+                    ],
+                ),
+                (
+                    terrariumd::card_dispatcher::WORKING_WIP,
+                    rusqlite::params!["p"],
+                ),
+            ];
+            for (sql, params) in queries {
+                let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                let rows = q.query_map(params, |r| r.get::<_, String>(3))?;
+                plan.extend(rows.collect::<Result<Vec<_>, _>>()?);
+            }
+            Ok(plan)
+        })
+        .await
+        .unwrap();
+    assert!(plan.iter().any(|s| s.contains("cards_column")), "{plan:?}");
+    assert!(plan.iter().all(|s| !s.contains("SCAN")), "{plan:?}");
+}
+
+async fn ready_card(td: &TestDaemon, body: Value) -> String {
+    td.post("/api/projects/p/cards", body).await.ok()["id"]
+        .as_str()
+        .unwrap()
+        .into()
+}
+
+/// A held GitHub card above an eligible card is skipped, not dispatched.
+/// The held card carries a usable type label, so only the hold gate
+/// skips it: without `github_gate::is_held` the dispatcher would pick it.
+#[tokio::test]
+async fn held_card_is_skipped_and_next_card_dispatched() {
+    let td = setup(2, 3, 10).await;
+    let held = ready_card(
+        &td,
+        json!({"title": "GitHub #7: held",
+               "labels": ["github", "hold", "type:small"],
+               "column": "ready"}),
+    )
+    .await;
+    let next = card(&td, "small").await;
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    let c = get(&td, &held).await;
+    assert_eq!(c["column"], "ready");
+    assert!(c["agent"].is_null());
+    assert_eq!(get(&td, &next).await["column"], "coding");
+}
+
+/// Held cards and cards without a usable type label must not starve the
+/// bounded page: the card after a full page of skips is still dispatched.
+/// The held cards carry a usable type label, so each skip kind is a skip
+/// for exactly one reason: the hold gate, or a missing template.
+#[tokio::test]
+async fn skips_beyond_one_page_do_not_starve_a_later_card() {
+    let td = setup(2, 4, 20).await;
+    for i in 0..terrariumd::card_dispatcher::CANDIDATE_PAGE + 1 {
+        let body = if i % 2 == 0 {
+            json!({"title": format!("GitHub #{i}: held"),
+                   "labels": ["github", "hold", "type:small"],
+                   "column": "ready"})
+        } else {
+            json!({"title": "No type label", "column": "ready"})
+        };
+        ready_card(&td, body).await;
+    }
+    let last = card(&td, "small").await;
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    assert_eq!(get(&td, &last).await["column"], "coding");
+}
+
+/// Positions can tie (archived cards keep theirs, group cards go in at 0
+/// with no shift). A tie at a page boundary must not drop the tied card,
+/// so the keyset is `(position, id)`, not `position` alone.
+#[tokio::test]
+async fn a_tie_at_a_page_boundary_does_not_drop_the_tied_card() {
+    let td = setup(2, 4, 20).await;
+    let mut skips = Vec::new();
+    for _ in 0..terrariumd::card_dispatcher::CANDIDATE_PAGE {
+        skips.push(ready_card(&td, json!({"title": "No type label", "column": "ready"})).await);
+    }
+    let tied = card(&td, "small").await;
+    // The eligible card ties with the last skip of the first page, and its
+    // id orders after that skip, so it is the first row of the next page.
+    let tied_to = skips[terrariumd::card_dispatcher::CANDIDATE_PAGE as usize - 1].clone();
+    assert!(tied_to < tied, "{tied_to} must order before {tied}");
+    let id = tied.clone();
+    state(&td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE cards SET position = ?2 WHERE id = ?1",
+                rusqlite::params![id, terrariumd::card_dispatcher::CANDIDATE_PAGE - 1],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    assert_eq!(get(&td, &tied).await["column"], "coding");
+    assert_eq!(get(&td, &tied_to).await["column"], "ready");
+}
+
+#[tokio::test]
 async fn review_global_fallback_and_conventional_verdict() {
     let (td, id) = review_setup().await;
     td.delete("/api/templates/p%2Fcard-review").await.ok();
