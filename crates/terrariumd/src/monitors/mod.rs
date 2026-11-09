@@ -282,7 +282,7 @@ pub async fn execute(
     let cmd = RemoteCmd {
         argv: vec!["sh".into(), "-c".into(), def.script.clone()],
         timeout_secs: Some(def.timeout_secs),
-        holder: Some(format!("{project}/monitors")),
+        holder: Some(terrarium_host::native::service_holder(project, "monitors")),
         ..Default::default()
     };
     let run = match executor::start_cmd(state, &tdef, &cmd) {
