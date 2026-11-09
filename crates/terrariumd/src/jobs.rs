@@ -3504,16 +3504,29 @@ mod tests {
             .is_ok_and(|o| o.status.success())
     }
 
-    /// Hold the lock of `path` (as another daemon would) until the child
-    /// ends.
+    /// Hold the lock of `path` (as another daemon would) until the holder
+    /// is stopped. The holder runs in its own process group, so
+    /// [`stop_holder`] can end the whole tree: the lock goes with it.
     fn flock_holder(path: &std::path::Path) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
         std::process::Command::new("flock")
             .arg("-n")
             .arg(path)
             .arg("sleep")
             .arg("30")
+            .process_group(0)
             .spawn()
             .unwrap()
+    }
+
+    /// End the holder and its children, so its lock goes.
+    fn stop_holder(holder: &mut std::process::Child) {
+        let pgid = nix::unistd::Pid::from_raw(holder.id() as i32);
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(-pgid.as_raw()),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        let _ = holder.wait();
     }
 
     /// Wait until a holder holds `path`: a second non-blocking flock fails.
@@ -3561,8 +3574,7 @@ mod tests {
         assert!(text.contains("held by another job or daemon"), "{text}");
         // The tree of the running job is untouched.
         assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]), one);
-        holder.kill().unwrap();
-        holder.wait().unwrap();
+        stop_holder(&mut holder);
         // The lock went with its holder: the next job of the slot passes.
         let (ok, text) = s.receive(&two, &t2, "");
         assert!(ok, "{text}");
@@ -3632,8 +3644,7 @@ mod tests {
         );
         assert!(text.contains("held by another job or daemon"), "{text}");
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
-        holder.kill().unwrap();
-        holder.wait().unwrap();
+        stop_holder(&mut holder);
     }
 
     #[test]
