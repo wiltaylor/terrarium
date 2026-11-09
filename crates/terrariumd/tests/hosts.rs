@@ -168,6 +168,7 @@ case "$1" in
           if [ "$a" = prepare ]; then for arg in "$@"; do
             if [ "$arg" = /src/terrarium ] && [ -f '{no_default}' ]; then echo 'base unavailable: denied' >&2; exit 3; fi
             if [ "$arg" = /home/agent/.terrarium-work ] && [ -f '{no_fallback}' ]; then echo 'base unavailable: denied' >&2; exit 3; fi
+            if [ "$arg" = /home/agent/.terrarium-work ] && [ -f '{broken_fallback}' ]; then echo 'disk full' >&2; exit 1; fi
           done; fi
           if [ "$a" = measure ] && [ -f '{bad_measure}' ]; then
             value=invalid; for arg in "$@"; do if [ "$arg" = zz-good ]; then value=0; fi; done
@@ -184,7 +185,8 @@ esac"#,
             missing_python = dir.join("missing-python").display(),
             bad_measure = dir.join("bad-measure").display(),
             no_default = dir.join("no-default-base").display(),
-            no_fallback = dir.join("no-fallback-base").display()
+            no_fallback = dir.join("no-fallback-base").display(),
+            broken_fallback = dir.join("broken-fallback-base").display()
         ),
         _ => format!(
             r#"case "$1" in
@@ -888,6 +890,22 @@ async fn owned_target_roots_fall_back_to_the_agent_home() {
     // The owned build env is set (docker gets it by name; build_env gives
     // the value under the root of the prepared base).
     assert!(log.contains("-e CARGO_TARGET_DIR"), "{log}");
+    // Any later failure at the stored fallback names work_root too.
+    std::fs::write(lab.bins.path().join("broken-fallback-base"), "").unwrap();
+    let r = lab
+        .td
+        .post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["true"]}))
+        .await;
+    r.err(422, "invalid");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("has no work_root"), "{msg}");
+    assert!(msg.contains("disk full"), "{msg}");
+    assert!(
+        msg.contains("terrarium admin target edit terra-box --work-root"),
+        "{msg}"
+    );
+    std::fs::remove_file(lab.bins.path().join("broken-fallback-base")).unwrap();
+    let log = lab.log();
     // The stored base is used directly: the default is tried one time only.
     assert_eq!(
         log.matches("prepare /src/terrarium terra").count(),
@@ -897,7 +915,7 @@ async fn owned_target_roots_fall_back_to_the_agent_home() {
     assert_eq!(
         log.matches("prepare /home/agent/.terrarium-work terra")
             .count(),
-        3,
+        4,
         "{log}"
     );
     terrariumd::spawn::close(

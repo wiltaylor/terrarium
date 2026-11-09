@@ -241,14 +241,20 @@ def walk(fd, remove, device, mount, keep_owner=False):
     return size
 fds = []
 try:
-    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    # Ancestors need only search permission (an Android /data is 0771), so
+    # they open with O_PATH. The agent root below them opens for reading.
+    fd = os.open('/', os.O_PATH | os.O_DIRECTORY)
     fds.append(fd)
     for part in base.split('/')[1:] + [project]:
         try:
             if mode == 'prepare':
                 try: os.mkdir(part, dir_fd=fd)
                 except FileExistsError: pass
-            try: fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                fd = os.open(part, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                fds.append(fd)
+                # O_PATH with O_NOFOLLOW may return the symlink itself: refuse it.
+                if not stat.S_ISDIR(os.fstat(fd).st_mode): raise RuntimeError('refusing non-directory ancestor')
             except FileNotFoundError:
                 if mode != 'prepare':
                     print(0)
@@ -261,7 +267,6 @@ try:
                 sys.stderr.write('base unavailable: ' + str(e) + '\n')
                 sys.exit(3)
             raise
-        fds.append(fd)
     parent = fd
     created = False
     if mode == 'prepare':
@@ -465,7 +470,7 @@ pub async fn prepare(
         warn_fallback(def, &current);
         if dest.is_some() {
             return Err(ApiError::invalid(format!(
-                "{DEFAULT_BASE} is not writable on target {}; the owned root is now {path}: use a path under it",
+                "{DEFAULT_BASE} is not writable on target {0}; the owned root is now {path}: use a path under it, or set a writable work_root with `terrarium admin target edit {0} --work-root <absolute path>`",
                 def.name
             )));
         }
@@ -478,7 +483,9 @@ pub async fn prepare(
         .await;
     }
     if !out.end().success() {
-        let unavailable = exit_code(&out) == Some(BASE_UNAVAILABLE);
+        // Each failure at the home fallback (now or stored from an earlier
+        // operation) names work_root, whatever the exit code.
+        let unavailable = exit_code(&out) == Some(BASE_UNAVAILABLE) || current != base(def);
         return Err(prepare_error(
             def,
             &current,
@@ -940,6 +947,29 @@ mod tests {
         assert!(run(tmp.path(), "delete", ""));
         std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(run(tmp.path(), "prepare", "repo"));
+    }
+
+    /// TER-498 review: ancestors need search permission only. Root ignores
+    /// modes, so run this one as a non-root user to prove it.
+    #[test]
+    fn search_only_ancestor_is_enough() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("terrarium")).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let readable = std::fs::read_dir(&src).is_ok();
+        let code = run_code(tmp.path(), "prepare", "repo");
+        let owned = tmp.path().join("src/terrarium/p/a");
+        let made = owned.join("repo").is_dir();
+        let deleted = run(tmp.path(), "delete", "") && !owned.exists();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            eprintln!("search_only_ancestor_is_enough: running as root, modes are not enforced");
+        }
+        assert_eq!(code, Some(0));
+        assert!(made);
+        assert!(deleted);
     }
 
     #[test]
