@@ -260,6 +260,8 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
             label,
             name,
             failed,
+            limit,
+            all,
         } => {
             let p = ctx.project_or(None).await?;
             let q = query([
@@ -270,7 +272,11 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
             ]);
             let items = ctx
                 .api
-                .list(&format!("{}/test-runs", project_path(&p)), q, None)
+                .list(
+                    &format!("{}/test-runs", project_path(&p)),
+                    q,
+                    (!*all).then_some(*limit),
+                )
                 .await?;
             let rows: Vec<Value> = items
                 .iter()
