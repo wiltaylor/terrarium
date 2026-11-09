@@ -138,6 +138,9 @@ pub struct Cache {
     ///
     /// [`groups::reconcile_merge_groups`]: crate::store::groups::reconcile_merge_groups
     merge_waits: HashMap<String, DateTime<Utc>>,
+    /// A tick came and the merge group repair has not run since: it waits
+    /// for a planning write that reads the log to its end.
+    merge_due: bool,
 }
 
 /// One project for [`load`]: its rules file (hash, time) and its flow.
@@ -1745,6 +1748,7 @@ async fn drive_pass(state: &Shared, cache: &mut Cache, lanes: &mut Lanes) -> Api
         let tick = cache.timers_at.is_none_or(|at| at.elapsed() >= TICK);
         if tick {
             cache.timers_at = Some(std::time::Instant::now());
+            cache.merge_due = true;
             if let Err(e) = state
                 .db
                 .write("rule:group-timeout", crate::store::groups::close_expired)
@@ -1760,15 +1764,18 @@ async fn drive_pass(state: &Shared, cache: &mut Cache, lanes: &mut Lanes) -> Api
         // Discover runnable lanes in the planning transaction. A separate
         // read would queue behind every worker again before we can plan
         // the next events under load.
-        // The merge group repair runs in this write, after the plan: each
-        // event before it has its runs, and a group with a pending run waits
-        // (TER-471). Its error rolls back only the repair.
-        let waits = tick.then(|| cache.merge_waits.clone());
+        // The merge group repair runs in this write, after a plan that read
+        // the log to its end (`more` false): then each event before this
+        // write has its runs, and a group with a pending run waits
+        // (TER-471). With `more`, the events after the batch have no runs
+        // yet, so the repair stays due for a later pass. Its error rolls
+        // back only the repair.
+        let waits = cache.merge_due.then(|| cache.merge_waits.clone());
         let (more, pending, waits) = state
             .db
             .write("system", move |t| {
                 let (_, more) = plan_events(t, &projects, Utc::now())?;
-                let waits = match waits {
+                let waits = match waits.filter(|_| !more) {
                     Some(w) => match t.savepoint(|t| {
                         crate::store::groups::reconcile_merge_groups(t, &w, Utc::now())
                     }) {
@@ -1785,6 +1792,7 @@ async fn drive_pass(state: &Shared, cache: &mut Cache, lanes: &mut Lanes) -> Api
             .await?;
         if let Some(w) = waits {
             cache.merge_waits = w;
+            cache.merge_due = false;
         }
         lanes.reap();
         lanes.start(pending, |lane| {

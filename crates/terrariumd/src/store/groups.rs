@@ -638,7 +638,8 @@ fn pending_run(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
 /// `group_add` found an empty group and closed it as abandoned, and a
 /// repair between a card move and its `merge-group-returned` run removed
 /// the card before the rule did. The engine calls this in its planning
-/// write, after `plan_events`, so each event before that write has its runs.
+/// write, only after a `plan_events` that read the log to its end, so each
+/// event before that write has its runs.
 ///
 /// `waiting` holds when each waiting group was first skipped. A group that
 /// waited [`RECONCILE_WAIT`] is repaired anyway. Returns the groups that
