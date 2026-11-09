@@ -378,40 +378,128 @@ fn daemon_module(manifest: &Path, parts: &[&str]) -> PathBuf {
     manifest.join(format!("src/{rel}/mod.rs"))
 }
 
-/// The files whose env reads go through a closure that the file hands to
-/// another function, with the names of the lookups that the file calls
-/// with the key. An empty list: the closure reads no `TERRARIUM_` key.
-const INDIRECT_READS: &[(&str, &[&str])] = &[
+/// The env reads whose key comes from a closure that the function hands
+/// to another function: (file, function, the lookups that the file calls
+/// with the key). An empty list: the closure reads no `TERRARIUM_` key.
+const INDIRECT_READS: &[(&str, &str, &[&str])] = &[
     // `HostListen::from_vars`.
-    ("hosts.rs", &["set"]),
+    ("hosts.rs", "from_env", &["set"]),
     // `hook_url_from`.
-    ("ingest.rs", &["set"]),
+    ("ingest.rs", "hook_url", &["set"]),
     // `Schedule::parse`.
-    ("backup/schedule.rs", &["get"]),
+    ("backup/schedule.rs", "from_env", &["get"]),
     // `password::SECRET_ENV`: only whether it is set, to scrub it.
-    ("main.rs", &[]),
+    ("main.rs", "restart_clean", &[]),
     // The GitHub token env of the Copilot probe.
-    ("probes/github.rs", &[]),
+    ("probes/github.rs", "credentials", &[]),
     // The npm registry env.
-    ("harness_versions.rs", &[]),
-    // The locale env that a harness inherits.
-    ("runner_supervisor.rs", &[]),
+    ("harness_versions.rs", "registry_from_env", &[]),
+    // The locale env that a harness inherits (`Sandbox::child_env`).
+    ("runner_supervisor.rs", "build_spec", &[]),
 ];
 
-/// The text of a source file without its `#[cfg(test)] mod ...` block.
-fn without_test_module(text: &str) -> &str {
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let mut offset = 0;
-    for (i, line) in lines.iter().enumerate() {
-        if line.trim_end() == "#[cfg(test)]" {
-            let next = lines[i + 1..].iter().find(|l| !l.starts_with("#["));
-            if next.is_some_and(|l| l.starts_with("mod ")) {
-                return &text[..offset];
+/// The first index at or after `from` where `b[i..]` starts with `pat`.
+fn find_bytes(b: &[u8], from: usize, pat: &[u8]) -> Option<usize> {
+    (from..b.len()).find(|&i| b[i..].starts_with(pat))
+}
+
+/// The end of the Rust item body that opens at `open` (the byte after its
+/// `{`): the byte after the matching `}`. It skips comments, strings, raw
+/// strings, and char literals.
+fn block_end(text: &str, open: usize) -> usize {
+    let b = text.as_bytes();
+    let mut depth = 1;
+    let mut p = open;
+    while depth > 0 {
+        assert!(p < b.len(), "unbalanced braces after byte {open}");
+        let ident_before = p > 0 && (b[p - 1].is_ascii_alphanumeric() || b[p - 1] == b'_');
+        let hashes = b[p + 1..].iter().take_while(|&&c| c == b'#').count();
+        if b[p..].starts_with(b"//") {
+            p = find_bytes(b, p, b"\n").unwrap_or(b.len());
+        } else if b[p..].starts_with(b"/*") {
+            p = find_bytes(b, p + 2, b"*/").map_or(b.len(), |e| e + 2);
+        } else if b[p] == b'r' && !ident_before && b.get(p + 1 + hashes) == Some(&b'"') {
+            let mut close = vec![b'"'];
+            close.extend(std::iter::repeat_n(b'#', hashes));
+            p = find_bytes(b, p + 2 + hashes, &close).unwrap() + close.len();
+        } else if b[p] == b'"' {
+            p += 1;
+            while b[p] != b'"' {
+                p += if b[p] == b'\\' { 2 } else { 1 };
             }
+            p += 1;
+        } else if b[p] == b'\'' {
+            p += if b[p + 1] == b'\\' {
+                // An escape: `'\''`, `'\n'`, `'\u{7f}'`.
+                find_bytes(b, p + 3, b"'").unwrap() + 1 - p
+            } else {
+                // A char literal of one char (of 1 to 4 bytes), else a lifetime.
+                (2..=5)
+                    .find(|&n| b.get(p + n) == Some(&b'\'') && text.is_char_boundary(p + n))
+                    .filter(|&n| text[p + 1..p + n].chars().count() == 1)
+                    .map_or(1, |n| n + 1)
+            };
+        } else {
+            match b[p] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            p += 1;
         }
-        offset += line.len();
     }
-    text
+    p
+}
+
+/// The text of a source file with each `#[cfg(test)]` module blanked out:
+/// a `mod x { ... }` block up to its matching brace, or a `mod x;` line.
+/// The code after it stays, and the line numbers stay the same.
+fn without_test_modules(text: &str) -> String {
+    let item = Regex::new(
+        r"^#\[cfg\(test\)\]\s*(?:#\[[^\n]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*([;{])",
+    )
+    .unwrap();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some(found) = text[at..].find("#[cfg(test)]") {
+        let start = at + found;
+        let line_start = start == 0 || text.as_bytes()[start - 1] == b'\n';
+        let Some(m) = item.captures(&text[start..]).filter(|_| line_start) else {
+            let next = start + "#[cfg(test)]".len();
+            out.push_str(&text[at..next]);
+            at = next;
+            continue;
+        };
+        let head = start + m.get(0).unwrap().end();
+        let end = if &m[1] == "{" {
+            block_end(text, head)
+        } else {
+            head
+        };
+        out.push_str(&text[at..start]);
+        out.push_str(&"\n".repeat(text[start..end].matches('\n').count()));
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+#[test]
+fn without_test_modules_keeps_the_code_after_the_module() {
+    let text = "fn a() {}\n#[cfg(test)]\nmod tests;\nfn b() { env::var(\"TERRARIUM_B\") }\n\
+                #[cfg(test)]\n#[allow(clippy::unwrap_used)]\nmod more {\n    \
+                const S: &str = \"}\"; let c = '}'; let e = '\u{e9}'; let r = r#\"}\"#; // }\n    \
+                /* } */ fn t() { env::var(\"TERRARIUM_T\") }\n}\n\
+                fn c<'a>() { env::var(\"TERRARIUM_C\") }\n#[cfg(test)]\nfn helper() {}\n";
+    let kept = without_test_modules(text);
+    assert!(kept.contains("TERRARIUM_B"), "{kept}");
+    assert!(kept.contains("TERRARIUM_C"), "{kept}");
+    assert!(kept.contains("fn helper"), "{kept}");
+    assert!(!kept.contains("mod tests"), "{kept}");
+    assert!(!kept.contains("TERRARIUM_T"), "{kept}");
+    assert_eq!(kept.lines().count(), text.lines().count());
+    let c_line = text.lines().position(|l| l.contains("TERRARIUM_C"));
+    assert_eq!(kept.lines().position(|l| l.contains("TERRARIUM_C")), c_line);
 }
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -434,26 +522,35 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// test modules. A read with a key from a parameter follows the lookup
 /// that passes it: a closure (`let var = |k| ...`), a small function
 /// (`fn cap(name: &str ...)`), or the names in `INDIRECT_READS`. The key
-/// at each call is a string literal or a const.
+/// at each call is a string literal or a const (also `&KEY`); any other
+/// key fails with its file and line.
 fn daemon_env_reads(manifest: &Path) -> BTreeSet<String> {
     let src = manifest.join("src");
     let call = Regex::new(r"env::var(?:_os)?\(([^)]*)\)").unwrap();
     let closure = Regex::new(r"let (\w+) = \|").unwrap();
-    let func = Regex::new(r"fn (\w+)\(").unwrap();
+    let func = Regex::new(r"fn (\w+)\b").unwrap();
     let param = Regex::new(r"^[a-z_][a-z0-9_]*$").unwrap();
     let key_token = Regex::new(r#"^("[^"]*"|(\w+::)*[A-Z_][A-Z0-9_]*)$"#).unwrap();
     let mut files = Vec::new();
     rs_files(&src, &mut files);
     let mut keys = BTreeSet::new();
+    let mut used_indirect = BTreeSet::new();
     for file in files {
         let rel = file
             .strip_prefix(&src)
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        let full = read(&file);
-        let text = without_test_module(&full);
+        let text = without_test_modules(&read(&file));
         let lines: Vec<&str> = text.lines().collect();
+        // The function around a line: the nearest `fn` at or above it.
+        let enclosing = |i: usize| {
+            lines[..=i]
+                .iter()
+                .rev()
+                .find_map(|l| func.captures(l).map(|m| m[1].to_string()))
+                .unwrap_or_default()
+        };
         let mut lookups: BTreeSet<String> = BTreeSet::new();
         for (i, line) in lines.iter().enumerate() {
             for c in call.captures_iter(line) {
@@ -461,52 +558,84 @@ fn daemon_env_reads(manifest: &Path) -> BTreeSet<String> {
                 if !param.is_match(arg) {
                     continue;
                 }
-                if let Some((_, names)) = INDIRECT_READS.iter().find(|(f, _)| *f == rel) {
-                    lookups.extend(names.iter().map(|n| (*n).to_string()));
+                let function = enclosing(i);
+                let indirect = INDIRECT_READS
+                    .iter()
+                    .position(|(f, func, _)| *f == rel && *func == function);
+                if let Some(at) = indirect {
+                    used_indirect.insert(at);
+                    lookups.extend(INDIRECT_READS[at].2.iter().map(|n| (*n).to_string()));
                 } else if let Some(m) = closure.captures(line) {
                     lookups.insert(m[1].to_string());
-                } else if let Some(m) = lines[i.saturating_sub(3)..=i]
+                } else if lines[i.saturating_sub(3)..=i]
                     .iter()
-                    .rev()
-                    .find_map(|l| func.captures(l))
+                    .any(|l| l.contains(&format!("fn {function}(")))
                 {
-                    lookups.insert(m[1].to_string());
+                    lookups.insert(function);
                 } else {
                     panic!(
-                        "src/{rel}:{}: an env read with the key `{arg}` from a closure; \
-                         add the file to INDIRECT_READS with its lookups",
+                        "src/{rel}:{}: an env read with the key `{arg}` from a closure in \
+                         `{function}`; add it to INDIRECT_READS with its lookups",
                         i + 1
                     );
                 }
             }
         }
-        let mut tokens: Vec<String> = call
-            .captures_iter(text)
-            .map(|c| c[1].trim().to_string())
+        let lookup_calls: Vec<Regex> = lookups
+            .iter()
+            .map(|name| {
+                Regex::new(&format!(
+                    r"(?:^|[^\w.:])({})\(([^)]*)",
+                    regex::escape(name)
+                ))
+                .unwrap()
+            })
             .collect();
-        for name in &lookups {
-            let at = Regex::new(&format!(
-                r"(?m)(?:^|[^\w.:])({})\(([^),]*)",
-                regex::escape(name)
-            ))
-            .unwrap();
-            for c in at.captures_iter(text) {
-                if text[..c.get(1).unwrap().start()].ends_with("fn ") {
-                    continue;
+        for (i, line) in lines.iter().enumerate() {
+            let mut tokens: Vec<&str> = call
+                .captures_iter(line)
+                .map(|c| c.get(1).unwrap().as_str().trim())
+                .filter(|a| !param.is_match(a))
+                .collect();
+            for at in &lookup_calls {
+                for c in at.captures_iter(line) {
+                    if line[..c.get(1).unwrap().start()].ends_with("fn ") {
+                        continue;
+                    }
+                    tokens.push(c.get(2).unwrap().as_str());
                 }
-                tokens.push(c[2].trim().to_string());
             }
-        }
-        for token in tokens {
-            if !key_token.is_match(&token) {
-                continue;
-            }
-            let key = resolve_env_token(&token, manifest, &file);
-            if key.starts_with("TERRARIUM_") {
-                keys.insert(key);
+            for token in tokens {
+                // The first argument: `cap("KEY", 2)`, `var(&KEY)`, `get(KEY,`.
+                let token = token
+                    .split(',')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_start_matches('&');
+                assert!(
+                    key_token.is_match(token),
+                    "src/{rel}:{}: cannot read the env key `{token}`; use a string literal \
+                     or a const, or extend this test",
+                    i + 1
+                );
+                let key = resolve_env_token(token, manifest, &file);
+                if key.starts_with("TERRARIUM_") {
+                    keys.insert(key);
+                }
             }
         }
     }
+    let stale: Vec<String> = INDIRECT_READS
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| !used_indirect.contains(at))
+        .map(|(_, (f, func, _))| format!("{f} {func}"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "INDIRECT_READS entries with no env read, remove them: {stale:?}"
+    );
     keys
 }
 
