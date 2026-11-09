@@ -22,7 +22,7 @@ export default function ReposPage() {
 
   return (
     <>
-      <PageHead title="Repos">
+      <PageHead title="Repos" level={2}>
         <button class="primary" onClick={() => setAdding(!adding())} aria-expanded={adding()}>
           {adding() ? "Close" : "Add repo"}
         </button>

@@ -68,6 +68,7 @@ export default function RepoPage() {
   return (
     <>
       <PageHead
+        level={2}
         title={
           <>
             <A href={`/p/${encodeURIComponent(params.project)}/repos`}>Repos</A> / {params.repo}

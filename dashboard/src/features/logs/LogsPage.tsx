@@ -13,8 +13,9 @@ export default function LogsPage(props: RouteSectionProps) {
     <TabScreen
       title={params.project ? `Logs · ${params.project}` : "Logs"}
       label="Logs"
-      base={params.project ? `/p/${encodeURIComponent(params.project)}/logs` : "/logs"}
+      base={params.project ? `/p/${encodeURIComponent(decodeURIComponent(params.project))}/logs` : "/logs"}
       tabs={params.project ? PROJECT_LOGS_TABS : LOGS_TABS}
+      level={params.project ? 2 : 1}
     >
       {props.children}
     </TabScreen>
