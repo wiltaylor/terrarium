@@ -278,6 +278,7 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
                     (!*all).then_some(*limit),
                 )
                 .await?;
+            let cut = !*all && *limit > 0 && items.len() >= *limit;
             let rows: Vec<Value> = items
                 .iter()
                 .map(|v| {
@@ -305,6 +306,9 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
                     ],
                     "no test runs",
                 );
+                if cut {
+                    c.line(format!("{} shown, --all for every run", rows.len()));
+                }
             })
         }
         TestCmd::Show { id, failed } => {

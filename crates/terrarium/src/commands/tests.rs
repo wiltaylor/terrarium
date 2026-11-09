@@ -173,6 +173,26 @@ async fn test_ls_limit_and_all() {
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v, json!([r("R3"), r("R2"), r("R1")]));
 
+    // A table cut at the limit ends with a hint line; a short table,
+    // --all and --json do not.
+    let hint = "2 shown, --all for every run";
+    let m = MockTransport::new();
+    m.reply_with(200, &[("x-next-cursor", "c1")], json!([r("R3"), r("R2")]));
+    let out = run(&["test", "ls", "--limit", "2"], &m).await;
+    assert!(out.contains("R3") && out.contains(hint), "{out}");
+    let m = MockTransport::new();
+    m.reply(200, json!([r("R1")]));
+    let out = run(&["test", "ls", "--limit", "2"], &m).await;
+    assert!(out.contains("R1") && !out.contains("shown"), "{out}");
+    let m = MockTransport::new();
+    m.reply(200, json!([r("R2"), r("R1")]));
+    let out = run(&["test", "ls", "--all"], &m).await;
+    assert!(out.contains("R2") && !out.contains("shown"), "{out}");
+    let m = MockTransport::new();
+    m.reply_with(200, &[("x-next-cursor", "c1")], json!([r("R3"), r("R2")]));
+    let out = run(&["--json", "test", "ls", "--limit", "2"], &m).await;
+    assert!(!out.contains("shown"), "{out}");
+
     // --all and --limit conflict.
     assert!(Cli::try_parse_from(["terrarium", "test", "ls", "--all", "--limit", "5"]).is_err());
 }
