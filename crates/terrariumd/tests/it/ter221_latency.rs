@@ -121,36 +121,64 @@ async fn dump(st: &Shared, seq: i64) {
     eprintln!("TER221 DUMP seq={seq} now={}\n{out}", chrono::Utc::now());
 }
 
+/// How long the engine may make no progress at all before [`settle`]
+/// fails. Under load (a merge job at load average 50) the order test
+/// needs minutes to drain its 800 runs: each action is one serialized
+/// write, and each comment is a new event. A fixed deadline from the start
+/// failed there while the engine still made progress (TER-480), so the
+/// deadline only counts time without progress.
+const STALL: Duration = Duration::from_secs(120);
+
 /// Wait until the engine read the whole log and ran every pending row.
+/// Fail only when neither the cursor nor the count of ended runs moved
+/// for [`STALL`]: a stuck engine, not a slow one.
 async fn settle(st: &Shared) {
     let mut quiet = 0;
     let start = Instant::now();
+    let mut seen = (i64::MIN, i64::MIN);
+    let mut moved = Instant::now();
     loop {
-        let (cursor, last, pending) = st
+        let (cursor, last, pending, ended) = st
             .db
             .read(|c| {
                 let cursor = terrariumd::rules_engine::cursor(c)?.unwrap_or(0);
                 let last = terrariumd::events::last_seq(c)?;
-                let pending: i64 = c.query_row(
-                    "SELECT count(*) FROM rule_runs WHERE state = 'pending'",
+                let (pending, ended): (i64, i64) = c.query_row(
+                    "SELECT count(*) FILTER (WHERE state = 'pending'),
+                            count(*) FILTER (WHERE state != 'pending')
+                       FROM rule_runs",
                     [],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
-                Ok((cursor, last, pending))
+                Ok((cursor, last, pending, ended))
             })
             .await
             .unwrap();
         if cursor >= last && pending == 0 {
             quiet += 1;
             if quiet >= 3 {
+                if start.elapsed() >= Duration::from_secs(10) {
+                    eprintln!(
+                        "TER221 settle took {:.1}s (ended runs={ended})",
+                        start.elapsed().as_secs_f64()
+                    );
+                }
                 return;
             }
         } else {
             quiet = 0;
         }
-        if start.elapsed() >= Duration::from_secs(120) {
+        if (cursor, ended) != seen {
+            seen = (cursor, ended);
+            moved = Instant::now();
+        }
+        if moved.elapsed() >= STALL {
             dump(st, last).await;
-            panic!("no settle: cursor={cursor} last={last} pending={pending}");
+            panic!(
+                "no settle: no progress for {}s (after {:.0}s): cursor={cursor} last={last} pending={pending} ended={ended}",
+                STALL.as_secs(),
+                start.elapsed().as_secs_f64()
+            );
         }
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
