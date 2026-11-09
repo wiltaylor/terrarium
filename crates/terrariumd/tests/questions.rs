@@ -1264,9 +1264,12 @@ async fn project_counts_give_blocked_cards_and_open_questions() {
     td.post("/api/projects/p/cards", json!({"title": "Ready"}))
         .await
         .ok();
-    td.post("/api/projects/q/cards", json!({"title": "Q", "column": "blocked", "comment": "Needs a decision"}))
-        .await
-        .ok();
+    td.post(
+        "/api/projects/q/cards",
+        json!({"title": "Q", "column": "blocked", "comment": "Needs a decision"}),
+    )
+    .await
+    .ok();
     td.delete(&format!("/api/cards/{}", blocked[2])).await.ok();
 
     // Open questions of each kind that needs a decision; a notice, an

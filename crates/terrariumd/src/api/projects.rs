@@ -14,8 +14,8 @@ use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
 use crate::store::projects::{self, NewProject, NewRepo, Project, ProjectPatch, Repo};
-use crate::store::target_grants::{self, Purpose, TargetGrant};
 use crate::store::questions::{self, QuestionKind};
+use crate::store::target_grants::{self, Purpose, TargetGrant};
 use crate::store::{Page, agents, board};
 
 pub fn routes() -> Router<Shared> {
@@ -105,8 +105,8 @@ async fn counts(
 ) -> ApiResult<Json<Counts>> {
     policy::read_project(&actor, &name)?;
     // The rule of `GET /api/questions?project=`.
-    let questions_allowed = policy::is_admin_of(&actor, &name)
-        || matches!(&actor, Actor::Agent(a) if a.reads_all());
+    let questions_allowed =
+        policy::is_admin_of(&actor, &name) || matches!(&actor, Actor::Agent(a) if a.reads_all());
     Ok(Json(
         state
             .db
