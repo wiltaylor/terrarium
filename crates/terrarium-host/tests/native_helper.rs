@@ -8,7 +8,7 @@
 //! of TER-345.
 
 use std::collections::{BTreeMap, HashMap};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,17 +32,6 @@ impl DeviceNodes for FakeNodes {
             .copied()
             .ok_or_else(|| format!("{} missing", path.display()))
     }
-}
-
-/// `native::bind` sets the process umask to 0o177 while it binds. The umask
-/// is per process, so a directory that another test creates in that window
-/// gets mode 0600: no search bit, and a non-root user then gets EACCES in
-/// it (root ignores the mode). Each fixture setup and each bind holds this
-/// lock.
-static UMASK: Mutex<()> = Mutex::new(());
-
-fn umask_lock() -> std::sync::MutexGuard<'static, ()> {
-    UMASK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 struct Fake {
@@ -100,7 +89,6 @@ impl Fake {
     }
 
     async fn with(rights: Vec<Right>, agent_uid: u32, gpu: Result<(), String>) -> Self {
-        let umask = umask_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let d = dir.path();
@@ -115,14 +103,18 @@ impl Fake {
                 env = d.join("env.copy").display(),
             ),
         );
-        // `show` prints the unit state (file `state`, default inactive);
-        // `list-units` prints the file `units`, or fails with `list.fail`.
+        // `show` prints the unit state (file `state`, default inactive)
+        // and its cgroup (file `cgroup`, default none); `list-units` prints
+        // the file `units`, or fails with `list.fail`.
         script(
             &d.join("systemctl"),
             &format!(
                 "printf '%s\\n' \"$*\" >> '{d}/ctl.log'\n\
                  case \"$1\" in\n\
-                 show) if [ -f '{d}/state' ]; then cat '{d}/state'; else echo inactive; fi ;;\n\
+                 show) case \"$2\" in\n\
+                 *ControlGroup) cat '{d}/cgroup' 2>/dev/null ;;\n\
+                 *) if [ -f '{d}/state' ]; then cat '{d}/state'; else echo inactive; fi ;;\n\
+                 esac ;;\n\
                  list-units) [ -f '{d}/list.fail' ] && exit 1; cat '{d}/units' 2>/dev/null ;;\n\
                  esac\n\
                  exit 0\n",
@@ -134,6 +126,9 @@ impl Fake {
             &format!("printf '{A}, 0\\n{B}, 1\\n'\n"),
         );
         std::fs::create_dir(d.join("sessions")).unwrap();
+        // A fake cgroup v2 tree: `cgroup` names a unit cgroup under it.
+        std::fs::create_dir(d.join("cgroupfs")).unwrap();
+        std::fs::write(d.join("cgroupfs/cgroup.controllers"), "cpu memory\n").unwrap();
         let check_ok = Arc::new(AtomicBool::new(true));
         let helper = Arc::new(Helper {
             ctx: Ctx {
@@ -149,6 +144,7 @@ impl Fake {
             systemd_run: d.join("systemd-run"),
             systemctl: d.join("systemctl"),
             nvidia_smi: d.join("nvidia-smi"),
+            cgroup_root: d.join("cgroupfs"),
             gpu,
             nodes: Box::new(FakeNodes(HashMap::from([
                 (PathBuf::from("/dev/nvidia0"), (195, 0)),
@@ -161,7 +157,6 @@ impl Fake {
         });
         let socket = d.join("helper.sock");
         let listener = native::bind(&socket, nix::unistd::getuid().as_raw()).unwrap();
-        drop(umask);
         tokio::spawn(native::serve(helper.clone(), listener));
         Self {
             dir,
@@ -464,6 +459,64 @@ fn shim(f: &Fake, req: &Request) -> std::process::Command {
     c
 }
 
+/// A stop with `--user-slice` (the host agent sends it once the helper
+/// enforced): the holder's user slice and its system slice both stop, and
+/// the shim fails when either stop fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shim_stop_also_stops_the_user_slice() {
+    let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
+    let bin = f.dir.path().join("userbin");
+    std::fs::create_dir(&bin).unwrap();
+    // The user manager's systemctl: exit 5 (not loaded) unless `user.code`.
+    script(
+        &bin.join("systemctl"),
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{d}/user.log'\n\
+             [ -f '{d}/user.code' ] && exit \"$(cat '{d}/user.code')\"\n\
+             exit 5\n",
+            d = f.dir.path().display()
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let stop = Request::Stop(SliceRequest {
+        target: "box".into(),
+        holder: "p/a".into(),
+    });
+    let slice = terrarium_host::limits::slice_name("box", "p/a");
+    let run = |socket: &Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_terrarium-host"))
+            .args(["native", "--user-slice", "--socket"])
+            .arg(socket)
+            .env(native::REQUEST_ENV, serde_json::to_string(&stop).unwrap())
+            .env("PATH", &path)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .code()
+    };
+    let stops = || {
+        f.log("ctl.log")
+            .matches(&format!("stop -- {slice}"))
+            .count()
+    };
+    // A user slice that is not loaded has nothing to stop.
+    assert_eq!(run(&f.socket), Some(0));
+    assert_eq!(f.log("user.log"), format!("--user stop -- {slice}\n"));
+    assert_eq!(stops(), 1);
+    // The user stop fails: the helper stop still runs, the shim fails.
+    f.write("user.code", "1");
+    assert_eq!(run(&f.socket), Some(125));
+    assert_eq!(stops(), 2);
+    // The helper is gone: the user stop runs, the shim fails.
+    f.write("user.code", "0");
+    assert_eq!(run(&f.dir.path().join("gone.sock")), Some(125));
+    assert_eq!(f.log("user.log").lines().count(), 3);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_shim_relays_a_session_and_its_exit_code() {
     use std::io::Write;
@@ -717,6 +770,46 @@ async fn a_unit_not_confirmed_stopped_keeps_its_gpu() {
     assert!(matches!(r, Reply::Started { .. }), "{r:?}");
 }
 
+/// A failed unit whose cgroup still holds a process is not stopped: its
+/// claim stays stuck until the cgroup is empty.
+#[tokio::test]
+async fn a_failed_unit_with_a_populated_cgroup_keeps_its_gpu() {
+    let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
+    let cg = f.dir.path().join("cgroupfs/system.slice/u.service");
+    std::fs::create_dir_all(&cg).unwrap();
+    std::fs::write(cg.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+    f.write("state", "failed\n");
+    f.write("cgroup", "/system.slice/u.service\n");
+    let (s, r) = send(
+        &f.socket,
+        &Request::Start(f.start("p/a", Some("L1"), &[A], &[A], &["true"])),
+    )
+    .await;
+    let Reply::Started { unit } = r else {
+        panic!("{r:?}")
+    };
+    drop(s);
+    let mut stuck = false;
+    for _ in 0..100 {
+        if f.helper
+            .sessions
+            .lock()
+            .unwrap()
+            .claim(&unit)
+            .is_some_and(|c| c.stuck)
+        {
+            stuck = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(stuck, "a failed unit with live processes freed its claim");
+    assert!(f.log("ctl.log").contains("--property=ControlGroup"));
+    // The last process ends: the retry frees the claim.
+    std::fs::write(cg.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+    f.wait_idle().await;
+}
+
 #[tokio::test]
 async fn leftover_units_are_stopped_before_serving_or_the_start_fails() {
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
@@ -800,7 +893,6 @@ fn the_socket_belongs_to_the_agent_user() {
         eprintln!("skipped: needs root to give the socket to another UID");
         return;
     }
-    let _umask = umask_lock();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("h.sock");
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -821,11 +913,95 @@ fn the_socket_belongs_to_the_agent_user() {
     });
 }
 
+/// The process umask, from the Umask line of /proc/self/status. Reading it
+/// there does not change it (umask(2) would, for a moment).
+fn process_umask() -> u32 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let line = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Umask:"))
+        .expect("a Umask line");
+    u32::from_str_radix(line.trim(), 8).unwrap()
+}
+
+/// `native::bind` gives the socket mode 0600 and the caller's owner without
+/// a change of the process umask (TER-500): a second thread samples the
+/// umask while bind runs many times and never sees another value. It also
+/// leaves no temporary directory behind.
+#[tokio::test]
+async fn bind_sets_the_mode_without_the_process_umask() {
+    use std::sync::atomic::AtomicUsize;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("h.sock");
+    let uid = nix::unistd::getuid().as_raw();
+    let before = process_umask();
+    let stop = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicUsize::new(0));
+    let sampler = {
+        let (stop, seen) = (stop.clone(), seen.clone());
+        std::thread::spawn(move || {
+            let mut other = Vec::new();
+            while !stop.load(Ordering::Relaxed) {
+                let m = process_umask();
+                seen.fetch_add(1, Ordering::Relaxed);
+                if m != before {
+                    other.push(m);
+                }
+            }
+            other
+        })
+    };
+    // Bind until the sampler has read the umask often enough to see a
+    // change (and at least 200 times).
+    let mut binds = 0;
+    while binds < 200 || (seen.load(Ordering::Relaxed) < 20_000 && binds < 20_000) {
+        drop(native::bind(&socket, uid).unwrap());
+        binds += 1;
+    }
+    let listener = native::bind(&socket, uid).unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let other = sampler.join().unwrap();
+    assert!(
+        other.is_empty(),
+        "the umask changed during bind: {:o} -> {:?} ({binds} binds)",
+        before,
+        other.iter().map(|m| format!("{m:o}")).collect::<Vec<_>>()
+    );
+    assert_eq!(process_umask(), before);
+    let meta = std::fs::symlink_metadata(&socket).unwrap();
+    assert!(meta.file_type().is_socket());
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(meta.uid(), uid);
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("h.sock")]);
+    // The socket accepts at the final path.
+    let (_client, accepted) = tokio::join!(UnixStream::connect(&socket), listener.accept());
+    accepted.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_shim_relays_the_terminal_size_after_sigwinch() {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
-    let mut req = f.start("p/a", None, &[], &[], &["sh", "-c", "sleep 3; stty size"]);
+    // The session prints a marker once it runs (the shim relays output
+    // only after its signal handlers are in place), then waits for the new
+    // size: no fixed sleep decides the order.
+    let mut req = f.start(
+        "p/a",
+        None,
+        &[],
+        &[],
+        &[
+            "sh",
+            "-c",
+            "echo ready; i=0; while [ $i -lt 200 ]; do s=$(stty size); \
+             if [ \"$s\" = '40 120' ]; then echo \"size $s\"; exit 0; fi; \
+             i=$((i + 1)); sleep 0.1; done; echo \"size stayed $s\"; exit 1",
+        ],
+    );
     req.pty = Some((24, 80));
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -854,13 +1030,19 @@ async fn the_shim_relays_the_terminal_size_after_sigwinch() {
             }
         }
     });
-    for _ in 0..100 {
-        if !f.log("run.log").is_empty() {
-            break;
+    let mut out = Vec::new();
+    let ready = tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(d) = rx.recv().await {
+            out.extend(d);
+            if String::from_utf8_lossy(&out).contains("ready") {
+                return true;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(ready, "{:?}", String::from_utf8_lossy(&out));
     pair.master
         .resize(PtySize {
             rows: 40,
@@ -869,11 +1051,10 @@ async fn the_shim_relays_the_terminal_size_after_sigwinch() {
             pixel_height: 0,
         })
         .unwrap();
-    let mut out = Vec::new();
     let found = tokio::time::timeout(Duration::from_secs(15), async {
         while let Some(d) = rx.recv().await {
             out.extend(d);
-            if String::from_utf8_lossy(&out).contains("40 120") {
+            if String::from_utf8_lossy(&out).contains("size 40 120") {
                 return true;
             }
         }

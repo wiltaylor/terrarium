@@ -75,19 +75,83 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
     (`nvidiactl`, `nvidia-uvm`, `nvidia-uvm-tools`) fail closed;
   - the slice limits: only from typed `RuntimeLimits`
     (`crate::limits::reservation_properties`);
-  - the working directory: resolved by root, under `workspace_root`, no
-    `%`, no control characters;
+  - the working directory: resolved by root, in the holder's workspace
+    scope (see UID reuse below) or the workspace root itself, no `%`, no
+    control characters;
   - the user: the holder's UID from `workload_users`. A holder keeps its
     UID while it has a live (or stuck) session; a UID never serves two
     holders at once; with no free UID the session is refused (`busy`, "no
     free workload user"). Before each session the helper looks the user up
     again and checks its groups and linger, so a later `usermod` or
     `loginctl enable-linger` does not reach a new session.
+  - UID reuse: a pool UID can pass to another holder once its holder's
+    last session is confirmed stopped. Nothing that the UID owns from the
+    old holder is reachable by the new one:
+    - The workspace: each unit gets `TemporaryFileSystem=<workspace_root>:ro`
+      (an empty read-only tmpfs) with only its holder's workspace scope
+      bound in (`BindPaths=`, `ReadWritePaths=`). The scope follows the
+      holder's trust domain:
+      - an agent `<project>/<agent>`: only
+        `<workspace_root>/<project>/<agent>`;
+      - a project service `<project>/@jobs`, `<project>/@pipelines`,
+        `<project>/@monitors`, or `<project>/@schedules` (a project-owned
+        schedule; a system-owned one is `global/@schedules`): the
+        project's directory `<workspace_root>/<project>` (job slots
+        `slot-<n>` and the agent directories of that project), never
+        another project's. On such a host, set the delivery `work_dir`
+        under `workspace_root`: the default `/tmp/terrarium-jobs` is
+        refused (see below);
+      - `operator`: the whole workspace root, with no tmpfs over it (the
+        operator is trusted). Only a command of the operator (the actor,
+        or a `run_as = "operator"` webhook) gets this holder: the daemon
+        refuses a command with no holder on such a host, so a path that
+        forgets the holder never gets the whole root. The daemon's own fixed
+        scripts for a card agent's owned root (the python probe, the home
+        fallback, prepare, measure, delete, also the sweep of an ended
+        agent) run with this operator scope, like the kill and clear
+        scripts of a run: they are daemon-written, take only checked names,
+        and run no agent code. The agent's own execs keep the holder
+        `<project>/<agent>` and see only `<workspace_root>/<project>/<agent>`.
+        So on such a host set the target's `work_root` to `workspace_root`:
+        the owned root `<work_root>/<project>/<agent>` is then inside the
+        agent's own directory scope. The default `/src/terrarium` is
+        outside every scope and read-only in the unit. Prepare refuses an
+        existing directory without its owner marker, so the owned root
+        works only where `<workspace_root>/<project>/<agent>` does not
+        exist before the first prepare.
+
+      Directories outside the scope do not exist in the unit, whatever
+      their modes, so a file that an earlier holder of the UID made private
+      (a credential store, a key, a `mkstemp` file) cannot be opened from
+      another trust domain. The working directory must lie in the scope.
+      Any other holder, or a scope directory that does not exist yet, gets
+      the empty root only. A scope that is a symlink is refused. No agent
+      can take a service holder: agent names never contain `@`, and the
+      bare names `jobs`, `pipelines`, `monitors`, and `schedules` are
+      reserved for agents (an agent of that name made before them is the
+      holder `<project>/jobs` and gets only its own directory).
+    - The rest of the tree: `ProtectSystem=strict` makes it read-only
+      except the API trees (`/dev`, `/proc`, `/sys`), so no world-writable
+      directory such as `/run/lock` or `/var/crash` keeps a file of the UID.
+    - `PrivateTmp=yes` gives the unit its own `/tmp` and `/var/tmp`, removed
+      with the unit. `RemoveIPC=yes` makes systemd remove the System V and
+      POSIX IPC objects of the UID, also its files in `/dev/shm`, when the
+      last unit of that UID stops.
+    - The pool users have no home directory (see the install steps).
+    - `workspace_root` must not be under `/tmp` or `/var/tmp` (each unit
+      gets a private copy of them): the helper refuses to start. A workspace
+      root or scope path with whitespace, quotes, `%`, `:`, or a backslash
+      is refused, since it goes in systemd path lists. The working
+      directory is not in such a list: only `%` and control characters are
+      refused there.
 - **The session** is a transient system service, not a scope: systemd sets
   the user, the groups, and the device policy before `exec`, and
   `KillMode=control-group` ends every descendant with the main process.
-  Properties: `--uid`/`--gid` of the holder's workload user, `NoNewPrivileges=yes`,
-  `CapabilityBoundingSet=`, `AmbientCapabilities=`, `RestrictSUIDSGID=yes`,
+  Properties: `--uid`/`--gid` of the holder's workload user,
+  `NoNewPrivileges=yes`, `CapabilityBoundingSet=`, `AmbientCapabilities=`,
+  `RestrictSUIDSGID=yes`, `PrivateTmp=yes`, `RemoveIPC=yes`,
+  `ProtectSystem=strict`, `TemporaryFileSystem=<workspace_root>:ro`,
+  `BindPaths=` and `ReadWritePaths=` of the holder's workspace scope,
   `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
   each granted GPU and support node, `--expand-environment=no`. The
   environment goes in a root-only `EnvironmentFile` under `state_dir`, not
@@ -107,15 +171,27 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   signal), as a shell reports it.
 - **Stop confirmation**: when `systemd-run` ends, the helper sends SIGKILL
   to the unit and waits, at most 30 s, until `systemctl show
-  --property=ActiveState` reports it inactive, failed, or unknown. Only then
-  is the claim freed. Otherwise it logs a warning, keeps the claim marked
-  stuck, and checks again every 10 s.
+  --property=ActiveState` reports it inactive, failed, or unknown, and its
+  `ControlGroup` is gone or `populated 0` in `cgroup.events` (a failed unit
+  can keep processes after a stop timed out). A cgroup directory without
+  `cgroup.events`, or a tree that is not cgroup v2, counts as not stopped.
+  Only then is the claim freed. Otherwise it logs a warning, keeps the
+  claim marked stuck, and checks again every 10 s.
 - **Start**: the helper stops the `terrarium-native-*.service` units of an
   earlier run before it serves, and waits until each is inactive. When the
   list fails or a unit does not stop, it exits (fail closed). It checks
   that the config, the binaries, the socket directory, and the state
   directory, and every parent of each, are owned by root and not writable
-  by group or others. GPU sessions need `nvidia_smi` verified the same way
+  by group or others. A path is resolved one component at a time: each
+  directory on the way, also one that a symlink leads to, must pass that
+  check, and each symlink (also the middle links of a chain) must be owned
+  by root and sit in a directory that passed, at most 40 symlinks. So no
+  link on the way can be repointed by another user. The helper then runs
+  `systemd_run`, `systemctl`, and `nvidia_smi`, and reads the config,
+  through the resolved paths. It refuses to start without cgroup v2
+  (`/sys/fs/cgroup/cgroup.controllers`). The state directory must not be a
+  symlink, and its existing parents are checked before the helper creates
+  it or changes its mode. GPU sessions need `nvidia_smi` verified the same way
   at start; otherwise they are refused with the reason.
 - **Rights** (separate per operation): the config lists the rights of the
   agent user. `session` covers `apply`, `stop`, and `start`. With no right,
@@ -148,12 +224,19 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   every `host` target command on that host is a `409` that names the
   reservation and the reason. Any native process there could open the
   reserved GPU. Docker targets keep their create-time allowlist.
-- `resource.apply` and `resource.stop` go to the helper's `apply` and
-  `stop` when the helper answered with enforcement at the last `hello`,
-  and to the user slices otherwise. The host agent routes by that answer,
-  not by its config, so a host agent whose helper is down keeps managing
-  the user slices where its sessions then run. `stop` waits for the units
-  to stop: the daemon keeps the reservation `ending` until then.
+- `resource.apply` goes to the helper's `apply` when the helper answered
+  with enforcement at the last `hello`, and to the user slices otherwise.
+  The host agent routes it by that answer, not by its config, so a host
+  agent whose helper is down keeps managing the user slices where its
+  sessions then run.
+- `resource.stop` goes through the shim whenever `[native_gpu]` is in the
+  config, whatever the helper answered: the shim stops the user slice and
+  the helper's slice, and fails when the helper cannot be reached. Native
+  units can still run after the helper stopped answering, or after the
+  host agent restarted, so a stop never reports success without the
+  helper. Without `[native_gpu]`, only the user slice stops. `stop` waits
+  for the units to stop: the daemon keeps the reservation `ending` until
+  then.
 
 ### Attribution
 
@@ -205,9 +288,10 @@ Known limits:
   native sessions at one time on the host.
 - File ownership: sessions write the workspace as their pool user. The
   workspace root needs a shared group with the setgid bit, or ACLs, so the
-  host agent and the sessions can both write (install step 4). Holders can
-  then read and write each other's workspaces through that group, as with
-  the host agent today; only processes are separated.
+  host agent and the sessions can both write (install step 4). A native
+  session sees only its holder's workspace scope (see UID reuse above);
+  outside native sessions, holders can read and write each other's
+  workspaces through that group, as with the host agent today.
 - **The agent user must never run content from the workspace** (scripts,
   hooks, binaries, git configuration it does not control). Sessions can
   write there, and the agent UID is the helper's trusted caller. Today
@@ -246,8 +330,10 @@ not run it on a shared target or a DGX Spark without that decision.
 2. **The workload pool**: one system user for each holder that may run
    native sessions at the same time (for example four). Each has its own
    UID and its own primary group, is not the agent user, has no login, no
-   linger, and none of the groups `root wheel sudo admin adm docker libvirt
-   lxd incus-admin disk kvm systemd-journal`. The helper refuses to start
+   linger, no home directory (a writable home would carry files from one
+   holder to the next holder of the UID), and none of the groups `root
+   wheel sudo admin adm docker libvirt lxd incus-admin disk kvm
+   systemd-journal`. The helper refuses to start
    otherwise, and checks the groups and linger again before each session.
 
    ```sh

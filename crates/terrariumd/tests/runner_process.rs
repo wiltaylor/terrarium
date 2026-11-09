@@ -194,7 +194,22 @@ fn env_wrapper(root: &Path) -> PathBuf {
     bin
 }
 
-fn supervisor(root: &Path, tools: Option<&Path>, cli: bool) -> Arc<RunnerSupervisor> {
+/// The daemon build that the supervisor compares runners with, and its
+/// upgrade limit ([`Td::upgrade`]).
+#[derive(Clone, Default)]
+struct Upgrade {
+    version: Option<String>,
+    limit: Option<usize>,
+    /// Start the runner processes through [`gated_runner`].
+    runner: Option<PathBuf>,
+}
+
+fn supervisor(
+    root: &Path,
+    tools: Option<&Path>,
+    cli: bool,
+    upgrade: &Upgrade,
+) -> Arc<RunnerSupervisor> {
     let mut homes = HashMap::new();
     for h in [
         HarnessId::Claude,
@@ -244,7 +259,18 @@ fn supervisor(root: &Path, tools: Option<&Path>, cli: bool) -> Arc<RunnerSupervi
         submit_timeout: Duration::from_secs(3),
         ..RunnerTuning::default()
     };
-    cfg.mode = RunnerMode::Process { bin: runner_bin() };
+    cfg.mode = RunnerMode::Process {
+        bin: upgrade.runner.clone().unwrap_or_else(runner_bin),
+    };
+    // A version with no ref schedules no upgrade restart. The runner binary
+    // of the tests can be of another build than the test daemon: the
+    // pinned N-1 runner, or a `terrarium-runner` that `runner_bin` finds
+    // from an earlier build with another `TERRARIUM_GIT_REF`. Only the
+    // upgrade test claims a build.
+    cfg.version = upgrade.version.clone().unwrap_or_else(|| "0.0.0".into());
+    if let Some(n) = upgrade.limit {
+        cfg.upgrade_limit = n;
+    }
     Arc::new(RunnerSupervisor::new(cfg))
 }
 
@@ -261,6 +287,8 @@ struct Td {
     /// The sandbox binds the real `terrarium` CLI, and the harness writes
     /// its env ([`Td::start_with_cli`]).
     cli: bool,
+    /// The next [`Td::boot`] claims this daemon build.
+    upgrade: Upgrade,
 }
 
 impl Td {
@@ -325,6 +353,7 @@ impl Td {
             daemon: None,
             tools,
             cli,
+            upgrade: Upgrade::default(),
         }
     }
 
@@ -344,6 +373,7 @@ impl Td {
                 self.dir.path(),
                 self.tools.as_ref().map(|t| t.dir.as_path()),
                 self.cli,
+                &self.upgrade,
             ),
             insecure_agent_header: true,
             artifact_listen: None,
@@ -967,6 +997,236 @@ async fn hot_swap_probation(rollback: bool) {
             1
         );
     }
+}
+
+/// A runner command that waits while the file `gate` exists, then runs
+/// the real runner: a relaunch holds there.
+fn gated_runner(dir: &Path, gate: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("gated-runner");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nwhile [ -e '{}' ]; do sleep 0.02; done\nexec '{}' \"$@\"\n",
+            gate.display(),
+            runner_bin().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// The status events of the daemon in store order: (agent, status, reason).
+fn status_order(td: &Td) -> Vec<(String, String, String)> {
+    let db = rusqlite::Connection::open(td.dir.path().join("state/terrarium.db")).unwrap();
+    let mut q = db
+        .prepare("SELECT agent_id, payload FROM events WHERE kind = 'status' ORDER BY seq")
+        .unwrap();
+    q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .map(|r| {
+            let (agent, payload) = r.unwrap();
+            let v: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+            let d = v.get("data").unwrap_or(&v);
+            let text = |k: &str| d[k].as_str().unwrap_or_default().to_owned();
+            (agent, text("status"), text("reason"))
+        })
+        .collect()
+}
+
+/// The upgrade restarts in store order: an agent is in its upgrade from
+/// its `restarting` (reason `upgrade`) to the `starting` of the new launch.
+/// The most agents in their upgrade at one time.
+fn most_upgrading(order: &[(String, String, String)]) -> usize {
+    let mut now = std::collections::HashSet::new();
+    let mut most = 0;
+    for (agent, status, reason) in order {
+        if status == "restarting" && reason == "upgrade" {
+            now.insert(agent.clone());
+            most = most.max(now.len());
+        } else if status == "starting" {
+            now.remove(agent);
+        }
+    }
+    most
+}
+
+/// R4 (TER-262): after a hot swap, a runner of another build gets
+/// `restart_scheduled` (reason `upgrade`). An agent out of its turn
+/// restarts with resume, one in a turn when the turn ends. A runner
+/// `blocked` on a question is in its turn: it keeps running until it
+/// rests. Here the new daemon claims another build. With a limit of 1, each
+/// next upgrade starts only after the earlier launch is in (M1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_runner_upgrades_after_its_turn() {
+    let mut td = Td::start().await;
+    let idle = [
+        td.agent("calm", json!({})).await,
+        td.agent("rest", json!({})).await,
+        td.agent("more", json!({})).await,
+    ];
+    let busy = td.agent("busy", json!({})).await;
+    let asks = td.agent("asks", json!({})).await;
+    for id in idle.iter().chain([&busy, &asks]) {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_status(id, "idle").await;
+    }
+    td.post(
+        &format!("/api/agents/{busy}/send"),
+        Some(json!({"text": "/hold"})),
+    )
+    .await;
+    td.wait_status(&busy, "working").await;
+    td.post(
+        &format!("/api/agents/{asks}/send"),
+        Some(json!({"text": "/question"})),
+    )
+    .await;
+    td.wait_status(&asks, "blocked").await;
+    let pid = |td: &Td, id: &str| td.runner_pid(id).unwrap();
+    let old: HashMap<String, u32> = idle
+        .iter()
+        .chain([&busy, &asks])
+        .map(|id| (id.clone(), pid(&td, id)))
+        .collect();
+
+    td.shutdown();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    td.upgrade = Upgrade {
+        version: Some("0.0.0+0000000".into()),
+        limit: Some(1),
+        runner: None,
+    };
+    td.boot().await;
+
+    // Each agent out of a turn restarts with resume on a new runner.
+    for id in &idle {
+        let notices = td
+            .wait_events(id, "system", |e| {
+                e.iter().any(|n| {
+                    n["data"]["message"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with("restart_scheduled (reason upgrade)"))
+                })
+            })
+            .await;
+        assert!(!notices.is_empty());
+        td.wait_events(id, "session_started", |e| e.len() == 2)
+            .await;
+        td.wait_status(id, "idle").await;
+        assert_ne!(pid(&td, id), old[id], "a new runner process");
+        let statuses = td.events(id, "status").await;
+        let reasons: Vec<&str> = statuses
+            .iter()
+            .filter_map(|s| s["data"]["reason"].as_str())
+            .collect();
+        assert!(reasons.contains(&"upgrade"), "{reasons:?}");
+        assert!(
+            reasons.iter().any(|r| r.starts_with("resuming session")),
+            "{reasons:?}"
+        );
+    }
+    let order = status_order(&td);
+    assert_eq!(most_upgrading(&order), 1, "at most the limit: {order:#?}");
+
+    // In a turn, and blocked on a question in a turn: no restart.
+    for id in [&busy, &asks] {
+        assert_eq!(td.runner_pid(id), Some(old[id]), "no restart in a turn");
+        assert_eq!(td.events(id, "session_started").await.len(), 1);
+    }
+    assert_eq!(td.status(&busy).await, "working");
+    assert_eq!(td.status(&asks).await, "blocked");
+    for (id, line) in [(&busy, "go"), (&asks, "y")] {
+        td.post(
+            &format!("/api/agents/{id}/send"),
+            Some(json!({"text": line, "raw": true})),
+        )
+        .await;
+        let starts = td
+            .wait_events(id, "session_started", |e| e.len() == 2)
+            .await;
+        let ends = td.events(id, "turn_end").await;
+        assert!(
+            ends.last().unwrap()["seq"].as_u64() < starts[1]["seq"].as_u64(),
+            "the restart came after the turn: {ends:#?} {starts:#?}"
+        );
+        td.wait_status(id, "idle").await;
+        assert_ne!(td.runner_pid(id), Some(old[id]), "a new runner process");
+    }
+    assert_eq!(most_upgrading(&status_order(&td)), 1);
+
+    // The new runners are not upgraded again.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for id in idle.iter().chain([&busy, &asks]) {
+        assert_eq!(td.events(id, "session_started").await.len(), 2);
+    }
+    for id in idle.iter().chain([&busy, &asks]) {
+        td.post(&format!("/api/agents/{id}/stop"), None).await;
+        td.wait_status(id, "stopped").await;
+    }
+}
+
+/// M2 (TER-262): a stop between the kill of the old runner and the launch
+/// of the new one frees the upgrade slot: the next upgrade still runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_during_an_upgrade_frees_its_slot() {
+    let mut td = Td::start().await;
+    let agents = [
+        td.agent("first", json!({})).await,
+        td.agent("second", json!({})).await,
+    ];
+    for id in &agents {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_status(id, "idle").await;
+    }
+    td.shutdown();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The relaunch of the upgrade holds until the gate goes.
+    let gate = td.dir.path().join("relaunch-gate");
+    std::fs::write(&gate, "").unwrap();
+    td.upgrade = Upgrade {
+        version: Some("0.0.0+0000000".into()),
+        limit: Some(1),
+        runner: Some(gated_runner(td.dir.path(), &gate)),
+    };
+    td.boot().await;
+
+    // One agent holds the only slot: its old runner is gone, the new one
+    // waits at the gate.
+    let start = Instant::now();
+    let (held, other) = loop {
+        let mut restarting = Vec::new();
+        for id in &agents {
+            if td.status(id).await == "restarting" {
+                restarting.push(id.clone());
+            }
+        }
+        if let [one] = restarting.as_slice() {
+            let other = agents.iter().find(|a| *a != one).unwrap().clone();
+            break (one.clone(), other);
+        }
+        assert!(start.elapsed() < WAIT, "no upgrade restart");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    td.post(&format!("/api/agents/{held}/stop"), None).await;
+    td.wait_status(&held, "stopped").await;
+    std::fs::remove_file(&gate).unwrap();
+
+    // The other agent gets the slot.
+    td.wait_events(&other, "session_started", |e| e.len() == 2)
+        .await;
+    td.wait_status(&other, "idle").await;
+    let reasons: Vec<String> = td
+        .events(&other, "status")
+        .await
+        .iter()
+        .filter_map(|s| s["data"]["reason"].as_str().map(str::to_owned))
+        .collect();
+    assert!(reasons.iter().any(|r| r == "upgrade"), "{reasons:?}");
+    td.wait_runner_gone(&held).await;
+    td.post(&format!("/api/agents/{other}/stop"), None).await;
+    td.wait_status(&other, "stopped").await;
 }
 
 /// PLAN §18: the daemon restarts, the agent does not. A new supervisor on

@@ -833,6 +833,7 @@ pub fn create_from(
     source: &str,
     template: Option<&TemplateRef>,
 ) -> ApiResult<AgentView> {
+    crate::store::check_new_agent_name(&def.name)?;
     check_def(def)?;
     projects::get(t, &def.project)?;
     check_plan_logins(

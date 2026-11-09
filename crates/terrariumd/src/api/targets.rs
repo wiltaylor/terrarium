@@ -750,8 +750,9 @@ async fn exec(
         shell: b.shell,
         agent: b.agent,
 
-        // `start_exec` sets it from the caller.
+        // `start_exec` sets these from the caller.
         holder: None,
+        operator: false,
     };
     let s = executor::start_exec(&state, &actor, &name, cmd).await?;
     Ok(opened(&s))

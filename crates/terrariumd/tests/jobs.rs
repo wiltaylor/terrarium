@@ -1866,10 +1866,15 @@ async fn a_cancel_ends_a_queued_job(flow: &'static str) {
     // and the job would end in the clone step with exit 2, before its
     // recipe (seen in merge job 01M6Z0AWT2PTTGX20N688FSABA), so no wait
     // could ever see job 1 run its recipe.
+    // The recipe outlives every wait of the test (DEADLINE 300 s), and the
+    // cancel kills it; a leaked one ends in 10 minutes. With `sleep 30`,
+    // under load the steps from the first `until_running` to the cancel
+    // took longer, job 1 passed, and the second `until_running` waited for
+    // a job that had ended (TER-471).
     lab.td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "p-box", "recipe": "sleep 30", "slots": 1,
+            json!({"target": "p-box", "recipe": "sleep 600", "slots": 1,
                    "next_repos": ["app"],
                    "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
         )
@@ -2206,15 +2211,17 @@ test -f OK"#;
 #[tokio::test]
 async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
     let a = lab(1).await;
+    // TER-526: the recipe of A must not outlive the test.
+    let fixtures = common::FixtureGuard::new(a._dirs.path());
     let wd = a._dirs.path().join("jobs");
     let marker = wd.join("p/recipe-of-a");
     // Daemon A's recipe holds the slot's lock until the gate appears (not a
     // fixed sleep: under load daemon B's two attempts may start late).
     let gate = a._dirs.path().join("gate");
     let recipe = format!(
-        "test -f OK && touch '{}' && while ! test -f '{}'; do sleep 0.05; done",
+        "test -f OK && touch '{}' && {}",
         marker.display(),
-        gate.display()
+        common::gate_wait(&gate, DEADLINE)
     );
     a.td.put(
         "/api/projects/p/delivery",
@@ -2295,6 +2302,7 @@ async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
     // A's job is unaffected: it passes and its card moves to review.
     a.until_card(&ca, "review", |c| c["column"] == "review")
         .await;
+    fixtures.assert_none_left().await;
 }
 
 #[tokio::test]
@@ -3348,10 +3356,7 @@ async fn hold_jobs(lab: &Lab) -> PathBuf {
     let gate = lab._dirs.path().join("gate");
     set_recipe(
         lab,
-        &format!(
-            "while ! test -f '{}'; do sleep 0.05; done; test -f OK",
-            gate.display()
-        ),
+        &format!("{} && test -f OK", common::gate_wait(&gate, DEADLINE)),
     )
     .await;
     gate

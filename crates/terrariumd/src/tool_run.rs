@@ -222,7 +222,9 @@ pub async fn run(
         timeout_secs: timeout_secs(&def)?,
         shell: false,
         agent: None,
+        // `start_tool_exec` sets these from the caller.
         holder: None,
+        operator: false,
     };
     let max_output = match &def.max_output {
         Some(m) => terrarium_core::skills::parse_size(m)

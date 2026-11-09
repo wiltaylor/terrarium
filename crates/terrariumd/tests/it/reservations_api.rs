@@ -137,6 +137,46 @@ async fn setup_opts(
         native_gpu,
         ..Default::default()
     };
+    if options
+        .capabilities
+        .native_gpu
+        .as_ref()
+        .is_some_and(|n| n.enforced)
+    {
+        // An enforced helper: a fake that answers `hello` with the session
+        // right, and a fake shim that records each helper request (apply,
+        // stop) and says ok.
+        let socket = td.dir.path().join("native-helper.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            use terrarium_host::native;
+            while let Ok((mut s, _)) = listener.accept().await {
+                let _ = native::read_frame(&mut s).await;
+                let reply = native::Reply::Hello {
+                    version: native::PROTOCOL_VERSION,
+                    rights: vec![native::Right::Session],
+                };
+                let _ = native::write_frame(
+                    &mut s,
+                    native::Kind::Reply,
+                    &serde_json::to_vec(&reply).unwrap(),
+                )
+                .await;
+            }
+        });
+        let shim = td.dir.path().join("native-shim");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${}\" >> '{}/native.calls'\n",
+                terrarium_host::native::REQUEST_ENV,
+                td.dir.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        options.native = Some(terrarium_host::native::NativeOptions { socket, shim });
+    }
     if live {
         options.docker_bin = "docker".into();
         // The Docker daemon may be remote. Local /proc is not its CPU
@@ -572,6 +612,10 @@ async fn native_exclusive_gpu_needs_enforced_helper_support() {
     let state = td.daemon.as_ref().unwrap().state.clone();
     td.post("/api/targets", native).await.ok();
     let resp = td.post("/api/hosts/h/reservations", body).await;
+    assert!(resp.status.is_success(), "{}: {}", resp.status, resp.body);
+    // The holder's limits went to the helper, not to the user manager.
+    let calls = std::fs::read_to_string(td.dir.path().join("native.calls")).unwrap_or_default();
+    assert!(calls.contains("\"apply\""), "{calls}");
     assert!(
         !resp.body.to_string().contains("native GPU support")
             && !resp.body.to_string().contains("exclusive GPU needs"),
@@ -638,16 +682,35 @@ async fn native_exclusive_gpu_needs_enforced_helper_support() {
     assert_eq!(grant.lease.as_deref(), Some(id.as_str()));
     assert_eq!(grant.exclusive, ["GPU-abcd"]);
     assert_eq!(l.reservation.as_ref().unwrap().gpu_devices, ["GPU-abcd"]);
-    let l = terrariumd::executor::native_gpu_limits(&def, caps.as_ref(), Some("p/worker"), Some(l))
+    use terrariumd::executor::native_gpu_limits;
+    let l = native_gpu_limits(&def, caps.as_ref(), Some("p/worker"), false, Some(l))
+        .unwrap()
         .unwrap();
     assert_eq!(l.native_gpu.unwrap().lease.as_deref(), Some(id.as_str()));
     let mut other = def.clone();
     other.name = "p-other".into();
-    let bare = terrariumd::executor::native_gpu_limits(&other, caps.as_ref(), None, None).unwrap();
+    // The operator (no holder, set from the actor) is the holder `operator`.
+    let bare = native_gpu_limits(&other, caps.as_ref(), None, true, None)
+        .unwrap()
+        .unwrap();
     assert_eq!(bare.native_gpu, Some(Default::default()));
+    assert_eq!(bare.holder, "operator");
     assert!(bare.reservation.is_none());
-    // Without the capability the grant is dropped.
-    assert!(terrariumd::executor::native_gpu_limits(&other, None, None, None).is_none());
+    // No holder and not the operator: refused, never the operator's scope.
+    let e = native_gpu_limits(&other, caps.as_ref(), None, false, None).unwrap_err();
+    assert!(e.to_string().contains("has no holder"), "{e}");
+    // A project service keeps its own holder.
+    let svc = terrarium_host::native::service_holder("p", "schedules");
+    let s = native_gpu_limits(&other, caps.as_ref(), Some(&svc), false, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(s.holder, "p/@schedules");
+    // Without the capability the grant is dropped (and no holder is needed).
+    assert!(
+        native_gpu_limits(&other, None, None, false, None)
+            .unwrap()
+            .is_none()
+    );
     client.abort();
     server.abort();
 }
@@ -786,8 +849,12 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
     let (td, server, client) = setup().await;
     let state = td.daemon.as_ref().unwrap().state.clone();
     let directory = td.dir.path();
+    // TER-526: the held pull must not outlive the test.
+    let fixtures = crate::common::FixtureGuard::new(directory);
     std::fs::write(directory.join("reservation-docker"), format!(
-        "#!/bin/sh\ncase $1 in\ninspect) echo '[]'; echo 'Error: No such object' >&2; exit 1;;\nrun) touch '{0}/pull-entered'; while [ ! -f '{0}/pull-release' ]; do sleep 0.05; done;;\nupdate) exit 0;;\nesac\n", directory.display()
+        "#!/bin/sh\ncase $1 in\ninspect) echo '[]'; echo 'Error: No such object' >&2; exit 1;;\nrun) touch '{0}/pull-entered'; {1};;\nupdate) exit 0;;\nesac\n",
+        directory.display(),
+        crate::common::gate_wait(&directory.join("pull-release"), Duration::from_secs(120))
     )).unwrap();
     let (server_b, address) = terrariumd::hosts::serve(state.clone(), "127.0.0.1:0")
         .await
@@ -928,6 +995,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         td.get(&format!("/api/reservations/{id}")).await.ok()["state"],
         "active"
     );
+    fixtures.assert_none_left().await;
     client.abort();
     server.abort();
     client_b.abort();
