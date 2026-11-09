@@ -128,8 +128,9 @@ async fn note(state: &Shared, card: &Card, message: &str) -> ApiResult<()> {
     }).await
 }
 
-/// Called by a separate timer so network fetches cannot delay agent lifecycle work.
+/// Called by a separate timer so remote reads cannot delay agent lifecycle work.
 pub async fn pass(state: &Shared) {
+    crate::trouble::observe_remote_heads(state).await;
     if let Err(e) = check(state).await {
         tracing::warn!("conflict hints: {e}");
     }

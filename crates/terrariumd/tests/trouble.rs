@@ -457,6 +457,82 @@ async fn research_card_starts_its_clock_and_signals_without_working_entry() {
 }
 
 #[tokio::test]
+async fn remote_head_change_resolves_no_progress_after_a_lead_only_notice() {
+    use std::time::Duration;
+    let remote = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(remote.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-b", "card"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    git(&["commit", "--allow-empty", "-m", "base"]);
+    let (td, lead, worker, card) = setup().await;
+    td.post(
+        "/api/projects/p/repos",
+        json!({"name": "app", "url": remote.path().to_str().unwrap()}),
+    )
+    .await
+    .ok();
+    td.put_as(
+        &lead,
+        "/api/projects/p/trouble",
+        json!({"no_progress_seconds": 1}),
+    )
+    .await
+    .ok();
+    let c = card.clone();
+    let w = worker.clone();
+    state(&td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE cards SET repo = 'app', branch = 'card' WHERE id = ?1",
+                [&c],
+            )?;
+            let base = chrono::Utc::now() - chrono::Duration::seconds(100);
+            t.execute(
+                "UPDATE events SET at = ?2 WHERE card = ?1",
+                rusqlite::params![c, base.to_rfc3339()],
+            )?;
+            let e = t.emit(
+                terrariumd::events::EventDraft::new("status", "working", json!({"status": "working"}))
+                    .project("p")
+                    .agent(&w, "worker"),
+            )?;
+            t.execute(
+                "UPDATE events SET at = ?2 WHERE seq = ?1",
+                rusqlite::params![e.seq, base.to_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    terrariumd::trouble::observe_remote_heads(&state(&td)).await;
+    assert_signals(&td, &card, json!([])).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_signals(&td, &card, json!(["no_progress"])).await;
+    assert_eq!(notices(&td, &lead).await, 1);
+    assert_eq!(notices(&td, &worker).await, 0);
+    assert_eq!(
+        td.get("/api/projects/p/board?view=summary").await.ok()["cards"][0]["trouble"],
+        json!(["no_progress"])
+    );
+    // A direct remote commit, with no repo.push audit row, is new progress.
+    git(&["commit", "--allow-empty", "-m", "direct push"]);
+    terrariumd::trouble::observe_remote_heads(&state(&td)).await;
+    assert_signals(&td, &card, json!([])).await;
+    terrariumd::trouble::pass(&state(&td)).await;
+    assert_eq!(notices(&td, &lead).await, 1);
+}
+
+#[tokio::test]
 async fn passed_eta_has_one_worker_reminder_and_only_a_lead_trouble_mail() {
     use std::time::{Duration, Instant};
     use terrarium_core::config::{CompactMaxAge, IdleStop};

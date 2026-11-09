@@ -30,6 +30,7 @@ pub struct Settings {
     pub timer_polls: u64,
     pub compactions: u64,
     pub review_wait_seconds: u64,
+    pub no_progress_seconds: u64,
 }
 
 impl Default for Settings {
@@ -45,6 +46,7 @@ impl Default for Settings {
             timer_polls: 3,
             compactions: 3,
             review_wait_seconds: 3600,
+            no_progress_seconds: 3600,
         }
     }
 }
@@ -378,6 +380,19 @@ pub fn view(c: &Connection, card: &str, now: DateTime<Utc>) -> ApiResult<View> {
     })
 }
 
+/// Working time already accumulated when the current remote head was first seen.
+const PROGRESS_BASELINE_SQL: &str =
+    "SELECT head IS NOT NULL, working_seconds FROM card_branch_heads WHERE card = ?1";
+
+fn progress_baseline(c: &Connection, card: &str) -> ApiResult<Option<(bool, u64)>> {
+    Ok(c.query_row(
+        PROGRESS_BASELINE_SQL,
+        [card],
+        |r| Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?.max(0) as u64)),
+    )
+    .optional()?)
+}
+
 pub fn active_signals(c: &Connection, card: &str) -> ApiResult<Vec<String>> {
     let mut q = c.prepare(
         "SELECT signal FROM card_trouble WHERE card = ?1 AND active = 1 ORDER BY signal",
@@ -449,6 +464,15 @@ fn desired(
     let limit = time_limit(kind, &s, p70);
     if limit > 0 && f.seconds >= limit {
         out.insert("time_budget".into());
+    }
+    if s.no_progress_seconds > 0
+        && (card.column_role.as_deref() == Some("working")
+            || card.column.eq_ignore_ascii_case("research"))
+        && let Some((present, baseline)) = progress_baseline(c, &card.id)?
+        && present
+        && f.seconds.saturating_sub(baseline) >= s.no_progress_seconds
+    {
+        out.insert("no_progress".into());
     }
     if card
         .eta_at
@@ -599,7 +623,8 @@ fn reconcile(t: &mut Tx<'_>, change: &Change, reminder_default: bool) -> ApiResu
                 .optional()?
                 .flatten()
                 .unwrap_or(reminder_default);
-            if !eta_reminder
+            if signal != "no_progress"
+                && !eta_reminder
                 && let Ok(to @ Address::Agent { .. }) = mail::resolve(t, agent, Some(&card.project))
             {
                 mail::send(
@@ -675,11 +700,15 @@ struct CardRevision {
     event: i64,
     tests: i64,
     settings: Option<String>,
+    head: Option<String>,
+    progress_seconds: Option<i64>,
 }
 
 const REVISION_SQL: &str = "SELECT (SELECT coalesce(max(seq), 0) FROM events WHERE card = ?1),
         (SELECT coalesce(max(run), 0) FROM test_run_cards WHERE card = ?1),
-        (SELECT settings FROM project_trouble WHERE project = ?2)";
+        (SELECT settings FROM project_trouble WHERE project = ?2),
+        (SELECT head FROM card_branch_heads WHERE card = ?1),
+        (SELECT working_seconds FROM card_branch_heads WHERE card = ?1)";
 
 fn revision(c: &Connection, card: &Watched) -> ApiResult<CardRevision> {
     Ok(
@@ -688,9 +717,115 @@ fn revision(c: &Connection, card: &Watched) -> ApiResult<CardRevision> {
                 event: r.get(0)?,
                 tests: r.get(1)?,
                 settings: r.get(2)?,
+                head: r.get(3)?,
+                progress_seconds: r.get(4)?,
             })
         })?,
     )
+}
+
+#[derive(Clone)]
+struct BranchCard {
+    id: String,
+    project: String,
+    repo: String,
+    branch: String,
+}
+
+const BRANCH_CARDS_SQL: &str = "SELECT c.id, c.project, c.repo, c.branch
+         FROM cards c INDEXED BY cards_branch_watch
+         JOIN board_columns k ON k.id = c.column_id
+         WHERE c.archived = 0 AND c.repo IS NOT NULL AND c.branch IS NOT NULL
+           AND (k.role IN ('working', 'review') OR lower(k.name) = 'research')
+         ORDER BY c.id LIMIT 256";
+
+fn branch_cards(c: &Connection) -> ApiResult<Vec<BranchCard>> {
+    let mut q = c.prepare(BRANCH_CARDS_SQL)?;
+    Ok(q.query_map([], |r| {
+        Ok(BranchCard {
+            id: r.get(0)?,
+            project: r.get(1)?,
+            repo: r.get(2)?,
+            branch: r.get(3)?,
+        })
+    })?
+    .collect::<Result<Vec<_>, _>>()?)
+}
+
+async fn remote_head(
+    state: &Shared,
+    repo: &crate::store::repos::Repo,
+    branch: &str,
+) -> Option<Option<String>> {
+    let secret = crate::secrets::secret_of(state, repo.owner(), repo.credential.as_deref())
+        .await
+        .ok()?;
+    let checkout = crate::git::Checkout {
+        url: repo.url.clone(),
+        dest: crate::api::repo_trees::mirror_dir(state, repo),
+        branch: None,
+        depth: None,
+        secret: secret.map(|(_, s)| s),
+        store: crate::secrets::RunDirs::new(&state.state_dir),
+        deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
+        timeout: std::time::Duration::from_secs(20),
+        hooks: Default::default(),
+        origin: Default::default(),
+        fetch_from: None,
+    };
+    let branch = branch.to_owned();
+    tokio::task::spawn_blocking(move || crate::git::ls_remote(&checkout, &branch).ok())
+        .await
+        .ok()?
+}
+
+/// Observe real remote heads rather than proxy audit rows, which also covers
+/// direct pushes. The first observation and every changed head start a new
+/// working-time interval. A missing branch stays unsignalled.
+pub async fn observe_remote_heads(state: &Shared) {
+    let cards = match state.db.read(branch_cards).await {
+        Ok(cards) => cards,
+        Err(e) => {
+            tracing::warn!("card branch scan failed: {e}");
+            return;
+        }
+    };
+    for card in cards {
+        let project = card.project.clone();
+        let name = card.repo.clone();
+        let repo = match state
+            .db
+            .read(move |c| crate::store::repos::resolve(c, &name, Some(&project)))
+            .await
+        {
+            Ok(repo) => repo,
+            Err(_) => continue,
+        };
+        let Some(head) = remote_head(state, &repo, &card.branch).await else {
+            continue;
+        };
+        if let Err(e) = state
+            .db
+            .write("system", move |t| {
+                let seconds = view(t, &card.id, Utc::now())?.working_seconds as i64;
+                t.execute(
+                    "INSERT INTO card_branch_heads(card, repo, branch, head, working_seconds, observed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(card) DO UPDATE SET
+                       repo = excluded.repo, branch = excluded.branch, head = excluded.head,
+                       working_seconds = excluded.working_seconds, observed_at = excluded.observed_at
+                     WHERE card_branch_heads.repo IS NOT excluded.repo
+                        OR card_branch_heads.branch IS NOT excluded.branch
+                        OR card_branch_heads.head IS NOT excluded.head",
+                    params![card.id, card.repo, card.branch, head, seconds, crate::db::now()],
+                )?;
+                Ok(())
+            })
+            .await
+        {
+            tracing::warn!("card branch observation failed: {e}");
+        }
+    }
 }
 
 pub async fn pass(state: &Shared) {
@@ -853,6 +988,7 @@ mod tests {
         assert!(s.tokens.is_empty() && s.turns.is_empty());
         s.time_seconds.insert("small".into(), 0);
         assert_eq!(time_limit("small", &s, Some(60000.0)), 0);
+        assert_eq!(s.no_progress_seconds, 3600);
         assert!(serde_json::from_value::<Settings>(json!({"red_streak": -1})).is_err());
         assert!(serde_json::from_value::<Settings>(json!({"unknown": 1})).is_err());
     }
@@ -1050,6 +1186,7 @@ mod tests {
         assert_eq!(events.len(), 4, "only one prior status and post-entry rows");
         assert_eq!(events.iter().filter(|e| e.kind == "status").count(), 2);
         c.execute_batch("CREATE TABLE test_runs(pk INTEGER PRIMARY KEY, name TEXT, commit_sha TEXT, failed INTEGER, errored INTEGER, created_by TEXT);
+            CREATE TABLE card_branch_heads(card TEXT PRIMARY KEY, head TEXT, working_seconds INTEGER);
             CREATE TABLE test_run_cards(run INTEGER, card TEXT, PRIMARY KEY(run, card));
             CREATE INDEX test_run_cards_card ON test_run_cards(card, run);
             CREATE TABLE project_trouble(project TEXT PRIMARY KEY, settings TEXT);
@@ -1084,12 +1221,51 @@ mod tests {
     }
 
     #[test]
+    fn branch_observation_queries_are_indexed_and_bounded() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE cards(id TEXT PRIMARY KEY, project TEXT, repo TEXT, branch TEXT,
+                archived INTEGER, column_id TEXT);
+             CREATE TABLE board_columns(id TEXT PRIMARY KEY, role TEXT, name TEXT);",
+        )
+        .unwrap();
+        c.execute_batch(include_str!("../migrations/ter-370-card-branch-head.sql"))
+            .unwrap();
+        for (sql, key, index) in [
+            (BRANCH_CARDS_SQL, "cards_branch_watch", "c"),
+            (PROGRESS_BASELINE_SQL, "card_branch_heads", "card_branch_heads"),
+        ] {
+            let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let plans = if sql == BRANCH_CARDS_SQL {
+                q.query_map([], |r| r.get::<_, String>(3))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            } else {
+                q.query_map(["P-1"], |r| r.get::<_, String>(3))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            assert!(
+                plans.iter().any(|p| {
+                    p.contains(&format!("SEARCH {key}")) && p.contains(index)
+                }),
+                "{plans:?}"
+            );
+            assert!(plans.iter().all(|p| !p.contains("SCAN c\n")), "{plans:?}");
+        }
+        assert!(BRANCH_CARDS_SQL.contains("LIMIT 256"));
+    }
+
+    #[test]
     fn unrelated_events_do_not_invalidate_a_card_plan() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
             "CREATE TABLE events(seq INTEGER PRIMARY KEY, card TEXT);
             CREATE TABLE test_run_cards(run INTEGER, card TEXT);
             CREATE TABLE project_trouble(project TEXT, settings TEXT);
+            CREATE TABLE card_branch_heads(card TEXT PRIMARY KEY, head TEXT, working_seconds INTEGER);
             INSERT INTO events VALUES (1, 'P-1');",
         )
         .unwrap();
