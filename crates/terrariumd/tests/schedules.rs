@@ -774,7 +774,9 @@ async fn a_turn_that_cannot_start_mails_the_project_inbox_or_the_operator() {
         body["owner"] = json!(owner);
         let s = td.post("/api/schedules", body).await;
         assert_eq!(s.ok()["owner"], owner, "{}", s.body);
-        let run = td.post_empty(&format!("/api/schedules/{}/run", id(&s.body))).await;
+        let run = td
+            .post_empty(&format!("/api/schedules/{}/run", id(&s.body)))
+            .await;
         let run = run.ok();
         assert_eq!(run["status"], "failed", "{run}");
         let mail = owner_mail(&td, to, name).await;

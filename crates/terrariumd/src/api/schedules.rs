@@ -1438,18 +1438,16 @@ impl NotStarted {
     /// not always `agent start`.
     fn hint(&self, who: &str) -> String {
         match self {
-            Self::NotReady => format!(
-                "For a time-critical turn, start it now (`terrarium agent start {who}`)."
-            ),
-            Self::Paused => format!(
-                "The unpause delivers it (`terrarium agent unpause {who}`)."
-            ),
+            Self::NotReady => {
+                format!("For a time-critical turn, start it now (`terrarium agent start {who}`).")
+            }
+            Self::Paused => format!("The unpause delivers it (`terrarium agent unpause {who}`)."),
             Self::Parked => "It goes in when the bound object of the agent comes back \
                  and the agent unparks."
                 .into(),
-            Self::Error | Self::Failed(_) => format!(
-                "Fix the error, then start the agent (`terrarium agent start {who}`)."
-            ),
+            Self::Error | Self::Failed(_) => {
+                format!("Fix the error, then start the agent (`terrarium agent start {who}`).")
+            }
             Self::Draining => {
                 "It goes in when the new daemon wakes the agent: no action is needed.".into()
             }
