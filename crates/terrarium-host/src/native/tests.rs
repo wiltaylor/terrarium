@@ -214,6 +214,8 @@ fn a_gpu_session_allows_only_its_gpu_and_the_support_nodes() {
     assert!(p.contains(&"NoNewPrivileges=yes"));
     assert!(p.contains(&"CapabilityBoundingSet="));
     assert!(p.contains(&"KillMode=control-group"));
+    assert!(p.contains(&"PrivateTmp=yes"));
+    assert!(p.contains(&"RemoveIPC=yes"));
     let allowed: Vec<_> = p
         .iter()
         .filter(|x| x.starts_with("DeviceAllow="))
@@ -659,6 +661,72 @@ fn trusted_paths_need_root_owned_parents() {
     assert!(check_root_chain(&dir.path().join("missing")).is_err());
     if Path::new("/usr/bin/env").exists() {
         check_root_chain(Path::new("/usr/bin/env")).unwrap();
+    }
+    assert!(check_root_chain(Path::new("relative/bin")).is_err());
+}
+
+/// A root-owned symlink in a trusted directory that points into a
+/// writable directory is not trusted: the resolved path is checked too.
+/// Needs root for a trusted directory; it is skipped elsewhere.
+#[test]
+fn a_symlink_into_a_writable_directory_is_not_trusted() {
+    if !nix::unistd::geteuid().is_root() {
+        eprintln!("skipped: needs root for a root-owned trusted directory");
+        return;
+    }
+    let trusted = tempfile::tempdir_in("/").unwrap();
+    let writable = tempfile::tempdir().unwrap();
+    std::fs::write(writable.path().join("nvidia-smi"), "").unwrap();
+    let link = trusted.path().join("nvidia-smi");
+    std::os::unix::fs::symlink(writable.path().join("nvidia-smi"), &link).unwrap();
+    let e = check_root_chain(&link).unwrap_err();
+    assert!(e.contains("resolves to"), "{e}");
+    if Path::new("/usr/bin/env").exists() {
+        let ok = trusted.path().join("env");
+        std::os::unix::fs::symlink("/usr/bin/env", &ok).unwrap();
+        check_root_chain(&ok).unwrap();
+        check_root_chain(trusted.path()).unwrap();
+    }
+}
+
+#[test]
+fn the_state_dir_is_checked_before_it_is_made() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("sessions");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let e = check_state_dir(&link).unwrap_err();
+    assert!(e.contains("must not be a symlink"), "{e}");
+    let file = dir.path().join("file");
+    std::fs::write(&file, "").unwrap();
+    assert!(check_state_dir(&file).unwrap_err().contains("directory"));
+    // A missing state_dir under a writable parent: refused before it is
+    // made.
+    assert!(check_state_dir(&dir.path().join("a/b")).is_err());
+    assert!(check_state_dir(Path::new("relative")).is_err());
+    if nix::unistd::geteuid().is_root() {
+        let trusted = tempfile::tempdir_in("/").unwrap();
+        check_state_dir(&trusted.path().join("a/b")).unwrap();
+    }
+}
+
+#[test]
+fn a_failed_unit_is_stopped_only_with_an_empty_cgroup() {
+    let root = tempfile::tempdir().unwrap();
+    let cg = root.path().join("system.slice/u.service");
+    std::fs::create_dir_all(&cg).unwrap();
+    // No cgroup, or a cgroup that is gone: empty.
+    assert!(cgroup_empty(root.path(), "").unwrap());
+    assert!(cgroup_empty(root.path(), "/system.slice/gone.service").unwrap());
+    std::fs::write(cg.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+    assert!(!cgroup_empty(root.path(), "/system.slice/u.service").unwrap());
+    std::fs::write(cg.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+    assert!(cgroup_empty(root.path(), "/system.slice/u.service").unwrap());
+    std::fs::write(cg.join("cgroup.events"), "frozen 0\n").unwrap();
+    assert!(cgroup_empty(root.path(), "/system.slice/u.service").is_err());
+    for bad in ["system.slice", "/system.slice/../x"] {
+        assert!(cgroup_empty(root.path(), bad).is_err(), "{bad}");
     }
 }
 

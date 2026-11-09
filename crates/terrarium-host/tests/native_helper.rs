@@ -103,14 +103,18 @@ impl Fake {
                 env = d.join("env.copy").display(),
             ),
         );
-        // `show` prints the unit state (file `state`, default inactive);
-        // `list-units` prints the file `units`, or fails with `list.fail`.
+        // `show` prints the unit state (file `state`, default inactive)
+        // and its cgroup (file `cgroup`, default none); `list-units` prints
+        // the file `units`, or fails with `list.fail`.
         script(
             &d.join("systemctl"),
             &format!(
                 "printf '%s\\n' \"$*\" >> '{d}/ctl.log'\n\
                  case \"$1\" in\n\
-                 show) if [ -f '{d}/state' ]; then cat '{d}/state'; else echo inactive; fi ;;\n\
+                 show) case \"$2\" in\n\
+                 *ControlGroup) cat '{d}/cgroup' 2>/dev/null ;;\n\
+                 *) if [ -f '{d}/state' ]; then cat '{d}/state'; else echo inactive; fi ;;\n\
+                 esac ;;\n\
                  list-units) [ -f '{d}/list.fail' ] && exit 1; cat '{d}/units' 2>/dev/null ;;\n\
                  esac\n\
                  exit 0\n",
@@ -449,6 +453,60 @@ fn shim(f: &Fake, req: &Request) -> std::process::Command {
         .arg(&f.socket)
         .env(native::REQUEST_ENV, serde_json::to_string(req).unwrap());
     c
+}
+
+/// A stop with `--user-slice` (the host agent sends it once the helper
+/// enforced): the holder's user slice and its system slice both stop, and
+/// the shim fails when either stop fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shim_stop_also_stops_the_user_slice() {
+    let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
+    let bin = f.dir.path().join("userbin");
+    std::fs::create_dir(&bin).unwrap();
+    // The user manager's systemctl: exit 5 (not loaded) unless `user.code`.
+    script(
+        &bin.join("systemctl"),
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{d}/user.log'\n\
+             [ -f '{d}/user.code' ] && exit \"$(cat '{d}/user.code')\"\n\
+             exit 5\n",
+            d = f.dir.path().display()
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let stop = Request::Stop(SliceRequest {
+        target: "box".into(),
+        holder: "p/a".into(),
+    });
+    let slice = terrarium_host::limits::slice_name("box", "p/a");
+    let run = |socket: &Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_terrarium-host"))
+            .args(["native", "--user-slice", "--socket"])
+            .arg(socket)
+            .env(native::REQUEST_ENV, serde_json::to_string(&stop).unwrap())
+            .env("PATH", &path)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .code()
+    };
+    let stops = || f.log("ctl.log").matches(&format!("stop -- {slice}")).count();
+    // A user slice that is not loaded has nothing to stop.
+    assert_eq!(run(&f.socket), Some(0));
+    assert_eq!(f.log("user.log"), format!("--user stop -- {slice}\n"));
+    assert_eq!(stops(), 1);
+    // The user stop fails: the helper stop still runs, the shim fails.
+    f.write("user.code", "1");
+    assert_eq!(run(&f.socket), Some(125));
+    assert_eq!(stops(), 2);
+    // The helper is gone: the user stop runs, the shim fails.
+    f.write("user.code", "0");
+    assert_eq!(run(&f.dir.path().join("gone.sock")), Some(125));
+    assert_eq!(f.log("user.log").lines().count(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -803,7 +861,22 @@ fn the_socket_belongs_to_the_agent_user() {
 async fn the_shim_relays_the_terminal_size_after_sigwinch() {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
-    let mut req = f.start("p/a", None, &[], &[], &["sh", "-c", "sleep 3; stty size"]);
+    // The session prints a marker once it runs (the shim relays output
+    // only after its signal handlers are in place), then waits for the new
+    // size: no fixed sleep decides the order.
+    let mut req = f.start(
+        "p/a",
+        None,
+        &[],
+        &[],
+        &[
+            "sh",
+            "-c",
+            "echo ready; i=0; while [ $i -lt 200 ]; do s=$(stty size); \
+             if [ \"$s\" = '40 120' ]; then echo \"size $s\"; exit 0; fi; \
+             i=$((i + 1)); sleep 0.1; done; echo \"size stayed $s\"; exit 1",
+        ],
+    );
     req.pty = Some((24, 80));
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -832,13 +905,19 @@ async fn the_shim_relays_the_terminal_size_after_sigwinch() {
             }
         }
     });
-    for _ in 0..100 {
-        if !f.log("run.log").is_empty() {
-            break;
+    let mut out = Vec::new();
+    let ready = tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(d) = rx.recv().await {
+            out.extend(d);
+            if String::from_utf8_lossy(&out).contains("ready") {
+                return true;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(ready, "{:?}", String::from_utf8_lossy(&out));
     pair.master
         .resize(PtySize {
             rows: 40,
@@ -847,11 +926,10 @@ async fn the_shim_relays_the_terminal_size_after_sigwinch() {
             pixel_height: 0,
         })
         .unwrap();
-    let mut out = Vec::new();
     let found = tokio::time::timeout(Duration::from_secs(15), async {
         while let Some(d) = rx.recv().await {
             out.extend(d);
-            if String::from_utf8_lossy(&out).contains("40 120") {
+            if String::from_utf8_lossy(&out).contains("size 40 120") {
                 return true;
             }
         }

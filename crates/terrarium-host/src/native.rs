@@ -451,13 +451,70 @@ pub fn check_root_owned(path: &Path, meta: &std::fs::Metadata) -> Result<(), Str
 }
 
 /// [`check_root_owned`] for the path and each of its parent directories:
-/// a writable parent could swap the file.
+/// a writable parent could swap the file. Symlinks do not hide a parent:
+/// the path is checked as written (each symlink on it must be root-owned,
+/// in a checked directory) and then as resolved (each directory that a
+/// symlink points into is checked too).
 pub fn check_root_chain(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("{} must be an absolute path", path.display()));
+    }
+    walk_root_chain(path)?;
+    let real = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if real != path {
+        walk_root_chain(&real)
+            .map_err(|e| format!("{} resolves to {}: {e}", path.display(), real.display()))?;
+    }
+    Ok(())
+}
+
+/// The path and its parents, without following the last component of
+/// each: a symlink only needs a root owner (its mode means nothing).
+fn walk_root_chain(path: &Path) -> Result<(), String> {
     let mut p = Some(path);
     while let Some(dir) = p {
-        let meta = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        check_root_owned(dir, &meta)?;
+        let meta =
+            std::fs::symlink_metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        if meta.file_type().is_symlink() {
+            if meta.uid() != 0 {
+                return Err(format!("symlink {} must be owned by root", dir.display()));
+            }
+        } else {
+            check_root_owned(dir, &meta)?;
+        }
         p = dir.parent();
+    }
+    Ok(())
+}
+
+/// Check the helper's state directory before it is created or changed:
+/// the existing part of its parent chain must be root-owned, and the
+/// directory itself must not be a symlink (the helper would chmod and
+/// write through it).
+pub fn check_state_dir(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("{} must be an absolute path", path.display()));
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!("{} must not be a symlink", path.display()));
+        }
+        Ok(meta) if !meta.is_dir() => {
+            return Err(format!("{} must be a directory", path.display()));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    }
+    // The nearest parent that exists: create_dir_all makes the rest as
+    // root, under it.
+    let mut parent = path.parent();
+    while let Some(p) = parent {
+        match std::fs::symlink_metadata(p) {
+            Ok(_) => return check_root_chain(p),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => parent = p.parent(),
+            Err(e) => return Err(format!("{}: {e}", p.display())),
+        }
     }
     Ok(())
 }
@@ -821,6 +878,13 @@ pub fn plan_start(
         "CapabilityBoundingSet=",
         "AmbientCapabilities=",
         "RestrictSUIDSGID=yes",
+        // A pool UID passes to another holder when its holder's last
+        // session ends: nothing of the old holder may stay behind for the
+        // next. /tmp and /var/tmp are private to the unit; systemd removes
+        // the UID's System V and POSIX IPC (also /dev/shm) when the last
+        // unit of the UID stops.
+        "PrivateTmp=yes",
+        "RemoveIPC=yes",
         "KillMode=control-group",
         "DevicePolicy=closed",
         "DeviceAllow=char-pts rw",
@@ -1039,6 +1103,41 @@ pub struct Helper {
     pub stop_retry: Duration,
 }
 
+/// Where the cgroup v2 tree is mounted.
+pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// True when the cgroup `cgroup` (a `ControlGroup` value, relative to
+/// `root`) holds no process: no cgroup, or `populated 0` in its
+/// `cgroup.events`. A value that is not a clean absolute path is an error.
+pub fn cgroup_empty(root: &Path, cgroup: &str) -> Result<bool, String> {
+    if cgroup.is_empty() {
+        return Ok(true);
+    }
+    let rel = Path::new(cgroup);
+    if !rel.is_absolute()
+        || rel
+            .components()
+            .skip(1)
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(format!("bad ControlGroup {cgroup:?}"));
+    }
+    let events = root
+        .join(rel.strip_prefix("/").unwrap_or(rel))
+        .join("cgroup.events");
+    match std::fs::read_to_string(&events) {
+        Ok(text) => {
+            let populated = text
+                .lines()
+                .find_map(|l| l.strip_prefix("populated "))
+                .ok_or_else(|| format!("{}: no populated line", events.display()))?;
+            Ok(populated.trim() == "0")
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(format!("{}: {e}", events.display())),
+    }
+}
+
 /// The default [`Helper::stop_timeout`].
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// The default [`Helper::stop_retry`].
@@ -1120,20 +1219,33 @@ impl Helper {
         })
     }
 
-    /// True when systemd reports the unit inactive, failed, or unknown.
-    async fn unit_stopped(&self, unit: &str) -> Result<bool, String> {
-        let state = call(
+    /// One property of a unit, as `systemctl show` prints it.
+    async fn unit_property(&self, unit: &str, property: &str) -> Result<String, String> {
+        call(
             &self.systemctl,
             &[
                 "show".to_owned(),
-                "--property=ActiveState".to_owned(),
+                format!("--property={property}"),
                 "--value".to_owned(),
                 "--".to_owned(),
                 unit.to_owned(),
             ],
         )
-        .await?;
-        Ok(matches!(state.trim(), "inactive" | "failed" | ""))
+        .await
+        .map(|v| v.trim().to_owned())
+    }
+
+    /// True when systemd reports the unit inactive, failed, or unknown,
+    /// and its cgroup holds no process. A failed unit can keep processes
+    /// (a stop that timed out): it counts as stopped only once its cgroup
+    /// is empty.
+    async fn unit_stopped(&self, unit: &str) -> Result<bool, String> {
+        let state = self.unit_property(unit, "ActiveState").await?;
+        if !matches!(state.as_str(), "inactive" | "failed" | "") {
+            return Ok(false);
+        }
+        let cgroup = self.unit_property(unit, "ControlGroup").await?;
+        cgroup_empty(Path::new(CGROUP_ROOT), &cgroup)
     }
 
     /// SIGKILL the unit and wait until systemd reports it stopped, at most
@@ -1865,7 +1977,11 @@ pub fn start_request(
 /// `terrarium-host native`: send the request in [`REQUEST_ENV`] to the
 /// helper. For `start`, relay stdio, signals, and the terminal size until
 /// the session ends. Returns the exit code of the process.
-pub async fn shim(socket: &Path) -> i32 {
+///
+/// With `user_slice`, a `stop` also stops the holder's slice in the agent
+/// user's manager first: the holder can have sessions in both (see
+/// `Client::slice_stop_plan`). It exits 0 only when both stops succeed.
+pub async fn shim(socket: &Path, user_slice: bool) -> i32 {
     let Some(text) = std::env::var_os(REQUEST_ENV) else {
         eprintln!("terrarium-host native: {REQUEST_ENV} is not set");
         return 125;
@@ -1877,6 +1993,14 @@ pub async fn shim(socket: &Path) -> i32 {
             return 125;
         }
     };
+    let mut user_failed = false;
+    if user_slice
+        && let Request::Stop(s) = &req
+        && let Err(e) = crate::limits::stop_user_slice(&s.target, &s.holder).await
+    {
+        eprintln!("terrarium-host native: {e}");
+        user_failed = true;
+    }
     let pty = matches!(&req, Request::Start(s) if s.pty.is_some());
     let stream = match UnixStream::connect(socket).await {
         Ok(s) => s,
@@ -1901,7 +2025,7 @@ pub async fn shim(socket: &Path) -> i32 {
     }
     match read_frame(&mut rd).await {
         Ok(Some((Kind::Reply, body))) => match serde_json::from_slice::<Reply>(&body) {
-            Ok(Reply::Ok | Reply::Hello { .. }) => return 0,
+            Ok(Reply::Ok | Reply::Hello { .. }) => return if user_failed { 125 } else { 0 },
             Ok(Reply::Started { .. }) => {}
             Ok(Reply::Error { code, message }) => {
                 eprintln!("terrarium-host native: refused ({code:?}): {message}");
@@ -2043,6 +2167,17 @@ pub fn parse_stty_size(text: &str) -> Option<(u16, u16)> {
     let rows = w.next()?.parse().ok()?;
     let cols = w.next()?.parse().ok()?;
     (rows > 0 && cols > 0).then_some((rows, cols))
+}
+
+/// [`verb_plan`] of a `stop` that also stops the holder's user slice
+/// (`--user-slice`, see [`shim`]).
+pub fn stop_plan(
+    opts: &NativeOptions,
+    request: &SliceRequest,
+) -> Result<crate::verb::VerbPlan, crate::verb::BuildError> {
+    let mut plan = verb_plan(opts, &Request::Stop(request.clone()))?;
+    plan.exec.args.push("--user-slice".into());
+    Ok(plan)
 }
 
 /// Ask the helper for one `apply` or `stop`, as a plan for the session

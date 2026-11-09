@@ -572,6 +572,7 @@ async fn native_exclusive_gpu_needs_enforced_helper_support() {
     let state = td.daemon.as_ref().unwrap().state.clone();
     td.post("/api/targets", native).await.ok();
     let resp = td.post("/api/hosts/h/reservations", body).await;
+    assert!(resp.status.is_success(), "{}: {}", resp.status, resp.body);
     assert!(
         !resp.body.to_string().contains("native GPU support")
             && !resp.body.to_string().contains("exclusive GPU needs"),

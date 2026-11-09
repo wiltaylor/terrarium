@@ -83,12 +83,21 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
     free workload user"). Before each session the helper looks the user up
     again and checks its groups and linger, so a later `usermod` or
     `loginctl enable-linger` does not reach a new session.
+  - UID reuse: a pool UID can pass to another holder once its holder's
+    last session is confirmed stopped. So that nothing of the old holder
+    stays for the new one, each unit has `PrivateTmp=yes` (its own `/tmp`
+    and `/var/tmp`, removed with the unit) and `RemoveIPC=yes` (systemd
+    removes the System V and POSIX IPC objects of the UID, also its files
+    in `/dev/shm`, when the last unit of that UID stops). The pool users
+    have no home directory (see the install steps). Files that a session
+    writes in its workspace stay: the workspace belongs to the target, not
+    to the UID.
 - **The session** is a transient system service, not a scope: systemd sets
   the user, the groups, and the device policy before `exec`, and
   `KillMode=control-group` ends every descendant with the main process.
   Properties: `--uid`/`--gid` of the holder's workload user, `NoNewPrivileges=yes`,
   `CapabilityBoundingSet=`, `AmbientCapabilities=`, `RestrictSUIDSGID=yes`,
-  `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
+  `PrivateTmp=yes`, `RemoveIPC=yes`, `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
   each granted GPU and support node, `--expand-environment=no`. The
   environment goes in a root-only `EnvironmentFile` under `state_dir`, not
   on a command line.
@@ -107,15 +116,21 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   signal), as a shell reports it.
 - **Stop confirmation**: when `systemd-run` ends, the helper sends SIGKILL
   to the unit and waits, at most 30 s, until `systemctl show
-  --property=ActiveState` reports it inactive, failed, or unknown. Only then
-  is the claim freed. Otherwise it logs a warning, keeps the claim marked
+  --property=ActiveState` reports it inactive, failed, or unknown, and its
+  `ControlGroup` is gone or `populated 0` in `cgroup.events` (a failed unit
+  can keep processes after a stop timed out). Only then is the claim
+  freed. Otherwise it logs a warning, keeps the claim marked
   stuck, and checks again every 10 s.
 - **Start**: the helper stops the `terrarium-native-*.service` units of an
   earlier run before it serves, and waits until each is inactive. When the
   list fails or a unit does not stop, it exits (fail closed). It checks
   that the config, the binaries, the socket directory, and the state
   directory, and every parent of each, are owned by root and not writable
-  by group or others. GPU sessions need `nvidia_smi` verified the same way
+  by group or others. A path with a symlink is checked as written (each
+  symlink root-owned) and as resolved, so a root-owned link into a
+  writable directory is refused. The state directory must not be a
+  symlink, and its existing parents are checked before the helper creates
+  it or changes its mode. GPU sessions need `nvidia_smi` verified the same way
   at start; otherwise they are refused with the reason.
 - **Rights** (separate per operation): the config lists the rights of the
   agent user. `session` covers `apply`, `stop`, and `start`. With no right,
@@ -246,7 +261,8 @@ not run it on a shared target or a DGX Spark without that decision.
 2. **The workload pool**: one system user for each holder that may run
    native sessions at the same time (for example four). Each has its own
    UID and its own primary group, is not the agent user, has no login, no
-   linger, and none of the groups `root wheel sudo admin adm docker libvirt
+   linger, no home directory (a writable home would carry files from one
+   holder to the next holder of the UID), and none of the groups `root wheel sudo admin adm docker libvirt
    lxd incus-admin disk kvm systemd-journal`. The helper refuses to start
    otherwise, and checks the groups and linger again before each session.
 

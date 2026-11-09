@@ -95,6 +95,9 @@ fn main() -> anyhow::Result<()> {
         .parent()
         .context("the socket needs a directory")?;
     root_chain(socket_dir)?;
+    // Before the helper creates or chmods it: a symlinked state_dir or a
+    // writable parent would let another user aim root's writes.
+    native::check_state_dir(&cfg.state_dir).map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("create {}", cfg.state_dir.display()))?;
     std::fs::set_permissions(
