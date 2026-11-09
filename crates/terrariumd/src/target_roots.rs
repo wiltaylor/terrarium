@@ -318,13 +318,21 @@ finally:
     for fd in reversed(fds): os.close(fd)
 "#;
 
-/// The holder of the daemon's own commands for an agent's root (probe,
-/// home fallback, prepare, measure, delete): the agent they act for,
-/// `<project>/<agent>` as [`crate::executor::holder_of`] makes it. On a
-/// host with native GPU enforcement each runs in that agent's own scope,
-/// never the operator's; the sweep of an ended agent uses the same holder.
-fn agent_holder(project: &str, name: &str) -> String {
-    format!("{project}/{name}")
+/// The daemon's own fixed root scripts (the python probe, the home
+/// fallback, prepare, measure, delete, also in the sweep of an ended agent)
+/// run with the operator's scope, as the kill and clear scripts of
+/// `run_kill` do: they are daemon-written, their only arguments are names
+/// that [`root`] checked, and no agent code runs in them. On a host with
+/// native GPU enforcement the operator scope (the whole workspace root,
+/// no tmpfs) keeps their mount check and their mkdir working; an agent's
+/// own execs keep the holder `<project>/<agent>` and its own directory.
+fn root_script(argv: Vec<String>, timeout_secs: u64) -> RemoteCmd {
+    RemoteCmd {
+        argv,
+        timeout_secs: Some(timeout_secs),
+        operator: true,
+        ..RemoteCmd::default()
+    }
 }
 
 fn command(
@@ -336,17 +344,15 @@ fn command(
     dest: &str,
 ) -> ApiResult<RemoteCmd> {
     root(base, project, name)?;
-    Ok(RemoteCmd {
-        argv: [
+    Ok(root_script(
+        [
             "python3", "-c", SCRIPT, mode, base, project, name, agent, dest,
         ]
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        timeout_secs: Some(if mode == "prepare" { 120 } else { 900 }),
-        holder: Some(agent_holder(project, name)),
-        ..RemoteCmd::default()
-    })
+        if mode == "prepare" { 120 } else { 900 },
+    ))
 }
 
 /// Record before creating anything, so a crash cannot orphan a new root.
@@ -396,12 +402,7 @@ pub async fn prepare(
     let probe = start_cmd(
         state,
         def,
-        &RemoteCmd {
-            argv: vec!["sh".into(), "-c".into(), PYTHON_PROBE.into()],
-            timeout_secs: Some(30),
-            holder: Some(agent_holder(&a.project, &a.name)),
-            ..RemoteCmd::default()
-        },
+        &root_script(vec!["sh".into(), "-c".into(), PYTHON_PROBE.into()], 30),
     )?
     .collect(4096)
     .await;
@@ -465,7 +466,7 @@ pub async fn prepare(
     {
         // Exit 3 means the agent user cannot reach the default base, so no
         // root of this agent exists there: switching the row orphans nothing.
-        current = home_fallback(state, def, &agent_holder(&a.project, &a.name)).await?;
+        current = home_fallback(state, def).await?;
         path = root(&current, &a.project, &a.name)?;
         let (id, target, fallback) = (a.id.clone(), def.name.clone(), current.clone());
         state
@@ -508,16 +509,11 @@ pub async fn prepare(
 }
 
 /// The home fallback base of the agent user on the target.
-async fn home_fallback(state: &Shared, def: &TargetDef, holder: &str) -> ApiResult<String> {
+async fn home_fallback(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     let out = start_cmd(
         state,
         def,
-        &RemoteCmd {
-            argv: vec!["python3".into(), "-c".into(), HOME_PROBE.into()],
-            timeout_secs: Some(30),
-            holder: Some(holder.to_owned()),
-            ..RemoteCmd::default()
-        },
+        &root_script(vec!["python3".into(), "-c".into(), HOME_PROBE.into()], 30),
     )?
     .collect(4096)
     .await;
@@ -757,11 +753,13 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    /// The daemon's own commands for agent X's root carry X's holder: on a
-    /// host with native GPU enforcement they pass (no "has no holder"),
-    /// run in X's own workspace scope, and name only X's root, never Y's.
+    /// The daemon's fixed root scripts run with the operator scope on a
+    /// host with native GPU enforcement (they pass, and the helper gives
+    /// them the whole workspace root, so their mount check and mkdir work);
+    /// they name only the root of the agent they act for. Any other
+    /// command with no holder is still refused there.
     #[test]
-    fn root_commands_run_as_the_agent_they_act_for() {
+    fn root_scripts_run_with_the_operator_scope() {
         let mut h: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
         h.name = "box".into();
         let caps = terrarium_core::protocol::HostCapabilities {
@@ -774,17 +772,24 @@ mod tests {
         };
         let ws = tempfile::tempdir().unwrap();
         let ws = std::fs::canonicalize(ws.path()).unwrap();
-        std::fs::create_dir_all(ws.join("terra/x")).unwrap();
-        std::fs::create_dir_all(ws.join("terra/y")).unwrap();
-        for mode in ["prepare", "measure", "delete"] {
-            let cmd = command(mode, "/srv/roots", "terra", "x", "agent-x", "").unwrap();
-            assert_eq!(cmd.holder.as_deref(), Some("terra/x"), "{mode}");
-            assert!(!cmd.operator, "{mode}");
+        let mut scripts: Vec<RemoteCmd> = ["prepare", "measure", "delete"]
+            .into_iter()
+            .map(|mode| command(mode, "/srv/roots", "terra", "x", "agent-x", "").unwrap())
+            .collect();
+        for cmd in &scripts {
             assert!(cmd.argv.iter().any(|a| a == "x"));
-            assert!(
-                !cmd.argv.iter().any(|a| a == "y" || a.contains("/y")),
-                "{mode}"
-            );
+            assert!(!cmd.argv.iter().any(|a| a == "y" || a.contains("/y")));
+        }
+        scripts.push(root_script(
+            vec!["sh".into(), "-c".into(), PYTHON_PROBE.into()],
+            30,
+        ));
+        scripts.push(root_script(
+            vec!["python3".into(), "-c".into(), HOME_PROBE.into()],
+            30,
+        ));
+        for cmd in &scripts {
+            assert!(cmd.operator && cmd.holder.is_none(), "{cmd:?}");
             let l = crate::executor::native_gpu_limits(
                 &h,
                 Some(&caps),
@@ -794,26 +799,48 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-            assert_eq!(l.holder, "terra/x");
-            // The helper's scope of that holder: X's directory only.
+            assert_eq!(l.holder, "operator");
             assert_eq!(
                 terrarium_host::native::holder_workspace(&ws, &l.holder).unwrap(),
-                Some(ws.join("terra/x"))
+                Some(ws.clone())
             );
         }
-        assert_eq!(agent_holder("terra", "x"), "terra/x");
-        // Without a holder the same command is refused on that host.
-        let bare = RemoteCmd::default();
-        assert!(
-            crate::executor::native_gpu_limits(
-                &h,
-                Some(&caps),
-                bare.holder.as_deref(),
-                false,
-                None
-            )
-            .is_err()
+        // A command that is no root script, with no holder: refused.
+        let bare = RemoteCmd {
+            argv: vec!["true".into()],
+            ..RemoteCmd::default()
+        };
+        let e = crate::executor::native_gpu_limits(
+            &h,
+            Some(&caps),
+            bare.holder.as_deref(),
+            bare.operator,
+            None,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("has no holder"), "{e}");
+    }
+
+    /// The owned root as the agent's own directory under the workspace root
+    /// (`work_root` = `workspace_root`): prepare creates `<ws>/<p>/<a>`
+    /// with the owner marker, and measure and delete pass the mount check,
+    /// since the root and its parent share a mount in the operator scope.
+    #[test]
+    fn the_owned_root_can_be_the_agents_directory_under_the_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The workspace root with the project directory of the host agent.
+        std::fs::create_dir_all(tmp.path().join("ws/p")).unwrap();
+        assert_eq!(run_code_at(tmp.path(), "/ws", "prepare", "repo"), Some(0));
+        let owned = tmp.path().join("ws/p/a");
+        assert_eq!(
+            std::fs::read_to_string(owned.join(".terrarium-owner")).unwrap(),
+            "agent-id"
         );
+        assert!(owned.join("repo").is_dir());
+        assert_eq!(run_code_at(tmp.path(), "/ws", "measure", ""), Some(0));
+        assert_eq!(run_code_at(tmp.path(), "/ws", "delete", ""), Some(0));
+        assert!(!owned.exists());
+        assert!(tmp.path().join("ws/p").is_dir());
     }
 
     #[test]
@@ -979,6 +1006,16 @@ mod tests {
     }
 
     fn run_code(base: &std::path::Path, mode: &str, dest: &str) -> Option<i32> {
+        run_code_at(base, "/src/terrarium", mode, dest)
+    }
+
+    /// [`run_code`] with another owned-root base (`work_root`) in the tree.
+    fn run_code_at(
+        base: &std::path::Path,
+        work_root: &str,
+        mode: &str,
+        dest: &str,
+    ) -> Option<i32> {
         // Exercise the exact target program in an isolated tree, not /src.
         let script = SCRIPT.replace(
             "os.open('/',",
@@ -989,7 +1026,7 @@ mod tests {
                 "-c",
                 &script,
                 mode,
-                "/src/terrarium",
+                work_root,
                 "p",
                 "a",
                 "agent-id",

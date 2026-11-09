@@ -105,13 +105,20 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
         operator is trusted). Only a command of the operator (the actor,
         or a `run_as = "operator"` webhook) gets this holder: the daemon
         refuses a command with no holder on such a host, so a path that
-        forgets the holder never gets the whole root. The daemon's own
-        commands for a card agent's owned root (probe, prepare, measure,
-        delete) run as that agent `<project>/<agent>`, in its own scope.
+        forgets the holder never gets the whole root. The daemon's own fixed
+        scripts for a card agent's owned root (the python probe, the home
+        fallback, prepare, measure, delete, also the sweep of an ended
+        agent) run with this operator scope, like the kill and clear
+        scripts of a run: they are daemon-written, take only checked names,
+        and run no agent code. The agent's own execs keep the holder
+        `<project>/<agent>` and see only `<workspace_root>/<project>/<agent>`.
         So on such a host set the target's `work_root` to `workspace_root`:
-        the owned root `<work_root>/<project>/<agent>` is then the agent's
-        own directory. The default `/src/terrarium` is outside the scope
-        and read-only in the unit.
+        the owned root `<work_root>/<project>/<agent>` is then inside the
+        agent's own directory scope. The default `/src/terrarium` is
+        outside every scope and read-only in the unit. Prepare refuses an
+        existing directory without its owner marker, so the owned root
+        works only where `<workspace_root>/<project>/<agent>` does not
+        exist before the first prepare.
 
       Directories outside the scope do not exist in the unit, whatever
       their modes, so a file that an earlier holder of the UID made private
