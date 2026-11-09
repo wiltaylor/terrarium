@@ -33,6 +33,32 @@ async fn card(td: &TestDaemon, agent: &str, body: Value) -> String {
 }
 
 #[tokio::test]
+async fn broken_worker_history_does_not_break_card_responses() {
+    let td = setup().await;
+    let sample = card(&td, "proj/lead", json!({"title":"Sample"})).await;
+    let path = format!("/api/cards/{sample}");
+    td.patch(&path, json!({"column":"working", "eta_at":"1h"})).await.ok();
+    td.patch(&path, json!({"column":"ready"})).await.ok();
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    db.write("system", move |t| {
+        // A non-string SQL labels value makes work_samples fail decoding.
+        t.execute("UPDATE events SET payload = json_set(payload, '$.labels', 1) WHERE card = ?1 AND json_extract(payload, '$.change') = 'eta'", [sample])?;
+        Ok(())
+    }).await.unwrap();
+    let id = card(&td, "proj/lead", json!({"title":"Work"})).await;
+    let path = format!("/api/cards/{id}");
+    let ready = td.get(&path).await.ok().clone();
+    assert!(ready.get("eta_history").is_none());
+    let claimed = td.post_as("proj/w1", &format!("{path}/claim"), json!({})).await.ok().clone();
+    assert!(claimed.get("eta_history").is_none());
+    let eta = td.patch(&path, json!({"eta_at":"25m"})).await.ok().clone();
+    assert!(eta.get("eta_history").is_none());
+    assert!(td.get(&path).await.ok().get("eta_history").is_none());
+    td.get("/api/projects/proj/cards").await.ok();
+    td.get("/api/projects/proj/board").await.ok();
+}
+
+#[tokio::test]
 async fn worker_eta_render_calibrates_but_preserves_raw_events() {
     let td = setup().await;
     let id = card(

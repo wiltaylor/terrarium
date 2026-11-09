@@ -201,8 +201,8 @@ pub struct Card {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta_calibrated: Option<bool>,
     /// Recent completed worker estimates in this project with the same type.
-    #[serde(default)]
-    pub eta_history: super::card_history::WorkHistory,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_history: Option<super::card_history::WorkHistory>,
     /// When the card last moved to `done`. A reopen clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<String>,
@@ -697,8 +697,11 @@ fn render(
     } else {
         (worker_eta, worker_start, row.eta_set_by, eta_set_by_name)
     };
-    let eta_history =
-        estimates.history(conn, &row.project, &json_col::<Vec<String>>(&row.labels))?;
+    let eta_history = if !row.archived && job.is_none()
+        && (row.column_role.as_deref() == Some(WORKING)
+            || (row.column_role.is_none() && row.column == WORKING)) {
+        estimates.history(conn, &row.project, &json_col::<Vec<String>>(&row.labels))
+    } else { None };
     Ok(Card {
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,

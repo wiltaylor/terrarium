@@ -52,7 +52,7 @@ fn work_history(samples: &[WorkSample], labels: &[String]) -> WorkHistory {
     WorkHistory {
         n,
         median_ms,
-        p70_ms: (n > 0).then(|| values[(n * 7).div_ceil(10) - 1]),
+        p70_ms: p70(values, 1),
     }
 }
 const WORK_SAMPLES_SQL: &str = "WITH recent AS (
@@ -126,9 +126,9 @@ pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSampl
     Ok(samples)
 }
 
-/// Nearest-rank p70. Five completed cards are required for each history.
-fn p70(mut values: Vec<f64>) -> Option<f64> {
-    if values.len() < 5 {
+/// Nearest-rank p70 with the caller's minimum sample size.
+fn p70(mut values: Vec<f64>, minimum: usize) -> Option<f64> {
+    if values.is_empty() || values.len() < minimum {
         return None;
     }
     values.sort_by(f64::total_cmp);
@@ -142,7 +142,7 @@ pub fn calibrated_ms(samples: &[WorkSample], labels: &[String], guess: Option<f6
         .filter(|s| seen.insert(&s.card))
         .take(30)
         .map(|s| s.actual_ms / s.guess_ms)
-        .collect());
+        .collect(), 5);
     seen.clear();
     let actual = p70(samples
         .iter()
@@ -154,7 +154,7 @@ pub fn calibrated_ms(samples: &[WorkSample], labels: &[String], guess: Option<f6
         })
         .take(30)
         .map(|s| s.actual_ms)
-        .collect());
+        .collect(), 5);
     match guess {
         Some(guess) => Some((guess * ratios? * actual?).sqrt()),
         None => actual,
@@ -216,20 +216,33 @@ pub fn completed_visits(
 pub struct ReviewEstimates {
     review: std::collections::HashMap<String, Option<Duration>>,
     work: std::collections::HashMap<String, Vec<WorkSample>>,
+    work_failed: std::collections::HashSet<String>,
 }
 
 impl ReviewEstimates {
+    fn load_work(&mut self, conn: &Connection, project: &str) -> bool {
+        if self.work_failed.contains(project) { return false; }
+        if !self.work.contains_key(project) {
+            match work_samples(conn, project) {
+                Ok(samples) => { self.work.insert(project.to_owned(), samples); }
+                Err(error) => {
+                    tracing::warn!(%project, %error, "cannot load similar-card history");
+                    self.work_failed.insert(project.to_owned());
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     pub fn history(
         &mut self,
         conn: &Connection,
         project: &str,
         labels: &[String],
-    ) -> ApiResult<WorkHistory> {
-        if !self.work.contains_key(project) {
-            self.work
-                .insert(project.to_owned(), work_samples(conn, project)?);
-        }
-        Ok(work_history(&self.work[project], labels))
+    ) -> Option<WorkHistory> {
+        if !self.load_work(conn, project) { return None; }
+        Some(work_history(&self.work[project], labels))
     }
 
     pub fn worker_ms(
@@ -239,10 +252,7 @@ impl ReviewEstimates {
         labels: &[String],
         guess: Option<f64>,
     ) -> ApiResult<Option<f64>> {
-        if !self.work.contains_key(project) {
-            self.work
-                .insert(project.to_owned(), work_samples(conn, project)?);
-        }
+        if !self.load_work(conn, project) { return Ok(None); }
         Ok(self
             .work
             .get(project)
