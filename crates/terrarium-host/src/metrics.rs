@@ -20,8 +20,11 @@
 //!   bytes.
 //! - Disk space: a mount whose source is a block device (`/dev/...`, not
 //!   `/dev/loop*`) or a ZFS dataset, with a type that is not in
-//!   [`SKIP_FSTYPES`], and with a mount point that is not under
-//!   [`SKIP_MOUNT_ROOTS`]. Network and FUSE filesystems have no `/dev`
+//!   [`SKIP_FSTYPES`], with a mount point that is not under
+//!   [`SKIP_MOUNT_ROOTS`], and that is not mounted read-only (`ro` in its
+//!   mount options: a read-only image, like the WSL kernel tools and
+//!   headers, is always full and cannot be filled or freed, so its usage
+//!   is not an alert). Network and FUSE filesystems have no `/dev`
 //!   source, so they are out too (a `statvfs` on a hung network mount can
 //!   block). One entry for each device: the shortest mount point wins (a
 //!   btrfs volume with many subvolumes shows one time). At most
@@ -254,6 +257,16 @@ pub struct Mount {
     pub device: String,
     pub mount: String,
     pub fstype: String,
+    /// The mount options (field 4), comma-separated: `rw,relatime`.
+    pub options: String,
+}
+
+impl Mount {
+    /// True when `ro` is one of the mount options. An exact match of one
+    /// option: `errors=remount-ro` is not a read-only mount.
+    pub fn is_read_only(&self) -> bool {
+        self.options.split(',').any(|o| o == "ro")
+    }
 }
 
 /// Undo the octal escapes of `/proc/mounts` (`\040` is a space).
@@ -285,6 +298,7 @@ pub fn parse_mounts(text: &str) -> Vec<Mount> {
                 device: unescape(f.next()?),
                 mount: unescape(f.next()?),
                 fstype: f.next()?.to_owned(),
+                options: f.next().unwrap_or_default().to_owned(),
             })
         })
         .collect()
@@ -301,6 +315,7 @@ pub fn is_real_fs(m: &Mount) -> bool {
                 .is_some_and(|rest| rest.starts_with('/'))
     };
     source_ok
+        && !m.is_read_only()
         && !SKIP_FSTYPES.contains(&m.fstype.as_str())
         && !m.fstype.starts_with("fuse.")
         && !SKIP_MOUNT_ROOTS.iter().any(|r| under(r))
@@ -661,6 +676,7 @@ mod tests {
             device: device.into(),
             mount: mount.into(),
             fstype: fstype.into(),
+            options: "rw,relatime".into(),
         };
         assert!(!is_real_fs(&m("tmpfs", "/tmp", "tmpfs")));
         assert!(!is_real_fs(&m("/dev/loop3", "/snap/core/1", "squashfs")));
@@ -676,6 +692,34 @@ mod tests {
     }
 
     #[test]
+    fn read_only_mounts_are_skipped() {
+        // The /proc/mounts lines of GitHub issue #26: the read-only ext4
+        // images that WSL mounts for the kernel tools and headers.
+        let wsl = "/dev/sdb /usr/lib/linux-tools/6.18.54.1-microsoft-standard-WSL2 ext4 ro,relatime 0 0
+/dev/sdb /usr/src/linux-headers-6.18.54.1-microsoft-standard-WSL2 ext4 ro,relatime 0 0
+/dev/sdc / ext4 rw,relatime 0 0";
+        let mounts = parse_mounts(wsl);
+        assert!(mounts.iter().all(|m| m.options.contains("relatime")));
+        let real = real_filesystems(&mounts);
+        let got: Vec<&str> = real.iter().map(|m| m.mount.as_str()).collect();
+        assert_eq!(got, ["/"]);
+        for m in mounts.iter().take(2) {
+            assert!(m.is_read_only(), "{}", m.mount);
+            assert!(!is_real_fs(m), "{}", m.mount);
+        }
+        // Only the exact option `ro` counts, not `errors=remount-ro`.
+        let rw = |options: &str| Mount {
+            device: "/dev/sda1".into(),
+            mount: "/".into(),
+            fstype: "ext4".into(),
+            options: options.into(),
+        };
+        assert!(!rw("rw,relatime,errors=remount-ro").is_read_only());
+        assert!(is_real_fs(&rw("rw,relatime,errors=remount-ro")));
+        assert!(!is_real_fs(&rw("ro,noatime")));
+    }
+
+    #[test]
     fn statvfs_space_follows_df() {
         let s = FsSpace {
             total: 1000,
@@ -687,6 +731,7 @@ mod tests {
                 device: "/dev/sda1".into(),
                 mount: "/".into(),
                 fstype: "ext4".into(),
+                options: "rw,relatime".into(),
             })
             .unwrap();
         assert_eq!(f.used_bytes, 600);
@@ -698,6 +743,7 @@ mod tests {
                     device: "/dev/x".into(),
                     mount: "/x".into(),
                     fstype: "ext4".into(),
+                    options: "rw".into(),
                 })
                 .is_none()
         );
