@@ -104,6 +104,37 @@ async fn review_candidate_query_uses_only_indexed_searches() {
 }
 
 #[tokio::test]
+async fn dispatch_candidate_query_uses_only_indexed_searches() {
+    let td = setup(2, 4, 20).await;
+    enabled(&td).await;
+    card(&td, "small").await;
+    let plan = state(&td)
+        .db
+        .read(|c| {
+            let mut plan = Vec::new();
+            for (sql, params) in [
+                (
+                    terrariumd::card_dispatcher::CANDIDATES.as_ref(),
+                    rusqlite::params!["p", "ready", 0],
+                ),
+                (
+                    terrariumd::card_dispatcher::WORKING_WIP.as_ref(),
+                    rusqlite::params!["p"],
+                ),
+            ] {
+                let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                let rows = q.query_map(params, |r| r.get::<_, String>(3))?;
+                plan.extend(rows.collect::<Result<Vec<_>, _>>()?);
+            }
+            Ok(plan)
+        })
+        .await
+        .unwrap();
+    assert!(plan.iter().any(|s| s.contains("cards_column")), "{plan:?}");
+    assert!(plan.iter().all(|s| !s.contains("SCAN")), "{plan:?}");
+}
+
+#[tokio::test]
 async fn review_global_fallback_and_conventional_verdict() {
     let (td, id) = review_setup().await;
     td.delete("/api/templates/p%2Fcard-review").await.ok();

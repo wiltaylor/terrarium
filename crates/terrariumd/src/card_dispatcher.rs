@@ -37,13 +37,9 @@ fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
     Ok(Some(actor(v.agent)))
 }
 
-fn template(card: &board::Card) -> Option<String> {
+fn template(labels: &[String]) -> Option<String> {
     // Only known worker types, not arbitrary labels used as template names.
-    let types: Vec<_> = card
-        .labels
-        .iter()
-        .filter_map(|l| l.strip_prefix("type:"))
-        .collect();
+    let types: Vec<_> = labels.iter().filter_map(|l| l.strip_prefix("type:")).collect();
     match types.as_slice() {
         ["small"] => Some("card-small".into()),
         ["impl"] => Some("card-impl".into()),
@@ -52,40 +48,64 @@ fn template(card: &board::Card) -> Option<String> {
     }
 }
 
+/// Bounded working-column WIP check: one indexed column lookup plus the
+/// count of its active cards. Keep it public for plan regression tests.
+pub const WORKING_WIP: &str = "
+SELECT k.wip_limit,
+       (SELECT count(*) FROM cards c WHERE c.column_id = k.id
+         AND c.archived = 0 AND c.kind = 'card')
+FROM board_columns k WHERE k.project = ?1 AND k.role = 'working'
+ORDER BY k.position LIMIT 1";
+
+/// Bounded ready-column lookup: cards with no assignee, no open bound
+/// agent, no unmet dependency and no cooldown, in board order. Keep the
+/// indexed query public for plan regression tests.
+pub const CANDIDATES: &str = "
+SELECT c.id, c.title, c.labels FROM cards c INDEXED BY cards_column
+WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
+  AND c.archived = 0 AND c.kind = 'card' AND c.assignee IS NULL
+  AND NOT EXISTS (SELECT 1 FROM spawns s WHERE s.bound_kind = 'card'
+      AND s.bound_id = c.id AND s.finished_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM card_dispatch_retries d WHERE d.card = c.id AND d.retry_at > ?3)
+  AND NOT EXISTS (SELECT 1 FROM card_deps e JOIN cards dc ON dc.id = e.depends_on
+      JOIN board_columns k ON k.id = dc.column_id
+      WHERE e.card = c.id AND dc.archived = 0
+        AND coalesce(k.role, k.name) NOT IN ('accepted', 'done'))
+ORDER BY c.position LIMIT 16";
+
+fn working_wip(r: &rusqlite::Row<'_>) -> rusqlite::Result<(Option<i64>, i64)> {
+    Ok((r.get(0)?, r.get(1)?))
+}
+
 fn candidate(c: &Connection, project: &str) -> ApiResult<Option<(String, String)>> {
-    let b = board::get_board(c, project)?;
-    let Some(working) = b
-        .columns
-        .iter()
-        .find(|col| col.role.as_deref() == Some(board::WORKING))
-    else {
-        return Ok(None);
-    };
+    let working = c
+        .query_row(WORKING_WIP, [project], working_wip)
+        .optional()?;
     // Fail closed without an explicit limit: opt-in must not create an
     // unbounded number of agents on a board with no concurrency policy.
-    if working.wip_limit.is_none_or(|limit| working.count >= limit) {
+    if !matches!(working, Some((Some(limit), count)) if count < limit) {
         return Ok(None);
     }
     let ready = board::role_name(c, project, "ready", "ready")?;
-    for card in b.cards.iter().filter(|card| card.column == ready) {
-        if card.kind != "card"
-            || card.assignee.is_some()
-            || card.agent.is_some()
-            || !card.blocked_by.is_empty()
-            || board::is_held(c, &card.id)?
-        {
+    let mut q = c.prepare(CANDIDATES)?;
+    let rows = q.query_map(
+        params![project, ready, chrono::Utc::now().timestamp()],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    for row in rows {
+        let (id, title, labels) = row?;
+        let labels = crate::store::json_col::<Vec<String>>(&labels);
+        if crate::store::github_gate::is_held(&title, &labels) {
             continue;
         }
-        let cooling: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM card_dispatch_retries WHERE card = ?1 AND retry_at > ?2)",
-            params![card.id, chrono::Utc::now().timestamp()],
-            |r| r.get(0),
-        )?;
-        if cooling {
-            continue;
-        }
-        if let Some(template) = template(card) {
-            return Ok(Some((card.id.clone(), template)));
+        if let Some(template) = template(&labels) {
+            return Ok(Some((id, template)));
         }
     }
     Ok(None)
