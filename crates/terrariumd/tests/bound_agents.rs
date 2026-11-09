@@ -1135,7 +1135,8 @@ async fn a_park_stop_spares_an_unparked_agent() {
     let (td, lead) = setup().await;
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
-    td.wait_status(&eph, "idle").await;
+    // The task turn first: else the check below can see it `working`.
+    td.wait_task_done(&eph).await;
     // The idle pass saw it parked; the unpark landed before the stop.
     terrariumd::lifecycle::park_stop(&state(&td), eph.parse().unwrap()).await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
