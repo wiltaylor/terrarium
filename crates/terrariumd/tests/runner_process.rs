@@ -258,15 +258,12 @@ fn supervisor(
         ..RunnerTuning::default()
     };
     cfg.mode = RunnerMode::Process { bin: runner_bin() };
-    match &upgrade.version {
-        Some(v) => cfg.version = v.clone(),
-        // The pinned N-1 runner tests the control protocol across a
-        // restart; a version with no ref keeps it (no upgrade restart).
-        None if std::env::var_os("TERRARIUM_TEST_OLD_RUNNER").is_some() => {
-            cfg.version = "0.0.0".into();
-        }
-        None => {}
-    }
+    // A version with no ref schedules no upgrade restart. The runner binary
+    // of the tests can be of another build than the test daemon: the
+    // pinned N-1 runner, or a `terrarium-runner` that `runner_bin` finds
+    // from an earlier build with another `TERRARIUM_GIT_REF`. Only the
+    // upgrade test claims a build.
+    cfg.version = upgrade.version.clone().unwrap_or_else(|| "0.0.0".into());
     if let Some(n) = upgrade.limit {
         cfg.upgrade_limit = n;
     }
