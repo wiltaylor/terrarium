@@ -2420,6 +2420,24 @@ while True: time.sleep(1)
     let marker = fixtures.path().join("recipe-started");
     let environment = fixtures.path().join("recipe-env.json");
     let relay_snapshot = fixtures.path().join("relay-files.json");
+    // The env dump of the recipe runs under `python3 -I`, which can itself
+    // add to the env it reports: without a LANG or LC_* in the runner env,
+    // PEP 538 locale coercion sets LC_CTYPE=C.UTF-8 (TER-446). Dump a
+    // baseline with the very same command from this process, so the purity
+    // assert below measures what the job added, not what the dump added.
+    let baseline_path = fixtures.path().join("baseline-env.json");
+    let dump_status = std::process::Command::new("python3")
+        .arg("-I")
+        .arg("-c")
+        .arg(format!(
+            r#"import json,os,pathlib; pathlib.Path("{}").write_text(json.dumps(dict(os.environ)))"#,
+            baseline_path.display()
+        ))
+        .status()
+        .unwrap();
+    assert!(dump_status.success());
+    let baseline: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(&baseline_path).unwrap()).unwrap();
     let recipe = format!(
         r#"test -z "${{DOCKER_CI_KEY:-}}${{DOCKER_CI_RESET_KEY:-}}${{SSH_AUTH_SOCK:-}}" && test -S "${{DOCKER_HOST#unix://}}" && python3 -I -c 'import json,os,pathlib; pathlib.Path("{}").write_text(json.dumps(dict(os.environ))); directory=pathlib.Path(os.environ["DOCKER_HOST"].removeprefix("unix://")).parent; pathlib.Path("{}").write_text(json.dumps([str(p) for p in directory.iterdir()])); assert all(not p.is_file() for p in directory.iterdir())' && touch '{}' && echo recipe-ok"#,
         environment.display(),
@@ -2497,7 +2515,6 @@ while True: time.sleep(1)
                         && !value.contains("dummy-tunnel-key-363")
                 );
             }
-            let inherited: std::collections::BTreeMap<_, _> = std::env::vars().collect();
             let ordinary = [
                 "GIT_AUTHOR_NAME",
                 "GIT_AUTHOR_EMAIL",
@@ -2516,7 +2533,7 @@ while True: time.sleep(1)
             ];
             let added: Vec<_> = env
                 .keys()
-                .filter(|k| !inherited.contains_key(*k) && !ordinary.contains(&k.as_str()))
+                .filter(|k| !baseline.contains_key(*k) && !ordinary.contains(&k.as_str()))
                 .map(String::as_str)
                 .collect();
             assert_eq!(added, ["DOCKER_HOST"]);
