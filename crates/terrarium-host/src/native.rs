@@ -864,23 +864,19 @@ pub fn plan_start(
         l.validate().map_err(Refusal::invalid)?;
     }
     let cwd = safe_cwd(&ctx.workspace_root, &req.cwd)?;
-    // One path in a space-separated systemd list: no quoting needed.
-    let rw = &ctx.workspace_root;
-    match rw.to_str() {
-        Some(t)
-            if t.starts_with('/')
-                && !t.contains(|c: char| {
-                    c.is_whitespace() || c.is_control() || matches!(c, '%' | '"' | '\'' | '\\')
-                }) => {}
-        _ => {
-            return Err(Refusal::new(
-                ErrorKind::Unsupported,
-                format!(
-                    "workspace_root {} cannot be a ReadWritePaths= entry",
-                    rw.display()
-                ),
-            ));
-        }
+    for p in [&ctx.workspace_root, &cwd] {
+        systemd_path(p)?;
+    }
+    // Each session sees only its own holder's workspace (see
+    // [`holder_workspace`]): its working directory is there, or the empty
+    // workspace root itself.
+    let own = holder_workspace(&ctx.workspace_root, &req.holder)?;
+    if cwd != ctx.workspace_root && !own.as_ref().is_some_and(|w| cwd.starts_with(w)) {
+        return Err(Refusal::invalid(format!(
+            "working directory {} is outside the workspace of holder {}",
+            cwd.display(),
+            req.holder
+        )));
     }
 
     let mut devices = Vec::new();
@@ -945,15 +941,17 @@ pub fn plan_start(
         "AmbientCapabilities=",
         "RestrictSUIDSGID=yes",
         // A pool UID passes to another holder when its holder's last
-        // session ends: nothing of the old holder may stay behind for the
-        // next. /tmp and /var/tmp are private to the unit; systemd removes
-        // the UID's System V and POSIX IPC (also /dev/shm) when the last
-        // unit of the UID stops.
+        // session ends. What the UID can reach from one holder to the next:
+        // /tmp and /var/tmp are private to the unit; systemd removes the
+        // UID's System V and POSIX IPC (also /dev/shm) when the last unit
+        // of the UID stops; the rest of the tree is read-only, so no
+        // world-writable directory (/run/lock, /var/crash, ...) keeps a
+        // file of the UID. The workspace root is an empty read-only tmpfs
+        // with only this holder's workspace bound in (below): a file that
+        // an earlier holder of the UID left in its own workspace, also a
+        // 0600 one, does not exist in the unit.
         "PrivateTmp=yes",
         "RemoveIPC=yes",
-        // And nowhere else: the whole tree is read-only but the workspace
-        // root (below), so no world-writable directory (/run/lock,
-        // /var/crash, ...) can keep a file of the UID.
         "ProtectSystem=strict",
         "KillMode=control-group",
         "DevicePolicy=closed",
@@ -967,7 +965,16 @@ pub fn plan_start(
         args.push(format!("DeviceAllow={} rw", d.display()));
     }
     args.push("-p".into());
-    args.push(format!("ReadWritePaths={}", rw.display()));
+    args.push(format!(
+        "TemporaryFileSystem={}:ro",
+        ctx.workspace_root.display()
+    ));
+    if let Some(w) = &own {
+        args.push("-p".into());
+        args.push(format!("BindPaths={}", w.display()));
+        args.push("-p".into());
+        args.push(format!("ReadWritePaths={}", w.display()));
+    }
     args.push("-p".into());
     args.push(format!("WorkingDirectory={}", cwd.display()));
     args.push("-p".into());
@@ -1028,6 +1035,77 @@ pub fn safe_cwd(root: &Path, cwd: &str) -> Result<PathBuf, Refusal> {
         return Err(Refusal::invalid("bad working directory"));
     }
     Ok(real)
+}
+
+/// A path that goes into a systemd property as one entry of a
+/// space-separated list (`TemporaryFileSystem=`, `BindPaths=`,
+/// `ReadWritePaths=`): absolute, UTF-8, and no character that systemd
+/// would read as a separator, a quote, a specifier, or an option.
+fn systemd_path(p: &Path) -> Result<(), Refusal> {
+    match p.to_str() {
+        Some(t)
+            if t.starts_with('/')
+                && !t.contains(|c: char| {
+                    c.is_whitespace()
+                        || c.is_control()
+                        || matches!(c, '%' | '"' | '\'' | '\\' | ':')
+                }) =>
+        {
+            Ok(())
+        }
+        _ => Err(Refusal::new(
+            ErrorKind::Unsupported,
+            format!(
+                "{} cannot be a path in a systemd property (whitespace, quotes, %, :, or \\)",
+                p.display()
+            ),
+        )),
+    }
+}
+
+/// The workspace of a holder `<project>/<agent>`: `<root>/<project>/<agent>`
+/// (the host agent's layout), when it exists. `None` for another holder
+/// (`operator`) or a workspace that is not there yet: the session then
+/// gets no workspace. A workspace that is a symlink, leads out of `root`,
+/// or is not a directory is refused.
+pub fn holder_workspace(root: &Path, holder: &str) -> Result<Option<PathBuf>, Refusal> {
+    let mut parts = holder.split('/');
+    let (Some(project), Some(agent), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Ok(None);
+    };
+    for part in [project, agent] {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(Refusal::invalid(format!("bad holder {holder:?}")));
+        }
+    }
+    let dir = root.join(project).join(agent);
+    match std::fs::canonicalize(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Refusal::invalid(format!("workspace {}: {e}", dir.display()))),
+        Ok(real) if real != dir || !real.is_dir() => Err(Refusal::invalid(format!(
+            "workspace {} must be a directory, not a symlink",
+            dir.display()
+        ))),
+        Ok(real) => {
+            systemd_path(&real)?;
+            Ok(Some(real))
+        }
+    }
+}
+
+/// `workspace_root` at helper start: not under /tmp or /var/tmp, which
+/// `PrivateTmp=yes` replaces in each unit (every session would fail).
+pub fn check_workspace_root(root: &Path) -> Result<(), String> {
+    for tmp in ["/tmp", "/var/tmp"] {
+        if root.starts_with(tmp) {
+            return Err(format!(
+                "workspace_root {} is under {tmp}, which each session gets a private copy of \
+                 (PrivateTmp=yes): put the workspace elsewhere, for example /srv/terrarium/work",
+                root.display()
+            ));
+        }
+    }
+    systemd_path(root).map_err(|r| r.message)
 }
 
 /// The slice of a holder for `apply` and `stop`. `stop` never takes the

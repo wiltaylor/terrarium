@@ -75,7 +75,8 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
     (`nvidiactl`, `nvidia-uvm`, `nvidia-uvm-tools`) fail closed;
   - the slice limits: only from typed `RuntimeLimits`
     (`crate::limits::reservation_properties`);
-  - the working directory: resolved by root, under `workspace_root`, no
+  - the working directory: resolved by root, in the holder's own workspace
+    `<workspace_root>/<project>/<agent>` or the workspace root itself, no
     `%`, no control characters;
   - the user: the holder's UID from `workload_users`. A holder keeps its
     UID while it has a live (or stuck) session; a UID never serves two
@@ -84,27 +85,38 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
     again and checks its groups and linger, so a later `usermod` or
     `loginctl enable-linger` does not reach a new session.
   - UID reuse: a pool UID can pass to another holder once its holder's
-    last session is confirmed stopped. A session can write only in the
-    workspace root and in places that end with the UID's units:
-    `ProtectSystem=strict` makes the whole tree read-only except
-    `ReadWritePaths=<workspace_root>` and the API trees (`/dev`, `/proc`,
-    `/sys`), so no world-writable directory such as `/run/lock` or
-    `/var/crash` can keep a file of the UID. `PrivateTmp=yes` gives the unit
-    its own `/tmp` and `/var/tmp`, removed with the unit. `RemoveIPC=yes`
-    makes systemd remove the System V and POSIX IPC objects of the UID,
-    also its files in `/dev/shm`, when the last unit of that UID stops. The
-    pool users have no home directory (see the install steps). Files in the
-    workspace stay: they belong to the target and are writable through the
-    shared workspace group anyway. A later holder of the UID gains only the
-    owner's right to change their mode, inside the workspace root. A `workspace_root` path with whitespace, quotes, `%`,
-    or a backslash is refused (it goes in a systemd path list).
+    last session is confirmed stopped. Nothing that the UID owns from the
+    old holder is reachable by the new one:
+    - The workspace: each unit gets `TemporaryFileSystem=<workspace_root>:ro`
+      (an empty read-only tmpfs) with only its holder's workspace
+      `<workspace_root>/<project>/<agent>` bound in (`BindPaths=`,
+      `ReadWritePaths=`). The workspaces of other holders do not exist in
+      the unit, whatever their modes, so a file that an earlier holder of
+      the UID made private (a credential store, a key, a `mkstemp` file)
+      cannot be opened. A holder without a workspace (`operator`, or an
+      agent that has not started yet) gets the empty root only. A
+      workspace that is a symlink is refused.
+    - The rest of the tree: `ProtectSystem=strict` makes it read-only
+      except the API trees (`/dev`, `/proc`, `/sys`), so no world-writable
+      directory such as `/run/lock` or `/var/crash` keeps a file of the UID.
+    - `PrivateTmp=yes` gives the unit its own `/tmp` and `/var/tmp`, removed
+      with the unit. `RemoveIPC=yes` makes systemd remove the System V and
+      POSIX IPC objects of the UID, also its files in `/dev/shm`, when the
+      last unit of that UID stops.
+    - The pool users have no home directory (see the install steps).
+    - `workspace_root` must not be under `/tmp` or `/var/tmp` (each unit
+      gets a private copy of them): the helper refuses to start. Paths with
+      whitespace, quotes, `%`, `:`, or a backslash are refused, since they
+      go in systemd path lists.
 - **The session** is a transient system service, not a scope: systemd sets
   the user, the groups, and the device policy before `exec`, and
   `KillMode=control-group` ends every descendant with the main process.
-  Properties: `--uid`/`--gid` of the holder's workload user, `NoNewPrivileges=yes`,
-  `CapabilityBoundingSet=`, `AmbientCapabilities=`, `RestrictSUIDSGID=yes`,
-  `PrivateTmp=yes`, `RemoveIPC=yes`, `ProtectSystem=strict`,
-  `ReadWritePaths=<workspace_root>`, `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
+  Properties: `--uid`/`--gid` of the holder's workload user,
+  `NoNewPrivileges=yes`, `CapabilityBoundingSet=`, `AmbientCapabilities=`,
+  `RestrictSUIDSGID=yes`, `PrivateTmp=yes`, `RemoveIPC=yes`,
+  `ProtectSystem=strict`, `TemporaryFileSystem=<workspace_root>:ro`,
+  `BindPaths=` and `ReadWritePaths=` of the holder's workspace,
+  `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
   each granted GPU and support node, `--expand-environment=no`. The
   environment goes in a root-only `EnvironmentFile` under `state_dir`, not
   on a command line.
@@ -127,8 +139,8 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   `ControlGroup` is gone or `populated 0` in `cgroup.events` (a failed unit
   can keep processes after a stop timed out). A cgroup directory without
   `cgroup.events`, or a tree that is not cgroup v2, counts as not stopped.
-  Only then is the claim freed. Otherwise it logs a warning, keeps the claim marked
-  stuck, and checks again every 10 s.
+  Only then is the claim freed. Otherwise it logs a warning, keeps the
+  claim marked stuck, and checks again every 10 s.
 - **Start**: the helper stops the `terrarium-native-*.service` units of an
   earlier run before it serves, and waits until each is inactive. When the
   list fails or a unit does not stop, it exits (fail closed). It checks
@@ -233,9 +245,10 @@ Known limits:
   native sessions at one time on the host.
 - File ownership: sessions write the workspace as their pool user. The
   workspace root needs a shared group with the setgid bit, or ACLs, so the
-  host agent and the sessions can both write (install step 4). Holders can
-  then read and write each other's workspaces through that group, as with
-  the host agent today; only processes are separated.
+  host agent and the sessions can both write (install step 4). A native
+  session sees only its own holder's workspace (see UID reuse above);
+  outside native sessions, holders can read and write each other's
+  workspaces through that group, as with the host agent today.
 - **The agent user must never run content from the workspace** (scripts,
   hooks, binaries, git configuration it does not control). Sessions can
   write there, and the agent UID is the helper's trusted caller. Today
@@ -275,8 +288,9 @@ not run it on a shared target or a DGX Spark without that decision.
    native sessions at the same time (for example four). Each has its own
    UID and its own primary group, is not the agent user, has no login, no
    linger, no home directory (a writable home would carry files from one
-   holder to the next holder of the UID), and none of the groups `root wheel sudo admin adm docker libvirt
-   lxd incus-admin disk kvm systemd-journal`. The helper refuses to start
+   holder to the next holder of the UID), and none of the groups `root
+   wheel sudo admin adm docker libvirt lxd incus-admin disk kvm
+   systemd-journal`. The helper refuses to start
    otherwise, and checks the groups and linger again before each session.
 
    ```sh

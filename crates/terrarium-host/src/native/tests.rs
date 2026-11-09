@@ -217,11 +217,13 @@ fn a_gpu_session_allows_only_its_gpu_and_the_support_nodes() {
     assert!(p.contains(&"PrivateTmp=yes"));
     assert!(p.contains(&"RemoveIPC=yes"));
     assert!(p.contains(&"ProtectSystem=strict"));
-    let rw = format!(
-        "ReadWritePaths={}",
-        std::fs::canonicalize(root.path()).unwrap().display()
-    );
-    assert!(p.contains(&rw.as_str()), "{p:?}");
+    // No holder workspace yet: the workspace root is an empty read-only
+    // tmpfs, nothing is bound in, nothing is writable.
+    let real = std::fs::canonicalize(root.path()).unwrap();
+    let tmpfs = format!("TemporaryFileSystem={}:ro", real.display());
+    assert!(p.contains(&tmpfs.as_str()), "{p:?}");
+    assert!(!p.iter().any(|x| x.starts_with("BindPaths=")), "{p:?}");
+    assert!(!p.iter().any(|x| x.starts_with("ReadWritePaths=")), "{p:?}");
     let allowed: Vec<_> = p
         .iter()
         .filter(|x| x.starts_with("DeviceAllow="))
@@ -737,7 +739,75 @@ fn a_workspace_root_that_cannot_be_a_systemd_path_is_refused() {
     .err()
     .unwrap();
     assert_eq!(e.code, ErrorKind::Unsupported);
-    assert!(e.message.contains("ReadWritePaths"), "{}", e.message);
+    assert!(e.message.contains("systemd property"), "{}", e.message);
+}
+
+/// A pool UID passes from holder A to holder B. B's unit gets only B's
+/// workspace: A's workspace, with a 0600 file that A's session left, is
+/// not in any property of B's unit, so it does not exist under B's empty
+/// workspace tmpfs, whatever its mode. A working directory in A's
+/// workspace is refused for B. (The mounts themselves need systemd: the
+/// hardware validation TER-460 opens the file from a real unit.)
+#[test]
+fn a_session_sees_only_its_own_holders_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let real = std::fs::canonicalize(root.path()).unwrap();
+    let a = real.join("terra/w-1");
+    let b = real.join("terra/w-2");
+    std::fs::create_dir_all(a.join("repo")).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let secret = a.join("repo/.git-credentials");
+    std::fs::write(&secret, "token").unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let ctx = ctx(root.path());
+    let plan_for = |holder: &str, cwd: &Path| {
+        let mut req = request(root.path());
+        req.holder = holder.into();
+        req.gpus.clear();
+        req.exclusive_gpus.clear();
+        req.lease = None;
+        req.cwd = cwd.to_string_lossy().into_owned();
+        plan_start(&ctx, &req, &inventory(), &nodes(), 1, &W)
+    };
+    // A: its own workspace bound read-write, its cwd there.
+    let pa = plan_for("terra/w-1", &a.join("repo")).unwrap();
+    let p = props(&pa.args);
+    assert!(p.contains(&format!("BindPaths={}", a.display()).as_str()), "{p:?}");
+    assert!(p.contains(&format!("ReadWritePaths={}", a.display()).as_str()));
+    // B, same pool UID later: only B's workspace; A's path is nowhere.
+    let pb = plan_for("terra/w-2", &b).unwrap();
+    let p = props(&pb.args);
+    assert!(p.contains(&format!("TemporaryFileSystem={}:ro", real.display()).as_str()));
+    assert!(p.contains(&format!("BindPaths={}", b.display()).as_str()), "{p:?}");
+    let a_text = a.display().to_string();
+    assert!(
+        !pb.args.iter().any(|x| x.contains(&a_text)),
+        "{:?}",
+        pb.args
+    );
+    // B may not start in A's workspace.
+    let e = plan_for("terra/w-2", &a.join("repo")).err().unwrap();
+    assert!(e.message.contains("outside the workspace"), "{}", e.message);
+    // The operator (no workspace) starts only in the empty root.
+    let po = plan_for("operator", &real).unwrap();
+    assert!(!props(&po.args).iter().any(|x| x.starts_with("BindPaths=")));
+    assert!(plan_for("operator", &a).is_err());
+    // A symlinked workspace is refused.
+    std::os::unix::fs::symlink(&a, real.join("terra/w-3")).unwrap();
+    assert!(holder_workspace(&real, "terra/w-3").is_err());
+    assert!(holder_workspace(&real, "terra/..").is_err());
+    assert_eq!(holder_workspace(&real, "terra/missing").unwrap(), None);
+}
+
+#[test]
+fn a_workspace_root_under_a_private_tmp_is_refused_at_start() {
+    for bad in ["/tmp/work", "/var/tmp/w", "/srv/a b"] {
+        assert!(check_workspace_root(Path::new(bad)).is_err(), "{bad}");
+    }
+    let e = check_workspace_root(Path::new("/tmp/work")).unwrap_err();
+    assert!(e.contains("PrivateTmp"), "{e}");
+    check_workspace_root(Path::new("/srv/terrarium/work")).unwrap();
+    check_workspace_root(Path::new("/tmpfoo/work")).unwrap();
 }
 
 #[test]

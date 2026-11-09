@@ -101,6 +101,7 @@ fn main() -> anyhow::Result<()> {
     }
     let workspace_root = std::fs::canonicalize(&cfg.workspace_root)
         .with_context(|| format!("workspace_root {}", cfg.workspace_root.display()))?;
+    native::check_workspace_root(&workspace_root).map_err(anyhow::Error::msg)?;
     let socket_dir = cfg
         .socket
         .parent()
