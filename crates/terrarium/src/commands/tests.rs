@@ -11087,3 +11087,43 @@ async fn rules_stored_parse_problems_are_printed_and_check_fails() {
         }
     }
 }
+
+/// `admin link ...` (TER-61, docs/api.md §36): the pairing code alone on
+/// stdout, and the routes of rotate and revoke.
+#[tokio::test]
+async fn admin_link_prints_the_pairing_code_alone() {
+    let made = json!({"link": {"id": "L1", "label": "office", "read_only": true,
+                               "status": "pending"},
+                      "code": "tlp_abc", "code_expires_at": "2026-11-09T10:10:00Z",
+                      "instance": {"id": "01I", "name": "lab", "version": "0.1.0"},
+                      "url": null});
+    let out = ok(
+        false,
+        &["admin", "link", "new", "office", "--read-only"],
+        vec![(201, made.clone())],
+        vec![(
+            Post,
+            "/api/links",
+            vec![],
+            Some(json!({"label": "office", "read_only": true})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "tlp_abc\n");
+    let out = ok(
+        false,
+        &["admin", "link", "rotate", "L1"],
+        vec![(200, made)],
+        vec![req(Post, "/api/links/L1/rotate")],
+    )
+    .await;
+    assert_eq!(out, "tlp_abc\n");
+    let out = ok(
+        false,
+        &["admin", "link", "revoke", "L1"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/links/L1")],
+    )
+    .await;
+    assert_eq!(out, "revoked link L1\n");
+}
