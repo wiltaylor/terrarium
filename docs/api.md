@@ -3897,10 +3897,10 @@ when the agent starts the work now (`terrarium thread post <id> -m <text>
 into tracking as `POST .../track`. `POST .../status` with `{"status"}`
 (`terrarium thread status <id> waiting_agent|tracking`) sets it without
 a message. Both withdraw a close proposal. Only `waiting_agent` and
-`tracking` are allowed (`422`), only for the attached agent (a `status`
-in an operator message is `422`, the status verb `403`), and an open
-question of the thread is `409 conflict`: a question keeps the thread on
-the operator. A `waiting_agent` or `tracking` thread is not in the Inbox
+`tracking` are allowed (`422`). The attached agent and the operator use
+the status verb (another agent is `403`); a `status` in an operator
+message is `422`. An open question of the thread is `409 conflict` for
+both: a question keeps the thread on the operator. A `waiting_agent` or `tracking` thread is not in the Inbox
 badge and gets no reminder or stale close.
 
 **Tracking on a card link** (GitHub #28). When a card is linked

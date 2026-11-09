@@ -1224,8 +1224,9 @@ fn no_open_question(t: &Tx<'_>, id: &str, want: ThreadStatus) -> ApiResult<()> {
     Ok(())
 }
 
-/// The attached agent `by` sets the status of thread `id` without a
-/// message (GitHub #28, `thread status`): `tracking` as [`track`], or
+/// The attached agent or the operator `by` sets the status of thread
+/// `id` without a message (GitHub #28, `thread status`, TER-456):
+/// `tracking` as [`track`], or
 /// `waiting_agent`: the agent works on, and the thread does not wait on
 /// the operator (no Inbox badge, no reminder, no stale close). An open
 /// question refuses it (`409`); a close proposal is withdrawn.
