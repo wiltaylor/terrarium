@@ -282,10 +282,17 @@ async fn like_skips_name_only_grants_the_owner_may_read() {
         .await);
     let r = spawn_as(&td, &mid, &mid, json!({"like": "w"})).await;
     assert_eq!(r.status, 403, "{}", r.body);
-    assert!(message(&r).contains("2 copied secret grant(s)"), "{}", r.body);
+    assert!(
+        message(&r).contains("2 copied secret grant(s)"),
+        "{}",
+        r.body
+    );
     assert!(message(&r).contains("like_skip_missing"), "{}", r.body);
     let body = r.body.to_string();
-    assert!(!body.contains("openai") && !body.contains("global/gh"), "{body}");
+    assert!(
+        !body.contains("openai") && !body.contains("global/gh"),
+        "{body}"
+    );
 
     // With the skip: a named entry for the secret whose name the owner
     // may read, one count for `gh`, whose name it may not.
