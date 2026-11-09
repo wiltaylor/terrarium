@@ -1110,9 +1110,7 @@ fn agent_spawn_like_sends_the_flags_and_prints_skipped() {
     let out = text(&o.stdout);
     assert!(out.contains("skipped copied right: target:box"), "{out}");
     assert!(
-        out.contains(
-            "skipped copied right: grant:1 hidden: the owner may not read their names"
-        ),
+        out.contains("skipped copied right: grant:1 hidden: the owner may not read their names"),
         "{out}"
     );
     assert!(out.contains("spawned terra/lead-worker-1"), "{out}");
@@ -1120,7 +1118,9 @@ fn agent_spawn_like_sends_the_flags_and_prints_skipped() {
     // No like: the flag is not sent. Without one: a usage error.
     let o = run(
         &socket,
-        &["--json", "agent", "spawn", "worker", "--task", "t", "--for", "w"],
+        &[
+            "--json", "agent", "spawn", "worker", "--task", "t", "--for", "w",
+        ],
     );
     assert!(o.status.success(), "{}", text(&o.stderr));
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
@@ -1128,7 +1128,14 @@ fn agent_spawn_like_sends_the_flags_and_prints_skipped() {
     assert!(v["sent"].get("like_skip_missing").is_none(), "{}", v);
     let o = run(
         &socket,
-        &["agent", "spawn", "worker", "--task", "t", "--like-skip-missing"],
+        &[
+            "agent",
+            "spawn",
+            "worker",
+            "--task",
+            "t",
+            "--like-skip-missing",
+        ],
     );
     assert_eq!(o.status.code(), Some(2));
     std::fs::remove_dir_all(&dir).ok();

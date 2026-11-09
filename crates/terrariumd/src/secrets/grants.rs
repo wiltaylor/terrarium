@@ -608,11 +608,7 @@ pub fn list(conn: &Connection, secret: &SecretInfo) -> ApiResult<Vec<Grant>> {
 /// secret of every scope. Only secrets that the grantee's project
 /// reaches count (a global one, or one of that project), as in
 /// [`effective`]. Project grants are not included: this is one grantee.
-pub fn list_by_grantee(
-    conn: &Connection,
-    grantee: &str,
-    project: &str,
-) -> ApiResult<Vec<Grant>> {
+pub fn list_by_grantee(conn: &Connection, grantee: &str, project: &str) -> ApiResult<Vec<Grant>> {
     let mut stmt = conn.prepare(
         "SELECT s.scope, s.name, g.level, g.env, g.targets, g.created_by, g.created_at
          FROM secret_grants g JOIN secrets s ON s.id = g.secret_id
@@ -634,24 +630,26 @@ pub fn list_by_grantee(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let label = label_of(conn, grantee)?;
     rows.into_iter()
-        .map(|(scope, name, level, env, targets, created_by, created_at)| {
-            let level = Level::parse(&level).unwrap_or(Level::Use);
-            Ok(Grant {
-                grantee_label: label.clone(),
-                grantee: grantee.to_owned(),
-                level,
-                env,
-                targets: if level == Level::Run {
-                    targets_of(targets)
-                } else {
-                    Vec::new()
-                },
-                scope,
-                name,
-                created_by,
-                created_at,
-            })
-        })
+        .map(
+            |(scope, name, level, env, targets, created_by, created_at)| {
+                let level = Level::parse(&level).unwrap_or(Level::Use);
+                Ok(Grant {
+                    grantee_label: label.clone(),
+                    grantee: grantee.to_owned(),
+                    level,
+                    env,
+                    targets: if level == Level::Run {
+                        targets_of(targets)
+                    } else {
+                        Vec::new()
+                    },
+                    scope,
+                    name,
+                    created_by,
+                    created_at,
+                })
+            },
+        )
         .collect()
 }
 

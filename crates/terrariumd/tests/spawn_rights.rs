@@ -282,8 +282,10 @@ async fn like_skips_name_only_grants_the_owner_may_read() {
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(
         r.body["skipped"],
-        json!(["grant:global/openai:read",
-               "grant:1 hidden: the owner may not read their names"])
+        json!([
+            "grant:global/openai:read",
+            "grant:1 hidden: the owner may not read their names"
+        ])
     );
     let child = id(&r.body);
     assert_eq!(r.body["agent"]["policy"]["targets"], json!(["box"]));
@@ -292,7 +294,11 @@ async fn like_skips_name_only_grants_the_owner_may_read() {
 
     // An owner with no right at all learns no name, only the counts.
     let weak = id(&td
-        .agent("p", "weak", json!({"policy": {"spawn": {"templates": ["worker"]}}}))
+        .agent(
+            "p",
+            "weak",
+            json!({"policy": {"spawn": {"templates": ["worker"]}}}),
+        )
         .await);
     let r = spawn_as(
         &td,
@@ -304,7 +310,10 @@ async fn like_skips_name_only_grants_the_owner_may_read() {
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(
         r.body["skipped"],
-        json!(["target:box", "grant:2 hidden: the owner may not read their names"])
+        json!([
+            "target:box",
+            "grant:2 hidden: the owner may not read their names"
+        ])
     );
     let body = r.body.to_string();
     assert!(!body.contains("openai") && !body.contains("/gh"), "{body}");
@@ -374,7 +383,10 @@ async fn like_harness_and_source_errors_name_the_cause() {
     .ok();
     for (name, spec) in [
         ("pitemp", json!({"harness": "pi"})),
-        ("altcase", json!({"harness": "claude", "subscription": "hsub"})),
+        (
+            "altcase",
+            json!({"harness": "claude", "subscription": "hsub"}),
+        ),
         ("altcase-alt", json!({"harness": "pi"})),
     ] {
         td.post(
