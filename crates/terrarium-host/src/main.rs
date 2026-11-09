@@ -495,7 +495,9 @@ fn main() -> anyhow::Result<()> {
                 .build()
                 .context("start the runtime")?;
             let code = rt.block_on(terrarium_host::native::shim(socket));
-            drop(rt);
+            // The stdin reader is a blocking read on the terminal that
+            // never ends by itself: do not wait for it.
+            rt.shutdown_background();
             std::process::exit(code);
         }
         _ => {}
