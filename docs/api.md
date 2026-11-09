@@ -5803,7 +5803,7 @@ defaults. Unknown fields and negative limits are rejected. Example:
 {"time_seconds":{"small":2700,"impl":7200,"impl-hard":14400},
  "tokens":{},"turns":{},"red_streak":3,"red_same_commit":2,
  "review_rounds":2,"eta_delays":3,"timer_polls":3,"compactions":3,
- "review_wait_seconds":3600}
+ "review_wait_seconds":3600,"no_progress_seconds":3600}
 ```
 
 Time, token and turn maps are keyed by the suffix of the card's `type:` label
@@ -5817,8 +5817,8 @@ they use the fixed fallbacks above (`hard` also uses four hours). Explicit
 project time overrides take precedence. A zero threshold disables that check.
 An ETA at or before now produces `eta_overdue`. The other signal names are
 `time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
-`validation_red`, `timer_polls`, `compactions` and `review_wait`. Review wait
-starts at the most recent entry into review and clears on return to work.
+`validation_red`, `timer_polls`, `compactions`, `review_wait` and `no_progress`.
+Review wait starts at the most recent entry into review and clears on return to work.
 Assignment changes while the card stays in review do not reset its age.
 Job-set ETAs do not count as agent ETA extensions.
 
@@ -5829,6 +5829,19 @@ examined per card. Three consecutive red runs, or
 two red runs on the same nonempty commit within the streak, trigger the mark.
 Short timer waits (at most one minute) and compaction requests use a rolling
 one-hour window. Review rounds and ETA extensions count the card's history.
+For a working or research card with a repo, the remote scan reads the actual
+branch head with `git ls-remote`, so direct pushes count. The branch is the
+card's branch, else the lowercase card id (as for validation jobs). The scan
+has its own five-minute timer, reads at most 32 cards per pass from a rotating
+cursor, and stops a pass after two minutes. A failed repo, credential or
+`ls-remote` read is logged and changes nothing. `no_progress` starts after
+`no_progress_seconds` of agent working time (waits excluded) without a new
+head: counted from the claim while the branch was never seen on the remote,
+otherwise from the working time when the current head was first seen. A new
+head clears the mark. No mark is set while the last successful read is older
+than the threshold, or when the stored read is for another repo or branch of
+the card. A zero threshold disables it. Proxy `repo.push result=forwarded`
+audit rows are not push evidence.
 
 The lifecycle tick plans in a read, using lightweight working/review/research
 card metadata and marked cards that need clearing. It opens a write only if
@@ -5842,13 +5855,13 @@ exception is `eta_overdue`: when the worker's card reminder is enabled
 (agent override, otherwise the daemon default), the reminder owns its nudge.
 The trouble pass records the signal and mails the lead, but does not send a
 second worker mail that could delay the reminder. If reminders are disabled,
-the worker still gets the trouble state request. Other signals are unchanged.
+the worker still gets the trouble state request. `no_progress` is lead-only.
+Other signals are unchanged.
 The once-per-card
 and signal record survives restarts, resolution and recurrence. A mark clears
 when its condition stops holding, its threshold is disabled, or the card
 leaves working/research/review or is archived. A recurrence can restore the
 mark but cannot send another notice. The existing idle alert is separate.
-No-push detection is deferred to successful remote-head tracking (TER-370).
 
 The CLI calls `GET /api/usage?agent=<me>` for `terrarium usage` and
 `GET /api/usage?project=<p>` for `terrarium usage project`. Both work;

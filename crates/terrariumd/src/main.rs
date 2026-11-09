@@ -267,6 +267,20 @@ async fn main() -> anyhow::Result<()> {
             terrariumd::conflict_hints::pass(&state).await;
         }
     });
+    // The remote card-branch heads for no_progress (TER-370): its own timer,
+    // so slow remotes delay neither conflict hints nor lifecycle work. Each
+    // pass is capped and the cursor rotates through the working cards.
+    let heads_state = std::sync::Arc::downgrade(&daemon.state);
+    tokio::spawn(async move {
+        let mut cursor = String::new();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let Some(state) = heads_state.upgrade() else {
+                return;
+            };
+            terrariumd::trouble::observe_remote_heads_from(&state, &mut cursor).await;
+        }
+    });
     // The self-update (TERRARIUM_SELF_UPDATE, docs/api.md §34): the
     // release check, the result mails, and the auto-update. A bad setting
     // stops the start.
