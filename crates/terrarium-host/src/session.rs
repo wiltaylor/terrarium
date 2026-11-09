@@ -647,7 +647,11 @@ mod tests {
             .unwrap();
         let script = format!("sleep 300 & echo $! > '{}'; wait", pidfile.display());
         let (run, child) = rt.block_on(async {
-            let run = spawn(plan("sh", &["-c", &script]), Arc::new(Outbox::new(1, 1 << 20))).unwrap();
+            let run = spawn(
+                plan("sh", &["-c", &script]),
+                Arc::new(Outbox::new(1, 1 << 20)),
+            )
+            .unwrap();
             let started = std::time::Instant::now();
             loop {
                 let text = std::fs::read_to_string(&pidfile).unwrap_or_default();
@@ -662,8 +666,11 @@ mod tests {
         let _ = std::fs::remove_file(&pidfile);
         let gone = || {
             nix::sys::signal::kill(Pid::from_raw(child), None).is_err()
-                || std::fs::read_to_string(format!("/proc/{child}/stat"))
-                    .is_ok_and(|s| s.rsplit(')').next().is_some_and(|r| r.trim_start().starts_with('Z')))
+                || std::fs::read_to_string(format!("/proc/{child}/stat")).is_ok_and(|s| {
+                    s.rsplit(')')
+                        .next()
+                        .is_some_and(|r| r.trim_start().starts_with('Z'))
+                })
         };
         let started = std::time::Instant::now();
         while !gone() && started.elapsed() < Duration::from_secs(10) {
