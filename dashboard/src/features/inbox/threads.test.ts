@@ -1,7 +1,7 @@
 // The pure helpers of the Inbox threads (docs/api.md §6.13).
 import { describe, expect, it } from "vitest";
 import type { Question, Thread, ThreadMessage } from "../../api/types";
-import { closeBody, inThreadsView, newThreadBody, pendingProposal, safeUrl, sortThreads, threadChip, threadListStatus, threadHref, threadText, THREAD_MESSAGE_MAX, THREAD_SUMMARY_MAX, timeline, waitsOnYou, whoName } from "./threads";
+import { closeBody, inThreadsView, newThreadBody, pendingProposal, safeUrl, sortThreads, threadChip, threadGroups, threadListStatus, threadHref, threadText, THREAD_MESSAGE_MAX, THREAD_SUMMARY_MAX, timeline, waitsOnYou, whoName } from "./threads";
 
 const thread = (over: Partial<Thread> = {}): Thread => ({
   id: "T1",
@@ -63,6 +63,21 @@ describe("Inbox threads", () => {
     expect(ids("open")).toEqual(["waiting_operator", "waiting_agent"]);
     expect(ids("tracking")).toEqual(["tracking"]);
     expect(ids("done")).toEqual(["closed"]);
+  });
+
+  it("groups the Open list: waiting on you, then the work in progress (GitHub #28)", () => {
+    const rows = sortThreads([
+      thread({ id: "W", status: "waiting_agent", last_at: "2026-11-06T11:00:00.000Z" }),
+      thread({ id: "O", status: "waiting_operator", last_at: "2026-11-06T08:00:00.000Z" }),
+      thread({ id: "Q", status: "waiting_agent", open_questions: 1, last_at: "2026-11-06T09:00:00.000Z" }),
+      thread({ id: "T", status: "tracking", last_at: "2026-11-06T10:00:00.000Z" }),
+    ]);
+    expect(threadGroups(rows).map((g) => [g.id, g.label, g.threads.map((t) => t.id)])).toEqual([
+      ["you", "Waiting on you", ["Q", "O"]],
+      ["progress", "In progress", ["W", "T"]],
+    ]);
+    expect(threadGroups(rows.filter((t) => t.id === "W")).map((g) => g.id)).toEqual(["progress"]);
+    expect(threadGroups([])).toEqual([]);
   });
 
   it("sorts the ones that wait on the operator first, then the newest activity", () => {

@@ -171,13 +171,16 @@ pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
                 ));
             })
         }
-        ThreadCmd::Post { id, message } => {
+        ThreadCmd::Post {
+            id,
+            message,
+            status,
+        } => {
+            let mut body = json!({"text": ctx.text(message)?});
+            super::set_opt(&mut body, "status", status.clone());
             let v = ctx
                 .api
-                .post(
-                    &format!("{}/messages", path(id)),
-                    Some(json!({"text": ctx.text(message)?})),
-                )
+                .post(&format!("{}/messages", path(id)), Some(body))
                 .await?;
             ctx.emit(&v, |c, v| {
                 c.line(format!(
@@ -300,6 +303,22 @@ pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
             super::set_opt(&mut body, "monitor", monitor.clone());
             let body = (!cards.is_empty() || monitor.is_some()).then_some(body);
             let v = ctx.api.post(&format!("{}/track", path(id)), body).await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "thread {} is {}.",
+                    field(v, "id"),
+                    field(v, "status")
+                ));
+            })
+        }
+        ThreadCmd::Status { id, status } => {
+            let v = ctx
+                .api
+                .post(
+                    &format!("{}/status", path(id)),
+                    Some(json!({"status": status})),
+                )
+                .await?;
             ctx.emit(&v, |c, v| {
                 c.line(format!(
                     "thread {} is {}.",
