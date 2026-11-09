@@ -52,8 +52,7 @@ pub async fn reset(state: &Shared, key: &str, config: &DockerCiDef) -> ApiResult
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| ApiError::internal("cannot start daemon Docker CI reset"))?;
-        let Ok(output) = tokio::time::timeout(RESET_TIMEOUT, child.wait_with_output()).await
-        else {
+        let Ok(output) = tokio::time::timeout(RESET_TIMEOUT, child.wait_with_output()).await else {
             warn!(
                 secs = RESET_TIMEOUT.as_secs(),
                 "docker ci: reset timed out; tunnel not opened"
@@ -88,10 +87,7 @@ fn last_line(stdout: &[u8]) -> String {
         .rev()
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
-    line.chars()
-        .filter(|c| !c.is_control())
-        .take(200)
-        .collect()
+    line.chars().filter(|c| !c.is_control()).take(200).collect()
 }
 
 fn reset_args(
@@ -526,7 +522,10 @@ mod tests {
         assert!(!ping_ok(b"HTTP/1.1 500 Internal Server Error\r\n\r\n"));
         assert!(!ping_ok(b""));
         assert!(!ping_ok(b"garbage 200"));
-        assert_eq!(last_line(b"booting\nreset ok rc=0 secs=21\n\n"), "reset ok rc=0 secs=21");
+        assert_eq!(
+            last_line(b"booting\nreset ok rc=0 secs=21\n\n"),
+            "reset ok rc=0 secs=21"
+        );
         assert_eq!(last_line(b""), "");
         assert_eq!(last_line(&[b'x'; 500]).len(), 200);
         assert_eq!(last_line(b"a\x1b[31mb\n"), "a[31mb");
