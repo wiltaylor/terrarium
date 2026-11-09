@@ -189,7 +189,38 @@ impl Docker {
         let image_id = c["Image"].as_str().unwrap_or_default().to_owned();
         let reference = c["Config"]["Image"].as_str().unwrap_or_default().to_owned();
         let img = self.inspect_image(&image_id).await?.unwrap_or(Value::Null);
-        let image = image_of(&img, &reference);
+        let mut image = image_of(&img, &reference);
+        // Docker's image field stays unchanged after a binary-only upgrade.
+        // Read the selected release identity, not the original container image.
+        if img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1" {
+            let attempted = self.exec(id, crate::machine::hot_argv("active", &[])).await;
+            let active = match attempted {
+                Ok(out) if out.code == 0 => out,
+                _ => {
+                    // A stopped, paused or broken target must still expose its
+                    // release identity for status/recovery. Read only metadata
+                    // through a disposable container sharing the state mount.
+                    let spec = json!({"container": c, "image": img["Config"]});
+                    self.run_body(once_body(
+                        &spec,
+                        &image_id,
+                        &crate::machine::hot_argv("active", &[]),
+                    ))
+                    .await?
+                }
+            };
+            if active.code != 0 {
+                return Err(format!(
+                    "cannot read active release identity: {}",
+                    active.reason()
+                ));
+            }
+            if let Some(selected) = serde_json::from_str::<Option<Image>>(&active.stdout)
+                .map_err(|e| format!("invalid active release identity: {e}"))?
+            {
+                image = selected;
+            }
+        }
         Ok(Container {
             id: c["Id"].as_str().unwrap_or_default().to_owned(),
             name: c["Name"]
@@ -463,6 +494,33 @@ pub fn create_body(spec: &Value, reference: &str) -> Value {
     Value::Object(body)
 }
 
+// The service opt-in is an entrypoint interface, not a user daemon argument.
+// Normalize it against the destination image, including cross-layout rollback.
+fn service_command(body: &mut Value, image: &Value) {
+    let mut cmd: Vec<String> = body
+        .get("Cmd")
+        .unwrap_or(&image["Config"]["Cmd"])
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    if cmd.first().is_some_and(|s| s == "--daemon-service") {
+        cmd.remove(0);
+    }
+    if cmd
+        .first()
+        .is_some_and(|s| Path::new(s).file_name().is_some_and(|n| n == "terrariumd"))
+        && image["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1"
+    {
+        cmd.insert(0, "--daemon-service".into());
+    }
+    if !cmd.is_empty() {
+        body["Cmd"] = json!(cmd);
+    }
+}
+
 /// The body of a one-off container like `spec` that runs `argv`: the same
 /// binds and user, no ports, no network, no restart, no health check, and
 /// no compose labels.
@@ -521,6 +579,25 @@ pub fn health_of(c: &Value) -> Health {
 }
 
 impl Engine for Docker {
+    fn can_hot_swap<'a>(&'a self, cur: &'a Container, to: &'a Image) -> BoxFut<'a, Res<bool>> {
+        Box::pin(async move {
+            let physical = cur.spec["container"]["Image"].as_str().unwrap_or_default();
+            let Some(old) = self.inspect_image(physical).await? else {
+                return Ok(false);
+            };
+            let Some(new) = self.inspect_image(&to.id).await? else {
+                return Ok(false);
+            };
+            if !hot_swap_compatible(&old, &new) {
+                return Ok(false);
+            }
+            Ok(self
+                .exec(&cur.id, crate::machine::hot_argv("probe", &[]))
+                .await?
+                .code
+                == 0)
+        })
+    }
     fn target(&self) -> BoxFut<'_, Res<Container>> {
         Box::pin(async move {
             let id = self.target_id().await?;
@@ -727,6 +804,11 @@ impl Engine for Docker {
     fn create<'a>(&'a self, spec: &'a Container, image: &'a Image) -> BoxFut<'a, Res<Container>> {
         Box::pin(async move {
             let mut body = create_body(&spec.spec, &image.reference);
+            let destination = self
+                .inspect_image(&image.reference)
+                .await?
+                .ok_or_else(|| "destination image missing before service creation".to_owned())?;
+            service_command(&mut body, &destination);
             // Compose records the image ID in a label; a stale one makes
             // the next `compose up` make the container again.
             if let Some(l) = body
@@ -755,9 +837,17 @@ impl Engine for Docker {
         &'a self,
         spec: &'a Container,
         image: &'a Image,
-        argv: Vec<String>,
+        mut argv: Vec<String>,
     ) -> BoxFut<'a, Res<ExecOut>> {
         Box::pin(async move {
+            // Offline restore must use the requested image's executable, not
+            // the volume's current link (which may still select the new daemon).
+            if argv.first().is_some_and(|s| s == "terrariumd")
+                && let Some(img) = self.inspect_image(&image.id).await?
+                && img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1"
+            {
+                argv[0] = "/opt/terrarium/bundled/bin/terrariumd".into();
+            }
             self.run_body(once_body(&spec.spec, &image.reference, &argv))
                 .await
         })
@@ -776,10 +866,77 @@ impl Engine for Docker {
     }
 }
 
+/// The release payload is the final layer, by hot-swap-layout contract. A
+/// missing label, changed supervisor/base, or protocol break forces replacement.
+pub fn hot_swap_compatible(old: &Value, new: &Value) -> bool {
+    let labels = |v: &Value| v["Config"]["Labels"].clone();
+    let a = labels(old);
+    let b = labels(new);
+    if a["io.terrarium.hot-swap-layout"] != "1"
+        || b["io.terrarium.hot-swap-layout"] != "1"
+        || a["io.terrarium.runner-compat-epoch"].as_str().is_none()
+        || a["io.terrarium.runner-compat-epoch"] != b["io.terrarium.runner-compat-epoch"]
+    {
+        return false;
+    }
+    for key in [
+        "Env",
+        "Entrypoint",
+        "Cmd",
+        "User",
+        "WorkingDir",
+        "Healthcheck",
+    ] {
+        if old["Config"][key] != new["Config"][key] {
+            return false;
+        }
+    }
+    match (
+        old["RootFS"]["Layers"].as_array(),
+        new["RootFS"]["Layers"].as_array(),
+    ) {
+        (Some(a), Some(b)) if a.len() > 1 && a.len() == b.len() => {
+            a[..a.len() - 1] == b[..b.len() - 1]
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_command_crosses_the_legacy_image_boundary_both_ways() {
+        let old = json!({"Config": {"Cmd": ["terrariumd"]}});
+        let new = json!({"Config": {"Cmd": ["terrariumd"], "Labels": {"io.terrarium.hot-swap-layout": "1"}}});
+        let mut body = create_body(&spec(), "new");
+        service_command(&mut body, &new);
+        assert_eq!(body["Cmd"], json!(["--daemon-service", "terrariumd"]));
+        service_command(&mut body, &old);
+        assert_eq!(body["Cmd"], json!(["terrariumd"]));
+        body["Cmd"] = json!(["--daemon-service", "terrariumd", "--sandbox", "none"]);
+        service_command(&mut body, &old);
+        assert_eq!(body["Cmd"], json!(["terrariumd", "--sandbox", "none"]));
+    }
+
+    #[test]
+    fn hot_swap_requires_identical_runtime_base_and_compatibility_epoch() {
+        let a = json!({"Config":{"Labels":{"io.terrarium.hot-swap-layout":"1", "io.terrarium.runner-compat-epoch":"1"}}, "RootFS":{"Layers":["base", "old-payload"]}});
+        let mut b = a.clone();
+        b["RootFS"]["Layers"][1] = json!("new-payload");
+        assert!(hot_swap_compatible(&a, &b));
+        b["RootFS"]["Layers"][0] = json!("different-base");
+        assert!(!hot_swap_compatible(&a, &b));
+        b = a.clone();
+        b["Config"]["Labels"]["io.terrarium.runner-compat-epoch"] = json!("2");
+        assert!(!hot_swap_compatible(&a, &b));
+        assert!(!hot_swap_compatible(&json!({}), &a));
+        b = a.clone();
+        b["Config"]["Env"] = json!(["NEW=setting"]);
+        assert!(!hot_swap_compatible(&a, &b));
+    }
 
     fn spec() -> Value {
         json!({

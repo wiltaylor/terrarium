@@ -51,6 +51,31 @@ for dir in "${AUTH_DIRS[@]}" "${STATE_DIRS[@]}"; do
 done
 chmod 700 /state/credentials 2>/dev/null || true
 
+# Compose opts its long-running service into initialization with a command
+# prefix. `compose run SERVICE COMMAND` replaces that command, so backups and
+# shells never select a release or remove the live daemon's probation marker.
+service=0
+if [ "${1:-}" = --daemon-service ]; then service=1; shift; fi
+supervise=0
+if [ "$(basename -- "${1:-}")" = terrariumd ] && [ "${TERRARIUM_SUPERVISOR:-1}" != 0 ]; then
+	case "${2:-}" in --help | -h | --version | -V) ;; "" | -*) supervise=1 ;; esac
+fi
+if [ "$supervise" = 0 ]; then
+	export PATH="/opt/terrarium/bundled/bin:$PATH"
+	exec "$@"
+fi
+if [ "$service" != 1 ]; then
+	log "daemon initialization requires --daemon-service (set by the Compose service command)"
+	exit 1
+fi
+if [ -f /usr/local/lib/terrarium-hot-swap.py ]; then
+	mkdir -p "${TERRARIUM_STATE_DIR:-/state}/releases"
+	exec 9> "${TERRARIUM_STATE_DIR:-/state}/releases/service.lock"
+	flock -n 9 || { log "another daemon container owns this state volume"; exit 1; }
+	export TERRARIUM_DAEMON_SERVICE=1
+	python3 /usr/local/lib/terrarium-hot-swap.py init
+fi
+
 # The runner processes (PLAN §6). The image sets TERRARIUM_RUNNER; keep a
 # value from compose, else find the binary on PATH.
 if [ "${TERRARIUM_RUNNER_MODE:-process}" = "process" ] && [ -z "${TERRARIUM_RUNNER:-}" ]; then
@@ -67,7 +92,7 @@ fi
 if [ "${TERRARIUM_HARNESS_INSTALL:-1}" != 0 ] && command -v terrariumd > /dev/null 2>&1; then
 	log "checking the harnesses in $TOOLS_DIR"
 	started="$(date +%s)"
-	if terrariumd harness install; then
+	if terrariumd harness install 9>&-; then
 		log "harnesses ready in $(($(date +%s) - started))s"
 	else
 		log "a harness install failed (see above); the daemon tries again at its start"
@@ -89,16 +114,6 @@ RESET_AFTER="${TERRARIUM_SUPERVISOR_RESET_AFTER:-300}"
 DAEMON_STOP_TIMEOUT="${TERRARIUM_DAEMON_STOP_TIMEOUT:-5}"
 SHUTDOWN_GRACE="${TERRARIUM_SHUTDOWN_GRACE:-20}"
 
-# Supervise only `terrariumd` with no subcommand. Other commands (a shell,
-# `terrariumd sandbox-dry-run`) run once, as before.
-supervise=0
-if [ "$(basename -- "${1:-}")" = terrariumd ] && [ "${TERRARIUM_SUPERVISOR:-1}" != 0 ]; then
-	case "${2:-}" in "" | -*) supervise=1 ;; esac
-fi
-if [ "$supervise" = 0 ]; then
-	exec "$@"
-fi
-
 set +e
 stop_signal=""
 daemon_pid=""
@@ -112,6 +127,16 @@ on_stop() {
 }
 trap 'on_stop TERM' TERM
 trap 'on_stop INT' INT
+
+# SIGUSR1 pauses only our daemon child. Unlike a container stop, it does not
+# stop runners or impose the five-second container shutdown timeout.
+on_upgrade_pause() {
+	if { [ -f "$RUN_DIR/upgrade-pause" ] || [ -f "$RUN_DIR/upgrade-resume" ]; } && [ -n "$daemon_pid" ]; then
+		kill -TERM "$daemon_pid" 2>/dev/null
+	fi
+}
+trap on_upgrade_pause USR1
+printf '%s\n' "$$" > "$RUN_DIR/upgrade-supervisor.pid"
 
 now() { date +%s; }
 
@@ -206,12 +231,22 @@ stop_runners() {
 
 backoff=1
 while :; do
+	if [ -f "$RUN_DIR/upgrade-pause" ]; then
+		touch "$RUN_DIR/upgrade-paused"
+		while [ -f "$RUN_DIR/upgrade-pause" ] && [ -z "$stop_signal" ]; do
+			sleep 0.1
+		done
+		if [ -n "$stop_signal" ]; then break; fi
+	fi
 	started="$(now)"
 	# A background job of a shell without job control ignores SIGINT and
 	# SIGQUIT; `env --default-signal` gives terrariumd and the runners the
 	# default dispositions back.
-	env --default-signal "$@" &
+	env --default-signal "$@" 9>&- &
 	daemon_pid=$!
+	rm -f "$RUN_DIR/upgrade-paused" "$RUN_DIR/upgrade-resume"
+	# Covers SIGUSR1 arriving between the loop-top check and assigning the PID.
+	on_upgrade_pause
 	if [ -n "$stop_signal" ]; then kill -s "$stop_signal" "$daemon_pid" 2>/dev/null; fi
 	log "started terrariumd (pid $daemon_pid)"
 	wait_daemon stop
@@ -221,6 +256,10 @@ while :; do
 		break
 	fi
 	uptime=$(($(now) - started))
+	if [ -f "$RUN_DIR/upgrade-pause" ] || [ -f "$RUN_DIR/upgrade-resume" ]; then
+		daemon_pid=""
+		continue
+	fi
 	if [ "$daemon_status" = 0 ]; then
 		log "terrariumd exited with status 0 after ${uptime}s: stopping the container"
 		break

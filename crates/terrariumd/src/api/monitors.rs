@@ -36,6 +36,7 @@ pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/projects/{name}/monitors", get(list).post(create))
         .route("/projects/{name}/monitors/test", post(test_run))
+        .route("/projects/{name}/eta-accuracy", get(eta_accuracy))
         .route(
             "/projects/{name}/dashboard",
             get(dashboard).put(put_dashboard),
@@ -511,6 +512,25 @@ async fn dashboard(
         "updated_by": updated_by,
         "monitors": rows,
     })))
+}
+
+/// Loaded independently of monitors. Backtesting runs after releasing the DB lock.
+async fn eta_accuracy(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    policy::read_project(&actor, &name)?;
+    let samples = state
+        .db
+        .read(move |c| {
+            crate::store::projects::get(c, &name)?;
+            crate::store::card_history::work_samples(c, &name)
+        })
+        .await?;
+    Ok(Json(json!(crate::store::card_history::accuracy_view(
+        &samples
+    ))))
 }
 
 async fn put_dashboard(

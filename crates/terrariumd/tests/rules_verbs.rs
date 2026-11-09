@@ -193,6 +193,11 @@ rule "close-group" {
   when "data.n" { eq = "4" }
   group_close { key = "batch" comment = "Finished" }
 }
+rule "fail-step" {
+  on = ["test.ping"]
+  when "data.n" { eq = "5" }
+  group_status { key = "batch" step = "{{group.failed_step}}" state = "failed" }
+}
 "#;
 
 const VERSION_CUT: &str = r#"
@@ -684,6 +689,43 @@ async fn group_timeout_closes_once_and_records_comment_and_rule_log() {
         1
     );
     assert!(card(&td, &a).await.get("group").is_none());
+}
+
+/// TER-404: the step placeholder of `group_status` can render empty
+/// (the run's card lost its group before its lane ran, as a red split
+/// re-groups a batch while the per-card lanes of the old verdict still
+/// mark the old group). The action skips, as a key without a group
+/// skips, instead of failing the run.
+#[tokio::test]
+async fn group_status_skips_when_the_step_placeholder_has_no_value() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    // The card leaves the group, which stays open (it is not a merge
+    // group): the key still resolves, only the step is empty.
+    ping(&td, "p", &a, 3).await;
+    settle(&td).await;
+    assert!(card(&td, &a).await.get("group").is_none());
+    let seq = ping(&td, "p", &a, 5).await;
+    settle(&td).await;
+    let fail: Vec<Value> = runs(&td, "p")
+        .await
+        .into_iter()
+        .filter(|r| r["event_seq"] == seq)
+        .collect();
+    assert_eq!(fail.len(), 1, "{fail:#?}");
+    assert_eq!(fail[0]["rule"], "fail-step", "{}", fail[0]);
+    assert_eq!(fail[0]["state"], "noop", "{}", fail[0]);
+    assert!(fail[0]["reason"].is_null(), "{}", fail[0]);
+    assert_eq!(
+        fail[0]["steps"][0]["detail"]["reason"],
+        "the step placeholder has no value (the card has no group)",
+        "{}",
+        fail[0]
+    );
 }
 
 async fn new_card(td: &TestDaemon, project: &str, body: Value) -> String {

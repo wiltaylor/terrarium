@@ -55,10 +55,19 @@ pub struct DefinitionCounts {
     pub subscriptions: usize,
 }
 
-pub async fn health(State(state): State<Shared>) -> Json<Health> {
+pub async fn health(State(state): State<Shared>) -> Response {
+    use axum::response::IntoResponse;
+    let failed = state.agent_calls.failure().is_some();
     let d = state.definitions();
-    Json(Health {
-        status: "ok".into(),
+    let body = Json(Health {
+        status: if failed {
+            "activation_failed"
+        } else if state.agent_calls.in_probation() && !state.agent_calls.has_probation_marker() {
+            "activating"
+        } else {
+            "ok"
+        }
+        .into(),
         version: terrarium_version::FULL.into(),
         uptime: state.started.elapsed().as_secs(),
         started_at: state.started_at,
@@ -77,7 +86,16 @@ pub async fn health(State(state): State<Shared>) -> Json<Health> {
             .filter(|h| h.compact_command().is_some())
             .map(|h| h.as_str().to_owned())
             .collect(),
-    })
+    });
+    (
+        if failed {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            axum::http::StatusCode::OK
+        },
+        body,
+    )
+        .into_response()
 }
 
 /// The body of `GET /api/system/version` (docs/api.md §1): the build of
