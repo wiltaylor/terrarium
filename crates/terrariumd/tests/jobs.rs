@@ -2193,30 +2193,27 @@ async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
     let marker = wd.join("p/recipe-of-a");
     // Daemon A's recipe runs for a while and holds the slot's lock.
     let recipe = format!("test -f OK && touch '{}' && sleep 10", marker.display());
-    a.td
-        .put(
-            "/api/projects/p/delivery",
-            json!({"target": "p-box", "recipe": recipe, "slots": 1,
+    a.td.put(
+        "/api/projects/p/delivery",
+        json!({"target": "p-box", "recipe": recipe, "slots": 1,
                    "next_repos": ["app"], "work_dir": wd.display().to_string()}),
-        )
-        .await
-        .ok();
+    )
+    .await
+    .ok();
     // Daemon B: another daemon, the same project name, the same work dir.
     let b = lab(1).await;
-    b.td
-        .put(
-            "/api/projects/p/delivery",
-            json!({"target": "p-box", "recipe": "test -f OK", "slots": 1,
+    b.td.put(
+        "/api/projects/p/delivery",
+        json!({"target": "p-box", "recipe": "test -f OK", "slots": 1,
                    "next_repos": ["app"], "work_dir": wd.display().to_string()}),
-        )
-        .await
-        .ok();
+    )
+    .await
+    .ok();
     // A's job first: wait until its recipe runs, so it holds the lock.
     let head_a = a.branch("ter-a1", "next", &[("OK", "a1\n")]);
     let ca = a.card("a1", "ter-a1").await;
-    let r = a
-        .td
-        .post_as(
+    let r =
+        a.td.post_as(
             &a.w1,
             &format!("/api/cards/{ca}/validate"),
             json!({"commit": head_a}),
@@ -2225,16 +2222,21 @@ async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
     assert_eq!(r.status, 201, "{}", r.body);
     let start = Instant::now();
     while !marker.is_file() {
-        assert!(start.elapsed() < DEADLINE, "daemon A's recipe never started");
+        assert!(
+            start.elapsed() < DEADLINE,
+            "daemon A's recipe never started"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(wd.join("p/slot-1.lock").is_file(), "no slot lock next to the tree");
+    assert!(
+        wd.join("p/slot-1.lock").is_file(),
+        "no slot lock next to the tree"
+    );
     // B's job on the same slot: refused with the clear error, twice.
     let head_b = b.branch("ter-b1", "next", &[("OK", "b1\n")]);
     let cb = b.card("b1", "ter-b1").await;
-    let r = b
-        .td
-        .post_as(
+    let r =
+        b.td.post_as(
             &b.w1,
             &format!("/api/cards/{cb}/validate"),
             json!({"commit": head_b}),
@@ -2242,11 +2244,7 @@ async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let jobs = b.until_idle().await;
-    let mut jobs: Vec<Value> = jobs
-        .iter()
-        .filter(|j| j["card"] == cb)
-        .cloned()
-        .collect();
+    let mut jobs: Vec<Value> = jobs.iter().filter(|j| j["card"] == cb).cloned().collect();
     jobs.sort_by_key(|j| j["attempt"].as_i64().unwrap_or(0));
     assert_eq!(jobs.len(), 2, "a clash is rerun once: {jobs:#?}");
     for job in &jobs {
@@ -2260,7 +2258,10 @@ async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
     assert_eq!(job["attempt"], 2, "a clash is rerun once: {job:#}");
     // B never touched A's tree: it is still at A's head, with A's file.
     assert_eq!(git(&wd.join("p/slot-1"), &["rev-parse", "HEAD"]), head_a);
-    assert_eq!(std::fs::read_to_string(wd.join("p/slot-1/OK")).unwrap(), "a1\n");
+    assert_eq!(
+        std::fs::read_to_string(wd.join("p/slot-1/OK")).unwrap(),
+        "a1\n"
+    );
     // A's job is unaffected: it passes and its card moves to review.
     a.until_card(&ca, "review", |c| c["column"] == "review")
         .await;

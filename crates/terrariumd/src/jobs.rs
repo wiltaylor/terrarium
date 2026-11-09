@@ -3499,7 +3499,10 @@ mod tests {
     /// True when `flock` works here: the TER-448 lock tests need it.
     fn flock_works() -> bool {
         std::process::Command::new("sh")
-            .args(["-c", "command -v flock >/dev/null 2>&1 && flock -n /dev/null true"])
+            .args([
+                "-c",
+                "command -v flock >/dev/null 2>&1 && flock -n /dev/null true",
+            ])
             .output()
             .is_ok_and(|o| o.status.success())
     }
