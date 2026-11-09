@@ -2383,11 +2383,23 @@ mod tests {
         // 2026-11-09 is a Monday. In Sydney (+11) the day turns at 13:00
         // UTC; in New York (-5) at 05:00 UTC.
         let syd = day_start("Australia/Sydney", None, None, &[]);
-        assert_eq!(plan(&syd, None, "2026-11-09T12:59:00Z").unwrap().1, "2026-11-09");
-        assert_eq!(plan(&syd, None, "2026-11-09T13:01:00Z").unwrap().1, "2026-11-10");
+        assert_eq!(
+            plan(&syd, None, "2026-11-09T12:59:00Z").unwrap().1,
+            "2026-11-09"
+        );
+        assert_eq!(
+            plan(&syd, None, "2026-11-09T13:01:00Z").unwrap().1,
+            "2026-11-10"
+        );
         let ny = day_start("America/New_York", None, None, &[]);
-        assert_eq!(plan(&ny, None, "2026-11-10T04:59:00Z").unwrap().1, "2026-11-09");
-        assert_eq!(plan(&ny, None, "2026-11-10T05:01:00Z").unwrap().1, "2026-11-10");
+        assert_eq!(
+            plan(&ny, None, "2026-11-10T04:59:00Z").unwrap().1,
+            "2026-11-09"
+        );
+        assert_eq!(
+            plan(&ny, None, "2026-11-10T05:01:00Z").unwrap().1,
+            "2026-11-10"
+        );
         // The done day blocks its day and every day before it.
         assert!(plan(&syd, Some("2026-11-09"), "2026-11-09T12:59:00Z").is_none());
         assert!(plan(&syd, Some("2026-11-10"), "2026-11-09T12:59:00Z").is_none());

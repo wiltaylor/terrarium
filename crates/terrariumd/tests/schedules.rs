@@ -1586,15 +1586,17 @@ async fn day_start_a_late_plan_runs_after_midnight_for_its_day() {
     let td = TestDaemon::start().await;
     setup(&td).await;
     let sid = id(td
-        .post("/api/schedules", day_start_body("late", json!({"delay": "30m"})))
+        .post(
+            "/api/schedules",
+            day_start_body("late", json!({"delay": "30m"})),
+        )
         .await
         .ok());
     let mut w = DayStartWatch::default();
     // A start at 23:50 with a delay of 30m plans a run at 00:20.
     pass(&td, at(0, 23, 50), StartCause::DaemonStart, &mut w, true).await;
-    let next = |s: &Value| {
-        DateTime::parse_from_rfc3339(s["next_run_at"].as_str().unwrap()).unwrap()
-    };
+    let next =
+        |s: &Value| DateTime::parse_from_rfc3339(s["next_run_at"].as_str().unwrap()).unwrap();
     assert_eq!(next(&schedule(&td, &sid).await), at(1, 0, 20));
     // The first tick of the new day keeps the plan.
     assert!(
@@ -1658,11 +1660,8 @@ async fn connect_host(
     name: &str,
     token: &str,
 ) -> tokio::task::JoinHandle<()> {
-    let mut o = terrarium_host::ClientOptions::new(
-        format!("ws://{addr}/hosts/connect"),
-        token,
-        name,
-    );
+    let mut o =
+        terrarium_host::ClientOptions::new(format!("ws://{addr}/hosts/connect"), token, name);
     o.capabilities = terrarium_core::protocol::HostCapabilities {
         shell: Some("/bin/sh".into()),
         ..Default::default()

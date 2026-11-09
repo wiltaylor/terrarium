@@ -232,8 +232,7 @@ where
                 } else {
                     cause
                 };
-                if schedules::day_start_plan(&s.spec, s.day_start_done.as_deref(), now)?.is_some()
-                {
+                if schedules::day_start_plan(&s.spec, s.day_start_done.as_deref(), now)?.is_some() {
                     changes.push(DayStartChange::Arm(s.id.clone(), cause));
                 }
             }
