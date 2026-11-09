@@ -2901,6 +2901,10 @@ async fn a_lease_grants_and_a_revoke_ends_the_sessions() {
 /// A lease with a short `until` expires: the timer ends the session with
 /// `lease_revoked`, writes `target.lease_expired` as `system`, and the
 /// next exec is `403`.
+///
+/// The grant is long and the extend shortens it only after the exec has
+/// started: a short `until` at the grant could run out in the slow commits
+/// of a loaded disk before the exec (TER-509).
 #[tokio::test]
 async fn an_expired_lease_ends_the_sessions() {
     let lab = Lab::start().await;
@@ -2913,7 +2917,7 @@ async fn an_expired_lease_ends_the_sessions() {
         .td
         .post(
             "/api/targets/box/leases",
-            json!({"agent": "terra/worker", "until": "2s"}),
+            json!({"agent": "terra/worker", "until": "1h"}),
         )
         .await;
     assert_eq!(g.status, 201, "{}", g.body);
@@ -2925,6 +2929,14 @@ async fn an_expired_lease_ends_the_sessions() {
     assert_eq!(r.status, 201, "{}", r.body);
     let sid = r.body["session_id"].as_str().unwrap().to_owned();
     let started = std::time::Instant::now();
+    let e = lab
+        .td
+        .patch(
+            "/api/targets/box/leases/terra%2Fworker",
+            json!({"until": "1s"}),
+        )
+        .await;
+    assert_eq!(e.status, 200, "{}", e.body);
     let d = drain_as(&lab.td, Some(&w), "box", &sid).await;
     assert_eq!(d.end["code"], "lease_revoked", "{}", d.end);
     assert!(started.elapsed() < Duration::from_secs(15));
