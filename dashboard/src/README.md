@@ -209,50 +209,34 @@ src/
 
 The sidebar (`app/Layout.tsx`, the item lists in `app/nav.ts`) has, from the
 top: Home, Inbox, Logs, and Schedules; the project tree; and a Settings
-section at the bottom. The project tree
-(`app/ProjectTree.tsx`) has a Projects root. A click on its name opens the
-project cards (`/projects`) and opens the root; the chevron only opens or
-closes it. Under the root, each project opens to show its pages. Repos and
-Agents are nodes, not pages. Agents is the last row of the project. The row
-of a node is not a link and you cannot select it. A click on the row, Enter,
-or Space opens or closes the node. Each node is closed by default. Open, the
-Repos node shows the repos of the project, sorted by name (`stores/repos.ts`
-loads them the first time the node opens). Each repo row is a link to the
-repo browser (`/p/:project/repos/:repo`). A repo page or the repo list of the
-project opens the node. Open, the Agents node shows the agents of that
-project, sorted by name
-(`app/AgentRow.tsx`). The row shows the agent name and a dot in the colour of
-the agent status. The row label and title also give the status. Each project
-row has a health dot before the name (`lib/projectHealth.ts`,
+section at the bottom. The project tree (`app/ProjectTree.tsx`) has a
+Projects root. A click on its name opens the project cards (`/projects`) and
+opens the root; the chevron only opens or closes it. Under the root there is
+one row per project, with no page, agent, or repo sub rows. The project row
+links `/p/:project`, whose tabs reach those views. It is marked on every
+`/p/:project/...` path and on the page of an agent in that project.
+
+Each project row has a health dot before the name (`lib/projectHealth.ts`,
 `components/ProjectDot.tsx`). The dot is red when an agent is in error or
 blocked. It is yellow when an agent works, starts, restarts, or compacts. It
 is green when all agents rest: idle, waiting, stopped, or paused. A project
 with no agents has a hollow grey ring. Red has the highest priority. The row
 label and title give the counts, for example `terrarium: 1 blocked, 2
 working, 3 idle`. The dot changes live with the agent events. The project
-cards (`/projects`) show the same dot. The project
-row and its Agents node show the number of agents that are blocked or in
-error. A "+" at the right of each node row adds an agent or a repo. The "+"
-of the Agents node opens the New agent dialog
-(`features/agents/NewAgentDialog.tsx`) for the project. The "+" of the Repos
-node opens the Add repo form in a dialog (`features/repos/AddRepoForm.tsx`,
-the same form as on the Repos page). The new repo shows under the node at
-once, and the node opens. The "+" is not a tree row, so it is not in the
-roving tabindex. On the keyboard, push `+` on the node row
-(`aria-keyshortcuts`). On a phone, the "+" is a 40px tap target. The pages
-`/p/:project/agents` and `/p/:project/repos` stay, and other links go to
-them, but the tree does not link them. A cog at the right of each project row opens the project settings
-screen (`/p/:project/settings`). The cog is muted until the row is under the
-pointer or has the focus, and it is in the accent colour while the screen is
-open. The cog is not a tree row, so it is not in the roving tabindex. The
-keyboard gets to the screen through the Settings link of the project cards
-(`/projects`). The sidebar has no other agent list: each agent is in a project. An
-agent page (`/agents/:id`) opens the Projects root, the project of the agent,
-and its Agents node, and marks the agent row. The dashboard has no list of
-all agents: `/agents` redirects to `/projects`. Above eight projects or
-agents or repos, the tree or a project node shows a filter. The root and the
-project nodes use `app/TreeRoot.tsx`, one open set in `localStorage`,
-and the keyboard map in `app/treeNav.ts`. Settings
+cards (`/projects`) show the same dot. The project row shows the number of
+agents that are blocked or in error.
+
+A cog at the right of each project row opens the project settings screen
+(`/p/:project/settings`). The cog is muted until the row is under the pointer
+or has the focus, and it is in the accent colour while the screen is open.
+The cog is not a tree row, so it is not in the roving tabindex. The keyboard
+gets to the screen through the Settings tab of the project page. An agent
+page (`/agents/:id`) opens the Projects root and marks the agent's project.
+The dashboard has no list of all agents: `/agents` redirects to `/projects`.
+Above eight projects, the tree shows a filter. The root and Bookmarks node
+use `app/TreeRoot.tsx`, one open set in `localStorage`, and the keyboard map
+in `app/treeNav.ts`. The open set keeps folder and root state; its old
+project, project Agents, and project Repos names are pruned. Settings
 (`features/settings/SettingsPage.tsx`) is one page with a tab for each of
 Account, Subscriptions, Secrets, Templates, System prompts, Skills, Targets,
 Harness config, Hosts, and Software. Each tab is a route under `/settings`. The Skills tab also has the
