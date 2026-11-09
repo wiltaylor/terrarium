@@ -506,7 +506,7 @@ pub enum DeliveryCmd {
     Show,
     /// Change the queue config; flags that you leave out keep their value
     /// (project_admin; a global target needs sysadmin)
-    Set(DeliverySetArgs),
+    Set(Box<DeliverySetArgs>),
 }
 
 #[derive(Debug, Args)]

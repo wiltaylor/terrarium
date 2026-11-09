@@ -237,7 +237,7 @@ pub async fn delivery(ctx: &Ctx, cmd: &DeliveryCmd) -> anyhow::Result<()> {
         }
         DeliveryCmd::Set(a) => {
             let cur = ctx.api.get(&path, vec![]).await?;
-            let body = merged(&cur["delivery"], a)?;
+            let body = merged(&cur["delivery"], &a)?;
             let v = ctx.api.put(&path, body).await?;
             ctx.emit(&v, print_delivery)
         }
