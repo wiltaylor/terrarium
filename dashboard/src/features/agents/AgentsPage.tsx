@@ -6,7 +6,9 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { AGENT_STATUSES, roleLabel, type Agent, type AgentStatus } from "../../api/types";
 import { duration } from "../../lib/format";
+import { decodePathParam } from "../../lib/url";
 import { agents, api, events, leases } from "../../stores";
+import { PinButton } from "../../app/PinnedBar";
 import { NewAgentDialog } from "./NewAgentDialog";
 
 export function RoleBadges(props: { agent: Agent }) {
@@ -17,7 +19,7 @@ export function RoleBadges(props: { agent: Agent }) {
   );
 }
 
-export function AgentCard(props: { agent: Agent; now: number }) {
+export function AgentCard(props: { agent: Agent; now: number; onError?: (e: unknown) => void }) {
   const a = () => props.agent;
   return (
     <div class="card-box agent-card">
@@ -29,6 +31,10 @@ export function AgentCard(props: { agent: Agent; now: number }) {
           <LeaseChips agentId={a().id} now={props.now} />
           <HoldBadge agentId={a().id} now={props.now} />
           <StatusBadge agent={a()} />
+          {/* The pin the sidebar agent rows had (TER-153). An ephemeral agent is short-lived: no pin, as on the agent page. */}
+          <Show when={!a().ephemeral}>
+            <PinButton agent={a()} class="small" onError={props.onError} />
+          </Show>
         </span>
       </div>
       <div class="row">
@@ -81,21 +87,24 @@ export function AgentsPage() {
   const now = useNow(1000);
   const navigate = useNavigate();
   const route = useParams<{ project: string }>();
+  // Router params keep their URL encoding: "my app" arrives as "my%20app".
+  const project = () => decodePathParam(route.project);
   const [creating, setCreating] = createSignal(false);
+  const [pinError, setPinError] = createSignal<unknown>(null);
   // The "holds <target>" chips: the leases older than the event backlog.
   onMount(() => void leases.loadAll());
   // `paused` is not a status: a paused agent is `stopped` with the pause flag.
   const [status, setStatus] = createSignal<AgentStatus | "paused" | "">("");
-  const shown = () => agents.inProject(route.project).filter((a) => !status() || (status() === "paused" ? a.paused : a.status === status()));
+  const shown = () => agents.inProject(project()).filter((a) => !status() || (status() === "paused" ? a.paused : a.status === status()));
   // The card agents (TER-75): the ephemeral agents bound to a card or assigned
   // one. The agents store leaves ephemeral agents out, so the page reads them.
   const [cardAgents, { refetch }] = createResource(
-    () => route.project,
+    () => project(),
     async (p) => (await api.agents.list(p, { card: true })).filter((a) => a.ephemeral),
   );
   let pending: ReturnType<typeof setTimeout> | undefined;
   const off = events.on((e) => {
-    if (e.project !== route.project || !(e.kind === "card" || e.kind === "status" || e.kind.startsWith("agent."))) return;
+    if (e.project !== project() || !(e.kind === "card" || e.kind === "status" || e.kind.startsWith("agent."))) return;
     clearTimeout(pending);
     pending = setTimeout(() => void refetch(), 1000);
   });
@@ -106,7 +115,7 @@ export function AgentsPage() {
 
   return (
     <>
-      <PageHead title={`Agents · ${route.project}`} level={2}>
+      <PageHead title={`Agents · ${project()}`} level={2}>
         <select value={status()} onChange={(e) => setStatus(e.currentTarget.value as AgentStatus | "paused" | "")} aria-label="Status filter">
           <option value="">Any status</option>
           <For each={AGENT_STATUSES}>{(s) => <option value={s}>{s}</option>}</For>
@@ -125,12 +134,13 @@ export function AgentsPage() {
         </button>
       </PageHead>
       <Show when={creating()}>
-        <NewAgentDialog project={route.project} onClose={() => setCreating(false)} onSaved={(a) => navigate(`/agents/${encodeURIComponent(a.id)}`)} />
+        <NewAgentDialog project={project()} onClose={() => setCreating(false)} onSaved={(a) => navigate(`/agents/${encodeURIComponent(a.id)}`)} />
       </Show>
       <ErrorBanner error={agents.state.error} />
+      <ErrorBanner error={pinError()} onDismiss={() => setPinError(null)} />
       <Show when={shown().length} fallback={<Empty>{agents.state.loading ? "Loading…" : "No agents match."}</Empty>}>
         <div class="grid">
-          <For each={shown()}>{(a) => <AgentCard agent={a} now={now()} />}</For>
+          <For each={shown()}>{(a) => <AgentCard agent={a} now={now()} onError={setPinError} />}</For>
         </div>
       </Show>
       <Show when={(cardAgents() ?? []).length}>
