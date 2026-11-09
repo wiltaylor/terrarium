@@ -14,7 +14,10 @@
 //!   of the Inbox that the operator forwarded to one ([`ask`], the table
 //!   `inbox_watches`). It is open while the newest message of its thread
 //!   is the operator's: it waits for the agent, not for the operator, so
-//!   the badge does not count it. The agent's answer is a `mail` item.
+//!   the badge does not count it. The agent's answer is a `mail` item;
+//! - `thread`: an Inbox thread (TER-91). Only `kind=thread` lists it, and
+//!   `open` of the counts leaves it out: the Threads screen of the
+//!   dashboard has its own badge (TER-466).
 //!
 //! No mail body is copied: an item holds the question or the message as
 //! the stores give it. Each change of an item emits one `inbox` event
@@ -714,7 +717,9 @@ pub fn page(
             }
         }
     }
-    if wants(f, InboxKind::Thread) {
+    // The Threads screen counts and lists the threads (TER-466): only an
+    // explicit `kind=thread` lists them here.
+    if f.kind == Some(InboxKind::Thread) {
         items.extend(thread_items(conn, f)?);
     }
     if wants(f, InboxKind::System) && f.status.open() {
@@ -766,8 +771,13 @@ pub struct Counts {
     /// them.
     pub watch: usize,
     /// The open thread items: waiting for the operator, or with an open
-    /// question.
+    /// question. The Threads screen has its own badge (TER-466), so
+    /// `open`, `urgent`, and `critical` do not count them.
     pub thread: usize,
+    /// The open thread items with an urgent or critical open question.
+    pub thread_urgent: usize,
+    /// The open thread items with a critical open question.
+    pub thread_critical: usize,
 }
 
 /// The counts of the open items, of every project or of one.
@@ -797,15 +807,17 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
         .count();
     let (thread, thread_urgent, thread_critical) = threads::inbox_counts(conn, project)?;
     Ok(Counts {
-        open: question + notice + mail + system + thread,
-        urgent: q.urgent + b.urgent + r.urgent + n.urgent + thread_urgent,
-        critical: q.critical + b.critical + r.critical + n.critical + thread_critical,
+        open: question + notice + mail + system,
+        urgent: q.urgent + b.urgent + r.urgent + n.urgent,
+        critical: q.critical + b.critical + r.critical + n.critical,
         question,
         notice,
         mail,
         system,
         watch,
         thread,
+        thread_urgent,
+        thread_critical,
     })
 }
 

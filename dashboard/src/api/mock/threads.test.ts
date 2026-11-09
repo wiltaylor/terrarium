@@ -62,12 +62,12 @@ describe("Inbox threads in the mock", () => {
     expect(q.thread).toBe(t.id);
     expect((await api.threads.get(t.id)).status).toBe("waiting_operator");
     // The Inbox item is open while a question is open, and holds the question; the question is no item of its own.
-    const items = await api.inbox.list();
+    const items = await api.inbox.list({ kind: "thread" });
     expect(items.find((i) => i.id === `inbox-thread:${t.id}`)).toMatchObject({ kind: "thread", open: true, thread: { open_questions: 1 } });
-    expect(items.some((i) => i.question?.id === q.id)).toBe(false);
+    expect((await api.inbox.list()).some((i) => i.question?.id === q.id || i.kind === "thread")).toBe(false);
     await api.questions.answer(q.id, { option: 0 });
     expect((await api.threads.get(t.id)).status).toBe("waiting_agent");
-    expect((await api.inbox.list()).some((i) => i.id === `inbox-thread:${t.id}`)).toBe(false);
+    expect((await api.inbox.list({ kind: "thread" })).some((i) => i.id === `inbox-thread:${t.id}`)).toBe(false);
     await expect(api.threads.post(t.id, " ")).rejects.toMatchObject({ status: 422 });
   });
 

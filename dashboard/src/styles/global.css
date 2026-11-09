@@ -2075,16 +2075,77 @@ a.chip.card-link:hover {
   border-color: var(--danger);
   border-width: 2px;
 }
-/* Inbox threads (docs/api.md §6.13): a row that waits on the operator, and the chat page. */
-.thread-row.waits {
-  border-left: 3px solid var(--warn);
+/* The Threads screen (TER-466): a forum table. A thread is a tbody: its row, and the close proposal under it. */
+.threads-table th.num,
+.threads-table td.num {
+  text-align: right;
+  white-space: nowrap;
 }
-/* The groups of the Open thread list: waiting on you, in progress (GitHub #28). */
-.thread-group {
-  margin: 0;
-  font-size: 0.85rem;
-  font-weight: 600;
+.threads-table .threads-icon {
+  width: 28px;
+  padding-right: 0;
+}
+.thread-tr.waits > tr:first-child > td:first-child {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+.thread-tr > tr.thread-proposal > td {
+  border-bottom: 1px solid var(--border);
+}
+.thread-tr > tr:has(+ tr.thread-proposal) > td {
+  border-bottom: none;
+}
+.thread-icon {
+  display: inline-flex;
   color: var(--muted);
+}
+.thread-icon.you {
+  color: var(--warn);
+}
+.thread-icon.agent {
+  color: var(--info);
+}
+.thread-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+/* A phone: the columns fold under the topic, each with its label. */
+@media (max-width: 760px) {
+  .threads-table thead {
+    display: none;
+  }
+  .threads-table tr {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr);
+    column-gap: 6px;
+    border-bottom: 1px solid var(--border);
+    padding: 6px 0;
+  }
+  .threads-table td {
+    border-bottom: none;
+    padding: 2px 4px;
+  }
+  .threads-table td.threads-icon {
+    grid-row: span 5;
+  }
+  .threads-table td[data-label] {
+    grid-column: 2;
+    text-align: left;
+  }
+  .threads-table td[data-label]::before {
+    content: attr(data-label) ": ";
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .threads-table td[data-label]:empty {
+    display: none;
+  }
+  .thread-tr > tr.thread-proposal > td:first-child {
+    display: none;
+  }
+  .thread-tr > tr.thread-proposal > td {
+    grid-column: 1 / -1;
+  }
 }
 .thread-msg {
   max-width: 85%;

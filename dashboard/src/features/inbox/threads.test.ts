@@ -1,7 +1,7 @@
 // The pure helpers of the Inbox threads (docs/api.md §6.13).
 import { describe, expect, it } from "vitest";
 import type { Question, Thread, ThreadMessage } from "../../api/types";
-import { closeBody, inThreadsView, newThreadBody, pendingProposal, safeUrl, sortThreads, threadChip, threadGroups, threadListStatus, threadHref, threadText, THREAD_MESSAGE_MAX, THREAD_SUMMARY_MAX, timeline, waitsOnYou, whoName } from "./threads";
+import { closeBody, inThreadsView, newThreadBody, pendingProposal, safeUrl, sortThreads, threadChip, threadIcon, threadListStatus, threadHref, threadsBadge, threadsViewOf, threadText, THREAD_MESSAGE_MAX, THREAD_SUMMARY_MAX, timeline, waitsOnYou, whoName } from "./threads";
 
 const thread = (over: Partial<Thread> = {}): Thread => ({
   id: "T1",
@@ -38,7 +38,7 @@ describe("Inbox threads", () => {
     expect(threadChip(thread({ status: "tracking" }))).toEqual({ label: "tracking", chip: "" });
     // A question in a thread that tracks still waits on the operator.
     expect(threadChip(thread({ status: "tracking", open_questions: 1 })).label).toBe("waiting on you");
-    expect(threadHref("01M7/x")).toBe("/inbox/threads/01M7%2Fx");
+    expect(threadHref("01M7/x")).toBe("/threads/01M7%2Fx");
   });
 
   it("shows the agent's close proposal only on an open thread, with its own chip (TER-95)", () => {
@@ -54,30 +54,38 @@ describe("Inbox threads", () => {
     expect(safeUrl({ kind: "other", ref: "https://x.example" })).toBeNull();
   });
 
-  it("lists the tracking threads under Tracking only (TER-145)", () => {
+  it("filters Open (with the tracking threads) and Archived (the closed ones) (TER-466)", () => {
+    expect(threadsViewOf(undefined)).toBe("open");
+    expect(threadsViewOf("archived")).toBe("archived");
+    expect(threadsViewOf("tracking")).toBe("open");
     expect(threadListStatus("open")).toBe("open");
-    expect(threadListStatus("tracking")).toBe("tracking");
-    expect(threadListStatus("done")).toBe("closed");
+    expect(threadListStatus("archived")).toBe("closed");
     const rows = (["waiting_operator", "waiting_agent", "tracking", "closed"] as const).map((status) => thread({ id: status, status }));
-    const ids = (v: "open" | "tracking" | "done") => rows.filter((t) => inThreadsView(v, t)).map((t) => t.id);
-    expect(ids("open")).toEqual(["waiting_operator", "waiting_agent"]);
-    expect(ids("tracking")).toEqual(["tracking"]);
-    expect(ids("done")).toEqual(["closed"]);
+    const ids = (v: "open" | "archived") => rows.filter((t) => inThreadsView(v, t)).map((t) => t.id);
+    expect(ids("open")).toEqual(["waiting_operator", "waiting_agent", "tracking"]);
+    expect(ids("archived")).toEqual(["closed"]);
   });
 
-  it("groups the Open list: waiting on you, then the work in progress (GitHub #28)", () => {
-    const rows = sortThreads([
-      thread({ id: "W", status: "waiting_agent", last_at: "2026-11-06T11:00:00.000Z" }),
-      thread({ id: "O", status: "waiting_operator", last_at: "2026-11-06T08:00:00.000Z" }),
-      thread({ id: "Q", status: "waiting_agent", open_questions: 1, last_at: "2026-11-06T09:00:00.000Z" }),
-      thread({ id: "T", status: "tracking", last_at: "2026-11-06T10:00:00.000Z" }),
-    ]);
-    expect(threadGroups(rows).map((g) => [g.id, g.label, g.threads.map((t) => t.id)])).toEqual([
-      ["you", "Waiting on you", ["Q", "O"]],
-      ["progress", "In progress", ["W", "T"]],
-    ]);
-    expect(threadGroups(rows.filter((t) => t.id === "W")).map((g) => g.id)).toEqual(["progress"]);
-    expect(threadGroups([])).toEqual([]);
+  it("picks the status icon and says why a thread waits on you (TER-466)", () => {
+    const p = { summary: "Done.", links: [], by: "A1", at: "2026-11-06T09:00:00.000Z" };
+    expect(threadIcon(thread({ status: "waiting_operator" }))).toEqual({ icon: "you", label: "Waiting on you: your turn" });
+    expect(threadIcon(thread({ open_questions: 1 }))).toEqual({ icon: "you", label: "Waiting on you: an open question" });
+    expect(threadIcon(thread({ status: "waiting_operator", open_questions: 2 }))).toEqual({ icon: "you", label: "Waiting on you: 2 open questions" });
+    expect(threadIcon(thread({ status: "waiting_operator", close_proposal: p }))).toEqual({ icon: "you", label: "Waiting on you: a close proposal" });
+    expect(threadIcon(thread()).icon).toBe("agent");
+    expect(threadIcon(thread({ status: "tracking" })).icon).toBe("tracking");
+    // A question in a thread that tracks waits on you.
+    expect(threadIcon(thread({ status: "tracking", open_questions: 1 })).icon).toBe("you");
+    expect(threadIcon(thread({ status: "closed", open_questions: 1, close_proposal: p }))).toEqual({ icon: "closed", label: "Closed" });
+  });
+
+  it("makes the Threads badge from the counts: red when one of the threads is urgent or critical (TER-466)", () => {
+    expect(threadsBadge({ thread: 0, thread_urgent: 0, thread_critical: 0 })).toBeNull();
+    expect(threadsBadge({})).toBeNull();
+    expect(threadsBadge({ thread: 2, thread_urgent: 0, thread_critical: 0 })).toEqual({ n: 2, cls: "nav-count info", title: "2 threads wait on you" });
+    expect(threadsBadge({ thread: 1, thread_urgent: 1, thread_critical: 0 })).toEqual({ n: 1, cls: "nav-count", title: "1 thread waits on you. 1 urgent" });
+    expect(threadsBadge({ thread: 3, thread_urgent: 1, thread_critical: 1 })!.cls).toBe("nav-count");
+    expect(threadsBadge({ thread: 3, thread_critical: 1 })!.cls).toBe("nav-count");
   });
 
   it("sorts the ones that wait on the operator first, then the newest activity", () => {

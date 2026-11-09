@@ -92,7 +92,7 @@ export default function ThreadPage() {
 
   return (
     <div class="stack thread-page">
-      <A href="/inbox?tab=thread" class="small muted">
+      <A href="/threads" class="small muted">
         ← Threads
       </A>
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />

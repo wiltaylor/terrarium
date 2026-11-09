@@ -30,12 +30,14 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
+let history = createMemoryHistory();
+
 function mount(url: string) {
   dispose?.();
   document.body.innerHTML = "";
   const el = document.createElement("div");
   document.body.append(el);
-  const history = createMemoryHistory();
+  history = createMemoryHistory();
   history.set({ value: url });
   dispose = render(
     () =>
@@ -207,20 +209,25 @@ describe("the ack of a mail that closed outside the Inbox (GitHub #25)", () => {
   });
 });
 
-describe("the Tracking tab of the Threads (TER-145)", () => {
-  it("shows Tracking between Open and Done on the Threads tab only, and lists only the tracking threads", async () => {
-    let el = mount("/inbox?tab=thread");
-    await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Thread ']").length).toBeGreaterThan(0));
-    const tabs = () => [...el.querySelectorAll("[role=tab]")].map((t) => t.textContent?.trim());
-    expect(tabs()).toEqual(["All", "Questions", "Notices", "Mail to you", "System", "Threads", "Open", "Tracking", "Done", "Asked"]);
-    // The mock has no tracking thread: the Tracking list is empty.
-    el = mount("/inbox?tab=thread&status=tracking");
-    await waitFor(() => expect(el.textContent).toContain("No thread tracks work"));
-    expect(el.querySelectorAll("article[aria-label^='Thread ']").length).toBe(0);
-    // Another kind tab has no Tracking tab, and ?status=tracking opens Open there.
-    el = mount("/inbox?tab=question&status=tracking");
+describe("the threads leave the Inbox (TER-466)", () => {
+  it("has no Threads tab and no Tracking tab, lists no thread item, and has no New thread button", async () => {
+    const el = mount("/inbox");
     await waitFor(() => expect(el.textContent).not.toContain("Loading"));
-    expect(tabs()).not.toContain("Tracking");
-    expect([...el.querySelectorAll("[role=tab][aria-selected=true]")].map((t) => t.textContent?.trim())).toEqual(["Questions", "Open"]);
+    const tabs = () => [...el.querySelectorAll("[role=tab]")].map((t) => t.textContent?.trim());
+    expect(tabs()).toEqual(["All", "Questions", "Notices", "Mail to you", "System", "Open", "Done", "Asked"]);
+    // The mock's thread that waits on you, with its questions, is not on the Inbox.
+    await waitFor(() => expect(el.querySelectorAll("[id^='inbox-item-']").length).toBeGreaterThan(0));
+    expect(el.querySelector("[id^='inbox-item-inbox-thread']")).toBeNull();
+    expect(el.textContent).not.toContain("Split the event store by project?");
+    expect([...el.querySelectorAll("button")].map((b) => b.textContent?.trim())).not.toContain("New thread");
+  });
+
+  it("redirects an old ?tab=thread link to the Threads screen, with the project and Done as Archived", async () => {
+    mount("/inbox?tab=thread&project=webshop");
+    await waitFor(() => expect(history.get()).toBe("/threads?project=webshop"));
+    mount("/inbox?tab=thread&status=done");
+    await waitFor(() => expect(history.get()).toBe("/threads?status=archived"));
+    mount("/inbox?tab=thread&status=tracking");
+    await waitFor(() => expect(history.get()).toBe("/threads"));
   });
 });
