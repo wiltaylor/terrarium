@@ -84,6 +84,9 @@ pub struct ClientOptions {
     pub version: String,
     /// Self-update ([`crate::selfupdate`]). `None`: off.
     pub self_update: Option<SelfUpdateOptions>,
+    /// Native GPU enforcement through the root helper (`[native_gpu]`,
+    /// TER-345). `None`: off.
+    pub native: Option<crate::native::NativeOptions>,
 }
 
 impl ClientOptions {
@@ -113,6 +116,7 @@ impl ClientOptions {
             metrics_interval: Duration::from_secs(METRICS_INTERVAL_SECS),
             version: terrarium_version::FULL.to_owned(),
             self_update: None,
+            native: None,
         }
     }
 }
@@ -409,6 +413,11 @@ impl Client {
             capabilities.gpus = crate::gpu::sample_with(&self.opts.nvidia_smi_bin)
                 .await
                 .unwrap_or_default();
+        }
+        if let Some(native) = &self.opts.native {
+            // A helper that went away or changed its version since the
+            // start closes native GPU admission on the daemon.
+            capabilities.native_gpu = Some(crate::native::capability(&native.socket).await);
         }
         let token = self.token().clone();
         let resume = token.map(|token| {
@@ -881,6 +890,7 @@ impl Client {
                 let id = req.session;
                 let plan = crate::verb::plan_exec(&req, p);
                 let plan = match (plan, &req.limits) {
+                    (Ok(plan), Some(l)) if l.native_gpu.is_some() => self.native(plan, l, id),
                     (Ok(plan), Some(l)) => self.limited(plan, l, id).await,
                     (plan, _) => plan,
                 };
@@ -901,6 +911,18 @@ impl Client {
                 let plan = if let Some(container) = &r.container {
                     need(docker_ok, "docker")
                         .and_then(|_| docker::plan_update(container, &r.limits, db))
+                } else if let Some(native) = &o.native {
+                    // Native sessions are in the helper's system slices.
+                    r.limits.validate().map_err(BuildError::bad).map(|()| {
+                        crate::native::verb_plan(
+                            native,
+                            &crate::native::Request::Apply(crate::native::ApplyRequest {
+                                target: r.target.clone(),
+                                holder: r.holder.clone(),
+                                limits: r.limits.clone(),
+                            }),
+                        )
+                    })
                 } else {
                     r.limits
                         .host_support(o.capabilities.limits.as_ref())
@@ -913,7 +935,16 @@ impl Client {
             }
             F::ResourceStop(r) => self.start(
                 r.session,
-                crate::limits::reservation_stop_plan(&r.target, &r.holder),
+                match &o.native {
+                    Some(native) => Ok(crate::native::verb_plan(
+                        native,
+                        &crate::native::Request::Stop(crate::native::SliceRequest {
+                            target: r.target.clone(),
+                            holder: r.holder.clone(),
+                        }),
+                    )),
+                    None => crate::limits::reservation_stop_plan(&r.target, &r.holder),
+                },
                 tx,
             ),
             F::DockerStart(r) => self.start(
@@ -1304,6 +1335,29 @@ impl Client {
         let scope = crate::limits::scope_name(&self.opts.name, session, random_u64() as u32);
         tracing::info!(session, %slice, %scope, limits = %l.limits.summary(), "limited session");
         crate::limits::wrap(&mut plan.exec, &slice, &scope);
+        Ok(plan)
+    }
+
+    /// Run an `exec` through the native GPU helper (TER-345): the daemon
+    /// marked it with `native_gpu`. A host agent without `[native_gpu]`
+    /// refuses it: the session never runs without its device policy.
+    fn native(
+        &self,
+        mut plan: VerbPlan,
+        l: &crate::protocol::ExecLimits,
+        session: SessionId,
+    ) -> Result<VerbPlan, BuildError> {
+        let Some(native) = &self.opts.native else {
+            return Err(BuildError {
+                code: ErrorCode::Unsupported,
+                message: "native GPU enforcement is off on this host agent ([native_gpu] in its config)"
+                    .into(),
+            });
+        };
+        let req =
+            crate::native::start_request(&plan.exec, session, Some(l), &self.opts.paths.work_dir);
+        tracing::info!(session, holder = %req.holder, gpus = ?req.gpus, lease = ?req.lease, "native session");
+        plan.exec = crate::native::shim_plan(native, &crate::native::Request::Start(req), plan.exec);
         Ok(plan)
     }
 

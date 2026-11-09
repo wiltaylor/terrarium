@@ -212,9 +212,25 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
         if !caps.gpu_reservations {
             return Err(ApiError::conflict("host lacks GPU reservation support"));
         }
-        if r.gpus.iter().any(|g| g.exclusive) && target.def.kind != TargetKind::Docker {
+        if r.gpus.iter().any(|g| g.exclusive)
+            && target.def.kind == TargetKind::Host
+            && !caps.native_gpu.as_ref().is_some_and(|n| n.enforced)
+        {
+            // Native exclusivity needs the root helper on this host (TER-345).
+            let reason = caps
+                .native_gpu
+                .as_ref()
+                .and_then(|n| n.reason.clone())
+                .unwrap_or_else(|| "the host agent has no [native_gpu] helper".into());
+            return Err(ApiError::conflict(format!(
+                "exclusive GPU needs enforced native GPU support on a native host target: {reason}"
+            )));
+        }
+        if r.gpus.iter().any(|g| g.exclusive)
+            && !matches!(target.def.kind, TargetKind::Docker | TargetKind::Host)
+        {
             return Err(ApiError::invalid(
-                "exclusive GPU needs a managed ephemeral Docker target; native host, SSH and vmlab cannot enforce exclusive access",
+                "exclusive GPU needs a managed ephemeral Docker target or a native host target with enforced native GPU support; SSH and vmlab cannot enforce exclusive access",
             ));
         }
         if target.def.kind == TargetKind::Docker
@@ -1159,16 +1175,22 @@ pub fn exec_budget(
                 return Ok(None);
             }
             let limits = budget(&r)?;
+            // The grant of a native session (TER-345). The executor drops it
+            // unless the host agent enforces native GPU access.
+            let native_gpu = Some(terrarium_host::protocol::NativeGpu {
+                lease: Some(r.id.clone()),
+                exclusive: r.gpus.iter().filter(|g| g.exclusive).map(|g| g.uuid.clone()).collect(),
+            });
             return Ok(Some(terrarium_host::protocol::ExecLimits {
                 target: scope(&r, if matches!(r.holder, Holder::Agent(_)) { "_reservation" } else { &def.name }),
-                holder: holder.unwrap_or("operator").into(), limits: limits.limits, reservation: Some(limits),
+                holder: holder.unwrap_or("operator").into(), limits: limits.limits, reservation: Some(limits), native_gpu,
             }));
         }
         if exclusive && def.kind == TargetKind::Host {
             // Even an otherwise unlimited command must enter terrarium.slice,
             // whose AllowedCPUs excludes every exclusive allocation.
             let limits = def.limits.as_ref().map(|l| l.resolve()).transpose().map_err(ApiError::invalid)?.unwrap_or_default();
-            return Ok(Some(terrarium_host::protocol::ExecLimits { target: def.name.clone(), holder: holder.unwrap_or("operator").into(), limits, reservation: None }));
+            return Ok(Some(terrarium_host::protocol::ExecLimits { target: def.name.clone(), holder: holder.unwrap_or("operator").into(), limits, reservation: None, native_gpu: None }));
         }
         Ok(None)
     })

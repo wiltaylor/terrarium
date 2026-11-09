@@ -474,7 +474,39 @@ pub fn exec_limits(
         target: def.name.clone(),
         holder: holder.unwrap_or("operator").to_owned(),
         limits,
+        native_gpu: None,
     }))
+}
+
+/// On a host agent with enforced native GPU support (TER-345), every
+/// command on a `host` target runs through the root helper: with no
+/// reservation it gets no GPU. Elsewhere the grant is dropped, so a host
+/// agent never sees a request it cannot enforce.
+pub fn native_gpu_limits(
+    def: &TargetDef,
+    caps: Option<&HostCapabilities>,
+    holder: Option<&str>,
+    limits: Option<ExecLimits>,
+) -> Option<ExecLimits> {
+    let native = def.kind == TargetKind::Host
+        && caps
+            .and_then(|c| c.native_gpu.as_ref())
+            .is_some_and(|n| n.enforced);
+    if !native {
+        return limits.map(|l| ExecLimits {
+            native_gpu: None,
+            ..l
+        });
+    }
+    let mut l = limits.unwrap_or_else(|| ExecLimits {
+        target: def.name.clone(),
+        holder: holder.unwrap_or("operator").to_owned(),
+        limits: Limits::default(),
+        reservation: None,
+        native_gpu: None,
+    });
+    l.native_gpu.get_or_insert_with(Default::default);
+    Some(l)
 }
 
 fn valid_env_key(k: &str) -> bool {
@@ -1795,6 +1827,7 @@ pub(crate) fn start_cmd_locked(
                 Some(limits) => Some(limits),
                 None => exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?,
             };
+            let limits = native_gpu_limits(def, caps.as_ref(), cmd.holder.as_deref(), limits);
             let shell = caps.and_then(|c| c.shell);
             let make = host_frame(def, shell.as_deref(), cmd, limits)?;
             Ok(pump_host(ex.hosts.open(host, make)?))

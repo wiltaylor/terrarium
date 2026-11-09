@@ -66,6 +66,14 @@ enum Cmd {
         #[arg(long)]
         probe: bool,
     },
+    /// Run one request of the native GPU helper (TER-345). The host agent
+    /// starts it; the request is in TERRARIUM_NATIVE_REQUEST.
+    #[command(hide = true)]
+    Native {
+        /// The helper socket.
+        #[arg(long, default_value = terrarium_host::native::DEFAULT_SOCKET)]
+        socket: PathBuf,
+    },
     /// Read a token from stdin and write it to PATH with mode 0600.
     TokenFile {
         /// Where to write the token, for example /etc/terrarium-host/token.
@@ -194,6 +202,9 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
     let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
     let paths = cfg.paths();
     caps.no_workspaces = !terrarium_host::workspace::available(&paths.work_dir);
+    if cfg.native_gpu.enabled {
+        caps.native_gpu = Some(terrarium_host::native::capability(&cfg.native_gpu.socket).await);
+    }
     let transport = cfg.daemon_url.as_ref().map(|_| cfg.transport());
     let (tls_mode, tls_error) = match &transport {
         Some(Ok(t)) => (Some(t.mode.clone()), None),
@@ -378,6 +389,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
              targets on it start without /work mounts"
         );
     }
+    let mut opts_native = None;
     let url = transport.url.clone();
     tracing::info!(%url, %name, tls = %transport.mode.describe(), docker = caps.docker.present, vmlab = caps.vmlab.present, desktop_display = caps.display.enabled, "starting");
     if caps.display.enabled {
@@ -404,7 +416,26 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
              in clear text, and anyone on the path can replay the token; use wss://"
         );
     }
+    if cfg.native_gpu.enabled {
+        let binary = std::env::current_exe().context("native_gpu needs the path of this binary")?;
+        let cap = terrarium_host::native::capability(&cfg.native_gpu.socket).await;
+        if cap.enforced {
+            tracing::info!(socket = %cfg.native_gpu.socket.display(), "native GPU enforcement: the helper answers");
+        } else {
+            tracing::warn!(
+                socket = %cfg.native_gpu.socket.display(),
+                reason = cap.reason.as_deref().unwrap_or(""),
+                "native GPU enforcement: off; the daemon refuses native exclusive GPU reservations here"
+            );
+        }
+        caps.native_gpu = Some(cap);
+        opts_native = Some(terrarium_host::native::NativeOptions {
+            socket: cfg.native_gpu.socket.clone(),
+            shim: binary,
+        });
+    }
     let mut opts = ClientOptions::new(url, token, name);
+    opts.native = opts_native;
     opts.capabilities = caps;
     opts.max_sessions = cfg.max_sessions;
     opts.buffer_limit = cfg.buffer_limit_bytes;
@@ -458,6 +489,15 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::TokenFile { path }) => return write_token_file(path),
         Some(Cmd::Cert { names, out, force }) => return write_cert(names, out, *force),
         Some(Cmd::Fingerprint { cert }) => return fingerprint(cert),
+        Some(Cmd::Native { socket }) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("start the runtime")?;
+            let code = rt.block_on(terrarium_host::native::shim(socket));
+            drop(rt);
+            std::process::exit(code);
+        }
         _ => {}
     }
     let cfg = load_config(&args)?;
@@ -472,6 +512,7 @@ fn main() -> anyhow::Result<()> {
             Cmd::TokenFile { .. }
             | Cmd::Cert { .. }
             | Cmd::Fingerprint { .. }
+            | Cmd::Native { .. }
             | Cmd::RdpForget { .. },
         ) => Ok(()),
     }

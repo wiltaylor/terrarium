@@ -69,6 +69,17 @@ async fn setup_docker(
     tokio::task::JoinHandle<()>,
     tokio::task::JoinHandle<()>,
 ) {
+    setup_opts(live, None).await
+}
+
+async fn setup_opts(
+    live: bool,
+    native_gpu: Option<terrarium_core::protocol::NativeGpuCapability>,
+) -> (
+    TestDaemon,
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let td = TestDaemon::start().await;
     td.project("p").await;
     td.agent("p", "lead", json!({"roles":["project_admin"]}))
@@ -123,6 +134,7 @@ async fn setup_docker(
             controllers: vec!["cpu".into(), "memory".into(), "io".into(), "cpuset".into()],
             ..Default::default()
         }),
+        native_gpu,
         ..Default::default()
     };
     if live {
@@ -518,6 +530,124 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
     assert!(
         !td.dir.path().join("docker.calls").exists(),
         "overage must not stop or update the container"
+    );
+    client.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn native_exclusive_gpu_needs_enforced_helper_support() {
+    let body = json!({"target":"p-native","gpus":[{"uuid":"GPU-abcd","exclusive":true}],"until":"30m"});
+    let native = json!({"name":"p-native","kind":"host","host":"h","project":"p"});
+    // A helper that does not answer: refused, with its reason.
+    let (td, server, client) = setup_opts(
+        false,
+        Some(terrarium_core::protocol::NativeGpuCapability {
+            enforced: false,
+            version: 1,
+            reason: Some("cannot reach the helper".into()),
+        }),
+    )
+    .await;
+    td.post("/api/targets", native.clone()).await.ok();
+    let refused = td.post("/api/hosts/h/reservations", body.clone()).await;
+    assert_eq!(refused.status.as_u16(), 409, "{}", refused.body);
+    let text = refused.body.to_string();
+    assert!(text.contains("enforced native GPU support"), "{text}");
+    assert!(text.contains("cannot reach the helper"), "{text}");
+    client.abort();
+    server.abort();
+
+    // An enforced helper passes the native boundary check.
+    let (td, server, client) = setup_opts(
+        false,
+        Some(terrarium_core::protocol::NativeGpuCapability {
+            enforced: true,
+            version: 1,
+            reason: None,
+        }),
+    )
+    .await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    td.post("/api/targets", native).await.ok();
+    let resp = td.post("/api/hosts/h/reservations", body).await;
+    assert!(
+        !resp.body.to_string().contains("native GPU support")
+            && !resp.body.to_string().contains("exclusive GPU needs"),
+        "{}",
+        resp.body
+    );
+    // The holder's commands carry the lease and the exclusive GPU; any other
+    // command on a native host target gets the native path with no GPU.
+    use terrariumd::store::reservations as r;
+    let id = state
+        .db
+        .write("test", |tx| {
+            // Clear whatever the API grant left on the host.
+            for row in r::list(tx, "h")? {
+                match row.state {
+                    r::State::Queued => {
+                        r::cancel(tx, &row.id)?;
+                    }
+                    r::State::Starting | r::State::Active => {
+                        r::end(tx, &row.id, false)?;
+                        r::finish_end(tx, &row.id)?;
+                    }
+                    r::State::Ending => {
+                        r::finish_end(tx, &row.id)?;
+                    }
+                    _ => {}
+                }
+            }
+            let record = r::request(
+                tx,
+                r::Request {
+                    gpus: vec![terrarium_core::resources::GpuClaim {
+                        uuid: "GPU-abcd".into(),
+                        vram_bytes: 0,
+                        exclusive: true,
+                    }],
+                    host: "h".into(),
+                    project: "p".into(),
+                    holder: r::Holder::Target("p-native".into()),
+                    target: "p-native".into(),
+                    amounts: Default::default(),
+                    exclusive: false,
+                    reason: "test".into(),
+                    duration_ms: 1_800_000,
+                    queue_ms: None,
+                },
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+            r::activate(tx, &record.id)?;
+            Ok(record.id)
+        })
+        .await
+        .unwrap();
+    let def = state
+        .db
+        .read(|c| Ok(terrariumd::store::targets::get(c, "p-native")?.def))
+        .await
+        .unwrap();
+    let caps = state.executor.hosts.capabilities("h");
+    let l = terrariumd::reservations::exec_budget(&state, &def, Some("p/worker"))
+        .unwrap()
+        .unwrap();
+    let grant = l.native_gpu.clone().unwrap();
+    assert_eq!(grant.lease.as_deref(), Some(id.as_str()));
+    assert_eq!(grant.exclusive, ["GPU-abcd"]);
+    assert_eq!(l.reservation.as_ref().unwrap().gpu_devices, ["GPU-abcd"]);
+    let l = terrariumd::executor::native_gpu_limits(&def, caps.as_ref(), Some("p/worker"), Some(l))
+        .unwrap();
+    assert_eq!(l.native_gpu.unwrap().lease.as_deref(), Some(id.as_str()));
+    let mut other = def.clone();
+    other.name = "p-other".into();
+    let bare = terrariumd::executor::native_gpu_limits(&other, caps.as_ref(), None, None).unwrap();
+    assert_eq!(bare.native_gpu, Some(Default::default()));
+    assert!(bare.reservation.is_none());
+    // Without the capability the grant is dropped.
+    assert!(
+        terrariumd::executor::native_gpu_limits(&other, None, None, None).is_none()
     );
     client.abort();
     server.abort();

@@ -24,6 +24,8 @@
 //! - [`capabilities`]: tool detection for `hello` and `check`.
 //! - [`limits`]: resource limits on a `host` target, with
 //!   `systemd-run --user` and a slice for each holder.
+//! - [`native`]: native GPU enforcement: the root helper, its protocol,
+//!   and the session shim (TER-345).
 //! - [`metrics`]: CPU, memory, network, disk IO, and disk space samples for
 //!   the `metrics` frame.
 //! - [`selfupdate`]: the host agent replaces itself with the daemon's
@@ -40,6 +42,7 @@ pub mod docker;
 pub mod labcheck;
 pub mod limits;
 pub mod metrics;
+pub mod native;
 pub mod outbox;
 pub mod prepare;
 pub mod protocol;

@@ -91,6 +91,36 @@ pub struct Config {
     /// Target displays (`[display]`): the opt-in for `desktop` targets.
     #[serde(default)]
     pub display: DisplayConfig,
+    /// `[native_gpu]`: native GPU enforcement through the root helper
+    /// (TER-345, docs/native-gpu-helper.md). Off by default.
+    #[serde(default)]
+    pub native_gpu: NativeGpuConfig,
+}
+
+/// `[native_gpu]` in the config. When it is on, every native `exec` that
+/// the daemon marks for it runs through the root helper at `socket`, as
+/// the helper's workload user, in a device policy with only its granted
+/// GPUs. Only this file turns it on; the daemon cannot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeGpuConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_helper_socket")]
+    pub socket: PathBuf,
+}
+
+impl Default for NativeGpuConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            socket: default_helper_socket(),
+        }
+    }
+}
+
+fn default_helper_socket() -> PathBuf {
+    crate::native::DEFAULT_SOCKET.into()
 }
 
 /// `[display]` in the config (PLAN §19b). It opens the desktop of this
@@ -264,6 +294,7 @@ impl Default for Config {
             max_running_targets: default_max_running_targets(),
             auto_update: true,
             display: DisplayConfig::default(),
+            native_gpu: NativeGpuConfig::default(),
         }
     }
 }

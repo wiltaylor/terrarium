@@ -41,6 +41,8 @@ pub async fn detect_with(
         limits: Some(limits),
         // The caller sets it from its work_dir (`crate::workspace::available`).
         no_workspaces: false,
+        // The caller sets it when `[native_gpu]` is on (`crate::native::capability`).
+        native_gpu: None,
     }
 }
 
