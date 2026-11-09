@@ -988,7 +988,8 @@ mod tests {
                 "name = \"p\" # \"\"\"\nd = \"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"
             ),
             format!(
-                "name = \"p\" # '''\nd = '''\n[[projects.repos]]\nurl = \"https://x/{random}\"\n'''\n"\n            ),
+                "name = \"p\" # '''\nd = '''\n[[projects.repos]]\nurl = \"https://x/{random}\"\n'''\n"
+            ),
         ] {
             let text = format!("[[projects]]\n{text}");
             assert!(rules(export, &text).contains(&he), "{text}");
