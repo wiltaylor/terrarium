@@ -31,6 +31,8 @@ export default function DashboardPage() {
   const tab = () => (search.tab === "monitors" ? "monitors" : "blocks");
   const now = useNow(5_000);
   const [error, setError] = createSignal<unknown>(null);
+  // One load per project mount, independent of monitor and layout updates.
+  const [accuracy] = createResource(() => params.project, (p) => api.monitors.etaAccuracy(p));
   const [view, { refetch, mutate }] = createResource(
     () => params.project,
     (p) => api.monitors.dashboard(p),
@@ -149,7 +151,8 @@ export default function DashboardPage() {
         <MonitorsPanel project={params.project} monitors={view.latest?.monitors ?? []} now={now()} onChanged={() => void refetch()} />
       </Show>
       <Show when={tab() === "blocks"}>
-        <Show when={view.latest?.eta_accuracy}>
+        <ErrorBanner error={accuracy.error} />
+        <Show when={accuracy()}>
           {(accuracy) => <EtaAccuracy value={accuracy()} />}
         </Show>
         <Show when={draft()}>

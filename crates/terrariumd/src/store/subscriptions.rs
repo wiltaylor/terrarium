@@ -787,12 +787,16 @@ pub fn insert_sample(
 }
 
 /// The newest sample of each window of a subscription, by window name.
+///
+/// One pass over the subscription's index entries (TER-394). The older
+/// correlated `max(id)` subquery scanned all samples of a window for each
+/// sample, quadratic in the never-pruned `quota_samples`, and held the
+/// database lock for many seconds on spawns and subscription lists.
 pub fn latest_windows(conn: &Connection, subscription: &str) -> ApiResult<Vec<QuotaSample>> {
     let mut stmt = conn.prepare(
-        "SELECT q.* FROM quota_samples q
-         WHERE q.subscription = ?1
-           AND q.id = (SELECT max(id) FROM quota_samples
-                       WHERE subscription = q.subscription AND window = q.window)
+        "SELECT q.* FROM (SELECT max(id) AS id FROM quota_samples
+                          WHERE subscription = ?1 GROUP BY window) m
+         JOIN quota_samples q ON q.id = m.id
          ORDER BY q.window",
     )?;
     let rows = stmt.query_map([subscription], sample_row)?;
@@ -1294,6 +1298,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    /// TER-394: the newest window rows come from one pass over the index,
+    /// with no correlated subquery per sample, so many samples stay fast.
+    #[tokio::test]
+    async fn latest_windows_stays_linear_with_many_samples() {
+        let db = db();
+        db.write("system", |t| {
+            upsert_def(t, &def("s1"), SOURCE_API)?;
+            upsert_def(t, &def("s2"), SOURCE_API)?;
+            t.execute_batch(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30000)
+                 INSERT INTO quota_samples (subscription, window, used_pct, at)
+                 SELECT 's1', CASE x % 3 WHEN 0 THEN '5h' WHEN 1 THEN '7d' ELSE '7d_opus' END,
+                        x % 100, '2026-11-01T00:00:00Z' FROM n;",
+            )?;
+            insert_sample(t, "s1", "7d", 42.0, None, &Value::Null)?;
+            insert_sample(t, "s2", "7d", 7.0, None, &Value::Null)
+        })
+        .await
+        .unwrap();
+        let started = std::time::Instant::now();
+        let w = db.read(|c| latest_windows(c, "s1")).await.unwrap();
+        let took = started.elapsed();
+        assert_eq!(
+            w.iter()
+                .map(|w| (w.window.as_str(), w.used_pct))
+                .collect::<Vec<_>>(),
+            vec![("5h", 0.0), ("7d", 42.0), ("7d_opus", 99.0)]
+        );
+        // The quadratic query took about 20 s here; the linear one is
+        // well under a second even on a loaded debug build.
+        assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+        let plan: Vec<String> = db
+            .read(|c| {
+                let mut stmt = c.prepare(
+                    "EXPLAIN QUERY PLAN SELECT q.* FROM (SELECT max(id) AS id FROM quota_samples
+                          WHERE subscription = ?1 GROUP BY window) m
+                     JOIN quota_samples q ON q.id = m.id ORDER BY q.window",
+                )?;
+                let rows = stmt.query_map(["s1"], |r| r.get::<_, String>(3))?;
+                Ok(rows.collect::<Result<_, _>>()?)
+            })
+            .await
+            .unwrap();
+        assert!(!plan.iter().any(|p| p.contains("CORRELATED")), "{plan:?}");
     }
 
     /// A login check renames the plan of an API subscription (Max 20x is

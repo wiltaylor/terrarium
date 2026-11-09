@@ -1572,6 +1572,8 @@ export interface Thread {
   agent_name: string | null;
   report_to: string | null;
   report_to_name: string | null;
+  /** The outcome when the attached agent ended while this thread was open. */
+  agent_end_outcome?: string | null;
   status: ThreadStatus;
   /** When the agent moved the thread into tracking (TER-145); set while it tracks. An older daemon sends none. */
   tracking_at?: string | null;
@@ -1604,7 +1606,7 @@ export interface ThreadCard {
 }
 
 /** `confirmed`: the operator confirmed the agent's proposal; `operator`: the operator closed it; `stale`: untouched; `failed_start`: its agent did not start. */
-export type ThreadCloseReason = "confirmed" | "operator" | "stale" | "failed_start";
+export type ThreadCloseReason = "confirmed" | "operator" | "stale" | "failed_start" | "agent_ended";
 
 /** `POST /api/threads`. `agent`: a ULID or `project/name`, until TER-92 spawns it from the template. */
 export interface NewThread {
@@ -4325,10 +4327,6 @@ export interface DashboardLayout {
 
 /** `GET /api/projects/{name}/dashboard`. */
 export interface DashboardView extends DashboardLayout {
-  eta_accuracy?: {
-    raw: EtaAccuracy;
-    calibrated: EtaAccuracy;
-  };
   project: string;
   updated_at: string | null;
   updated_by: string | null;
@@ -4342,6 +4340,11 @@ export interface EtaAccuracy {
   samples: number;
   on_time_pct: number | null;
   within_half_to_double_pct: number | null;
+}
+
+export interface EtaAccuracyView {
+  raw: EtaAccuracy;
+  calibrated: EtaAccuracy;
 }
 
 /** The status of a pipeline run or step (docs/api.md §31.2), the same for every adapter. */

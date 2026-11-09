@@ -438,6 +438,12 @@ export function createMonitorMock(ctx: MonitorMockContext) {
         const rows = s.results.filter((r) => from === undefined || Date.parse(r.at) >= from);
         return downsample(rows, q.bucket * 1000).slice(-Math.min(MAX_POINTS, q.limit ?? 500));
       }),
+    etaAccuracy: (project) => ctx.reply(() => {
+      ctx.project(project);
+      canRead(project);
+      const empty = { samples: 0, on_time_pct: null, within_half_to_double_pct: null };
+      return { raw: empty, calibrated: { ...empty } };
+    }),
     dashboard: (project) =>
       ctx.reply(() => {
         ctx.project(project);

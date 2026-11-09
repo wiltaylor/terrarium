@@ -36,6 +36,7 @@ pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/projects/{name}/monitors", get(list).post(create))
         .route("/projects/{name}/monitors/test", post(test_run))
+        .route("/projects/{name}/eta-accuracy", get(eta_accuracy))
         .route(
             "/projects/{name}/dashboard",
             get(dashboard).put(put_dashboard),
@@ -480,18 +481,12 @@ async fn dashboard(
 ) -> ApiResult<Json<Value>> {
     policy::read_project(&actor, &name)?;
     let p = name.clone();
-    let (layout, meta, rows, eta_accuracy) = state
+    let (layout, meta, rows) = state
         .db
         .read(move |c| {
             crate::store::projects::get(c, &p)?;
             let (l, meta) = monitors::layout_of(c, &p)?;
-            let samples = crate::store::card_history::dashboard_work_samples(c, &p)?;
-            Ok((
-                l,
-                meta,
-                monitors::list(c, &p)?,
-                crate::store::card_history::accuracy_view(&samples),
-            ))
+            Ok((l, meta, monitors::list(c, &p)?))
         })
         .await?;
     let kinds = rows.iter().map(|m| (m.id.clone(), m.def.kind)).collect();
@@ -516,8 +511,21 @@ async fn dashboard(
         "updated_at": updated_at,
         "updated_by": updated_by,
         "monitors": rows,
-        "eta_accuracy": eta_accuracy,
     })))
+}
+
+/// Loaded independently of monitors. Backtesting runs after releasing the DB lock.
+async fn eta_accuracy(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    policy::read_project(&actor, &name)?;
+    let samples = state.db.read(move |c| {
+        crate::store::projects::get(c, &name)?;
+        crate::store::card_history::work_samples(c, &name)
+    }).await?;
+    Ok(Json(json!(crate::store::card_history::accuracy_view(&samples))))
 }
 
 async fn put_dashboard(

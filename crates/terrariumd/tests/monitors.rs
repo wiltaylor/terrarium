@@ -371,10 +371,17 @@ async fn runs_status_events_and_the_dashboard() {
     let dpath = "/api/projects/terra/dashboard";
     let d = td.get_as(&worker, dpath).await;
     assert_eq!(d.ok()["blocks"], json!([]));
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    db.write("system", |t| {
+        t.execute("INSERT INTO events(project,card,kind,at,payload) VALUES ('terra','broken','card','2026-11-08T00:00:00Z','not JSON')", [])?;
+        Ok(())
+    }).await.unwrap();
+    let accuracy = td.get_as(&worker, "/api/projects/terra/eta-accuracy").await;
     assert_eq!(
-        d.body["eta_accuracy"],
+        accuracy.ok(),
         json!({"raw": {"samples": 0, "on_time_pct": null, "within_half_to_double_pct": null}, "calibrated": {"samples": 0, "on_time_pct": null, "within_half_to_double_pct": null}})
     );
+    td.get_as(&worker, dpath).await.ok();
     assert_eq!(d.body["monitors"].as_array().unwrap().len(), 3);
     let layout = json!({"blocks": [
         {"id": "h", "kind": "note", "text": "## Host", "size": "l"},

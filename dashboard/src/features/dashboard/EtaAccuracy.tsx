@@ -1,5 +1,5 @@
 import { Show } from "solid-js";
-import type { DashboardView, EtaAccuracy as Accuracy } from "../../api/types";
+import type { EtaAccuracyView, EtaAccuracy as Accuracy } from "../../api/types";
 
 function Metrics(props: { label: string; value: Accuracy }) {
   return <div>
@@ -11,7 +11,7 @@ function Metrics(props: { label: string; value: Accuracy }) {
   </div>;
 }
 
-export function EtaAccuracy(props: { value: NonNullable<DashboardView["eta_accuracy"]> }) {
+export function EtaAccuracy(props: { value: EtaAccuracyView }) {
   return <section aria-label="ETA accuracy">
     <h2>ETA accuracy</h2>
     <p class="small muted">Latest 30 completed cards, each counted once. History is limited to the latest 2,000 project card moves.</p>
