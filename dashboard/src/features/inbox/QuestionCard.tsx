@@ -13,6 +13,7 @@ import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
 import { api } from "../../stores";
 import { ackText, answerBody, cardHref, chosenLabel, statusChip } from "./questions";
+import { threadHref } from "./threads";
 
 /**
  * `prefill`: text for the answer box (the reply of an agent that the
@@ -98,7 +99,15 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
 
       <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project)} />}</Show>
 
-      <Show when={q().status === "open"}>
+      <Show when={q().status === "in_thread" && q().thread}>
+        {(t) => (
+          <div class="small">
+            In a thread with the agent: <A href={threadHref(t())}>open the thread</A>
+          </div>
+        )}
+      </Show>
+
+      <Show when={q().status === "open" || q().status === "in_thread"}>
         <form class="stack" style={{ gap: "6px" }} onSubmit={send} aria-label={notice() ? "Acknowledge" : "Answer"}>
           <ErrorBanner error={error()} onDismiss={() => setError(null)} />
           <Show when={!notice() && q().options.length}>
@@ -137,6 +146,15 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
             </Show>
             <input placeholder="Reason to retract (optional)" value={reason()} onInput={(e) => setReason(e.currentTarget.value)} aria-label="Retract reason" />
             <ConfirmButton class="small" label="Retract" confirmLabel="Yes, retract" disabled={busy()} onConfirm={() => run(() => api.questions.retract(q().id, reason().trim() || undefined))} />
+            <Show when={q().status === "open" && !q().thread}>
+              <ConfirmButton
+                class="small"
+                label="To thread"
+                confirmLabel="Yes, open a thread"
+                disabled={busy()}
+                onConfirm={() => run(async () => (await api.questions.toThread(q().id)).question)}
+              />
+            </Show>
           </div>
         </form>
       </Show>

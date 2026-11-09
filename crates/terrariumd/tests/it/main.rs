@@ -108,6 +108,8 @@ mod project_folders;
 mod projects_agents;
 #[path = "../question_guard.rs"]
 mod question_guard;
+#[path = "../question_to_thread.rs"]
+mod question_to_thread;
 #[path = "../questions.rs"]
 mod questions;
 #[path = "../queued_turns.rs"]

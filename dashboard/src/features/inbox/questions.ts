@@ -28,7 +28,7 @@ export function putQuestion(list: Question[], q: Question): Question[] {
 
 /** The body of an answer from the form: a choice, a text, or both; else the reason the form cannot send. */
 export function answerBody(q: Pick<Question, "options" | "status">, text: string, option: number | null, skip = false): { body: QuestionAnswer } | { error: string } {
-  if (q.status !== "open") return { error: `The question is ${q.status}.` };
+  if (q.status !== "open" && q.status !== "in_thread") return { error: `The question is ${q.status}.` };
   if (skip && !text.trim()) return { error: "Write a reason to skip the question." };
   const t = skip ? `Skipped question: ${text.trim()}` : text.trim();
   if (skip) option = null;
@@ -43,14 +43,14 @@ export function answerBody(q: Pick<Question, "options" | "status">, text: string
 
 /** The optional reply of an acknowledge: the trimmed text, or undefined; else the reason the form cannot send. */
 export function ackText(status: QuestionStatus, text: string): { text?: string } | { error: string } {
-  if (status !== "open") return { error: `The notice is ${status}.` };
+  if (status !== "open" && status !== "in_thread") return { error: `The notice is ${status}.` };
   const t = text.trim();
   if (t.length > MAX_TEXT) return { error: `The reply is longer than ${MAX_TEXT} characters.` };
   return t ? { text: t } : {};
 }
 
 /** The chip class of a status. */
-export const statusChip = (s: QuestionStatus): string => ({ open: "info", answered: "ok", acknowledged: "ok", retracted: "" })[s] ?? "";
+export const statusChip = (s: QuestionStatus): string => ({ open: "info", in_thread: "info", answered: "ok", acknowledged: "ok", retracted: "" })[s] ?? "";
 
 /** The label of the chosen option, if any. */
 export const chosenLabel = (q: Pick<Question, "options" | "answer_option">): string | null =>

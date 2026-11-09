@@ -4055,7 +4055,28 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     },
 
     waits: waitMock.waits,
-    questions: questionMock.questions,
+    questions: {
+      ...questionMock.questions,
+      // GitHub #30: the operator moves an open question or notice into a new
+      // Inbox thread with its agent (store/questions.rs to_thread).
+      toThread: async (id, message) => {
+        const q = (w.questions ?? []).find((x) => x.id === id) ?? fail(404, "not_found", `no question \`${id}\``);
+        if (q.kind === "bundle") fail(409, "conflict", `bundle ${q.id} is a bundle: a bundle does not move into a thread; answer it in the Inbox`);
+        if (q.status !== "open") fail(409, "conflict", `${q.kind} ${q.id} is ${q.status}; a move into a thread needs an open ${q.kind}`);
+        if (q.thread) fail(409, "conflict", `${q.kind} ${q.id} is in Inbox thread ${q.thread} already; write there`);
+        const quote = (s: string) => s.split("\n").map((l) => `> ${l}\n`).join("");
+        let text = `The operator moved this ${q.kind} of ${q.agent_name} into a thread.\n\nThe ${q.kind} (${q.id}):\n${quote(q.text)}`;
+        if (q.options.length) text += `\nThe options:\n${q.options.map((o, i) => `> ${i + 1}. ${o}\n`).join("")}`;
+        if (q.context) text += `\nThe context:\n${quote(q.context)}`;
+        if (message?.trim()) text += `\n${message.trim()}\n`;
+        const th = await threadMock.threads.open({ topic: q.text.split("\n")[0]!.slice(0, 150), scope: q.project, agent: q.agent, text });
+        const row = (w.threads ?? []).find((t) => t.id === th.id);
+        if (row) row.from_question = q.id;
+        Object.assign(q, { status: "in_thread", thread: th.id, updated_at: iso() });
+        audit("question.to_thread", q.id, q.project, { agent: q.agent, kind: q.kind, thread: th.id });
+        return { question: { ...q }, thread: await threadMock.threads.get(th.id) };
+      },
+    },
     watches: waitMock.watches,
 
     schedules: createScheduleMock({

@@ -475,6 +475,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             })
         }
         QuestionCmd::Retract { id, reason } => retract(ctx, id, reason).await,
+        QuestionCmd::ToThread { id, message } => to_thread(ctx, id, message).await,
     }
 }
 
@@ -487,6 +488,30 @@ async fn retract(ctx: &Ctx, id: &str, reason: &Option<String>) -> anyhow::Result
         .await?;
     ctx.emit(&v, |c, v| {
         c.line(format!("{} {} retracted.", kind_of(v), field(v, "id")));
+    })
+}
+
+/// `question to-thread <id> [-m <message>]` (GitHub #30): the operator
+/// moves the question into a new Inbox thread with its agent.
+async fn to_thread(ctx: &Ctx, id: &str, message: &Option<String>) -> anyhow::Result<()> {
+    let mut body = json!({});
+    if let Some(m) = message {
+        body["message"] = json!(ctx.text(m)?);
+    }
+    let v = ctx
+        .api
+        .post(&format!("{}/to-thread", path(id)), Some(body))
+        .await?;
+    ctx.emit(&v, |c, v| {
+        let q = &v["question"];
+        c.line(format!(
+            "{} {} moved into thread {} with {}: `terrarium thread show {}`.",
+            kind_of(q),
+            field(q, "id"),
+            field(&v["thread"], "id"),
+            field(q, "agent_name"),
+            field(&v["thread"], "id")
+        ));
     })
 }
 
@@ -618,6 +643,7 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
             })
         }
         AdminQuestionCmd::Retract { id, reason } => retract(ctx, id, reason).await,
+        AdminQuestionCmd::ToThread { id, message } => to_thread(ctx, id, message).await,
     }
 }
 
