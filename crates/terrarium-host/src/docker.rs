@@ -51,11 +51,18 @@ pub const CLI_DENIED_ENV: &[&str] = &["GODEBUG", "GETCONF_DIR", "NIS_PATH", "RES
 /// any case is refused too.
 pub const CLI_DENIED_ENV_PREFIXES: &[&str] = &["DOCKER_", "SSL_", "OTEL_"];
 
+/// The one prefix of the grant deny list that the fallback lets through:
+/// the daemon's own names. The daemon sends multi-line values under them on
+/// each agent exec (`TERRARIUM_GIT_TRAILERS`, `TERRARIUM_GIT_KNOWN_HOSTS`,
+/// `TERRARIUM_COMMIT_HOOK`), and neither the `docker` CLI nor its children
+/// read them. A grant cannot set them.
+pub const CLI_ALLOWED_PREFIX: &str = "TERRARIUM_";
+
 /// Does `k` steer the `docker` CLI, its children, or the loader under it?
-/// The grant deny list, plus [`CLI_DENIED_ENV`] and
-/// [`CLI_DENIED_ENV_PREFIXES`].
+/// The grant deny list except [`CLI_ALLOWED_PREFIX`], plus
+/// [`CLI_DENIED_ENV`] and [`CLI_DENIED_ENV_PREFIXES`].
 pub fn steers_the_cli(k: &str) -> bool {
-    terrarium_core::env_deny::denied(k)
+    (terrarium_core::env_deny::denied(k) && !k.starts_with(CLI_ALLOWED_PREFIX))
         || CLI_DENIED_ENV.contains(&k)
         || CLI_DENIED_ENV_PREFIXES.iter().any(|p| k.starts_with(p))
         || k.to_ascii_uppercase().ends_with("_PROXY")
@@ -1070,7 +1077,8 @@ mod tests {
         names.extend(CLI_DENIED_ENV_PREFIXES.iter().map(|p| format!("{p}X")));
         names.extend(["http_proxy".into(), "FOO".into(), "DEPLOY_KEY".into()]);
         for n in &names {
-            let expected = terrarium_core::env_deny::denied(n)
+            let expected = (terrarium_core::env_deny::denied(n)
+                && !n.starts_with(CLI_ALLOWED_PREFIX))
                 || CLI_DENIED_ENV.contains(&n.as_str())
                 || CLI_DENIED_ENV_PREFIXES.iter().any(|p| n.starts_with(p))
                 || n.to_ascii_uppercase().ends_with("_PROXY");
@@ -1078,6 +1086,14 @@ mod tests {
         }
         assert!(!steers_the_cli("FOO") && !steers_the_cli("DEPLOY_KEY"));
         assert!(steers_the_cli("http_proxy") && steers_the_cli("SSH_ASKPASS"));
+        // The daemon's own multi-line names go through.
+        assert!(!steers_the_cli("TERRARIUM_GIT_TRAILERS"));
+        let plan = plan_exec(
+            &exec_req(json!({"TERRARIUM_GIT_TRAILERS":"Terrarium-Agent: a\nTerrarium-Card: b\n"})),
+            "docker",
+        )
+        .unwrap();
+        assert_eq!(args(&plan), "exec -i -e TERRARIUM_GIT_TRAILERS c1 sh -c id");
     }
 
     /// A fake `docker` CLI: it prints the DOCKER_* env that it runs with, the

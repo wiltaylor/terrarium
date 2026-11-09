@@ -890,7 +890,9 @@ pub(crate) mod tests {
 
     /// TER-490: the host agent refuses a multi-line docker env value for
     /// each name that a grant cannot set, from the same list
-    /// ([`terrarium_core::env_deny`]), plus its own names.
+    /// ([`terrarium_core::env_deny`]), plus its own names. The daemon's own
+    /// `TERRARIUM_*` names are the one exception: it sends multi-line values
+    /// under them on each agent exec.
     #[test]
     fn the_host_agent_refuses_every_name_that_a_grant_refuses() {
         use terrarium_core::env_deny::{DENIED_ENV, DENIED_ENV_PREFIXES, DENIED_ENV_SUFFIXES};
@@ -905,8 +907,11 @@ pub(crate) mod tests {
         );
         for n in &names {
             assert!(check_env_name(n).is_err(), "{n}");
-            assert!(steers_the_cli(n), "{n}");
+            // The daemon's own names are the one exception.
+            let own = n.starts_with(terrarium_host::docker::CLI_ALLOWED_PREFIX);
+            assert_eq!(steers_the_cli(n), !own, "{n}");
         }
+        assert!(names.iter().any(|n| n.starts_with("TERRARIUM_")));
         assert!(check_env_name("DEPLOY_KEY").is_ok());
         assert!(!steers_the_cli("DEPLOY_KEY"));
     }
