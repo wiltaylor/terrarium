@@ -92,8 +92,10 @@ async fn to_thread_opens_a_thread_and_the_answer_settles_it() {
         .clone();
     let cid = id(&card);
     let q = lab
-        .ask(json!({"text": "Keep the logs 30 days?", "options": ["yes", "no"],
-                    "context": "The disk is 80% full.", "card": cid}))
+        .ask(
+            json!({"text": "Keep the logs 30 days?", "options": ["yes", "no"],
+                    "context": "The disk is 80% full.", "card": cid}),
+        )
         .await;
     let qid = id(&q);
     assert_eq!(lab.counts().await["question"], 1);
@@ -164,7 +166,10 @@ async fn to_thread_opens_a_thread_and_the_answer_settles_it() {
     assert_eq!(mail.len(), 1);
     assert_eq!(mail[0]["thread_id"], q["thread_id"]);
     let body = &bodies(&mail)[0];
-    assert!(body.contains(&format!("terrarium thread post {tid}")), "{body}");
+    assert!(
+        body.contains(&format!("terrarium thread post {tid}")),
+        "{body}"
+    );
     assert!(body.contains("in_thread"), "{body}");
 
     // Twice is a conflict; an update of the moved question too.
