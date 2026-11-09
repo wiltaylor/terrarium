@@ -380,13 +380,16 @@ pub fn view(c: &Connection, card: &str, now: DateTime<Utc>) -> ApiResult<View> {
     })
 }
 
-/// Working time already accumulated when the current remote head was first seen.
-const PROGRESS_BASELINE_SQL: &str =
-    "SELECT head IS NOT NULL, working_seconds FROM card_branch_heads WHERE card = ?1";
+/// Working time already accumulated when the current remote head (or its
+/// absence) was first seen, and the last successful read. A row for an old
+/// repo or branch of the card is ignored.
+const PROGRESS_BASELINE_SQL: &str = "SELECT h.working_seconds, h.checked_at
+         FROM card_branch_heads h JOIN cards c ON c.id = h.card
+         WHERE h.card = ?1 AND h.repo = c.repo AND h.branch = coalesce(c.branch, lower(c.id))";
 
-fn progress_baseline(c: &Connection, card: &str) -> ApiResult<Option<(bool, u64)>> {
+fn progress_baseline(c: &Connection, card: &str) -> ApiResult<Option<(u64, String)>> {
     Ok(c.query_row(PROGRESS_BASELINE_SQL, [card], |r| {
-        Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+        Ok((r.get::<_, i64>(0)?.max(0) as u64, r.get::<_, String>(1)?))
     })
     .optional()?)
 }
@@ -466,8 +469,10 @@ fn desired(
     if s.no_progress_seconds > 0
         && (card.column_role.as_deref() == Some("working")
             || card.column.eq_ignore_ascii_case("research"))
-        && let Some((present, baseline)) = progress_baseline(c, &card.id)?
-        && present
+        && let Some((baseline, checked)) = progress_baseline(c, &card.id)?
+        && parse(&checked).is_some_and(|at| {
+            (now - at).num_seconds() <= s.no_progress_seconds as i64
+        })
         && f.seconds.saturating_sub(baseline) >= s.no_progress_seconds
     {
         out.insert("no_progress".into());
@@ -730,114 +735,199 @@ struct BranchCard {
     branch: String,
 }
 
-const BRANCH_CARDS_SQL: &str = "SELECT c.id, c.project, c.repo, c.branch
-         FROM cards c INDEXED BY cards_branch_watch
-         JOIN board_columns k ON k.id = c.column_id
-         WHERE c.archived = 0 AND c.repo IS NOT NULL AND c.branch IS NOT NULL
-           AND (k.role IN ('working', 'review') OR lower(k.name) = 'research')
-         ORDER BY c.id LIMIT 256";
+/// Cards observed per pass; the cursor rotates through the rest.
+const BRANCH_PAGE: usize = 32;
+/// Cap of one observation pass, and of one remote read.
+const OBSERVE_PASS_CAP: std::time::Duration = std::time::Duration::from_secs(120);
+const LS_REMOTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
-fn branch_cards(c: &Connection) -> ApiResult<Vec<BranchCard>> {
-    let mut q = c.prepare(BRANCH_CARDS_SQL)?;
-    Ok(q.query_map([], |r| {
-        Ok(BranchCard {
-            id: r.get(0)?,
-            project: r.get(1)?,
-            repo: r.get(2)?,
-            branch: r.get(3)?,
-        })
-    })?
-    .collect::<Result<Vec<_>, _>>()?)
+const WATCH_COLUMNS_SQL: &str = "SELECT id FROM board_columns WHERE role = 'working'
+         UNION ALL SELECT id FROM board_columns WHERE lower(name) = 'research'";
+
+/// One column's repo cards after the cursor (`?2`). The branch defaults to
+/// the lowercase card id, as for validation jobs.
+const BRANCH_CARDS_SQL: &str = "SELECT c.id, c.project, c.repo, coalesce(c.branch, lower(c.id))
+         FROM cards c INDEXED BY cards_branch_watch
+         WHERE c.column_id = ?1 AND c.archived = 0 AND c.repo IS NOT NULL AND c.id > ?2
+         ORDER BY c.id LIMIT ?3";
+/// The same from the start up to the cursor, after a wrap.
+const BRANCH_CARDS_WRAP_SQL: &str = "SELECT c.id, c.project, c.repo, coalesce(c.branch, lower(c.id))
+         FROM cards c INDEXED BY cards_branch_watch
+         WHERE c.column_id = ?1 AND c.archived = 0 AND c.repo IS NOT NULL AND c.id <= ?2
+         ORDER BY c.id LIMIT ?3";
+
+fn branch_cards(c: &Connection, cursor: &str) -> ApiResult<Vec<BranchCard>> {
+    let mut columns = c
+        .prepare(WATCH_COLUMNS_SQL)?
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    columns.sort_unstable();
+    columns.dedup();
+    let page = |sql: &str| -> ApiResult<Vec<BranchCard>> {
+        let mut q = c.prepare(sql)?;
+        let mut out = Vec::new();
+        for column in &columns {
+            let rows = q.query_map(
+                params![column, cursor, BRANCH_PAGE as i64],
+                |r| {
+                    Ok(BranchCard {
+                        id: r.get(0)?,
+                        project: r.get(1)?,
+                        repo: r.get(2)?,
+                        branch: r.get(3)?,
+                    })
+                },
+            )?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out.truncate(BRANCH_PAGE);
+        Ok(out)
+    };
+    let mut cards = page(BRANCH_CARDS_SQL)?;
+    if cards.len() < BRANCH_PAGE {
+        let mut wrapped = page(BRANCH_CARDS_WRAP_SQL)?;
+        wrapped.truncate(BRANCH_PAGE - cards.len());
+        cards.extend(wrapped);
+    }
+    Ok(cards)
 }
 
-async fn remote_head(
-    state: &Shared,
-    repo: &crate::store::repos::Repo,
-    branch: &str,
-) -> Option<Option<String>> {
-    let secret = crate::secrets::secret_of(state, repo.owner(), repo.credential.as_deref())
+/// `None` when the head could not be read (logged).
+async fn remote_head(state: &Shared, card: &BranchCard) -> Option<Option<String>> {
+    let (project, name) = (card.project.clone(), card.repo.clone());
+    let repo = match state
+        .db
+        .read(move |c| crate::store::repos::resolve(c, &name, Some(&project)))
         .await
-        .ok()?;
+    {
+        Ok(repo) => repo,
+        Err(e) => {
+            tracing::warn!("card branch watch {}: repo {}: {e}", card.id, card.repo);
+            return None;
+        }
+    };
+    let secret =
+        match crate::secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await {
+            Ok(secret) => secret,
+            Err(e) => {
+                tracing::warn!("card branch watch {}: credential: {e}", card.id);
+                return None;
+            }
+        };
     let checkout = crate::git::Checkout {
         url: repo.url.clone(),
-        dest: crate::api::repo_trees::mirror_dir(state, repo),
+        dest: crate::api::repo_trees::mirror_dir(state, &repo),
         branch: None,
         depth: None,
         secret: secret.map(|(_, s)| s),
         store: crate::secrets::RunDirs::new(&state.state_dir),
         deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
-        timeout: std::time::Duration::from_secs(20),
+        timeout: LS_REMOTE_TIMEOUT,
         hooks: Default::default(),
         origin: Default::default(),
         fetch_from: None,
     };
-    let branch = branch.to_owned();
-    tokio::task::spawn_blocking(move || crate::git::ls_remote(&checkout, &branch).ok())
-        .await
-        .ok()?
+    let branch = card.branch.clone();
+    match tokio::task::spawn_blocking(move || crate::git::ls_remote(&checkout, &branch)).await {
+        Ok(Ok(head)) => Some(head),
+        Ok(Err(e)) => {
+            tracing::warn!("card branch watch {}: ls-remote {}: {e}", card.id, card.branch);
+            None
+        }
+        Err(e) => {
+            tracing::warn!("card branch watch {}: ls-remote task: {e}", card.id);
+            None
+        }
+    }
 }
 
-const BRANCH_HEAD_SAME_SQL: &str = "SELECT repo IS ?2 AND branch IS ?3 AND head IS ?4
-         FROM card_branch_heads WHERE card = ?1";
+const BRANCH_HEAD_SQL: &str =
+    "SELECT head FROM card_branch_heads WHERE card = ?1 AND repo = ?2 AND branch = ?3";
+
+/// Record one successful read. An unchanged head only refreshes `checked_at`.
+/// A changed head starts a new interval at the current working time. The
+/// first read of a missing branch keeps the interval from the claim, so a
+/// branch that never reaches the remote also counts.
+fn record_head(t: &Tx<'_>, card: &BranchCard, head: Option<&str>, at: &str) -> ApiResult<()> {
+    let prior: Option<Option<String>> = t
+        .query_row(
+            BRANCH_HEAD_SQL,
+            params![card.id, card.repo, card.branch],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if prior.as_ref().is_some_and(|p| p.as_deref() == head) {
+        t.execute(
+            "UPDATE card_branch_heads SET checked_at = ?2 WHERE card = ?1",
+            params![card.id, at],
+        )?;
+        return Ok(());
+    }
+    let seconds = if prior.is_none() && head.is_none() {
+        0
+    } else {
+        view(t, &card.id, Utc::now())?.working_seconds as i64
+    };
+    t.execute(
+        "INSERT INTO card_branch_heads(card, repo, branch, head, working_seconds, observed_at, checked_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+         ON CONFLICT(card) DO UPDATE SET
+           repo = excluded.repo, branch = excluded.branch, head = excluded.head,
+           working_seconds = excluded.working_seconds, observed_at = excluded.observed_at,
+           checked_at = excluded.checked_at",
+        params![card.id, card.repo, card.branch, head, seconds, at],
+    )?;
+    Ok(())
+}
+
+/// One pass from the start of the card order (tests and a fresh daemon).
+pub async fn observe_remote_heads(state: &Shared) {
+    observe_remote_heads_from(state, &mut String::new()).await;
+}
 
 /// Observe real remote heads rather than proxy audit rows, which also covers
-/// direct pushes. The first observation and every changed head start a new
-/// working-time interval. A missing branch stays unsignalled.
-pub async fn observe_remote_heads(state: &Shared) {
-    let cards = match state.db.read(branch_cards).await {
+/// direct pushes. Reads at most one page of working/research repo cards after
+/// `cursor`, wraps to the start, and stops at the pass cap. Moves the cursor
+/// past the cards it read. Writes all results in one transaction.
+pub async fn observe_remote_heads_from(state: &Shared, cursor: &mut String) {
+    let from = cursor.clone();
+    let cards = match state.db.read(move |c| branch_cards(c, &from)).await {
         Ok(cards) => cards,
         Err(e) => {
             tracing::warn!("card branch scan failed: {e}");
             return;
         }
     };
+    let deadline = tokio::time::Instant::now() + OBSERVE_PASS_CAP;
+    let mut seen = Vec::new();
     for card in cards {
-        let project = card.project.clone();
-        let name = card.repo.clone();
-        let repo = match state
-            .db
-            .read(move |c| crate::store::repos::resolve(c, &name, Some(&project)))
-            .await
-        {
-            Ok(repo) => repo,
-            Err(_) => continue,
-        };
-        let Some(head) = remote_head(state, &repo, &card.branch).await else {
-            continue;
-        };
-        if let Err(e) = state
-            .db
-            .write("system", move |t| {
-                // Primary-key read first: an unchanged head costs no history scan.
-                let same: bool = t
-                    .query_row(
-                        BRANCH_HEAD_SAME_SQL,
-                        params![card.id, card.repo, card.branch, head],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-                    .unwrap_or(false);
-                if same {
-                    return Ok(());
-                }
-                let seconds = view(t, &card.id, Utc::now())?.working_seconds as i64;
-                t.execute(
-                    "INSERT INTO card_branch_heads(card, repo, branch, head, working_seconds, observed_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT(card) DO UPDATE SET
-                       repo = excluded.repo, branch = excluded.branch, head = excluded.head,
-                       working_seconds = excluded.working_seconds, observed_at = excluded.observed_at
-                     WHERE card_branch_heads.repo IS NOT excluded.repo
-                        OR card_branch_heads.branch IS NOT excluded.branch
-                        OR card_branch_heads.head IS NOT excluded.head",
-                    params![card.id, card.repo, card.branch, head, seconds, crate::db::now()],
-                )?;
-                Ok(())
-            })
-            .await
-        {
-            tracing::warn!("card branch observation failed: {e}");
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!("card branch watch: pass cap reached at {}", card.id);
+            break;
         }
+        cursor.clone_from(&card.id);
+        let read = tokio::time::timeout_at(deadline, remote_head(state, &card)).await;
+        if let Ok(Some(head)) = read {
+            seen.push((card, head, crate::db::now()));
+        }
+    }
+    if seen.is_empty() {
+        return;
+    }
+    if let Err(e) = state
+        .db
+        .write("system", move |t| {
+            for (card, head, at) in &seen {
+                record_head(t, card, head.as_deref(), at)?;
+            }
+            Ok(())
+        })
+        .await
+    {
+        tracing::warn!("card branch observation failed: {e}");
     }
 }
 
@@ -1199,7 +1289,7 @@ mod tests {
         assert_eq!(events.len(), 4, "only one prior status and post-entry rows");
         assert_eq!(events.iter().filter(|e| e.kind == "status").count(), 2);
         c.execute_batch("CREATE TABLE test_runs(pk INTEGER PRIMARY KEY, name TEXT, commit_sha TEXT, failed INTEGER, errored INTEGER, created_by TEXT);
-            CREATE TABLE card_branch_heads(card TEXT PRIMARY KEY, head TEXT, working_seconds INTEGER);
+            CREATE TABLE card_branch_heads(card TEXT PRIMARY KEY, head TEXT, working_seconds INTEGER, checked_at TEXT);
             CREATE TABLE test_run_cards(run INTEGER, card TEXT, PRIMARY KEY(run, card));
             CREATE INDEX test_run_cards_card ON test_run_cards(card, run);
             CREATE TABLE project_trouble(project TEXT PRIMARY KEY, settings TEXT);
@@ -1238,49 +1328,38 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
             "CREATE TABLE cards(id TEXT PRIMARY KEY, project TEXT, repo TEXT, branch TEXT,
-                archived INTEGER, column_id TEXT);
-             CREATE TABLE board_columns(id TEXT PRIMARY KEY, role TEXT, name TEXT);",
+                archived INTEGER, column_id INTEGER);
+             CREATE TABLE board_columns(id INTEGER PRIMARY KEY, project TEXT, role TEXT, name TEXT);",
         )
         .unwrap();
         c.execute_batch(include_str!("../migrations/ter-370-card-branch-head.sql"))
             .unwrap();
-        for (sql, table, index) in [
-            (BRANCH_CARDS_SQL, "c", "cards_branch_watch"),
-            (
-                PROGRESS_BASELINE_SQL,
-                "card_branch_heads",
-                "card_branch_heads",
-            ),
-        ] {
+        let plan = |sql: &str, args: usize| -> Vec<String> {
             let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-            let plans = if sql == BRANCH_CARDS_SQL {
-                q.query_map([], |r| r.get::<_, String>(3))
-                    .unwrap()
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap()
-            } else {
-                q.query_map(["P-1"], |r| r.get::<_, String>(3))
-                    .unwrap()
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap()
-            };
+            let args = vec!["x"; args];
+            q.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for (sql, args, uses) in [
+            (BRANCH_CARDS_SQL, 3, "SEARCH c USING INDEX cards_branch_watch (column_id=? AND id>?)"),
+            (BRANCH_CARDS_WRAP_SQL, 3, "SEARCH c USING INDEX cards_branch_watch (column_id=? AND id<?)"),
+            (WATCH_COLUMNS_SQL, 0, "SEARCH board_columns USING COVERING INDEX board_columns_role_watch (role=?)"),
+            (WATCH_COLUMNS_SQL, 0, "SEARCH board_columns USING INDEX board_columns_name_watch (<expr>=?)"),
+            (PROGRESS_BASELINE_SQL, 1, "SEARCH h USING INDEX sqlite_autoindex_card_branch_heads_1 (card=?)"),
+            (BRANCH_HEAD_SQL, 3, "SEARCH card_branch_heads USING INDEX sqlite_autoindex_card_branch_heads_1 (card=?)"),
+        ] {
+            let plans = plan(sql, args);
+            assert!(plans.iter().any(|p| p == uses), "{uses}: {plans:?}");
             assert!(
                 plans
                     .iter()
-                    .any(|p| { p.contains(&format!("SEARCH {table}")) && p.contains(index) }),
+                    .all(|p| !p.starts_with("SCAN") && !p.contains("TEMP B-TREE")),
                 "{plans:?}"
             );
-            assert!(plans.iter().all(|p| !p.contains("SCAN c\n")), "{plans:?}");
         }
-        let plan: String = c
-            .query_row(
-                &format!("EXPLAIN QUERY PLAN {BRANCH_HEAD_SAME_SQL}"),
-                params!["P-1", "app", "card", "abc"],
-                |r| r.get(3),
-            )
-            .unwrap();
-        assert!(plan.contains("SEARCH card_branch_heads"), "{plan}");
-        assert!(BRANCH_CARDS_SQL.contains("LIMIT 256"));
+        assert!(BRANCH_CARDS_SQL.contains("LIMIT ?3") && BRANCH_PAGE <= 64);
     }
 
     #[test]
@@ -1290,7 +1369,7 @@ mod tests {
             "CREATE TABLE events(seq INTEGER PRIMARY KEY, card TEXT);
             CREATE TABLE test_run_cards(run INTEGER, card TEXT);
             CREATE TABLE project_trouble(project TEXT, settings TEXT);
-            CREATE TABLE card_branch_heads(card TEXT PRIMARY KEY, head TEXT, working_seconds INTEGER);
+            CREATE TABLE card_branch_heads(card TEXT PRIMARY KEY, head TEXT, working_seconds INTEGER, checked_at TEXT);
             INSERT INTO events VALUES (1, 'P-1');",
         )
         .unwrap();

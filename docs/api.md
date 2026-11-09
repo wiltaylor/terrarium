@@ -5796,12 +5796,19 @@ examined per card. Three consecutive red runs, or
 two red runs on the same nonempty commit within the streak, trigger the mark.
 Short timer waits (at most one minute) and compaction requests use a rolling
 one-hour window. Review rounds and ETA extensions count the card's history.
-For a card with a repo and branch, the remote scan reads the actual branch head
-with `git ls-remote`, including changes made by direct pushes. Its first
-observation sets a working-time baseline. `no_progress` starts after
-`no_progress_seconds` of additional agent working time without a changed head;
-a zero threshold disables it. A new head or a missing remote branch clears the
-mark. Proxy `repo.push result=forwarded` audit rows are not push evidence.
+For a working or research card with a repo, the remote scan reads the actual
+branch head with `git ls-remote`, so direct pushes count. The branch is the
+card's branch, else the lowercase card id (as for validation jobs). The scan
+has its own five-minute timer, reads at most 32 cards per pass from a rotating
+cursor, and stops a pass after two minutes. A failed repo, credential or
+`ls-remote` read is logged and changes nothing. `no_progress` starts after
+`no_progress_seconds` of agent working time (waits excluded) without a new
+head: counted from the claim while the branch was never seen on the remote,
+otherwise from the working time when the current head was first seen. A new
+head clears the mark. No mark is set while the last successful read is older
+than the threshold, or when the stored read is for another repo or branch of
+the card. A zero threshold disables it. Proxy `repo.push result=forwarded`
+audit rows are not push evidence.
 
 The lifecycle tick plans in a read, using lightweight working/review/research
 card metadata and marked cards that need clearing. It opens a write only if
