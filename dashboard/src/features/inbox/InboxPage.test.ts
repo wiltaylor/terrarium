@@ -7,6 +7,7 @@ import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMockApi } from "../../api/mock";
+import { ApiError } from "../../api/http";
 import { waitFor } from "../../test/wait";
 import type { InboxItem } from "../../api/types";
 
@@ -144,6 +145,28 @@ describe("the Asked status tab (TER-42)", () => {
     el = mount("/inbox?status=done");
     await waitFor(() => expect(watchCards(el).length).toBe(1));
     expect(el.textContent).toContain("Answered by terrarium/lead");
+  });
+});
+
+describe("the ack of a mail that closed outside the Inbox (GitHub #25)", () => {
+  it("treats a 409 on ack as success: no error banner, the card leaves Open", async () => {
+    // The mail was read or replied outside the Inbox (the CLI, the Mail
+    // page): the daemon answers the ack with 409, and the card closes here.
+    const spy = vi.spyOn(api.inbox, "ackMail").mockImplementation(async () => {
+      throw new ApiError(409, "mail is acknowledged already (read)", undefined, "conflict");
+    });
+    try {
+      const el = mount("/inbox?tab=mail");
+      await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']”).length).toBeGreaterThan(0));
+      const before = el.querySelectorAll("article[aria-label^='Mail ']").length;
+      const card = [...el.querySelectorAll("article[aria-label^='Mail ']")].find((c) => c.textContent!.includes("0.1.0 ready for review"))!;
+      card.querySelector<HTMLFormElement>("form[aria-label=Acknowledge]")!.requestSubmit();
+      await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBe(before - 1));
+      expect(el.textContent).not.toContain("is acknowledged already");
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

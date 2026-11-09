@@ -6,6 +6,7 @@
 import { A } from "@solidjs/router";
 import { createSignal, For, Show } from "solid-js";
 import type { InboxWatch, Message, PausedThread } from "../../api/types";
+import { ApiError } from "../../api/http";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { api } from "../../stores";
@@ -60,7 +61,18 @@ export function MailItemCard(props: {
     const text = reply().trim();
     let done: Message | undefined;
     // A reply to a system mail with nobody else on the thread is a 422; the banner shows it.
-    if (await a.run(async () => (done = (await api.inbox.ackMail(m().id, text || undefined)).message))) {
+    // A 409 means the mail was read or replied outside the Inbox (the CLI,
+    // the Mail page): it is closed already, so the ack succeeds (GitHub #25).
+    if (
+      await a.run(async () => {
+        try {
+          done = (await api.inbox.ackMail(m().id, text || undefined)).message;
+        } catch (e) {
+          if (!(e instanceof ApiError && e.status === 409)) throw e;
+          done = m();
+        }
+      })
+    ) {
       setReply("");
       if (done) props.onAck(done);
     }

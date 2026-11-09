@@ -109,6 +109,19 @@ async fn turns(td: &TestDaemon, agent: &str) -> usize {
         .len()
 }
 
+/// The `inbox` event changes of one item, oldest first.
+async fn inbox_changes(td: &TestDaemon, item: &str) -> Vec<String> {
+    td.get("/api/events?kind=inbox&limit=200")
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["data"]["item"] == item)
+        .map(|e| e["data"]["change"].as_str().unwrap().to_owned())
+        .collect()
+}
+
 async fn inbox(td: &TestDaemon, query: &str) -> (Vec<Value>, Value) {
     let r = td.get(&format!("/api/inbox{query}")).await;
     let rows = r.ok().as_array().unwrap().clone();
@@ -673,6 +686,83 @@ async fn an_operator_mail_ack_replies_on_the_thread() {
     td.post_empty_as(&lead, &format!("/api/inbox/mail/{}/ack", id(&m2)))
         .await
         .err(403, "forbidden");
+}
+
+/// GitHub #25: operator mail that is read or replied outside the Inbox
+/// (the Mail page, the CLI) closes its Inbox item there too: the closed
+/// event fires and the counts drop, so the badge follows without a reload.
+/// The later ack still answers 409, which the dashboard treats as success.
+#[tokio::test]
+async fn mail_handled_outside_the_inbox_closes_its_item() {
+    let World { td, lead, .. } = setup().await;
+
+    // The operator reads the mail on the Mail page, not in the Inbox.
+    let m = td
+        .post_as(
+            &lead,
+            "/api/mail",
+            json!({"to": "operator", "subject": "Budget", "body": "We need more."}),
+        )
+        .await
+        .ok()
+        .clone();
+    let mid = id(&m);
+    let (rows, counts) = inbox(&td, "?kind=mail").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(counts["mail"], 1);
+    let r = td.post_empty(&format!("/api/mail/{mid}/read")).await;
+    assert_eq!(r.ok()["state"], "read");
+    let (rows, counts) = inbox(&td, "?kind=mail").await;
+    assert!(rows.is_empty(), "{rows:?}");
+    assert_eq!(counts["mail"], 0);
+    let changes = inbox_changes(&td, &format!("mail:{mid}")).await;
+    assert!(
+        changes.contains(&"opened".to_owned()) && changes.contains(&"closed".to_owned()),
+        "{changes:?}"
+    );
+    // The ack of closed mail still answers 409.
+    td.post_empty(&format!("/api/inbox/mail/{mid}/ack"))
+        .await
+        .err(409, "conflict");
+
+    // A reply outside the Inbox closes its item too, with the project.
+    let m2 = td
+        .post_as(
+            &lead,
+            "/api/mail",
+            json!({"to": "operator", "subject": "Note", "body": "Just so you know."}),
+        )
+        .await
+        .ok()
+        .clone();
+    let mid2 = id(&m2);
+    let replies = td
+        .post(&format!("/api/mail/{mid2}/reply"), json!({"body": "Thanks."}))
+        .await
+        .ok();
+    assert_eq!(replies.as_array().unwrap().len(), 1);
+    let (rows, counts) = inbox(&td, "?kind=mail").await;
+    assert!(rows.is_empty(), "{rows:?}");
+    assert_eq!(counts["mail"], 0);
+    let ev = td.get("/api/events?kind=inbox&limit=200").await;
+    let item = ev
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["data"]["item"] == format!("mail:{mid2}"))
+        .unwrap();
+    assert_eq!(item["data"]["change"], "closed");
+    assert_eq!(item["data"]["project"], "p");
+
+    // The agent reads its answer: no inbox event for mail that is not to
+    // the operator.
+    let rid = id(&replies[0]);
+    td.post_empty_as(&lead, &format!("/api/mail/{rid}/read"))
+        .await
+        .ok();
+    let changes = inbox_changes(&td, &format!("mail:{rid}")).await;
+    assert!(changes.is_empty(), "{changes:?}");
 }
 
 /// A held message and a paused thread are a system item: a release
