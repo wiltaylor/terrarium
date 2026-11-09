@@ -139,10 +139,8 @@ fn long_runs() -> Option<&'static Regex> {
 /// scp form (`git@host:x/y`) are not credentials.
 fn url_userinfo() -> Option<&'static Regex> {
     static R: OnceLock<Option<Regex>> = OnceLock::new();
-    R.get_or_init(|| {
-        Regex::new(r"(?i)\bhttps?://[^\s/?#]*@|://[^\s/:@]+:[^\s/@]*@").ok()
-    })
-    .as_ref()
+    R.get_or_init(|| Regex::new(r"(?i)\bhttps?://[^\s/?#]*@|://[^\s/:@]+:[^\s/@]*@").ok())
+        .as_ref()
 }
 
 /// A value that names a secret and is not one: an env reference, a
@@ -733,9 +731,7 @@ mod tests {
         let export = "export/projects/p1.fleet.toml";
         let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
         // A run in a trailing comment, outside the quotes, hits.
-        let text = format!(
-            "[[projects.repos]]\nurl = \"https://x/o/r.git\" # {random}\n"
-        );
+        let text = format!("[[projects.repos]]\nurl = \"https://x/o/r.git\" # {random}\n");
         assert!(rules(export, &text).contains(&he), "{text}");
         // A value that is not a quoted string is not exempt.
         let text = format!("[[projects.repos]]\nurl = {random}\n");
