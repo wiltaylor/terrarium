@@ -90,8 +90,7 @@ that step.
    with `terrarium card comment <id> -m "..."`.
    Set an ETA when you claim: `terrarium card claim <id> --eta <minutes>m`.
    ETAs are agent time in minutes, not human hours.
-   Claim and ETA print this project's same-type history (median, p70, n).
-   Use it to estimate. Most cards take 5-60
+   Estimate from claim/ETA history (project/type median/p70/n). Most cards take 5-60
    minutes. The operator sees a countdown on the board. When
    the estimate changes, run `terrarium card eta <id> <duration>` again. Do
    not let the ETA run overdue.
