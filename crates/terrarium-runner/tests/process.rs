@@ -15,8 +15,8 @@ use terrarium_runner::events::read_since;
 use terrarium_runner::test_support::{RunnerProcessGuard, sweep_stale_runners_once};
 use terrarium_runner::{
     AdapterKind, AttachEvent, BoxFuture, ConnectOptions, RemoteRunner, RequestContext,
-    RequestHandler, RpcError, RunnerHandle, RunnerSpec, SpawnOptions, StoppedBy, live_runner_pid,
-    read_exit_record, read_exit_status,
+    RequestHandler, RpcError, RunnerError, RunnerHandle, RunnerSpec, SpawnOptions, StoppedBy,
+    live_runner_pid, read_exit_record, read_exit_status,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -119,10 +119,24 @@ impl Env {
     async fn connect(&self, since: Option<u64>) -> RemoteRunner {
         self.connect_opts(self.options(since)).await
     }
+    /// Connect with the same bounded retry as [`RemoteRunner::spawn_process`]:
+    /// on a loaded target the first connect to a freshly bound socket can
+    /// come back `ConnectionRefused` (merge batch of TER-151/343/178), so
+    /// retry until the socket accepts. Any other error fails at once.
     async fn connect_opts(&self, opts: ConnectOptions) -> RemoteRunner {
-        RemoteRunner::connect_with(&self.run(), self.agent, opts)
-            .await
-            .expect("connect")
+        timeout(wait(), async {
+            loop {
+                match RemoteRunner::connect_with(&self.run(), self.agent, opts.clone()).await {
+                    Ok(r) => return r,
+                    Err(RunnerError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::ConnectionRefused => {}
+                    Err(e) => panic!("connect: {e}"),
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("connect: the control socket did not accept in {:?}", wait()))
     }
     /// Start the binary as a child of the test, so that the test sees its
     /// exit code, and connect to it.

@@ -486,6 +486,9 @@ pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
     let state_c = canonical(&roots.state);
     let mut skip: HashSet<PathBuf> = HashSet::new();
     skip.insert(canonical(dir));
+    // Reconstructible image payloads, not application data. In particular do
+    // not copy every retained daemon binary into every pre-upgrade backup.
+    skip.insert(state_c.join("releases"));
     for f in ["", "-wal", "-shm", "-journal"] {
         skip.insert(state_c.join(format!("{DB_FILE}{f}")));
     }
@@ -1114,7 +1117,8 @@ pub fn restore(path: &Path, roots: &Roots, opts: &RestoreOptions) -> anyhow::Res
     }
 
     // Every file is good: swap each root.
-    let keep: Vec<PathBuf> = opts.keep.iter().map(|p| canonical(p)).collect();
+    let mut keep: Vec<PathBuf> = opts.keep.iter().map(|p| canonical(p)).collect();
+    keep.push(canonical(&roots.state).join("releases"));
     let mut done = Vec::new();
     for (root, dir) in &targets {
         let pre = dir.join(format!("{PRE_RESTORE_PREFIX}{stamp}"));

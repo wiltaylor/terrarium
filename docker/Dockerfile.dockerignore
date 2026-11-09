@@ -9,6 +9,7 @@
 dashboard/node_modules
 dashboard/dist
 !docker/entrypoint.sh
+!docker/hot-swap.py
 # The packaged defaults: prompts and harness settings (/opt/terrarium/defaults).
 !defaults/**
 # The host installer: terrariumd embeds it (GET /install/host.sh).

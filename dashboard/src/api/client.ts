@@ -61,6 +61,7 @@ import type {
   DashboardLayout,
   DashboardView,
   JobStats,
+  EtaAccuracyView,
   Monitor,
   MonitorDef,
   MonitorPoint,
@@ -632,6 +633,7 @@ export interface Api {
     /** One point per bucket of `bucket` seconds. */
     series(id: string, q: MonitorResultsQuery & { bucket: number }): Promise<MonitorPoint[]>;
     dashboard(project: string): Promise<DashboardView>;
+    etaAccuracy(project: string): Promise<EtaAccuracyView>;
     saveDashboard(project: string, layout: DashboardLayout): Promise<DashboardView>;
   };
 
@@ -1397,6 +1399,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       results: (id, q = {}) => get(`/api/monitors/${seg(id)}/results`, { ...q }),
       series: (id, q) => get(`/api/monitors/${seg(id)}/results`, { ...q }),
       dashboard: (project) => get(`${p(project)}/dashboard`),
+      etaAccuracy: (project) => get(`${p(project)}/eta-accuracy`),
       saveDashboard: (project, layout) => put(`${p(project)}/dashboard`, layout),
     },
 

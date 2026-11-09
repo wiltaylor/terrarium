@@ -71,6 +71,13 @@ class Dockerfile(unittest.TestCase):
         cfg = hv.load(hv.TOML)
         self.assertEqual(hv.check_dockerfile(cfg, hv.DOCKERFILE.read_text()), [])
 
+    def test_release_payload_pins_require_the_current_link(self):
+        cfg = hv.load(hv.TOML)
+        text = hv.DOCKERFILE.read_text().replace(
+            "ln -s /state/releases/current/harnesses.toml /etc/terrarium/harnesses.toml", "true")
+        self.assertEqual(hv.check_dockerfile(cfg, text),
+                         ["docker/Dockerfile does not copy harnesses.toml to /etc/terrarium/harnesses.toml"])
+
     def test_main_check_exit_codes(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
