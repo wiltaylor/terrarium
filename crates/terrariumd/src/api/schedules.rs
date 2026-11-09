@@ -900,9 +900,9 @@ impl RunCtx {
     }
 }
 
-/// Run schedule `id` once. `trigger` is `cron`, `manual`, or `catch_up`;
-/// `by` labels the run's events and audit row (the `run_as` for a timed
-/// run, the caller for a run-now). A run while another run of the
+/// Run schedule `id` once. `trigger` is `cron`, `manual`, `catch_up`, or
+/// `day_start`; `by` labels the run's events and audit row (the `run_as`
+/// for a timed run, the caller for a run-now). A run while another run of the
 /// schedule is still running is `skipped`. Returns the run when it ends.
 pub async fn run_schedule(
     state: &Shared,
@@ -1753,6 +1753,8 @@ mod tests {
             consecutive_skips: 0,
             disabled_reason: None,
             webhook_failures: 0,
+            day_start_done: None,
+            day_start_last: None,
             created_at: String::new(),
             updated_at: String::new(),
             anchor_at: String::new(),
