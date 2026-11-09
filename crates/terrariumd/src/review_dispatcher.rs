@@ -102,10 +102,13 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
             if round < 3 {
                 return Ok(false);
             }
-            t.execute(
-                "UPDATE card_reviews SET cap_notified = 1 WHERE card = ?1",
+            let notified = t.execute(
+                "UPDATE card_reviews SET cap_notified = 1 WHERE card = ?1 AND cap_notified = 0",
                 [&card],
             )?;
+            if notified == 0 {
+                return Ok(true);
+            }
             tell_owner(
                 t,
                 &a,
