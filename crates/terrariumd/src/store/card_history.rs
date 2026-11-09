@@ -137,24 +137,30 @@ fn p70(mut values: Vec<f64>, minimum: usize) -> Option<f64> {
 
 pub fn calibrated_ms(samples: &[WorkSample], labels: &[String], guess: Option<f64>) -> Option<f64> {
     let mut seen = std::collections::HashSet::new();
-    let ratios = p70(samples
-        .iter()
-        .filter(|s| seen.insert(&s.card))
-        .take(30)
-        .map(|s| s.actual_ms / s.guess_ms)
-        .collect(), 5);
+    let ratios = p70(
+        samples
+            .iter()
+            .filter(|s| seen.insert(&s.card))
+            .take(30)
+            .map(|s| s.actual_ms / s.guess_ms)
+            .collect(),
+        5,
+    );
     seen.clear();
-    let actual = p70(samples
-        .iter()
-        .filter(|s| seen.insert(&s.card))
-        .filter(|s| {
-            labels
-                .iter()
-                .any(|l| l.starts_with("type:") && s.labels.contains(l))
-        })
-        .take(30)
-        .map(|s| s.actual_ms)
-        .collect(), 5);
+    let actual = p70(
+        samples
+            .iter()
+            .filter(|s| seen.insert(&s.card))
+            .filter(|s| {
+                labels
+                    .iter()
+                    .any(|l| l.starts_with("type:") && s.labels.contains(l))
+            })
+            .take(30)
+            .map(|s| s.actual_ms)
+            .collect(),
+        5,
+    );
     match guess {
         Some(guess) => Some((guess * ratios? * actual?).sqrt()),
         None => actual,
@@ -221,10 +227,14 @@ pub struct ReviewEstimates {
 
 impl ReviewEstimates {
     fn load_work(&mut self, conn: &Connection, project: &str) -> bool {
-        if self.work_failed.contains(project) { return false; }
+        if self.work_failed.contains(project) {
+            return false;
+        }
         if !self.work.contains_key(project) {
             match work_samples(conn, project) {
-                Ok(samples) => { self.work.insert(project.to_owned(), samples); }
+                Ok(samples) => {
+                    self.work.insert(project.to_owned(), samples);
+                }
                 Err(error) => {
                     tracing::warn!(%project, %error, "cannot load similar-card history");
                     self.work_failed.insert(project.to_owned());
@@ -241,7 +251,9 @@ impl ReviewEstimates {
         project: &str,
         labels: &[String],
     ) -> Option<WorkHistory> {
-        if !self.load_work(conn, project) { return None; }
+        if !self.load_work(conn, project) {
+            return None;
+        }
         Some(work_history(&self.work[project], labels))
     }
 
@@ -252,7 +264,9 @@ impl ReviewEstimates {
         labels: &[String],
         guess: Option<f64>,
     ) -> ApiResult<Option<f64>> {
-        if !self.load_work(conn, project) { return Ok(None); }
+        if !self.load_work(conn, project) {
+            return Ok(None);
+        }
         Ok(self
             .work
             .get(project)

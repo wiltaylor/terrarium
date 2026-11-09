@@ -37,7 +37,9 @@ async fn broken_worker_history_does_not_break_card_responses() {
     let td = setup().await;
     let sample = card(&td, "proj/lead", json!({"title":"Sample"})).await;
     let path = format!("/api/cards/{sample}");
-    td.patch(&path, json!({"column":"working", "eta_at":"1h"})).await.ok();
+    td.patch(&path, json!({"column":"working", "eta_at":"1h"}))
+        .await
+        .ok();
     td.patch(&path, json!({"column":"ready"})).await.ok();
     let db = td.daemon.as_ref().unwrap().state.db.clone();
     db.write("system", move |t| {
@@ -49,7 +51,11 @@ async fn broken_worker_history_does_not_break_card_responses() {
     let path = format!("/api/cards/{id}");
     let ready = td.get(&path).await.ok().clone();
     assert!(ready.get("eta_history").is_none());
-    let claimed = td.post_as("proj/w1", &format!("{path}/claim"), json!({})).await.ok().clone();
+    let claimed = td
+        .post_as("proj/w1", &format!("{path}/claim"), json!({}))
+        .await
+        .ok()
+        .clone();
     assert!(claimed.get("eta_history").is_none());
     let eta = td.patch(&path, json!({"eta_at":"25m"})).await.ok().clone();
     assert!(eta.get("eta_history").is_none());

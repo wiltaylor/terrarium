@@ -697,11 +697,15 @@ fn render(
     } else {
         (worker_eta, worker_start, row.eta_set_by, eta_set_by_name)
     };
-    let eta_history = if !row.archived && job.is_none()
+    let eta_history = if !row.archived
+        && job.is_none()
         && (row.column_role.as_deref() == Some(WORKING)
-            || (row.column_role.is_none() && row.column == WORKING)) {
+            || (row.column_role.is_none() && row.column == WORKING))
+    {
         estimates.history(conn, &row.project, &json_col::<Vec<String>>(&row.labels))
-    } else { None };
+    } else {
+        None
+    };
     Ok(Card {
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,
