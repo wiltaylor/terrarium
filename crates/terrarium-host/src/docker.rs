@@ -1044,12 +1044,20 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let err = super::plan_exec(&exec_req(json!({"A":"1"})), "docker", &link).unwrap_err();
         assert_eq!(err.code, crate::protocol::ErrorCode::SpawnFailed);
-        assert!(err.message.contains("not a dir of this user"), "{}", err.message);
+        assert!(
+            err.message.contains("not a dir of this user"),
+            "{}",
+            err.message
+        );
         assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
         // A link in the parent is refused too.
-        let err = super::plan_exec(&exec_req(json!({"A":"1"})), "docker", &link.join("sub"))
-            .unwrap_err();
-        assert!(err.message.contains("not a dir of this user"), "{}", err.message);
+        let err =
+            super::plan_exec(&exec_req(json!({"A":"1"})), "docker", &link.join("sub")).unwrap_err();
+        assert!(
+            err.message.contains("not a dir of this user"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
