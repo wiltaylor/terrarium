@@ -11109,7 +11109,9 @@ async fn admin_link_prints_the_pairing_code_alone() {
         )],
     )
     .await;
-    assert_eq!(out, "tlp_abc\n");
+    // The code is the first line (stdout); the hints follow (stderr).
+    assert_eq!(out.lines().next(), Some("tlp_abc"), "{out}");
+    assert!(out.contains("one use") && out.contains("instance: 01I"), "{out}");
     let out = ok(
         false,
         &["admin", "link", "rotate", "L1"],
@@ -11117,7 +11119,9 @@ async fn admin_link_prints_the_pairing_code_alone() {
         vec![req(Post, "/api/links/L1/rotate")],
     )
     .await;
-    assert_eq!(out, "tlp_abc\n");
+    // The code is the first line (stdout); the hints follow (stderr).
+    assert_eq!(out.lines().next(), Some("tlp_abc"), "{out}");
+    assert!(out.contains("one use") && out.contains("instance: 01I"), "{out}");
     let out = ok(
         false,
         &["admin", "link", "revoke", "L1"],
