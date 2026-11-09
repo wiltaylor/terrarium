@@ -584,11 +584,7 @@ fn daemon_env_reads(manifest: &Path) -> BTreeSet<String> {
         let lookup_calls: Vec<Regex> = lookups
             .iter()
             .map(|name| {
-                Regex::new(&format!(
-                    r"(?:^|[^\w.:])({})\(([^)]*)",
-                    regex::escape(name)
-                ))
-                .unwrap()
+                Regex::new(&format!(r"(?:^|[^\w.:])({})\(([^)]*)", regex::escape(name))).unwrap()
             })
             .collect();
         for (i, line) in lines.iter().enumerate() {
