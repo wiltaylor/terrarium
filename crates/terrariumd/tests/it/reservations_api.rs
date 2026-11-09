@@ -652,6 +652,85 @@ async fn native_exclusive_gpu_needs_enforced_helper_support() {
     server.abort();
 }
 
+/// An exclusive GPU reservation of a native target, written to the store.
+async fn native_exclusive(state: &terrariumd::api::Shared) -> String {
+    use terrariumd::store::reservations as r;
+    state
+        .db
+        .write("test", |tx| {
+            let record = r::request(
+                tx,
+                r::Request {
+                    gpus: vec![terrarium_core::resources::GpuClaim {
+                        uuid: "GPU-abcd".into(),
+                        vram_bytes: 0,
+                        exclusive: true,
+                    }],
+                    host: "h".into(),
+                    project: "p".into(),
+                    holder: r::Holder::Target("p-native".into()),
+                    target: "p-native".into(),
+                    amounts: Default::default(),
+                    exclusive: false,
+                    reason: "test".into(),
+                    duration_ms: 1_800_000,
+                    queue_ms: None,
+                },
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+            r::activate(tx, &record.id)?;
+            Ok(record.id)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn lost_native_enforcement_refuses_host_commands_while_an_exclusive_gpu_is_reserved() {
+    // The reservation became active while the helper answered; now the host
+    // agent reconnected without enforcement.
+    let (td, server, client) = setup_opts(
+        false,
+        Some(terrarium_core::protocol::NativeGpuCapability {
+            enforced: false,
+            version: 1,
+            reason: Some("cannot reach the helper".into()),
+        }),
+    )
+    .await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    for name in ["p-native", "p-other"] {
+        td.post(
+            "/api/targets",
+            json!({"name":name,"kind":"host","host":"h","project":"p"}),
+        )
+        .await
+        .ok();
+    }
+    let def = |name: &'static str| {
+        let state = state.clone();
+        async move {
+            state
+                .db
+                .read(move |c| Ok(terrariumd::store::targets::get(c, name)?.def))
+                .await
+                .unwrap()
+        }
+    };
+    // No exclusive reservation yet: host commands run as before.
+    assert!(terrariumd::reservations::exec_budget(&state, &def("p-other").await, None).is_ok());
+    let id = native_exclusive(&state).await;
+    for name in ["p-native", "p-other"] {
+        let e = terrariumd::reservations::exec_budget(&state, &def(name).await, Some("p/worker"))
+            .unwrap_err();
+        assert!(e.message.contains(&id), "{}", e.message);
+        assert!(e.message.contains("cannot reach the helper"), "{}", e.message);
+        assert!(e.message.contains("refused until it does"), "{}", e.message);
+    }
+    client.abort();
+    server.abort();
+}
+
 #[tokio::test]
 async fn host_reservation_refusal_names_existing_agent_sessions() {
     let (td, server, client) = setup().await;

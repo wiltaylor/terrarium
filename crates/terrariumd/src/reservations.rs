@@ -1161,6 +1161,7 @@ pub fn exec_budget(
         let agent = holder.and_then(|h| agents::find(c, h, None).ok()).map(|a| a.agent.id.to_string());
         let rows = store::list(c, host)?;
         gpu_path_admission(def, &rows)?;
+        native_gpu_admission(state, c, host, def, &rows)?;
         let exclusive = rows.iter().any(|r| managed(r) && r.exclusive);
         if exclusive && (!matches!(def.kind, TargetKind::Host | TargetKind::Docker)
             || (def.kind == TargetKind::Docker && def.image.is_none())) {
@@ -1194,6 +1195,48 @@ pub fn exec_budget(
         }
         Ok(None)
     })
+}
+
+/// Fail closed when native enforcement is lost (TER-345): while a managed
+/// exclusive GPU reservation of a native `host` target is on the host and
+/// its host agent does not report enforced native GPU support (the helper
+/// is down, has another version, `[native_gpu]` is off, or the agent is
+/// older), every `host` target command on that host is refused. Any native
+/// process there could open the reserved GPU without a device policy.
+fn native_gpu_admission(
+    state: &Shared,
+    c: &rusqlite::Connection,
+    host: &str,
+    def: &TargetDef,
+    rows: &[Reservation],
+) -> ApiResult<()> {
+    if def.kind != TargetKind::Host {
+        return Ok(());
+    }
+    let native = state
+        .executor
+        .hosts
+        .capabilities(host)
+        .and_then(|caps| caps.native_gpu);
+    if native.as_ref().is_some_and(|n| n.enforced) {
+        return Ok(());
+    }
+    for r in rows
+        .iter()
+        .filter(|r| managed(r) && r.gpus.iter().any(|g| g.exclusive))
+    {
+        if targets::get(c, &r.target).is_ok_and(|t| t.def.kind == TargetKind::Host) {
+            let reason = native
+                .as_ref()
+                .and_then(|n| n.reason.clone())
+                .unwrap_or_else(|| "the host agent sends no native GPU capability".into());
+            return Err(ApiError::conflict(format!(
+                "exclusive GPU reservation {} of native target {} needs enforced native GPU support, and the host agent of {host} does not report it now ({reason}); host-target commands on this host are refused until it does",
+                r.id, r.target
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn gpu_path_admission(def: &TargetDef, rows: &[Reservation]) -> ApiResult<()> {

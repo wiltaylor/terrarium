@@ -873,13 +873,19 @@ its exclusively reserved UUIDs. The granted GPUs are
 through the helper, as the helper's workload user, in a transient system
 service with `DevicePolicy=closed` and one `DeviceAllow=` for each granted
 GPU and the NVIDIA support nodes. A host agent without `[native_gpu]`
-refuses such an `exec` (`unsupported`). The helper refuses a session
-while another reservation's session holds one of its exclusive GPUs:
-the `exec` ends with exit code 125 and the reason on stderr.
+refuses such an `exec` (`unsupported`), and so does one whose helper did
+not answer with enforcement at the last `hello`. The helper refuses a
+session while another reservation's session holds one of its exclusive
+GPUs, or while no workload user of its pool is free: the `exec` ends with
+exit code 125 and the reason on stderr. A native session that a signal
+ended reports exit code 128 + N in `exit.code` and no `exit.signal`. A
+command whose request (argv and env as JSON) is over 128 KiB is refused
+before the start.
 
-With `[native_gpu]` on, `resource.apply` and `resource.stop` for a native
-holder go to the helper (`apply`, `stop`), which sets or stops the
-holder's system slice. The slice has the same name as the user slice of
+When the helper answered with enforcement at the last `hello`,
+`resource.apply` and `resource.stop` for a holder go to the helper
+(`apply`, `stop`), which sets or stops the holder's system slice; otherwise
+they act on the user slice, as without `[native_gpu]`. The slice has the same name as the user slice of
 "Applying CPU, memory and IO limits", so `metrics.gpu_usage` attribution
 by slice segment is unchanged, and the session unit
 `terrarium-native-<session>-<nonce>.service` in the cgroup path names the

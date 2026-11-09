@@ -332,9 +332,11 @@ pub struct HelperConfig {
     pub socket: PathBuf,
     /// The trusted host-agent user. Only it may connect.
     pub agent_user: String,
-    /// The user that native sessions run as. Not root, not the agent user,
-    /// no linger, and none of [`DENIED_GROUPS`].
-    pub workload_user: String,
+    /// The pool of users that native sessions run as: each holder gets one
+    /// of them, and never one that another holder's live session uses.
+    /// Each is not root, not the agent user, has no linger, and is in none
+    /// of [`DENIED_GROUPS`].
+    pub workload_users: Vec<String>,
     /// Every session working directory is under it.
     pub workspace_root: PathBuf,
     /// The rights of the agent user. Empty: only `hello`.
@@ -418,8 +420,16 @@ impl HelperConfig {
         if cfg.gpu.support_nodes.iter().any(|p| !p.is_absolute()) {
             return Err("helper config: gpu.support_nodes must be absolute paths".into());
         }
-        if cfg.agent_user == cfg.workload_user {
-            return Err("helper config: workload_user must differ from agent_user".into());
+        if cfg.workload_users.is_empty() {
+            return Err("helper config: workload_users must name at least one user".into());
+        }
+        for (i, u) in cfg.workload_users.iter().enumerate() {
+            if *u == cfg.agent_user {
+                return Err("helper config: workload_users must not contain agent_user".into());
+            }
+            if cfg.workload_users[..i].contains(u) {
+                return Err(format!("helper config: workload user {u} is listed twice"));
+            }
         }
         Ok(cfg)
     }
@@ -436,6 +446,18 @@ pub fn check_root_owned(path: &Path, meta: &std::fs::Metadata) -> Result<(), Str
             "{} must not be writable by group or others",
             path.display()
         ));
+    }
+    Ok(())
+}
+
+/// [`check_root_owned`] for the path and each of its parent directories:
+/// a writable parent could swap the file.
+pub fn check_root_chain(path: &Path) -> Result<(), String> {
+    let mut p = Some(path);
+    while let Some(dir) = p {
+        let meta = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        check_root_owned(dir, &meta)?;
+        p = dir.parent();
     }
     Ok(())
 }
@@ -459,27 +481,85 @@ pub fn check_workload(
     linger: bool,
 ) -> Result<(), String> {
     if workload.uid == 0 || workload.gid == 0 {
-        return Err("workload_user must not be root or in group root".into());
+        return Err(format!(
+            "workload user {} must not be root or in group root",
+            workload.name
+        ));
     }
     if workload.uid == agent_uid || agent_uid == 0 {
-        return Err("workload_user and agent_user must be distinct non-root users".into());
+        return Err(format!(
+            "workload user {} and agent_user must be distinct non-root users",
+            workload.name
+        ));
     }
     if let Some((_, name)) = groups
         .iter()
         .find(|(gid, name)| *gid == 0 || DENIED_GROUPS.contains(&name.as_str()))
     {
         return Err(format!(
-            "workload_user {} must not be in group {name}",
+            "workload user {} must not be in group {name}",
             workload.name
         ));
     }
     if linger {
         return Err(format!(
-            "workload_user {} has linger enabled; run `loginctl disable-linger {}`",
+            "workload user {} has linger enabled; run `loginctl disable-linger {}`",
             workload.name, workload.name
         ));
     }
     Ok(())
+}
+
+/// Look up a user, its groups, and its linger file.
+pub fn resolve_user(name: &str) -> Result<(Identity, Vec<(u32, String)>, bool), String> {
+    use nix::unistd::{Group, User};
+    let user = User::from_name(name)
+        .map_err(|e| format!("look up user {name}: {e}"))?
+        .ok_or_else(|| format!("no user {name}"))?;
+    let id = Identity {
+        name: user.name.clone(),
+        uid: user.uid.as_raw(),
+        gid: user.gid.as_raw(),
+    };
+    let cname = std::ffi::CString::new(name).map_err(|_| format!("bad user name {name:?}"))?;
+    let groups = nix::unistd::getgrouplist(&cname, user.gid)
+        .map_err(|e| format!("groups of {name}: {e}"))?
+        .into_iter()
+        .map(|g| {
+            let n = Group::from_gid(g)
+                .ok()
+                .flatten()
+                .map(|g| g.name)
+                .unwrap_or_default();
+            (g.as_raw(), n)
+        })
+        .collect();
+    let linger = Path::new("/var/lib/systemd/linger").join(name).exists();
+    Ok((id, groups, linger))
+}
+
+/// The check of a workload user before each session: a later `usermod`
+/// or `loginctl enable-linger` must not reach a new session.
+pub trait WorkloadCheck: Send + Sync {
+    fn check(&self, w: &Identity) -> Result<(), String>;
+}
+
+/// The real check: the passwd and group databases and the linger file.
+pub struct HostWorkloadCheck {
+    pub agent_uid: u32,
+}
+
+impl WorkloadCheck for HostWorkloadCheck {
+    fn check(&self, w: &Identity) -> Result<(), String> {
+        let (now, groups, linger) = resolve_user(&w.name)?;
+        if now != *w {
+            return Err(format!(
+                "workload user {} changed its UID or GID since the helper started; restart the helper",
+                w.name
+            ));
+        }
+        check_workload(self.agent_uid, w, &groups, linger)
+    }
 }
 
 /// The version in the first line of `systemctl --version`:
@@ -542,7 +622,6 @@ pub fn parse_minors(text: &str) -> Result<Vec<(String, u32)>, String> {
 /// What the helper needs to plan a session.
 #[derive(Debug, Clone)]
 pub struct Ctx {
-    pub workload: Identity,
     /// Canonical.
     pub workspace_root: PathBuf,
     pub state_dir: PathBuf,
@@ -619,6 +698,7 @@ pub fn plan_start(
     inventory: &[(String, u32)],
     nodes: &dyn DeviceNodes,
     nonce: u32,
+    workload: &Identity,
 ) -> Result<Plan, Refusal> {
     check_name("target", &req.target, true)?;
     check_name("holder", &req.holder, false)?;
@@ -731,8 +811,8 @@ pub fn plan_start(
     args.push(if req.pty.is_some() { "--pty" } else { "--pipe" }.to_owned());
     args.push(format!("--unit={unit}"));
     args.push(format!("--slice={slice}"));
-    args.push(format!("--uid={}", ctx.workload.uid));
-    args.push(format!("--gid={}", ctx.workload.gid));
+    args.push(format!("--uid={}", workload.uid));
+    args.push(format!("--gid={}", workload.gid));
     for p in [
         "NoNewPrivileges=yes",
         "CapabilityBoundingSet=",
@@ -772,6 +852,8 @@ pub fn plan_start(
             lease: req.lease.clone(),
             gpus: req.gpus.clone(),
             exclusive: req.exclusive_gpus.clone(),
+            uid: workload.uid,
+            stuck: false,
         },
     })
 }
@@ -829,9 +911,14 @@ pub struct Claim {
     pub lease: Option<String>,
     pub gpus: Vec<String>,
     pub exclusive: Vec<String>,
+    /// The workload UID of the session.
+    pub uid: u32,
+    /// The unit was not confirmed stopped: its GPUs are unavailable to
+    /// everyone and its UID stays with its holder until it is.
+    pub stuck: bool,
 }
 
-/// The live sessions of the helper, by unit. The helper kills its units
+/// The live sessions of the helper, by unit. The helper stops its units
 /// on start, so the table is complete.
 #[derive(Debug, Default)]
 pub struct Sessions {
@@ -839,25 +926,54 @@ pub struct Sessions {
 }
 
 impl Sessions {
+    /// The workload user of a holder: the UID of its live sessions, else a
+    /// pool user that no live session of another holder uses.
+    pub fn pick(&self, holder: &str, pool: &[Identity]) -> Result<Identity, Refusal> {
+        if let Some(c) = self.live.values().find(|c| c.holder == holder)
+            && let Some(id) = pool.iter().find(|w| w.uid == c.uid)
+        {
+            return Ok(id.clone());
+        }
+        pool.iter()
+            .find(|w| !self.live.values().any(|c| c.uid == w.uid))
+            .cloned()
+            .ok_or_else(|| {
+                Refusal::new(
+                    ErrorKind::Busy,
+                    format!(
+                        "no free workload user: all {} of the pool are in use by other holders' sessions",
+                        pool.len()
+                    ),
+                )
+            })
+    }
+
     /// Admit a session. A GPU that either side holds exclusively may be
-    /// shared only by sessions of the same lease and holder. A lease with
-    /// another holder is a forged holder.
+    /// shared only by sessions of the same lease (one reservation; several
+    /// agents may use a target's reservation). A GPU of a stuck unit is
+    /// unavailable. A UID never serves two holders at once.
     pub fn admit(&mut self, unit: &str, claim: Claim) -> Result<(), Refusal> {
-        for other in self.live.values() {
-            if claim.lease.is_some() && other.lease == claim.lease && other.holder != claim.holder {
+        for (other_unit, other) in &self.live {
+            if other.uid == claim.uid && other.holder != claim.holder {
                 return Err(Refusal::new(
                     ErrorKind::Forbidden,
-                    "the lease belongs to another holder",
+                    "the workload user serves another holder",
                 ));
             }
             for g in &claim.gpus {
                 if !other.gpus.contains(g) {
                     continue;
                 }
+                if other.stuck {
+                    return Err(Refusal::new(
+                        ErrorKind::Busy,
+                        format!(
+                            "GPU {g} is unavailable: unit {other_unit} is not confirmed stopped"
+                        ),
+                    ));
+                }
                 let exclusive = other.exclusive.contains(g) || claim.exclusive.contains(g);
-                let same = claim.lease.is_some()
-                    && other.lease == claim.lease
-                    && other.holder == claim.holder;
+                let same = claim.lease.is_some() && other.lease == claim.lease;
                 if exclusive && !same {
                     return Err(Refusal::new(
                         ErrorKind::Busy,
@@ -870,8 +986,20 @@ impl Sessions {
         Ok(())
     }
 
+    /// Keep the claim of a unit whose stop is not confirmed.
+    pub fn mark_stuck(&mut self, unit: &str) {
+        if let Some(c) = self.live.get_mut(unit) {
+            c.stuck = true;
+        }
+    }
+
+    /// Free the claim. Only after the unit is confirmed stopped.
     pub fn end(&mut self, unit: &str) {
         self.live.remove(unit);
+    }
+
+    pub fn claim(&self, unit: &str) -> Option<&Claim> {
+        self.live.get(unit)
     }
 
     pub fn len(&self) -> usize {
@@ -890,12 +1018,28 @@ pub struct Helper {
     pub ctx: Ctx,
     pub agent_uid: u32,
     pub rights: Vec<Right>,
+    /// The workload users, in config order.
+    pub pool: Vec<Identity>,
+    /// Re-checks a workload user before each session.
+    pub checker: Box<dyn WorkloadCheck>,
     pub systemd_run: PathBuf,
     pub systemctl: PathBuf,
     pub nvidia_smi: PathBuf,
+    /// `Ok` when `nvidia_smi` was verified root-owned at start. Otherwise
+    /// GPU sessions are refused with the reason.
+    pub gpu: Result<(), String>,
     pub nodes: Box<dyn DeviceNodes>,
     pub sessions: Mutex<Sessions>,
+    /// How long to wait for a unit to be inactive after its kill.
+    pub stop_timeout: Duration,
+    /// How often to try again for a stuck unit.
+    pub stop_retry: Duration,
 }
+
+/// The default [`Helper::stop_timeout`].
+pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// The default [`Helper::stop_retry`].
+pub const STOP_RETRY: Duration = Duration::from_secs(10);
 
 /// Run a command to its end with a timeout. The error holds the first
 /// line of stderr.
@@ -965,15 +1109,78 @@ impl Helper {
             unit.to_owned(),
         ];
         Box::pin(async move {
+            // A unit that is gone already fails here; the stop check after
+            // it decides.
             if let Err(e) = call(&bin, &args).await {
                 tracing::debug!(error = %e, "unit kill");
             }
         })
     }
 
-    /// Kill the units of an earlier run of the helper: their sessions
-    /// ended with it. Never another unit.
-    pub async fn kill_leftovers(&self) {
+    /// True when systemd reports the unit inactive, failed, or unknown.
+    async fn unit_stopped(&self, unit: &str) -> Result<bool, String> {
+        let state = call(
+            &self.systemctl,
+            &[
+                "show".to_owned(),
+                "--property=ActiveState".to_owned(),
+                "--value".to_owned(),
+                "--".to_owned(),
+                unit.to_owned(),
+            ],
+        )
+        .await?;
+        Ok(matches!(state.trim(), "inactive" | "failed" | ""))
+    }
+
+    /// SIGKILL the unit and wait until systemd reports it stopped, at most
+    /// `stop_timeout`.
+    pub async fn stop_confirmed(&self, unit: &str) -> bool {
+        let deadline = tokio::time::Instant::now() + self.stop_timeout;
+        loop {
+            self.kill_unit(unit, 9).await;
+            match self.unit_stopped(unit).await {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(e) => tracing::warn!(%unit, error = %e, "cannot read the unit state"),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Free a session's claim only after its unit is confirmed stopped.
+    /// Until then the claim stays, marked stuck, and a task tries again.
+    async fn finish(self: Arc<Self>, unit: String) {
+        if self.stop_confirmed(&unit).await {
+            self.sessions.lock().expect("sessions lock").end(&unit);
+            return;
+        }
+        tracing::warn!(%unit, timeout = ?self.stop_timeout, "the unit is not confirmed stopped; its GPUs stay unavailable and its UID stays held");
+        self.sessions
+            .lock()
+            .expect("sessions lock")
+            .mark_stuck(&unit);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(self.stop_retry).await;
+                if self.stop_confirmed(&unit).await {
+                    tracing::warn!(%unit, "the stuck unit is now stopped; its claim is free");
+                    self.sessions.lock().expect("sessions lock").end(&unit);
+                    return;
+                }
+                tracing::warn!(%unit, "the unit is still not confirmed stopped");
+            }
+        });
+    }
+
+    /// Stop the units of an earlier run of the helper: their sessions
+    /// ended with it. Never another unit. Fails closed: when the list
+    /// fails, or a unit is not confirmed stopped, the helper must not
+    /// serve, since a leftover could still hold a GPU.
+    pub async fn kill_leftovers(&self) -> Result<(), String> {
         let list = [
             "list-units",
             "--type=service",
@@ -986,10 +1193,16 @@ impl Helper {
         .into_iter()
         .chain([format!("{UNIT_PREFIX}*")])
         .collect::<Vec<_>>();
-        if let Ok(text) = call(&self.systemctl, &list).await {
-            for unit in parse_units(&text) {
-                tracing::warn!(%unit, "killing a session unit that an earlier run left");
-                self.kill_unit(&unit, 9).await;
+        let text = call(&self.systemctl, &list)
+            .await
+            .map_err(|e| format!("cannot list leftover session units: {e}"))?;
+        for unit in parse_units(&text) {
+            tracing::warn!(%unit, "stopping a session unit that an earlier run left");
+            if !self.stop_confirmed(&unit).await {
+                return Err(format!(
+                    "leftover session unit {unit} is not confirmed stopped after {:?}",
+                    self.stop_timeout
+                ));
             }
         }
         if let Ok(dir) = std::fs::read_dir(&self.ctx.state_dir) {
@@ -1000,6 +1213,7 @@ impl Helper {
                 }
             }
         }
+        Ok(())
     }
 
     /// Serve one connection.
@@ -1080,10 +1294,9 @@ impl Helper {
             }
         };
         let exit = self.clone().run(&req, &plan, rd, wr).await;
-        self.kill_unit(&plan.unit, 9).await;
         let _ = std::fs::remove_file(&plan.env_file);
-        self.sessions.lock().expect("sessions lock").end(&plan.unit);
         tracing::info!(unit = %plan.unit, ?exit, "session ended");
+        self.finish(plan.unit.clone()).await;
     }
 
     /// Plan, claim the GPUs, write the environment file, and set the slice
@@ -1093,6 +1306,12 @@ impl Helper {
         let inventory = if req.gpus.is_empty() {
             vec![]
         } else {
+            if let Err(e) = &self.gpu {
+                return Err(Refusal::new(
+                    ErrorKind::Unsupported,
+                    format!("GPU sessions are off on this helper: {e}"),
+                ));
+            }
             self.inventory().await?
         };
         #[allow(clippy::cast_possible_truncation)]
@@ -1101,11 +1320,23 @@ impl Helper {
             .map(|d| d.as_nanos() as u32)
             .unwrap_or_default()
             ^ std::process::id();
-        let plan = plan_start(&self.ctx, req, &inventory, self.nodes.as_ref(), nonce)?;
-        self.sessions
-            .lock()
-            .expect("sessions lock")
-            .admit(&plan.unit, plan.claim.clone())?;
+        let plan = {
+            let mut sessions = self.sessions.lock().expect("sessions lock");
+            let workload = sessions.pick(&req.holder, &self.pool)?;
+            self.checker
+                .check(&workload)
+                .map_err(|e| Refusal::new(ErrorKind::Unsupported, e))?;
+            let plan = plan_start(
+                &self.ctx,
+                req,
+                &inventory,
+                self.nodes.as_ref(),
+                nonce,
+                &workload,
+            )?;
+            sessions.admit(&plan.unit, plan.claim.clone())?;
+            plan
+        };
         let ready = async {
             write_private(&plan.env_file, plan.env.as_bytes())
                 .map_err(|e| Refusal::new(ErrorKind::Failed, format!("environment file: {e}")))?;
@@ -1120,7 +1351,7 @@ impl Helper {
             self.sessions.lock().expect("sessions lock").end(&plan.unit);
             return Err(r);
         }
-        tracing::info!(unit = %plan.unit, slice = %plan.slice, holder = %req.holder, lease = ?req.lease, gpus = ?req.gpus, "session start");
+        tracing::info!(unit = %plan.unit, slice = %plan.slice, holder = %req.holder, uid = plan.claim.uid, lease = ?req.lease, gpus = ?req.gpus, "session start");
         Ok(plan)
     }
 
@@ -1549,24 +1780,34 @@ pub async fn capability(socket: &Path) -> terrarium_core::protocol::NativeGpuCap
     }
 }
 
-/// Turn a plan into a shim call. The request goes in [`REQUEST_ENV`].
+/// The largest request that fits in [`REQUEST_ENV`]: Linux limits one
+/// environment string (`NAME=value`) to 128 KiB (`MAX_ARG_STRLEN`).
+pub const MAX_SHIM_REQUEST: usize = 128 * 1024 - REQUEST_ENV.len() - 2;
+
+/// Turn a plan into a shim call. The request goes in [`REQUEST_ENV`]. A
+/// request that does not fit is refused with its size, before a spawn
+/// would fail with `E2BIG`.
 pub fn shim_plan(
     opts: &NativeOptions,
     request: &Request,
     mut plan: crate::session::ExecPlan,
-) -> crate::session::ExecPlan {
+) -> Result<crate::session::ExecPlan, String> {
+    let text = serde_json::to_string(request).map_err(|e| e.to_string())?;
+    if text.len() > MAX_SHIM_REQUEST {
+        return Err(format!(
+            "the command and its environment are too large for a native session: {} bytes, the limit is {MAX_SHIM_REQUEST}",
+            text.len()
+        ));
+    }
     plan.program = opts.shim.to_string_lossy().into_owned();
     plan.args = vec![
         "native".into(),
         "--socket".into(),
         opts.socket.to_string_lossy().into_owned(),
     ];
-    plan.env = BTreeMap::from([(
-        REQUEST_ENV.to_owned(),
-        serde_json::to_string(request).unwrap_or_default(),
-    )]);
+    plan.env = BTreeMap::from([(REQUEST_ENV.to_owned(), text)]);
     plan.scope = None;
-    plan
+    Ok(plan)
 }
 
 /// Build the start request of an `exec` plan. `cwd` defaults to
@@ -1803,15 +2044,20 @@ pub fn parse_stty_size(text: &str) -> Option<(u16, u16)> {
 
 /// Ask the helper for one `apply` or `stop`, as a plan for the session
 /// runner: the shim exits 0 when the helper says ok.
-pub fn verb_plan(opts: &NativeOptions, request: &Request) -> crate::verb::VerbPlan {
-    crate::verb::VerbPlan::plain(shim_plan(
+pub fn verb_plan(
+    opts: &NativeOptions,
+    request: &Request,
+) -> Result<crate::verb::VerbPlan, crate::verb::BuildError> {
+    shim_plan(
         opts,
         request,
         crate::session::ExecPlan {
             timeout: Some(CALL_TIMEOUT * 2),
             ..Default::default()
         },
-    ))
+    )
+    .map(crate::verb::VerbPlan::plain)
+    .map_err(crate::verb::BuildError::bad)
 }
 
 #[cfg(test)]

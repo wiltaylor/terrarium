@@ -33,13 +33,14 @@ fn inventory() -> Vec<(String, u32)> {
     vec![(A.into(), 0), (B.into(), 1)]
 }
 
+const W: Identity = Identity {
+    name: String::new(),
+    uid: 2001,
+    gid: 2001,
+};
+
 fn ctx(root: &Path) -> Ctx {
     Ctx {
-        workload: Identity {
-            name: "terrarium-work".into(),
-            uid: 2001,
-            gid: 2001,
-        },
         workspace_root: std::fs::canonicalize(root).unwrap(),
         state_dir: "/run/terrarium-host-helper/sessions".into(),
         dev_dir: "/dev".into(),
@@ -126,13 +127,17 @@ fn requests_are_typed_and_refuse_unknown_fields() {
 
 #[test]
 fn config_needs_absolute_paths_and_distinct_users() {
-    let ok = "agent_user = \"terrarium\"\nworkload_user = \"terrarium-work\"\nworkspace_root = \"/work\"\nrights = [\"session\"]\n";
+    let ok = "agent_user = \"terrarium\"\nworkload_users = [\"terrarium-w1\", \"terrarium-w2\"]\nworkspace_root = \"/work\"\nrights = [\"session\"]\n";
     let cfg = HelperConfig::parse(ok).unwrap();
     assert_eq!(cfg.socket, PathBuf::from(DEFAULT_SOCKET));
     assert_eq!(cfg.rights, [Right::Session]);
     assert_eq!(cfg.gpu.support_nodes.len(), 3);
     assert!(HelperConfig::parse(&ok.replace("/work", "work")).is_err());
-    assert!(HelperConfig::parse(&ok.replace("terrarium-work", "terrarium")).is_err());
+    assert!(HelperConfig::parse(&ok.replace("terrarium-w2", "terrarium")).is_err());
+    assert!(HelperConfig::parse(&ok.replace("terrarium-w2", "terrarium-w1")).is_err());
+    assert!(
+        HelperConfig::parse(&ok.replace("[\"terrarium-w1\", \"terrarium-w2\"]", "[]")).is_err()
+    );
     assert!(HelperConfig::parse(&format!("{ok}systemctl = \"systemctl\"\n")).is_err());
     assert!(HelperConfig::parse(&format!("{ok}run_as_root = true\n")).is_err());
     assert!(HelperConfig::parse(&ok.replace("\"session\"", "\"quota\"")).is_err());
@@ -193,7 +198,7 @@ fn inventory_is_strict() {
 fn a_gpu_session_allows_only_its_gpu_and_the_support_nodes() {
     let root = tempfile::tempdir().unwrap();
     let ctx = ctx(root.path());
-    let plan = plan_start(&ctx, &request(root.path()), &inventory(), &nodes(), 0xab).unwrap();
+    let plan = plan_start(&ctx, &request(root.path()), &inventory(), &nodes(), 0xab, &W).unwrap();
     assert_eq!(plan.unit, "terrarium-native-7-000000ab.service");
     assert_eq!(plan.slice, "terrarium-box-terra-w\\x2d1.slice");
     let p = props(&plan.args);
@@ -247,7 +252,7 @@ fn a_session_without_gpus_gets_no_gpu_node() {
     req.exclusive_gpus.clear();
     req.pty = Some((24, 80));
     // No inventory and no device nodes needed.
-    let plan = plan_start(&ctx(root.path()), &req, &[], &FakeNodes(HashMap::new()), 1).unwrap();
+    let plan = plan_start(&ctx(root.path()), &req, &[], &FakeNodes(HashMap::new()), 1, &W).unwrap();
     let p = props(&plan.args);
     assert!(p.contains(&"DevicePolicy=closed"));
     assert_eq!(
@@ -271,7 +276,7 @@ fn limits_go_on_the_slice_from_typed_values_only() {
         cpus: Some(vec![2, 3]),
         ..Default::default()
     });
-    let plan = plan_start(&ctx(root.path()), &req, &inventory(), &nodes(), 1).unwrap();
+    let plan = plan_start(&ctx(root.path()), &req, &inventory(), &nodes(), 1, &W).unwrap();
     let a = plan.slice_args.unwrap();
     assert_eq!(
         &a[..4],
@@ -285,7 +290,7 @@ fn limits_go_on_the_slice_from_typed_values_only() {
         ..Default::default()
     });
     assert_eq!(
-        plan_start(&ctx(root.path()), &bad, &inventory(), &nodes(), 1)
+        plan_start(&ctx(root.path()), &bad, &inventory(), &nodes(), 1, &W)
             .unwrap_err()
             .code,
         ErrorKind::Invalid
@@ -441,7 +446,7 @@ fn unsafe_requests_are_refused() {
         ),
     ];
     for (what, req, code) in cases {
-        let e = plan_start(&ctx, &req, &inventory(), &nodes(), 1).unwrap_err();
+        let e = plan_start(&ctx, &req, &inventory(), &nodes(), 1, &W).unwrap_err();
         assert_eq!(e.code, code, "{what}: {e}");
     }
 }
@@ -453,25 +458,86 @@ fn device_nodes_must_match_the_inventory() {
     // The node of minor 0 is another device.
     let mut wrong = nodes();
     wrong.0.insert("/dev/nvidia0".into(), (195, 1));
-    let e = plan_start(&ctx(root.path()), &req, &inventory(), &wrong, 1).unwrap_err();
+    let e = plan_start(&ctx(root.path()), &req, &inventory(), &wrong, 1, &W).unwrap_err();
     assert_eq!(e.code, ErrorKind::Unsupported, "{e}");
     let mut other_major = nodes();
     other_major.0.insert("/dev/nvidia0".into(), (1, 0));
-    assert!(plan_start(&ctx(root.path()), &req, &inventory(), &other_major, 1).is_err());
+    assert!(plan_start(&ctx(root.path()), &req, &inventory(), &other_major, 1, &W).is_err());
     // A missing support node fails closed.
     let mut missing = nodes();
     missing.0.remove(Path::new("/dev/nvidia-uvm"));
-    let e = plan_start(&ctx(root.path()), &req, &inventory(), &missing, 1).unwrap_err();
+    let e = plan_start(&ctx(root.path()), &req, &inventory(), &missing, 1, &W).unwrap_err();
     assert_eq!(e.code, ErrorKind::Unsupported, "{e}");
 }
 
+/// A claim; the holder `p/a` has UID 2001, `p/b` 2002, and so on.
 fn claim(holder: &str, lease: Option<&str>, gpus: &[&str], exclusive: &[&str]) -> Claim {
     Claim {
         holder: holder.into(),
         lease: lease.map(str::to_owned),
         gpus: gpus.iter().map(|g| (*g).to_owned()).collect(),
         exclusive: exclusive.iter().map(|g| (*g).to_owned()).collect(),
+        uid: 2000 + u32::from(holder.as_bytes()[holder.len() - 1] - b'a' + 1),
+        stuck: false,
     }
+}
+
+fn pool(n: u32) -> Vec<Identity> {
+    (1..=n)
+        .map(|i| Identity {
+            name: format!("w{i}"),
+            uid: 2000 + i,
+            gid: 2000 + i,
+        })
+        .collect()
+}
+
+#[test]
+fn each_holder_gets_its_own_workload_user() {
+    let mut s = Sessions::default();
+    let pool = pool(2);
+    let a = s.pick("p/a", &pool).unwrap();
+    s.admit("u1", Claim { uid: a.uid, ..claim("p/a", None, &[], &[]) }).unwrap();
+    // The same holder keeps its UID; another holder gets another one.
+    assert_eq!(s.pick("p/a", &pool).unwrap(), a);
+    let b = s.pick("p/b", &pool).unwrap();
+    assert_ne!(b.uid, a.uid);
+    s.admit("u2", Claim { uid: b.uid, ..claim("p/b", None, &[], &[]) }).unwrap();
+    // The pool is used up: a third holder is refused with the reason.
+    let e = s.pick("p/c", &pool).unwrap_err();
+    assert_eq!(e.code, ErrorKind::Busy);
+    assert!(e.message.contains("no free workload user"), "{e}");
+    // A UID never serves two holders at once, even if the caller forges it.
+    let e = s
+        .admit("u3", Claim { uid: a.uid, ..claim("p/c", None, &[], &[]) })
+        .unwrap_err();
+    assert_eq!(e.code, ErrorKind::Forbidden);
+    // Once A's sessions ended, its UID is free for another holder.
+    s.end("u1");
+    assert_eq!(s.pick("p/c", &pool).unwrap(), a);
+}
+
+#[test]
+fn a_stuck_unit_keeps_its_gpu_and_its_uid() {
+    let mut s = Sessions::default();
+    let pool = pool(2);
+    s.admit("u1", claim("p/a", Some("L1"), &[A], &[A])).unwrap();
+    s.mark_stuck("u1");
+    assert!(s.claim("u1").unwrap().stuck);
+    // Even the same reservation cannot use the GPU of a stuck unit, nor a
+    // shared claim.
+    for (unit, c) in [
+        ("u2", claim("p/a", Some("L1"), &[A], &[A])),
+        ("u3", claim("p/b", None, &[A], &[])),
+    ] {
+        let e = s.admit(unit, c).unwrap_err();
+        assert_eq!(e.code, ErrorKind::Busy);
+        assert!(e.message.contains("not confirmed stopped"), "{e}");
+    }
+    // Its UID stays with p/a.
+    assert_eq!(s.pick("p/b", &pool).unwrap().uid, 2002);
+    s.end("u1");
+    s.admit("u3", claim("p/b", None, &[A], &[])).unwrap();
 }
 
 #[test]
@@ -494,13 +560,10 @@ fn an_exclusive_gpu_is_never_shared_across_reservations() {
             "{unit}"
         );
     }
-    // A forged holder on the live lease.
-    assert_eq!(
-        s.admit("u7", claim("p/b", Some("L1"), &[A], &[A]))
-            .unwrap_err()
-            .code,
-        ErrorKind::Forbidden
-    );
+    // Another agent on the same reservation (a target reservation is used
+    // by every agent of the target) shares the GPU, under its own UID.
+    s.admit("u7", claim("p/d", Some("L1"), &[A], &[A])).unwrap();
+    s.end("u7");
     // A disjoint GPU is free.
     s.admit("u8", claim("p/b", Some("L2"), &[B], &[B])).unwrap();
     // Capacity is not reassigned until every session of L1 ended.
@@ -548,6 +611,19 @@ fn small_parsers() {
         ["terrarium-native-7-000000ab.service"]
     );
     assert_eq!(env_line("A", "plain"), "A=\"plain\"\n");
+}
+
+#[test]
+fn trusted_paths_need_root_owned_parents() {
+    // This test runs as root on the build targets and as a user elsewhere:
+    // a temporary directory is never trusted (owner or a 1777 parent).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "").unwrap();
+    assert!(check_root_chain(&dir.path().join("config.toml")).is_err());
+    assert!(check_root_chain(&dir.path().join("missing")).is_err());
+    if Path::new("/usr/bin/env").exists() {
+        check_root_chain(Path::new("/usr/bin/env")).unwrap();
+    }
 }
 
 #[test]
@@ -601,7 +677,7 @@ fn an_exec_becomes_a_shim_call_with_the_request_in_the_environment() {
         socket: "/run/h.sock".into(),
         shim: "/usr/local/bin/terrarium-host".into(),
     };
-    let shim = shim_plan(&opts, &Request::Start(req.clone()), plan);
+    let shim = shim_plan(&opts, &Request::Start(req.clone()), plan.clone()).unwrap();
     assert_eq!(shim.program, "/usr/local/bin/terrarium-host");
     assert_eq!(shim.args, ["native", "--socket", "/run/h.sock"]);
     // The secret is not on the command line.
@@ -611,6 +687,12 @@ fn an_exec_becomes_a_shim_call_with_the_request_in_the_environment() {
         Request::Start(req)
     );
     assert!(shim.pty.is_some() && shim.scope.is_none());
+    // A request that does not fit in one environment string is refused.
+    let mut big = req.clone();
+    big.env
+        .insert("BIG".into(), "x".repeat(MAX_SHIM_REQUEST));
+    let e = shim_plan(&opts, &Request::Start(big), plan).unwrap_err();
+    assert!(e.contains("too large"), "{e}");
     // No limits and no reservation: no GPU, the operator's slice.
     let bare = start_request(
         &crate::session::ExecPlan::default(),

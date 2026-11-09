@@ -6527,7 +6527,11 @@ native host the request is a `409` that gives the helper's reason. SSH and
 vmlab exclusive GPU requests are refused, never granted as unenforced
 exclusive access. On a host with native enforcement, every command of a
 `host` target runs in a device policy with only its reservation's GPUs,
-and a command with no GPU reservation gets no GPU. Shared claims are supported for native host targets and
+and a command with no GPU reservation gets no GPU. When the host agent
+stops reporting enforcement while a native exclusive GPU reservation is
+managed on the host, every command of a `host` target on that host is a
+`409` that names the reservation and the reason, until enforcement is
+back or the reservation ended. Shared claims are supported for native host targets and
 managed ephemeral Docker targets. Docker reservations belong to the target,
 not individual agents. SSH and vmlab GPU reservations are unsupported.
 

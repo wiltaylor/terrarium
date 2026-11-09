@@ -1,18 +1,18 @@
 //! `terrarium-host-helper`: the root helper of native GPU enforcement
 //! (TER-345, docs/native-gpu-helper.md). It runs as a root systemd
 //! service and serves only the host agent's user on a Unix socket. It
-//! never runs a command as root: each session runs as the workload user,
-//! in a transient system service with a closed device policy.
+//! never runs a command as root: each session runs as its holder's user
+//! from the workload pool, in a transient system service with a closed
+//! device policy.
 
-use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use nix::unistd::{Group, User};
+use nix::unistd::User;
 use terrarium_host::native::{
-    self, Ctx, Helper, HelperConfig, HostDevices, Identity, MIN_SYSTEMD, Sessions,
+    self, Ctx, Helper, HelperConfig, HostDevices, HostWorkloadCheck, MIN_SYSTEMD, Sessions,
 };
 
 #[derive(Debug, Parser)]
@@ -26,15 +26,9 @@ struct Args {
     check: bool,
 }
 
-fn root_owned(path: &Path) -> anyhow::Result<()> {
-    let meta = std::fs::metadata(path).with_context(|| format!("{}", path.display()))?;
-    native::check_root_owned(path, &meta).map_err(anyhow::Error::msg)
-}
-
-fn user(name: &str) -> anyhow::Result<User> {
-    User::from_name(name)
-        .with_context(|| format!("look up user {name}"))?
-        .with_context(|| format!("no user {name}"))
+/// The path and every parent: root-owned, not writable by group or others.
+fn root_chain(path: &Path) -> anyhow::Result<()> {
+    native::check_root_chain(path).map_err(anyhow::Error::msg)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -49,41 +43,42 @@ fn main() -> anyhow::Result<()> {
     if !nix::unistd::geteuid().is_root() {
         bail!("terrarium-host-helper must run as root");
     }
-    root_owned(&args.config)?;
+    root_chain(&args.config)?;
     let text = std::fs::read_to_string(&args.config)
         .with_context(|| format!("read {}", args.config.display()))?;
     let cfg = HelperConfig::parse(&text).map_err(anyhow::Error::msg)?;
 
-    let agent = user(&cfg.agent_user)?;
-    let workload = user(&cfg.workload_user)?;
-    let id = Identity {
-        name: workload.name.clone(),
-        uid: workload.uid.as_raw(),
-        gid: workload.gid.as_raw(),
-    };
-    let cname = CString::new(workload.name.as_str()).context("workload user name")?;
-    let groups: Vec<(u32, String)> = nix::unistd::getgrouplist(&cname, workload.gid)
-        .context("groups of the workload user")?
-        .into_iter()
-        .map(|g| {
-            let name = Group::from_gid(g)
-                .ok()
-                .flatten()
-                .map(|g| g.name)
-                .unwrap_or_default();
-            (g.as_raw(), name)
-        })
-        .collect();
-    let linger = Path::new("/var/lib/systemd/linger")
-        .join(&workload.name)
-        .exists();
-    native::check_workload(agent.uid.as_raw(), &id, &groups, linger).map_err(anyhow::Error::msg)?;
+    let agent = User::from_name(&cfg.agent_user)
+        .with_context(|| format!("look up user {}", cfg.agent_user))?
+        .with_context(|| format!("no user {}", cfg.agent_user))?;
+    let agent_uid = agent.uid.as_raw();
+    let mut pool = Vec::new();
+    for name in &cfg.workload_users {
+        let (id, groups, linger) = native::resolve_user(name).map_err(anyhow::Error::msg)?;
+        native::check_workload(agent_uid, &id, &groups, linger).map_err(anyhow::Error::msg)?;
+        if pool
+            .iter()
+            .any(|w: &native::Identity| w.uid == id.uid || w.gid == id.gid)
+        {
+            bail!(
+                "workload user {name} shares its UID or primary group with another pool user; \
+                 each pool user needs its own UID and primary group"
+            );
+        }
+        pool.push(id);
+    }
 
     for bin in [&cfg.systemd_run, &cfg.systemctl] {
-        root_owned(bin)?;
+        root_chain(bin)?;
     }
-    if cfg.gpu.nvidia_smi.exists() {
-        root_owned(&cfg.gpu.nvidia_smi)?;
+    // GPU sessions need a verified nvidia-smi: the helper runs it as root.
+    let gpu = if cfg.gpu.nvidia_smi.exists() {
+        native::check_root_chain(&cfg.gpu.nvidia_smi)
+    } else {
+        Err(format!("{} is missing", cfg.gpu.nvidia_smi.display()))
+    };
+    if let Err(e) = &gpu {
+        tracing::warn!(error = %e, "GPU sessions are off");
     }
     let version = std::process::Command::new(&cfg.systemctl)
         .arg("--version")
@@ -99,46 +94,57 @@ fn main() -> anyhow::Result<()> {
         .socket
         .parent()
         .context("the socket needs a directory")?;
-    root_owned(socket_dir)?;
+    root_chain(socket_dir)?;
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("create {}", cfg.state_dir.display()))?;
     std::fs::set_permissions(
         &cfg.state_dir,
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
     )?;
-    root_owned(&cfg.state_dir)?;
+    root_chain(&cfg.state_dir)?;
     if args.check {
         println!(
-            "ok: agent uid {}, workload {} ({}:{}), workspace root {}, rights {:?}",
-            agent.uid,
-            id.name,
-            id.uid,
-            id.gid,
+            "ok: agent uid {agent_uid}, workload pool {:?}, workspace root {}, rights {:?}, GPU sessions {}",
+            pool.iter()
+                .map(|w| format!("{}={}", w.name, w.uid))
+                .collect::<Vec<_>>(),
             workspace_root.display(),
-            cfg.rights
+            cfg.rights,
+            match &gpu {
+                Ok(()) => "on".to_owned(),
+                Err(e) => format!("off ({e})"),
+            }
         );
         return Ok(());
     }
 
     let helper = Arc::new(Helper {
         ctx: Ctx {
-            workload: id,
             workspace_root,
             state_dir: cfg.state_dir.clone(),
             dev_dir: cfg.gpu.dev_dir.clone(),
             support_nodes: cfg.gpu.support_nodes.clone(),
         },
-        agent_uid: agent.uid.as_raw(),
+        agent_uid,
         rights: cfg.rights.clone(),
+        pool,
+        checker: Box::new(HostWorkloadCheck { agent_uid }),
         systemd_run: cfg.systemd_run.clone(),
         systemctl: cfg.systemctl.clone(),
         nvidia_smi: cfg.gpu.nvidia_smi.clone(),
+        gpu,
         nodes: Box::new(HostDevices),
         sessions: Mutex::new(Sessions::default()),
+        stop_timeout: native::STOP_TIMEOUT,
+        stop_retry: native::STOP_RETRY,
     });
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     rt.block_on(async move {
-        helper.kill_leftovers().await;
+        // Fail closed: never serve while a leftover unit may hold a GPU.
+        helper
+            .kill_leftovers()
+            .await
+            .map_err(anyhow::Error::msg)?;
         let listener = native::bind(&cfg.socket, helper.agent_uid)
             .with_context(|| format!("bind {}", cfg.socket.display()))?;
         tracing::info!(socket = %cfg.socket.display(), rights = ?cfg.rights, "serving");

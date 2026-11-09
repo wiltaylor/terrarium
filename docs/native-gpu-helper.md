@@ -27,8 +27,20 @@ installed and `[native_gpu] enabled = true`:
   at the same time. The helper refuses a session while another
   reservation's session still runs on that GPU (`busy`), so capacity is
   not handed on while an old process can still hold a device handle.
+- Each holder's sessions run under that holder's own workload UID from a
+  root-configured pool (lead decision Q2, revised after the security
+  review). A session of holder B cannot ptrace, `pidfd_getfd`,
+  `process_vm_writev`, read `/proc/<pid>/mem`, or signal a session of
+  holder A, so it cannot borrow A's open GPU handles: the kernel checks
+  the UID for each of these.
 - A native session cannot reach the helper, the host agent's user bus, or
-  the Docker socket: it runs as a separate workload user.
+  the Docker socket.
+- The claim of a session is freed only after systemd confirms its unit
+  stopped. A unit that is not confirmed stopped keeps its GPUs unavailable
+  to everyone and its UID with its holder, and the helper tries again.
+- When enforcement is lost while a native exclusive GPU reservation is
+  managed on the host, the daemon refuses every `host` target command on
+  that host (fail closed), instead of running it without device policy.
 
 Not covered: processes that Terrarium did not start (an operator login, a
 non-Terrarium service). The daemon never calls a native reservation
@@ -41,7 +53,7 @@ follow-up card (Q4 is the operator's decision).
 daemon --exec{limits.native_gpu}--> host agent (agent user)
            host agent --spawn--> terrarium-host native (shim, agent user)
                   shim --Unix socket, framed--> terrarium-host-helper (root)
-                         helper --> systemd-run --system --uid=<workload> \
+                         helper --> systemd-run --system --uid=<holder's pool UID> \
                                     -p DevicePolicy=closed -p DeviceAllow=/dev/nvidia<N> rw ...
 ```
 
@@ -64,11 +76,17 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   - the slice limits: only from typed `RuntimeLimits`
     (`crate::limits::reservation_properties`);
   - the working directory: resolved by root, under `workspace_root`, no
-    `%`, no control characters.
+    `%`, no control characters;
+  - the user: the holder's UID from `workload_users`. A holder keeps its
+    UID while it has a live (or stuck) session; a UID never serves two
+    holders at once; with no free UID the session is refused (`busy`, "no
+    free workload user"). Before each session the helper looks the user up
+    again and checks its groups and linger, so a later `usermod` or
+    `loginctl enable-linger` does not reach a new session.
 - **The session** is a transient system service, not a scope: systemd sets
   the user, the groups, and the device policy before `exec`, and
   `KillMode=control-group` ends every descendant with the main process.
-  Properties: `--uid`/`--gid` of the workload user, `NoNewPrivileges=yes`,
+  Properties: `--uid`/`--gid` of the holder's workload user, `NoNewPrivileges=yes`,
   `CapabilityBoundingSet=`, `AmbientCapabilities=`, `RestrictSUIDSGID=yes`,
   `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
   each granted GPU and support node, `--expand-environment=no`. The
@@ -82,6 +100,23 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   A PTY session gets its own PTY in the helper (`systemd-run --pty`); the
   shim puts the outer one in raw mode. A kill of the session kills the
   shim, the helper sees the end of the connection and kills the unit.
+  The request must fit in one environment string: a command and
+  environment over 128 KiB of JSON is refused by the host agent with its
+  size (Linux `MAX_ARG_STRLEN`). A session that a signal ended exits with
+  code 128 + N through the shim (the `exit` frame then has a code, not a
+  signal), as a shell reports it.
+- **Stop confirmation**: when `systemd-run` ends, the helper sends SIGKILL
+  to the unit and waits, at most 30 s, until `systemctl show
+  --property=ActiveState` reports it inactive, failed, or unknown. Only then
+  is the claim freed. Otherwise it logs a warning, keeps the claim marked
+  stuck, and checks again every 10 s.
+- **Start**: the helper stops the `terrarium-native-*.service` units of an
+  earlier run before it serves, and waits until each is inactive. When the
+  list fails or a unit does not stop, it exits (fail closed). It checks
+  that the config, the binaries, the socket directory, and the state
+  directory, and every parent of each, are owned by root and not writable
+  by group or others. GPU sessions need `nvidia_smi` verified the same way
+  at start; otherwise they are refused with the reason.
 - **Rights** (separate per operation): the config lists the rights of the
   agent user. `session` covers `apply`, `stop`, and `start`. With no right,
   only `hello` answers. The disk quota operations of TER-251 get their own
@@ -106,10 +141,19 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   exclusive UUIDs, and its GPUs in `reservation.gpu_devices`. A command
   with no reservation still gets `native_gpu` with no GPU. On any other
   host the field is dropped.
-- `resource.apply` and `resource.stop` of a native holder go to the
-  helper's `apply` and `stop`, so CPU isolation and the cleanup at the end
-  of a reservation reach the system slices. `stop` waits for the units to
-  stop: the daemon keeps the reservation `ending` until then.
+- Fail closed (`reservations.rs`, `native_gpu_admission`): while a managed
+  exclusive GPU reservation of a native `host` target is on the host and
+  the host agent does not report `native_gpu.enforced` (the helper is down,
+  has another version, `[native_gpu]` is off, or the agent is older),
+  every `host` target command on that host is a `409` that names the
+  reservation and the reason. Any native process there could open the
+  reserved GPU. Docker targets keep their create-time allowlist.
+- `resource.apply` and `resource.stop` go to the helper's `apply` and
+  `stop` when the helper answered with enforcement at the last `hello`,
+  and to the user slices otherwise. The host agent routes by that answer,
+  not by its config, so a host agent whose helper is down keeps managing
+  the user slices where its sessions then run. `stop` waits for the units
+  to stop: the daemon keeps the reservation `ending` until then.
 
 ### Attribution
 
@@ -124,12 +168,13 @@ only; unknown and failed samples stay unknown. Monitoring never enforces.
 
 | Party | Identity | Can |
 | --- | --- | --- |
-| helper | root | start a unit as the workload user, set and stop Terrarium slices, read GPU inventory |
+| helper | root | start a unit as a pool user, set and stop Terrarium slices, read GPU inventory |
 | host agent | agent user | call the helper with the rights in its config |
-| session | workload user | use its granted GPUs, its workspace, nothing of the helper |
+| session | its holder's pool user | use its granted GPUs, its workspace, nothing of the helper or of another holder's sessions |
 
 What a caller with the agent UID can do through the helper: start any
-command, but only as the workload user (never root, never the agent user),
+command, but only as a pool user (never root, never the agent user, never
+a UID that another holder's live session uses),
 only in a closed device policy, only with GPUs from the live inventory,
 only in a working directory under `workspace_root`, and set or stop slices
 whose names the helper derives. It cannot pass properties, units, paths,
@@ -140,9 +185,13 @@ other than the GPUs and their support nodes.
 Negative tests (`crates/terrarium-host/src/native/tests.rs`,
 `crates/terrarium-host/tests/native_helper.rs`): a caller with another UID,
 a missing right, an old protocol version, unknown fields (a smuggled
-property, unit, or slice), a forged holder on a live lease, a second
-reservation on an exclusive GPU, a session without a grant on an exclusive
-GPU, a stale lease of the same holder, a working directory outside the root
+property, unit, or slice), a UID of another holder, a used-up pool, a
+second reservation on an exclusive GPU, a session without a grant on an
+exclusive GPU, a stale lease of the same holder, the GPU of a unit that is
+not confirmed stopped, leftover units that do not stop or cannot be listed,
+a workload user that changed since the start, GPU sessions without a
+verified `nvidia-smi`, a trusted path with a writable parent, a working
+directory outside the root
 (directly or by a symlink), `%` in a path, control characters, NUL in argv,
 bad environment names and newlines in values, unknown GPUs, device nodes
 that do not match the inventory, missing support nodes, and `stop` of a
@@ -150,12 +199,30 @@ shared parent slice.
 
 Known limits:
 
-- One workload UID for all holders (lead decision Q2). Two holders'
-  sessions can signal or read each other's processes. One UID per holder
-  is a follow-up if the security review asks for it.
-- File ownership: sessions write the workspace as the workload user. The
+- Holder means the `holder` of the command (the agent, or `operator`).
+  Several agents that use one target's reservation share its GPUs, each
+  under its own UID. The pool needs as many users as holders that run
+  native sessions at one time on the host.
+- File ownership: sessions write the workspace as their pool user. The
   workspace root needs a shared group with the setgid bit, or ACLs, so the
-  host agent and the sessions can both write (install step 4).
+  host agent and the sessions can both write (install step 4). Holders can
+  then read and write each other's workspaces through that group, as with
+  the host agent today; only processes are separated.
+- **The agent user must never run content from the workspace** (scripts,
+  hooks, binaries, git configuration it does not control). Sessions can
+  write there, and the agent UID is the helper's trusted caller. Today
+  git's `safe.directory` owner check covers the host agent's own git calls
+  under `instances_dir`.
+- On an enforced host, every `host` target command runs as a pool user,
+  also daemon-internal ones (target root probes, workspace sync, monitors,
+  pipelines). Its working directory must be under `workspace_root`: a
+  `cwd` that `allowed_cwd_roots` permits outside it, or no `cwd` while
+  `work_dir` is outside it, fails with exit code 125 and the reason.
+- A helper that goes away between two `hello`s makes each native command
+  fail with exit code 125 until the next reconnect reports the loss; the
+  daemon then refuses host commands while a native exclusive GPU
+  reservation is managed, and the host agent manages the user slices
+  again.
 - A native session no longer inherits the host agent's environment: it
   gets systemd's service environment plus the command's `env`.
 - Removing a device from a policy does not revoke an open handle. The
@@ -176,14 +243,18 @@ not run it on a shared target or a DGX Spark without that decision.
    `/dev/nvidia-uvm`, and `/dev/nvidia-uvm-tools` present at boot
    (`nvidia-modprobe -u -c=0` from a boot unit, or `modprobe nvidia-uvm`).
    No MIG.
-2. **The workload user**: a system user that is not the agent user, has
-   no login, no linger, and none of the groups `root wheel sudo admin adm
-   docker libvirt lxd incus-admin disk kvm systemd-journal`. The helper
-   refuses to start otherwise.
+2. **The workload pool**: one system user for each holder that may run
+   native sessions at the same time (for example four). Each has its own
+   UID and its own primary group, is not the agent user, has no login, no
+   linger, and none of the groups `root wheel sudo admin adm docker libvirt
+   lxd incus-admin disk kvm systemd-journal`. The helper refuses to start
+   otherwise, and checks the groups and linger again before each session.
 
    ```sh
-   useradd --system --no-create-home --shell /usr/sbin/nologin terrarium-work
-   loginctl disable-linger terrarium-work
+   for i in 1 2 3 4; do
+     useradd --system --user-group --no-create-home --shell /usr/sbin/nologin terrarium-w$i
+     loginctl disable-linger terrarium-w$i
+   done
    ```
 
 3. **The binary**, root-owned:
@@ -198,19 +269,19 @@ not run it on a shared target or a DGX Spark without that decision.
    ```sh
    groupadd terrarium-ws
    usermod -aG terrarium-ws <agent user>
-   usermod -aG terrarium-ws terrarium-work
+   for i in 1 2 3 4; do usermod -aG terrarium-ws terrarium-w$i; done
    chgrp -R terrarium-ws /srv/terrarium/work
    chmod -R g+rwX /srv/terrarium/work
    find /srv/terrarium/work -type d -exec chmod g+s {} +
    ```
 
 5. **The config** `/etc/terrarium-host-helper/config.toml`, owned by root,
-   mode 0644 or stricter (the helper refuses a file that group or others
-   can write):
+   mode 0644 or stricter, in directories owned by root and not writable by
+   group or others (the helper checks the file and each parent):
 
    ```toml
    agent_user = "terrarium"              # the host agent's user
-   workload_user = "terrarium-work"
+   workload_users = ["terrarium-w1", "terrarium-w2", "terrarium-w3", "terrarium-w4"]
    workspace_root = "/srv/terrarium/work"
    rights = ["session"]
    # socket = "/run/terrarium-host-helper/helper.sock"
@@ -261,8 +332,10 @@ not run it on a shared target or a DGX Spark without that decision.
    `enforced: true`, the daemon accepts exclusive GPU claims on native
    `host` targets of this host.
 
-**Turning it off**: set `[native_gpu] enabled = false` and restart the
+**Turning it off**: end or retract the native exclusive GPU reservations
+of the host first. Then set `[native_gpu] enabled = false` and restart the
 host agent. The daemon then refuses new native exclusive GPU claims on the
-host. Running units end with their sessions. `systemctl disable --now
+host; while one is still managed, it refuses the host's `host` target
+commands (fail closed). Running units end with their sessions. `systemctl disable --now
 terrarium-host-helper` removes the helper; on its next start it kills the
 units that an earlier run left (`terrarium-native-*` only).
