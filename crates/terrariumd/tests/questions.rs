@@ -1275,7 +1275,7 @@ async fn project_counts_give_blocked_cards_and_open_questions() {
     ask(&td, &lead, json!({"text": "Urgent?", "priority": "urgent"})).await;
     ask(
         &td,
-        &worker,
+        &lead,
         json!({"kind": "bundle", "text": "Choices", "priority": "critical",
             "items": [{"text": "A?"}, {"text": "B?"}]}),
     )
