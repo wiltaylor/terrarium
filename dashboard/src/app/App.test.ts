@@ -144,6 +144,7 @@ describe("App project routes", () => {
     await vi.waitFor(() => expect(root.textContent).toContain("Cards page"));
     expect(root.querySelector("h1")?.textContent).toBe("a%zz");
     expect(root.querySelector("h2")?.textContent).toBe("Board · a%zz");
+    expect(window.location.pathname).toBe("/p/a%25zz/board");
     expect(root.textContent).not.toContain("Page not found.");
   });
 });

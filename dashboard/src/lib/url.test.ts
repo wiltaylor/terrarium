@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodePath, decodePathParam, projectBase } from "./url";
+import { decodePath, decodePathParam, escapeMalformedPath, projectBase } from "./url";
 
 describe("project route URLs", () => {
   it("decodes the title value and encodes the project base once", () => {
@@ -12,5 +12,7 @@ describe("project route URLs", () => {
     expect(decodePathParam("a%zz")).toBe("a%zz");
     expect(decodePath("/p/a%zz/board")).toBe("/p/a%zz/board");
     expect(projectBase("a%zz")).toBe("/p/a%25zz");
+    expect(escapeMalformedPath("/p/a%zz/board")).toBe("/p/a%25zz/board");
+    expect(escapeMalformedPath("/p/my%20app/board")).toBe("/p/my%20app/board");
   });
 });

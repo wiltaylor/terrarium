@@ -16,5 +16,15 @@ export function decodePath(value: string): string {
   }
 }
 
+/** Make a malformed browser path safe for the router, preserving its raw text. */
+export function escapeMalformedPath(value: string): string {
+  try {
+    decodeURI(value);
+    return value;
+  } catch {
+    return value.replaceAll("%", "%25");
+  }
+}
+
 /** The encoded base URL of a project route parameter. */
 export const projectBase = (project: string): string => `/p/${encodeURIComponent(decodePathParam(project))}`;
