@@ -18,8 +18,17 @@ use terrariumd::{DaemonConfig, start_with_usage};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+fn main() -> anyhow::Result<()> {
+    // A script child of the board rules (TER-173): no runtime, no logs,
+    // no settings. It sets its own limits and runs one script.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(terrariumd::rule_script::CHILD_ARG)) {
+        std::process::exit(terrariumd::rule_script::child_main());
+    }
+    daemon_main()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn daemon_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
