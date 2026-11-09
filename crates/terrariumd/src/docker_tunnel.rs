@@ -9,6 +9,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
+use tracing::{info, warn};
 
 use crate::api::Shared;
 use crate::error::{ApiError, ApiResult};
@@ -18,31 +19,79 @@ use terrarium_core::config::{DockerCiDef, TargetDef};
 
 const RELAY: &str = include_str!("docker_relay.py");
 
+/// The env name of the job socket in the recipe. Not `DOCKER_HOST`: on a
+/// `docker` target the host agent runs `docker exec -e <name>`, and the
+/// host's own docker CLI reads `DOCKER_HOST` from that env, so it dialed
+/// the in-container relay path on the host and the recipe never started
+/// (TER-477). `scripts/docker_ci.py` sets `DOCKER_HOST` inside the gate.
+pub const ENDPOINT_ENV: &str = "TERRARIUM_DOCKER_HOST";
+
+/// Time for one reset call. Resets take up to about 60 s under load.
+const RESET_TIMEOUT: Duration = Duration::from_secs(180);
+/// Time for the VM's Docker daemon to answer through the tunnel after a reset.
+const PING_DEADLINE: Duration = Duration::from_secs(90);
+
 /// META-104 forced command. No recipe code or remote command is involved.
 pub async fn reset(state: &Shared, key: &str, config: &DockerCiDef) -> ApiResult<()> {
     let dir = RunDirs::new(&state.state_dir).run_dir()?;
     let identity = dir.write_private("reset-identity", key.as_bytes())?;
     let hosts = dir.write_private("reset_known_hosts", config.reset_known_hosts.as_bytes())?;
     for attempt in 0..3 {
-        let mut child = tokio::process::Command::new(&state.executor.ssh_bin)
+        info!(
+            destination = %config.reset_destination,
+            attempt = attempt + 1,
+            "docker ci: reset start"
+        );
+        let started = std::time::Instant::now();
+        let child = tokio::process::Command::new(&state.executor.ssh_bin)
             .args(reset_args(&identity, &hosts, config))
             .env_remove("SSH_AUTH_SOCK")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| ApiError::internal("cannot start daemon Docker CI reset"))?;
-        let status = tokio::time::timeout(Duration::from_secs(150), child.wait())
-            .await
-            .map_err(|_| ApiError::conflict("Docker CI reset timed out; tunnel not opened"))?
-            .map_err(|_| ApiError::internal("cannot wait for Docker CI reset"))?;
-        if status.code() != Some(75) || attempt == 2 {
-            return reset_status(status.code());
+        let Ok(output) = tokio::time::timeout(RESET_TIMEOUT, child.wait_with_output()).await
+        else {
+            warn!(
+                secs = RESET_TIMEOUT.as_secs(),
+                "docker ci: reset timed out; tunnel not opened"
+            );
+            return Err(ApiError::conflict(
+                "Docker CI reset timed out; tunnel not opened",
+            ));
+        };
+        let output = output.map_err(|_| ApiError::internal("cannot wait for Docker CI reset"))?;
+        let code = output.status.code();
+        let line = last_line(&output.stdout);
+        let secs = started.elapsed().as_secs();
+        if code == Some(0) {
+            info!(?code, secs, stdout = %line, "docker ci: reset done");
+        } else {
+            warn!(?code, secs, stdout = %line, "docker ci: reset failed");
+        }
+        if code != Some(75) || attempt == 2 {
+            return reset_status(code);
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     unreachable!("reset loop always returns")
+}
+
+/// The last non-empty line of the reset output, bounded and printable.
+/// reset.sh prints one result line and no key material (ops2).
+fn last_line(stdout: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stdout);
+    let line = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    line.chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect()
 }
 
 fn reset_args(
@@ -190,9 +239,23 @@ pub async fn open(
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     };
-    tokio::time::timeout(Duration::from_secs(15), ready)
+    let up = tokio::time::timeout(Duration::from_secs(15), ready)
         .await
-        .map_err(|_| ApiError::conflict("Docker SSH tunnel did not become ready"))??;
+        .map_err(|_| ApiError::conflict("Docker SSH tunnel did not become ready"))
+        .and_then(|r| r);
+    if let Err(e) = up {
+        warn!(destination = %config.destination, "docker ci: tunnel failed: {}", e.message);
+        return Err(e);
+    }
+    // A bound forward is not a Docker daemon that answers: right after a
+    // reset the VM's dockerd can still be starting. The recipe starts only
+    // after a `/_ping` through the tunnel returned 200.
+    if let Err(e) = wait_for_ping(&socket, &mut ssh, PING_DEADLINE).await {
+        warn!(destination = %config.destination, "docker ci: tunnel failed: {}", e.message);
+        let _ = ssh.kill().await;
+        return Err(e);
+    }
+    info!(destination = %config.destination, "docker ci: tunnel up, Docker answers /_ping");
     let target_dir = format!("{work_dir}/.git/terrarium/d-{}", ulid::Ulid::new());
     let cmd = RemoteCmd {
         argv: vec![
@@ -225,11 +288,80 @@ pub async fn open(
         let _ = tunnel.relay.send(Control::Kill);
         tunnel.task.abort();
         let _ = tunnel.ssh.kill().await;
+        warn!(target = %target.name, "docker ci: relay failed: the target relay did not become ready");
         return Err(ApiError::conflict(
             "Docker target relay did not become ready",
         ));
     }
+    info!(target = %target.name, socket = %format!("{target_dir}/docker.sock"), "docker ci: relay socket created");
     Ok(tunnel)
+}
+
+/// Retry `GET /_ping` on the daemon-side forward until Docker answers 200,
+/// the SSH client ends, or `deadline` passes.
+async fn wait_for_ping(
+    socket: &std::path::Path,
+    ssh: &mut tokio::process::Child,
+    deadline: Duration,
+) -> ApiResult<()> {
+    let end = tokio::time::Instant::now() + deadline;
+    loop {
+        if matches!(ping(socket).await, Ok(true)) {
+            return Ok(());
+        }
+        if ssh
+            .try_wait()
+            .map_err(|_| ApiError::internal("cannot check Docker SSH tunnel"))?
+            .is_some()
+        {
+            return Err(ApiError::conflict(
+                "Docker SSH tunnel ended before Docker answered /_ping",
+            ));
+        }
+        if tokio::time::Instant::now() >= end {
+            return Err(ApiError::conflict(format!(
+                "Docker did not answer /_ping through the tunnel in {} s",
+                deadline.as_secs()
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// One Docker `/_ping` over a Unix socket: true on an HTTP 200 answer.
+async fn ping(socket: &std::path::Path) -> std::io::Result<bool> {
+    let attempt = async {
+        let mut stream = tokio::net::UnixStream::connect(socket).await?;
+        stream
+            .write_all(b"GET /_ping HTTP/1.0\r\nHost: docker\r\n\r\n")
+            .await?;
+        let mut answer = Vec::new();
+        let mut chunk = [0; 512];
+        while answer.len() < 4096 {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            answer.extend_from_slice(&chunk[..n]);
+            if answer.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        Ok(ping_ok(&answer))
+    };
+    tokio::time::timeout(Duration::from_secs(5), attempt)
+        .await
+        .unwrap_or(Ok(false))
+}
+
+fn ping_ok(answer: &[u8]) -> bool {
+    let status = answer.split(|b| *b == b'\n').next().unwrap_or_default();
+    let status = String::from_utf8_lossy(status);
+    let mut parts = status.split_whitespace();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(v), Some("200")) if v.starts_with("HTTP/1.")
+    )
 }
 
 fn send(ctl: &mpsc::UnboundedSender<Control>, event: Value) -> bool {
@@ -385,6 +517,59 @@ mod tests {
         for code in [Some(1), Some(75), None] {
             assert!(reset_status(code).is_err());
         }
+    }
+
+    #[test]
+    fn ping_needs_an_http_200_and_reset_line_is_bounded() {
+        assert!(ping_ok(b"HTTP/1.1 200 OK\r\nApi-Version: 1.47\r\n\r\nOK"));
+        assert!(ping_ok(b"HTTP/1.0 200 OK\r\n\r\n"));
+        assert!(!ping_ok(b"HTTP/1.1 500 Internal Server Error\r\n\r\n"));
+        assert!(!ping_ok(b""));
+        assert!(!ping_ok(b"garbage 200"));
+        assert_eq!(last_line(b"booting\nreset ok rc=0 secs=21\n\n"), "reset ok rc=0 secs=21");
+        assert_eq!(last_line(b""), "");
+        assert_eq!(last_line(&[b'x'; 500]).len(), 200);
+        assert_eq!(last_line(b"a\x1b[31mb\n"), "a[31mb");
+    }
+
+    #[tokio::test]
+    async fn ping_waits_until_docker_answers_through_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docker.sock");
+        // Nothing listens yet: no answer, so the recipe must not start.
+        assert!(!ping(&path).await.unwrap_or(false));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            // First connection: closed without an answer (dockerd not up).
+            drop(listener.accept().await.unwrap());
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 256];
+            let n = socket.read(&mut request).await.unwrap();
+            assert!(request[..n].starts_with(b"GET /_ping HTTP/1.0\r\n"));
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .await
+                .unwrap();
+        });
+        let mut ssh = tokio::process::Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        wait_for_ping(&path, &mut ssh, Duration::from_secs(10))
+            .await
+            .unwrap();
+        server.await.unwrap();
+        // A tunnel whose SSH client ended fails, it does not wait the deadline.
+        let mut gone = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = gone.wait().await;
+        let started = std::time::Instant::now();
+        let err = wait_for_ping(&path, &mut gone, Duration::from_secs(30))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("ended"), "{}", err.message);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let _ = ssh.kill().await;
     }
 
     #[tokio::test]

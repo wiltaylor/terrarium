@@ -11941,8 +11941,15 @@ The daemon pins the Docker VM's public host key and owns its SSH local
 forward. Trusted relay code embedded in the daemon release, never read
 from the merged branch, creates a 0600 Unix socket in a job-private
 directory on the target. Docker byte streams travel over its executor
-session to the daemon's SSH forward. The recipe gets only
-`DOCKER_HOST=unix://<job socket>`. Teardown closes the relay, socket, and
+session to the daemon's SSH forward. The daemon starts the relay only after
+a Docker `GET /_ping` through its forward returned 200 (it retries for up to
+90 seconds after the reset). The recipe gets only
+`TERRARIUM_DOCKER_HOST=unix://<job socket>`, not `DOCKER_HOST`: on a
+`docker` target the host agent's own `docker exec` client would read
+`DOCKER_HOST` (TER-477). The gate script sets `DOCKER_HOST` from it when
+`TERRARIUM_DOCKER_CI=1`. The daemon logs the reset start and result (exit
+code and the last stdout line), the tunnel up or its failure, and the relay
+socket path. Teardown closes the relay, socket, and
 SSH child on success or failure. Other processes sharing the target OS
 account can reach that socket during the job. This is an accepted risk:
 it grants Docker control of the throwaway VM, not access to its SSH key.
@@ -11950,7 +11957,7 @@ Before opening the tunnel the daemon calls META-104's forced-command SSH
 reset as `dockerci@10.3.0.2` on port 22, with the second job-only key and
 strict checking against configured `reset_known_hosts` in its private RunDir.
 It sends no remote command. Exit 0 permits the tunnel, exit 1 fails, exit
-75 reports the reset lock busy, and a 150-second timeout fails closed.
+75 reports the reset lock busy, and a 180-second timeout per attempt fails closed.
 Both keys remain daemon-side. The VM's LAN and Tailscale egress is blocked
 outside the VM by vmlab switch rules, so branch code cannot undo it.
 The generic stream relay
