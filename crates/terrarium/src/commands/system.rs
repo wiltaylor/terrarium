@@ -891,7 +891,7 @@ pub async fn links(ctx: &Ctx, cmd: &LinkCmd) -> anyhow::Result<()> {
             ctx.emit(&v, |c, v| {
                 print_table(
                     c,
-                    &as_items(v),
+                    as_items(v),
                     &[
                         ("ID", "id"),
                         ("LABEL", "label"),

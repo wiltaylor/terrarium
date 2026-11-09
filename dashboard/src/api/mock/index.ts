@@ -37,6 +37,8 @@ import { mockChanges, mockCommit, mockCommits, mockFile, mockList, mockTrees } f
 import type { Question, Thread, ThreadLink } from "../types";
 import type {
   Agent,
+  Link,
+  NewLinkCode,
   QueuedTurn,
   AgentDef,
   Harness,
@@ -4178,6 +4180,72 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
               audit("agent.unpin", id, w.agents.find((x) => x.id === id)?.project, { owner: "operator" });
             }
             return pinList();
+          }),
+      };
+    })(),
+
+    // docs/api.md §36: link keys. The mock keeps no key; a pairing never happens here.
+    links: (() => {
+      const links: Link[] = [];
+      const code = (link: Link): NewLinkCode => {
+        const expires = new Date(now() + 10 * 60_000).toISOString();
+        link.pair_expires_at = expires;
+        return {
+          link: { ...link },
+          code: `tlp_${ulid("code").toLowerCase()}`,
+          code_expires_at: expires,
+          instance: { id: "01MOCKINSTANCE00000000000000", name: "mock", version: "0.0.0" },
+          url: MOCK_PUBLIC_URL,
+        };
+      };
+      const find = (id: string) => {
+        const l = links.find((x) => x.id === id && x.status !== "revoked");
+        if (!l) fail(404, "not_found", `no link \`${id}\``);
+        return l;
+      };
+      return {
+        list: (o = {}) => reply(() => links.filter((l) => o.revoked || l.status !== "revoked").map((l) => ({ ...l })).reverse()),
+        create: (label, o = {}) =>
+          reply(() => {
+            const t = label.trim();
+            if (!t || t.length > 64) fail(422, "invalid", "a link label has 1 to 64 characters");
+            const link: Link = {
+              id: ulid("link"),
+              label: t,
+              read_only: !!o.readOnly,
+              status: "pending",
+              home_instance_id: null,
+              home_name: null,
+              paired_at: null,
+              paired_from: null,
+              created_by: "operator",
+              created_at: iso(),
+              rotated_at: null,
+              first_used_at: null,
+              last_used_at: null,
+              last_used_from: null,
+              pair_expires_at: null,
+              revoked_at: null,
+            };
+            links.push(link);
+            audit("link.new", link.id, undefined, { label: t, read_only: link.read_only });
+            return code(link);
+          }),
+        rotate: (id) =>
+          reply(() => {
+            const l = find(id);
+            l.status = "pending";
+            l.rotated_at = iso();
+            audit("link.rotate", id, undefined, { label: l.label });
+            return code(l);
+          }),
+        revoke: (id) =>
+          reply(() => {
+            const l = find(id);
+            l.status = "revoked";
+            l.revoked_at = iso();
+            l.pair_expires_at = null;
+            audit("link.revoke", id, undefined, { label: l.label, by_self: false });
           }),
       };
     })(),
