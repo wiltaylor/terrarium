@@ -445,18 +445,22 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     opts.vmlab_bin = cfg.vmlab_bin.clone();
     opts.git_bin = cfg.git_bin.clone();
     opts.paths = cfg.paths();
-    // Env files that a crash left behind hold command env values.
-    match terrarium_host::session::remove_private_files(
-        &opts.env_dir,
-        terrarium_host::docker::ENV_FILE_PREFIX,
-    ) {
+    // Env files that a crash left behind hold command env values. Check
+    // the dir once here, so a bad one is one clear error at the start.
+    let env_dir = &opts.env_dir;
+    match terrarium_host::session::private_dir(env_dir).and_then(|()| {
+        terrarium_host::session::remove_private_files(
+            env_dir,
+            terrarium_host::docker::ENV_FILE_PREFIX,
+        )
+    }) {
         Ok(0) => {}
-        Ok(n) => {
-            tracing::info!(n, dir = %opts.env_dir.display(), "removed leftover docker env files")
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, dir = %opts.env_dir.display(), "cannot clean the docker env files")
-        }
+        Ok(n) => tracing::info!(n, dir = %env_dir.display(), "removed leftover docker env files"),
+        Err(e) => tracing::error!(
+            error = %e,
+            dir = %env_dir.display(),
+            "the docker env dir is not usable: docker verbs with env will fail"
+        ),
     }
     opts.max_running_targets = cfg.max_running_targets;
     tracing::info!(work_dir = %opts.paths.work_dir.display(), instances_dir = %opts.paths.instances_dir.display(), repos_dir = %opts.paths.repos_dir.display(), "workspace and lab paths");

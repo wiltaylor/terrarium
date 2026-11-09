@@ -1645,7 +1645,9 @@ secret with several secret fields needs one (`422`).
   target as one base64 line on the stdin of the remote shell, which reads
   and exports it; on a `docker` target through `docker exec --env-file`
   with a 0600 file on the host that is removed when the `docker` process
-  exits (TER-490); on a `host`
+  exits (TER-490); a multi-line value goes instead through `-e KEY` into
+  the env of the `docker` process on the host, and some names and long
+  lines are refused ([host protocol](host-protocol.md#docker)); on a `host`
   target in the env of the process. It is never on a command line (local
   or remote), in the sandbox env, in the daemon log, or in a record. A
   `vmlab` target takes no env (`422`).

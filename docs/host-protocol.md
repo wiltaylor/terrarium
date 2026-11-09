@@ -441,15 +441,20 @@ env dir at its next start. So the CLI keeps the host agent's own
 command env cannot change which daemon it talks to (TER-490).
 
 Only a multi-line value (a newline or a carriage return, for example a key)
-falls back to `-e K` with the value in the env of the `docker` process.
-That fallback refuses the names that steer the CLI, its loader, or the C
-library (`bad_request`): `DOCKER_*`, `LD_*`, `SSL_*`, `MALLOC_*`, `XDG_*`,
-`HOME`, `PATH`, `SSH_AUTH_SOCK`, `GODEBUG`, `GCONV_PATH`, `GLIBC_TUNABLES`,
-`LOCPATH`, `NLSPATH`, `HOSTALIASES`, `RES_OPTIONS`, `LOCALDOMAIN`, `TMPDIR`,
-and each name that ends in `_PROXY` in any case
-(`terrarium_host::docker::CLI_DENIED_ENV`). A single-line value over 60 KiB,
-and a name with whitespace or a leading `#` or BOM, are refused
-(`bad_request`): an env file line cannot hold them.
+falls back to `-e K` with the value in the env of the `docker` process,
+which its children (credential helpers, the ssh connection helper) inherit
+too. That fallback refuses (`bad_request`) each name that a secret grant
+cannot set (`terrarium_core::env_deny`: the loader, the C library, the
+shells, `SSH_*`, `GIT_*`, the language runtimes, the proxies and CA files,
+the harnesses), and also `DOCKER_*`, `SSL_*`, `OTEL_*`, `GODEBUG`,
+`GETCONF_DIR`, `NIS_PATH`, `RESOLV_HOST_CONF` and each name that ends in
+`_PROXY` in any case (`terrarium_host::docker::steers_the_cli`). A
+single-line value over 60 KiB, and a name with whitespace or a leading `#`
+or BOM, are refused (`bad_request`): an env file line cannot hold them.
+The env dir and its parent must be real dirs of the host agent's user;
+with neither `XDG_DATA_HOME` nor `HOME` it is
+`<temp_dir>/terrarium-host-<euid>/env`. The host agent checks it at the
+start and logs an error when it is not usable.
 
 | Frame | Fields | Command |
 |---|---|---|

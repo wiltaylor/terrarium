@@ -39,33 +39,24 @@ pub const ENV_FILE_LINE_MAX: usize = 60 * 1024;
 /// The name prefix of the env files in [`crate::client::ClientOptions::env_dir`].
 pub const ENV_FILE_PREFIX: &str = "terrarium-env-";
 
-/// Names that steer the `docker` CLI, the loader, or the C library under
-/// it. A multi-line value goes into the CLI's own environment (`-e KEY`), so
-/// these names cannot have one. The loader and C library names are the
-/// ones of the daemon's grant deny list (`terrariumd` `secrets::grants`,
-/// a test keeps them in it).
-pub const CLI_DENIED_ENV: &[&str] = &[
-    "HOME",
-    "PATH",
-    "SSH_AUTH_SOCK",
-    "GODEBUG",
-    "GCONV_PATH",
-    "GLIBC_TUNABLES",
-    "LOCPATH",
-    "NLSPATH",
-    "HOSTALIASES",
-    "RES_OPTIONS",
-    "LOCALDOMAIN",
-    "TMPDIR",
-];
+/// Names that the host agent refuses for a multi-line value, on top of the
+/// daemon's grant deny list ([`terrarium_core::env_deny`]): the `docker`
+/// CLI's own names and the C library names that the grant list does not
+/// have. A multi-line value goes into the CLI's own environment (`-e KEY`),
+/// which the CLI's children (credential helpers, the ssh connection helper)
+/// inherit too.
+pub const CLI_DENIED_ENV: &[&str] = &["GODEBUG", "GETCONF_DIR", "NIS_PATH", "RESOLV_HOST_CONF"];
 
-/// Name prefixes of [`CLI_DENIED_ENV`]. Each name that ends in `_PROXY`
-/// (any case) is refused too.
-pub const CLI_DENIED_ENV_PREFIXES: &[&str] = &["DOCKER_", "LD_", "SSL_", "MALLOC_", "XDG_"];
+/// Name prefixes of [`CLI_DENIED_ENV`]. Each name that ends in `_PROXY` in
+/// any case is refused too.
+pub const CLI_DENIED_ENV_PREFIXES: &[&str] = &["DOCKER_", "SSL_", "OTEL_"];
 
-/// Does `k` steer the `docker` CLI or the loader under it?
+/// Does `k` steer the `docker` CLI, its children, or the loader under it?
+/// The grant deny list, plus [`CLI_DENIED_ENV`] and
+/// [`CLI_DENIED_ENV_PREFIXES`].
 pub fn steers_the_cli(k: &str) -> bool {
-    CLI_DENIED_ENV.contains(&k)
+    terrarium_core::env_deny::denied(k)
+        || CLI_DENIED_ENV.contains(&k)
         || CLI_DENIED_ENV_PREFIXES.iter().any(|p| k.starts_with(p))
         || k.to_ascii_uppercase().ends_with("_PROXY")
 }
@@ -975,6 +966,17 @@ mod tests {
             "MALLOC_ARENA_MAX",
             "TMPDIR",
             "XDG_CONFIG_HOME",
+            "PYTHONPATH",
+            "BASH_ENV",
+            "SSH_ASKPASS",
+            "SSH_AUTH_SOCK",
+            "NODE_OPTIONS",
+            "GNUPGHOME",
+            "PERL5OPT",
+            "JAVA_TOOL_OPTIONS",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "TZDIR",
+            "NIS_PATH",
         ] {
             for v in ["a\nb", "a\rb"] {
                 let err = plan_exec(&exec_req(json!({ k: v })), "docker").unwrap_err();
@@ -1031,6 +1033,43 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn a_symlinked_env_dir_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("env");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let err = super::plan_exec(&exec_req(json!({"A":"1"})), "docker", &link).unwrap_err();
+        assert_eq!(err.code, crate::protocol::ErrorCode::SpawnFailed);
+        assert!(err.message.contains("not a dir of this user"), "{}", err.message);
+        assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
+        // A link in the parent is refused too.
+        let err = super::plan_exec(&exec_req(json!({"A":"1"})), "docker", &link.join("sub"))
+            .unwrap_err();
+        assert!(err.message.contains("not a dir of this user"), "{}", err.message);
+    }
+
+    #[test]
+    fn the_cli_deny_set_is_the_grant_list_plus_the_host_names() {
+        use terrarium_core::env_deny::{DENIED_ENV, DENIED_ENV_PREFIXES, DENIED_ENV_SUFFIXES};
+        let mut names: Vec<String> = DENIED_ENV.iter().map(|n| n.to_string()).collect();
+        names.extend(DENIED_ENV_PREFIXES.iter().map(|p| format!("{p}X")));
+        names.extend(DENIED_ENV_SUFFIXES.iter().map(|p| format!("X{p}")));
+        names.extend(CLI_DENIED_ENV.iter().map(|n| n.to_string()));
+        names.extend(CLI_DENIED_ENV_PREFIXES.iter().map(|p| format!("{p}X")));
+        names.extend(["http_proxy".into(), "FOO".into(), "DEPLOY_KEY".into()]);
+        for n in &names {
+            let expected = terrarium_core::env_deny::denied(n)
+                || CLI_DENIED_ENV.contains(&n.as_str())
+                || CLI_DENIED_ENV_PREFIXES.iter().any(|p| n.starts_with(p))
+                || n.to_ascii_uppercase().ends_with("_PROXY");
+            assert_eq!(steers_the_cli(n), expected, "{n}");
+        }
+        assert!(!steers_the_cli("FOO") && !steers_the_cli("DEPLOY_KEY"));
+        assert!(steers_the_cli("http_proxy") && steers_the_cli("SSH_ASKPASS"));
     }
 
     /// A fake `docker` CLI: it prints the DOCKER_* env that it runs with, the

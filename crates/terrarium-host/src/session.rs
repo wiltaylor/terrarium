@@ -58,7 +58,7 @@ pub struct PrivateFile(Arc<tempfile::TempPath>);
 
 impl PrivateFile {
     /// Write `data` to a new file `<prefix><random>` in `dir`. The dir is
-    /// created with mode 0700, or set to it.
+    /// checked with [`private_dir`] first.
     pub fn new(dir: &Path, prefix: &str, data: &[u8]) -> std::io::Result<Self> {
         use std::os::unix::fs::PermissionsExt;
         private_dir(dir)?;
@@ -84,19 +84,37 @@ impl PartialEq for PrivateFile {
 
 impl Eq for PrivateFile {}
 
-/// Create `dir` (and its parents) and give it mode 0700.
-fn private_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+/// Create `dir` (and its parents, each with mode 0700) and make sure that
+/// it is private: `dir` and its parent must be real dirs (not symlinks) of
+/// this user, and `dir` gets mode 0700.
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)?;
+    let euid = nix::unistd::geteuid().as_raw();
+    for d in [Some(dir), dir.parent()].into_iter().flatten() {
+        let m = std::fs::symlink_metadata(d)?;
+        if !m.file_type().is_dir() || m.uid() != euid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is not a dir of this user (uid {euid}); refusing it for private files",
+                    d.display()
+                ),
+            ));
+        }
+    }
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
 /// Delete the files in `dir` whose name starts with `prefix`: the private
 /// files that a crashed host agent left behind. Run it at the start, before
-/// any session. Returns how many it deleted. A missing dir is no error.
+/// any session. It does not recurse and follows no symlink. A file that it
+/// cannot delete is logged, and it goes on. Returns how many it deleted. A
+/// missing dir is no error. Two host agents on one data dir would delete
+/// each other's live files: run one per user.
 pub fn remove_private_files(dir: &Path, prefix: &str) -> std::io::Result<usize> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -104,11 +122,19 @@ pub fn remove_private_files(dir: &Path, prefix: &str) -> std::io::Result<usize> 
         Err(e) => return Err(e),
     };
     let mut n = 0;
-    for entry in entries {
-        let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with(prefix) && entry.file_type()?.is_file() {
-            std::fs::remove_file(entry.path())?;
-            n += 1;
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(prefix)
+            || !entry.file_type().is_ok_and(|t| t.is_file())
+        {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => n += 1,
+            Err(e) => tracing::warn!(
+                path = %entry.path().display(),
+                error = %e,
+                "cannot delete a leftover private file"
+            ),
         }
     }
     Ok(n)
