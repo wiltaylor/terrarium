@@ -459,7 +459,7 @@ async fn version_cut_freezes_members_and_explicit_built_completes_only_snapshot(
 
 #[tokio::test]
 async fn version_cut_age_timer_waits_for_merge_group_close() {
-    let td = TestDaemon::start().await;
+    let mut td = TestDaemon::start().await;
     td.project("p").await;
     put_rules(&td, "p", GROUPS).await;
     let a = new_card(
@@ -471,9 +471,18 @@ async fn version_cut_age_timer_waits_for_merge_group_close() {
     ping(&td, "p", &a, 1).await;
     settle(&td).await;
     put_rules(&td, "p", VERSION_CUT).await;
+    settle(&td).await;
+    // While the daemon runs, its engine races the manual timer call below:
+    // its own timer tick can fire the version-cut timer, and the close of
+    // the merge group writes a `card` event that the (when-less) rule runs
+    // on directly, so the engine can cut before the test looks and the
+    // manual call finds nothing (the 0.25.0 release CI saw it return 0).
+    // Stop the daemon for the timer part, then boot it again to run the cut.
+    let st = state(&td);
+    td.daemon.take().unwrap().shutdown();
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let id = a.clone();
-    state(&td)
-        .db
+    st.db
         .write("test", move |t| {
             t.execute(
                 "UPDATE cards SET created_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
@@ -488,22 +497,21 @@ async fn version_cut_age_timer_waits_for_merge_group_close() {
         .await
         .unwrap();
     let mut cache = rules_engine::Cache::default();
-    let projects = rules_engine::load(&state(&td).db, &mut cache)
-        .await
-        .unwrap();
+    let projects = rules_engine::load(&st.db, &mut cache).await.unwrap();
     let mut fired = std::collections::HashMap::new();
     assert_eq!(
-        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, chrono::Utc::now())
+        rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
             .await
             .unwrap(),
         1
     );
     assert_eq!(
-        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, chrono::Utc::now())
+        rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
             .await
             .unwrap(),
         0
     );
+    td.boot(None, None).await;
     settle(&td).await;
     assert!(
         card(&td, &a).await["group"]["key"]
