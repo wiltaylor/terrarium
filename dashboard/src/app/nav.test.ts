@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import app from "./App.tsx?raw";
 import layout from "./Layout.tsx?raw";
-import { BOARD_TABS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
+import { BOARD_TABS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_TABS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
 
 describe("navigation", () => {
   it("has no Spend item; the project has Logs, not Inbox or Mail, with a route", () => {
@@ -10,9 +10,7 @@ describe("navigation", () => {
     expect(paths).not.toContain("inbox");
     expect(paths).not.toContain("mail");
     expect(PROJECT_ITEMS.find((i) => i.path === "logs")?.label).toBe("Logs");
-    expect(app).toMatch(/<Route path="\/p\/:project\/logs" component=\{LogsPage\}>/);
-    expect(app).not.toMatch(/path="\/p\/:project\/inbox" component/);
-    expect(app).not.toMatch(/path="\/p\/:project\/mail" component/);
+    expect(app).toMatch(/<Route path="\/logs" component=\{LogsPage\}>/);
   });
 
   it("has one Logs item where Mail was, and the logs screen has the tabs Mail, Events, Audit, each with a route", () => {
@@ -30,22 +28,43 @@ describe("navigation", () => {
 
   it("has the tabs Mail and Events on the project logs screen, each with a route under the project", () => {
     expect(PROJECT_LOGS_TABS.map((t) => t.label)).toEqual(["Mail", "Events"]);
-    const block = app.slice(app.indexOf('<Route path="/p/:project/logs"'), app.indexOf("</Route>", app.indexOf('<Route path="/p/:project/logs"')));
+    const project = app.slice(app.indexOf('<Route path="/p/:project" component={ProjectScreen}>'));
+    const start = project.indexOf('<Route path="/logs" component={LogsPage}>');
+    const block = project.slice(start, project.indexOf("</Route>", start));
     expect(block).toMatch(/path="\/mail" component=\{MailPage\}/);
     expect(block).toMatch(/path="\/events" component=\{EventsPage\}/);
     expect(block).not.toMatch(/AuditPage/);
   });
 
+  it("has a project shell with Board first and every former view as a route tab", () => {
+    expect(PROJECT_TABS).toEqual([
+      { path: "board", label: "Board" },
+      { path: "dashboard", label: "Dashboard" },
+      { path: "agents", label: "Agents" },
+      { path: "repos", label: "Repos" },
+      { path: "knowledge", label: "Knowledge" },
+      { path: "pipelines", label: "Pipelines" },
+      { path: "calendar", label: "Calendar" },
+      { path: "logs", label: "Logs" },
+      { path: "settings", label: "Settings" },
+    ]);
+    expect(app).toMatch(/<Route path="\/p\/:project" component=\{ProjectScreen\}>/);
+    expect(app).toMatch(/<Route path="\/" component=\{ProjectIndex\} \/>/);
+    expect(app).toMatch(/<Navigate href=\{`\/p\/\$\{params\.project\}\/board`\} \/>/);
+    expect(app).not.toMatch(/<Navigate href=\{`\/p\/\$\{params\.project\}\/dashboard`\} \/>/);
+  });
+
   it("has Agents last under the project, with a route to the Agents page", () => {
     expect(PROJECT_ITEMS.at(-1)).toEqual({ path: "agents", label: "Agents" });
-    expect(app).toMatch(/path="\/p\/:project\/agents" component=\{AgentsPage\}/);
+    expect(app).toMatch(/path="\/agents" component=\{AgentsPage\}/);
   });
 
   it("has no global Agents item or page: the agents are in the project tree only, but the agent detail keeps its route", () => {
     expect([...TOP_ITEMS, ...SETTINGS_ITEMS].map((i) => i.href)).not.toContain("/agents");
     expect(layout).not.toMatch(/AgentTree/);
     expect(Object.keys(import.meta.glob("./AgentTree.tsx"))).toEqual([]);
-    expect(app).not.toMatch(/path="\/agents" component=/);
+    const global = app.slice(0, app.indexOf('<Route path="/p/:project" component={ProjectScreen}>'));
+    expect(global).not.toMatch(/path="\/agents" component=/);
     expect(app).toMatch(/path="\/agents\/:id" component=\{AgentDetail\}/);
   });
 
@@ -65,15 +84,15 @@ describe("navigation", () => {
       { path: "secrets", label: "Secrets" },
       { path: "templates", label: "Templates" },
     ]);
-    expect(app).toMatch(/<Route path="\/p\/:project\/settings" component=\{SettingsPage\}>/);
-    const start = app.indexOf('<Route path="/p/:project/settings"');
-    const block = app.slice(start, app.indexOf("</Route>", start));
+    const project = app.slice(app.indexOf('<Route path="/p/:project" component={ProjectScreen}>'));
+    expect(project).toMatch(/<Route path="\/settings" component=\{SettingsPage\}>/);
+    const start = project.indexOf('<Route path="/settings" component={SettingsPage}>');
+    const block = project.slice(start, project.indexOf("</Route>", start));
     expect(block).toMatch(/path="\/general" component=\{ProjectSettings\}/);
     expect(block).toMatch(/path="\/secrets" component=\{SecretsPage\}/);
     expect(block).toMatch(/path="\/templates" component=\{TemplatesPage\}/);
     for (const t of PROJECT_SETTINGS_TABS) expect(block).toContain(`path="/${t.path}"`);
-    for (const old of ["secrets", "templates"]) expect(app).not.toMatch(new RegExp(`path="/p/:project/${old}" component=`));
-    expect(app).not.toMatch(/path="\/p\/:project\/settings" component=\{ProjectSettings\}/);
+    expect(project).not.toMatch(/path="\/settings" component=\{ProjectSettings\}/);
   });
 
   it("redirects the old project Secrets, Templates, and Settings paths to the project settings tabs", () => {
@@ -91,8 +110,8 @@ describe("navigation", () => {
     const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
     expect(paths.indexOf("repos")).toBe(paths.indexOf("board") + 1);
     expect(PROJECT_ITEMS.find((i) => i.path === "repos")?.label).toBe("Repos");
-    expect(app).toMatch(/path="\/p\/:project\/repos" component=\{ReposPage\}/);
-    expect(app).toMatch(/path="\/p\/:project\/repos\/:repo" component=\{RepoPage\}/);
+    expect(app).toMatch(/path="\/repos" component=\{ReposPage\}/);
+    expect(app).toMatch(/path="\/repos\/:repo" component=\{RepoPage\}/);
     expect(movedTo("/p/terrarium/repos")).toBeUndefined();
   });
 
@@ -101,7 +120,6 @@ describe("navigation", () => {
     const hrefs = TOP_ITEMS.map((i) => i.href) as string[];
     expect(hrefs.indexOf("/schedules")).toBe(hrefs.indexOf("/logs") + 1);
     expect(app).toMatch(/path="\/schedules" component=\{SchedulesPage\}/);
-    expect(app).not.toMatch(/path="\/p\/:project\/schedules" component=/);
     expect(BOARD_TABS.map((t) => t.path)).toContain("schedules");
   });
 
@@ -112,7 +130,7 @@ describe("navigation", () => {
     expect(app).toMatch(/path="\/inbox" component=\{InboxPage\}/);
     // The combined calendar and the calendar of a project use one page (docs/api.md §33).
     expect(app).toMatch(/path="\/calendar" component=\{CalendarPage\}/);
-    expect(app).toMatch(/path="\/p\/:project\/calendar" component=\{CalendarPage\}/);
+    expect(app).toMatch(/path="\/calendar" component=\{CalendarPage\}/);
     expect(app).not.toMatch(/path="\/questions" component/);
     expect(Object.keys(import.meta.glob("../features/questions/**"))).toEqual([]);
   });
@@ -266,9 +284,10 @@ describe("navigation", () => {
       { path: "schedules", label: "Schedules" },
       { path: "rules", label: "Rules" },
     ]);
-    expect(app).toMatch(/<Route path="\/p\/:project\/board" component=\{BoardScreen\}>/);
-    const start = app.indexOf('<Route path="/p/:project/board"');
-    const block = app.slice(start, app.indexOf("</Route>", start));
+    const project = app.slice(app.indexOf('<Route path="/p/:project" component={ProjectScreen}>'));
+    expect(project).toMatch(/<Route path="\/board" component=\{BoardScreen\}>/);
+    const start = project.indexOf('<Route path="/board" component={BoardScreen}>');
+    const block = project.slice(start, project.indexOf("</Route>", start));
     expect(block).toMatch(/path="\/" component=\{BoardPage\}/);
     // Versions are card labels (TER-58): no Versions tab.
     expect(app).not.toMatch(/VersionsPage/);
@@ -279,7 +298,7 @@ describe("navigation", () => {
     expect(block).toMatch(/path="\/tests\/:id" component=\{TestRunPage\}/);
     expect(movedTo("/p/terrarium/tests")).toBe("/p/terrarium/board/tests");
     expect(movedTo("/p/terrarium/tests/01JBTRUN1")).toBe("/p/terrarium/board/tests/01JBTRUN1");
-    for (const gone of ["versions", "artifacts", "wiki", "memory"]) expect(app).not.toMatch(new RegExp(`path="/p/:project/${gone}[^"]*" component=`));
+    for (const gone of ["versions", "wiki", "memory"]) expect(block).not.toMatch(new RegExp(`<Route path="/${gone}[^"]*" component=`));
     // The Cards tab and its `?card=` links keep the path.
     expect(movedTo("/p/terrarium/board")).toBeUndefined();
     for (const now of ["/p/terrarium/board/artifacts/ART-2", "/p/terrarium/board/schedules", "/p/terrarium/board/rules", "/p/terrarium/board/tests", "/p/terrarium/board/tests/01JBTRUN1"]) expect(movedTo(now)).toBeUndefined();
@@ -292,9 +311,10 @@ describe("navigation", () => {
       { path: "memory", label: "Memory" },
       { path: "db", label: "DB" },
     ]);
-    expect(app).toMatch(/<Route path="\/p\/:project\/knowledge" component=\{KnowledgePage\}>/);
-    const start = app.indexOf('<Route path="/p/:project/knowledge"');
-    const block = app.slice(start, app.indexOf("</Route>", start));
+    const project = app.slice(app.indexOf('<Route path="/p/:project" component={ProjectScreen}>'));
+    expect(project).toMatch(/<Route path="\/knowledge" component=\{KnowledgePage\}>/);
+    const start = project.indexOf('<Route path="/knowledge" component={KnowledgePage}>');
+    const block = project.slice(start, project.indexOf("</Route>", start));
     expect(block).toMatch(/path="\/wiki\/\*path" component=\{WikiPage\}/);
     expect(block).toMatch(/path="\/memory" component=\{MemoryPage\}/);
     expect(block).toMatch(/path="\/db" component=\{DbTypesPage\}/);

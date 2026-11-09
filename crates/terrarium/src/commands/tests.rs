@@ -111,6 +111,92 @@ async fn reservation_commands_use_item_routes() {
     assert_eq!(run.reqs[1].method, Method::Get);
 }
 
+/// `test ls` asks for one page of the newest runs by default, and follows
+/// every page only with `--all` (TER-397). `--json` stays a plain array.
+#[tokio::test]
+async fn test_ls_limit_and_all() {
+    async fn run(args: &[&str], mock: &MockTransport) -> String {
+        let cli = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_or_else(|e| panic!("{args:?}: {e}"));
+        let env = Some(AgentEnv {
+            agent: ME.into(),
+            socket: "/nonexistent.sock".into(),
+        });
+        let mut ctx = Ctx::for_test(Arc::new(mock.clone()), env).with_identity(json!({
+            "agent": ME, "name": "worker", "project": "terra",
+            "harness": "pi", "status": "idle", "roles": []
+        }));
+        ctx.json = cli.json;
+        super::run(&ctx, &cli.command)
+            .await
+            .unwrap_or_else(|e| panic!("{args:?}: {e:#}"));
+        ctx.out.captured()
+    }
+    let r = |id: &str| json!({"id": id, "name": "unit", "status": "passed"});
+
+    // Default: one request with limit=50.
+    let m = MockTransport::new();
+    m.reply(200, json!([r("R2"), r("R1")]));
+    let out = run(&["--json", "test", "ls"], &m).await;
+    let reqs = m.requests();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].path, "/api/projects/terra/test-runs");
+    assert_eq!(reqs[0].query_value("limit"), Some("50"));
+    assert_eq!(reqs[0].query_value("cursor"), None);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v, json!([r("R2"), r("R1")]));
+
+    // --limit N asks for N, keeps at most N, and a full page does not
+    // follow the cursor.
+    let m = MockTransport::new();
+    m.reply_with(
+        200,
+        &[("x-next-cursor", "c1")],
+        json!([r("R3"), r("R2"), r("R1")]),
+    );
+    let out = run(&["--json", "test", "ls", "--limit", "2"], &m).await;
+    assert_eq!(m.requests().len(), 1);
+    assert_eq!(m.requests()[0].query_value("limit"), Some("2"));
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v, json!([r("R3"), r("R2")]));
+
+    // --all follows every page and sends no limit.
+    let m = MockTransport::new();
+    m.reply_with(200, &[("x-next-cursor", "c1")], json!([r("R3"), r("R2")]))
+        .reply(200, json!([r("R1")]));
+    let out = run(&["--json", "test", "ls", "--all", "--card", "TER-1"], &m).await;
+    let reqs = m.requests();
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(reqs[0].query_value("limit"), None);
+    assert_eq!(reqs[0].query_value("card"), Some("TER-1"));
+    assert_eq!(reqs[1].query_value("cursor"), Some("c1"));
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v, json!([r("R3"), r("R2"), r("R1")]));
+
+    // A table cut at the limit ends with a hint line; a short table,
+    // --all and --json do not.
+    let hint = "2 shown, --all for every run";
+    let m = MockTransport::new();
+    m.reply_with(200, &[("x-next-cursor", "c1")], json!([r("R3"), r("R2")]));
+    let out = run(&["test", "ls", "--limit", "2"], &m).await;
+    assert!(out.contains("R3") && out.contains(hint), "{out}");
+    let m = MockTransport::new();
+    m.reply(200, json!([r("R1")]));
+    let out = run(&["test", "ls", "--limit", "2"], &m).await;
+    assert!(out.contains("R1") && !out.contains("shown"), "{out}");
+    let m = MockTransport::new();
+    m.reply(200, json!([r("R2"), r("R1")]));
+    let out = run(&["test", "ls", "--all"], &m).await;
+    assert!(out.contains("R2") && !out.contains("shown"), "{out}");
+    let m = MockTransport::new();
+    m.reply_with(200, &[("x-next-cursor", "c1")], json!([r("R3"), r("R2")]));
+    let out = run(&["--json", "test", "ls", "--limit", "2"], &m).await;
+    assert!(!out.contains("shown"), "{out}");
+
+    // --all and --limit conflict.
+    assert!(Cli::try_parse_from(["terrarium", "test", "ls", "--all", "--limit", "5"]).is_err());
+}
+
 struct Run {
     result: anyhow::Result<()>,
     out: String,
@@ -8817,7 +8903,7 @@ async fn test_runs() {
         vec![(
             Get,
             "/api/projects/terra/test-runs",
-            vec![("card", "TER-1"), ("status", "failed")],
+            vec![("card", "TER-1"), ("status", "failed"), ("limit", "50")],
             None,
         )],
     )

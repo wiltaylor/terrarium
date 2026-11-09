@@ -18,6 +18,9 @@
 //! quota policy. A successful probe removes each stored window that its
 //! answer does not have (`subs::retire_windows`): the window and its
 //! quota notice rows go, for every probe. A failed probe removes nothing.
+//! Each hour the scheduler also deletes the samples older than
+//! `TERRARIUM_QUOTA_SAMPLE_KEEP` (default 48 hours) in small batches
+//! ([`prune_samples`]); the newest sample of each window stays.
 
 pub mod anthropic;
 pub mod github;
@@ -39,6 +42,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::api::Shared;
+use crate::db::Db;
 use crate::error::ApiResult;
 use crate::events::EventDraft;
 use crate::store::subscriptions::{self as subs, PROBE_FAILED, PROBE_NONE, PROBE_OK};
@@ -477,17 +481,82 @@ fn due(sub: &subs::Subscription, interval: Duration, now: DateTime<Utc>) -> bool
     age.to_std().is_ok_and(|a| a >= interval)
 }
 
+/// How often the probe scheduler prunes old quota samples (TER-395).
+pub const SAMPLE_PRUNE_EVERY: Duration = Duration::from_secs(3600);
+
+/// The pause between two prune batches, so that the waiting readers and
+/// writers get the database lock (TER-395).
+pub const SAMPLE_PRUNE_PAUSE: Duration = Duration::from_millis(20);
+
+/// Delete the quota samples older than `keep` (back from `now`), in
+/// transactions of at most [`subs::SAMPLE_PRUNE_BATCH`] rows, so no write
+/// holds the single database connection long (TER-394). The newest sample
+/// of each window stays at any age: [`subs::latest_windows`] reads it.
+/// Returns the rows deleted.
+pub async fn prune_samples(db: &Db, keep: Duration, now: DateTime<Utc>) -> ApiResult<usize> {
+    let Some(before) = chrono::Duration::from_std(keep)
+        .ok()
+        .and_then(|k| now.checked_sub_signed(k))
+    else {
+        return Ok(0);
+    };
+    let before = crate::time_param::stored(before);
+    let names = db
+        .read(|c| {
+            Ok(subs::list(c)?
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>())
+        })
+        .await?;
+    let mut deleted = 0;
+    for name in names {
+        let n = name.clone();
+        let windows = db.read(move |c| subs::sample_windows(c, &n)).await?;
+        for (window, newest) in windows {
+            loop {
+                let (s, w, b) = (name.clone(), window.clone(), before.clone());
+                let rows = db
+                    .write("system", move |t| {
+                        subs::prune_window_samples(t, &s, &w, newest, &b, subs::SAMPLE_PRUNE_BATCH)
+                    })
+                    .await?;
+                deleted += rows;
+                if rows < subs::SAMPLE_PRUNE_BATCH {
+                    break;
+                }
+                // Let the waiting readers and writers take the lock.
+                tokio::time::sleep(SAMPLE_PRUNE_PAUSE).await;
+            }
+        }
+    }
+    Ok(deleted)
+}
+
 /// Run each subscription's probe on the interval of the usage config.
 pub fn spawn_scheduler(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         let cfg = &state.usage.config;
         let (interval, tick) = (cfg.probe_interval, cfg.probe_tick);
+        let keep = cfg.quota_sample_keep;
         info!(
             interval_s = interval.as_secs(),
+            sample_keep_h = keep.as_secs() / 3600,
             "quota probe scheduler started"
         );
+        // The first prune runs at the first tick, so a backlog of old
+        // samples goes soon after a start (TER-395).
+        let mut next_prune = tokio::time::Instant::now();
         loop {
             tokio::time::sleep(tick).await;
+            if tokio::time::Instant::now() >= next_prune {
+                next_prune = tokio::time::Instant::now() + SAMPLE_PRUNE_EVERY;
+                match prune_samples(&state.db, keep, Utc::now()).await {
+                    Ok(0) => {}
+                    Ok(n) => info!(deleted = n, "pruned old quota samples"),
+                    Err(e) => warn!("the quota sample prune failed: {e}"),
+                }
+            }
             let list = match state.db.read(subs::list).await {
                 Ok(l) => l,
                 Err(e) => {
@@ -679,5 +748,101 @@ pub(crate) mod tests {
             Duration::from_secs(300),
             now + chrono::Duration::minutes(6)
         ));
+    }
+
+    /// TER-395: the prune deletes the samples past the keep time in
+    /// batches, keeps the recent ones, and keeps the newest sample of each
+    /// window at any age, so `latest_windows` answers as before.
+    #[tokio::test]
+    async fn the_sample_prune_keeps_recent_and_newest_rows() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        let db = Db::new(conn, crate::events::EventHub::default());
+        let def = |name: &str| -> terrarium_core::config::SubscriptionDef {
+            toml::from_str(&format!(
+                "name = \"{name}\"\nprovider = \"anthropic\"\nplan = \"Max 20x\"\nharnesses = [\"claude\"]\nprobe = \"anthropic-oauth-usage\"\n"
+            ))
+            .unwrap()
+        };
+        let (d1, d2) = (def("s1"), def("s2"));
+        db.write("system", move |t| {
+            subs::upsert_def(t, &d1, crate::store::projects::SOURCE_API)?;
+            subs::upsert_def(t, &d2, crate::store::projects::SOURCE_API)?;
+            // s1 5h: 1200 samples 3 days old (more than two batches), then
+            // one 47 hours old and one an hour old.
+            // s1 7d and s2 monthly: only old samples.
+            t.execute_batch(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1200)
+                 INSERT INTO quota_samples (subscription, window, used_pct, at)
+                 SELECT 's1', '5h', x % 100, '2026-11-01T00:00:00.000Z' FROM n;
+                 INSERT INTO quota_samples (subscription, window, used_pct, at) VALUES
+                   ('s1', '5h', 40, '2026-11-02T01:00:00.000Z'),
+                   ('s1', '5h', 41, '2026-11-03T23:00:00.000Z'),
+                   ('s1', '7d', 10, '2026-10-20T00:00:00.000Z'),
+                   ('s1', '7d', 11, '2026-10-21T00:00:00.000Z'),
+                   ('s2', 'monthly', 70, '2026-10-01T00:00:00.000Z'),
+                   ('s2', 'monthly', 71, '2026-10-02T00:00:00.000Z');",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let latest = |db: &Db, name: &'static str| {
+            let db = db.clone();
+            async move {
+                db.read(move |c| subs::latest_windows(c, name))
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|w| (w.window, w.used_pct, w.at))
+                    .collect::<Vec<_>>()
+            }
+        };
+        let before = (latest(&db, "s1").await, latest(&db, "s2").await);
+        let now = DateTime::parse_from_rfc3339("2026-11-04T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let keep = Duration::from_secs(48 * 3600);
+        let deleted = prune_samples(&db, keep, now).await.unwrap();
+        assert_eq!(deleted, 1200 + 1 + 1, "the old 5h, 7d, and monthly rows");
+        assert_eq!(
+            (latest(&db, "s1").await, latest(&db, "s2").await),
+            before,
+            "the newest row of each window survives"
+        );
+        let left = db
+            .read(|c| {
+                let mut st = c.prepare(
+                    "SELECT subscription, window, used_pct FROM quota_samples ORDER BY id",
+                )?;
+                let rows = st.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, f64>(2)?,
+                    ))
+                })?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            })
+            .await
+            .unwrap();
+        let left: Vec<(&str, &str, f64)> = left
+            .iter()
+            .map(|(s, w, u)| (s.as_str(), w.as_str(), *u))
+            .collect();
+        assert_eq!(
+            left,
+            vec![
+                ("s1", "5h", 40.0),
+                ("s1", "5h", 41.0),
+                ("s1", "7d", 11.0),
+                ("s2", "monthly", 71.0),
+            ]
+        );
+        assert_eq!(
+            prune_samples(&db, keep, now).await.unwrap(),
+            0,
+            "nothing more to do"
+        );
     }
 }

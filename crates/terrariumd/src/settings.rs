@@ -259,6 +259,18 @@ pub struct Settings {
     )]
     pub thread_stale: std::time::Duration,
 
+    /// The quota probe samples younger than this stay (TER-395): a
+    /// duration of at least `24h`, the default history of
+    /// `GET /api/subscriptions/{name}/quota`. The newest sample of each
+    /// window stays at any age.
+    #[arg(
+        long,
+        env = "TERRARIUM_QUOTA_SAMPLE_KEEP",
+        default_value = "48h",
+        value_parser = parse_sample_keep
+    )]
+    pub quota_sample_keep: std::time::Duration,
+
     /// The tools dir: the npm prefix that holds the harnesses
     /// (`<dir>/bin` first on `PATH`). At start the daemon installs each pin
     /// of `<config dir>/harnesses.toml` that is missing there, and
@@ -736,6 +748,22 @@ pub fn parse_switch(s: &str) -> Result<bool, String> {
     }
 }
 
+/// The default of `TERRARIUM_QUOTA_SAMPLE_KEEP`.
+pub const DEFAULT_QUOTA_SAMPLE_KEEP: std::time::Duration =
+    std::time::Duration::from_secs(48 * 3600);
+
+/// `TERRARIUM_QUOTA_SAMPLE_KEEP`: a duration of at least 24 hours.
+pub fn parse_sample_keep(s: &str) -> Result<std::time::Duration, String> {
+    let d = parse_duration(s)?;
+    if d < std::time::Duration::from_secs(24 * 3600) {
+        return Err(format!(
+            "`{}`: keep the quota samples at least 24h (the dashboard reads 24 hours)",
+            s.trim()
+        ));
+    }
+    Ok(d)
+}
+
 /// A duration: seconds (`3600`), or a number with `s`, `m`, `h`, or `d`
 /// (`90m`, `12h`, `1d`). It must be more than zero.
 pub fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
@@ -809,6 +837,18 @@ mod tests {
         assert!(parse_duration("0").is_err());
         assert!(parse_duration("12x").is_err());
         assert!(parse_duration("h").is_err());
+    }
+
+    /// TER-395: the quota samples stay at least the 24 hours that the
+    /// dashboard reads.
+    #[test]
+    fn quota_sample_keep_is_at_least_a_day() {
+        assert_eq!(parse_sample_keep("48h").unwrap(), DEFAULT_QUOTA_SAMPLE_KEEP);
+        assert_eq!(parse_sample_keep("1d").unwrap().as_secs(), 86_400);
+        assert!(parse_sample_keep("23h").is_err());
+        assert!(parse_sample_keep("0").is_err());
+        let s = Settings::try_parse_from(["terrariumd"]).unwrap();
+        assert_eq!(s.quota_sample_keep, DEFAULT_QUOTA_SAMPLE_KEEP);
     }
 
     #[test]

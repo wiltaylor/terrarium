@@ -1110,7 +1110,7 @@ lists the artifacts with a `label` link of that label: the daemon filters
 terrarium test push <file> [--format auto|junit|trx|ctrf|libtest-json|vitest-json|jest-json|tap]
                     [--name n] [--card id]... [--label l]... [--commit sha] [--branch b]
                     [--fail-on-failures]
-terrarium test ls [--card id] [--label l] [--name n] [--failed]
+terrarium test ls [--card id] [--label l] [--name n] [--failed] [--limit n | --all]
 terrarium test show <id> [--failed] [--json]
 terrarium test compare <id> [--with <id> | previous]
 terrarium test link <id> [--card id]... [--label l]...
@@ -1136,6 +1136,8 @@ rights of the card; a label is free text that any member links
 (docs/api.md §29.4).
 
 `test ls --failed` shows only the runs with the status `failed`.
+`test ls` lists the 50 newest runs in one request; `--limit` sets the
+number, and `--all` follows every page.
 `test show --failed` shows only the failed and the errored cases, with
 their messages. `test compare` compares the run with the previous run of
 the same name (the default), or with the run that `--with` gives. It
