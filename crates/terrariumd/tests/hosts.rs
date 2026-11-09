@@ -164,6 +164,11 @@ case "$1" in
   rm) rm -f "$f" ;;
   exec) for a in "$@"; do
           if [ "$a" = 'command -v python3 >/dev/null || printf missing-python3' ] && [ -f '{missing_python}' ]; then printf missing-python3; exit 0; fi
+          if [ "$a" = "import os, sys; sys.stdout.write(os.path.expanduser('~'))" ]; then printf /home/agent; exit 0; fi
+          if [ "$a" = prepare ]; then for arg in "$@"; do
+            if [ "$arg" = /src/terrarium ] && [ -f '{no_default}' ]; then echo 'base unavailable: denied' >&2; exit 3; fi
+            if [ "$arg" = /home/agent/.terrarium-work ] && [ -f '{no_fallback}' ]; then echo 'base unavailable: denied' >&2; exit 3; fi
+          done; fi
           if [ "$a" = measure ] && [ -f '{bad_measure}' ]; then
             value=invalid; for arg in "$@"; do if [ "$arg" = zz-good ]; then value=0; fi; done
             printf '%s' "$value"; exit 0
@@ -177,7 +182,9 @@ esac"#,
             hc = dir.join("docker.host-config").display(),
             end = dir.join("sleeper.end").display(),
             missing_python = dir.join("missing-python").display(),
-            bad_measure = dir.join("bad-measure").display()
+            bad_measure = dir.join("bad-measure").display(),
+            no_default = dir.join("no-default-base").display(),
+            no_fallback = dir.join("no-fallback-base").display()
         ),
         _ => format!(
             r#"case "$1" in
@@ -795,6 +802,118 @@ async fn owned_target_roots_legacy_python_and_bad_measurement() {
     );
     let audit = lab.td.get("/api/audit?action=agent.target_cleanup").await;
     assert_eq!(audit.ok()[0]["detail"]["agent"], "zz-good");
+}
+
+/// TER-498: a target without work_root whose /src the agent user may not
+/// create falls back to the agent home; when that fails too, the error
+/// names work_root.
+#[tokio::test]
+async fn owned_target_roots_fall_back_to_the_agent_home() {
+    let lab = Lab::start().await;
+    let _host = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    lab.target(json!({"name": "terra-box", "kind": "docker", "host": "lab1", "image": "alpine:3", "project": "terra"})).await;
+    let owner = lab
+        .td
+        .agent(
+            "terra",
+            "lead",
+            json!({"roles": ["project_admin"],
+        "policy": {"targets": ["terra-box"], "spawn": {"templates": ["project:*"],
+        "max_concurrent": 1, "max_lifetime": "5m", "bound": true}}}),
+        )
+        .await;
+    lab.td
+        .post(
+            "/api/templates",
+            json!({"name": "builder", "project": "terra",
+        "spec": {"harness": "claude", "policy": {"targets": ["terra-box"]}}}),
+        )
+        .await
+        .ok();
+    let card = lab
+        .td
+        .post(
+            "/api/projects/terra/cards",
+            json!({"title": "Build", "column": "in_progress"}),
+        )
+        .await
+        .ok()
+        .clone();
+    let owner_id = owner["id"].as_str().unwrap();
+    let worker = lab.td.post_as(owner_id, &format!("/api/agents/{owner_id}/spawn"),
+        json!({"template": "builder", "task": "Build", "bind": format!("card:{}", card["id"].as_str().unwrap())})).await.ok().clone();
+    let id = worker["id"].as_str().unwrap().to_owned();
+    let name = worker["name"].as_str().unwrap().to_owned();
+    let state = lab.state();
+    let base_of = |state: terrariumd::api::Shared| async move {
+        state
+            .db
+            .read(|c| {
+                Ok(c.query_row("SELECT base FROM agent_target_roots", [], |r| {
+                    r.get::<_, Option<String>>(0)
+                })?)
+            })
+            .await
+            .unwrap()
+    };
+    std::fs::write(lab.bins.path().join("no-default-base"), "").unwrap();
+    std::fs::write(lab.bins.path().join("no-fallback-base"), "").unwrap();
+    let r = lab
+        .td
+        .post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["true"]}))
+        .await;
+    r.err(400, "invalid");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("has no work_root"), "{msg}");
+    assert!(msg.contains("/home/agent/.terrarium-work"), "{msg}");
+    assert!(
+        msg.contains("terrarium admin target edit terra-box --work-root"),
+        "{msg}"
+    );
+    std::fs::remove_file(lab.bins.path().join("no-fallback-base")).unwrap();
+    for _ in 0..2 {
+        let r = lab
+            .td
+            .post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["true"]}))
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
+    }
+    assert_eq!(
+        base_of(state.clone()).await.as_deref(),
+        Some("/home/agent/.terrarium-work")
+    );
+    let log = lab.log();
+    assert!(
+        log.contains(&format!(
+            "CARGO_TARGET_DIR=/home/agent/.terrarium-work/terra/{name}/target"
+        )),
+        "{log}"
+    );
+    // The stored base is used directly: the default is tried one time only.
+    assert_eq!(log.matches("prepare /src/terrarium terra").count(), 1, "{log}");
+    assert_eq!(
+        log.matches("prepare /home/agent/.terrarium-work terra").count(),
+        3,
+        "{log}"
+    );
+    terrariumd::spawn::close(
+        &state,
+        &id,
+        terrariumd::store::spawns::DONE,
+        Some("Built".into()),
+        false,
+    )
+    .await
+    .unwrap();
+    terrariumd::target_roots::sweep(&state).await.unwrap();
+    let log = lab.log();
+    assert!(
+        log.contains(&format!("measure /home/agent/.terrarium-work terra {name}")),
+        "{log}"
+    );
+    assert!(!log.contains("measure /src/terrarium"), "{log}");
 }
 
 #[tokio::test]

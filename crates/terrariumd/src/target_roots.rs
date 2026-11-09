@@ -83,8 +83,86 @@ fn root(base: &str, project: &str, name: &str) -> ApiResult<String> {
     Ok(format!("{base}/{project}/{name}"))
 }
 
+/// The base of a target without `work_root`.
+pub const DEFAULT_BASE: &str = "/src/terrarium";
+/// The exit code of the prepare script when the agent user may not create
+/// the base (EACCES, EPERM, EROFS).
+const BASE_UNAVAILABLE: i32 = 3;
+/// The fallback base under the agent user's home, when the target has no
+/// `work_root` and the default base is unavailable.
+const FALLBACK_DIR: &str = ".terrarium-work";
+const HOME_PROBE: &str = "import os, sys; sys.stdout.write(os.path.expanduser('~'))";
+
 fn base(def: &TargetDef) -> &str {
-    def.work_root.as_deref().unwrap_or("/src/terrarium")
+    def.work_root.as_deref().unwrap_or(DEFAULT_BASE)
+}
+
+/// The fallback base for a home directory, checked like a `work_root`.
+fn fallback_base(home: &str) -> ApiResult<String> {
+    let fallback = format!("{}/{FALLBACK_DIR}", home.trim_end_matches('/'));
+    check_base(&fallback)?;
+    Ok(fallback)
+}
+
+/// The base that an agent's root on a target already uses: the stored
+/// fallback, else the base of the definition.
+async fn stored_base(state: &Shared, agent: &str, target: &str) -> ApiResult<Option<String>> {
+    let (agent, target) = (agent.to_owned(), target.to_owned());
+    state
+        .db
+        .read(move |c| {
+            use rusqlite::OptionalExtension;
+            Ok(c.query_row(
+                "SELECT base FROM agent_target_roots WHERE agent=?1 AND target=?2",
+                params![agent, target],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+        })
+        .await
+}
+
+fn exit_code(out: &crate::executor::Collected) -> Option<i32> {
+    match out.end() {
+        crate::executor::End::Exit { code, .. } => code,
+        _ => None,
+    }
+}
+
+/// The error for a failed prepare. It names `work_root` and the command
+/// that sets it when the base itself is the problem.
+fn prepare_error(def: &TargetDef, base: &str, unavailable: bool, tail: &str) -> ApiError {
+    let edit = format!(
+        "set a writable work_root with `terrarium admin target edit {} --work-root <absolute path>`",
+        def.name
+    );
+    ApiError::invalid(match (unavailable, &def.work_root) {
+        (false, _) => format!("cannot prepare owned target root under {base}: {tail}"),
+        (true, Some(_)) => format!(
+            "cannot prepare owned target root: work_root {base} of target {} is not writable by the agent user: {tail}; fix its permissions or {edit}",
+            def.name
+        ),
+        (true, None) => format!(
+            "cannot prepare owned target root: target {} has no work_root, the default {DEFAULT_BASE} is not writable by the agent user, and the fallback {base} failed: {tail}; {edit}",
+            def.name
+        ),
+    })
+}
+
+/// Warn one time per target and daemon run about the home fallback.
+fn warn_fallback(def: &TargetDef, fallback: &str) {
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let first = WARNED
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(def.name.clone());
+    if first {
+        tracing::warn!(target = %def.name, %fallback,
+            "target has no work_root and {DEFAULT_BASE} is not writable; card-agent roots fall back to the agent user's home; set one with `terrarium admin target edit {} --work-root <absolute path>`", def.name);
+    }
 }
 
 /// Only machine/path identity matters. Credentials and limits may be rotated
@@ -131,7 +209,7 @@ pub fn build_env(root: &str, cmd: &mut RemoteCmd) -> ApiResult<()> {
 // outside the root during traversal. Directory FDs prevent symlink redirection,
 // not same-UID renames. That UID already has permission to delete these files.
 const SCRIPT: &str = r#"
-import os, stat, sys
+import errno, os, stat, sys
 mode, base, project, name, agent, dest = sys.argv[1:]
 def mount_id(fd):
     with open('/proc/self/fdinfo/' + str(fd)) as info:
@@ -163,14 +241,22 @@ try:
     fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     fds.append(fd)
     for part in base.split('/')[1:] + [project]:
-        if mode == 'prepare':
-            try: os.mkdir(part, dir_fd=fd)
-            except FileExistsError: pass
-        try: fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        except FileNotFoundError:
-            if mode != 'prepare':
-                print(0)
-                sys.exit(0)
+        try:
+            if mode == 'prepare':
+                try: os.mkdir(part, dir_fd=fd)
+                except FileExistsError: pass
+            try: fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                if mode != 'prepare':
+                    print(0)
+                    sys.exit(0)
+                raise
+        except OSError as e:
+            # Only a base the agent user may not create is unavailable. A
+            # symlink or a foreign owner still fails closed (exit 1).
+            if mode == 'prepare' and e.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+                sys.stderr.write('base unavailable: ' + str(e) + '\n')
+                sys.exit(3)
             raise
         fds.append(fd)
     parent = fd
@@ -310,7 +396,9 @@ pub async fn prepare(
             "cannot check target python3 availability",
         ));
     }
-    let path = root(base(def), &a.project, &a.name)?;
+    let stored = stored_base(state, &a.id, &def.name).await?;
+    let mut current = stored.unwrap_or_else(|| base(def).to_owned());
+    let mut path = root(&current, &a.project, &a.name)?;
     if dest.is_some_and(|d| !inside(&path, d)) {
         warn_outside(state, actor, def, &path).await?;
         return Ok(None);
@@ -345,20 +433,77 @@ pub async fn prepare(
         })
         .await?;
     let relative = dest.map(|d| &d[path.len() + 1..]).unwrap_or_default();
-    let out = start_cmd(
+    let mut out = start_cmd(
         state,
         def,
-        &command("prepare", base(def), &a.project, &a.name, &a.id, relative)?,
+        &command("prepare", &current, &a.project, &a.name, &a.id, relative)?,
     )?
     .collect(4096)
     .await;
+    if exit_code(&out) == Some(BASE_UNAVAILABLE) && def.work_root.is_none() && current == DEFAULT_BASE {
+        // Exit 3 means the agent user cannot reach the default base, so no
+        // root of this agent exists there: switching the row orphans nothing.
+        current = home_fallback(state, def).await?;
+        path = root(&current, &a.project, &a.name)?;
+        let (id, target, fallback) = (a.id.clone(), def.name.clone(), current.clone());
+        state
+            .db
+            .write("system", move |t| {
+                t.execute(
+                    "UPDATE agent_target_roots SET base=?3 WHERE agent=?1 AND target=?2",
+                    params![id, target, fallback],
+                )?;
+                Ok(())
+            })
+            .await?;
+        warn_fallback(def, &current);
+        if dest.is_some() {
+            return Err(ApiError::invalid(format!(
+                "{DEFAULT_BASE} is not writable on target {}; the owned root is now {path}: use a path under it",
+                def.name
+            )));
+        }
+        out = start_cmd(
+            state,
+            def,
+            &command("prepare", &current, &a.project, &a.name, &a.id, "")?,
+        )?
+        .collect(4096)
+        .await;
+    }
     if !out.end().success() {
-        return Err(ApiError::invalid(format!(
-            "cannot prepare owned target root: {}",
-            out.stderr_tail()
-        )));
+        let unavailable = exit_code(&out) == Some(BASE_UNAVAILABLE);
+        return Err(prepare_error(def, &current, unavailable, &out.stderr_tail()));
     }
     Ok(Some(path))
+}
+
+/// The home fallback base of the agent user on the target.
+async fn home_fallback(state: &Shared, def: &TargetDef) -> ApiResult<String> {
+    let out = start_cmd(
+        state,
+        def,
+        &RemoteCmd {
+            argv: vec!["python3".into(), "-c".into(), HOME_PROBE.into()],
+            timeout_secs: Some(30),
+            ..RemoteCmd::default()
+        },
+    )?
+    .collect(4096)
+    .await;
+    let home = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if !out.end().success() {
+        let tail = format!("cannot read the home of the agent user: {}", out.stderr_tail());
+        return Err(prepare_error(def, &format!("~/{FALLBACK_DIR}"), true, &tail));
+    }
+    fallback_base(&home).map_err(|_| {
+        prepare_error(
+            def,
+            &format!("~/{FALLBACK_DIR}"),
+            true,
+            &format!("the home of the agent user `{home}` is not a usable absolute path"),
+        )
+    })
 }
 
 pub async fn prepare_exec(
@@ -370,7 +515,8 @@ pub async fn prepare_exec(
     let Some(a) = actor.agent() else {
         return Ok(());
     };
-    let r = root(base(def), &a.project, &a.name)?;
+    let stored = stored_base(state, &a.id, &def.name).await?;
+    let r = root(stored.as_deref().unwrap_or(base(def)), &a.project, &a.name)?;
     let paths = [
         cmd.cwd.as_deref(),
         cmd.env.get("CARGO_TARGET_DIR").map(String::as_str),
@@ -389,7 +535,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         .db
         .read(|c| {
             let mut q = c.prepare(
-                "SELECT r.agent, r.project, r.name, r.target, r.definition
+                "SELECT r.agent, r.project, r.name, r.target, r.definition, r.base
             FROM agent_target_roots r WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id=r.agent)",
             )?;
             Ok(q.query_map([], |r| {
@@ -399,6 +545,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, Option<String>>(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?)
@@ -412,7 +559,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
     // delete has its own deadline so one large tree cannot stall other targets.
     futures_util::stream::iter(by_target.into_values().map(Ok::<_, ApiError>))
         .try_for_each_concurrent(3, |rows| async move {
-    for (id, project, name, target, definition) in rows {
+    for (id, project, name, target, definition, stored) in rows {
         let _guard = lock(&format!("{id}:{target}")).await;
         if state.executor.live_of(&id) != 0 {
             continue;
@@ -438,10 +585,11 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             tracing::warn!(%id, %target, "target cleanup refused: definition changed");
             continue;
         }
+        let owned = stored.unwrap_or_else(|| base(&row.def).to_owned());
         let measured = match start_cmd(
             state,
             &row.def,
-            &command("measure", base(&row.def), &project, &name, &id, "")?,
+            &command("measure", &owned, &project, &name, &id, "")?,
         ) {
             Ok(run) => run.collect(4096).await,
             Err(e) => {
@@ -461,7 +609,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
                 continue;
             }
         };
-        let path = root(base(&row.def), &project, &name)?;
+        let path = root(&owned, &project, &name)?;
         let (audit_id, audit_project, audit_target, audit_path) =
             (id.clone(), project.clone(), target.clone(), path.clone());
         state.db.write("system", move |t| {
@@ -471,7 +619,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         let run = match start_cmd(
             state,
             &row.def,
-            &command("delete", base(&row.def), &project, &name, &id, "")?,
+            &command("delete", &owned, &project, &name, &id, "")?,
         ) {
             Ok(run) => run,
             Err(e) => {
@@ -730,6 +878,10 @@ mod tests {
     }
 
     fn run(base: &std::path::Path, mode: &str, dest: &str) -> bool {
+        run_code(base, mode, dest) == Some(0)
+    }
+
+    fn run_code(base: &std::path::Path, mode: &str, dest: &str) -> Option<i32> {
         // Exercise the exact target program in an isolated tree, not /src.
         let script = SCRIPT.replace(
             "os.open('/',",
@@ -749,7 +901,59 @@ mod tests {
             .output()
             .unwrap()
             .status
-            .success()
+            .code()
+    }
+
+    #[test]
+    fn unwritable_base_exits_unavailable_and_nothing_is_made() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root ignores the mode: then there is nothing to prove here.
+        if std::fs::create_dir(src.join("probe")).is_ok() {
+            return;
+        }
+        assert_eq!(run_code(tmp.path(), "prepare", ""), Some(BASE_UNAVAILABLE));
+        assert!(!src.join("terrarium").exists());
+        // Measure and delete of a root that cannot exist report nothing.
+        assert!(run(tmp.path(), "delete", ""));
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(run(tmp.path(), "prepare", "repo"));
+    }
+
+    #[test]
+    fn fallback_base_is_under_home_and_checked() {
+        assert_eq!(
+            fallback_base("/home/agent").unwrap(),
+            "/home/agent/.terrarium-work"
+        );
+        assert_eq!(
+            fallback_base("/home/agent/").unwrap(),
+            "/home/agent/.terrarium-work"
+        );
+        for bad in ["", "/", "relative", "/home/../root", "~"] {
+            assert!(fallback_base(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn prepare_errors_name_work_root() {
+        let mut def: TargetDef = toml::from_str("kind = 'ssh'\naddress = 'user@box'\n").unwrap();
+        def.name = "box".into();
+        let msg = |e: ApiError| e.to_string();
+        let none = msg(prepare_error(&def, "/home/u/.terrarium-work", true, "denied"));
+        assert!(none.contains("has no work_root"), "{none}");
+        assert!(none.contains(DEFAULT_BASE), "{none}");
+        assert!(none.contains("/home/u/.terrarium-work"), "{none}");
+        assert!(none.contains("terrarium admin target edit box --work-root"), "{none}");
+        def.work_root = Some("/var/build".into());
+        let set = msg(prepare_error(&def, "/var/build", true, "denied"));
+        assert!(set.contains("work_root /var/build"), "{set}");
+        assert!(set.contains("--work-root"), "{set}");
+        let other = msg(prepare_error(&def, "/var/build", false, "owner"));
+        assert!(other.contains("cannot prepare owned target root under /var/build: owner"), "{other}");
     }
 
     #[test]
@@ -782,7 +986,9 @@ mod tests {
             let link = tmp.path().join(component);
             std::fs::create_dir_all(link.parent().unwrap()).unwrap();
             std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-            assert!(!run(tmp.path(), "prepare", "repo"));
+            // A symlink fails closed: never the unavailable code, so no fallback.
+            let code = run_code(tmp.path(), "prepare", "repo");
+            assert!(code != Some(0) && code != Some(BASE_UNAVAILABLE), "{code:?}");
             assert!(!run(tmp.path(), "delete", ""));
             assert!(link.is_symlink());
         }
@@ -800,7 +1006,8 @@ mod tests {
     fn refuses_preexisting_unowned_directory() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src/terrarium/p/a")).unwrap();
-        assert!(!run(tmp.path(), "prepare", "repo"));
+        let code = run_code(tmp.path(), "prepare", "repo");
+        assert!(code != Some(0) && code != Some(BASE_UNAVAILABLE), "{code:?}");
         assert!(!run(tmp.path(), "delete", ""));
     }
 }

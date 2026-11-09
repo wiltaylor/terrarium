@@ -6363,7 +6363,7 @@ all projects. Targets are project targets by default: a global target
 
 | Field | Meaning |
 |---|---|
-| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Keep project shared caches outside each agent root. |
+| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. A `work_root` that is set never falls back: its failure names it. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
 | `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. A snapshot delete removes a name. A snapshot list removes the names that the host no longer has (§17.3, "Snapshots"). |
