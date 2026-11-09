@@ -3386,7 +3386,8 @@ To thread (GitHub #30, TER-469):
   and the thread item stands for it. Its `question` waits stay open.
   In its thread it counts as an open question (TER-495): the agent sets no
   `waiting_agent` or `tracking` (`409 conflict`), a message of the agent
-  makes the thread `waiting_operator`, and a close retracts it.
+  makes the thread `waiting_operator`, and a close retracts it. The
+  operator's `POST .../status` `waiting_agent` passes it (TER-514).
 - The agent gets one mail from the operator on the mail thread of the
   question (`In a thread: ...`), with the commands to read the thread and
   reply there. The agent is not bound to the thread, so each later
@@ -3952,7 +3953,9 @@ a message. Both withdraw a close proposal. Only `waiting_agent` and
 `tracking` are allowed (`422`). The attached agent and the operator use
 the status verb (another agent is `403`); a `status` in an operator
 message is `422`. An open question of the thread is `409 conflict` for
-both: a question keeps the thread on the operator. A `waiting_agent` or `tracking` thread is not in the Inbox
+both: a question keeps the thread on the operator. An `in_thread`
+question refuses only the agent: the operator's `waiting_agent` passes it
+(TER-514). A `waiting_agent` or `tracking` thread is not in the Inbox
 badge and gets no reminder or stale close.
 
 **Tracking on a card link** (GitHub #28). When a card is linked
@@ -4130,7 +4133,7 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
 | `POST /api/threads/{id}/track` | no body, or `{"cards"?, "monitor"?}`: at most 50 cards to link first (TER-146), optional monitor `project:name` (TER-149) | The attached agent: `200` the thread, `tracking`, with `tracking_at`, `cards` and optional `monitor`. `409` with an open question; invalid links roll back the whole write |
-| `POST /api/threads/{id}/status` | `{"status"}`: `waiting_agent` or `tracking` (GitHub #28) | The attached agent: `200` the thread. `403` for anyone else, `409` with an open question, `422` for another status |
+| `POST /api/threads/{id}/status` | `{"status"}`: `waiting_agent` or `tracking` (GitHub #28) | The attached agent: `200` the thread. `403` for anyone else, `409` with an open question (for the operator's `waiting_agent`, only an `open` one, not `in_thread`), `422` for another status |
 | `POST /api/threads/{id}/cards` | `{"card"}`: `<project>:<card>` or `<card>` | `200` the thread with `cards`, also when the card was linked already. `404` without the read right on the thread, for a card that does not exist or is not in the named project, and without the read right on the card's project; `422` for an archived card; `409` on a closed thread |
 
 **Ops tracking** (TER-149, D6). `terrarium thread track <id> --monitor <project>:<monitor>`

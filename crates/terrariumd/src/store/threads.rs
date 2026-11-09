@@ -1241,12 +1241,32 @@ fn no_open_question(t: &Tx<'_>, id: &str, want: ThreadStatus) -> ApiResult<()> {
     Ok(())
 }
 
+/// An `open` question of thread `id` refuses the operator's `want`
+/// (`409`). An `in_thread` question does not: the operator moved it into
+/// the thread (TER-514).
+fn operator_no_open_question(t: &Tx<'_>, id: &str, want: ThreadStatus) -> ApiResult<()> {
+    let open: i64 = t.query_row(
+        "SELECT count(*) FROM questions WHERE thread = ?1 AND status = 'open'",
+        [id],
+        |r| r.get(0),
+    )?;
+    if open > 0 {
+        return Err(ApiError::conflict(format!(
+            "thread {id} has {open} open question(s) in the Inbox: answer them first; then set {}",
+            want.as_str()
+        )));
+    }
+    Ok(())
+}
+
 /// The attached agent or the operator `by` sets the status of thread
 /// `id` without a message (GitHub #28, `thread status`, TER-456):
 /// `tracking` as [`track`], or
 /// `waiting_agent`: the agent works on, and the thread does not wait on
 /// the operator (no Inbox badge, no reminder, no stale close). An open
-/// question refuses it (`409`); a close proposal is withdrawn.
+/// question refuses it (`409`); a close proposal is withdrawn. The
+/// operator's `waiting_agent` passes an `in_thread` question: the operator
+/// moved it into this thread and decides when the agent works on (TER-514).
 pub fn set_by_agent(t: &mut Tx<'_>, id: &str, by: &str, status: ThreadStatus) -> ApiResult<Thread> {
     agent_status(status)?;
     if status == ThreadStatus::Tracking {
@@ -1254,7 +1274,11 @@ pub fn set_by_agent(t: &mut Tx<'_>, id: &str, by: &str, status: ThreadStatus) ->
     }
     let th = get_bare(t, id)?;
     not_closed(&th, "a status change")?;
-    no_open_question(t, &th.id, status)?;
+    if by == "operator" {
+        operator_no_open_question(t, &th.id, status)?;
+    } else {
+        no_open_question(t, &th.id, status)?;
+    }
     let at = now();
     t.execute(
         "UPDATE threads SET status = ?2, updated_at = ?3, close_proposal = NULL WHERE id = ?1",
