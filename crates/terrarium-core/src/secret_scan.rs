@@ -22,7 +22,7 @@
 //! | `jwt` | `eyJ...` `.` `eyJ...` `.` (a JWT, as the CLI session tokens) |
 //! | `terrarium-host-token` | `thk_...` (a host agent token), `the_...` (an enrol token) |
 //! | `credential-key` | a key named like `token`, `secret`, `password`, `api_key`, or `authorization`, with a value of 16 characters or more |
-//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) or sits inside the quoted value of a non-secret repo field of the daemon-written export ([`exempt_export_value_span`], issue #27) and that value has the strict allow shape ([`has_allow_shape`]) |
+//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) or sits inside the quoted value of a repo `url` of the daemon-written export ([`exempt_export_value_span`], issue #27) and that value has the strict allow shape ([`has_allow_shape`]) |
 //! | `url-userinfo` | a repo URL of the export with a credential in its user part (`https://token@x/y`, `https://user:pass@x/y`, `ssh://user:pass@x/y`), on the same exempt lines (issue #27) |
 //! | `credential-file` | a file name that holds credentials: `.env`, `auth.json`, `.credentials.json`, `id_rsa`, `*.pem`, `*.key`, ... |
 //!
@@ -37,14 +37,19 @@
 //! stay on its lines (issue #27). Instead, only the runs inside the
 //! quoted value of a repo field of the export fleet files that holds no
 //! secret skip the `high-entropy` rule ([`EXPORT_EXEMPT_FIELDS`]):
-//! the `url` of a repo, its `default_branch`, and a `credential` name,
-//! under a `[[projects.repos]]` table header, and only when the whole
-//! value has a strict allow shape ([`has_allow_shape`]). A `url` must
-//! be a plain `https`, `http`, `ssh`, or `git` URL or the scp form,
-//! with a user part of at most 16 plain characters ([`strict_repo_url`]),
-//! and no value holds a backslash. So no high-entropy token fits in
-//! the user part, no TOML escape gets the exemption, and a value of
-//! any other shape gets the normal rules. Another table of the same
+//! only the `url` of a repo under a `[[projects.repos]]` table header,
+//! and only when the whole value has a strict allow shape
+//! ([`has_allow_shape`]): a plain `https`, `http`, `ssh`, or `git`
+//! URL or the scp form, with a user part of at most 16 plain
+//! characters ([`strict_repo_url`]), and no backslash. So no
+//! high-entropy token fits in the user part, no TOML escape gets the
+//! exemption, and a value of any other shape gets the normal rules.
+//! A `default_branch` and a `credential` name of a repo table get the
+//! normal rules too. Known limit, the accepted residual of issue #27:
+//! a high-entropy run in the host or the path of a URL of the allow
+//! shape is still exempt (`ssh://<token>/r.git`, `git@<token>:r.git`,
+//! `https://h/<token>/r.git`). The shape keeps a token out of the user
+//! part only. Another table of the same
 //! file (a schedule webhook action also writes a `url`, and its path
 //! can hold the secret) and the rest of the line (a trailing comment)
 //! keep the rule. A real secret in another field of the same export
@@ -187,15 +192,11 @@ fn strict_repo_url() -> Option<&'static Regex> {
     .as_ref()
 }
 
-/// Does the quoted `value` of the exempt field `key` have the allow
-/// shape? A `url` must match [`strict_repo_url`]. A `default_branch`
-/// and a `credential` name are not URLs: they only must hold no
-/// backslash, so a TOML escape never gets the exemption.
-fn has_allow_shape(key: &str, value: &str) -> bool {
-    if value.contains('\\') {
-        return false;
-    }
-    key != "url" || strict_repo_url().is_some_and(|re| re.is_match(value))
+/// Does the quoted `value` of a repo `url` have the allow shape? It
+/// holds no backslash, so a TOML escape never gets the exemption, and
+/// it matches [`strict_repo_url`] as a whole.
+fn has_allow_shape(value: &str) -> bool {
+    !value.contains('\\') && strict_repo_url().is_some_and(|re| re.is_match(value))
 }
 
 /// A value that names a secret and is not one: an env reference, a
@@ -297,12 +298,14 @@ const EXPORT_FLEET_SUFFIX: &str = ".fleet.toml";
 /// hold the secret.
 const REPOS_TABLE: &str = "projects.repos";
 
-/// The fields of a repo table that hold no secret (issue #27): the
-/// `url` of a repo, its `default_branch`, and a `credential` name (a
-/// name in the secret store, never a value). Only the runs inside their
-/// quoted value skip the `high-entropy` rule
-/// ([`exempt_export_value_span`]).
-const EXPORT_EXEMPT_FIELDS: &[&str] = &["url", "default_branch", "credential"];
+/// The fields of a repo table that hold no secret (issue #27): only
+/// the `url` of a repo. Only the runs inside its quoted value skip the
+/// `high-entropy` rule, and only when the value has the strict allow
+/// shape ([`exempt_export_value_span`]). A `default_branch` and a
+/// `credential` name are short names in practice, so they get the
+/// normal rules: a long high-entropy value there (a token pasted in
+/// place of a secret name) hits.
+const EXPORT_EXEMPT_FIELDS: &[&str] = &["url"];
 
 /// The table header of `line` (`[[projects.repos]]`, `[defaults]`),
 /// without its brackets, or `None` when the line is not one. A
@@ -433,7 +436,7 @@ fn multiline_open_after(line: &str, open: Option<char>) -> Option<char> {
     open
 }
 
-/// The field and the span of the quoted value of `line`, when `line`
+/// The span of the quoted value of `line`, when `line`
 /// is one of the [`EXPORT_EXEMPT_FIELDS`] of a repo table of the
 /// daemon-written export (issue #27): the key stands before the first
 /// `=`, and the value is a quoted string. Such a line is a candidate:
@@ -445,11 +448,11 @@ fn multiline_open_after(line: &str, open: Option<char>) -> Option<char> {
 /// `[[projects.repos]]` line inside a multi-line string is text of
 /// that string, not a header ([`multiline_open_after`]), and the token
 /// patterns still run on every line.
-fn export_repo_value_span<'a>(
+fn export_repo_value_span(
     path: &str,
     header: Option<&str>,
-    line: &'a str,
-) -> Option<(&'a str, std::ops::Range<usize>)> {
+    line: &str,
+) -> Option<std::ops::Range<usize>> {
     if !path.starts_with(EXPORT_PREFIX) || !path.ends_with(EXPORT_FLEET_SUFFIX) {
         return None;
     }
@@ -468,7 +471,7 @@ fn export_repo_value_span<'a>(
     }
     let start = line.len() - value.len() + 1;
     let end = start + value[1..].find(char::from(first))?;
-    Some((key, start..end))
+    Some(start..end)
 }
 
 /// The span of the quoted value of a candidate line
@@ -480,8 +483,8 @@ fn exempt_export_value_span(
     header: Option<&str>,
     line: &str,
 ) -> Option<std::ops::Range<usize>> {
-    let (key, span) = export_repo_value_span(path, header, line)?;
-    has_allow_shape(key, &line[span.clone()]).then_some(span)
+    let span = export_repo_value_span(path, header, line)?;
+    has_allow_shape(&line[span.clone()]).then_some(span)
 }
 
 /// Is `name` (the last part of a path) a file that holds credentials?
@@ -584,7 +587,7 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
         // value of a candidate line, do not take the marker: the
         // daemon writes the export, so a credential in a repo URL, and
         // a marker on that line, are hand edits.
-        let candidate = export_repo_value_span(path, header.as_deref(), line).map(|(_, s)| s);
+        let candidate = export_repo_value_span(path, header.as_deref(), line);
         let exempt = exempt_export_value_span(path, header.as_deref(), line);
         let inside = |span: &Option<std::ops::Range<usize>>, m: &regex::Match<'_>| {
             span.as_ref()
@@ -818,11 +821,12 @@ mod tests {
         assert!(!is_word_path("abc/def+ghi=="));
     }
 
-    /// The non-secret repo fields of the daemon-written export fleet
-    /// files skip the `high-entropy` rule (issue #27): a repo URL with
-    /// a long mixed-case path commits. The same value in a field that
-    /// is not exempt, or in a file outside the export, still hits, and
-    /// so does a token pattern on the exempt line.
+    /// The repo `url` of the daemon-written export fleet files skips
+    /// the `high-entropy` rule (issue #27): a repo URL with a long
+    /// mixed-case path commits. The same value in another field
+    /// (`default_branch` and `credential` too), or in a file outside
+    /// the export, still hits, and so does a token pattern on the
+    /// exempt line.
     #[test]
     fn export_repo_fields_known_not_secret_skip_high_entropy() {
         let he = "high-entropy".to_owned();
@@ -834,11 +838,15 @@ mod tests {
         let run = "com/wiltaylor-daf/ExampleReportingService";
         assert!(run.len() >= ENTROPY_MIN_LEN && shannon_entropy(run) > ENTROPY_THRESHOLD);
         let repos = format!(
-            "[[projects]]\nname = \"p1\"\n\n[[projects.repos]]\nname = \"app\"\nurl = \"{url}\"\ndefault_branch = \"{random}\"\ncredential = \"{random}\"\n"
+            "[[projects]]\nname = \"p1\"\n\n[[projects.repos]]\nname = \"app\"\nurl = \"{url}\"\ndefault_branch = \"main\"\ncredential = \"github-app\"\n"
         );
-        assert!(!rules(export, &repos).contains(&he), "{repos}");
-        // By field, not by file: another field of the same table hits.
+        assert!(rules(export, &repos).is_empty(), "{repos}");
+        // By field, not by file: another field of the same table hits,
+        // also a long high-entropy `default_branch` or `credential` (a
+        // token pasted in place of a secret name).
         for line in [
+            format!("default_branch = \"{random}\""),
+            format!("credential = \"{random}\""),
             format!("description = \"{random}\""),
             format!("host = \"{random}\""),
             format!("name = \"{random}\""),
@@ -1073,10 +1081,10 @@ mod tests {
         let text = format!("url = 'ssh://{random}\"x@git.example/o/r.git'");
         assert!(line(&text).contains(&he), "{text}");
         // A user part of 16 characters fits the shape, one of 17 does not.
-        assert!(has_allow_shape("url", "ssh://abcdefghijklmnop@h/r.git"));
-        assert!(!has_allow_shape("url", "ssh://abcdefghijklmnopq@h/r.git"));
-        assert!(has_allow_shape("url", "abcdefghijklmnop@h:r.git"));
-        assert!(!has_allow_shape("url", "abcdefghijklmnopq@h:r.git"));
+        assert!(has_allow_shape("ssh://abcdefghijklmnop@h/r.git"));
+        assert!(!has_allow_shape("ssh://abcdefghijklmnopq@h/r.git"));
+        assert!(has_allow_shape("abcdefghijklmnop@h:r.git"));
+        assert!(!has_allow_shape("abcdefghijklmnopq@h:r.git"));
         // Plain URLs of the strict shape stay exempt, in both quote forms.
         for url in [
             "ssh://git@git.example/o/r.git",
@@ -1085,13 +1093,21 @@ mod tests {
             "git@github.com:wiltaylor-daf/terrarium.git",
             "https://github.com/wiltaylor-daf/ExampleReportingService.git",
         ] {
-            assert!(has_allow_shape("url", url), "{url}");
+            assert!(has_allow_shape(url), "{url}");
             assert!(at(url).is_empty(), "{url}: {:?}", at(url));
             assert!(line(&format!("url = '{url}'")).is_empty(), "{url}");
         }
-        // The other exempt fields only must hold no backslash.
-        assert!(has_allow_shape("default_branch", "main"));
-        assert!(!has_allow_shape("credential", "a\\u0041"));
+        // Known limit (the accepted residual of issue #27): a
+        // high-entropy run in the host or the path of a URL of the
+        // allow shape stays exempt. A change here is a choice.
+        for url in [
+            format!("ssh://{random}/r.git"),
+            format!("git@{random}:r.git"),
+            format!("https://h/{random}/r.git"),
+            format!("https://h/~{random}"),
+        ] {
+            assert!(at(&url).is_empty(), "{url}: {:?}", at(&url));
+        }
     }
 
     /// The allow marker does not skip `url-userinfo`, nor `high-entropy`
