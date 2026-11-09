@@ -12,7 +12,7 @@ import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
 import { api } from "../../stores";
-import { ackText, answerBody, cardHref, chosenLabel, statusChip } from "./questions";
+import { ackText, answerBody, cardHref, chosenLabel, statusChip, THREAD_MOVE_MESSAGE_MAX } from "./questions";
 import { threadHref } from "./threads";
 
 /**
@@ -27,6 +27,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
   const [text, setText] = createSignal("");
   const [skip, setSkip] = createSignal(false);
   const [reason, setReason] = createSignal("");
+  const [threadMessage, setThreadMessage] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
   createEffect(on(() => props.prefill, (p) => p && setText(p.text)));
@@ -147,12 +148,13 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
             <input placeholder="Reason to retract (optional)" value={reason()} onInput={(e) => setReason(e.currentTarget.value)} aria-label="Retract reason" />
             <ConfirmButton class="small" label="Retract" confirmLabel="Yes, retract" disabled={busy()} onConfirm={() => run(() => api.questions.retract(q().id, reason().trim() || undefined))} />
             <Show when={q().status === "open" && !q().thread}>
+              <input placeholder="Message for the thread (optional)" value={threadMessage()} maxLength={THREAD_MOVE_MESSAGE_MAX} onInput={(e) => setThreadMessage(e.currentTarget.value)} aria-label="Thread message" />
               <ConfirmButton
                 class="small"
                 label="To thread"
                 confirmLabel="Yes, open a thread"
                 disabled={busy()}
-                onConfirm={() => run(async () => (await api.questions.toThread(q().id)).question)}
+                onConfirm={() => run(async () => (await api.questions.toThread(q().id, threadMessage().trim() || undefined)).question)}
               />
             </Show>
           </div>
