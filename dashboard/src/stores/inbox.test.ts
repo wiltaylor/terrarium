@@ -19,22 +19,22 @@ describe("inbox store", () => {
   it("drops an older refresh that resolves after a newer one (no stale critical item)", async () => {
     // Refresh 1 sees a critical thread; its thread read is still in flight
     // when refresh 2 sees none. The late thread read must not restore it.
-    const countReads = [deferred<InboxCounts>(), deferred<InboxCounts>()];
+    const [older, newer] = [deferred<InboxCounts>(), deferred<InboxCounts>()];
     const threadRead = deferred<InboxItem[]>();
     let c = 0;
     const api = {
       inbox: {
-        counts: () => countReads[c++].promise,
+        counts: () => (c++ === 0 ? older : newer).promise,
         list: (q: { kind?: string }) => (q.kind === "thread" ? threadRead.promise : Promise.resolve([])),
       },
     } as unknown as Parameters<typeof createInboxStore>[0];
     await createRoot(async (dispose) => {
       const store = createInboxStore(api);
       const first = store.refresh();
-      countReads[0].resolve(counts(1));
+      older.resolve(counts(1));
       await flush(); // refresh 1 now waits for its thread read
       const second = store.refresh();
-      countReads[1].resolve(counts(0));
+      newer.resolve(counts(0));
       await second;
       expect(store.open()).toEqual([]);
       threadRead.resolve([criticalThread]);
@@ -46,11 +46,11 @@ describe("inbox store", () => {
   });
 
   it("drops older counts that resolve after newer ones", async () => {
-    const countReads = [deferred<InboxCounts>(), deferred<InboxCounts>()];
+    const [older, newer] = [deferred<InboxCounts>(), deferred<InboxCounts>()];
     let c = 0;
     const api = {
       inbox: {
-        counts: () => countReads[c++].promise,
+        counts: () => (c++ === 0 ? older : newer).promise,
         list: (q: { kind?: string }) => Promise.resolve(q.kind === "thread" ? [criticalThread] : []),
       },
     } as unknown as Parameters<typeof createInboxStore>[0];
@@ -58,9 +58,9 @@ describe("inbox store", () => {
       const store = createInboxStore(api);
       const first = store.refresh();
       const second = store.refresh();
-      countReads[1].resolve(counts(0));
+      newer.resolve(counts(0));
       await second;
-      countReads[0].resolve(counts(1));
+      older.resolve(counts(1));
       await first;
       expect(store.counts().thread_critical).toBe(0);
       expect(store.open()).toEqual([]);
