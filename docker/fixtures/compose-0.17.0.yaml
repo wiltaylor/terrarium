@@ -1,0 +1,174 @@
+# Terrarium stack (PLAN §23.4). Start it with `just up`; stop it with `just down`.
+# Every variable is documented in .env.example.
+#
+# The bind mounts are under TERRARIUM_DATA_DIR. Unset (a dev checkout,
+# `just up`): the project dir, so ./config, ./state, ... of the repo.
+# `just deploy::server` sets it to the install dir: the code is in
+# <dir>/src and the data stays in <dir>, so a new deploy never touches it.
+services:
+  terrarium:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      # TERRARIUM_GIT_REF: the git ref of the build (`terrarium version`).
+      # The deploy wrapper sets it from src/.deployed-ref, `just docker::up`
+      # from git. Empty: the binaries report `+unknown`.
+      args: { UID: "${TERRARIUM_UID:-1000}", GID: "${TERRARIUM_GID:-1000}", TERRARIUM_GIT_REF: "${TERRARIUM_GIT_REF:-}" }
+    image: ${TERRARIUM_IMAGE:-terrarium:dev}
+    restart: unless-stopped
+    # The entrypoint stops terrariumd, then gives the agent runners
+    # TERRARIUM_SHUTDOWN_GRACE (20 s) to end their harnesses (docker/README.md).
+    stop_grace_period: 40s
+    ports:
+      - "${TERRARIUM_PORT:-8080}:8080"                 # dashboard and API
+      - "${TERRARIUM_ARTIFACT_PORT:-8081}:8081"        # artifact serving origin (§15.2)
+      - "${TERRARIUM_HOST_PORT:-8082}:8082"            # host agent dial-in (§19)
+      - "${TERRARIUM_INGEST_PORT:-8083}:8083"          # webhooks of the event sources (docs/api.md §20)
+    environment:
+      TERRARIUM_TOKEN: ${TERRARIUM_TOKEN:?set TERRARIUM_TOKEN in .env (see .env.example)}
+      TERRARIUM_PUBLIC_URL: ${TERRARIUM_PUBLIC_URL:-http://localhost:8080}
+      RUST_LOG: ${RUST_LOG:-info}
+      # The host agent dial-in (docs/host-protocol.md "TLS"). With a cert
+      # and key it speaks TLS on 0.0.0.0:8082. Without them it is plaintext
+      # on 127.0.0.1:8082 in the container, which the published port cannot
+      # reach: set TERRARIUM_HOST_LISTEN in .env to open it (see .env.example).
+      TERRARIUM_HOST_LISTEN: ${TERRARIUM_HOST_LISTEN:-auto}
+      # The daemon_url that the host installer (GET /install/host.sh) writes.
+      # Empty: wss://<host of TERRARIUM_PUBLIC_URL>:8082 with TLS.
+      TERRARIUM_HOST_DAEMON_URL: ${TERRARIUM_HOST_DAEMON_URL:-}
+      TERRARIUM_ARTIFACT_PUBLIC_URL: ${TERRARIUM_ARTIFACT_PUBLIC_URL:-}
+      # The webhook listener (docs/api.md §20): only /hooks/... and /healthz.
+      # TERRARIUM_INGEST_PUBLIC_URL is the URL that a forge reaches; the
+      # hook URL of each event source starts with it.
+      TERRARIUM_INGEST_ADDR: 0.0.0.0:8083
+      TERRARIUM_INGEST_PUBLIC_URL: ${TERRARIUM_INGEST_PUBLIC_URL:-}
+      # The addresses that a webhook action can reach (docs/api.md §19.5):
+      # allow (the default) or deny (no private, loopback, or own ports).
+      TERRARIUM_WEBHOOK_PRIVATE: ${TERRARIUM_WEBHOOK_PRIVATE:-allow}
+      # The git proxy (PLAN §9, "The git proxy"): agent checkouts of a
+      # proxied repo push and fetch through it, and the forge token stays in
+      # the daemon. Loopback in the container: the sandboxes share its
+      # network. Empty turns it off (every repo is then direct).
+      TERRARIUM_GIT_PROXY_LISTEN: ${TERRARIUM_GIT_PROXY_LISTEN-127.0.0.1:8084}
+      TERRARIUM_WS_QUERY_TOKEN: ${TERRARIUM_WS_QUERY_TOKEN:-}
+      # The operator password at the first start, when none is set (remove it
+      # from .env after that), and the session lives (docs/api.md §1.1).
+      TERRARIUM_PASSWORD: ${TERRARIUM_PASSWORD:-}
+      TERRARIUM_SESSION_TTL: ${TERRARIUM_SESSION_TTL:-30d}
+      TERRARIUM_CLI_SESSION_TTL: ${TERRARIUM_CLI_SESSION_TTL:-90d}
+      TERRARIUM_SESSION_MAX_AGE: ${TERRARIUM_SESSION_MAX_AGE:-90d}
+      TERRARIUM_MAIL_LOOP_LIMIT: ${TERRARIUM_MAIL_LOOP_LIMIT:-}
+      # Match the daemon defaults when the instance has no git identity set.
+      TERRARIUM_GIT_NAME: ${TERRARIUM_GIT_NAME:-Terrarium}
+      TERRARIUM_GIT_EMAIL: ${TERRARIUM_GIT_EMAIL:-terrarium@localhost}
+      TERRARIUM_TRASH_DAYS: ${TERRARIUM_TRASH_DAYS:-}
+      TERRARIUM_CARD_FILE_MAX_BYTES: ${TERRARIUM_CARD_FILE_MAX_BYTES:-}
+      TERRARIUM_CARD_FILES_MAX_BYTES: ${TERRARIUM_CARD_FILES_MAX_BYTES:-}
+      # The most bytes in a system prompt (an agent's own, or a persona file).
+      TERRARIUM_SYSTEM_PROMPT_MAX: ${TERRARIUM_SYSTEM_PROMPT_MAX:-}
+      # The idle stop of an agent that sets none (PLAN §18): a duration, or off.
+      TERRARIUM_IDLE_STOP: ${TERRARIUM_IDLE_STOP:-10m}
+      # Auto compact of an agent that sets none (PLAN §18): on or off, and a
+      # duration or off. Each compaction is one model call.
+      TERRARIUM_COMPACT_ON_IDLE: ${TERRARIUM_COMPACT_ON_IDLE:-off}
+      TERRARIUM_COMPACT_MAX_AGE: ${TERRARIUM_COMPACT_MAX_AGE:-off}
+      TERRARIUM_HOST_TLS_CERT: ${TERRARIUM_HOST_TLS_CERT:-}
+      TERRARIUM_HOST_TLS_KEY: ${TERRARIUM_HOST_TLS_KEY:-}
+      # The harness auto-update check: daily, off, or a duration (6h). A
+      # pinned harness is never updated.
+      TERRARIUM_HARNESS_AUTO_UPDATE: ${TERRARIUM_HARNESS_AUTO_UPDATE:-daily}
+      # An Inbox mail for each installed harness update: off or on. A failed
+      # install always sends a mail.
+      TERRARIUM_HARNESS_UPDATE_MAIL: ${TERRARIUM_HARNESS_UPDATE_MAIL:-off}
+      # Backups (docs/api.md §32): the dir (default /state/backups) and the
+      # schedule: off (the default), daily, weekly, or a duration of 1h or more.
+      TERRARIUM_BACKUP_DIR: ${TERRARIUM_BACKUP_DIR:-}
+      TERRARIUM_BACKUP_SCHEDULE: ${TERRARIUM_BACKUP_SCHEDULE:-off}
+      TERRARIUM_BACKUP_FULL_EVERY: ${TERRARIUM_BACKUP_FULL_EVERY:-7d}
+      TERRARIUM_BACKUP_KEEP: ${TERRARIUM_BACKUP_KEEP:-4}
+      TERRARIUM_BACKUP_WORK: ${TERRARIUM_BACKUP_WORK:-off}
+      TERRARIUM_BACKUP_PASSPHRASE_FILE: ${TERRARIUM_BACKUP_PASSPHRASE_FILE:-}
+      # The config repo auto-sync (PLAN §8.3): off, pull, or sync, every interval.
+      TERRARIUM_CONFIG_SYNC: ${TERRARIUM_CONFIG_SYNC:-off}
+      TERRARIUM_CONFIG_SYNC_INTERVAL: ${TERRARIUM_CONFIG_SYNC_INTERVAL:-15m}
+      # The self-update (docs/api.md §34): off, notify (a mail for each
+      # new release), or auto (an update inside a global maintenance
+      # window); the channel stable or pre. The updater service below does
+      # the work; the daemon reaches it on the updater socket only.
+      TERRARIUM_SELF_UPDATE: ${TERRARIUM_SELF_UPDATE:-notify}
+      TERRARIUM_UPDATE_CHANNEL: ${TERRARIUM_UPDATE_CHANNEL:-stable}
+      TERRARIUM_UPDATE_REPO: ${TERRARIUM_UPDATE_REPO:-wiltaylor/terrarium}
+      TERRARIUM_UPDATER_SOCKET: /run/terrarium-updater/updater.sock
+    volumes:
+      - ${TERRARIUM_DATA_DIR:-.}/config/claude:/auth/claude
+      - ${TERRARIUM_DATA_DIR:-.}/config/codex:/auth/codex
+      - ${TERRARIUM_DATA_DIR:-.}/config/copilot:/auth/copilot
+      - ${TERRARIUM_DATA_DIR:-.}/config/pi:/auth/pi
+      - ${TERRARIUM_DATA_DIR:-.}/tools:/opt/terrarium/tools             # the harnesses: npm prefix, installed at the first start, updated in place (TERRARIUM_TOOLS_DIR)
+      - ${TERRARIUM_DATA_DIR:-.}/state:/state
+      - ${TERRARIUM_DATA_DIR:-.}/config/terrarium:/config/terrarium     # the config repo: prompts, harness settings, export (PLAN §8.3); git, shareable, no secrets
+      - ${TERRARIUM_DATA_DIR:-.}/subscriptions:/etc/terrarium/subscriptions
+      - ${TERRARIUM_DATA_DIR:-.}/projects:/etc/terrarium/projects
+      - ${TERRARIUM_DATA_DIR:-.}/agents:/etc/terrarium/agents
+      - ${TERRARIUM_DATA_DIR:-.}/targets:/etc/terrarium/targets
+      - ${TERRARIUM_DATA_DIR:-.}/fleets:/etc/terrarium/fleets           # *.toml fleet files, auto-applied at start and on reload
+      - ${TERRARIUM_DATA_DIR:-.}/repos:/repos                           # local bare repos, bound rw into the agents of their project (TERRARIUM_REPOS_DIR)
+      - ${TERRARIUM_DATA_DIR:-.}/work:/work                             # agent workspaces, <project>/<agent> (TERRARIUM_WORK_DIR); a host agent on this machine attaches them to targets (its work_dir is this ./work)
+      - ${TERRARIUM_DATA_DIR:-.}/config/tls:/etc/terrarium/tls:ro   # `just host::cert <name>` writes here
+      - ${TERRARIUM_DATA_DIR:-.}/updater/run:/run/terrarium-updater  # the updater socket (the updater service); no docker.sock here
+    security_opt:
+      - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)
+      - apparmor:unconfined
+      - systempaths=unconfined              # bwrap --proc needs an unmasked /proc (see docker/seccomp-bwrap.README.md)
+    healthcheck:
+      test: ["CMD", "terrarium", "daemon", "status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # The first start installs the harnesses into ./tools (a minute or
+      # two); a check that passes ends the start period at once.
+      start_period: 600s
+      start_interval: 2s
+
+  # The updater (docs/api.md §34, PLAN §23.8). It holds docker.sock and
+  # moves the terrarium container to a release image: it checks the
+  # signature, drains the daemon, makes a backup, starts the new image,
+  # and goes back to the old image and the backup when the new one is not
+  # healthy. The daemon never gets docker.sock: it asks the updater on the
+  # socket in updater/run (mode 0700, the same uid). Off by default: set
+  # COMPOSE_PROFILES=updater and TERRARIUM_DOCKER_GID in .env
+  # (.env.example). The same image as the daemon, another entrypoint.
+  terrarium-updater:
+    image: ${TERRARIUM_UPDATER_IMAGE:-${TERRARIUM_IMAGE:-terrarium:dev}}
+    profiles: ["updater"]
+    entrypoint: ["/usr/local/bin/terrarium-updater"]
+    command: ["serve"]
+    restart: unless-stopped
+    stop_grace_period: 10s
+    # The uid of the daemon, so the socket is the daemon's only; the group
+    # of docker.sock (`stat -c %g /var/run/docker.sock`) for the Engine API.
+    user: "${TERRARIUM_UID:-1000}:${TERRARIUM_GID:-1000}"
+    group_add: ["${TERRARIUM_DOCKER_GID:-0}"]
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      # The image check of a release: gh (the default: the build provenance
+      # attestation of the release workflow), cosign, off, or
+      # command:<shell command> (docs/api.md §34.4).
+      TERRARIUM_UPDATE_VERIFY: ${TERRARIUM_UPDATE_VERIFY:-gh}
+      TERRARIUM_UPDATE_WORKFLOW: ${TERRARIUM_UPDATE_WORKFLOW:-.github/workflows/ci.yml}
+      TERRARIUM_UPDATE_IMAGE: ${TERRARIUM_UPDATE_IMAGE:-ghcr.io/wiltaylor/terrarium}
+      TERRARIUM_UPDATE_REPO: ${TERRARIUM_UPDATE_REPO:-wiltaylor/terrarium}
+      TERRARIUM_UPDATE_DRAIN_WAIT: ${TERRARIUM_UPDATE_DRAIN_WAIT:-600}
+      TERRARIUM_UPDATE_HEALTH_TIMEOUT: ${TERRARIUM_UPDATE_HEALTH_TIMEOUT:-900}
+      # The name of the terrarium container. Empty: the service `terrarium`
+      # of this compose project, found by its compose labels.
+      TERRARIUM_UPDATER_TARGET: ${TERRARIUM_UPDATER_TARGET:-}
+      TERRARIUM_UPDATER_SOCKET: /run/terrarium-updater/updater.sock
+      TERRARIUM_UPDATER_STATE: /updater
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock                  # root on the host: only this service has it
+      # Fresh Compose configuration for each self-update. Read-only, updater only.
+      - .:/compose:ro
+      - ${TERRARIUM_DATA_DIR:-.}:/deployment:ro
+      - ${TERRARIUM_DATA_DIR:-.}/updater/run:/run/terrarium-updater  # the socket, shared with the daemon
+      - ${TERRARIUM_DATA_DIR:-.}/updater/state:/updater              # the history, the rollback target, and the image file

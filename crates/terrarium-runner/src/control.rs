@@ -15,7 +15,14 @@ use crate::protocol::{RequestContext, RpcError};
 use crate::runner::{ExitStatus, ScreenSnapshot};
 
 /// The version of the control protocol. `hello` reports it.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// Version 1 remains wire compatible (including the TER-260 hold extension).
+/// A future incompatible change must also bump the image runner-compat-epoch,
+/// forcing replacement of even runners retained across several hot swaps.
+pub fn supported_protocol(version: u32) -> bool {
+    (PROTOCOL_VERSION - 1..=PROTOCOL_VERSION).contains(&version)
+}
 
 /// A line from the daemon to the runner process.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

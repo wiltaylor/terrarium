@@ -126,6 +126,68 @@ pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSampl
     Ok(samples)
 }
 
+/// Accuracy of raw worker guesses for the latest 30 distinct completed cards
+/// in the bounded history. Null percentages mean there are no samples.
+#[derive(serde::Serialize)]
+pub struct WorkAccuracy {
+    pub samples: usize,
+    pub on_time_pct: Option<f64>,
+    pub within_half_to_double_pct: Option<f64>,
+}
+
+#[derive(serde::Serialize)]
+pub struct AccuracyView {
+    pub raw: WorkAccuracy,
+    pub calibrated: WorkAccuracy,
+}
+
+/// Backtest each recent card against only work completed before its guess.
+/// Missing calibration history is excluded, not counted as a raw prediction.
+pub fn accuracy_view(samples: &[WorkSample]) -> AccuracyView {
+    let mut seen = std::collections::HashSet::new();
+    let predictions: Vec<_> = samples
+        .iter()
+        .filter(|s| seen.insert(&s.card))
+        .take(30)
+        .filter_map(|s| {
+            let older: Vec<_> = samples
+                .iter()
+                .filter(|h| h.end_seq < s.start_seq)
+                .cloned()
+                .collect();
+            calibrated_ms(&older, &s.labels, Some(s.guess_ms)).map(|guess_ms| WorkSample {
+                guess_ms,
+                ..s.clone()
+            })
+        })
+        .collect();
+    AccuracyView {
+        raw: work_accuracy(samples),
+        calibrated: work_accuracy(&predictions),
+    }
+}
+
+pub fn work_accuracy(samples: &[WorkSample]) -> WorkAccuracy {
+    let mut seen = std::collections::HashSet::new();
+    let recent: Vec<_> = samples
+        .iter()
+        .filter(|s| seen.insert(&s.card))
+        .take(30)
+        .collect();
+    let percent =
+        |count: usize| (!recent.is_empty()).then(|| count as f64 * 100.0 / recent.len() as f64);
+    WorkAccuracy {
+        samples: recent.len(),
+        on_time_pct: percent(recent.iter().filter(|s| s.actual_ms <= s.guess_ms).count()),
+        within_half_to_double_pct: percent(
+            recent
+                .iter()
+                .filter(|s| s.actual_ms >= s.guess_ms / 2.0 && s.actual_ms <= s.guess_ms * 2.0)
+                .count(),
+        ),
+    }
+}
+
 /// Nearest-rank p70 with the caller's minimum sample size.
 fn p70(mut values: Vec<f64>, minimum: usize) -> Option<f64> {
     if values.is_empty() || values.len() < minimum {
@@ -503,6 +565,79 @@ mod tests {
             calibrated_ms(&recent, &labels, Some(10000.0)),
             Some(10000.0)
         );
+    }
+
+    #[test]
+    fn accuracy_counts_inclusive_boundaries_and_latest_distinct_cards() {
+        let empty = work_accuracy(&[]);
+        assert_eq!(empty.samples, 0);
+        assert_eq!(empty.on_time_pct, None);
+        assert_eq!(empty.within_half_to_double_pct, None);
+        let sample = |card: &str, actual_ms| WorkSample {
+            card: card.into(),
+            start_seq: 0,
+            end_seq: 1,
+            actual_ms,
+            guess_ms: 100.0,
+            labels: vec![],
+        };
+        let samples = vec![
+            sample("a", 50.0),
+            sample("b", 100.0),
+            sample("c", 200.0),
+            sample("d", 201.0),
+            sample("a", 999.0),
+        ];
+        let accuracy = work_accuracy(&samples);
+        assert_eq!(accuracy.samples, 4);
+        assert_eq!(accuracy.on_time_pct, Some(50.0));
+        assert_eq!(accuracy.within_half_to_double_pct, Some(75.0));
+        let mut samples: Vec<_> = (0..30).map(|i| sample(&i.to_string(), 100.0)).collect();
+        samples.push(sample("old", 999.0));
+        assert_eq!(work_accuracy(&samples).samples, 30);
+        assert_eq!(work_accuracy(&samples).on_time_pct, Some(100.0));
+    }
+
+    #[test]
+    fn calibrated_accuracy_uses_only_completions_before_each_guess() {
+        let samples: Vec<_> = (0..10)
+            .rev()
+            .map(|n| WorkSample {
+                card: n.to_string(),
+                start_seq: n * 2,
+                end_seq: n * 2 + 1,
+                actual_ms: 100.0,
+                guess_ms: 1000.0,
+                labels: vec!["type:impl".into()],
+            })
+            .collect();
+        let view = accuracy_view(&samples);
+        assert_eq!(view.raw.samples, 10);
+        assert_eq!(view.raw.within_half_to_double_pct, Some(0.0));
+        assert_eq!(view.calibrated.samples, 5);
+        assert_eq!(view.calibrated.on_time_pct, Some(100.0));
+        assert_eq!(view.calibrated.within_half_to_double_pct, Some(100.0));
+        let overlapping: Vec<_> = samples
+            .iter()
+            .cloned()
+            .map(|s| WorkSample { start_seq: 0, ..s })
+            .collect();
+        assert_eq!(accuracy_view(&overlapping).calibrated.samples, 0);
+        assert_eq!(accuracy_view(&overlapping).calibrated.on_time_pct, None);
+    }
+
+    #[test]
+    fn accuracy_history_ignores_non_json_and_non_move_events() {
+        let c = db();
+        c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES ('p','old','card','2026-11-08T00:00:00Z',?1)", [serde_json::json!({"change":"eta","column_role":"working","eta_at":"2026-11-08T00:10:00Z"}).to_string()]).unwrap();
+        moved(&c, "p", "old", 5, "working", "review");
+        assert_eq!(work_samples(&c, "p").unwrap().len(), 1);
+        for _ in 0..2000 {
+            c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES ('p','noise','card','2026-11-08T00:06:00Z','{\"change\":\"comment\"}')", []).unwrap();
+        }
+        c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES ('p','old','card','2026-11-08T00:06:00Z','not JSON')", []).unwrap();
+        let samples = work_samples(&c, "p").unwrap();
+        assert_eq!(accuracy_view(&samples).raw.samples, 1);
     }
 
     #[test]
