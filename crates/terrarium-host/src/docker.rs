@@ -87,8 +87,7 @@ fn push_env(
     let mut cli_env = BTreeMap::new();
     for (k, v) in env {
         env_key(k)?;
-        if k.starts_with('#') || k.starts_with('\u{feff}') || k.chars().any(char::is_whitespace)
-        {
+        if k.starts_with('#') || k.starts_with('\u{feff}') || k.chars().any(char::is_whitespace) {
             return Err(BuildError::bad(format!(
                 "environment name {k:?} has whitespace or starts with '#' or a BOM; \
                  a docker env file cannot hold it"

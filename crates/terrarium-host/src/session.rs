@@ -106,9 +106,7 @@ pub fn remove_private_files(dir: &Path, prefix: &str) -> std::io::Result<usize> 
     let mut n = 0;
     for entry in entries {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with(prefix)
-            && entry.file_type()?.is_file()
-        {
+        if entry.file_name().to_string_lossy().starts_with(prefix) && entry.file_type()?.is_file() {
             std::fs::remove_file(entry.path())?;
             n += 1;
         }

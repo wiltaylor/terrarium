@@ -451,8 +451,12 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         terrarium_host::docker::ENV_FILE_PREFIX,
     ) {
         Ok(0) => {}
-        Ok(n) => tracing::info!(n, dir = %opts.env_dir.display(), "removed leftover docker env files"),
-        Err(e) => tracing::warn!(error = %e, dir = %opts.env_dir.display(), "cannot clean the docker env files"),
+        Ok(n) => {
+            tracing::info!(n, dir = %opts.env_dir.display(), "removed leftover docker env files")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, dir = %opts.env_dir.display(), "cannot clean the docker env files")
+        }
     }
     opts.max_running_targets = cfg.max_running_targets;
     tracing::info!(work_dir = %opts.paths.work_dir.display(), instances_dir = %opts.paths.instances_dir.display(), repos_dir = %opts.paths.repos_dir.display(), "workspace and lab paths");
