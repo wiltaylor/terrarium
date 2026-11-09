@@ -106,17 +106,23 @@ async fn main() -> anyhow::Result<()> {
             info!("agents run in the daemon process: they end when the daemon stops");
         }
     }
+    let probation = terrariumd::agent_rpc::CallGate::with_probation(Some(
+        settings.state_dir.join("releases/probation"),
+    ))
+    .has_probation_marker();
     if let Some(t) = &tools {
         if settings.no_harness_install {
             info!(tools = %t.dir.display(), "harness install skipped (--no-harness-install)");
-        } else {
+        } else if !probation {
             log_install(&t.install().await);
         }
     }
     // The config repo (PLAN §8.3): the packaged defaults go in, and it is
     // a git repo. A failure does not stop the start: the agents then run
     // with what the repo has (or the built-in prompt).
-    seed_config_repo(&settings);
+    if !probation {
+        seed_config_repo(&settings);
+    }
     let mut cfg = supervisor_config(sandbox);
     cfg.mode = mode;
     if std::env::var_os(terrariumd::harness_versions::ENV_POLICY).is_some() {
@@ -133,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
         // files are in the shared home.
         per_agent_sessions: settings.sandbox == sandbox::SandboxMode::Bwrap,
         auto_swap: terrariumd::accounts::auto_swap_from_env(),
+        quota_sample_keep: settings.quota_sample_keep,
         ..UsageConfig::default()
     };
     // The web settings, from the flags and the env, in one place.
@@ -149,12 +156,12 @@ async fn main() -> anyhow::Result<()> {
     web.install.host_listen = host_listen.clone();
     let daemon = start_with_usage(
         DaemonConfig {
-            socket: settings.socket,
-            listen: Some(settings.listen),
-            token: settings.token,
-            state_dir: settings.state_dir,
-            config_dir: settings.config_dir,
-            work_dir: settings.work_dir,
+            socket: settings.socket.clone(),
+            listen: Some(settings.listen.clone()),
+            token: settings.token.clone(),
+            state_dir: settings.state_dir.clone(),
+            config_dir: settings.config_dir.clone(),
+            work_dir: settings.work_dir.clone(),
             max_targets_per_project: settings.max_targets_per_project,
             repos_dir: settings.repos_dir.clone(),
             supervisor,
@@ -165,6 +172,28 @@ async fn main() -> anyhow::Result<()> {
         usage,
     )
     .await?;
+    if probation {
+        // Health/read listeners are up, but no auxiliary subsystem or harness
+        // update may escape the snapshot before the updater commits admission.
+        tokio::select! {
+            ready = daemon.state.agent_calls.wait_until_ready() => {
+                if let Err(error) = ready {
+                    daemon.shutdown();
+                    anyhow::bail!("daemon activation failed after health commit: {error}");
+                }
+            },
+            () = shutdown_signal() => {
+                daemon.shutdown();
+                return Ok(());
+            }
+        }
+        if let Some(t) = &tools
+            && !settings.no_harness_install
+        {
+            log_install(&t.install().await);
+        }
+        seed_config_repo(&settings);
+    }
     if let Some(t) = tools {
         daemon.state.harness_tools.configure(t);
         // The start reconciled the live agents, so the supervisor knows the
@@ -262,7 +291,13 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    shutdown_signal().await;
+    tokio::select! {
+        () = shutdown_signal() => {},
+        error = daemon.state.agent_calls.wait_failure() => {
+            daemon.shutdown();
+            anyhow::bail!("daemon activation failed after health commit: {error}");
+        }
+    }
     info!("shutting down");
     if let Err(e) = terrariumd::agent_rpc::drain(
         &daemon.state,

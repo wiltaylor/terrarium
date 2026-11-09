@@ -4340,6 +4340,17 @@ export interface DashboardView extends DashboardLayout {
 
 // ---------------------------------------------------------------- pipelines
 
+export interface EtaAccuracy {
+  samples: number;
+  on_time_pct: number | null;
+  within_half_to_double_pct: number | null;
+}
+
+export interface EtaAccuracyView {
+  raw: EtaAccuracy;
+  calibrated: EtaAccuracy;
+}
+
 /** The status of a pipeline run or step (docs/api.md §31.2), the same for every adapter. */
 export type PipelineRunStatus = "queued" | "running" | "waiting" | "success" | "failed" | "cancelled" | "skipped" | "unknown";
 

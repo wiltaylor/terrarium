@@ -181,6 +181,8 @@ pub struct Card {
     /// The dependencies that are neither accepted nor done yet.
     pub blocked_by: Vec<String>,
     pub comments: Vec<Comment>,
+    #[serde(default)]
+    pub review_round: u32,
     pub links: Vec<Link>,
     pub created_by: String,
     pub created_by_name: String,
@@ -652,14 +654,7 @@ fn render(
             || (row.column_role.is_none() && row.column == WORKING))
     {
         if worker_start.is_none() {
-            worker_start = conn
-                .query_row(
-                    "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
-                 AND json_extract(payload, '$.change') = 'moved' ORDER BY seq DESC LIMIT 1",
-                    [&row.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            worker_start = estimates.entered_at(conn, &row.project, &row.id, None)?;
         }
         if let Some(start) = worker_start
             .as_deref()
@@ -700,6 +695,14 @@ fn render(
     };
     Ok(Card {
         trouble: crate::trouble::active_signals(conn, &row.id)?,
+        review_round: conn
+            .query_row(
+                "SELECT round FROM card_reviews WHERE card = ?1",
+                [&row.id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0),
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,
         tests: crate::store::test_runs::card_chip(conn, &row.id)?,
@@ -740,7 +743,11 @@ fn render(
 
 pub fn get_card(conn: &Connection, id: &str) -> ApiResult<Card> {
     let row = find_row(conn, id)?;
-    render(conn, row, &mut Default::default())
+    render(
+        conn,
+        row,
+        &mut super::card_history::ReviewEstimates::for_card(id),
+    )
 }
 
 pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
@@ -875,7 +882,7 @@ pub fn board_summary(
             if super::jobs::card_job(conn, id)?.is_none() {
                 let mut start = card["eta_set_at"].as_str().map(str::to_owned);
                 if start.is_none() {
-                    start = last_moved_at(conn, id)?;
+                    start = estimates.entered_at(conn, project, id, None)?;
                 }
                 if let Some(at) = start
                     .as_deref()
@@ -2613,6 +2620,7 @@ pub fn reply_comment(
     insert_reply(t, &card.id, &author, body, human_reply)?;
     touch(t, &card.id)?;
     card_event(t, &card, "commented", json!({"comment": body}))?;
+    crate::review_dispatcher::verdict(t, actor, &card.id, body)?;
     get_card(t, &card.id)
 }
 
