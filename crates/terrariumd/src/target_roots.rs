@@ -781,7 +781,10 @@ mod tests {
             assert_eq!(cmd.holder.as_deref(), Some("terra/x"), "{mode}");
             assert!(!cmd.operator, "{mode}");
             assert!(cmd.argv.iter().any(|a| a == "x"));
-            assert!(!cmd.argv.iter().any(|a| a == "y" || a.contains("/y")), "{mode}");
+            assert!(
+                !cmd.argv.iter().any(|a| a == "y" || a.contains("/y")),
+                "{mode}"
+            );
             let l = crate::executor::native_gpu_limits(
                 &h,
                 Some(&caps),
@@ -802,8 +805,14 @@ mod tests {
         // Without a holder the same command is refused on that host.
         let bare = RemoteCmd::default();
         assert!(
-            crate::executor::native_gpu_limits(&h, Some(&caps), bare.holder.as_deref(), false, None)
-                .is_err()
+            crate::executor::native_gpu_limits(
+                &h,
+                Some(&caps),
+                bare.holder.as_deref(),
+                false,
+                None
+            )
+            .is_err()
         );
     }
 
