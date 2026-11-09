@@ -39,8 +39,41 @@ fn spec_text(spec: &Value) -> String {
             t
         }
         Some("manual") => "manual (action)".to_owned(),
+        Some("day_start") => {
+            let mut t = "start of day".to_owned();
+            if let Some(tz) = spec["tz"].as_str().filter(|tz| *tz != "UTC") {
+                t.push_str(&format!(" ({tz})"));
+            }
+            match (spec["not_before"].as_str(), spec["not_after"].as_str()) {
+                (Some(b), Some(a)) => t.push_str(&format!(" {b}-{a}")),
+                (Some(b), None) => t.push_str(&format!(" from {b}")),
+                (None, Some(a)) => t.push_str(&format!(" until {a}")),
+                (None, None) => {}
+            }
+            if let Some(d) = spec["delay"].as_str() {
+                t.push_str(&format!(" +{d}"));
+            }
+            let days = strings(&spec["weekdays"]);
+            if !days.is_empty() {
+                t.push_str(&format!(" on {}", days.join(",")));
+            }
+            t
+        }
         _ => spec.to_string(),
     }
+}
+
+/// The next run: its time, or for a start-of-day schedule without a
+/// planned run, `at the first start after <day>` (the day of its last
+/// run) or `at the next start`.
+fn next_text(s: &Value) -> String {
+    if s["next_run_at"].is_null() && s["spec"]["kind"] == "day_start" {
+        return match s["day_start_done"].as_str() {
+            Some(day) => format!("at the first start after {day}"),
+            None => "at the next start".to_owned(),
+        };
+    }
+    short_time(&field(s, "next_run_at"))
 }
 
 fn strings(v: &Value) -> Vec<&str> {
@@ -92,7 +125,7 @@ fn row(s: &Value) -> Value {
         "spec": spec_text(&s["spec"]),
         "action": action_text(&s["action"]),
         "enabled": if s["enabled"] == true { "yes" } else { "no" },
-        "next_run_at": s["next_run_at"],
+        "next_run_at": next_text(s),
         "last": s["last_run"]["status"],
     })
 }
@@ -182,13 +215,21 @@ const RUN_COLS: &[(&str, &str)] = &[
     ("SUMMARY", "summary"),
 ];
 
-/// A run with `event_text`: the `seq` and kind of a trigger run's event.
+/// A run with `event_text`: the `seq` and kind of a trigger run's event,
+/// or the detected start of a start-of-day run.
 fn run_row(r: &Value) -> Value {
     let mut r = r.clone();
     let text = match (r["event_seq"].as_i64(), r["event"]["kind"].as_str()) {
         (Some(seq), Some(kind)) => format!("{seq} {kind}"),
         (Some(seq), None) => seq.to_string(),
-        _ => String::new(),
+        // A start-of-day run: the detected start.
+        _ => match r["day_start"]["cause"].as_str() {
+            Some(cause) => format!(
+                "{cause} {}",
+                short_time(r["day_start"]["at"].as_str().unwrap_or(""))
+            ),
+            None => String::new(),
+        },
     };
     r["event_text"] = json!(text);
     r
@@ -245,10 +286,14 @@ fn print_schedule(ctx: &Ctx, s: &Value) {
             .map(|r| format!(" ({r})"))
             .unwrap_or_default()
     ));
-    ctx.line(format!(
-        "next run:  {}",
-        short_time(&field(s, "next_run_at"))
-    ));
+    ctx.line(format!("next run:  {}", next_text(s)));
+    if let Some(d) = s["day_start_last"].as_object() {
+        ctx.line(format!(
+            "last start: {} at {}",
+            d.get("cause").and_then(Value::as_str).unwrap_or("-"),
+            short_time(d.get("at").and_then(Value::as_str).unwrap_or("-"))
+        ));
+    }
     if s["last_run"].is_object() {
         let l = &s["last_run"];
         ctx.line(format!(
@@ -416,6 +461,25 @@ fn spec_of(a: &ScheduleArgs) -> anyhow::Result<Option<Value>> {
     }
     if a.manual {
         return Ok(Some(json!({"kind": "manual"})));
+    }
+    if a.day_start {
+        let mut spec = json!({"kind": "day_start", "tz": a.tz.as_deref().unwrap_or("UTC")});
+        if let Some(t) = &a.not_before {
+            spec["not_before"] = json!(t);
+        }
+        if let Some(t) = &a.not_after {
+            spec["not_after"] = json!(t);
+        }
+        if let Some(d) = &a.delay {
+            spec["delay"] = json!(d);
+        }
+        if !a.weekdays.is_empty() {
+            spec["weekdays"] = json!(a.weekdays);
+        }
+        return Ok(Some(spec));
+    }
+    if a.tz.is_some() && a.cron.is_none() {
+        return Err(CliError::usage("--tz goes with --cron or --day-start"));
     }
     if !a.matches.is_empty()
         || a.dedupe.is_some()
@@ -658,7 +722,7 @@ fn print_saved(ctx: &Ctx, s: &Value, what: &str) {
         "{what} schedule {} ({}); next run {}",
         key_of(s),
         field(s, "id"),
-        short_time(&field(s, "next_run_at"))
+        next_text(s)
     ));
 }
 
@@ -698,8 +762,8 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
         ScheduleCmd::New { name, owner, args } => {
             let spec = spec_of(args)?.ok_or_else(|| {
                 CliError::usage(
-                    "give the time: --cron \"<expr>\", --every <dur>, or --at <time>; \
-                     a trigger: --on <kind>; or a project action: --manual",
+                    "give the time: --cron \"<expr>\", --every <dur>, --at <time>, or \
+                     --day-start; a trigger: --on <kind>; or a project action: --manual",
                 )
             })?;
             let action = action_of(ctx, args)?.ok_or_else(|| {
@@ -811,7 +875,7 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
                     } else {
                         "disabled"
                     },
-                    short_time(&field(s, "next_run_at"))
+                    next_text(s)
                 ));
             })
         }

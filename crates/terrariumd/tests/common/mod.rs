@@ -380,6 +380,39 @@ impl TestDaemon {
         }
     }
 
+    /// Poll until the agent `agent` ran a turn and is `idle`: a status
+    /// event `working -> idle`, then the status `idle`. The `idle` of the
+    /// start can come before the first turn (the task turn of an ephemeral
+    /// agent), and the daemon writes `working` from the supervisor events
+    /// after the prompt is typed, so `wait_status(idle)` alone may return
+    /// while that turn is still to run (TER-452, TER-462). The status event
+    /// is written in the same write as the status.
+    pub async fn wait_task_done(&self, agent: &str) {
+        let start = std::time::Instant::now();
+        loop {
+            let r = self
+                .get(&format!("/api/agents/{agent}/events?kind=status"))
+                .await;
+            let ended = r
+                .ok()
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["data"]["from"] == "working" && e["data"]["status"] == "idle");
+            if ended {
+                break;
+            }
+            // Longer than WAIT: under load a start alone took up to 16 s
+            // (TER-108), and the task turn comes after it.
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "agent {agent} never ended a turn"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        self.wait_status(agent, "idle").await;
+    }
+
     /// The mail of an agent, as that agent sees it.
     pub async fn mail_of(&self, agent: &str) -> Vec<Value> {
         self.get_as(agent, "/api/mail")
