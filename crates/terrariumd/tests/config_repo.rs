@@ -395,8 +395,9 @@ async fn a_long_repo_url_commits_and_a_token_in_another_export_field_blocks() {
     assert!(shown.contains("high-entropy"), "{shown}");
     let findings = r.body["error"]["details"]["findings"].as_array().unwrap();
     assert!(
-        findings.iter().any(|f| f["rule"] == "high-entropy"
-            && f["path"] == "export/projects/p1.fleet.toml"),
+        findings
+            .iter()
+            .any(|f| f["rule"] == "high-entropy" && f["path"] == "export/projects/p1.fleet.toml"),
         "{shown}"
     );
 }

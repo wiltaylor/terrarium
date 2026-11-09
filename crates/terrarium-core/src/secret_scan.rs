@@ -570,11 +570,12 @@ mod tests {
         // The token patterns and the `credential-key` rule still run on
         // the exempt line.
         let ghp = format!("ghp_{}", "FAKEfake0123456789".repeat(2));
-        assert!(rules(export, &format!("url = \"https://x.example/{ghp}\""))
-            .contains(&"github-token".to_owned()));
+        assert!(
+            rules(export, &format!("url = \"https://x.example/{ghp}\""))
+                .contains(&"github-token".to_owned())
+        );
         let feed = "https://example.com/feed?token=0123456789abcdef0123456789abcdef";
-        assert!(rules(export, &format!("url = \"{feed}\""))
-            .contains(&"credential-key".to_owned()));
+        assert!(rules(export, &format!("url = \"{feed}\"")).contains(&"credential-key".to_owned()));
     }
 
     #[test]
