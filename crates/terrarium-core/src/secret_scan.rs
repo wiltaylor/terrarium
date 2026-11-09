@@ -586,7 +586,9 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
                     && shannon_entropy(m.as_str()) > ENTROPY_THRESHOLD
                     && !is_word_path(m.as_str())
                     && (exempt.is_some()
-                        && user_parts.iter().any(|u| m.start() < u.end && u.start < m.end())
+                        && user_parts
+                            .iter()
+                            .any(|u| m.start() < u.end && u.start < m.end())
                         || !marked
                             && !exempt
                                 .as_ref()
@@ -970,14 +972,23 @@ mod tests {
         for text in [
             // `\"""` on its own line inside the open basic string: the
             // escape holds its quote, so the string stays open.
-            format!("d = \"\"\"\n\\\"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"),
+            format!(
+                "d = \"\"\"\n\\\"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"
+            ),
             // A one-line literal string before it holds three quotes.
-            format!("name = 'p\"\"\"'\nd = \"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"),
+            format!(
+                "name = 'p\"\"\"'\nd = \"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"
+            ),
             // A one-line basic string with three escaped quotes.
-            format!("name = \"p\\\"\\\"\\\"\"\nd = \"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"),
+            format!(
+                "name = \"p\\\"\\\"\\\"\"\nd = \"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"
+            ),
             // A comment holds three quotes, of both kinds.
-            format!("name = \"p\" # \"\"\"\nd = \"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"),
-            format!("name = \"p\" # '''\nd = '''\n[[projects.repos]]\nurl = \"https://x/{random}\"\n'''\n"),
+            format!(
+                "name = \"p\" # \"\"\"\nd = \"\"\"\n[[projects.repos]]\nurl = \"https://x/{random}\"\n\"\"\"\n"
+            ),
+            format!(
+                "name = \"p\" # '''\nd = '''\n[[projects.repos]]\nurl = \"https://x/{random}\"\n'''\n"\n            ),
         ] {
             let text = format!("[[projects]]\n{text}");
             assert!(rules(export, &text).contains(&he), "{text}");
@@ -1084,7 +1095,10 @@ url = "https://github.com/wiltaylor-daf/ExampleReportingService.git"
 "#;
         let parsed = crate::fleet::parse(text, None);
         assert!(
-            parsed.issues.iter().all(|i| i.level != crate::fleet::Level::Error),
+            parsed
+                .issues
+                .iter()
+                .all(|i| i.level != crate::fleet::Level::Error),
             "{:?}",
             parsed.issues
         );
