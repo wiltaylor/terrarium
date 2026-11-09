@@ -597,7 +597,24 @@ pub fn expire(t: &mut Tx<'_>) -> ApiResult<()> {
 
 /// Repair memberships left by older rule packs. Review is also a valid
 /// member state: queued jobs may create their group before moving the cards.
+///
+/// The repair waits while the rule engine has work: an event it has not
+/// planned, or a pending run (TER-471). A run writes each action on its
+/// own, so a repair between `group_open` and `group_add` found an empty
+/// group and closed it as abandoned, and a repair between a card move and
+/// its `merge-group-returned` run removed the card before the rule did.
+/// The next engine tick with no work runs the repair.
 fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
+    let last = crate::events::last_seq(t)?;
+    let behind = crate::rules_engine::cursor(t)?.is_some_and(|seq| seq < last);
+    let pending: bool = t.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rule_runs WHERE state = 'pending')",
+        [],
+        |r| r.get(0),
+    )?;
+    if behind || pending {
+        return Ok(());
+    }
     let ids: Vec<String> = {
         let mut stmt = t.prepare(
             "SELECT card FROM card_groups WHERE closed_at IS NULL AND key LIKE 'merge:%'",

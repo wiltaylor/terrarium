@@ -1866,10 +1866,15 @@ async fn a_cancel_ends_a_queued_job(flow: &'static str) {
     // and the job would end in the clone step with exit 2, before its
     // recipe (seen in merge job 01M6Z0AWT2PTTGX20N688FSABA), so no wait
     // could ever see job 1 run its recipe.
+    // The recipe outlives every wait of the test (DEADLINE 300 s), and the
+    // cancel kills it; a leaked one ends in 10 minutes. With `sleep 30`,
+    // under load the steps from the first `until_running` to the cancel
+    // took longer, job 1 passed, and the second `until_running` waited for
+    // a job that had ended (TER-471).
     lab.td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "p-box", "recipe": "sleep 30", "slots": 1,
+            json!({"target": "p-box", "recipe": "sleep 600", "slots": 1,
                    "next_repos": ["app"],
                    "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
         )

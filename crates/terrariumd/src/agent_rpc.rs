@@ -618,8 +618,11 @@ mod tests {
             })
         };
         started.notified().await;
+        // Only a guard against a hang: after the 20 ms cap the drain makes
+        // two durable writes, and on a loaded disk they took over 2 s
+        // (TER-471).
         tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(60),
             drain_active(
                 &gate,
                 &db,
