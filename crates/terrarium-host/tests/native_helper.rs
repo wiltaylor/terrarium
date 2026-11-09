@@ -34,6 +34,17 @@ impl DeviceNodes for FakeNodes {
     }
 }
 
+/// `native::bind` sets the process umask to 0o177 while it binds. The umask
+/// is per process, so a directory that another test creates in that window
+/// gets mode 0600: no search bit, and a non-root user then gets EACCES in
+/// it (root ignores the mode). Each fixture setup and each bind holds this
+/// lock.
+static UMASK: Mutex<()> = Mutex::new(());
+
+fn umask_lock() -> std::sync::MutexGuard<'static, ()> {
+    UMASK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 struct Fake {
     dir: tempfile::TempDir,
     root: tempfile::TempDir,
@@ -89,6 +100,7 @@ impl Fake {
     }
 
     async fn with(rights: Vec<Right>, agent_uid: u32, gpu: Result<(), String>) -> Self {
+        let umask = umask_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let d = dir.path();
@@ -149,6 +161,7 @@ impl Fake {
         });
         let socket = d.join("helper.sock");
         let listener = native::bind(&socket, nix::unistd::getuid().as_raw()).unwrap();
+        drop(umask);
         tokio::spawn(native::serve(helper.clone(), listener));
         Self {
             dir,
@@ -779,6 +792,7 @@ fn the_socket_belongs_to_the_agent_user() {
         eprintln!("skipped: needs root to give the socket to another UID");
         return;
     }
+    let _umask = umask_lock();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("h.sock");
     let rt = tokio::runtime::Builder::new_current_thread()
