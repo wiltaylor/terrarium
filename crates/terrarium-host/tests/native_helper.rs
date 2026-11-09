@@ -466,7 +466,6 @@ fn shim(f: &Fake, req: &Request) -> std::process::Command {
 async fn a_shim_stop_also_stops_the_user_slice() {
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
     let bin = f.dir.path().join("userbin");
-    let umask = umask_lock();
     std::fs::create_dir(&bin).unwrap();
     // The user manager's systemctl: exit 5 (not loaded) unless `user.code`.
     script(
@@ -478,7 +477,6 @@ async fn a_shim_stop_also_stops_the_user_slice() {
             d = f.dir.path().display()
         ),
     );
-    drop(umask);
     let path = format!(
         "{}:{}",
         bin.display(),
@@ -778,10 +776,7 @@ async fn a_unit_not_confirmed_stopped_keeps_its_gpu() {
 async fn a_failed_unit_with_a_populated_cgroup_keeps_its_gpu() {
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
     let cg = f.dir.path().join("cgroupfs/system.slice/u.service");
-    {
-        let _umask = umask_lock();
-        std::fs::create_dir_all(&cg).unwrap();
-    }
+    std::fs::create_dir_all(&cg).unwrap();
     std::fs::write(cg.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
     f.write("state", "failed\n");
     f.write("cgroup", "/system.slice/u.service\n");
