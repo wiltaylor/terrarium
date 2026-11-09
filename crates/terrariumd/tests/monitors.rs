@@ -378,7 +378,7 @@ async fn runs_status_events_and_the_dashboard() {
     }).await.unwrap();
     let accuracy = td.get_as(&worker, "/api/projects/terra/eta-accuracy").await;
     assert_eq!(
-        accuracy.ok(),
+        accuracy.ok().clone(),
         json!({"raw": {"samples": 0, "on_time_pct": null, "within_half_to_double_pct": null}, "calibrated": {"samples": 0, "on_time_pct": null, "within_half_to_double_pct": null}})
     );
     td.get_as(&worker, dpath).await.ok();
