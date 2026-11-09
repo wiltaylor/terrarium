@@ -431,15 +431,25 @@ output.
 Each Docker verb runs one `docker` CLI process as a session. Its output
 streams like `exec`. The table shows the command line. Environment values
 never go on the command line or into the environment of the `docker`
-process: the host agent writes them to a 0600 file in its temp dir, passes
-`--env-file FILE`, and removes the file when the `docker` process exits. So
-the CLI keeps the host agent's own `DOCKER_HOST`, `DOCKER_CONTEXT`,
-`DOCKER_CONFIG` and other env, and a command env cannot change which daemon
-it talks to (TER-490). A value that one env file line cannot hold (a newline
-or a carriage return, over 60 KiB, or a name with whitespace) falls back to
-`-e K` with the value in the env of the `docker` process. That fallback
-refuses `DOCKER_*`, `HOME`, `PATH`, `SSH_AUTH_SOCK` and the proxy names
-(`bad_request`).
+process: the host agent writes them to a 0600 file in its env dir
+(`<data_dir>/terrarium-host/env`, mode 0700), passes `--env-file FILE`, and
+removes the file when the `docker` process exits. For `docker exec` that is
+the end of the command, not its start: the CLI gives no sign that it has
+read the file. The host agent deletes the files that a crash left in the
+env dir at its next start. So the CLI keeps the host agent's own
+`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG` and other env, and a
+command env cannot change which daemon it talks to (TER-490).
+
+Only a multi-line value (a newline or a carriage return, for example a key)
+falls back to `-e K` with the value in the env of the `docker` process.
+That fallback refuses the names that steer the CLI, its loader, or the C
+library (`bad_request`): `DOCKER_*`, `LD_*`, `SSL_*`, `MALLOC_*`, `XDG_*`,
+`HOME`, `PATH`, `SSH_AUTH_SOCK`, `GODEBUG`, `GCONV_PATH`, `GLIBC_TUNABLES`,
+`LOCPATH`, `NLSPATH`, `HOSTALIASES`, `RES_OPTIONS`, `LOCALDOMAIN`, `TMPDIR`,
+and each name that ends in `_PROXY` in any case
+(`terrarium_host::docker::CLI_DENIED_ENV`). A single-line value over 60 KiB,
+and a name with whitespace or a leading `#` or BOM, are refused
+(`bad_request`): an env file line cannot hold them.
 
 | Frame | Fields | Command |
 |---|---|---|

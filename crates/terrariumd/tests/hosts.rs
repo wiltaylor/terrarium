@@ -3544,7 +3544,6 @@ async fn a_host_connect_reconciles_the_target_states() {
 
 // ------------------------------------------------------------ mode 1
 
-/// The `docker run` lines of the fake's log.
 /// The names in the `--env-file` of a logged call ([`fake_tool`]).
 fn env_file_names(line: &str) -> Vec<&str> {
     line.split_once("--env-file ")
@@ -3553,6 +3552,7 @@ fn env_file_names(line: &str) -> Vec<&str> {
         .unwrap_or_default()
 }
 
+/// The `docker run` lines of the fake's log.
 fn runs(lab: &Lab) -> Vec<String> {
     lab.log()
         .lines()

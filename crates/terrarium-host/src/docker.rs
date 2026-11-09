@@ -34,66 +34,99 @@ fn s(v: &str) -> String {
 
 /// The longest `KEY=VALUE` line that goes into the env file. The CLI reads
 /// the file line by line with a 64 KiB limit.
-const ENV_FILE_LINE_MAX: usize = 60 * 1024;
+pub const ENV_FILE_LINE_MAX: usize = 60 * 1024;
 
-/// Names that steer the `docker` CLI itself. They may reach the command only
-/// through the env file, never through the CLI's own environment.
-fn steers_the_cli(k: &str) -> bool {
-    k.starts_with("DOCKER_")
-        || matches!(k, "HOME" | "PATH" | "SSH_AUTH_SOCK")
-        || matches!(
-            k.to_ascii_uppercase().as_str(),
-            "HTTP_PROXY" | "HTTPS_PROXY" | "NO_PROXY" | "ALL_PROXY"
-        )
+/// The name prefix of the env files in [`crate::client::ClientOptions::env_dir`].
+pub const ENV_FILE_PREFIX: &str = "terrarium-env-";
+
+/// Names that steer the `docker` CLI, the loader, or the C library under
+/// it. A multi-line value goes into the CLI's own environment (`-e KEY`), so
+/// these names cannot have one. The loader and C library names are the
+/// ones of the daemon's grant deny list (`terrariumd` `secrets::grants`,
+/// a test keeps them in it).
+pub const CLI_DENIED_ENV: &[&str] = &[
+    "HOME",
+    "PATH",
+    "SSH_AUTH_SOCK",
+    "GODEBUG",
+    "GCONV_PATH",
+    "GLIBC_TUNABLES",
+    "LOCPATH",
+    "NLSPATH",
+    "HOSTALIASES",
+    "RES_OPTIONS",
+    "LOCALDOMAIN",
+    "TMPDIR",
+];
+
+/// Name prefixes of [`CLI_DENIED_ENV`]. Each name that ends in `_PROXY`
+/// (any case) is refused too.
+pub const CLI_DENIED_ENV_PREFIXES: &[&str] = &["DOCKER_", "LD_", "SSL_", "MALLOC_", "XDG_"];
+
+/// Does `k` steer the `docker` CLI or the loader under it?
+pub fn steers_the_cli(k: &str) -> bool {
+    CLI_DENIED_ENV.contains(&k)
+        || CLI_DENIED_ENV_PREFIXES.iter().any(|p| k.starts_with(p))
+        || k.to_ascii_uppercase().ends_with("_PROXY")
 }
 
-/// Can the CLI read `KEY=VALUE` back from one env file line unchanged?
-fn fits_env_file(k: &str, v: &str) -> bool {
-    !k.starts_with('#')
-        && !k.chars().any(char::is_whitespace)
-        && !k.starts_with('\u{feff}')
-        && !v.contains(['\n', '\r'])
-        && k.len() + 1 + v.len() <= ENV_FILE_LINE_MAX
-}
-
-/// Add the command env to `args`. Each value goes into a 0600 env file
-/// (`--env-file`). A value that one line cannot hold (a newline, a very long
-/// value, a name with whitespace) falls back to `-e KEY` with the value in
-/// the CLI's own environment, which the returned map holds. That fallback
-/// refuses the names that steer the CLI ([`steers_the_cli`]).
+/// Add the command env to `args`. Each single-line value goes into a 0600
+/// env file in `env_dir` (`--env-file`). A multi-line value (a newline or a
+/// carriage return, for example a key) cannot go on one line: it falls back
+/// to `-e KEY` with the value in the CLI's own environment, which the
+/// returned map holds. That fallback refuses the names that steer the CLI
+/// ([`steers_the_cli`]). A name that the env file cannot hold (whitespace,
+/// a leading `#` or BOM) and a single-line value over
+/// [`ENV_FILE_LINE_MAX`] are refused.
 fn push_env(
     args: &mut Vec<String>,
     env: &BTreeMap<String, String>,
+    env_dir: &std::path::Path,
 ) -> Result<(BTreeMap<String, String>, Option<PrivateFile>), BuildError> {
     let mut file = String::new();
     let mut cli_env = BTreeMap::new();
     for (k, v) in env {
         env_key(k)?;
-        if fits_env_file(k, v) {
+        if k.starts_with('#') || k.starts_with('\u{feff}') || k.chars().any(char::is_whitespace)
+        {
+            return Err(BuildError::bad(format!(
+                "environment name {k:?} has whitespace or starts with '#' or a BOM; \
+                 a docker env file cannot hold it"
+            )));
+        }
+        if v.contains(['\n', '\r']) {
+            if steers_the_cli(k) {
+                return Err(BuildError::bad(format!(
+                    "environment {k:?} has a multi-line value; it would go into the env of the \
+                     host's docker CLI, and {k} steers the CLI or its loader"
+                )));
+            }
+            cli_env.insert(k.clone(), v.clone());
+        } else if k.len() + 1 + v.len() > ENV_FILE_LINE_MAX {
+            return Err(BuildError::bad(format!(
+                "environment {k:?} is over {ENV_FILE_LINE_MAX} bytes on one line; \
+                 a docker env file cannot hold it"
+            )));
+        } else {
             file.push_str(k);
             file.push('=');
             file.push_str(v);
             file.push('\n');
-        } else if steers_the_cli(k) {
-            return Err(BuildError::bad(format!(
-                "environment {k:?} has a value that an env file cannot hold \
-                 (a newline or over {ENV_FILE_LINE_MAX} bytes), and {k} would change the host's docker CLI"
-            )));
-        } else {
-            cli_env.insert(k.clone(), v.clone());
         }
     }
     let private = if file.is_empty() {
         None
     } else {
-        let f = PrivateFile::new("terrarium-env-", file.as_bytes()).map_err(|e| BuildError {
-            code: crate::protocol::ErrorCode::SpawnFailed,
-            message: format!("cannot write the env file: {e}"),
+        let f = PrivateFile::new(env_dir, ENV_FILE_PREFIX, file.as_bytes()).map_err(|e| {
+            BuildError {
+                code: crate::protocol::ErrorCode::SpawnFailed,
+                message: format!("cannot write the env file in {}: {e}", env_dir.display()),
+            }
         })?;
         let path = f
             .path()
             .to_str()
-            .ok_or_else(|| BuildError::bad("the temp dir path is not UTF-8"))?
+            .ok_or_else(|| BuildError::bad("the env file path is not UTF-8"))?
             .to_owned();
         args.push(s("--env-file"));
         args.push(path);
@@ -132,6 +165,7 @@ pub fn plan_run(
     bin: &str,
     policy: &PathPolicy,
     work_dir: &std::path::Path,
+    env_dir: &std::path::Path,
 ) -> Result<VerbPlan, BuildError> {
     let mut a = vec![s("run")];
     if req.detach {
@@ -197,7 +231,7 @@ pub fn plan_run(
             .entry("HOME".into())
             .or_insert_with(|| "/tmp".into());
     }
-    let (env, env_file) = push_env(&mut a, &req_env)?;
+    let (env, env_file) = push_env(&mut a, &req_env, env_dir)?;
     for v in &req.volumes {
         if v.source.is_empty()
             || v.target.is_empty()
@@ -360,7 +394,11 @@ pub fn blkio_weight(io_weight: u16) -> u16 {
     u16::try_from(b.clamp(10, 1000)).unwrap_or(1000)
 }
 
-pub fn plan_exec(req: &DockerExec, bin: &str) -> Result<VerbPlan, BuildError> {
+pub fn plan_exec(
+    req: &DockerExec,
+    bin: &str,
+    env_dir: &std::path::Path,
+) -> Result<VerbPlan, BuildError> {
     let mut a = vec![s("exec"), s("-i")];
     if req.pty.is_some() {
         a.push(s("-t"));
@@ -369,7 +407,7 @@ pub fn plan_exec(req: &DockerExec, bin: &str) -> Result<VerbPlan, BuildError> {
         a.push(s("-w"));
         a.push(ident("cwd", cwd)?.to_owned());
     }
-    let (env, env_file) = push_env(&mut a, &req.env)?;
+    let (env, env_file) = push_env(&mut a, &req.env, env_dir)?;
     if let Some(u) = &req.user {
         a.push(s("-u"));
         a.push(ident("user", u)?.to_owned());
@@ -601,6 +639,24 @@ mod tests {
     use super::*;
     use crate::protocol::VolumeMount;
     use std::path::PathBuf;
+
+    /// The env dir of the tests.
+    fn env_dir() -> PathBuf {
+        std::env::temp_dir().join("terrarium-host-test-env")
+    }
+
+    fn plan_run(
+        r: &DockerRun,
+        bin: &str,
+        policy: &PathPolicy,
+        work: &std::path::Path,
+    ) -> Result<VerbPlan, BuildError> {
+        super::plan_run(r, bin, policy, work, &env_dir())
+    }
+
+    fn plan_exec(r: &DockerExec, bin: &str) -> Result<VerbPlan, BuildError> {
+        super::plan_exec(r, bin, &env_dir())
+    }
 
     fn run_req() -> DockerRun {
         serde_json::from_value(json!({"session":1,"image":"alpine:3"})).unwrap()
@@ -892,34 +948,101 @@ mod tests {
     }
 
     #[test]
-    fn values_that_a_line_cannot_hold_fall_back_to_the_cli_env() {
-        let long = "x".repeat(ENV_FILE_LINE_MAX);
+    fn only_multi_line_values_fall_back_to_the_cli_env() {
         let plan = plan_exec(
-            &exec_req(json!({"KEY":"a\nb","LONG":long,"B":"1"})),
+            &exec_req(json!({"KEY":"a\nb","CR":"a\rb","B":"1"})),
             "docker",
         )
         .unwrap();
         assert_eq!(
             args(&plan),
-            "exec -i --env-file <env> -e KEY -e LONG c1 sh -c id"
+            "exec -i --env-file <env> -e CR -e KEY c1 sh -c id"
         );
         assert_eq!(plan.exec.env["KEY"], "a\nb");
-        assert_eq!(plan.exec.env["LONG"], long);
+        assert_eq!(plan.exec.env["CR"], "a\rb");
         assert_eq!(file_env(&plan).len(), 1);
-        // A name that steers the CLI never goes into the CLI env.
-        for k in ["DOCKER_HOST", "HOME", "PATH", "https_proxy"] {
-            let err = plan_exec(&exec_req(json!({ k: "a\rb" })), "docker").unwrap_err();
-            assert_eq!(err.code, crate::protocol::ErrorCode::BadRequest);
-            assert!(err.message.contains(k), "{}", err.message);
+        // A name that steers the CLI or its loader never goes into the CLI env.
+        for k in [
+            "DOCKER_HOST",
+            "HOME",
+            "PATH",
+            "https_proxy",
+            "FTP_PROXY",
+            "LD_PRELOAD",
+            "LD_AUDIT",
+            "SSL_CERT_FILE",
+            "GODEBUG",
+            "GCONV_PATH",
+            "MALLOC_ARENA_MAX",
+            "TMPDIR",
+            "XDG_CONFIG_HOME",
+        ] {
+            for v in ["a\nb", "a\rb"] {
+                let err = plan_exec(&exec_req(json!({ k: v })), "docker").unwrap_err();
+                assert_eq!(err.code, crate::protocol::ErrorCode::BadRequest);
+                assert!(err.message.contains(k), "{}", err.message);
+            }
         }
     }
 
-    /// A fake `docker` CLI: it prints the DOCKER_* env that it runs with, and
-    /// the mode and content of its env file.
+    #[test]
+    fn a_long_line_or_a_name_the_file_cannot_hold_is_refused() {
+        // A long single-line value is refused, never put in the CLI env:
+        // the loader reads spaces as separators.
+        let long = format!("/srv/work/x.so{}", " ".repeat(ENV_FILE_LINE_MAX));
+        for k in ["LD_PRELOAD", "FOO"] {
+            let err = plan_exec(&exec_req(json!({ k: long })), "docker").unwrap_err();
+            assert_eq!(err.code, crate::protocol::ErrorCode::BadRequest);
+            assert!(err.message.contains("bytes on one line"), "{}", err.message);
+        }
+        // Just under the limit goes into the file.
+        let fits = "x".repeat(ENV_FILE_LINE_MAX - "FOO=".len());
+        let plan = plan_exec(&exec_req(json!({ "FOO": fits })), "docker").unwrap();
+        assert_eq!(file_env(&plan)["FOO"], fits);
+        assert!(plan.exec.env.is_empty());
+        for k in ["A B", "#A", "\u{feff}A", "A\tB"] {
+            let err = plan_exec(&exec_req(json!({ k: "1" })), "docker").unwrap_err();
+            assert_eq!(err.code, crate::protocol::ErrorCode::BadRequest);
+        }
+    }
+
+    #[test]
+    fn the_env_file_dir_is_private_and_a_start_removes_leftovers() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state/terrarium-host/env");
+        let plan = super::plan_exec(&exec_req(json!({"A":"1"})), "docker", &dir).unwrap();
+        let path = plan.exec.private_file.as_ref().unwrap().path().to_owned();
+        assert_eq!(path.parent().unwrap(), dir);
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        // A crash leaves the file: forget the guard.
+        std::mem::forget(plan);
+        std::fs::write(dir.join("other"), "keep").unwrap();
+        assert_eq!(
+            crate::session::remove_private_files(&dir, ENV_FILE_PREFIX).unwrap(),
+            1
+        );
+        assert!(!path.exists());
+        assert!(dir.join("other").exists());
+        // A missing dir is no error.
+        assert_eq!(
+            crate::session::remove_private_files(&tmp.path().join("none"), ENV_FILE_PREFIX)
+                .unwrap(),
+            0
+        );
+    }
+
+    /// A fake `docker` CLI: it prints the DOCKER_* env that it runs with, the
+    /// mode and content of its env file, and the value of each `-e` name.
     const FAKE_DOCKER: &str = r#"
 echo "cli DOCKER_HOST=${DOCKER_HOST-unset} DOCKER_CONTEXT=${DOCKER_CONTEXT-unset}"
 while [ $# -gt 0 ]; do
-  if [ "$1" = --env-file ]; then shift; stat -c %a "$1"; cat "$1"; fi
+  case "$1" in
+    --env-file) shift; stat -c %a "$1"; cat "$1" ;;
+    -e) shift; eval "v=\${$1}"; printf 'via -e %s=%s\n' "$1" "$v" ;;
+  esac
   shift
 done
 "#;
@@ -928,7 +1051,8 @@ done
     async fn the_cli_keeps_its_own_docker_env_and_the_command_gets_its_values() {
         let mut plan = plan_exec(
             &exec_req(json!({
-                "DOCKER_HOST":"unix:///tmp/job.sock","DOCKER_CONTEXT":"job"
+                "DOCKER_HOST":"unix:///tmp/job.sock","DOCKER_CONTEXT":"job",
+                "FOO":"line 1\nline 2"
             })),
             "docker",
         )
@@ -950,7 +1074,8 @@ done
             out,
             format!(
                 "cli DOCKER_HOST={} DOCKER_CONTEXT={}\n600\n\
-                 DOCKER_CONTEXT=job\nDOCKER_HOST=unix:///tmp/job.sock\n",
+                 DOCKER_CONTEXT=job\nDOCKER_HOST=unix:///tmp/job.sock\n\
+                 via -e FOO=line 1\nline 2\n",
                 own("DOCKER_HOST"),
                 own("DOCKER_CONTEXT")
             )

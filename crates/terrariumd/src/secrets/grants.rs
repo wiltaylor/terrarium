@@ -1043,6 +1043,29 @@ pub(crate) mod tests {
     pub(crate) const AGENT: &str = "01K8AGENT0000000000000000A";
     pub(crate) const OTHER: &str = "01K8AGENT0000000000000000B";
 
+    /// TER-490: the host agent refuses a multi-line value for the names that
+    /// steer its `docker` CLI or the loader. Its loader and C library names
+    /// come from this deny list: each one stays refused here too. The host
+    /// list adds `DOCKER_*`, `GODEBUG` and all of `SSL_*`, which a grant
+    /// does not refuse; the full grant list would refuse multi-line keys
+    /// such as `SSH_*` or `GIT_*` that a docker command may need.
+    #[test]
+    fn the_host_agent_cli_deny_list_stays_in_the_grant_deny_list() {
+        use terrarium_host::docker::{CLI_DENIED_ENV, CLI_DENIED_ENV_PREFIXES};
+        for name in CLI_DENIED_ENV.iter().filter(|n| **n != "GODEBUG") {
+            assert!(check_env_name(name).is_err(), "{name}");
+        }
+        for prefix in CLI_DENIED_ENV_PREFIXES
+            .iter()
+            .filter(|p| !matches!(**p, "DOCKER_" | "SSL_"))
+        {
+            assert!(DENIED_ENV_PREFIXES.contains(prefix), "{prefix}");
+        }
+        assert!(DENIED_ENV_PREFIXES.contains(&"SSL_CERT_"));
+        assert!(check_env_name("SSL_CERT_FILE").is_err());
+        assert!(check_env_name("HTTPS_PROXY").is_err());
+    }
+
     pub(crate) fn db() -> Connection {
         let c = crate::secrets::tests::db();
         c.execute(

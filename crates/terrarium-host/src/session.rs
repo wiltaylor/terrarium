@@ -49,19 +49,23 @@ pub struct ExecPlan {
     pub private_file: Option<PrivateFile>,
 }
 
-/// A file with mode 0600 in the temp dir, removed when the last clone is
-/// dropped. It carries values that must not show in `ps` or reach the env of
-/// the program itself.
+/// A file with mode 0600 in a private dir (mode 0700), removed when the
+/// last clone is dropped. It carries values that must not show in `ps` or
+/// reach the env of the program itself. A crash of the host agent can leave
+/// one behind: [`remove_private_files`] at the next start deletes it.
 #[derive(Debug, Clone)]
 pub struct PrivateFile(Arc<tempfile::TempPath>);
 
 impl PrivateFile {
-    pub fn new(prefix: &str, data: &[u8]) -> std::io::Result<Self> {
+    /// Write `data` to a new file `<prefix><random>` in `dir`. The dir is
+    /// created with mode 0700, or set to it.
+    pub fn new(dir: &Path, prefix: &str, data: &[u8]) -> std::io::Result<Self> {
         use std::os::unix::fs::PermissionsExt;
+        private_dir(dir)?;
         let mut f = tempfile::Builder::new()
             .prefix(prefix)
             .permissions(std::fs::Permissions::from_mode(0o600))
-            .tempfile()?;
+            .tempfile_in(dir)?;
         f.write_all(data)?;
         f.flush()?;
         Ok(Self(Arc::new(f.into_temp_path())))
@@ -79,6 +83,38 @@ impl PartialEq for PrivateFile {
 }
 
 impl Eq for PrivateFile {}
+
+/// Create `dir` (and its parents) and give it mode 0700.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Delete the files in `dir` whose name starts with `prefix`: the private
+/// files that a crashed host agent left behind. Run it at the start, before
+/// any session. Returns how many it deleted. A missing dir is no error.
+pub fn remove_private_files(dir: &Path, prefix: &str) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut n = 0;
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(prefix)
+            && entry.file_type()?.is_file()
+        {
+            std::fs::remove_file(entry.path())?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
 
 /// Input for a running session.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -225,6 +225,13 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/var/lib"))
 }
 
+/// The private dir of the `docker --env-file` files (TER-490):
+/// `<data_dir>/terrarium-host/env`, mode 0700. The host agent deletes the
+/// leftover files in it at the start.
+pub fn default_env_dir() -> PathBuf {
+    absolute(data_dir().join("terrarium-host").join("env"))
+}
+
 fn absolute(p: PathBuf) -> PathBuf {
     if p.is_absolute() {
         p

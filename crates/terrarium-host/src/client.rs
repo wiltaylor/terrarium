@@ -62,6 +62,9 @@ pub struct ClientOptions {
     pub git_bin: String,
     /// `work_dir`, `instances_dir`, and `repos_dir` of the config.
     pub paths: HostPaths,
+    /// The private dir (mode 0700) of the `docker --env-file` files:
+    /// [`crate::config::default_env_dir`].
+    pub env_dir: PathBuf,
     /// Sent in `hello`; the daemon enforces it.
     pub max_running_targets: u32,
     /// A TLS config for `wss://`. `None` uses the system roots.
@@ -108,6 +111,7 @@ impl ClientOptions {
             vmlab_bin: "vmlab".into(),
             git_bin: "git".into(),
             paths: HostPaths::default(),
+            env_dir: crate::config::default_env_dir(),
             max_running_targets: crate::config::DEFAULT_MAX_RUNNING_TARGETS,
             tls: None,
             allow_insecure: false,
@@ -913,12 +917,12 @@ impl Client {
             F::DockerRun(r) => self.start(
                 r.session,
                 need(docker_ok, "docker")
-                    .and_then(|_| docker::plan_run(&r, db, p, &o.paths.work_dir)),
+                    .and_then(|_| docker::plan_run(&r, db, p, &o.paths.work_dir, &o.env_dir)),
                 tx,
             ),
             F::DockerExec(r) => self.start(
                 r.session,
-                need(docker_ok, "docker").and_then(|_| docker::plan_exec(&r, db)),
+                need(docker_ok, "docker").and_then(|_| docker::plan_exec(&r, db, &o.env_dir)),
                 tx,
             ),
             F::ResourceApply(r) => {
