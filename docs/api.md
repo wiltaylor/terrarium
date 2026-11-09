@@ -919,6 +919,7 @@ three letters and digits in upper case, then longer, then with a number
 | `DELETE /api/projects/{name}?confirm=true` | | `204` | sysadmin |
 | `GET /api/projects/{name}/agents` | | `200` agents by ID | read |
 | `GET /api/projects/{name}/targets` | | `200` targets, the project's and the global ones | read |
+| `GET /api/projects/{name}/counts` | | `200` `{"blocked_cards", "questions"}`, below | read |
 | `GET /api/projects/{name}/target-grants` | | `200` the global targets granted to the project for its project-owned monitors and schedules (§30.7) | read |
 | `POST /api/projects/{name}/target-grants` | `{target, for}` | `201` the grant | sysadmin |
 | `DELETE /api/projects/{name}/target-grants/{target}/{for}` | | `204` | sysadmin |
@@ -928,6 +929,19 @@ three letters and digits in upper case, then longer, then with a number
 Names are 1 to 63 of `a-z`, `0-9`, `-`, `_`, and start with a letter or a
 digit. `card_prefix` is 1 to 10 of `A-Z` and `0-9`, and starts with a
 letter. The prefix cannot change after the first card (`conflict`).
+
+`GET /api/projects/{name}/counts` gives the counts of the project tabs of
+the dashboard (TER-154). `blocked_cards` counts the cards in the columns with
+the `blocked` role, archived cards not counted. `questions` is `{"open",
+"urgent", "critical"}`: the open questions, bundles, and tool run approvals
+of the project, also those in a thread (a notice needs no decision).
+`urgent` counts the urgent and the critical ones, `critical` only the
+critical ones. `questions` is `null` for an actor that may not list the
+questions of the project (`GET /api/questions?project=`: the operator, a
+sysadmin or architect, or a project_admin of the project). The counts use
+indexes and read no card or question rows, so the dashboard reads them again
+on each `card` and `question` event of the project. An unknown project is
+`404`.
 
 `idle_alert` is the threshold of the idle alert (§6.2, "Idle alert"): a
 duration (`15m`, `1h`), or `off` (also `0`). `null` sets the default
