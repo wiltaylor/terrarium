@@ -198,7 +198,15 @@ fn inventory_is_strict() {
 fn a_gpu_session_allows_only_its_gpu_and_the_support_nodes() {
     let root = tempfile::tempdir().unwrap();
     let ctx = ctx(root.path());
-    let plan = plan_start(&ctx, &request(root.path()), &inventory(), &nodes(), 0xab, &W).unwrap();
+    let plan = plan_start(
+        &ctx,
+        &request(root.path()),
+        &inventory(),
+        &nodes(),
+        0xab,
+        &W,
+    )
+    .unwrap();
     assert_eq!(plan.unit, "terrarium-native-7-000000ab.service");
     assert_eq!(plan.slice, "terrarium-box-terra-w\\x2d1.slice");
     let p = props(&plan.args);
@@ -252,7 +260,15 @@ fn a_session_without_gpus_gets_no_gpu_node() {
     req.exclusive_gpus.clear();
     req.pty = Some((24, 80));
     // No inventory and no device nodes needed.
-    let plan = plan_start(&ctx(root.path()), &req, &[], &FakeNodes(HashMap::new()), 1, &W).unwrap();
+    let plan = plan_start(
+        &ctx(root.path()),
+        &req,
+        &[],
+        &FakeNodes(HashMap::new()),
+        1,
+        &W,
+    )
+    .unwrap();
     let p = props(&plan.args);
     assert!(p.contains(&"DevicePolicy=closed"));
     assert_eq!(
@@ -497,19 +513,39 @@ fn each_holder_gets_its_own_workload_user() {
     let mut s = Sessions::default();
     let pool = pool(2);
     let a = s.pick("p/a", &pool).unwrap();
-    s.admit("u1", Claim { uid: a.uid, ..claim("p/a", None, &[], &[]) }).unwrap();
+    s.admit(
+        "u1",
+        Claim {
+            uid: a.uid,
+            ..claim("p/a", None, &[], &[])
+        },
+    )
+    .unwrap();
     // The same holder keeps its UID; another holder gets another one.
     assert_eq!(s.pick("p/a", &pool).unwrap(), a);
     let b = s.pick("p/b", &pool).unwrap();
     assert_ne!(b.uid, a.uid);
-    s.admit("u2", Claim { uid: b.uid, ..claim("p/b", None, &[], &[]) }).unwrap();
+    s.admit(
+        "u2",
+        Claim {
+            uid: b.uid,
+            ..claim("p/b", None, &[], &[])
+        },
+    )
+    .unwrap();
     // The pool is used up: a third holder is refused with the reason.
     let e = s.pick("p/c", &pool).unwrap_err();
     assert_eq!(e.code, ErrorKind::Busy);
     assert!(e.message.contains("no free workload user"), "{e}");
     // A UID never serves two holders at once, even if the caller forges it.
     let e = s
-        .admit("u3", Claim { uid: a.uid, ..claim("p/c", None, &[], &[]) })
+        .admit(
+            "u3",
+            Claim {
+                uid: a.uid,
+                ..claim("p/c", None, &[], &[])
+            },
+        )
         .unwrap_err();
     assert_eq!(e.code, ErrorKind::Forbidden);
     // Once A's sessions ended, its UID is free for another holder.
@@ -689,8 +725,7 @@ fn an_exec_becomes_a_shim_call_with_the_request_in_the_environment() {
     assert!(shim.pty.is_some() && shim.scope.is_none());
     // A request that does not fit in one environment string is refused.
     let mut big = req.clone();
-    big.env
-        .insert("BIG".into(), "x".repeat(MAX_SHIM_REQUEST));
+    big.env.insert("BIG".into(), "x".repeat(MAX_SHIM_REQUEST));
     let e = shim_plan(&opts, &Request::Start(big), plan).unwrap_err();
     assert!(e.contains("too large"), "{e}");
     // No limits and no reservation: no GPU, the operator's slice.

@@ -141,10 +141,7 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     rt.block_on(async move {
         // Fail closed: never serve while a leftover unit may hold a GPU.
-        helper
-            .kill_leftovers()
-            .await
-            .map_err(anyhow::Error::msg)?;
+        helper.kill_leftovers().await.map_err(anyhow::Error::msg)?;
         let listener = native::bind(&cfg.socket, helper.agent_uid)
             .with_context(|| format!("bind {}", cfg.socket.display()))?;
         tracing::info!(socket = %cfg.socket.display(), rights = ?cfg.rights, "serving");

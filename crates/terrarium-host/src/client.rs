@@ -1400,8 +1400,9 @@ impl Client {
         let req =
             crate::native::start_request(&plan.exec, session, Some(l), &self.opts.paths.work_dir);
         tracing::info!(session, holder = %req.holder, gpus = ?req.gpus, lease = ?req.lease, "native session");
-        plan.exec = crate::native::shim_plan(native, &crate::native::Request::Start(req), plan.exec)
-            .map_err(BuildError::bad)?;
+        plan.exec =
+            crate::native::shim_plan(native, &crate::native::Request::Start(req), plan.exec)
+                .map_err(BuildError::bad)?;
         Ok(plan)
     }
 
@@ -1758,15 +1759,29 @@ mod tests {
         let client = native_client(&socket);
         let hello = client.hello().await;
         assert!(!hello.capabilities.native_gpu.unwrap().enforced);
-        assert_eq!(client.slice_apply_plan(&apply).unwrap().exec.program, "systemctl");
-        assert_eq!(client.slice_stop_plan(&stop).unwrap().exec.program, "systemctl");
+        assert_eq!(
+            client.slice_apply_plan(&apply).unwrap().exec.program,
+            "systemctl"
+        );
+        assert_eq!(
+            client.slice_stop_plan(&stop).unwrap().exec.program,
+            "systemctl"
+        );
         let (plan, l) = native_exec();
         let e = client.native(plan, &l, 3).err().unwrap();
         assert!(e.message.contains("did not answer"), "{}", e.message);
 
         // The helper answers: apply, stop, and exec go through the shim.
         let helper = fake_helper(&socket).await;
-        assert!(client.hello().await.capabilities.native_gpu.unwrap().enforced);
+        assert!(
+            client
+                .hello()
+                .await
+                .capabilities
+                .native_gpu
+                .unwrap()
+                .enforced
+        );
         for plan in [
             client.slice_apply_plan(&apply).unwrap(),
             client.slice_stop_plan(&stop).unwrap(),
@@ -1783,8 +1798,19 @@ mod tests {
         helper.abort();
         let _ = helper.await;
         std::fs::remove_file(&socket).unwrap();
-        assert!(!client.hello().await.capabilities.native_gpu.unwrap().enforced);
-        assert_eq!(client.slice_stop_plan(&stop).unwrap().exec.program, "systemctl");
+        assert!(
+            !client
+                .hello()
+                .await
+                .capabilities
+                .native_gpu
+                .unwrap()
+                .enforced
+        );
+        assert_eq!(
+            client.slice_stop_plan(&stop).unwrap().exec.program,
+            "systemctl"
+        );
     }
 
     #[test]

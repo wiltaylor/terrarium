@@ -9,8 +9,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,7 +65,10 @@ impl WorkloadCheck for Check {
         if self.0.load(Ordering::SeqCst) {
             Ok(())
         } else {
-            Err(format!("workload user {} must not be in group docker", w.name))
+            Err(format!(
+                "workload user {} must not be in group docker",
+                w.name
+            ))
         }
     }
 }
@@ -576,10 +579,7 @@ async fn each_holder_runs_under_its_own_workload_uid() {
         .await;
     let mut seen = uids(&run);
     seen.sort();
-    assert_eq!(
-        seen,
-        ["--uid=2001", "--uid=2001", "--uid=2002"]
-    );
+    assert_eq!(seen, ["--uid=2001", "--uid=2001", "--uid=2002"]);
     // The pool of two is used up by p/a and p/b.
     let (_, r) = send(
         &f.socket,
@@ -638,7 +638,10 @@ fn another_uid_cannot_reach_a_session_process() {
         format!("kill -0 {pid}"),
     ] {
         assert!(!probe(2002, &cmd), "uid 2002 reached uid 2001: {cmd}");
-        assert!(probe(2001, &cmd), "uid 2001 could not reach its own process: {cmd}");
+        assert!(
+            probe(2001, &cmd),
+            "uid 2001 could not reach its own process: {cmd}"
+        );
     }
     a.kill().unwrap();
     a.wait().unwrap();
@@ -702,13 +705,18 @@ async fn leftover_units_are_stopped_before_serving_or_the_start_fails() {
          ssh.service loaded active running y\n",
     );
     std::fs::write(
-        f.dir.path().join("sessions/terrarium-native-5-0000abcd.service.env"),
+        f.dir
+            .path()
+            .join("sessions/terrarium-native-5-0000abcd.service.env"),
         "A=\"b\"\n",
     )
     .unwrap();
     f.helper.kill_leftovers().await.unwrap();
     let ctl = f.log("ctl.log");
-    assert!(ctl.contains("kill --signal=9 -- terrarium-native-5-0000abcd.service"), "{ctl}");
+    assert!(
+        ctl.contains("kill --signal=9 -- terrarium-native-5-0000abcd.service"),
+        "{ctl}"
+    );
     assert!(!ctl.contains("ssh.service"), "{ctl}");
     assert_eq!(
         std::fs::read_dir(f.dir.path().join("sessions"))

@@ -724,7 +724,11 @@ async fn lost_native_enforcement_refuses_host_commands_while_an_exclusive_gpu_is
         let e = terrariumd::reservations::exec_budget(&state, &def(name).await, Some("p/worker"))
             .unwrap_err();
         assert!(e.message.contains(&id), "{}", e.message);
-        assert!(e.message.contains("cannot reach the helper"), "{}", e.message);
+        assert!(
+            e.message.contains("cannot reach the helper"),
+            "{}",
+            e.message
+        );
         assert!(e.message.contains("refused until it does"), "{}", e.message);
     }
     client.abort();
