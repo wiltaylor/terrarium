@@ -284,9 +284,11 @@ pub(crate) async fn defer_project(
 async fn record_failure(state: &Shared, id: String, who: Actor, error: String) -> ApiResult<()> {
     state.db.write("system", move |t| {
         let card = board::get_card(t, &id)?;
-    let ready = board::role_name(t, &card.project, "ready", "ready")?;
+        let ready = board::role_name(t, &card.project, "ready", "ready")?;
         let review = board::role_name(t, &card.project, "review", "review")?;
-        if card.archived || (card.column != review && (card.column != ready || card.agent.is_some())) || card.assignee.is_some() {
+        let ineligible_column =
+            card.column != review && (card.column != ready || card.agent.is_some());
+        if card.archived || ineligible_column || card.assignee.is_some() {
             return Ok(());
         }
         let previous: Option<(u32, i64)> = t.query_row(

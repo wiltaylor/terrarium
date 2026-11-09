@@ -3,6 +3,7 @@ CREATE TABLE card_reviews (
     card TEXT PRIMARY KEY REFERENCES cards(id) ON DELETE CASCADE,
     round INTEGER NOT NULL DEFAULT 0,
     agent TEXT,
+    cap_notified INTEGER NOT NULL DEFAULT 0,
     -- 0: waiting for verdict, 1: invalidated by move, 2: verdict consumed.
     applied INTEGER NOT NULL DEFAULT 0
 );

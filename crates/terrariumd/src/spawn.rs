@@ -1192,7 +1192,7 @@ fn bound_prompt_section(owner: &str, bound: &str) -> String {
     if let Some(card) = bound.strip_prefix("review:") {
         return format!(
             "## You are a review agent\n\nYou review card {card} for `{owner}`. \
-             Post a comment on that card with the first line exactly `accept` or `changes`, \
+             Post a comment on that card with the first line exactly `Review verdict: accept` or `Review verdict: changes`, \
              followed by findings. Do not move cards, merge, deploy, or claim work. \
              End your turn after the verdict. The daemon closes this review round.\n"
         );

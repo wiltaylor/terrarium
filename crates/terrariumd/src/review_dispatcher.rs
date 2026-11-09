@@ -8,7 +8,7 @@ use crate::card_dispatcher::{actor, defer_project, project_limit};
 use crate::db::Tx;
 use crate::error::{ApiError, ApiResult};
 use crate::spawn::{Internal, SpawnBody};
-use crate::store::{agents, board, projects, spawns};
+use crate::store::{agents, board, projects, spawns, mail};
 
 fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
     let Some(name) = projects::get(c, project)?.review_dispatcher else {
@@ -23,36 +23,41 @@ fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
     Ok((!v.paused).then(|| actor(v.agent)))
 }
 
+/// Bounded review-column lookup. Keep the indexed query public for plan regression tests.
+pub const CANDIDATES: &str = "
+SELECT c.id, c.title, c.labels FROM cards c INDEXED BY cards_column
+WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
+  AND c.archived = 0 AND c.kind = 'card'
+  AND NOT EXISTS (SELECT 1 FROM spawns s WHERE s.bound_kind = 'review'
+      AND s.bound_id = c.id AND s.finished_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM card_dispatch_retries d WHERE d.card = c.id AND d.retry_at > ?3)
+  AND NOT EXISTS (SELECT 1 FROM card_reviews r WHERE r.card = c.id
+      AND (r.applied = 2 OR r.cap_notified = 1))
+ORDER BY c.position LIMIT 16";
+
 fn candidate(c: &Connection, project: &str) -> ApiResult<Option<String>> {
     let review = board::role_name(c, project, "review", "review")?;
-    for card in board::get_board(c, project)?.cards {
-        if card.column != review
-            || card.kind != "card"
-            || card.archived
-            || board::is_held(c, &card.id)?
-        {
-            continue;
-        }
-        if spawns::open_bound(c, &spawns::Bound::new("review", &card.id))?.is_some() {
-            continue;
-        }
-        let cooling: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM card_dispatch_retries WHERE card = ?1 AND retry_at > ?2)",
-            params![card.id, chrono::Utc::now().timestamp()],
-            |r| r.get(0),
-        )?;
-        let reviewed: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM card_reviews r WHERE card = ?1
-             AND (applied = 2 OR (applied = 0 AND EXISTS
-                 (SELECT 1 FROM spawns s WHERE s.id = r.agent AND s.finished_at IS NULL))))",
-            [&card.id],
-            |r| r.get(0),
-        )?;
-        if !cooling && !reviewed {
-            return Ok(Some(card.id));
+    let mut q = c.prepare(CANDIDATES)?;
+    let rows = q.query_map(params![project, review, chrono::Utc::now().timestamp()], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+    })?;
+    for row in rows {
+        let (id, title, labels) = row?;
+        if !crate::store::github_gate::is_held(&title, &crate::store::json_col::<Vec<String>>(&labels)) {
+            return Ok(Some(id));
         }
     }
     Ok(None)
+}
+
+fn tell_owner(t: &mut Tx<'_>, who: &Actor, id: &str, reason: &str) -> ApiResult<()> {
+    board::system_comment(t, id, reason, None)?;
+    mail::send(t, mail::Outgoing {
+        from: &mail::Address::System, to: &mail::Address::from_actor(who),
+        subject: &format!("{id}: review needs lead decision"), body: reason,
+        thread: None, in_reply_to: None,
+    })?;
+    Ok(())
 }
 
 pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
@@ -65,18 +70,30 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
             return Ok(false);
         }
     };
+    let p = project.to_owned();
+    let Some(id) = state.db.read(move |c| candidate(c, &p)).await? else {
+        return Ok(false);
+    };
+    let (card, a) = (id.clone(), who.clone());
+    let capped = state.db.write("system", move |t| {
+        let round: u32 = t.query_row("SELECT coalesce((SELECT round FROM card_reviews WHERE card = ?1), 0)", [&card], |r| r.get(0))?;
+        if round < 3 { return Ok(false); }
+        t.execute("UPDATE card_reviews SET cap_notified = 1 WHERE card = ?1", [&card])?;
+        tell_owner(t, &a, &card, "Review round limit (3) reached. Card remains in review for the lead.")?;
+        Ok(true)
+    }).await?;
+    if capped { return Ok(true); }
     let a = who.clone();
     if let Some(reason) = state.db.read(move |c| project_limit(c, &a)).await? {
         defer_project(state, project, Some(&who), &reason).await?;
         return Ok(false);
     }
-    let p = project.to_owned();
-    let Some(id) = state.db.read(move |c| candidate(c, &p)).await? else {
-        return Ok(false);
-    };
     let (p, expected, expected_owner) = (project.to_owned(), id.clone(), who.clone());
     let check: crate::spawn::DefCheck = Box::new(move |c, _| {
-        if owner(c, &p)?.as_ref() != Some(&expected_owner) || candidate(c, &p)? != Some(expected) {
+        let round: u32 = c.query_row(
+            "SELECT coalesce((SELECT round FROM card_reviews WHERE card = ?1), 0)",
+            [&expected], |r| r.get(0))?;
+        if round >= 3 || owner(c, &p)?.as_ref() != Some(&expected_owner) || candidate(c, &p)? != Some(expected) {
             return Err(ApiError::conflict("review selection changed")
                 .with_details(serde_json::json!({"dispatcher_selection_changed":true})));
         }
@@ -97,15 +114,25 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
         .get()
         .ok()
         .map(|r| crate::skills::library_dir(&r.dir));
-    let result = crate::spawn::spawn_with(state, &who, who.address(), SpawnBody {
-        template: format!("{project}/card-review"),
-        task: format!("Review {id}. Read the card, repo AGENTS.md, branch diff and test evidence. Post a card comment whose first line is exactly 'accept' or 'changes', followed by findings. Do not move, merge or deploy. Then end your turn."),
-        name: None, wait: false, timeout: None, project: None,
-        targets: vec![], grants: vec![], bind: None,
-    }, skills, None, Internal {
-        bound: Some(spawns::Bound::new("review", &id)),
-        check: Some(check), after_create: Some(attach), ..Internal::default()
-    }).await;
+    let task = format!(
+        "Review {id}. Read the card, repo AGENTS.md, branch diff and test evidence. \
+         Post a card comment whose first line is exactly 'Review verdict: accept' or \
+         'Review verdict: changes', followed by findings. Do not move, merge or deploy. \
+         Then end your turn."
+    );
+    let result = crate::spawn::spawn_with(
+        state, &who, who.address(),
+        SpawnBody {
+            template: "card-review".into(), task,
+            name: None, wait: false, timeout: None, project: None,
+            targets: vec![], grants: vec![], bind: None,
+        },
+        skills, None,
+        Internal {
+            bound: Some(spawns::Bound::new("review", &id)),
+            check: Some(check), after_create: Some(attach), ..Internal::default()
+        },
+    ).await;
     if let Err(e) = result {
         return crate::card_dispatcher::handle_spawn_error(state, project, id, who, e).await;
     }
@@ -134,9 +161,10 @@ pub fn verdict(t: &mut Tx<'_>, reviewer: &Actor, id: &str, body: &str) -> ApiRes
     let Some(who) = owner(t, &card.project)? else {
         return Ok(());
     };
-    let destination = match body.lines().next().map(str::trim) {
-        Some("accept") => "merge_queue",
-        Some("changes") => "ready",
+    let first = body.lines().next().unwrap_or_default().trim();
+    let destination = match first.strip_prefix("Review verdict: ").unwrap_or(first) {
+        "accept" => "merge_queue",
+        "changes" => "ready",
         _ => return Ok(()),
     };
     // Mark this round consumed even when the decision is reserved for the lead.
@@ -144,15 +172,13 @@ pub fn verdict(t: &mut Tx<'_>, reviewer: &Actor, id: &str, body: &str) -> ApiRes
     if card.labels.iter().any(|l| l == "review:lead") {
         return Ok(());
     }
-    let column = board::role_name(t, &card.project, destination, destination)?;
-    board::move_card(
-        t,
-        &who,
-        id,
-        &column,
-        (destination == "ready").then_some(0),
-        Some(body),
-    )?;
+    let moved = t.savepoint(|t| {
+        let column = board::role_name(t, &card.project, destination, destination)?;
+        board::move_card(t, &who, id, &column, (destination == "ready").then_some(0), Some(body))
+    });
+    if let Err(e) = moved {
+        tell_owner(t, &who, id, &format!("Review verdict retained, but move to {destination} failed: {}. Card remains in review for the lead.", e.message))?;
+    }
     Ok(())
 }
 

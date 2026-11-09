@@ -82,6 +82,79 @@ async fn review_setup() -> (TestDaemon, String) {
     (td, id)
 }
 
+#[tokio::test]
+async fn review_candidate_query_uses_only_indexed_searches() {
+    let (td, _) = review_setup().await;
+    let plan = state(&td).db.read(|c| {
+        let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {}", terrariumd::review_dispatcher::CANDIDATES))?;
+        Ok(q.query_map(rusqlite::params!["p", "review", 0], |r| r.get::<_, String>(3))?.collect::<Result<Vec<_>, _>>()?)
+    }).await.unwrap();
+    assert!(plan.iter().any(|s| s.contains("cards_column")), "{plan:?}");
+    assert!(plan.iter().all(|s| !s.contains("SCAN")), "{plan:?}");
+}
+
+#[tokio::test]
+async fn review_global_fallback_and_conventional_verdict() {
+    let (td, id) = review_setup().await;
+    td.delete("/api/templates/p%2Fcard-review").await.ok();
+    td.post("/api/templates", json!({"name":"card-review","spec":{"harness":"codex"}})).await.ok();
+    let lead = lead_id(&td).await;
+    td.patch(&format!("/api/agents/{lead}"), json!({"policy":{"spawn":{
+        "templates":["global:*"],"bound":true,"max_concurrent":4
+    }}})).await.ok();
+    assert!(terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+    let agent = reviewer(&td, &id).await;
+    td.post_as(&agent, &format!("/api/cards/{id}/comments"), json!({"body":"Review verdict: accept\nChecked."})).await.ok();
+    assert_eq!(get(&td, &id).await["column"], "merge_queue");
+}
+
+#[tokio::test]
+async fn review_round_limit_notifies_owner_once() {
+    let (td, id) = review_setup().await;
+    for _ in 0..3 {
+        assert!(terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+        let agent = reviewer(&td, &id).await;
+        terrariumd::spawn::close(&state(&td), &agent, terrariumd::store::spawns::DONE, None, false).await.unwrap();
+    }
+    assert!(terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+    assert!(!terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+    assert_eq!(get(&td, &id).await["review_round"], 3);
+    assert_eq!(get(&td, &id).await["column"], "review");
+    let count: i64 = state(&td).db.read(|c| {
+        Ok(c.query_row("SELECT count(*) FROM messages WHERE subject LIKE '%review needs lead decision'", [], |r| r.get(0))?)
+    }).await.unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn review_failed_move_retains_findings_and_notifies_owner() {
+    for verdict in ["Review verdict: accept", "Review verdict: changes"] {
+        let (td, id) = review_setup().await;
+        let column = if verdict.ends_with("accept") { "merge_queue" } else { "ready" };
+        let col = column.to_owned();
+        state(&td).db.write("operator", move |t| {
+            t.execute("UPDATE board_columns SET wip_limit = 1 WHERE project = 'p' AND name = ?1", [&col])?;
+            Ok(())
+        }).await.unwrap();
+        let blocker = card(&td, "small").await;
+        if column == "merge_queue" {
+            td.post(&format!("/api/cards/{blocker}/move"), json!({"column":column})).await.ok();
+        }
+        assert!(terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+        let agent = reviewer(&td, &id).await;
+        let body = format!("{verdict}\nF1: Retained findings.");
+        td.post_as(&agent, &format!("/api/cards/{id}/comments"), json!({"body":body})).await.ok();
+        let c = get(&td, &id).await;
+        assert_eq!(c["column"], "review");
+        assert!(c["comments"].as_array().unwrap().iter().any(|x| x["body"] == body));
+        assert!(c["comments"].as_array().unwrap().iter().any(|x| x["body"].as_str().unwrap().contains("move to")));
+        let count: i64 = state(&td).db.read(|c| {
+            Ok(c.query_row("SELECT count(*) FROM messages WHERE subject LIKE '%review needs lead decision'", [], |r| r.get(0))?)
+        }).await.unwrap();
+        assert_eq!(count, 1);
+    }
+}
+
 async fn reviewer(td: &TestDaemon, id: &str) -> String {
     let id = id.to_owned();
     state(td)
