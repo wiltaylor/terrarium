@@ -119,14 +119,15 @@ describe("App project routes", () => {
       const links = Array.from(root.querySelectorAll<HTMLAnchorElement>(`nav[aria-label="${label}"] a`));
       expect(links.find((a) => a.textContent === tab)?.getAttribute("href")).toBe(href);
       expect(links.filter((a) => a.classList.contains("active")).map((a) => a.textContent)).toEqual([tab]);
+      expect(root.querySelector("h2")?.textContent).toBe(`${label} · my app`);
       dispose?.();
       document.body.replaceChildren();
     }
   });
 
-  it("resolves every moved route to a real destination", async () => {
+  it.each(["terrarium", "my%20app"])("resolves every moved route to a real destination for %s", async (project) => {
     for (const route of MOVED_ROUTES) {
-      const from = route.path.replace(":project", "terrarium").replace(":id", "x1").replace(":name", "code-review").replace("*path", "a/b");
+      const from = route.path.replace(":project", project).replace(":id", "x1").replace(":name", "code-review").replace("*path", "a/b");
       const to = movedTo(from)!;
       const root = mount(from);
       await vi.waitFor(() => expect(window.location.pathname).toBe(to));
@@ -134,5 +135,14 @@ describe("App project routes", () => {
       dispose?.();
       document.body.replaceChildren();
     }
+  });
+
+  it("renders a project URL with bad percent-encoding", async () => {
+    const root = mount("/p/a%zz/board");
+    await vi.waitFor(() => expect(root.textContent).toContain("Cards page"));
+    expect(root.querySelector("h1")?.textContent).toBe("a%zz");
+    expect(root.querySelector("h2")?.textContent).toBe("Board · a%zz");
+    expect(window.location.pathname).toBe("/p/a%25zz/board");
+    expect(root.textContent).not.toContain("Page not found.");
   });
 });

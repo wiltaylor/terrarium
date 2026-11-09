@@ -196,25 +196,41 @@ impl TestDaemon {
 
     /// Start (or start again) the daemon on the same dirs.
     pub async fn boot(&mut self, listen: Option<&str>, token: Option<&str>) {
+        self.boot_with_ssh(listen, token, None).await;
+    }
+
+    pub async fn boot_with_ssh(
+        &mut self,
+        listen: Option<&str>,
+        token: Option<&str>,
+        ssh: Option<&str>,
+    ) {
         if let Some(d) = self.daemon.take() {
             d.shutdown();
         }
         seed_database(&self.state);
-        let daemon = terrariumd::start(DaemonConfig {
-            socket: self.socket.clone(),
-            listen: listen.map(str::to_owned),
-            token: token.map(str::to_owned),
-            state_dir: self.state.clone(),
-            config_dir: self.config.clone(),
-            work_dir: self.state.clone().with_file_name("work"),
-            max_targets_per_project: terrariumd::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
-            repos_dir: std::path::PathBuf::from("/repos"),
-            supervisor: self.sup.clone(),
-            // The tests name the calling agent with the header.
-            insecure_agent_header: true,
-            artifact_listen: self.artifact_listen.clone(),
-            web: self.web.clone(),
-        })
+        let mut executor = terrariumd::executor::Executor::default();
+        if let Some(ssh) = ssh {
+            executor.ssh_bin = ssh.to_owned();
+        }
+        let daemon = terrariumd::start_with_executor(
+            DaemonConfig {
+                socket: self.socket.clone(),
+                listen: listen.map(str::to_owned),
+                token: token.map(str::to_owned),
+                state_dir: self.state.clone(),
+                config_dir: self.config.clone(),
+                work_dir: self.state.clone().with_file_name("work"),
+                max_targets_per_project: terrariumd::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
+                repos_dir: std::path::PathBuf::from("/repos"),
+                supervisor: self.sup.clone(),
+                // The tests name the calling agent with the header.
+                insecure_agent_header: true,
+                artifact_listen: self.artifact_listen.clone(),
+                web: self.web.clone(),
+            },
+            executor,
+        )
         .await
         .unwrap();
         // TER-216: the job queue takes up the running jobs of the last

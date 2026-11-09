@@ -553,6 +553,7 @@ pub fn check_delivery(
     project: &str,
     def: &DeliveryDef,
 ) -> ApiResult<()> {
+    check_merge_refs(def)?;
     if def
         .failure_patterns
         .as_ref()
@@ -1003,11 +1004,30 @@ async fn step(
     max: usize,
     input: Option<Vec<u8>>,
 ) -> ApiResult<Collected> {
+    step_redacted(state, job, def, cmd, max, input, &[]).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn step_redacted(
+    state: &Shared,
+    job: &str,
+    def: &terrarium_core::config::TargetDef,
+    cmd: &RemoteCmd,
+    max: usize,
+    input: Option<Vec<u8>>,
+    own: &[(String, zeroize::Zeroizing<String>)],
+) -> ApiResult<Collected> {
     let pidfile = crate::run_kill::job_pidfile(job);
     let admission = state.executor.target_resource_lock(def).lock_owned().await;
     let (running, report) =
         crate::run_kill::start_named_locked(state, def, cmd, pidfile, &admission)?;
     let running = crate::executor::track_resource_run(state, def, cmd, running, report.clone())?;
+    let running = crate::executor::redact_run(
+        running,
+        crate::executor::own_redactor(own),
+        state.db.redactor().get(),
+        terrarium_core::redact::View::All,
+    );
     set_control(job, Some(running.ctl.clone()));
     drop(admission);
     // A kill between the check in [`StepCtx::run`] and set_control found
@@ -1890,20 +1910,57 @@ async fn steps(
             warn!(job = %job.id, "cannot update merge group recipe boundary: {e}");
         }
     }
+    let injected = merge_secrets(x.state, job, delivery).await?;
+    let own: Vec<_> = injected
+        .iter()
+        .map(|i| (i.label(), i.value.clone()))
+        .collect();
+    let mut env = recipe_env(job, x.dir, &head, base);
+    let tunnel = if let Some(key) = injected.iter().find(|i| i.env == "DOCKER_CI_KEY") {
+        let reset = injected
+            .iter()
+            .find(|i| i.env == "DOCKER_CI_RESET_KEY")
+            .ok_or_else(|| ApiError::invalid("Docker tunnel requires DOCKER_CI_RESET_KEY"))?;
+        let config = delivery.docker_ci.as_ref().ok_or_else(|| {
+            ApiError::invalid("merge_secrets requires docker_ci endpoint configuration")
+        })?;
+        crate::docker_tunnel::reset(x.state, &reset.value, config).await?;
+        let tunnel = crate::docker_tunnel::open(
+            x.state,
+            x.def,
+            &key.value,
+            x.dir,
+            delivery.timeout_secs(),
+            config,
+        )
+        .await?;
+        env.insert("DOCKER_HOST".into(), tunnel.endpoint.clone());
+        Some(tunnel)
+    } else {
+        None
+    };
+    // Credentials stay in the daemon, so retain the normal target recipe log.
+    let script = recipe_script(recipe, base);
     let recipe_cmd = RemoteCmd {
-        argv: vec![
-            "sh".into(),
-            "-c".into(),
-            logged_recipe(recipe_script(recipe, base), &log),
-        ],
+        argv: vec!["sh".into(), "-c".into(), logged_recipe(script, &log)],
         cwd: Some(x.dir.to_owned()),
-        env: recipe_env(job, x.dir, &head, base),
+        env,
         timeout_secs: Some(delivery.timeout_secs()),
         holder: x.holder.clone(),
         ..RemoteCmd::default()
     };
     // An error here is a recipe that did not start: no session.
-    let c = x.run(&recipe_cmd, RECIPE_MAX, None).await?;
+    if killed(&job.id) {
+        return Err(ApiError::conflict("the job was cancelled"));
+    }
+    let recipe_cmd = RemoteCmd {
+        argv: low_priority(recipe_cmd.argv.clone(), x.ionice),
+        ..recipe_cmd
+    };
+    let c = step_redacted(x.state, &job.id, x.def, &recipe_cmd, RECIPE_MAX, None, &own).await?;
+    if let Some(tunnel) = tunnel {
+        tunnel.close().await;
+    }
     x.recipe_started.store(true, Ordering::SeqCst);
     let ok = c.end.as_ref().is_some_and(End::success);
     // TER-196: a run that the infrastructure lost is no red; [`run`]
@@ -1936,14 +1993,18 @@ async fn steps(
     } else {
         String::new()
     };
+    let log_location = format!(
+        "Full log on target {}: {}",
+        delivery.target.as_deref().unwrap_or("-"),
+        log
+    );
     let mut tail = format!(
-        "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\nFull log on target {}: {}",
+        "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\n{}",
         excerpt.trim_end(),
         output_of(&c).trim_end(),
         end_text(c.end.as_ref()),
         low_priority(Vec::new(), x.ionice).join(" "),
-        delivery.target.as_deref().unwrap_or("-"),
-        log
+        log_location
     );
     if let Some(b) = &batch {
         tail.push_str(&format!("\n[{}]", batch_summary(b)));
@@ -1994,6 +2055,101 @@ async fn steps(
             ..JobEnd::default()
         }),
     }
+}
+
+/// Resolve only the project's delivery principal, only at a merge boundary.
+async fn merge_secrets(
+    state: &Shared,
+    job: &Job,
+    delivery: &DeliveryDef,
+) -> ApiResult<Vec<secrets::run_env::Injected>> {
+    if job.kind != JobKind::Merge || delivery.merge_secrets.is_empty() {
+        return Ok(Vec::new());
+    }
+    check_merge_refs(delivery)?;
+    let refs = secrets::run_env::parse_refs(&delivery.merge_secrets)?;
+    let key = secrets::key(&state.state_dir)?;
+    let project = job.project.clone();
+    let target = delivery.target.clone().unwrap_or_default();
+    let proxy_on = state.git_proxy.is_on();
+    let injected = state
+        .db
+        .read(move |c| {
+            let use_only = crate::git_proxy::use_only_secrets(c, proxy_on)?;
+            secrets::run_env::resolve_delivery(c, &key, &project, &target, &refs, &use_only)
+        })
+        .await?;
+    let audits: Vec<_> = injected
+        .iter()
+        .map(|i| {
+            (
+                format!("{}/{}", i.scope, i.name),
+                serde_json::json!({"job": job.id, "project": job.project,
+            "target": delivery.target, "field": i.field, "env": i.env,
+            "principal": format!("delivery:{}", job.project), "level": "run"}),
+            )
+        })
+        .collect();
+    let project = job.project.clone();
+    state
+        .db
+        .write("system", move |t| {
+            for (object, detail) in audits {
+                t.audit("secret.run", &object, Some(&project), detail)?;
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(injected)
+}
+
+fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
+    if !delivery.merge_secrets.is_empty() && delivery.docker_ci.is_none() {
+        return Err(ApiError::invalid(
+            "merge_secrets requires docker_ci with separate tunnel and reset pins",
+        ));
+    }
+    if let Some(config) = &delivery.docker_ci {
+        for destination in [&config.destination, &config.reset_destination] {
+            if destination.is_empty()
+                || destination.starts_with('-')
+                || destination.chars().any(char::is_whitespace)
+            {
+                return Err(ApiError::invalid(
+                    "Docker CI SSH destinations must be nonempty user@host values, not options",
+                ));
+            }
+        }
+        if config.port == 0
+            || config.reset_port == 0
+            || config.known_hosts.trim().is_empty()
+            || config.reset_known_hosts.trim().is_empty()
+        {
+            return Err(ApiError::invalid(
+                "Docker CI requires nonzero SSH ports and a pinned known_hosts line",
+            ));
+        }
+    }
+    for name in delivery.merge_secrets.keys() {
+        secrets::grants::check_env_name(name)?;
+        if name != "DOCKER_CI_KEY" && name != "DOCKER_CI_RESET_KEY" {
+            return Err(ApiError::invalid(
+                "merge_secrets supports only DOCKER_CI_KEY and DOCKER_CI_RESET_KEY, consumed by the daemon, never recipe env",
+            ));
+        }
+    }
+    if !delivery.merge_secrets.is_empty() && delivery.merge_secrets.len() != 2 {
+        return Err(ApiError::invalid(
+            "Docker tunnel requires both DOCKER_CI_KEY and DOCKER_CI_RESET_KEY",
+        ));
+    }
+    let refs = secrets::run_env::parse_refs(&delivery.merge_secrets)?;
+    if refs.len() != delivery.merge_secrets.len() {
+        return Err(ApiError::invalid(
+            "merge_secrets accepts only @secret references",
+        ));
+    }
+    Ok(())
 }
 
 /// The file of the changed paths in a job clone, relative to its root
@@ -2870,6 +3026,40 @@ printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_references_refuse_literals_and_reserved_env_names() {
+        for (name, value) in [
+            ("KEY", "literal"),
+            ("KEY", "@secret:"),
+            ("PATH", "@secret:vm"),
+        ] {
+            let mut delivery = DeliveryDef::default();
+            delivery.merge_secrets.insert(name.into(), value.into());
+            assert!(check_merge_refs(&delivery).is_err());
+        }
+        let mut delivery = DeliveryDef::default();
+        delivery
+            .merge_secrets
+            .insert("DOCKER_CI_KEY".into(), "@secret:vm.private_key".into());
+        delivery.merge_secrets.insert(
+            "DOCKER_CI_RESET_KEY".into(),
+            "@secret:reset.private_key".into(),
+        );
+        assert!(check_merge_refs(&delivery).is_err());
+        delivery.docker_ci = Some(terrarium_core::config::DockerCiDef {
+            destination: "root@vm".into(),
+            port: 2250,
+            known_hosts: "vm ssh-ed25519 test-pin".into(),
+            reset_destination: "reset@host".into(),
+            reset_port: 22,
+            reset_known_hosts: "".into(),
+        });
+        assert!(check_merge_refs(&delivery).is_err());
+        delivery.docker_ci.as_mut().unwrap().reset_known_hosts =
+            "host ssh-ed25519 reset-pin".into();
+        assert!(check_merge_refs(&delivery).is_ok());
+    }
 
     #[test]
     fn job_log_keeps_early_panics_before_a_long_noisy_tail() {

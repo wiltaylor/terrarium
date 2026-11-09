@@ -1156,6 +1156,7 @@ pub fn spawn(state: &Shared) -> Vec<JoinHandle<()>> {
             idle_pass(&state).await;
             // The idle alert to the leads (TER-67).
             crate::idle_alert::pass(&state).await;
+            crate::trouble::pass(&state).await;
             // The lifetime and the owner of each ephemeral agent.
             crate::spawn::pass(&state).await;
             crate::card_dispatcher::pass(&state).await;

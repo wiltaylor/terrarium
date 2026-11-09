@@ -13,26 +13,6 @@ export const PROJECT_TABS = [
   { path: "settings", label: "Settings" },
 ] as const;
 
-export const PROJECT_ITEMS = [
-  // The monitors of the project as blocks (docs/api.md §30); the first item in the tree.
-  { path: "dashboard", label: "Dashboard" },
-  // The CI/CD pipelines of the project and their runs (docs/api.md §31).
-  { path: "pipelines", label: "Pipelines" },
-  // The calendar of the project with the global events (docs/api.md §33).
-  { path: "calendar", label: "Calendar" },
-  { path: "board", label: "Board" },
-  // The repos of the project (PLAN §9a). In the tree a node, not a link: open, it shows the repos, each a link to its browser.
-  // The page /p/:project/repos stays (other links go to it).
-  { path: "repos", label: "Repos" },
-  // The logs of the project (PROJECT_LOGS_TABS): every message and every event that touches it.
-  { path: "logs", label: "Logs" },
-  // The wiki and the memory of the project (KNOWLEDGE_TABS).
-  { path: "knowledge", label: "Knowledge" },
-  // Every agent of the project, in any status. In the tree a node, not a link: open, it shows the agents.
-  // Last, so the agent rows of the open node do not push the pages down. The page /p/:project/agents stays.
-  { path: "agents", label: "Agents" },
-] as const;
-
 /**
  * The tabs of the board screen, in order. Each is a route under
  * /p/:project/board. The Cards tab has the empty path: it is the board at
@@ -63,7 +43,7 @@ export const KNOWLEDGE_TABS = [
  * /p/:project/settings. The cog of the project row in the tree opens it.
  */
 export const PROJECT_SETTINGS_TABS = [
-  // The project edit and delete, and the Targets panel. The repos have their own item (PROJECT_ITEMS).
+  // The project edit and delete, and the Targets panel. The repos have their own project tab.
   { path: "general", label: "General" },
   // The project's secrets and the global ones it can use (PLAN §16b).
   { path: "secrets", label: "Secrets" },

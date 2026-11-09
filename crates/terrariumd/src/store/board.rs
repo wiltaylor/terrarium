@@ -144,6 +144,10 @@ fn normal_card_kind() -> String {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Card {
+    /// Active trouble signals (TER-79). The durable notification history
+    /// stays separate, so resolving a mark cannot send another notice.
+    #[serde(default)]
+    pub trouble: Vec<String>,
     #[serde(default = "normal_card_kind")]
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +206,9 @@ pub struct Card {
     /// Worker ETA calibration status. Absent for review and job estimates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta_calibrated: Option<bool>,
+    /// Recent completed worker estimates in this project with the same type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_history: Option<super::card_history::WorkHistory>,
     /// When the card last moved to `done`. A reopen clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<String>,
@@ -689,7 +696,17 @@ fn render(
     } else {
         (worker_eta, worker_start, row.eta_set_by, eta_set_by_name)
     };
+    let eta_history = if !row.archived
+        && job.is_none()
+        && (row.column_role.as_deref() == Some(WORKING)
+            || (row.column_role.is_none() && row.column == WORKING))
+    {
+        estimates.history(conn, &row.project, &json_col::<Vec<String>>(&row.labels))
+    } else {
+        None
+    };
     Ok(Card {
+        trouble: crate::trouble::active_signals(conn, &row.id)?,
         review_round: conn
             .query_row(
                 "SELECT round FROM card_reviews WHERE card = ?1",
@@ -731,6 +748,7 @@ fn render(
         eta_set_by,
         eta_set_by_name,
         eta_calibrated,
+        eta_history,
         done_at: row.done_at,
         idle_since: row.idle_since,
     })
@@ -824,6 +842,8 @@ pub fn board_summary(
           'eta_set_by', c.eta_set_by,
           'eta_set_by_name', coalesce(eb.project || '/' || eb.name, ebr.project || '/' || ebr.name, c.eta_set_by),
           'done_at', c.done_at, 'idle_since', c.idle_since,
+          'trouble', (SELECT json_group_array(signal) FROM
+            (SELECT signal FROM card_trouble WHERE card = c.id AND active = 1 ORDER BY signal)),
           'tests', (SELECT json_object('id', r.id, 'name', r.name, 'created_at', r.created_at,
             'status', CASE WHEN r.failed + r.errored > 0 THEN 'failed' WHEN r.total = 0 THEN 'empty' ELSE 'passed' END,
             'counts', json_object('passed', r.passed, 'failed', r.failed, 'errored', r.errored, 'skipped', r.skipped, 'total', r.total))
@@ -1106,13 +1126,16 @@ fn blocked_info(conn: &Connection, card: &Card) -> ApiResult<(String, Option<Str
 }
 
 /// When the card `id` last moved to another column (its newest `moved`
-/// event), if it ever did.
+/// event), if it ever did. The `json_valid` guard keeps a malformed
+/// event from failing the lookup (the `events_card` index serves it),
+/// like the per-card lookup in `card_history.rs`.
 pub fn last_moved_at(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
     Ok(conn
         .query_row(
             "SELECT at FROM events
               WHERE card = ?1 AND kind = 'card'
-                AND json_extract(payload, '$.change') = 'moved'
+                AND CASE WHEN json_valid(payload)
+                  THEN json_extract(payload, '$.change') END = 'moved'
               ORDER BY seq DESC LIMIT 1",
             [id],
             |r| r.get(0),

@@ -10,6 +10,7 @@ import type { DbQueryResult, DbRecord } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { api, events } from "../../stores";
 import { cellText, columnValue, defaultColumns, errorAt, queryErrorOf, sortOf, splitTerms, toggleSort, withType } from "./model";
+import { projectBase } from "../../lib/url";
 import { RecordModal } from "./RecordModal";
 import { SchemaEditor } from "./SchemaEditor";
 
@@ -101,7 +102,7 @@ export default function DbRecordsPage() {
     timer = setTimeout(() => {
       void load();
       if (e.kind === "db.type") {
-        if (e.data.change === "deleted") navigate(`/p/${encodeURIComponent(params.project)}/knowledge/db`);
+        if (e.data.change === "deleted") navigate(`${projectBase(params.project)}/knowledge/db`);
         else void refetchType();
       }
     }, 300);
@@ -123,7 +124,7 @@ export default function DbRecordsPage() {
     if (!t) return;
     try {
       await api.db.removeType(params.project, t.name, t.records > 0 ? "records" : "true");
-      navigate(`/p/${encodeURIComponent(params.project)}/knowledge/db`);
+      navigate(`${projectBase(params.project)}/knowledge/db`);
     } catch (e) {
       setError(e);
     }
@@ -136,7 +137,7 @@ export default function DbRecordsPage() {
       <PageHead
         title={
           <span>
-            <A href={`/p/${encodeURIComponent(params.project)}/knowledge/db`}>DB</A> / <span class="mono">{typeName()}</span>
+            <A href={`${projectBase(params.project)}/knowledge/db`}>DB</A> / <span class="mono">{typeName()}</span>
           </span>
         }
         level={2}
@@ -333,7 +334,7 @@ export default function DbRecordsPage() {
       </Show>
       <Show when={!type() && !typeRes.loading && !typeRes.error}>
         <Empty>
-          No type <span class="mono">{typeName()}</span>. <A href={`/p/${encodeURIComponent(params.project)}/knowledge/db`}>All types</A>
+          No type <span class="mono">{typeName()}</span>. <A href={`${projectBase(params.project)}/knowledge/db`}>All types</A>
         </Empty>
       </Show>
     </>

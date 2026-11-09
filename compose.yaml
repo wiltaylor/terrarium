@@ -59,10 +59,20 @@ services:
       TERRARIUM_CLI_SESSION_TTL: ${TERRARIUM_CLI_SESSION_TTL:-90d}
       TERRARIUM_SESSION_MAX_AGE: ${TERRARIUM_SESSION_MAX_AGE:-90d}
       TERRARIUM_MAIL_LOOP_LIMIT: ${TERRARIUM_MAIL_LOOP_LIMIT:-}
+      # The untouched Inbox threads (TER-95, docs/api.md §6.13): the time
+      # before the one reminder, and before the stale close that mails the
+      # report-to lead. A duration, or off.
+      TERRARIUM_THREAD_REMINDER: ${TERRARIUM_THREAD_REMINDER:-3d}
+      TERRARIUM_THREAD_STALE: ${TERRARIUM_THREAD_STALE:-14d}
       # Match the daemon defaults when the instance has no git identity set.
       TERRARIUM_GIT_NAME: ${TERRARIUM_GIT_NAME:-Terrarium}
       TERRARIUM_GIT_EMAIL: ${TERRARIUM_GIT_EMAIL:-terrarium@localhost}
       TERRARIUM_TRASH_DAYS: ${TERRARIUM_TRASH_DAYS:-}
+      # The quota probe samples younger than this stay (TER-395); the
+      # default history of GET /api/subscriptions/{name}/quota. At least 24h.
+      TERRARIUM_QUOTA_SAMPLE_KEEP: ${TERRARIUM_QUOTA_SAMPLE_KEEP:-48h}
+      # The most targets one project may have (a create past it is 409).
+      TERRARIUM_MAX_TARGETS_PER_PROJECT: ${TERRARIUM_MAX_TARGETS_PER_PROJECT:-8}
       TERRARIUM_CARD_FILE_MAX_BYTES: ${TERRARIUM_CARD_FILE_MAX_BYTES:-}
       TERRARIUM_CARD_FILES_MAX_BYTES: ${TERRARIUM_CARD_FILES_MAX_BYTES:-}
       # The most bytes in a system prompt (an agent's own, or a persona file).
@@ -99,6 +109,9 @@ services:
       TERRARIUM_SELF_UPDATE: ${TERRARIUM_SELF_UPDATE:-notify}
       TERRARIUM_UPDATE_CHANNEL: ${TERRARIUM_UPDATE_CHANNEL:-stable}
       TERRARIUM_UPDATE_REPO: ${TERRARIUM_UPDATE_REPO:-wiltaylor/terrarium}
+      # Seconds: the updater waits this long for the daemon to drain, and
+      # the daemon caps a graceful agent RPC drain with it (docs/api.md §34).
+      TERRARIUM_UPDATE_DRAIN_WAIT: ${TERRARIUM_UPDATE_DRAIN_WAIT:-600}
       TERRARIUM_UPDATER_SOCKET: /run/terrarium-updater/updater.sock
     volumes:
       - ${TERRARIUM_DATA_DIR:-.}/config/claude:/auth/claude

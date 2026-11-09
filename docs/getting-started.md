@@ -181,7 +181,9 @@ logins. Each login is its own subscription. To add a second login:
 
 When the default subscription (for example `anthropic-max-20x`) has an
 account, the daemon names the new one `anthropic-max-20x-2`. Each account
-has its own card, with its quota bars and the agents on it. **Re-login**
+has its own card, with its quota bars and the agents on it. The daemon
+keeps the probe samples behind the bars for `TERRARIUM_QUOTA_SAMPLE_KEEP`
+(default `48h`, at least `24h`; set it in `.env`). **Re-login**
 on a card replaces the login of that account only.
 
 The first account of a harness stays the **default** account. Its card

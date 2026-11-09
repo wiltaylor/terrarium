@@ -1541,14 +1541,38 @@ pub fn ensure_crypto_provider() {
 mod tests {
     use super::*;
 
+    /// Write the 0700 fake `nvidia-smi` script that the product execs.
+    /// `gpu::sample_with` runs `nvidia_smi_bin` directly (`Command::new`)
+    /// and must keep doing so for the real binary, so the fake cannot be
+    /// run as `sh <path>` (with the `--query-gpu` args `sh` answers
+    /// `Illegal option`). This process must then never hold a write fd on
+    /// the script: a fork of the test binary while such an fd is open
+    /// copies the fd table, and the exec of the script in that window
+    /// fails with ETXTBSY under load (TER-415, TER-423). A child shell
+    /// does the write and drops the fd by exiting.
+    fn write_execd_script(dir: &std::path::Path, name: &str, text: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf %s \"$1\" > \"$2\" && chmod 700 \"$2\"")
+            .arg("sh")
+            .arg(text)
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "write the {name} fixture");
+        path
+    }
+
     #[tokio::test]
     async fn each_connection_hello_refreshes_gpu_inventory_and_clears_failed_probes() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("smi");
         let inventory = dir.path().join("inventory");
-        std::fs::write(&bin, format!("#!/bin/sh\ncat '{}'\n", inventory.display())).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bin = write_execd_script(
+            dir.path(),
+            "smi",
+            &format!("#!/bin/sh\ncat '{}'\n", inventory.display()),
+        );
         let mut opts = ClientOptions::new("ws://localhost", "test", "test");
         opts.capabilities.gpu_reservations = true;
         opts.nvidia_smi_bin = bin.to_string_lossy().into_owned();
