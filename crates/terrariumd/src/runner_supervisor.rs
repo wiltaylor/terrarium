@@ -1027,6 +1027,18 @@ struct Slot {
     start_reason: Option<String>,
 }
 
+/// The slot fields that [`RunnerSupervisor::prepare_new_session`] sets,
+/// as they were before: a new session whose kill failed puts them back.
+struct NewSessionUndo {
+    resume: Option<HarnessSessionId>,
+    session: Option<HarnessSessionId>,
+    start_reason: Option<String>,
+    recap: Option<String>,
+    /// The plan put a `then` turn first in `turns`.
+    then: bool,
+    reset_gate: bool,
+}
+
 /// A compaction that runs: its number, and where its end goes.
 struct Compacting {
     token: u64,
@@ -1966,6 +1978,31 @@ impl RunnerSupervisor {
         slot.reset_gate = false;
     }
 
+    /// The kill of a requested restart failed and the harness runs on:
+    /// clear the request (and the set-up of a new session), so that the
+    /// work that waited for the relaunch goes out to this harness.
+    fn restart_not_on_its_way(&self, id: AgentId, undo: Option<NewSessionUndo>) {
+        {
+            let mut slots = lock(&self.inner.slots);
+            let Some(slot) = slots.get_mut(&id).filter(|s| s.runner.is_some()) else {
+                return;
+            };
+            slot.restart_requested = false;
+            if let Some(u) = undo {
+                slot.resume = u.resume;
+                slot.session = u.session;
+                slot.start_reason = u.start_reason;
+                slot.recap = u.recap;
+                slot.reset_gate = u.reset_gate;
+                if u.then && !slot.turns.is_empty() {
+                    slot.turns.remove(0);
+                }
+            }
+        }
+        warn!(agent = %id, "the restart did not happen; the harness runs on");
+        self.deliver_pending(id);
+    }
+
     /// [`Supervisor::start`], and for a new session the set-up of
     /// [`RunnerSupervisor::prepare_new_session`] after the claim.
     async fn start_with(
@@ -2338,9 +2375,10 @@ impl RunnerSupervisor {
     /// agent is still out of a turn. A turn that started meanwhile keeps the
     /// upgrade pending for its end.
     async fn upgrade_after_turn(self, id: AgentId, epoch: u64) {
+        // With no daemon state (a unit test), no hot swap gate applies.
         let ready = match self.state() {
             Some(state) => state.agent_calls.wait_until_ready().await,
-            None => Err("the daemon state is gone".to_owned()),
+            None => Ok(()),
         };
         let permit = match ready {
             Ok(()) => self.inner.upgrades.clone().acquire_owned().await.ok(),
@@ -3441,11 +3479,17 @@ impl RunnerSupervisor {
             let pointer = me.still_current(id, pointer).await;
             if pointer.is_empty() {
                 me.forget_stored(id, stored, upto).await;
-                if let Some(slot) = lock(&me.inner.slots).get_mut(&id) {
+                let resting = lock(&me.inner.slots).get_mut(&id).map(|slot| {
                     slot.pointer_busy = false;
-                }
+                    (slot.epoch, slot.seen.is_resting())
+                });
                 // Items that came in meanwhile go out now.
                 me.maybe_push(id);
+                // No turn came of it, so no status change: a restart that
+                // waited for the end of the delivery goes now.
+                if let Some((epoch, true)) = resting {
+                    me.take_pending_restart(id, epoch);
+                }
                 return;
             }
             let pointer = me.fill_mail(id, pointer).await;
@@ -4432,10 +4476,18 @@ impl Supervisor for RunnerSupervisor {
                                 "the agent stops now; it starts no new session".into(),
                             ));
                         }
+                        let undo = NewSessionUndo {
+                            resume: slot.resume.clone(),
+                            session: slot.session.clone(),
+                            start_reason: slot.start_reason.clone(),
+                            recap: slot.recap.clone(),
+                            then: plan.then.is_some(),
+                            reset_gate: slot.reset_gate,
+                        };
                         slot.restart_requested = true;
                         slot.agent = agent.clone();
                         Self::prepare_new_session(slot, plan.clone());
-                        Some((slot.runner.clone(), slot.agent.harness))
+                        Some((slot.runner.clone(), slot.agent.harness, undo))
                     }
                     Some(slot) if slot.live() => {
                         return Err(SupervisorError::NotReady(
@@ -4446,12 +4498,16 @@ impl Supervisor for RunnerSupervisor {
                 }
             };
             match live {
-                Some((Some(r), harness)) => {
+                Some((Some(r), harness, undo)) => {
                     info!(agent = %id, reason = %plan.reason, "ending the session for a new one");
                     if let Err(e) = r.set_stopped_by(StoppedBy::Policy).await {
                         debug!(agent = %id, "cannot record the stop reason: {e}");
                     }
-                    self.exit_gracefully(id, r, harness).await
+                    let ended = self.exit_gracefully(id, r, harness).await;
+                    if ended.is_err() {
+                        self.restart_not_on_its_way(id, Some(undo));
+                    }
+                    ended
                 }
                 _ => self.start_with(agent, None, Some(plan)).await,
             }
@@ -4521,7 +4577,11 @@ impl Supervisor for RunnerSupervisor {
             match runner {
                 Some(r) => {
                     let _ = r.set_stopped_by(StoppedBy::Policy).await;
-                    r.kill().await.map_err(other)
+                    let killed = r.kill().await.map_err(other);
+                    if killed.is_err() {
+                        self.restart_not_on_its_way(id, None);
+                    }
+                    killed
                 }
                 None => {
                     let resume = agent.session.clone();
@@ -5699,6 +5759,133 @@ mod tests {
             assert_eq!(lock(&runner.typed)[1], "queued turn");
             assert!(!runner.claimed.load(Ordering::SeqCst));
         }
+    }
+
+    /// TER-262 M4: a pointer delivery that starts while the upgrade waits
+    /// for a slot keeps the upgrade pending: the harness is not killed
+    /// under the turn of the pointer, also when the runner rests again.
+    #[tokio::test]
+    async fn a_pointer_during_the_upgrade_wait_keeps_the_upgrade_pending() {
+        struct PointerAdapter;
+        impl Adapter for PointerAdapter {
+            fn id(&self) -> HarnessId {
+                HarnessId::Claude
+            }
+            fn detect_version(&self) -> terrarium_core::Result<semver::Version> {
+                Ok(semver::Version::new(1, 0, 0))
+            }
+            fn launch(&self, _: &Agent, _: Option<&HarnessSessionId>) -> LaunchSpec {
+                unreachable!("the test supplies the launch spec")
+            }
+            fn hook_event(&self, hook: &terrarium_core::HookPayload) -> Vec<Event> {
+                match hook.hook.as_str() {
+                    "UserPromptSubmit" => vec![Event::TurnStart {
+                        prompt: hook.str_field("prompt").map(str::to_owned),
+                    }],
+                    "Stop" => vec![Event::TurnEnd],
+                    _ => vec![],
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = RunnerSupervisorConfig::new(
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        );
+        let adapter = Arc::new(PointerAdapter);
+        let sup = RunnerSupervisor::new(cfg);
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p",
+            "harness": "claude", "workspace": tmp.path()
+        }))
+        .unwrap();
+        let id = agent.id;
+        let mut rc = RunnerConfig::new(id, &sup.inner.cfg.state_dir, &sup.inner.cfg.runtime_dir);
+        rc.ready_detector = Some(Arc::new(terrarium_runner::DefaultReadyDetector {
+            quiet: Duration::from_millis(100),
+            pattern: None,
+        }));
+        let spec = LaunchSpec::new("python3", tmp.path()).arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../terrarium-runner/tests/fake_tui/fake_tui.py")
+                .display()
+                .to_string(),
+        );
+        let runner = Runner::spawn(rc, adapter, spec, sup.rpc_handler())
+            .await
+            .unwrap();
+        struct StopRunner(Runner);
+        impl Drop for StopRunner {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+            }
+        }
+        let _stop = StopRunner(runner.clone());
+        let status = runner.watch_status();
+        let wait_idle = |mut status: watch::Receiver<AgentStatus>| async move {
+            tokio::time::timeout(Duration::from_secs(45), async {
+                while *status.borrow_and_update() != AgentStatus::Idle {
+                    status.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+        };
+        wait_idle(status.clone()).await;
+        let mut slot = Slot::new(agent);
+        slot.runner = Some(Arc::new(runner.clone()));
+        slot.phase = Phase::Running;
+        slot.seen = AgentStatus::Idle;
+        slot.reached_idle = true;
+        slot.upgrade_pending = true;
+        slot.upgrade_waiting = true;
+        lock(&sup.inner.slots).insert(id, slot);
+        // Every upgrade slot is taken: the upgrade waits.
+        let limit = u32::try_from(sup.inner.cfg.upgrade_limit).unwrap();
+        let held = sup
+            .inner
+            .upgrades
+            .clone()
+            .acquire_many_owned(limit)
+            .await
+            .unwrap();
+        let waiter = tokio::spawn(sup.clone().upgrade_after_turn(id, 0));
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        *lock(&sup.inner.pointer_delivery_pause) = Some(PointerDeliveryPause {
+            reached: reached_tx,
+            resume: resume_rx,
+        });
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new("m1".into(), "p/b".into(), "T1".into()))
+        });
+        tokio::time::timeout(Duration::from_secs(45), reached_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // The pointer turn ended and the runner rests, but the delivery
+        // still owns the slot. Now a slot frees.
+        wait_idle(status.clone()).await;
+        assert!(lock(&sup.inner.slots)[&id].pointer_busy);
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(45), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let slots = lock(&sup.inner.slots);
+            let slot = &slots[&id];
+            assert!(slot.upgrade_pending, "the upgrade waits for the next rest");
+            assert!(!slot.restart_requested);
+            assert!(slot.upgrade_permit.is_none());
+        }
+        assert_eq!(runner.status(), AgentStatus::Idle, "the harness runs on");
+        resume_tx.send(()).unwrap();
+        runner.kill().unwrap();
+        runner.wait().await;
     }
 
     /// TER-213: idle arrives while the completed delivery still owns busy.
