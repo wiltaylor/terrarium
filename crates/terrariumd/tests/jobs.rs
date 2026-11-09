@@ -1854,7 +1854,11 @@ async fn a_cancel_ends_a_queued_job(flow: &'static str) {
     lab.td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "p-box", "recipe": "sleep 30", "slots": 1}),
+            // The lab's own work dir: its two flows (code and rules) run in
+            // parallel, and with the default `/tmp/terrarium-jobs` they would
+            // hold each other's slot lock (TER-448) and fail clearly.
+            json!({"target": "p-box", "recipe": "sleep 30", "slots": 1,
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
         )
         .await
         .ok();
