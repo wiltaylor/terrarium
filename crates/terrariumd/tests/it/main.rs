@@ -45,6 +45,8 @@ mod card_reminder;
 mod card_sessions;
 #[path = "../config_repo.rs"]
 mod config_repo;
+#[path = "../conflict_hints.rs"]
+mod conflict_hints;
 #[path = "../db.rs"]
 mod db;
 #[path = "../displays.rs"]

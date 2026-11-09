@@ -28,7 +28,7 @@ mod project_folders;
 mod projects;
 mod questions;
 mod records;
-mod repo_trees;
+pub(crate) mod repo_trees;
 mod repos;
 mod reservations;
 mod rules;

@@ -16,6 +16,7 @@ pub mod card_delivery;
 pub mod card_dispatcher;
 pub mod card_reminder;
 pub mod config_repo;
+pub mod conflict_hints;
 pub mod db;
 pub mod defaults;
 pub mod display;
