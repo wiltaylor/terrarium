@@ -1310,8 +1310,7 @@ async fn merge_group_repair_keeps_an_empty_group_while_its_rule_runs() {
                 |r| r.get(0),
             )?;
             fake_pending_run(t, &rule, &key)?;
-            let waits =
-                groups::reconcile_merge_groups(t, &Default::default(), chrono::Utc::now())?;
+            let waits = groups::reconcile_merge_groups(t, &Default::default(), chrono::Utc::now())?;
             let open_while = groups::get(t, &group)?.closed_at.is_none();
             t.execute("DELETE FROM rule_runs WHERE id = 'test-run'", [])?;
             groups::expire(t)?;
@@ -1321,7 +1320,10 @@ async fn merge_group_repair_keeps_an_empty_group_while_its_rule_runs() {
         .await
         .unwrap();
     assert!(waits.contains_key(&gid), "{waits:?}");
-    assert!(open_while, "the opening rule's pending run keeps the empty group");
+    assert!(
+        open_while,
+        "the opening rule's pending run keeps the empty group"
+    );
     assert!(!open_after, "the idle repair closes the empty group");
     assert_eq!(card(&td, &gid).await["archived"], true);
 }
