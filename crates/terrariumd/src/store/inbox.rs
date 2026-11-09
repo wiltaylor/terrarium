@@ -809,6 +809,29 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
     })
 }
 
+/// An operator mail left the open list: its `mail` item of the Inbox
+/// closes. `mail::mark_read`, `mail::mark_read_in_turn`, and `mail::reply`
+/// call it with the message as it was before (GitHub #25): only a mail to
+/// the operator that was `queued` or `delivered` was an open item, so only
+/// that change closes one. A pause notice opened no item, so it closes
+/// none. The ack reaches the same stores, and mail to an agent is no
+/// Inbox item.
+pub fn mail_closed(t: &mut Tx<'_>, before: &Message) -> ApiResult<()> {
+    if before.to_kind != "operator"
+        || !matches!(before.state.as_str(), "queued" | "delivered")
+        || mail::is_pause_notice_key(&before.from, &before.subject)
+    {
+        return Ok(());
+    }
+    emit(
+        t,
+        &format!("mail:{}", before.id),
+        "mail",
+        "closed",
+        sender_project(before).as_deref(),
+    )
+}
+
 /// Emit an `inbox` event: `item` (`notice:<id>`, ...) of `kind` was
 /// `opened`, `updated`, or `closed`.
 pub fn emit(

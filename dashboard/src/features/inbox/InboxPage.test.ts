@@ -7,14 +7,16 @@ import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMockApi } from "../../api/mock";
+import { ApiError } from "../../api/http";
 import { waitFor } from "../../test/wait";
 import type { InboxItem } from "../../api/types";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
+const inboxRefresh = vi.fn();
 vi.mock("../../stores", () => ({
   api,
   events: { on: () => () => {} },
-  inbox: { refresh: async () => {} },
+  inbox: { refresh: inboxRefresh },
   projects: { projects: () => [] },
   agents: { state: { agents: [] } },
 }));
@@ -144,6 +146,64 @@ describe("the Asked status tab (TER-42)", () => {
     el = mount("/inbox?status=done");
     await waitFor(() => expect(watchCards(el).length).toBe(1));
     expect(el.textContent).toContain("Answered by terrarium/lead");
+  });
+});
+
+describe("the ack of a mail that closed outside the Inbox (GitHub #25)", () => {
+  it("treats a 409 on ack without text as success: the item and the counts refresh, no banner", async () => {
+    // The mail was read or replied outside the Inbox (the CLI, the Mail
+    // page): the daemon answers the ack with 409, and the card closes here.
+    const ack = vi.spyOn(api.inbox, "ackMail").mockImplementation(async () => {
+      throw new ApiError(409, "mail is acknowledged already (read)", undefined, "conflict");
+    });
+    const item = (await api.inbox.list()).find((i) => i.message?.subject === "0.1.0 ready for review")!;
+    // The fetched message is the mail as it is now, not the stale card one.
+    const get = vi.spyOn(api.mail, "get").mockImplementation(async (id) => ({ ...item.message!, id, state: "read" }));
+    try {
+      const el = mount("/inbox?tab=mail");
+      await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBeGreaterThan(0));
+      const before = el.querySelectorAll("article[aria-label^='Mail ']").length;
+      const card = [...el.querySelectorAll("article[aria-label^='Mail ']")].find((c) => c.textContent!.includes("0.1.0 ready for review"))!;
+      inboxRefresh.mockClear();
+      card.querySelector<HTMLFormElement>("form[aria-label=Acknowledge]")!.requestSubmit();
+      await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBe(before - 1));
+      expect(el.textContent).not.toContain("is acknowledged already");
+      expect(ack).toHaveBeenCalledTimes(1);
+      expect(ack).toHaveBeenCalledWith(item.message!.id, undefined);
+      expect(get).toHaveBeenCalledWith(item.message!.id);
+      expect(inboxRefresh).toHaveBeenCalled();
+    } finally {
+      ack.mockRestore();
+      get.mockRestore();
+    }
+  });
+
+  it("keeps the banner and the reply text on a 409 with text: the reply was not sent", async () => {
+    // The daemon checks the state before it sends the reply, so a 409 means
+    // the reply was not sent: the banner shows it, the text stays to send again.
+    const ack = vi.spyOn(api.inbox, "ackMail").mockImplementation(async () => {
+      throw new ApiError(409, "mail is acknowledged already (replied)", undefined, "conflict");
+    });
+    const get = vi.spyOn(api.mail, "get");
+    try {
+      const el = mount("/inbox?tab=mail");
+      await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBeGreaterThan(0));
+      const before = el.querySelectorAll("article[aria-label^='Mail ']").length;
+      const card = [...el.querySelectorAll("article[aria-label^='Mail ']")].find((c) => c.textContent!.includes("0.1.0 ready for review"))!;
+      const form = card.querySelector<HTMLFormElement>("form[aria-label=Acknowledge]")!;
+      const box = form.querySelector<HTMLTextAreaElement>("textarea")!;
+      box.value = "Ship it";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      form.requestSubmit();
+      await waitFor(() => expect(card.textContent).toContain("is acknowledged already"));
+      expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBe(before);
+      expect(box.value).toBe("Ship it");
+      expect(ack).toHaveBeenCalledWith(expect.any(String), "Ship it");
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      ack.mockRestore();
+      get.mockRestore();
+    }
   });
 });
 

@@ -1851,10 +1851,19 @@ async fn jobs_keep_to_the_slots_in_order() {
 both_flows!(a_cancel_ends_a_queued_job);
 async fn a_cancel_ends_a_queued_job(flow: &'static str) {
     let lab = lab_flow(1, flow).await;
+    // A work dir of this lab alone. The default `/tmp/terrarium-jobs` is
+    // shared by every daemon on the host, and the two flows of this test
+    // are two daemons of one project: their receives would wipe each
+    // other's `slot-1.bundle` (`rm -f` at the start of the receive step)
+    // and the job would end in the clone step with exit 2, before its
+    // recipe (seen in merge job 01M6Z0AWT2PTTGX20N688FSABA), so no wait
+    // could ever see job 1 run its recipe.
     lab.td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "p-box", "recipe": "sleep 30", "slots": 1}),
+            json!({"target": "p-box", "recipe": "sleep 30", "slots": 1,
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
         )
         .await
         .ok();
@@ -2332,32 +2341,53 @@ echo real-tunnel-large-log-ok
     assert!(!detail.contains(&key));
 }
 
+/// A daemon-tracing capture shared by this whole test binary (TER-425):
+/// `set_global_default` succeeds only once per process, so a test that
+/// installs its own subscriber makes every later install panic. The layer
+/// is installed exactly once, through a `OnceLock`; acquiring the handle
+/// empties the buffer, so each test captures its own run and drains it
+/// with `take`. Tests that drain it must not run at the same time.
+#[derive(Clone)]
+struct TraceCapture(std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>);
+impl std::io::Write for TraceCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Some(buffer) = self.0.lock().unwrap().as_mut() {
+            buffer.extend_from_slice(bytes);
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+static TRACE_CAPTURE: std::sync::OnceLock<TraceCapture> = std::sync::OnceLock::new();
+
+/// Global to include job-queue and executor tasks spawned by the daemon.
+fn daemon_trace_capture() -> TraceCapture {
+    let capture = TRACE_CAPTURE
+        .get_or_init(|| {
+            let buffer = std::sync::Arc::new(std::sync::Mutex::new(Some(Vec::new())));
+            let capture = TraceCapture(buffer);
+            let writer = capture.clone();
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            )
+            .expect("the shared capture is the only global subscriber");
+            capture
+        })
+        .clone();
+    *capture.0.lock().unwrap() = Some(Vec::new());
+    capture
+}
+
 #[tokio::test]
 async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
     use std::os::unix::fs::PermissionsExt;
-    #[derive(Clone)]
-    struct Trace(std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>);
-    impl std::io::Write for Trace {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if let Some(buffer) = self.0.lock().unwrap().as_mut() {
-                buffer.extend_from_slice(bytes);
-            }
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let trace = Trace(std::sync::Arc::new(std::sync::Mutex::new(Some(Vec::new()))));
-    let writer = trace.clone();
-    // Global to include job-queue and executor tasks spawned by the daemon.
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish(),
-    )
-    .unwrap();
+    let trace = daemon_trace_capture();
     let fixtures = tempfile::tempdir().unwrap();
     let ssh = fixtures.path().join("ssh");
     std::fs::write(

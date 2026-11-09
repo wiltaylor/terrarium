@@ -208,6 +208,11 @@ rule "own-step" {
   when "data.n" { eq = "7" }
   group_status { key = "batch" step = "{{event.data.step}}" state = "failed" }
 }
+rule "other-group-step" {
+  on = ["test.ping"]
+  when "data.n" { eq = "8" }
+  group_status { key = "batch" step = "{{group.eta_at}}" state = "failed" }
+}
 "#;
 
 const VERSION_CUT: &str = r#"
@@ -459,7 +464,7 @@ async fn version_cut_freezes_members_and_explicit_built_completes_only_snapshot(
 
 #[tokio::test]
 async fn version_cut_age_timer_waits_for_merge_group_close() {
-    let td = TestDaemon::start().await;
+    let mut td = TestDaemon::start().await;
     td.project("p").await;
     put_rules(&td, "p", GROUPS).await;
     let a = new_card(
@@ -471,9 +476,18 @@ async fn version_cut_age_timer_waits_for_merge_group_close() {
     ping(&td, "p", &a, 1).await;
     settle(&td).await;
     put_rules(&td, "p", VERSION_CUT).await;
+    settle(&td).await;
+    // While the daemon runs, its engine races the manual timer call below:
+    // its own timer tick can fire the version-cut timer, and the close of
+    // the merge group writes a `card` event that the (when-less) rule runs
+    // on directly, so the engine can cut before the test looks and the
+    // manual call finds nothing (the 0.25.0 release CI saw it return 0).
+    // Stop the daemon for the timer part, then boot it again to run the cut.
+    let st = state(&td);
+    td.daemon.take().unwrap().shutdown();
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let id = a.clone();
-    state(&td)
-        .db
+    st.db
         .write("test", move |t| {
             t.execute(
                 "UPDATE cards SET created_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
@@ -488,22 +502,21 @@ async fn version_cut_age_timer_waits_for_merge_group_close() {
         .await
         .unwrap();
     let mut cache = rules_engine::Cache::default();
-    let projects = rules_engine::load(&state(&td).db, &mut cache)
-        .await
-        .unwrap();
+    let projects = rules_engine::load(&st.db, &mut cache).await.unwrap();
     let mut fired = std::collections::HashMap::new();
     assert_eq!(
-        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, chrono::Utc::now())
+        rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
             .await
             .unwrap(),
         1
     );
     assert_eq!(
-        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, chrono::Utc::now())
+        rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
             .await
             .unwrap(),
         0
     );
+    td.boot(None, None).await;
     settle(&td).await;
     assert!(
         card(&td, &a).await["group"]["key"]
@@ -790,6 +803,49 @@ async fn group_status_fails_steps_the_rule_itself_left_empty() {
             fail[0]
         );
     }
+}
+
+/// TER-437 (review of TER-419, minor 2): the other half of the empty
+/// `{{group.*}}` step noop. The run's card is in one group and the key's
+/// open group is another: the placeholder looks at the card's own group
+/// (`eta_at`, which it does not have), so the step renders empty while
+/// the card does have a group. The action skips, as when the card has no
+/// group at all, instead of failing the run.
+#[tokio::test]
+async fn group_status_skips_an_empty_step_when_the_cards_group_is_another() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["group"]["key"], "batch");
+    // The card leaves `batch` (which stays open) and joins `other`, which
+    // has no eta: `{{group.eta_at}}` has no value there.
+    ping(&td, "p", &a, 3).await;
+    settle(&td).await;
+    ping(&td, "p", &a, 2).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["group"]["key"], "other");
+    let seq = ping(&td, "p", &a, 8).await;
+    settle(&td).await;
+    let fail: Vec<Value> = runs(&td, "p")
+        .await
+        .into_iter()
+        .filter(|r| r["event_seq"] == seq)
+        .collect();
+    assert_eq!(fail.len(), 1, "{fail:#?}");
+    assert_eq!(fail[0]["rule"], "other-group-step", "{}", fail[0]);
+    assert_eq!(fail[0]["state"], "noop", "{}", fail[0]);
+    assert!(fail[0]["reason"].is_null(), "{}", fail[0]);
+    assert_eq!(
+        fail[0]["steps"][0]["detail"],
+        json!({"key": "batch", "reason": "the step placeholder has no value"}),
+        "{}",
+        fail[0]
+    );
+    // A noop marks no step: the key's group `batch` is unchanged.
+    assert_eq!(fail[0]["steps"][0]["changed"], false, "{}", fail[0]);
 }
 
 async fn new_card(td: &TestDaemon, project: &str, body: Value) -> String {
