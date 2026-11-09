@@ -781,7 +781,7 @@ async fn group_status_fails_steps_the_rule_itself_left_empty() {
         assert_eq!(fail[0]["state"], "failed", "{}", fail[0]);
         assert_eq!(
             fail[0]["steps"][0]["error"],
-            "group step name must not be empty",
+            "Invalid: group step name must not be empty",
             "{}",
             fail[0]
         );
