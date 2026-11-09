@@ -98,6 +98,14 @@ pub fn valid_name(name: &str) -> bool {
 }
 
 pub fn check_name(kind: &str, name: &str) -> crate::error::ApiResult<()> {
+    // Agent names never look like a project service: the services' holders
+    // are `<project>/@<service>`, which no name can take (no `@`), and the
+    // bare service names are reserved too, so no agent can pass for one.
+    if kind == "agent" && terrarium_host::native::PROJECT_SERVICES.contains(&name) {
+        return Err(crate::error::ApiError::invalid(format!(
+            "agent name `{name}` is reserved for a project service"
+        )));
+    }
     if valid_name(name) {
         Ok(())
     } else {
@@ -134,6 +142,20 @@ pub fn json_col<T: serde::de::DeserializeOwned + Default>(text: &str) -> T {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// No agent can take a project service's holder (`<project>/@jobs`):
+    /// `@` is never in a name, and the bare service names are reserved for
+    /// agents at every entry point (create, spawn, target roots).
+    #[test]
+    fn agent_names_never_pass_for_a_project_service() {
+        for service in terrarium_host::native::PROJECT_SERVICES {
+            assert!(check_name("agent", service).is_err(), "{service}");
+            assert!(check_name("agent", &format!("@{service}")).is_err());
+            // Other kinds keep the name.
+            check_name("project", service).unwrap();
+        }
+        check_name("agent", "jobs-1").unwrap();
+    }
 
     #[test]
     fn names() {

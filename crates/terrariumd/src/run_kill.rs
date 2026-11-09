@@ -199,6 +199,9 @@ pub fn kill_cmd(cmd: &RemoteCmd, pidfile: &str, grace: u64) -> RemoteCmd {
         timeout_secs: Some(grace + 30),
         agent: cmd.agent.clone(),
         holder: cmd.holder.clone(),
+        // A daemon-made script with no user content: with no holder it
+        // runs as the operator, so a run of the operator can be killed.
+        operator: cmd.operator || cmd.holder.is_none(),
         ..RemoteCmd::default()
     }
 }
@@ -217,6 +220,7 @@ pub fn clear_cmd(cmd: &RemoteCmd, pidfile: &str) -> RemoteCmd {
         timeout_secs: Some(15),
         agent: cmd.agent.clone(),
         holder: cmd.holder.clone(),
+        operator: cmd.operator || cmd.holder.is_none(),
         ..RemoteCmd::default()
     }
 }
@@ -575,6 +579,9 @@ where
     F: Fn(RemoteCmd) -> ApiResult<Running>,
 {
     let base = RemoteCmd {
+        // The kill and clear scripts are daemon-made: a lost run of the
+        // operator (no holder) is killed as the operator.
+        operator: holder.is_none(),
         holder,
         ..RemoteCmd::default()
     };
@@ -938,7 +945,7 @@ mod tests {
                 "run".into(),
                 child_file.display().to_string(),
             ],
-            holder: Some("p/jobs".into()),
+            holder: Some(terrarium_host::native::service_holder("p", "jobs")),
             ..RemoteCmd::default()
         };
         let job = ulid::Ulid::new().to_string();
@@ -954,7 +961,7 @@ mod tests {
         std::mem::forget(report);
         let r = kill_file_with(
             starter.clone(),
-            Some("p/jobs".into()),
+            Some(terrarium_host::native::service_holder("p", "jobs")),
             &job_pidfile(&job),
             1,
             Duration::ZERO,

@@ -425,6 +425,12 @@ pub struct RemoteCmd {
     /// The owner of the resource budget on a `host` target with `limits`:
     /// `<project>/<agent>` of the caller. `None` is the operator.
     pub holder: Option<String>,
+    /// The operator runs the command (set from the actor). On a host with
+    /// native GPU enforcement a command with no holder runs as the
+    /// operator only with this set; otherwise it is refused
+    /// ([`native_gpu_limits`]), so a daemon path that forgets the holder
+    /// never gets the operator's whole workspace root.
+    pub operator: bool,
 }
 
 impl std::fmt::Debug for RemoteCmd {
@@ -438,6 +444,7 @@ impl std::fmt::Debug for RemoteCmd {
             .field("shell", &self.shell)
             .field("agent", &self.agent)
             .field("holder", &self.holder)
+            .field("operator", &self.operator)
             .finish()
     }
 }
@@ -481,32 +488,48 @@ pub fn exec_limits(
 /// On a host agent with enforced native GPU support (TER-345), every
 /// command on a `host` target runs through the root helper: with no
 /// reservation it gets no GPU. Elsewhere the grant is dropped, so a host
-/// agent never sees a request it cannot enforce.
+/// agent never sees a request it cannot enforce. On such a host a command
+/// needs a holder: the helper gives each holder its workspace scope. No
+/// holder is the operator only when `operator` says so (the actor was the
+/// operator); any other command with no holder is refused, never given the
+/// operator's whole root by default.
 pub fn native_gpu_limits(
     def: &TargetDef,
     caps: Option<&HostCapabilities>,
     holder: Option<&str>,
+    operator: bool,
     limits: Option<ExecLimits>,
-) -> Option<ExecLimits> {
+) -> ApiResult<Option<ExecLimits>> {
     let native = def.kind == TargetKind::Host
         && caps
             .and_then(|c| c.native_gpu.as_ref())
             .is_some_and(|n| n.enforced);
     if !native {
-        return limits.map(|l| ExecLimits {
+        return Ok(limits.map(|l| ExecLimits {
             native_gpu: None,
             ..l
-        });
+        }));
     }
+    let holder = match (holder, operator) {
+        (Some(h), _) => h,
+        (None, true) => "operator",
+        (None, false) => {
+            return Err(ApiError::invalid(format!(
+                "a command on target {} has no holder; with native GPU enforcement each command \
+                 needs one (an agent, a project service, or the operator)",
+                def.name
+            )));
+        }
+    };
     let mut l = limits.unwrap_or_else(|| ExecLimits {
         target: def.name.clone(),
-        holder: holder.unwrap_or("operator").to_owned(),
+        holder: holder.to_owned(),
         limits: Limits::default(),
         reservation: None,
         native_gpu: None,
     });
     l.native_gpu.get_or_insert_with(Default::default);
-    Some(l)
+    Ok(Some(l))
 }
 
 fn valid_env_key(k: &str) -> bool {
@@ -1827,7 +1850,13 @@ pub(crate) fn start_cmd_locked(
                 Some(limits) => Some(limits),
                 None => exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?,
             };
-            let limits = native_gpu_limits(def, caps.as_ref(), cmd.holder.as_deref(), limits);
+            let limits = native_gpu_limits(
+                def,
+                caps.as_ref(),
+                cmd.holder.as_deref(),
+                cmd.operator,
+                limits,
+            )?;
             let shell = caps.and_then(|c| c.shell);
             let make = host_frame(def, shell.as_deref(), cmd, limits)?;
             Ok(pump_host(ex.hosts.open(host, make)?))
@@ -2036,6 +2065,7 @@ async fn start_exec_secrets(
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
     let mut cmd = cmd;
     cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
+    cmd.operator = actor.is_operator();
     crate::target_roots::prepare_exec(state, actor, &def, &mut cmd).await?;
     // VMLab's exec protocol cannot carry an environment.
     if def.kind != TargetKind::Vmlab
@@ -2143,6 +2173,7 @@ pub async fn start_tool_exec(
     cmd.shell = false;
     cmd.pty = None;
     cmd.holder = holder_of(actor);
+    cmd.operator = actor.is_operator();
     let resources = state.executor.target_resource_lock(&def).lock_owned().await;
     let (running, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     let (sess, ctl) = ExecSession::new(
@@ -5162,6 +5193,7 @@ pub async fn checkout_on_target(
         cmd.env.insert("TERRARIUM_GIT_KNOWN_HOSTS".into(), k);
     }
     cmd.holder = holder_of(actor);
+    cmd.operator = actor.is_operator();
     let c = start_cmd(state, &row.def, &cmd)?.collect(256 * 1024).await;
     if !c.end().success() {
         let e = verb_failed("git checkout on the target", &c);

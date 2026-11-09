@@ -812,8 +812,10 @@ fn a_session_sees_only_its_own_holders_workspace() {
 }
 
 /// The bind scope follows the holder's trust domain: a project service
-/// (jobs, pipelines, monitors) gets its project's directory, never another
-/// project's; the operator gets the whole workspace root.
+/// (`<project>/@jobs`, `@pipelines`, `@monitors`, `@schedules`) gets its
+/// project's directory, never another project's; an agent named like a
+/// service gets only its own directory; the operator gets the whole
+/// workspace root.
 #[test]
 fn the_workspace_scope_follows_the_holders_trust_domain() {
     let root = tempfile::tempdir().unwrap();
@@ -841,9 +843,11 @@ fn the_workspace_scope_follows_the_holders_trust_domain() {
             .map(str::to_owned)
             .collect()
     };
-    // A job in a slot of its project: the project's directory is bound.
-    for service in ["jobs", "pipelines", "monitors"] {
-        let holder = format!("terra/{service}");
+    // A job in a slot of its project (or a project schedule, pipeline, or
+    // monitor in the project): the project's directory is bound.
+    for service in PROJECT_SERVICES {
+        let holder = service_holder("terra", service);
+        assert_eq!(holder, format!("terra/@{service}"));
         let plan = plan_for(&holder, &slot).unwrap();
         assert_eq!(
             bind(&plan),
@@ -868,8 +872,26 @@ fn the_workspace_scope_follows_the_holders_trust_domain() {
                 .any(|x| x.contains(&*other.to_string_lossy()))
         );
     }
-    // An agent of the project still gets only its own directory.
+    // An agent of the project still gets only its own directory, also an
+    // agent named like a service.
     assert!(plan_for("terra/w-1", &slot).is_err());
+    std::fs::create_dir_all(terra.join("jobs")).unwrap();
+    for name in PROJECT_SERVICES {
+        let agent = format!("terra/{name}");
+        assert!(plan_for(&agent, &slot).is_err(), "{agent}");
+        std::fs::create_dir_all(terra.join(name)).unwrap();
+        let plan = plan_for(&agent, &terra.join(name)).unwrap();
+        assert_eq!(
+            bind(&plan),
+            [
+                format!("TemporaryFileSystem={}:ro", real.display()),
+                format!("BindPaths={}", terra.join(name).display()),
+            ],
+            "{agent}"
+        );
+    }
+    // An `@` holder that is no known service: the empty root only.
+    assert_eq!(holder_workspace(&real, "terra/@other").unwrap(), None);
     // The operator: the whole root, writable, no tmpfs over it, any cwd.
     let plan = plan_for("operator", &other.join("slot-1")).unwrap();
     let p = props(&plan.args);

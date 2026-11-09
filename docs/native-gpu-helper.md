@@ -93,20 +93,30 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
       holder's trust domain:
       - an agent `<project>/<agent>`: only
         `<workspace_root>/<project>/<agent>`;
-      - a project service `<project>/jobs`, `<project>/pipelines`, or
-        `<project>/monitors`: the project's directory
-        `<workspace_root>/<project>` (job slots `slot-<n>` and the agent
-        directories of that project), never another project's;
+      - a project service `<project>/@jobs`, `<project>/@pipelines`,
+        `<project>/@monitors`, or `<project>/@schedules` (a project-owned
+        schedule; a system-owned one is `global/@schedules`): the
+        project's directory `<workspace_root>/<project>` (job slots
+        `slot-<n>` and the agent directories of that project), never
+        another project's. On such a host, set the delivery `work_dir`
+        under `workspace_root`: the default `/tmp/terrarium-jobs` is
+        refused (see below);
       - `operator`: the whole workspace root, with no tmpfs over it (the
-        operator is trusted).
+        operator is trusted). Only a command of the operator (the actor,
+        or a `run_as = "operator"` webhook or monitor) gets this holder: the
+        daemon refuses a command with no holder on such a host, so a path
+        that forgets the holder never gets the whole root.
 
       Directories outside the scope do not exist in the unit, whatever
       their modes, so a file that an earlier holder of the UID made private
       (a credential store, a key, a `mkstemp` file) cannot be opened from
       another trust domain. The working directory must lie in the scope.
       Any other holder, or a scope directory that does not exist yet, gets
-      the empty root only. A scope that is a symlink is refused. An agent
-      named `jobs`, `pipelines`, or `monitors` gets the project scope.
+      the empty root only. A scope that is a symlink is refused. No agent
+      can take a service holder: agent names never contain `@`, and the
+      bare names `jobs`, `pipelines`, `monitors`, and `schedules` are
+      reserved for agents (an agent of that name made before them is the
+      holder `<project>/jobs` and gets only its own directory).
     - The rest of the tree: `ProtectSystem=strict` makes it read-only
       except the API trees (`/dev`, `/proc`, `/sys`), so no world-writable
       directory such as `/run/lock` or `/var/crash` keeps a file of the UID.

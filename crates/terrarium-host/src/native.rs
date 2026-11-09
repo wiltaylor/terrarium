@@ -1073,15 +1073,24 @@ fn systemd_path(p: &Path) -> Result<(), Refusal> {
     }
 }
 
-/// The project services whose holder is `<project>/<service>`: they run in
-/// the project's trust domain, not as one agent.
-pub const PROJECT_SERVICES: &[&str] = &["jobs", "pipelines", "monitors"];
+/// The project services. Their holder is `<project>/@<service>`
+/// ([`service_holder`]): they run in the project's trust domain, not as
+/// one agent. No agent name can contain `@` (the daemon's name check), so
+/// an agent can never take a service's holder; an agent named `jobs` is
+/// the holder `<project>/jobs` and gets only its own directory.
+pub const PROJECT_SERVICES: &[&str] = &["jobs", "pipelines", "monitors", "schedules"];
+
+/// The holder of a project service: `<project>/@<service>`.
+pub fn service_holder(project: &str, service: &str) -> String {
+    format!("{project}/@{service}")
+}
 
 /// The workspace scope of a holder, by its trust domain (the host agent's
 /// layout is `<root>/<project>/<agent>`):
 /// - `operator`: the whole `root` (trusted);
-/// - a project service `<project>/jobs`, `/pipelines`, `/monitors`: the
-///   project's directory `<root>/<project>`, never another project's;
+/// - a project service `<project>/@jobs`, `@pipelines`, `@monitors`,
+///   `@schedules` ([`service_holder`]): the project's directory
+///   `<root>/<project>`, never another project's;
 /// - an agent `<project>/<agent>`: only `<root>/<project>/<agent>`.
 ///
 /// `None` for any other holder, or a scope directory that is not there
@@ -1100,10 +1109,11 @@ pub fn holder_workspace(root: &Path, holder: &str) -> Result<Option<PathBuf>, Re
             return Err(Refusal::invalid(format!("bad holder {holder:?}")));
         }
     }
-    let dir = if PROJECT_SERVICES.contains(&name) {
-        root.join(project)
-    } else {
-        root.join(project).join(name)
+    let dir = match name.strip_prefix('@') {
+        Some(service) if PROJECT_SERVICES.contains(&service) => root.join(project),
+        // An `@` holder that is no known service: no workspace.
+        Some(_) => return Ok(None),
+        None => root.join(project).join(name),
     };
     match std::fs::canonicalize(&dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

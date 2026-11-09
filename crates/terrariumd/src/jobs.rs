@@ -446,7 +446,7 @@ async fn end_lost(state: &Shared, l: Lost) {
             let r = crate::run_kill::kill_file(
                 state,
                 &def,
-                Some(format!("{}/jobs", job.project)),
+                Some(terrarium_host::native::service_holder(&job.project, "jobs")),
                 &crate::run_kill::job_pidfile(&job.id),
             )
             .await;
@@ -1392,7 +1392,7 @@ async fn run_inner(
             )));
         }
     };
-    let holder = Some(format!("{}/jobs", job.project));
+    let holder = Some(terrarium_host::native::service_holder(&job.project, "jobs"));
     let ionice = has_ionice(state, job, &target, &row.def, holder.clone()).await;
     let project = job.project.clone();
     let wipe = state

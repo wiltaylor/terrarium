@@ -682,16 +682,35 @@ async fn native_exclusive_gpu_needs_enforced_helper_support() {
     assert_eq!(grant.lease.as_deref(), Some(id.as_str()));
     assert_eq!(grant.exclusive, ["GPU-abcd"]);
     assert_eq!(l.reservation.as_ref().unwrap().gpu_devices, ["GPU-abcd"]);
-    let l = terrariumd::executor::native_gpu_limits(&def, caps.as_ref(), Some("p/worker"), Some(l))
+    use terrariumd::executor::native_gpu_limits;
+    let l = native_gpu_limits(&def, caps.as_ref(), Some("p/worker"), false, Some(l))
+        .unwrap()
         .unwrap();
     assert_eq!(l.native_gpu.unwrap().lease.as_deref(), Some(id.as_str()));
     let mut other = def.clone();
     other.name = "p-other".into();
-    let bare = terrariumd::executor::native_gpu_limits(&other, caps.as_ref(), None, None).unwrap();
+    // The operator (no holder, set from the actor) is the holder `operator`.
+    let bare = native_gpu_limits(&other, caps.as_ref(), None, true, None)
+        .unwrap()
+        .unwrap();
     assert_eq!(bare.native_gpu, Some(Default::default()));
+    assert_eq!(bare.holder, "operator");
     assert!(bare.reservation.is_none());
-    // Without the capability the grant is dropped.
-    assert!(terrariumd::executor::native_gpu_limits(&other, None, None, None).is_none());
+    // No holder and not the operator: refused, never the operator's scope.
+    let e = native_gpu_limits(&other, caps.as_ref(), None, false, None).unwrap_err();
+    assert!(e.to_string().contains("has no holder"), "{e}");
+    // A project service keeps its own holder.
+    let svc = terrarium_host::native::service_holder("p", "schedules");
+    let s = native_gpu_limits(&other, caps.as_ref(), Some(&svc), false, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(s.holder, "p/@schedules");
+    // Without the capability the grant is dropped (and no holder is needed).
+    assert!(
+        native_gpu_limits(&other, None, None, false, None)
+            .unwrap()
+            .is_none()
+    );
     client.abort();
     server.abort();
 }
