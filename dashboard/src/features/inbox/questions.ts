@@ -8,6 +8,9 @@ import type { AgentEvent, Question, QuestionAnswer, QuestionStatus } from "../..
 /** The longest answer or reply, as in the daemon. */
 const MAX_TEXT = 8000;
 
+/** The longest operator message of a move into a thread (`to-thread`), as the answer in the daemon. */
+export const THREAD_MOVE_MESSAGE_MAX = MAX_TEXT;
+
 /** Open first: critical first, then urgent, then the oldest first. Then the others, the newest first. As the daemon. */
 export function sortQuestions(list: Question[]): Question[] {
   const rank = (q: Question) => (q.status === "open" ? 2 - (q.priority === "critical" ? 2 : q.priority === "urgent" ? 1 : 0) : 3);

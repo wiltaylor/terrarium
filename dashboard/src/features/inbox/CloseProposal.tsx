@@ -13,7 +13,7 @@ import type { Thread, ThreadLink } from "../../api/types";
 import { ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { api } from "../../stores";
-import { openQuestionCount, pendingProposal, safeUrl, THREAD_MESSAGE_MAX, threadText, whoName } from "./threads";
+import { pendingProposal, retractedOnClose, safeUrl, THREAD_MESSAGE_MAX, threadText, whoName } from "./threads";
 
 /** The links of a handoff or a proposal. */
 export function HandoffLinks(props: { links: ThreadLink[] }) {
@@ -49,7 +49,7 @@ export function CloseProposal(props: { thread: Thread; now: number; onChanged: (
   const [text, setText] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
-  const open = () => openQuestionCount(props.thread);
+  const open = () => retractedOnClose(props.thread);
   const run = async (write: () => Promise<Thread>) => {
     setBusy(true);
     try {

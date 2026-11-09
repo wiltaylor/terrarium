@@ -3377,10 +3377,16 @@ To thread (GitHub #30, TER-469):
   `from_question` set to the question. Its first message, by the operator,
   quotes the question, its options, and its context, and then gives the
   optional `message`. It is `waiting_agent`. A question with a card links
-  the card to the thread (an archived card is not linked).
+  the card to the thread (an archived card is not linked). The quotes add
+  to the size: when the first message has more than 32 KiB, the move is
+  `422 invalid`, with `bytes` and `max` in the details, and nothing moves
+  (TER-495).
 - The question becomes `in_thread`, with `thread` set: it is not open, so
   it leaves the open counts, the Inbox, and the `X-Open-Questions` count,
   and the thread item stands for it. Its `question` waits stay open.
+  In its thread it counts as an open question (TER-495): the agent sets no
+  `waiting_agent` or `tracking` (`409 conflict`), a message of the agent
+  makes the thread `waiting_operator`, and a close retracts it.
 - The agent gets one mail from the operator on the mail thread of the
   question (`In a thread: ...`), with the commands to read the thread and
   reply there. The agent is not bound to the thread, so each later

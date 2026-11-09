@@ -18,6 +18,9 @@ export const threadHref = (id: string) => `/threads/${encodeURIComponent(id)}`;
 /** The open questions of a thread: the `questions` of a full thread, else `open_questions` of a list row. */
 export const openQuestionCount = (t: Pick<Thread, "questions" | "open_questions">): number => (t.questions ? t.questions.filter((q) => q.status === "open").length : (t.open_questions ?? 0));
 
+/** The questions that a close retracts: `open` and `in_thread` (moved into this thread from the Inbox, TER-469). Full thread only, else as {@link openQuestionCount}. */
+export const retractedOnClose = (t: Pick<Thread, "questions" | "open_questions">): number => (t.questions ? t.questions.filter((q) => q.status === "open" || q.status === "in_thread").length : (t.open_questions ?? 0));
+
 /** The agent's close proposal that waits for the operator (TER-95), or `null`: none, or the thread is closed. */
 export const pendingProposal = (t: Pick<Thread, "status" | "close_proposal">): ThreadHandoff | null => (t.status === "closed" ? null : (t.close_proposal ?? null));
 

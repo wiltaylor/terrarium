@@ -1750,6 +1750,26 @@ pub fn to_thread(
     if let Some(m) = message {
         first.push_str(&format!("\n{m}\n"));
     }
+    // The quotes add to the size: a long context and a long message can
+    // each pass their own limit and still not fit one thread message
+    // (TER-495).
+    let bytes = first.trim().len();
+    if bytes > threads::MAX_MESSAGE {
+        let (adds, fix) = if message.is_some() {
+            (
+                " and your message",
+                "send a shorter message, or none and write it in the thread after the move",
+            )
+        } else {
+            ("", "answer it in the Inbox")
+        };
+        return Err(ApiError::invalid(format!(
+            "the first message of the thread would have {bytes} bytes, more than the {} of a \
+             thread message: it quotes the {noun} with its options and context{adds}; {fix}",
+            threads::MAX_MESSAGE
+        ))
+        .with_details(json!({"bytes": bytes, "max": threads::MAX_MESSAGE})));
+    }
     let th = threads::open(
         t,
         threads::NewThread {

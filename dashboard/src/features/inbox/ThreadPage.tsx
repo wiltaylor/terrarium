@@ -23,7 +23,7 @@ import { BundleCard } from "./BundleCard";
 import { CloseProposal, HandoffLinks } from "./CloseProposal";
 import { QuestionCard } from "./QuestionCard";
 import { TrackedCards } from "./TrackedCards";
-import { byOperator, closeBody, openQuestionCount, scopeLabel, THREAD_MESSAGE_MAX, THREAD_RESPONSE_MAX, threadChip, threadText, timeline, type TimelineEntry, whoName } from "./threads";
+import { byOperator, closeBody, retractedOnClose, scopeLabel, THREAD_MESSAGE_MAX, THREAD_RESPONSE_MAX, threadChip, threadText, timeline, type TimelineEntry, whoName } from "./threads";
 
 export default function ThreadPage() {
   const params = useParams<{ id: string }>();
@@ -268,7 +268,7 @@ function CloseDialog(props: { thread: Thread; onClose: () => void; onClosed: (t:
   const [links, setLinks] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
-  const open = () => openQuestionCount(props.thread);
+  const open = () => retractedOnClose(props.thread);
   const submit = async (e: Event) => {
     e.preventDefault();
     const b = closeBody(summary(), links());
