@@ -2618,6 +2618,19 @@ pub enum ThreadCmd {
         /// The message, as Markdown (`-` reads stdin)
         #[arg(short = 'm', long = "message")]
         message: String,
+        /// The thread's status after the message (the attached agent):
+        /// `waiting_agent` when you start the work now, `tracking` when you
+        /// hand it off. Without it, your message waits on the operator
+        #[arg(long, value_parser = ["waiting_agent", "tracking"])]
+        status: Option<String>,
+    },
+    /// Set the status of your thread without a message (the attached
+    /// agent): `waiting_agent` while you work, `tracking` after the
+    /// handoff. An open question keeps it on the operator
+    Status {
+        id: String,
+        #[arg(value_parser = ["waiting_agent", "tracking"])]
+        status: String,
     },
     /// Ask the operator a question in your thread; with --bundle, several
     /// related questions as one bundle. The operator answers in the thread

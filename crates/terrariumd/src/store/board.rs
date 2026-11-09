@@ -2138,7 +2138,10 @@ pub(crate) fn create_card_with_author(
     )?;
     set_deps(t, &id, &new.depends_on)?;
     if let Some(th) = new.inbox_thread.as_deref().filter(|s| !s.trim().is_empty()) {
-        crate::store::threads::link_card(t, actor, th, &id)?;
+        let th = crate::store::threads::link_card(t, actor, th, &id)?;
+        // A card made after the agent's hand-off message moves the thread
+        // into tracking (GitHub #28).
+        crate::store::threads::track_on_link(t, &th.id)?;
     }
     if let Some(thread) = &thread {
         t.execute(
