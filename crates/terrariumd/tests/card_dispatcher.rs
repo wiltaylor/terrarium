@@ -142,9 +142,7 @@ async fn dispatch_candidate_query_uses_only_indexed_searches() {
 }
 
 async fn ready_card(td: &TestDaemon, body: Value) -> String {
-    td.post("/api/projects/p/cards", body)
-        .await
-        .ok()["id"]
+    td.post("/api/projects/p/cards", body).await.ok()["id"]
         .as_str()
         .unwrap()
         .into()
