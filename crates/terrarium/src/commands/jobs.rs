@@ -540,12 +540,18 @@ mod tests {
     #[test]
     fn docker_ci_flags_set_keep_and_clear() {
         let args = parse_set(&[
-            "--docker-ci-destination", "root@vm.example",
-            "--docker-ci-port", "2250",
-            "--docker-ci-known-hosts", "vm.example ssh-ed25519 AAAAplace-holder-pin\n",
-            "--docker-ci-reset-destination", "reset@reset.example",
-            "--docker-ci-reset-port", "22",
-            "--docker-ci-reset-known-hosts", "reset.example ssh-ed25519 AAAAplace-holder-reset\n",
+            "--docker-ci-destination",
+            "root@vm.example",
+            "--docker-ci-port",
+            "2250",
+            "--docker-ci-known-hosts",
+            "vm.example ssh-ed25519 AAAAplace-holder-pin\n",
+            "--docker-ci-reset-destination",
+            "reset@reset.example",
+            "--docker-ci-reset-port",
+            "22",
+            "--docker-ci-reset-known-hosts",
+            "reset.example ssh-ed25519 AAAAplace-holder-reset\n",
         ])
         .unwrap();
         let cur = serde_json::json!({"target": "p-box", "recipe": "just ci::validate"});
@@ -556,8 +562,10 @@ mod tests {
 
         // A flag left out keeps the stored value, the given one replaces it.
         let args = parse_set(&[
-            "--docker-ci-port", "2251",
-            "--docker-ci-reset-known-hosts", "reset.example ssh-ed25519 AAAAnew\n",
+            "--docker-ci-port",
+            "2251",
+            "--docker-ci-reset-known-hosts",
+            "reset.example ssh-ed25519 AAAAnew\n",
         ])
         .unwrap();
         let cur = serde_json::json!({"docker_ci": docker_ci()});
@@ -603,12 +611,7 @@ mod tests {
         assert!(super::merged(&cur, &args.delivery).is_ok());
 
         // Clear and set at once is a usage error.
-        assert!(parse_set(&[
-            "--clear-docker-ci",
-            "--docker-ci-port",
-            "2251"
-        ])
-        .is_err());
+        assert!(parse_set(&["--clear-docker-ci", "--docker-ci-port", "2251"]).is_err());
     }
 
     #[test]
@@ -625,8 +628,14 @@ mod tests {
             }),
         );
         let out = ctx.out.captured();
-        assert!(out.contains("docker ci:  root@vm.example:2250 (reset reset@reset.example:22)"), "{out}");
-        assert!(out.contains("docker pin: vm.example ssh-ed25519 AAAAplace-holder-pin"), "{out}");
+        assert!(
+            out.contains("docker ci:  root@vm.example:2250 (reset reset@reset.example:22)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("docker pin: vm.example ssh-ed25519 AAAAplace-holder-pin"),
+            "{out}"
+        );
         assert!(
             out.contains("reset pin:  reset.example ssh-ed25519 AAAAplace-holder-reset"),
             "{out}"
@@ -646,7 +655,8 @@ mod tests {
         struct Args {
             #[command(flatten)]
             delivery: super::DeliverySetArgs,
-        }        let parse = |flags: &[&str]| {
+        }
+        let parse = |flags: &[&str]| {
             Args::try_parse_from(std::iter::once("test").chain(flags.iter().copied()))
         };
         let args = parse(&["--merge-secret", "KEY=@secret:vm.private_key"]).unwrap();
