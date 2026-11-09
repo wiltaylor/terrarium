@@ -6,6 +6,7 @@ use terrariumd::card_dispatcher::dispatch;
 
 async fn setup(limit: i64, concurrent: u32, daily: u32) -> TestDaemon {
     let td = TestDaemon::start().await;
+    park_timer(&td);
     td.project("p").await;
     td.patch(
         "/api/projects/p/board",
@@ -39,6 +40,21 @@ async fn setup(limit: i64, concurrent: u32, daily: u32) -> TestDaemon {
     )
     .await;
     td
+}
+
+/// TER-475: the daemon's timer runs `card_dispatcher::pass` and
+/// `review_dispatcher::pass` on each tick (15 s by default). Under load a
+/// test outlives a tick, and the timer dispatches between the test's own
+/// steps: a manual `dispatch` then finds nothing, or a retry count moves
+/// by one. The tests drive every pass by hand, so the timer sleeps for a
+/// day. Set before any dispatcher is enabled, so an earlier tick is a
+/// no-op.
+fn park_timer(td: &TestDaemon) {
+    let s = state(td);
+    s.lifecycle.set_tuning(terrariumd::lifecycle::Tuning {
+        tick: std::time::Duration::from_secs(24 * 60 * 60),
+        ..s.lifecycle.tuning()
+    });
 }
 
 fn state(td: &TestDaemon) -> terrariumd::api::Shared {
