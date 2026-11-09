@@ -148,7 +148,11 @@ async fn test_ls_limit_and_all() {
 
     // --limit N asks for N and keeps at most N.
     let m = MockTransport::new();
-    m.reply_with(200, &[("x-next-cursor", "c1")], json!([r("R3"), r("R2"), r("R1")]));
+    m.reply_with(
+        200,
+        &[("x-next-cursor", "c1")],
+        json!([r("R3"), r("R2"), r("R1")]),
+    );
     let out = run(&["--json", "test", "ls", "--limit", "2"], &m).await;
     assert_eq!(m.requests().len(), 1);
     assert_eq!(m.requests()[0].query_value("limit"), Some("2"));
@@ -169,9 +173,7 @@ async fn test_ls_limit_and_all() {
     assert_eq!(v, json!([r("R3"), r("R2"), r("R1")]));
 
     // --all and --limit conflict.
-    assert!(
-        Cli::try_parse_from(["terrarium", "test", "ls", "--all", "--limit", "5"]).is_err()
-    );
+    assert!(Cli::try_parse_from(["terrarium", "test", "ls", "--all", "--limit", "5"]).is_err());
 }
 
 struct Run {
