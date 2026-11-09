@@ -157,7 +157,7 @@ describe("the ack of a mail that closed outside the Inbox (GitHub #25)", () => {
     });
     try {
       const el = mount("/inbox?tab=mail");
-      await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']”).length).toBeGreaterThan(0));
+      await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBeGreaterThan(0));
       const before = el.querySelectorAll("article[aria-label^='Mail ']").length;
       const card = [...el.querySelectorAll("article[aria-label^='Mail ']")].find((c) => c.textContent!.includes("0.1.0 ready for review"))!;
       card.querySelector<HTMLFormElement>("form[aria-label=Acknowledge]")!.requestSubmit();
