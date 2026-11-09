@@ -156,6 +156,19 @@ impl Fake {
         }
     }
 
+    /// The helper answers `started` before it spawns `systemd-run`: wait
+    /// for the fake's log to show the spawns.
+    async fn wait_log(&self, name: &str, ok: impl Fn(&str) -> bool) -> String {
+        for _ in 0..200 {
+            let text = self.log(name);
+            if ok(&text) {
+                return text;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("{name}: {}", self.log(name));
+    }
+
     fn write(&self, name: &str, text: &str) {
         std::fs::write(self.dir.path().join(name), text).unwrap();
     }
@@ -381,7 +394,8 @@ async fn two_reservations_never_hold_one_exclusive_gpu() {
     let other = f.start("p/b", Some("L2"), &[B], &[B], &["true"]);
     let (_s, r) = send(&f.socket, &Request::Start(other)).await;
     assert!(matches!(r, Reply::Started { .. }), "{r:?}");
-    assert_eq!(f.log("run.log").matches("DevicePolicy=closed").count(), 2);
+    f.wait_log("run.log", |l| l.matches("DevicePolicy=closed").count() == 2)
+        .await;
     // After A's session ended, B may take the GPU.
     drop(held);
     f.wait_idle().await;
@@ -557,8 +571,13 @@ async fn each_holder_runs_under_its_own_workload_uid() {
     )
     .await;
     assert!(matches!(r, Reply::Started { .. }), "{r:?}");
+    let run = f
+        .wait_log("run.log", |l| l.matches("--uid=").count() == 3)
+        .await;
+    let mut seen = uids(&run);
+    seen.sort();
     assert_eq!(
-        uids(&f.log("run.log")),
+        seen,
         ["--uid=2001", "--uid=2001", "--uid=2002"]
     );
     // The pool of two is used up by p/a and p/b.

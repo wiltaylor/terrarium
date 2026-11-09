@@ -510,8 +510,11 @@ pub fn check_workload(
     Ok(())
 }
 
+/// The GIDs and names of a user's groups.
+pub type Groups = Vec<(u32, String)>;
+
 /// Look up a user, its groups, and its linger file.
-pub fn resolve_user(name: &str) -> Result<(Identity, Vec<(u32, String)>, bool), String> {
+pub fn resolve_user(name: &str) -> Result<(Identity, Groups, bool), String> {
     use nix::unistd::{Group, User};
     let user = User::from_name(name)
         .map_err(|e| format!("look up user {name}: {e}"))?

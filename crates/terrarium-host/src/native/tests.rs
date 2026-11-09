@@ -684,7 +684,7 @@ fn an_exec_becomes_a_shim_call_with_the_request_in_the_environment() {
     assert!(!shim.args.iter().any(|a| a.contains("s3")));
     assert_eq!(
         serde_json::from_str::<Request>(&shim.env[REQUEST_ENV]).unwrap(),
-        Request::Start(req)
+        Request::Start(req.clone())
     );
     assert!(shim.pty.is_some() && shim.scope.is_none());
     // A request that does not fit in one environment string is refused.
