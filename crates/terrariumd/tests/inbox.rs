@@ -737,7 +737,10 @@ async fn mail_handled_outside_the_inbox_closes_its_item() {
         .clone();
     let mid2 = id(&m2);
     let replies = td
-        .post(&format!("/api/mail/{mid2}/reply"), json!({"body": "Thanks."}))
+        .post(
+            &format!("/api/mail/{mid2}/reply"),
+            json!({"body": "Thanks."}),
+        )
         .await
         .ok();
     assert_eq!(replies.as_array().unwrap().len(), 1);

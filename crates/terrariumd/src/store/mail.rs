@@ -1221,12 +1221,18 @@ mod tests {
 
         // A read in a turn (the daemon typed the mail into a turn) closes it.
         let m = to_operator(&mut t, &Address::System, "One").unwrap();
-        assert_eq!(mark_read_in_turn(&mut t, &[m.id.clone()], "operator").unwrap(), 1);
+        assert_eq!(
+            mark_read_in_turn(&mut t, &[m.id.clone()], "operator").unwrap(),
+            1
+        );
         let closed = closed_events(&t, &format!("mail:{}", m.id));
         assert_eq!(closed.len(), 1, "{closed:?}");
         assert_eq!(closed[0]["kind"], "mail");
         // Again: nothing changed, no second event.
-        assert_eq!(mark_read_in_turn(&mut t, &[m.id.clone()], "operator").unwrap(), 0);
+        assert_eq!(
+            mark_read_in_turn(&mut t, &[m.id.clone()], "operator").unwrap(),
+            0
+        );
         assert_eq!(closed_events(&t, &format!("mail:{}", m.id)).len(), 1);
 
         // A read outside the Inbox (the Mail page, the CLI).
