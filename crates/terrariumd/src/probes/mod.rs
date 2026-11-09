@@ -484,6 +484,10 @@ fn due(sub: &subs::Subscription, interval: Duration, now: DateTime<Utc>) -> bool
 /// How often the probe scheduler prunes old quota samples (TER-395).
 pub const SAMPLE_PRUNE_EVERY: Duration = Duration::from_secs(3600);
 
+/// The pause between two prune batches, so that the waiting readers and
+/// writers get the database lock (TER-395).
+pub const SAMPLE_PRUNE_PAUSE: Duration = Duration::from_millis(20);
+
 /// Delete the quota samples older than `keep` (back from `now`), in
 /// transactions of at most [`subs::SAMPLE_PRUNE_BATCH`] rows, so no write
 /// holds the single database connection long (TER-394). The newest sample
@@ -522,7 +526,7 @@ pub async fn prune_samples(db: &Db, keep: Duration, now: DateTime<Utc>) -> ApiRe
                     break;
                 }
                 // Let the waiting readers and writers take the lock.
-                tokio::task::yield_now().await;
+                tokio::time::sleep(SAMPLE_PRUNE_PAUSE).await;
             }
         }
     }
