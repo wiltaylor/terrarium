@@ -375,7 +375,25 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
     // after the target socket has accepted it, not after enqueueing stdin.
     let mut credits = HashMap::<u64, mpsc::Sender<()>>::new();
     let mut aborts = HashMap::<u64, tokio::task::AbortHandle>::new();
-    while let Some(event) = run.events.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = run.events.recv() => event,
+            Some(ended) = tasks.join_next(), if !tasks.is_empty() => {
+                // A connection task ended on its own (both halves done, or a
+                // connect, read, or write error). The relay does not answer
+                // that "close", so free the id here, or dead entries fill
+                // the cap below (TER-540 review). Ids are never reused.
+                if let Ok(id) = ended {
+                    connections.remove(&id);
+                    credits.remove(&id);
+                    aborts.remove(&id);
+                }
+                continue;
+            }
+        };
+        let Some(event) = event else {
+            break;
+        };
         let Ev::Data(Stream::Stdout, data) = event else {
             if matches!(event, Ev::End(_)) {
                 break;
@@ -459,10 +477,10 @@ async fn connection(
     ctl: mpsc::UnboundedSender<Control>,
     mut input: mpsc::Receiver<Vec<u8>>,
     mut credit: mpsc::Receiver<()>,
-) {
+) -> u64 {
     let Ok(socket) = tokio::net::UnixStream::connect(path).await else {
         send(&ctl, json!({"id":id,"close":true}));
-        return;
+        return id;
     };
     let (mut reader, mut writer) = socket.into_split();
     let write_ctl = ctl.clone();
@@ -516,6 +534,7 @@ async fn connection(
     if !(wrote && drained) {
         send(&ctl, json!({"id":id,"close":true}));
     }
+    id
 }
 
 #[cfg(test)]
@@ -830,6 +849,130 @@ mod tests {
         task.abort();
         let _ = relay.kill().await;
         assert!(status.success(), "{run}: {status}");
+    }
+
+    /// The next daemon frame for `id`, skipping acks; `None` after `wait`.
+    async fn frame_for(
+        controls: &mut mpsc::UnboundedReceiver<Control>,
+        id: u64,
+        wait: Duration,
+    ) -> Option<Value> {
+        let end = tokio::time::Instant::now() + wait;
+        loop {
+            let control = tokio::time::timeout_at(end, controls.recv()).await.ok()??;
+            let Control::Stdin(bytes) = control else {
+                continue;
+            };
+            let event: Value = serde_json::from_slice(&bytes).unwrap();
+            if event["id"] == id && event["ack"] != true {
+                return Some(event);
+            }
+        }
+    }
+
+    /// TER-540 review: a connection that ends on its own (here: no Docker
+    /// socket) frees its id, so 33 failed opens leave the cap of 32 free.
+    #[tokio::test]
+    async fn failed_connections_free_their_slot_for_later_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docker.sock");
+        let (events, rx) = mpsc::channel(8);
+        let (ctl, mut controls) = mpsc::unbounded_channel();
+        let (ready, _) = oneshot::channel();
+        let task = tokio::spawn(bridge(
+            crate::executor::Running { events: rx, ctl },
+            path.clone(),
+            ready,
+        ));
+        let frame = |event: Value| Ev::Data(Stream::Stdout, format!("{event}\n").into_bytes());
+        for id in 1..=33 {
+            events
+                .send(frame(json!({"id":id,"open":true})))
+                .await
+                .unwrap();
+            let event = frame_for(&mut controls, id, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert_eq!(event["close"], true, "{event}");
+        }
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4];
+            socket.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b"ping");
+            socket.write_all(b"pong").await.unwrap();
+        });
+        events
+            .send(frame(json!({"id":34,"open":true})))
+            .await
+            .unwrap();
+        events
+            .send(frame(json!({"id":34,"data":STANDARD.encode(b"ping")})))
+            .await
+            .unwrap();
+        let event = frame_for(&mut controls, 34, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            STANDARD.decode(event["data"].as_str().unwrap()).unwrap(),
+            b"pong",
+            "{event}"
+        );
+        server.await.unwrap();
+        drop(events);
+        task.await.unwrap();
+    }
+
+    /// A relay "close" ends the connection task at once: Docker sees the
+    /// socket closed, and an answer it sends later is not forwarded.
+    #[tokio::test]
+    async fn relay_close_aborts_the_connection_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let (accepted, accepted_rx) = oneshot::channel();
+        let (closed, closed_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            accepted.send(()).unwrap();
+            assert_eq!(socket.read(&mut [0; 16]).await.unwrap(), 0);
+            let _ = socket.write_all(b"late").await;
+            closed.send(()).unwrap();
+        });
+        let (events, rx) = mpsc::channel(8);
+        let (ctl, mut controls) = mpsc::unbounded_channel();
+        let (ready, _) = oneshot::channel();
+        let task = tokio::spawn(bridge(
+            crate::executor::Running { events: rx, ctl },
+            path,
+            ready,
+        ));
+        let frame = |event: Value| Ev::Data(Stream::Stdout, format!("{event}\n").into_bytes());
+        events
+            .send(frame(json!({"id":5,"open":true})))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        events
+            .send(frame(json!({"id":5,"close":true})))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closed_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // Without the abort the read half would forward "late" as data.
+        assert_eq!(
+            frame_for(&mut controls, 5, Duration::from_millis(500)).await,
+            None
+        );
+        server.await.unwrap();
+        drop(events);
+        task.await.unwrap();
     }
 
     #[tokio::test]
