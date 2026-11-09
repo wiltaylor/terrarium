@@ -826,6 +826,8 @@ pub fn inbox_urgency(conn: &Connection) -> ApiResult<HashMap<String, (bool, bool
 }
 
 /// Inbox badge counts need neither thread bodies nor per-thread name/summary queries.
+/// A pending close proposal waits on the operator whatever the status
+/// (the same rule as the Inbox thread item).
 pub fn inbox_counts(conn: &Connection, project: Option<&str>) -> ApiResult<(usize, usize, usize)> {
     Ok(conn.query_row(
         "SELECT count(*), coalesce(sum(q.urgent > 0), 0), coalesce(sum(q.critical > 0), 0)
@@ -835,7 +837,8 @@ pub fn inbox_counts(conn: &Connection, project: Option<&str>) -> ApiResult<(usiz
                            sum(priority = 'critical') AS critical
                     FROM questions WHERE status = 'open' AND thread IS NOT NULL
                     GROUP BY thread) q ON q.thread = t.id
-         WHERE t.status != 'closed' AND (t.status = 'waiting_operator' OR q.open > 0)
+         WHERE t.status != 'closed'
+           AND (t.status = 'waiting_operator' OR t.close_proposal IS NOT NULL OR q.open > 0)
            AND (?1 IS NULL OR (t.scope != 'global' AND t.scope = ?1))",
         [project],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
