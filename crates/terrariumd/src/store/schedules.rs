@@ -624,7 +624,8 @@ pub fn day_start_plan(
 }
 
 /// The enabled `day_start` schedules, at most [`DAY_START_BATCH`]. The
-/// index `schedules_spec_kind` serves the read.
+/// index `schedules_spec_kind` serves the read. A full batch means that
+/// some schedules were not read: the caller logs a warning.
 pub fn day_starts(conn: &Connection) -> ApiResult<Vec<Schedule>> {
     let limit = DAY_START_BATCH as i64;
     query(
@@ -699,10 +700,13 @@ pub fn day_start_armed_valid(s: &Schedule, now: DateTime<Utc>) -> ApiResult<bool
     Ok(true)
 }
 
-/// Drop the planned run of a `day_start` schedule.
+/// Drop the planned run of a `day_start` schedule. The write checks the
+/// spec kind: an API write that changed the spec to another kind since the
+/// pass read it keeps the `next_run_at` that it set.
 pub fn disarm_day_start(t: &Tx<'_>, id: &str) -> ApiResult<()> {
     t.execute(
-        "UPDATE schedules SET next_run_at = NULL WHERE id = ?1",
+        "UPDATE schedules SET next_run_at = NULL
+          WHERE id = ?1 AND json_extract(spec, '$.kind') = 'day_start'",
         [id],
     )?;
     Ok(())
