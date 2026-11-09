@@ -57,6 +57,8 @@ type Rule {
   @children("card_assign") card_assign: list<CardAssign>
   @children("card_prepend") card_prepend: list<CardPrepend>
   @children("mail") mail: list<Mail>
+  @children("card_blocked_mail") card_blocked_mail: list<CardBlockedMail>
+  @children("card_done_mail") card_done_mail: list<CardDoneMail>
   @children("job_queue") job_queue: list<JobQueue>
   @children("job_cancel") job_cancel: list<JobCancel>
   @children("job_rerun") job_rerun: list<JobRerun>
@@ -197,6 +199,18 @@ type Mail {
   subject: utf8
   body: utf8?
 }
+
+// The blocked notice of a move to the blocked column, as the coded flow
+// sends it: from `system` to the operator and the card's creator, not to
+// the mover. Only on the `moved` event of such a move.
+@block("card_blocked_mail")
+type CardBlockedMail {}
+
+// The done notice of a move to `done`, as the coded flow sends it: to the
+// participants of each linked thread. Only on the `moved` event of such a
+// move.
+@block("card_done_mail")
+type CardDoneMail {}
 
 // `kind`: `validate`, `merge`, or `batch`. A batch takes the cards of the
 // column `from` in board order, at most `limit` (absent: all of them).
