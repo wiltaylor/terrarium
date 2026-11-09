@@ -5870,7 +5870,11 @@ mod tests {
         assert_eq!(slot.resume, None);
         assert_eq!(slot.session, None);
         assert_eq!(slot.recap.as_deref(), Some("recap"));
-        assert_eq!(slot.turns.len(), 2, "the then turn and the queued turn wait");
+        assert_eq!(
+            slot.turns.len(),
+            2,
+            "the then turn and the queued turn wait"
+        );
         assert!(lock(&runner.typed).is_empty());
     }
 
@@ -5882,7 +5886,10 @@ mod tests {
         let (sup, agent, runner) =
             kill_err_supervisor(tmp.path(), |id| KillErrRunner::new(id, false, false));
         let id = agent.id;
-        lock(&sup.inner.slots).get_mut(&id).unwrap().restart_requested = true;
+        lock(&sup.inner.slots)
+            .get_mut(&id)
+            .unwrap()
+            .restart_requested = true;
         let old: Arc<dyn RunnerHandle> = KillErrRunner::new(id, false, false);
         sup.restart_not_on_its_way(
             id,
