@@ -21,6 +21,12 @@ use terrarium_runner::{RequestContext, RequestHandler};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
+/// How long a host link may take to come online and open admission. The
+/// connect writes the `host.connected` event and the target states, and
+/// each daemon DB commit is an fsync: on a busy disk that took more than
+/// the old 6 s budget (300 polls of 20 ms) with no error (TER-497).
+const LINK_WAIT: Duration = Duration::from_secs(60);
+
 struct Lab {
     td: TestDaemon,
     addr: SocketAddr,
@@ -162,7 +168,8 @@ impl Lab {
     }
 
     async fn wait_online(&self, name: &str, online: bool) {
-        for _ in 0..300 {
+        let start = std::time::Instant::now();
+        while start.elapsed() < LINK_WAIT {
             let r = self.td.get(&format!("/api/hosts/{name}")).await;
             if r.body["online"] == online {
                 if online {
@@ -179,7 +186,7 @@ impl Lab {
         // The link becomes online before reservation reconciliation opens
         // admission. Target verbs must wait for both, including on reconnect.
         let start = std::time::Instant::now();
-        for _ in 0..300 {
+        while start.elapsed() < LINK_WAIT {
             if !self.state().executor.resource_pending(name) {
                 return;
             }
