@@ -2,7 +2,7 @@
 // The job-queue strip (TER-178): the merge first-attempt rate, one stats call
 // per mount, one debounced call per ended merge job, and a failed call hides
 // the strip instead of throwing to the page's error boundary.
-import { createComponent, ErrorBoundary } from "solid-js";
+import { createComponent, createSignal, ErrorBoundary } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, JobStats } from "../../api/types";
@@ -55,7 +55,7 @@ const flush = async () => {
 
 let dispose: (() => void) | undefined;
 let crashed = false;
-function mount() {
+function mount(project: () => string = () => "terra") {
   const el = document.createElement("div");
   document.body.append(el);
   dispose = render(
@@ -63,7 +63,7 @@ function mount() {
       createComponent(ErrorBoundary, {
         fallback: () => ((crashed = true), "crashed"),
         get children() {
-          return createComponent(JobQueuePanel, { project: "terra" });
+          return createComponent(JobQueuePanel, { get project() { return project(); } });
         },
       }),
     el,
@@ -96,6 +96,18 @@ describe("JobQueuePanel", () => {
     expect(strip.querySelector("strong")!.textContent).toBe("88%");
     expect(strip.textContent).toContain("7 of 8 first attempts passed");
     expect(strip.textContent).toContain("1 conflict");
+  });
+
+  it("hides again when the new project has no jobs", async () => {
+    stats.mockImplementation((project: string) => Promise.resolve(body({ project, jobs: project === "terra" ? 10 : 0 })));
+    const [project, setProject] = createSignal("terra");
+    const el = mount(project);
+    await flush();
+    expect(el.querySelector(".job-strip")).not.toBeNull();
+    setProject("other");
+    await flush();
+    expect(stats).toHaveBeenLastCalledWith("other", "7d");
+    expect(el.querySelector(".job-strip")).toBeNull();
   });
 
   it("hides with no job in the window", async () => {

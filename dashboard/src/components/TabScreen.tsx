@@ -8,12 +8,13 @@
 import { A, useLocation } from "@solidjs/router";
 import { For, type JSX } from "solid-js";
 import { PageHead } from "./ui";
+import { decodePath } from "../lib/url";
 
 export function TabScreen(props: { title: JSX.Element; label: string; base: string; tabs: readonly { path: string; label: string }[]; level?: 1 | 2; children?: JSX.Element }) {
   const location = useLocation();
   const active = (tab: { path: string }) => {
-    const current = decodeURI(location.pathname).replace(/\/$/, "");
-    const target = decodeURI(tab.path ? `${props.base}/${tab.path}` : props.base).replace(/\/$/, "");
+    const current = decodePath(location.pathname).replace(/\/$/, "");
+    const target = decodePath(tab.path ? `${props.base}/${tab.path}` : props.base).replace(/\/$/, "");
     return tab.path ? current === target || current.startsWith(`${target}/`) : current === target;
   };
   return (

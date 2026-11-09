@@ -17,7 +17,7 @@
 // its select. A failed call (an older daemon without the route, a 403, the
 // network) hides the strip and never reaches the page's error boundary.
 
-import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { JobStats } from "../../api/types";
 import { api, events } from "../../stores";
 import { JOB_WINDOWS, jobStatNotes, passRateText } from "./model";
@@ -32,6 +32,7 @@ export function JobQueuePanel(props: { project: string }) {
     ([p, w]): Promise<JobStats | null> => api.jobs.stats(p, w).catch(() => null),
   );
   const [seen, setSeen] = createSignal(false);
+  createEffect(on(() => props.project, () => setSeen(false)));
   createEffect(() => {
     if ((stats.latest?.jobs ?? 0) > 0) setSeen(true);
   });

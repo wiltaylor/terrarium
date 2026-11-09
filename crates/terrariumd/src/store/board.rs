@@ -1126,13 +1126,16 @@ fn blocked_info(conn: &Connection, card: &Card) -> ApiResult<(String, Option<Str
 }
 
 /// When the card `id` last moved to another column (its newest `moved`
-/// event), if it ever did.
+/// event), if it ever did. The `json_valid` guard keeps a malformed
+/// event from failing the lookup (the `events_card` index serves it),
+/// like the per-card lookup in `card_history.rs`.
 pub fn last_moved_at(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
     Ok(conn
         .query_row(
             "SELECT at FROM events
               WHERE card = ?1 AND kind = 'card'
-                AND json_extract(payload, '$.change') = 'moved'
+                AND CASE WHEN json_valid(payload)
+                  THEN json_extract(payload, '$.change') END = 'moved'
               ORDER BY seq DESC LIMIT 1",
             [id],
             |r| r.get(0),

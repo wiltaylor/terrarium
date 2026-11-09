@@ -81,9 +81,9 @@ export function toggle(list: readonly string[], name: string): string[] {
  * Drop the old project, project Agents, and project Repos open names. Only
  * the root markers, Bookmarks, and folders remain in the open set. A folder
  * stays while `folders` is null (not loaded, or no access), else while its
- * ID is in `folders`. `_known` remains in the call shape of the old store.
+ * ID is in `folders`.
  */
-export function prune(list: readonly string[], _known: readonly string[], folders: readonly string[] | null = null): string[] {
+export function prune(list: readonly string[], folders: readonly string[] | null = null): string[] {
   return list.filter(
     (n) =>
       n === ROOT_CLOSED ||
@@ -165,8 +165,8 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
       lastFollowed = at;
       if (at) open(PROJECTS_ROOT);
     },
-    prune: (known: readonly string[], folders: readonly string[] | null = null) => {
-      const next = prune(list(), known, folders);
+    prune: (folders: readonly string[] | null = null) => {
+      const next = prune(list(), folders);
       if (next.length !== list().length) write(next);
     },
   };

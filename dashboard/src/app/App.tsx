@@ -1,6 +1,7 @@
 import { Navigate, Route, Router, useParams } from "@solidjs/router";
 import { For, lazy, Match, Show, Switch } from "solid-js";
 import { isMock } from "../api";
+import { escapeMalformedPath } from "../lib/url";
 import { auth } from "../stores";
 import { Layout } from "./Layout";
 import { MOVED_ROUTES, movedTo, withQuery } from "./nav";
@@ -67,6 +68,12 @@ function NotFound() {
 }
 
 export function App() {
+  // @solidjs/router decodes the location in every link. Escape a malformed
+  // path before it renders; valid paths and their project params stay intact.
+  const pathname = escapeMalformedPath(window.location.pathname);
+  if (pathname !== window.location.pathname) {
+    window.history.replaceState(window.history.state, "", `${pathname}${window.location.search}${window.location.hash}`);
+  }
   return (
     // At load: wait for `GET /api/session` (the cookie is the cache).
     // Signed out: the login screen alone. A session that ended keeps the
