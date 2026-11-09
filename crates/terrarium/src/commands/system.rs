@@ -671,6 +671,11 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 body["keep"] = a.keep.into();
             }
             set_opt(&mut body, "snapshot_before_task", a.snapshot_before_task);
+            if a.clear_work_root {
+                body["work_root"] = Value::Null;
+            } else {
+                set_opt(&mut body, "work_root", a.work_root.clone());
+            }
             if a.no_limits {
                 body["limits"] = Value::Null;
             } else if let Some(l) = limits_body(&a.limits) {
@@ -681,6 +686,7 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 return Err(crate::api::CliError::usage(
                     "give a change: --lab-path, --lab-ref, --machine, --image, --host, \
                      --ephemeral, --permanent, --keep, --no-keep, --snapshot-before-task, \
+                     --work-root, --clear-work-root, \
                      --cpu, --memory, --swap, --pids, --io-weight, or --no-limits",
                 ));
             }
