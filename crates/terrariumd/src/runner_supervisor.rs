@@ -1070,6 +1070,27 @@ impl Slot {
             && self.compacting.is_none()
     }
 
+    /// A restart for an account swap may start now (TER-524): the runner
+    /// rests (`idle` or `waiting`, not `blocked`), no restart or stop is on
+    /// its way, and no turn, recap, pointer or compaction is in flight or
+    /// queued. Unlike [`Slot::can_idle_stop`] it does not read the runner's
+    /// own status stream: that can lag behind the events, and a swap that
+    /// waits needs the next rest event to fire. The work that holds the swap
+    /// back goes out as a turn, and the end of that turn is a new rest
+    /// event.
+    fn can_swap_restart(&self) -> bool {
+        !self.stop_requested
+            && !self.restart_requested
+            && self.runner.is_some()
+            && self.seen.is_resting()
+            && self.turns_in_flight == 0
+            && self.turns.is_empty()
+            && self.recap.is_none()
+            && self.pointer.is_empty()
+            && !self.pointer_busy
+            && self.compacting.is_none()
+    }
+
     fn new(agent: Agent) -> Self {
         Self {
             agent,
@@ -2346,9 +2367,12 @@ impl RunnerSupervisor {
             let mut slots = lock(&self.inner.slots);
             match slots.get_mut(&id).filter(|s| s.epoch == epoch) {
                 // Out of a turn only: a runner `blocked` is in a turn (a
-                // question on screen, a stalled tool call).
-                Some(slot) if slot.swap_pending && slot.seen.is_resting() => {
+                // question on screen, a stalled tool call). The check and the
+                // claim of the restart are under one lock: from here, no
+                // turn, recap or pointer goes out (`restart_requested`).
+                Some(slot) if slot.swap_pending && slot.can_swap_restart() => {
                     slot.swap_pending = false;
+                    slot.restart_requested = true;
                     slot.agent.clone()
                 }
                 Some(slot) if slot.upgrade_pending && !slot.upgrade_waiting => {
@@ -5310,15 +5334,17 @@ impl Supervisor for RunnerSupervisor {
                             Plan::Live
                         } else {
                             slot.agent = agent.clone();
-                            // In a turn unless the runner rests: a runner
-                            // `blocked` has a question on screen or a
-                            // stalled tool call in its turn.
-                            let busy = !slot.seen.is_resting() || slot.runner.is_none();
-                            if busy {
+                            // In a turn unless the runner rests with no work
+                            // on its way: a runner `blocked` has a question
+                            // on screen or a stalled tool call in its turn.
+                            // The claim of the restart is under the same
+                            // lock as the check (`restart_requested`).
+                            if slot.can_swap_restart() {
+                                slot.restart_requested = true;
+                                Plan::Now
+                            } else {
                                 slot.swap_pending = true;
                                 Plan::Later
-                            } else {
-                                Plan::Now
                             }
                         }
                     }
