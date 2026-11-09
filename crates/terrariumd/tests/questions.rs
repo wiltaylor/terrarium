@@ -1256,7 +1256,7 @@ async fn project_counts_give_blocked_cards_and_open_questions() {
         blocked.push(id(td
             .post(
                 "/api/projects/p/cards",
-                json!({"title": title, "column": "blocked"}),
+                json!({"title": title, "column": "blocked", "comment": "Needs a decision"}),
             )
             .await
             .ok()));
@@ -1264,7 +1264,7 @@ async fn project_counts_give_blocked_cards_and_open_questions() {
     td.post("/api/projects/p/cards", json!({"title": "Ready"}))
         .await
         .ok();
-    td.post("/api/projects/q/cards", json!({"title": "Q", "column": "blocked"}))
+    td.post("/api/projects/q/cards", json!({"title": "Q", "column": "blocked", "comment": "Needs a decision"}))
         .await
         .ok();
     td.delete(&format!("/api/cards/{}", blocked[2])).await.ok();
