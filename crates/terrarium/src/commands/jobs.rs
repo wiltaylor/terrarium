@@ -542,10 +542,10 @@ mod tests {
         let args = parse_set(&[
             "--docker-ci-destination", "root@vm.example",
             "--docker-ci-port", "2250",
-            "--docker-ci-known-hosts", "vm.example ssh-ed25519 AAAApin\n",
+            "--docker-ci-known-hosts", "vm.example ssh-ed25519 AAAAplace-holder-pin\n",
             "--docker-ci-reset-destination", "reset@reset.example",
             "--docker-ci-reset-port", "22",
-            "--docker-ci-reset-known-hosts", "reset.example ssh-ed25519 AAAAreset\n",
+            "--docker-ci-reset-known-hosts", "reset.example ssh-ed25519 AAAAplace-holder-reset\n",
         ])
         .unwrap();
         let cur = serde_json::json!({"target": "p-box", "recipe": "just ci::validate"});
