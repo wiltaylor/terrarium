@@ -971,7 +971,21 @@ async fn connect_host(
         assert!(start.elapsed() < DEADLINE, "{name} never came online");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    wait_admission(td, name).await;
     (o, client)
+}
+
+/// The link is online before reservation reconciliation opens admission
+/// (TER-383): a job start that falls in that window is put back in the
+/// queue, which under load moves the start by whole seconds. Wait, as
+/// the host tests do, until the gate is open.
+async fn wait_admission(td: &TestDaemon, name: &str) {
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let start = Instant::now();
+    while state.executor.resource_pending(name) {
+        assert!(start.elapsed() < DEADLINE, "{name} admission never opened");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 impl Lab {
@@ -998,6 +1012,7 @@ impl Lab {
         let c = tokio::spawn(Client::new(self.client_opts.clone()).run());
         *self.client.lock().unwrap() = Some(c);
         self.until_online(true).await;
+        wait_admission(&self.td, "lab1").await;
     }
 
     /// Make branch `name` from `base` with `files`, push it, and return
@@ -1847,6 +1862,11 @@ async fn a_cancel_ends_a_queued_job(flow: &'static str) {
         .as_str()
         .unwrap()
         .to_owned();
+    // Job 1 must hold the only slot before job 2 is posted. Under load
+    // its start can wait for its host or the host admission (TER-160,
+    // TER-383), and job 2 would queue beside or ahead of it, not behind
+    // it, and the position below would not be 1.
+    until_running(&lab, &j1).await;
     let r = lab
         .td
         .post_as(
@@ -1865,11 +1885,7 @@ async fn a_cancel_ends_a_queued_job(flow: &'static str) {
     // The worker cancels its queued job; then the running one (killed).
     let r = lab.td.delete(&format!("/api/jobs/{j2}")).await;
     assert_eq!(r.ok()["state"], "cancelled");
-    let start = Instant::now();
-    while lab.td.get(&format!("/api/jobs/{j1}")).await.ok()["state"] != "running" {
-        assert!(start.elapsed() < DEADLINE, "job 1 never started");
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
+    until_running(&lab, &j1).await;
     let r = lab.td.delete(&format!("/api/jobs/{j1}")).await;
     assert_eq!(r.ok()["state"], "cancelled");
     let jobs = lab.until_idle().await;
@@ -3015,6 +3031,22 @@ async fn until_ended(lab: &Lab, id: &str) -> Value {
         }
         assert!(start.elapsed() < DEADLINE, "job {id} never ended: {j}");
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Poll job `id` until it runs. This is a precondition of the next
+/// step, not a timing check: under load the start can wait for the host
+/// or its admission (TER-160, TER-383), and a second job posted first
+/// would take its place in the queue.
+async fn until_running(lab: &Lab, id: &str) {
+    let start = Instant::now();
+    loop {
+        let j = lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+        if j["state"] == "running" {
+            return;
+        }
+        assert!(start.elapsed() < DEADLINE, "job {id} never started: {j}");
+        tokio::time::sleep(Duration::from_millis(30)).await;
     }
 }
 
