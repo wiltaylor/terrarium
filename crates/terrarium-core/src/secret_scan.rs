@@ -399,11 +399,16 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
     let mut before_string: Option<String> = None;
     for (i, line) in text.lines().enumerate() {
         let next = multiline_open_after(line, open);
-        if next.is_some() && open.is_none() {
+        if open.is_none() && next.is_some() {
+            // The line opens one: the table above it is back after the
+            // close, and the lines of the string get no header.
             before_string = header.take();
-        } else if next.is_none() && open.is_some() {
+        } else if open.is_some() && next.is_none() {
             header = before_string.take();
-        } else if let Some(h) = table_header(line) {
+        } else if open.is_none()
+            && next.is_none()
+            && let Some(h) = table_header(line)
+        {
             header = Some(h.to_owned());
         }
         open = next;
