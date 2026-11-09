@@ -48,6 +48,23 @@ const SELECT: &str = "SELECT s.id, s.agent_id, s.harness_session_id, s.current, 
      LEFT JOIN agents a ON a.id = s.agent_id
      LEFT JOIN agents_removed r ON r.id = s.agent_id";
 
+/// Sessions in the period on a subscription. Both usage lookups use
+/// `usage_samples_session` (TER-394): per session, not per subscription.
+const SUBSCRIPTION_SESSIONS: &str = "WHERE s.started_at < strftime('%Y-%m-%dT%H:%M:%fZ', ?3)
+           AND (s.ended_at IS NULL OR s.ended_at > strftime('%Y-%m-%dT%H:%M:%fZ', ?2))
+           AND (EXISTS (SELECT 1 FROM usage_samples u
+                WHERE u.agent = s.agent_id
+                  AND u.session IN (s.id, s.harness_session_id) AND u.subscription = ?1)
+             OR (a.subscription = ?1 AND NOT EXISTS (SELECT 1 FROM usage_samples u
+                WHERE u.agent = s.agent_id AND u.session IN (s.id, s.harness_session_id))))
+         ORDER BY s.started_at DESC, s.id DESC";
+
+/// The usage totals of one session on a subscription in the period.
+const SESSION_USAGE: &str = "SELECT max(model), max(card_id), sum(input_tokens), sum(output_tokens)
+             FROM usage_samples WHERE agent = ?1 AND session IN (?2, ?3)
+               AND subscription = ?4 AND julianday(at) >= julianday(?5)
+               AND julianday(at) < julianday(?6)";
+
 /// Sessions attributed by usage, including removed ephemeral agents, or by
 /// the live agent when no usage has been collected yet.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -66,17 +83,7 @@ pub fn on_subscription(
     since: &str,
     until: &str,
 ) -> ApiResult<Vec<SubscriptionSession>> {
-    let mut stmt = conn.prepare(&format!(
-        "{SELECT}
-         WHERE s.started_at < strftime('%Y-%m-%dT%H:%M:%fZ', ?3)
-           AND (s.ended_at IS NULL OR s.ended_at > strftime('%Y-%m-%dT%H:%M:%fZ', ?2))
-           AND (EXISTS (SELECT 1 FROM usage_samples u
-                WHERE u.agent = s.agent_id
-                  AND u.session IN (s.id, s.harness_session_id) AND u.subscription = ?1)
-             OR (a.subscription = ?1 AND NOT EXISTS (SELECT 1 FROM usage_samples u
-                WHERE u.agent = s.agent_id AND u.session IN (s.id, s.harness_session_id))))
-         ORDER BY s.started_at DESC, s.id DESC"
-    ))?;
+    let mut stmt = conn.prepare(&format!("{SELECT} {SUBSCRIPTION_SESSIONS}"))?;
     let sessions = stmt
         .query_map(params![subscription, since, until], row)?
         .collect::<Result<Vec<_>, _>>()?;
@@ -84,10 +91,7 @@ pub fn on_subscription(
         .into_iter()
         .map(|s| {
             let (model, card, input_tokens, output_tokens) = conn.query_row(
-                "SELECT max(model), max(card_id), sum(input_tokens), sum(output_tokens)
-             FROM usage_samples WHERE agent = ?1 AND session IN (?2, ?3)
-               AND subscription = ?4 AND julianday(at) >= julianday(?5)
-               AND julianday(at) < julianday(?6)",
+                SESSION_USAGE,
                 params![
                     s.session.agent_id,
                     s.session.id,
@@ -549,6 +553,40 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// TER-394: the session list looks usage up per agent and session
+    /// through `usage_samples_session`, not through every sample of the
+    /// subscription (`usage_samples_sub`), which held the lock for seconds.
+    #[test]
+    fn subscription_sessions_use_the_session_usage_index() {
+        let c = db();
+        let plan = |sql: &str, n: usize| -> Vec<String> {
+            let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            stmt.query_map(rusqlite::params_from_iter(vec!["x"; n]), |r| {
+                r.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        for (sql, n) in [
+            (format!("{SELECT} {SUBSCRIPTION_SESSIONS}"), 3),
+            (SESSION_USAGE.to_owned(), 6),
+        ] {
+            let steps = plan(&sql, n);
+            let usage: Vec<_> = steps
+                .iter()
+                .filter(|s| s.contains("usage_samples"))
+                .collect();
+            assert!(!usage.is_empty(), "{steps:?}");
+            assert!(
+                usage
+                    .iter()
+                    .all(|s| s.contains("INDEX usage_samples_session (agent=? AND session=?")),
+                "{steps:?}"
+            );
+        }
     }
 
     #[test]
