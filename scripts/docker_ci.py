@@ -54,9 +54,22 @@ def live_tests(env: dict[str, str]) -> int:
     return 0
 
 
+def suite_env(env: dict[str, str]) -> dict[str, str]:
+    """The env of the full suite: without the gate's Docker env (TER-518).
+
+    The suite starts its own test daemons and recipes, which must not see
+    the outer merge job's gate switch or its Docker socket. Only
+    `docker info` and the explicit live tests get DOCKER_HOST.
+    """
+    child = dict(env)
+    for name in ("TERRARIUM_DOCKER_CI", ENDPOINT_ENV, "DOCKER_HOST", "DOCKER_CONFIG"):
+        child.pop(name, None)
+    return child
+
+
 def gate(env: dict[str, str]) -> int:
     subprocess.run(["docker", "info"], env=env, check=True, stdout=subprocess.DEVNULL)
-    code = subprocess.call(["just", "ci::validate"], env=env)
+    code = subprocess.call(["just", "ci::validate"], env=suite_env(env))
     return code or live_tests(env)
 
 

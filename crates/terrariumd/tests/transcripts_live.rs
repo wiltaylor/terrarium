@@ -124,6 +124,7 @@ async fn live_transcripts() {
         config_repo: Arc::default(),
         lifecycle: Arc::default(),
         tool_rates: Arc::default(),
+        lease_sweep: Arc::default(),
         monitors: Arc::default(),
         webhooks: Arc::default(),
         pipelines: Arc::default(),

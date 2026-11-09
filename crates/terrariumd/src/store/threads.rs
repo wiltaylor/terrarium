@@ -806,9 +806,13 @@ fn questions_of(conn: &Connection, thread: &str) -> ApiResult<Vec<Question>> {
     ids.iter().map(|id| questions::get(conn, id)).collect()
 }
 
+/// The unsettled questions of `thread`: `open`, and `in_thread` (a
+/// question that the operator moved into this thread, TER-469). Both keep
+/// the thread on the operator: the agent sets no other status until they
+/// are settled (TER-495).
 fn open_questions(conn: &Connection, thread: &str) -> ApiResult<i64> {
     Ok(conn.query_row(
-        "SELECT count(*) FROM questions WHERE thread = ?1 AND status = 'open'",
+        "SELECT count(*) FROM questions WHERE thread = ?1 AND status IN ('open', 'in_thread')",
         [thread],
         |r| r.get(0),
     )?)

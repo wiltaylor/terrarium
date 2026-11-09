@@ -21,10 +21,73 @@ use terrarium_runner::{RequestContext, RequestHandler};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
+/// How long a host link may take to come online and open admission. The
+/// connect writes the `host.connected` event and the target states, and
+/// each daemon DB commit is an fsync: on a busy disk that took more than
+/// the old 6 s budget (300 polls of 20 ms) with no error (TER-497).
+const LINK_WAIT: Duration = Duration::from_secs(60);
+
 struct Lab {
     td: TestDaemon,
     addr: SocketAddr,
     bins: tempfile::TempDir,
+    trace: TraceBuf,
+    _trace: tracing::subscriber::DefaultGuard,
+}
+
+/// The daemon trace of one lab (TER-497). The subscriber is the thread
+/// default, not the global one: `jobs.rs` owns the global subscriber of
+/// this test binary. A `#[tokio::test]` runs the daemon tasks on the test
+/// thread, so they log here.
+#[derive(Clone, Default)]
+struct TraceBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for TraceBuf {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl TraceBuf {
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        let writer = self.clone();
+        tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.clone())
+                .finish(),
+        )
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+    }
+}
+
+/// Poll `ready` each 20 ms for up to [`LINK_WAIT`], as the admission wait
+/// does. On the timeout, panic with `what`, the time, and the daemon trace:
+/// a fixed count of polls failed on a busy disk with no cause (TER-512).
+async fn wait_until(trace: &TraceBuf, what: &str, mut ready: impl AsyncFnMut() -> bool) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < LINK_WAIT {
+        if ready().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "{what} after {:?}; daemon trace:\n{}",
+        start.elapsed(),
+        trace.text()
+    );
 }
 
 impl Lab {
@@ -33,6 +96,8 @@ impl Lab {
     }
 
     async fn with_config(f: impl FnOnce(&Path)) -> Self {
+        let trace = TraceBuf::default();
+        let guard = trace.install();
         let td = TestDaemon::with_config(f).await;
         let state = td.daemon.as_ref().unwrap().state.clone();
         let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
@@ -45,7 +110,13 @@ impl Lab {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        Self { td, addr, bins }
+        Self {
+            td,
+            addr,
+            bins,
+            trace,
+            _trace: guard,
+        }
     }
 
     fn state(&self) -> terrariumd::api::Shared {
@@ -115,7 +186,8 @@ impl Lab {
     }
 
     async fn wait_online(&self, name: &str, online: bool) {
-        for _ in 0..300 {
+        let start = std::time::Instant::now();
+        while start.elapsed() < LINK_WAIT {
             let r = self.td.get(&format!("/api/hosts/{name}")).await;
             if r.body["online"] == online {
                 if online {
@@ -131,13 +203,19 @@ impl Lab {
     async fn wait_admission_ready(&self, name: &str) {
         // The link becomes online before reservation reconciliation opens
         // admission. Target verbs must wait for both, including on reconnect.
-        for _ in 0..300 {
+        let start = std::time::Instant::now();
+        while start.elapsed() < LINK_WAIT {
             if !self.state().executor.resource_pending(name) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("host {name} admission never became ready");
+        // The reconcile error is only in the daemon log (TER-497).
+        panic!(
+            "host {name} admission never became ready after {:?}; daemon trace:\n{}",
+            start.elapsed(),
+            self.trace.text()
+        );
     }
 
     async fn target(&self, def: Value) {
@@ -369,6 +447,8 @@ async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
     if terrarium_version::this().git_ref.is_none() {
         return; // no git: nothing is stale, so nothing is offered
     }
+    let trace = TraceBuf::default();
+    let _trace = trace.install();
     let dist = tempfile::tempdir().unwrap();
     let served = fake_host_binary(terrarium_version::FULL);
     write_exec(
@@ -447,13 +527,11 @@ async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
     // daemon records it.
     let task = tokio::spawn(Client::new(options(terrarium_version::FULL)).run());
     let mut found = Vec::new();
-    for _ in 0..300 {
+    wait_until(&trace, "the update was never confirmed", async || {
         found = events(&td, "host.updated").await;
-        if !found.is_empty() && !sidecar(&bin, PENDING).exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+        !found.is_empty() && !sidecar(&bin, PENDING).exists()
+    })
+    .await;
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0]["data"]["from"], "0.0.9+0000000");
     assert_eq!(found[0]["data"]["to"], terrarium_version::FULL);
@@ -477,12 +555,10 @@ async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
         let mut o = options(terrarium_version::FULL);
         o.self_update.as_mut().unwrap().enabled = false;
         let task = tokio::spawn(Client::new(o).run());
-        for _ in 0..300 {
-            if events(&td, "host.connected").await.len() > before {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        wait_until(&trace, "the host link never connected", async || {
+            events(&td, "host.connected").await.len() > before
+        })
+        .await;
         task.abort();
         let _ = task.await;
     }
@@ -500,6 +576,8 @@ async fn a_self_update_with_a_wrong_checksum_changes_nothing() {
     if terrarium_version::this().git_ref.is_none() {
         return;
     }
+    let trace = TraceBuf::default();
+    let _trace = trace.install();
     let dist = tempfile::tempdir().unwrap();
     let name = format!("terrarium-host-{}-linux", std::env::consts::ARCH);
     write_exec(
@@ -534,13 +612,10 @@ async fn a_self_update_with_a_wrong_checksum_changes_nothing() {
     });
     let run = tokio::spawn(Client::new(o).run());
     // The agent stays online and its binary stays.
-    for _ in 0..300 {
-        let h = td.get("/api/hosts/bad").await;
-        if h.body["online"] == true {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_until(&trace, "host bad never became online", async || {
+        td.get("/api/hosts/bad").await.body["online"] == true
+    })
+    .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         !run.is_finished(),
@@ -2676,12 +2751,10 @@ async fn an_enrol_token_is_swapped_for_a_stored_long_lived_token() {
 
     // A reconnect uses the stored token.
     assert!(lab.state().executor.hosts.drop_link("lab1"));
-    for _ in 0..300 {
-        if events(&lab.td, "host.connected").await.len() == 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_until(&lab.trace, "the host never reconnected", async || {
+        events(&lab.td, "host.connected").await.len() == 2
+    })
+    .await;
     let ev = events(&lab.td, "host.connected").await;
     assert_eq!(ev.len(), 2, "the host came back with the stored token");
     assert_eq!(ev[1]["data"]["enrolled"], false);
@@ -2838,12 +2911,58 @@ async fn a_lease_grants_and_a_revoke_ends_the_sessions() {
     assert_eq!(changes, ["granted", "ended"], "{ev:#?}");
 }
 
+/// The grant schedules the timer of its lease: with the sweep off, a lease
+/// granted with a short `until` still expires, as `system` (TER-512). No
+/// step needs the lease, so a slow commit cannot fail the test.
+#[tokio::test]
+async fn a_granted_lease_expires_by_its_own_timer() {
+    let lab = Lab::start().await;
+    lab.state().lease_sweep.set_every(Duration::from_secs(3600));
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    lab.td.agent("terra", "worker", json!({})).await;
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1"}))
+        .await;
+    let g = lab
+        .td
+        .post(
+            "/api/targets/box/leases",
+            json!({"agent": "terra/worker", "until": "1s"}),
+        )
+        .await;
+    assert_eq!(g.status, 201, "{}", g.body);
+    // The `state` of a lease reads `expired` once `expires_at` is past,
+    // before any expiry runs: wait for the audit row that only the expiry
+    // writes.
+    wait_until(&lab.trace, "the granted lease never expired", async || {
+        let a = lab.td.get("/api/audit?action=target.lease_expired").await;
+        !a.ok().as_array().unwrap().is_empty()
+    })
+    .await;
+    let row = last_audit(&lab.td, "target.lease_expired").await;
+    assert_eq!(row["actor"], "system");
+    assert_eq!(row["target"], "box");
+    let all = lab
+        .td
+        .get("/api/agents/terra%2Fworker/leases?all=true")
+        .await;
+    assert_eq!(all.ok()[0]["state"], "expired");
+    assert_eq!(all.ok()[0]["revoked_by"], "system");
+}
+
 /// A lease with a short `until` expires: the timer ends the session with
 /// `lease_revoked`, writes `target.lease_expired` as `system`, and the
 /// next exec is `403`.
+///
+/// The grant is long and the extend shortens it only after the exec has
+/// started: a short `until` at the grant could run out in the slow commits
+/// of a loaded disk before the exec (TER-509). The sweep is off (1 h), so
+/// only the timer that the extend scheduled can end the session before the
+/// `sleep 30` ends by itself (TER-512).
 #[tokio::test]
 async fn an_expired_lease_ends_the_sessions() {
     let lab = Lab::start().await;
+    lab.state().lease_sweep.set_every(Duration::from_secs(3600));
     let _h = lab.host("lab1").await;
     lab.td.project("terra").await;
     let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
@@ -2853,7 +2972,7 @@ async fn an_expired_lease_ends_the_sessions() {
         .td
         .post(
             "/api/targets/box/leases",
-            json!({"agent": "terra/worker", "until": "2s"}),
+            json!({"agent": "terra/worker", "until": "1h"}),
         )
         .await;
     assert_eq!(g.status, 201, "{}", g.body);
@@ -2864,10 +2983,16 @@ async fn an_expired_lease_ends_the_sessions() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let sid = r.body["session_id"].as_str().unwrap().to_owned();
-    let started = std::time::Instant::now();
+    let e = lab
+        .td
+        .patch(
+            "/api/targets/box/leases/terra%2Fworker",
+            json!({"until": "1s"}),
+        )
+        .await;
+    assert_eq!(e.status, 200, "{}", e.body);
     let d = drain_as(&lab.td, Some(&w), "box", &sid).await;
     assert_eq!(d.end["code"], "lease_revoked", "{}", d.end);
-    assert!(started.elapsed() < Duration::from_secs(15));
     let row = last_audit(&lab.td, "target.lease_expired").await;
     assert_eq!(row["actor"], "system");
     assert_eq!(row["target"], "box");

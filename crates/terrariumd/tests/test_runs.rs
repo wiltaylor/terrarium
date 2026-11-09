@@ -175,7 +175,7 @@ async fn upload_list_show_raw_and_the_card_chip() {
         r.body
     );
     let rid = id(&run);
-    assert_eq!(run["url"], format!("/p/proj/board/tests/{rid}"));
+    assert_eq!(run["url"], format!("/p/proj/tests/{rid}"));
 
     // Board summaries keep only the compact result chip, identical to detail.
     let b = td.get("/api/projects/proj/board").await;

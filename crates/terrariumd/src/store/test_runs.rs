@@ -280,7 +280,7 @@ fn find_for(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<RunRow> {
 }
 
 pub fn page_path(project: &str, id: &str) -> String {
-    format!("/p/{project}/board/tests/{id}")
+    format!("/p/{project}/tests/{id}")
 }
 
 fn render(conn: &Connection, row: RunRow) -> ApiResult<TestRunSummary> {
