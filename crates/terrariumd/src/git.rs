@@ -3618,8 +3618,11 @@ mod tests {
             "username=bot\npassword=tok\n"
         );
         // What the snippet avoids: an exec of the script while a write fd
-        // is open. The kernel refuses that with ETXTBSY.
+        // is open. The kernel refuses that with ETXTBSY; LC_ALL=C pins the
+        // shell's strerror message to English, whatever the environment
+        // of the run.
         let mut direct = Command::new("sh")
+            .env("LC_ALL", "C")
             .arg("-c")
             .arg(format!("{} get", sh_quote(&script.to_string_lossy())))
             .stdin(Stdio::piped())
