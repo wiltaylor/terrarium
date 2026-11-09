@@ -651,16 +651,18 @@ pub async fn spawn_with(
                 // may already read that name: its own grants, or the
                 // operator, which reads every name. Otherwise the count
                 // is all the caller learns (TER-391).
-                let readable: std::collections::BTreeSet<(String, String)> = owner_view
-                    .as_ref()
-                    .map(|v| {
-                        crate::secrets::grants::effective(t, &v.agent.id.to_string(), &v.agent.project)?
-                            .into_iter()
-                            .map(|e| (e.scope, e.name))
-                            .collect()
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
+                let mut readable: std::collections::BTreeSet<(String, String)> =
+                    Default::default();
+                if let Some(v) = owner_view.as_ref() {
+                    readable = crate::secrets::grants::effective(
+                        t,
+                        &v.agent.id.to_string(),
+                        &v.agent.project,
+                    )?
+                    .into_iter()
+                    .map(|e| (e.scope, e.name))
+                    .collect();
+                }
                 let mut hidden = 0usize;
                 for grant in crate::secrets::grants::list_by_grantee(t, &grantee, &def.project)? {
                     let suffix = if grant.targets.is_empty() { String::new() } else { format!("={}", grant.targets.join(",")) };
