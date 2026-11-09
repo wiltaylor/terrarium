@@ -1,13 +1,12 @@
-// The sidebar trees (Projects and Agents): which nodes are open, the filters,
-// and the order of the agents. Pure, so tests can read it.
+// The sidebar Projects tree: the open root and folders, the project filter,
+// and the rows in screen order. Pure, so tests can read it.
 
 import { createSignal } from "solid-js";
-import type { Agent } from "../api/types";
 import type { KeyValueStorage } from "../stores/auth";
 
 export const EXPANDED_KEY = "terrarium.tree.expanded";
 
-/** Above this many projects (or agents), the tree shows a filter input. */
+/** Above this many projects, the tree shows a filter input. */
 export const FILTER_THRESHOLD = 8;
 
 /**
@@ -30,60 +29,6 @@ export const ROOT_CLOSED = "!/projects";
  */
 export const OLD_AGENTS_ROOT = "/agents";
 
-/**
- * The name of the Agents node of a project in the open set: `<project>/agents`.
- * A project name has no `/`, so this name cannot be a project or a root. The
- * node is closed by default.
- */
-export const projectAgentsNode = (project: string): string => `${project}/agents`;
-
-/** The project of a project Agents node name, or null for any other name. */
-export function projectOfAgentsNode(name: string): string | null {
-  const m = /^([^/]+)\/agents$/.exec(name);
-  return m ? m[1]! : null;
-}
-
-/**
- * The name of the Repos node of a project in the open set: `<project>/repos`.
- * It is closed by default, as the Agents node.
- */
-export const projectReposNode = (project: string): string => `${project}/repos`;
-
-/** The project of a project node name (Agents or Repos), or null for any other name. */
-export function projectOfNode(name: string): string | null {
-  const m = /^([^/]+)\/(agents|repos)$/.exec(name);
-  return m ? m[1]! : null;
-}
-
-/** The project whose Repos node a URL opens: /p/<project>/repos, or a repo page of that project. */
-export function projectReposFromPath(pathname: string): string | null {
-  const p = projectFromPath(pathname);
-  return p && /^\/p\/[^/]+\/repos(\/|$)/.test(pathname) ? p : null;
-}
-
-/** The repo name in a /p/<project>/repos/<repo> path, or null. */
-export function repoFromPath(pathname: string): string | null {
-  const m = /^\/p\/[^/]+\/repos\/([^/]+)/.exec(pathname);
-  if (!m) return null;
-  try {
-    return decodeURIComponent(m[1]!);
-  } catch {
-    return m[1]!;
-  }
-}
-
-/**
- * The project whose Agents node a URL opens: /p/<project>/agents, or the
- * page of an agent in that project. `projectOfAgent` gives the project of
- * an agent ID or `project/name` (undefined while the agents are not loaded).
- */
-export function projectAgentsFromPath(pathname: string, projectOfAgent: (id: string) => string | undefined): string | null {
-  const p = projectFromPath(pathname);
-  if (p) return /^\/p\/[^/]+\/agents\/?$/.test(pathname) ? p : null;
-  const id = agentFromPath(pathname);
-  return id ? (projectOfAgent(id) ?? null) : null;
-}
-
 /** The agent ID (or `project/name`) in an /agents/<id> path, or null. */
 export function agentFromPath(pathname: string): string | null {
   const m = /^\/agents\/([^/]+)/.exec(pathname);
@@ -93,26 +38,6 @@ export function agentFromPath(pathname: string): string | null {
   } catch {
     return m[1]!;
   }
-}
-
-/** The agents in sidebar order: by project, then by name. */
-export function sortAgents<T extends Pick<Agent, "project" | "name">>(agents: readonly T[]): T[] {
-  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-  return [...agents].sort((a, b) => cmp(a.project, b.project) || cmp(a.name, b.name));
-}
-
-/** The repos whose name holds the query (case-insensitive). An empty query keeps all. */
-export function filterRepos<T extends { name: string }>(repos: readonly T[], query: string): T[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return [...repos];
-  return repos.filter((r) => r.name.toLowerCase().includes(q));
-}
-
-/** The agents whose `project/name` holds the query (case-insensitive). An empty query keeps all. */
-export function filterAgents<T extends Pick<Agent, "project" | "name">>(agents: readonly T[], query: string): T[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return [...agents];
-  return agents.filter((a) => `${a.project}/${a.name}`.toLowerCase().includes(q));
 }
 
 /** The project in a /p/<name>/... path, or null. */
@@ -153,15 +78,18 @@ export function toggle(list: readonly string[], name: string): string[] {
 }
 
 /**
- * Drop the names of projects that are gone, and their Agents and Repos nodes. An empty
- * `known` list (not loaded yet) keeps all. The root marker stays. The old
- * Agents root goes always. A folder (`folder:<id>`) stays while `folders`
- * is null (not loaded, or no access), else while its ID is in `folders`.
+ * Drop the old project, project Agents, and project Repos open names. Only
+ * the root markers, Bookmarks, and folders remain in the open set. A folder
+ * stays while `folders` is null (not loaded, or no access), else while its
+ * ID is in `folders`. `_known` remains in the call shape of the old store.
  */
-export function prune(list: readonly string[], known: readonly string[], folders: readonly string[] | null = null): string[] {
-  const kept = list.filter((n) => n !== OLD_AGENTS_ROOT && (folders === null || !n.startsWith("folder:") || folders.includes(n.slice(7))));
-  if (known.length === 0) return kept;
-  return kept.filter((n) => n === ROOT_CLOSED || n === BOOKMARKS_KEY || n.startsWith("folder:") || known.includes(n) || known.includes(projectOfNode(n) ?? ""));
+export function prune(list: readonly string[], _known: readonly string[], folders: readonly string[] | null = null): string[] {
+  return list.filter(
+    (n) =>
+      n === ROOT_CLOSED ||
+      n === BOOKMARKS_KEY ||
+      (n.startsWith("folder:") && (folders === null || folders.includes(n.slice(7)))),
+  );
 }
 
 /** True for the pages under the Projects root: the cards (/projects) and every /p/<name>/... page. */
@@ -177,10 +105,8 @@ export function filterProjects<T extends { name: string }>(projects: readonly T[
 }
 
 /**
- * The open set, persisted. `follow(path)` opens the project of a new URL, so
- * the project you go to is always open; you can close it again after that.
- * The name PROJECTS_ROOT is the Projects root: it is open while ROOT_CLOSED
- * is not in the list.
+ * The open set, persisted. `follow(path)` opens the Projects root on a
+ * project page or the page of an agent whose project is loaded.
  */
 export function createExpandedStore(storage: KeyValueStorage | null = null) {
   const read = () => {
@@ -200,8 +126,6 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
     }
   };
   let lastFollowed: string | null = null;
-  let lastProjectAgents: string | null = null;
-  let lastProjectRepos: string | null = null;
 
   const isOpen = (name: string) => (name === PROJECTS_ROOT ? !list().includes(ROOT_CLOSED) : list().includes(name));
   const open = (name: string) => {
@@ -222,47 +146,24 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
     open,
     close,
     /**
-     * Open the Projects root and the project of `pathname` when the URL moves
-     * into the project pages or to a different project. Open the Agents node
-     * of a project when the URL moves to its agent list, and its Repos node
-     * when the URL moves to its repo list or a repo page. When the URL moves
-     * to a different agent page, open the Projects root, the project of the
-     * agent, and its Agents node. `projectOfAgent` gives the project of an
-     * agent ID or `project/name` (undefined while the agents are not loaded).
+     * Open the Projects root when the URL moves to the project cards, a
+     * project, or a different agent. `projectOfAgent` gives the project of
+     * an agent ID or `project/name` (undefined while agents are not loaded).
      */
     follow: (pathname: string, projectOfAgent: (id: string) => string | undefined = () => undefined) => {
       const agent = agentFromPath(pathname);
+      let at: string | null;
       if (agent) {
         const p = projectOfAgent(agent);
         // Wait for the agents: then the project of the agent is known.
         if (!p) return;
-        // A different agent is a different place, also in the same project.
-        const at = `${p}\n${agent}`;
-        if (at === lastFollowed) return;
-        lastFollowed = at;
-        lastProjectAgents = p;
-        open(PROJECTS_ROOT);
-        open(p);
-        open(projectAgentsNode(p));
-        return;
+        at = `${p}\n${agent}`;
+      } else {
+        at = projectFromPath(pathname) ?? (inProjects(pathname) ? PROJECTS_ROOT : null);
       }
-      const node = projectAgentsFromPath(pathname, projectOfAgent);
-      if (node !== lastProjectAgents) {
-        lastProjectAgents = node;
-        if (node) open(projectAgentsNode(node));
-      }
-      const repos = projectReposFromPath(pathname);
-      if (repos !== lastProjectRepos) {
-        lastProjectRepos = repos;
-        if (repos) open(projectReposNode(repos));
-      }
-      const p = projectFromPath(pathname);
-      const at = p ?? (inProjects(pathname) ? PROJECTS_ROOT : null);
       if (at === lastFollowed) return;
       lastFollowed = at;
-      if (!at) return;
-      open(PROJECTS_ROOT);
-      if (p) open(p);
+      if (at) open(PROJECTS_ROOT);
     },
     prune: (known: readonly string[], folders: readonly string[] | null = null) => {
       const next = prune(list(), known, folders);
@@ -277,34 +178,8 @@ export type ExpandedStore = ReturnType<typeof createExpandedStore>;
 
 /** The `data-key` of a project row. */
 export const projectKey = (name: string): string => `p:${name}`;
-/** The `data-key` of a page row under a project (PROJECT_ITEMS). */
-export const itemKey = (name: string, path: string): string => `i:${name}/${path}`;
-/** The `data-key` of an agent row under the Agents node of a project. */
-export const projectAgentKey = (id: string): string => `pa:${id}`;
-/** The `data-key` of a repo row under the Repos node of a project. */
-export const projectRepoKey = (project: string, repo: string): string => `pr:${project}/${repo}`;
 
-/**
- * The rows of the project tree in screen order, for the roving tabindex.
- * `items` are the page paths of a project. The `agents` and `repos` items
- * are nodes: open, they show `agentsOf(project)` (agent IDs) and
- * `reposOf(project)` (repo names), sorted and filtered.
- */
-export function projectTreeKeys(t: {
-  rootKey: string;
-  rootOpen: boolean;
-  projects: readonly string[];
-  items: readonly string[];
-  isOpen: (name: string) => boolean;
-  agentsOf: (project: string) => readonly string[];
-  reposOf?: (project: string) => readonly string[];
-}): string[] {
-  if (!t.rootOpen) return [t.rootKey];
-  const children = (p: string, path: string): string[] => {
-    if (path === "agents" && t.isOpen(projectAgentsNode(p))) return t.agentsOf(p).map(projectAgentKey);
-    if (path === "repos" && t.isOpen(projectReposNode(p))) return (t.reposOf?.(p) ?? []).map((r) => projectRepoKey(p, r));
-    return [];
-  };
-  const rows = (p: string) => t.items.flatMap((path) => [itemKey(p, path), ...children(p, path)]);
-  return [t.rootKey, ...t.projects.flatMap((p) => [projectKey(p), ...(t.isOpen(p) ? rows(p) : [])])];
+/** The rows of the project tree in screen order, for the roving tabindex. */
+export function projectTreeKeys(t: { rootKey: string; rootOpen: boolean; projects: readonly string[] }): string[] {
+  return t.rootOpen ? [t.rootKey, ...t.projects.map(projectKey)] : [t.rootKey];
 }

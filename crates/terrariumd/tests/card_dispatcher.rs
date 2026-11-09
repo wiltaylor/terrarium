@@ -1179,6 +1179,8 @@ async fn cap_reached_after_selection_defers_without_card_failure() {
             &who,
             who.address(),
             terrariumd::spawn::SpawnBody {
+                like: None,
+                like_skip_missing: false,
                 template: "card-small".into(),
                 task: "Selected card".into(),
                 name: Some(id.to_ascii_lowercase()),

@@ -816,7 +816,19 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
 }
 
 async fn lab_impl(slots: u32, docker: Option<&Path>, flow: &'static str) -> Lab {
-    let td = TestDaemon::start().await;
+    lab_impl_ssh(slots, docker, flow, None).await
+}
+
+async fn lab_impl_ssh(
+    slots: u32,
+    docker: Option<&Path>,
+    flow: &'static str,
+    ssh: Option<&str>,
+) -> Lab {
+    let mut td = TestDaemon::start().await;
+    if ssh.is_some() {
+        td.boot_with_ssh(None, None, ssh).await;
+    }
     let state = td.daemon.as_ref().unwrap().state.clone();
     let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
         .await
@@ -2225,6 +2237,390 @@ async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
     assert_eq!(r.status, 201, "{}", r.body);
     let jobs = lab.until_idle().await;
     jobs.into_iter().find(|j| j["card"] == id.as_str()).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated scratch SSH endpoint with real Docker"]
+async fn live_docker_through_daemon_tunnel_and_release_relay() {
+    // The scratch exercise supplies a temporary, local-only SSH identity and
+    // sshd. Never use the production Docker CI or reset identities here.
+    let ssh = std::env::var("TER363_SCRATCH_SSH").unwrap();
+    let key = std::fs::read_to_string(std::env::var("TER363_SCRATCH_KEY").unwrap()).unwrap();
+    let pin = std::fs::read_to_string(std::env::var("TER363_SCRATCH_PIN").unwrap()).unwrap();
+    let port: u16 = std::env::var("TER363_SCRATCH_PORT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let lab = lab_impl_ssh(1, None, "code", Some(&ssh)).await;
+    for name in ["vm", "reset"] {
+        lab.td
+            .put(
+                &format!("/api/secrets/p/{name}"),
+                json!({"kind":"ssh_key", "fields":{"private_key":key}}),
+            )
+            .await
+            .ok();
+        lab.td
+            .post(
+                &format!("/api/secrets/p/{name}/grants"),
+                json!({"grantee":"delivery:p", "level":"run", "targets":["p-box"]}),
+            )
+            .await
+            .ok();
+    }
+    let recipe = r#"set -eu
+docker version
+docker pull alpine:3.21
+name=ter-363-relay-$$
+trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+docker run --name "$name" alpine:3.21 sh -c 'yes ter-363-large-log | head -c 8388608'
+test "$(docker logs "$name" | wc -c)" -eq 8388608
+echo real-tunnel-large-log-ok
+"#;
+    let marker = lab._dirs.path().join("live-recipe-started");
+    let mut config = json!({"target":"p-box", "recipe":format!("touch '{}'\n{recipe}", marker.display()), "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm.private_key", "DOCKER_CI_RESET_KEY":"@secret:reset.private_key"}, "docker_ci":{"destination":"root@127.0.0.1", "port":port, "known_hosts":pin, "reset_destination":"root@127.0.0.1", "reset_port":port,"reset_known_hosts":pin}});
+    let wrong_pin =
+        std::fs::read_to_string(std::env::var("TER363_SCRATCH_WRONG_PIN").unwrap()).unwrap();
+    for (branch, reset_pin) in [
+        (
+            "reset-unknown-host",
+            pin.replace("127.0.0.1", "unknown-host"),
+        ),
+        ("reset-wrong-key", wrong_pin),
+    ] {
+        config["docker_ci"]["reset_known_hosts"] = json!(reset_pin);
+        lab.td
+            .put("/api/projects/p/delivery", config.clone())
+            .await
+            .ok();
+        lab.branch(branch, "next", &[(branch, "yes\n")]);
+        let card = lab.card(branch, branch).await;
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .await
+            .ok();
+        let jobs = lab.until_idle().await;
+        let job = jobs.iter().find(|j| j["card"] == card).unwrap();
+        assert_ne!(job["state"], "passed", "{job:#}");
+        assert!(
+            !marker.exists(),
+            "reset pin failure must prevent the recipe"
+        );
+        let detail = lab
+            .td
+            .get(&format!("/api/jobs/{}", job["id"].as_str().unwrap()))
+            .await;
+        assert!(detail.ok().to_string().contains("reset failed"));
+    }
+    config["docker_ci"]["reset_known_hosts"] = json!(pin);
+    lab.td.put("/api/projects/p/delivery", config).await.ok();
+    lab.branch("live-relay", "next", &[("live-relay", "yes\n")]);
+    let card = lab.card("live relay", "live-relay").await;
+    lab.td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await
+        .ok();
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["card"] == card).unwrap();
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let detail = lab
+        .td
+        .get(&format!("/api/jobs/{}", job["id"].as_str().unwrap()))
+        .await;
+    let detail = detail.ok().to_string();
+    assert!(detail.contains("real-tunnel-large-log-ok"), "{detail}");
+    assert!(!detail.contains(&key));
+}
+
+#[tokio::test]
+async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
+    use std::os::unix::fs::PermissionsExt;
+    #[derive(Clone)]
+    struct Trace(std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>);
+    impl std::io::Write for Trace {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(buffer) = self.0.lock().unwrap().as_mut() {
+                buffer.extend_from_slice(bytes);
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let trace = Trace(std::sync::Arc::new(std::sync::Mutex::new(Some(Vec::new()))));
+    let writer = trace.clone();
+    // Global to include job-queue and executor tasks spawned by the daemon.
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    )
+    .unwrap();
+    let fixtures = tempfile::tempdir().unwrap();
+    let ssh = fixtures.path().join("ssh");
+    std::fs::write(
+        &ssh,
+        format!(
+            r#"#!/usr/bin/env python3
+import os, pathlib, socket, sys, time
+root = pathlib.Path({root:?})
+args = sys.argv[1:]
+key = pathlib.Path(args[args.index('-i') + 1]).read_text()
+assert 'SSH_AUTH_SOCK' not in os.environ
+if '-L' not in args:
+    assert key == 'dummy-reset-key-363'
+    assert 'StrictHostKeyChecking=yes' in args
+    pin_arg = next(a for a in args if a.startswith('UserKnownHostsFile='))
+    pin_path = pathlib.Path(pin_arg.split('=', 1)[1])
+    assert pin_path.parent == pathlib.Path(args[args.index('-i') + 1]).parent
+    pin = pin_path.read_text()
+    with (root / 'order').open('a') as f: f.write('reset\n')
+    if not pin.startswith('test-host '): sys.exit(255)
+    if 'public-test-pin' not in pin: sys.exit(255)
+    status = root / 'status'
+    code = int(status.read_text()) if status.exists() else 0
+    if code == 75: status.write_text('0')
+    if code == 175: code = 75
+    sys.exit(code)
+assert key == 'dummy-tunnel-key-363'
+assert (root / 'order').read_text().endswith('reset\n')
+with (root / 'order').open('a') as f: f.write('tunnel\n')
+s = socket.socket(socket.AF_UNIX)
+s.bind(args[args.index('-L') + 1].split(':')[0])
+s.listen()
+while True: time.sleep(1)
+"#,
+            root = fixtures.path().to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let lab = lab_impl_ssh(1, None, "code", Some(ssh.to_str().unwrap())).await;
+    for (name, value) in [
+        ("vm", "dummy-tunnel-key-363"),
+        ("reset", "dummy-reset-key-363"),
+    ] {
+        lab.td
+            .put(
+                &format!("/api/secrets/p/{name}"),
+                json!({"kind":"api_key", "fields":{"value":value}}),
+            )
+            .await
+            .ok();
+        lab.td
+            .post(
+                &format!("/api/secrets/p/{name}/grants"),
+                json!({"grantee":"delivery:p", "level":"run", "targets":["p-box"]}),
+            )
+            .await
+            .ok();
+    }
+    let marker = fixtures.path().join("recipe-started");
+    let environment = fixtures.path().join("recipe-env.json");
+    let relay_snapshot = fixtures.path().join("relay-files.json");
+    let recipe = format!(
+        r#"test -z "${{DOCKER_CI_KEY:-}}${{DOCKER_CI_RESET_KEY:-}}${{SSH_AUTH_SOCK:-}}" && test -S "${{DOCKER_HOST#unix://}}" && python3 -I -c 'import json,os,pathlib; pathlib.Path("{}").write_text(json.dumps(dict(os.environ))); directory=pathlib.Path(os.environ["DOCKER_HOST"].removeprefix("unix://")).parent; pathlib.Path("{}").write_text(json.dumps([str(p) for p in directory.iterdir()])); assert all(not p.is_file() for p in directory.iterdir())' && touch '{}' && echo recipe-ok"#,
+        environment.display(),
+        relay_snapshot.display(),
+        marker.display()
+    );
+    let mut config = json!({"target":"p-box", "recipe":recipe, "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm", "DOCKER_CI_RESET_KEY":"@secret:reset"}, "docker_ci":{"destination":"root@test-vm", "port":2250, "known_hosts":"test-vm ssh-ed25519 public-test-pin\n", "reset_destination":"reset@test-host", "reset_port":22,"reset_known_hosts":"test-host ssh-ed25519 public-test-pin\n"}});
+    for (branch, status, expected) in [
+        ("secret-ok", 0, true),
+        ("secret-reset-failed", 1, false),
+        ("secret-reset-busy", 75, true),
+        ("secret-reset-exhausted", 175, false),
+        ("secret-reset-unknown-pin", 255, false),
+        ("secret-reset-wrong-pin", 256, false),
+        ("secret-revoked", 0, false),
+    ] {
+        std::fs::write(fixtures.path().join("status"), status.to_string()).unwrap();
+        let order_before = std::fs::read_to_string(fixtures.path().join("order"))
+            .unwrap_or_default()
+            .len();
+        config["docker_ci"]["reset_known_hosts"] = match status {
+            255 => json!("other-host ssh-ed25519 public-test-pin\n"),
+            256 => json!("test-host ssh-ed25519 wrong-key\n"),
+            _ => json!("test-host ssh-ed25519 public-test-pin\n"),
+        };
+        lab.td
+            .put("/api/projects/p/delivery", config.clone())
+            .await
+            .ok();
+        let _ = std::fs::remove_file(&marker);
+        if branch == "secret-revoked" {
+            lab.td
+                .delete("/api/secrets/p/vm/grants?grantee=delivery:p")
+                .await
+                .ok();
+        }
+        lab.branch(branch, "next", &[(branch, "yes\n")]);
+        let card = lab.card(branch, branch).await;
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .await
+            .ok();
+        let jobs = lab.until_idle().await;
+        let job = jobs.iter().find(|j| j["card"] == card).unwrap();
+        assert_eq!(job["state"] == "passed", expected, "{job:#}");
+        assert_eq!(marker.exists(), expected);
+        let detail = lab
+            .td
+            .get(&format!("/api/jobs/{}", job["id"].as_str().unwrap()))
+            .await;
+        let text = detail.ok().to_string();
+        for key in ["dummy-reset-key-363", "dummy-tunnel-key-363"] {
+            assert!(!text.contains(key), "{text}");
+        }
+        if status == 1 {
+            assert!(text.contains("reset failed"), "{text}");
+        }
+        if status == 175 {
+            assert!(text.contains("lock busy"));
+            let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
+            let attempts = &order[order_before..];
+            assert!(!attempts.contains("tunnel"));
+            // Other failed cards may be retried in this queue cycle, but each
+            // job must finish after exactly three busy attempts.
+            assert!(attempts.lines().count() >= 3);
+            assert_eq!(attempts.lines().count() % 3, 0);
+        }
+        if expected {
+            assert!(text.contains("Full log on target"), "{text}");
+            let env: std::collections::BTreeMap<String, String> =
+                serde_json::from_slice(&std::fs::read(&environment).unwrap()).unwrap();
+            for value in env.values() {
+                assert!(
+                    !value.contains("dummy-reset-key-363")
+                        && !value.contains("dummy-tunnel-key-363")
+                );
+            }
+            let inherited: std::collections::BTreeMap<_, _> = std::env::vars().collect();
+            let ordinary = [
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+                "TERRARIUM_JOB_KIND",
+                "TERRARIUM_JOB_ID",
+                "TERRARIUM_JOB_SLOT",
+                "TERRARIUM_HEAD",
+                "TERRARIUM_BASE",
+                "TERRARIUM_CHANGED_FILES",
+                "PWD",
+                "OLDPWD",
+                "SHLVL",
+                "_",
+            ];
+            let added: Vec<_> = env
+                .keys()
+                .filter(|k| !inherited.contains_key(*k) && !ordinary.contains(&k.as_str()))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(added, ["DOCKER_HOST"]);
+            assert!(
+                std::fs::read_to_string(&relay_snapshot)
+                    .unwrap()
+                    .contains("docker.sock")
+            );
+        }
+    }
+    let audit = lab.td.get("/api/audit").await;
+    let text = audit.ok().to_string();
+    assert!(text.contains("delivery:p"), "{text}");
+    for key in ["dummy-reset-key-363", "dummy-tunnel-key-363"] {
+        assert!(!text.contains(key));
+    }
+    let events = lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| {
+            let mut statement =
+                c.prepare("SELECT summary || payload FROM events WHERE project = 'p'")?;
+            let rows = statement.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?.join("\n"))
+        })
+        .await
+        .unwrap();
+    for key in ["dummy-reset-key-363", "dummy-tunnel-key-363"] {
+        assert!(!events.contains(key), "{events}");
+    }
+    fn scan(path: &Path, logs: &mut usize) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                scan(&entry.path(), logs);
+            } else if kind.is_file() {
+                let bytes = std::fs::read(entry.path()).unwrap();
+                for key in [
+                    b"dummy-reset-key-363".as_slice(),
+                    b"dummy-tunnel-key-363".as_slice(),
+                ] {
+                    assert!(
+                        !bytes.windows(key.len()).any(|window| window == key),
+                        "key in job file"
+                    );
+                }
+                if entry.path().extension().is_some_and(|e| e == "log") {
+                    *logs += 1;
+                }
+            }
+        }
+    }
+    let mut logs = 0;
+    scan(&lab._dirs.path().join("jobs"), &mut logs);
+    assert!(
+        logs > 0,
+        "must inspect raw recipe logs as well as checkout files"
+    );
+    let trace = trace.0.lock().unwrap().take().unwrap();
+    assert!(!trace.is_empty(), "daemon tracing was not captured");
+    for key in [
+        b"dummy-reset-key-363".as_slice(),
+        b"dummy-tunnel-key-363".as_slice(),
+    ] {
+        assert!(
+            !trace.windows(key.len()).any(|window| window == key),
+            "key in daemon tracing"
+        );
+    }
+    let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
+    // The queue may retry another failed card while a new merge is queued.
+    // Every tunnel, including those retries, must follow a successful reset.
+    assert!(order.starts_with("reset\ntunnel\n"), "{order}");
+    assert!(order.contains("reset\nreset\n"), "{order}");
+    for pair in order.lines().collect::<Vec<_>>().windows(2) {
+        if pair[1] == "tunnel" {
+            assert_eq!(pair[0], "reset");
+        }
+    }
+}
+
+#[tokio::test]
+async fn delivery_secret_config_refuses_plaintext_and_arbitrary_env_injection() {
+    let lab = lab(1).await;
+    for refs in [
+        json!({"DOCKER_CI_KEY":"literal"}),
+        json!({"MERGE_KEY":"@secret:vm"}),
+        json!({"PATH":"@secret:vm"}),
+    ] {
+        lab.td
+            .put(
+                "/api/projects/p/delivery",
+                json!({
+                    "target":"p-box", "recipe":"true", "merge_secrets":refs
+                }),
+            )
+            .await
+            .err(422, "invalid");
+    }
 }
 
 /// Review B1: the recipe commits in its clone and moves HEAD. The push

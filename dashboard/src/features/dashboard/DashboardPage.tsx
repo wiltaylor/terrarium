@@ -16,6 +16,7 @@ import { ActionButtons } from "../actions/ActionButtons";
 import { projectActions } from "../actions/model";
 import { BlockDialog } from "./BlockDialog";
 import { BlockView } from "./blocks";
+import { JobQueuePanel } from "./JobQueuePanel";
 import { layoutProblems, moveBlock, SIZES, STATE_META, stateCounts, type BlockState } from "./model";
 import { MonitorsPanel } from "./MonitorsPanel";
 import { EtaAccuracy } from "./EtaAccuracy";
@@ -146,6 +147,9 @@ export default function DashboardPage() {
             </For>
           </Show>
         </p>
+      </Show>
+      <Show when={tab() === "blocks"}>
+        <JobQueuePanel project={params.project} />
       </Show>
       <Show when={tab() === "monitors"}>
         <MonitorsPanel project={params.project} monitors={view.latest?.monitors ?? []} now={now()} onChanged={() => void refetch()} />

@@ -60,6 +60,7 @@ import type {
   TestRunSummary,
   DashboardLayout,
   DashboardView,
+  JobStats,
   EtaAccuracyView,
   Monitor,
   MonitorDef,
@@ -634,6 +635,14 @@ export interface Api {
     dashboard(project: string): Promise<DashboardView>;
     etaAccuracy(project: string): Promise<EtaAccuracyView>;
     saveDashboard(project: string, layout: DashboardLayout): Promise<DashboardView>;
+  };
+
+  /**
+   * The job queue (docs/api.md §35.4): the pass rate of a project's jobs over a window. Members read.
+   */
+  jobs: {
+    /** `since` is an RFC 3339 time, or a duration back from now such as `7d` (the daemon's default window). */
+    stats(project: string, since?: string): Promise<JobStats>;
   };
 
   /**
@@ -1392,6 +1401,10 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       dashboard: (project) => get(`${p(project)}/dashboard`),
       etaAccuracy: (project) => get(`${p(project)}/eta-accuracy`),
       saveDashboard: (project, layout) => put(`${p(project)}/dashboard`, layout),
+    },
+
+    jobs: {
+      stats: (project, since) => get<JobStats>(`${p(project)}/jobs/stats`, since === undefined ? undefined : { since }),
     },
 
     calendar: (() => {

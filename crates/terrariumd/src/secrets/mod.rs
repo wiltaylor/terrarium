@@ -226,6 +226,12 @@ fn io_err(what: &str, path: &Path, e: &std::io::Error) -> ApiError {
 }
 
 /// Write `bytes` to `path` with mode 0600, through a temp file and a rename.
+///
+/// The write fd is closed **before** the rename that publishes the file.
+/// A fork in another thread while the fd is open copies the fd table, so
+/// that child holds a write fd on the published name until its own exec,
+/// and every exec of the name in that window fails with ETXTBSY (Text
+/// file busy). O_CLOEXEC does not prevent it (TER-339, TER-415).
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> ApiResult<()> {
     let tmp = path.with_extension(format!("tmp-{}", ulid::Ulid::new()));
     let result = (|| {
@@ -236,6 +242,10 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> ApiResult<()> {
             .open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
+        // Close the write fd before the file is published by the rename:
+        // no fd of this process, and none of a fork in flight, stays on
+        // the published name.
+        drop(f);
         fs::rename(&tmp, path)
     })();
     if let Err(e) = result {
@@ -271,7 +281,9 @@ impl RunDir {
         Ok(p)
     }
 
-    /// Write a 0700 script in the run dir.
+    /// Write a 0700 script in the run dir. Run such a script as
+    /// `sh <path>`: a script that git execs can still hit ETXTBSY while a
+    /// fork of this process is in flight ([`write_private`]).
     pub fn write_script(&self, name: &str, text: &str) -> ApiResult<PathBuf> {
         let p = self.write_private(name, text.as_bytes())?;
         fs::set_permissions(&p, fs::Permissions::from_mode(0o700))
