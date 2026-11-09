@@ -2358,9 +2358,8 @@ static TRACE_CAPTURE: std::sync::OnceLock<TraceCapture> = std::sync::OnceLock::n
 fn daemon_trace_capture() -> TraceCapture {
     let capture = TRACE_CAPTURE
         .get_or_init(|| {
-            let capture = TraceCapture(std::sync::Arc::new(std::sync::Mutex::new(Some(
-                Vec::new(),
-            ))));
+            let buffer = std::sync::Arc::new(std::sync::Mutex::new(Some(Vec::new())));
+            let capture = TraceCapture(buffer);
             let writer = capture.clone();
             tracing::subscriber::set_global_default(
                 tracing_subscriber::fmt()
