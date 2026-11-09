@@ -16,6 +16,9 @@
 //!   question is `409`.
 //! - `POST /api/questions/{id}/retract`: the asking leader or the
 //!   operator.
+//! - `POST /api/questions/{id}/to-thread`: the operator moves an open
+//!   question or notice into a new Inbox thread with its agent (GitHub
+//!   #30); the question becomes `in_thread`.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -46,6 +49,7 @@ pub fn routes() -> Router<Shared> {
         .route("/questions/{id}/answer", post(answer))
         .route("/questions/{id}/ack", post(ack))
         .route("/questions/{id}/retract", post(retract))
+        .route("/questions/{id}/to-thread", post(to_thread))
 }
 
 async fn find_agent(state: &Shared, actor: &Actor, key: String) -> ApiResult<AgentView> {
@@ -605,4 +609,43 @@ async fn retract(
             })
             .await?,
     ))
+}
+
+/// The body of `POST /api/questions/{id}/to-thread`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToThreadBody {
+    /// The operator's message after the question in the first message.
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// `POST /api/questions/{id}/to-thread` (GitHub #30): the operator only.
+/// The body is optional. `201` `{question, thread}`.
+async fn to_thread(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    let b: ToThreadBody = optional_body(&body)?;
+    let q = find(&state, &actor, id).await?;
+    if !matches!(actor, Actor::Operator) {
+        return Err(ApiError::forbidden(
+            "only the operator moves a question into a thread: the thread is between the \
+             operator and the asking agent",
+        ));
+    }
+    let qid = q.id.clone();
+    let (q, th) = state
+        .db
+        .write(actor.label(), move |t| {
+            questions::to_thread(t, &qid, b.message.as_deref())
+        })
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"question": q, "thread": th})),
+    )
+        .into_response())
 }

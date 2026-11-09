@@ -60,20 +60,30 @@ def gate(env: dict[str, str]) -> int:
     return code or live_tests(env)
 
 
+# The daemon passes the job socket under this name, not as DOCKER_HOST: on a
+# docker target the host's docker CLI would read DOCKER_HOST itself (TER-477).
+ENDPOINT_ENV = "TERRARIUM_DOCKER_HOST"
+
+
 def main() -> int:
     enabled = os.environ.get("TERRARIUM_DOCKER_CI", "0")
     if enabled == "0":
-        return subprocess.call(["just", "ci::validate"], env=dict(os.environ))
+        # Gate off: no Docker endpoint reaches the suite, whatever is set.
+        env = dict(os.environ)
+        for name in ("DOCKER_HOST", ENDPOINT_ENV):
+            env.pop(name, None)
+        return subprocess.call(["just", "ci::validate"], env=env)
     if enabled != "1":
         print("TERRARIUM_DOCKER_CI must be 0 or 1", file=sys.stderr)
         return 1
-    endpoint = os.environ.get("DOCKER_HOST", "")
+    endpoint = os.environ.get(ENDPOINT_ENV, "")
     if os.environ.get("TERRARIUM_JOB_KIND") != "merge" or not endpoint.startswith("unix://"):
         print("Docker gate requires a merge job and its daemon-provisioned Unix endpoint", file=sys.stderr)
         return 1
     env = dict(os.environ)
-    for name in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SSH_AUTH_SOCK"):
+    for name in (ENDPOINT_ENV, "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SSH_AUTH_SOCK"):
         env.pop(name, None)
+    env["DOCKER_HOST"] = endpoint
     with tempfile.TemporaryDirectory(prefix="terrarium-docker-config-") as directory:
         env["DOCKER_CONFIG"] = directory
         return gate(env)

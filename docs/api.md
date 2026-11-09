@@ -3221,12 +3221,12 @@ except for the differences in "Bundles" below.
 | `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
 | `card` | Optional. A card of the agent's project. The question then shows on that card on the board (§8) and in the Inbox. Link or unlink later with `PATCH` (see "Cards"). |
 | `priority` | `normal`, `urgent`, or `critical`. Lists put the critical open questions first, then the urgent ones. Use `critical` only when the operator must act now: production is down, data is lost, a security problem, or a spent budget that stops all work. While a critical item is open, the dashboard shows a banner on each page and flashes its browser tab (§6.9). |
-| `status` | A question: `open`, `answered`, or `retracted`. A notice: `open`, `acknowledged`, or `retracted`. Only `open` changes. |
+| `status` | A question: `open`, `in_thread`, `answered`, or `retracted`. A notice: `open`, `in_thread`, `acknowledged`, or `retracted`. Only `open` and `in_thread` change. `in_thread`: the operator moved it into an Inbox thread with its agent (see "To thread"). |
 | `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. For an acknowledged notice, `answer` is the reply of the operator, if any. |
 | `answered_by`, `answered_by_name` | `operator`, or the ULID and `project/name` of a sysadmin agent. |
 | `retract_reason`, `retracted_by` | The reason, and the actor label (`operator`, `agent:<ulid>`, or `system` for a deleted agent). |
 | `thread_id` | The mail thread of the question. The answer goes on it. |
-| `thread` | The Inbox thread that the question was asked in (§6.13), or absent. |
+| `thread` | The Inbox thread that the question was asked in, or moved into (§6.13, "To thread"), or absent. |
 | `revision` | 1 at the ask. Each update that changes a field adds 1. |
 
 The rights:
@@ -3237,6 +3237,7 @@ The rights:
 | Read | The agent itself, a project_admin of its project, a sysadmin, the operator. Another caller gets `404` for one question and `403` for a list. |
 | Answer, acknowledge | The operator. A sysadmin agent, for the question or notice of another agent. Never the asking agent (`403`). |
 | Retract | The asking leader, or the operator. |
+| To thread | The operator. Another caller that reads the question gets `403`. |
 | Link to a card, unlink | The asking leader while the question is open. The operator, and a sysadmin agent for the question of another agent, at each status. |
 
 | Endpoint | Body or query | Answer |
@@ -3248,7 +3249,8 @@ The rights:
 | `PATCH /api/questions/{id}` | `{"text"?, "options"?, "items"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field; `items` replaces all items of a bundle. `{"card": "<id>" \| null}` alone links or unlinks a card (see "Cards") | `200` the question. A question that is not open is `409 conflict`, except for a change of the card by the operator or a sysadmin. A card of another project, or an unknown card, is `422 invalid`. |
 | `POST /api/questions/{id}/answer` | `{"answer"?, "option"?, "revision"?}`: a text, an option (its label, or its 0-based index), or both. A bundle: `{"items": [{"answer"?, "option"?}, ...], "revision"?}` | `200` the question. A question that is not open is `409 conflict`. A notice is `409 conflict`. A `revision` that is not the current one is `409 conflict`, with `details.revision`. |
 | `POST /api/questions/{id}/ack` | `{"text"?}`, or no body | `200` the notice, `acknowledged`. A notice that is not open is `409 conflict`. A question is `409 conflict`. |
-| `POST /api/questions/{id}/retract` | `{"reason"?}`, or no body | `200` the question. A question that is not open is `409 conflict`. |
+| `POST /api/questions/{id}/retract` | `{"reason"?}`, or no body | `200` the question. A question that is not open or `in_thread` is `409 conflict`. |
+| `POST /api/questions/{id}/to-thread` | `{"message"?}` (at most 8000 characters), or no body | `201` `{"question", "thread"}`: the question, `in_thread`, and the new thread (§6.13). A bundle, a tool run approval, a hold question, a question that is not open, and a question asked in a thread are `409 conflict`. |
 
 The rules:
 
@@ -3284,18 +3286,21 @@ The rules:
   the answer mail (or the retract mail of the operator) is its wake mail,
   so the agent gets one mail, not two. The mail says that the wait is
   resolved. A timeout of the wait sends the usual wake mail from `system`.
-- A deleted agent: its open questions are `retracted` (`retracted_by:
-  "system"`), with no mail.
+- A deleted agent: its open and `in_thread` questions are `retracted`
+  (`retracted_by: "system"`), with no mail.
+- An answer, an acknowledgement, and a retract settle an `in_thread`
+  question as an open one. An update of it is `409 conflict`.
 - The open questions and notices of one agent share the limit of 50. The
   copy check compares a new text with the open items of the same kind.
 - The recap turn of a new session lists the open questions, the open
   notices, the answers since the last turn, and the acknowledgements since
   the last turn, with the replies.
 - Each change writes an audit row (`question.ask`, `question.update`,
-  `question.answer`, `question.ack`, `question.retract`), a `question`
+  `question.answer`, `question.ack`, `question.retract`,
+  `question.to_thread`), a `question`
   event: `{question_id, kind, change, status, priority, text, revision,
   agent_id, card_id?, previous_card_id?}`, where `change` is `asked`,
-  `updated`, `answered`, `acknowledged`, or `retracted`, and an `inbox`
+  `updated`, `answered`, `acknowledged`, `retracted`, or `to_thread`, and an `inbox`
   event (§6.9). The event has the top-level `card` of the linked card.
 
 Cards:
@@ -3360,6 +3365,34 @@ Bundles:
   one question.
 - The recap turn lists an open bundle as `<id> [bundle of N items]`, and
   an answered bundle item by item.
+
+To thread (GitHub #30, TER-469):
+
+- The operator moves an open question or notice into a new Inbox thread
+  with the asking agent: the Inbox action "To thread", `POST
+  /api/questions/{id}/to-thread`, or `terrarium question to-thread <id>
+  [-m <message>]` (also `terrarium admin question to-thread`).
+- The thread (§6.13) is in the project of the question, with the asking
+  agent attached, the operator as its opener, no template, and
+  `from_question` set to the question. Its first message, by the operator,
+  quotes the question, its options, and its context, and then gives the
+  optional `message`. It is `waiting_agent`. A question with a card links
+  the card to the thread (an archived card is not linked).
+- The question becomes `in_thread`, with `thread` set: it is not open, so
+  it leaves the open counts, the Inbox, and the `X-Open-Questions` count,
+  and the thread item stands for it. Its `question` waits stay open.
+- The agent gets one mail from the operator on the mail thread of the
+  question (`In a thread: ...`), with the commands to read the thread and
+  reply there. The agent is not bound to the thread, so each later
+  message and response of the operator in the thread also comes to it as
+  mail (`Thread: ...`), on the same mail thread.
+- In the thread the operator answers (or acknowledges) the question with
+  the usual verbs, and it becomes `answered` (or `acknowledged`) with its
+  `thread` link. The agent retracts it, and can ask a revised question in
+  the thread (`terrarium thread ask <thread> ...`). A close of the thread
+  retracts it, as an open question of the thread.
+- The recap turn lists the `in_thread` questions with their threads.
+- A bundle does not move (`409 conflict`): that is a follow-up.
 
 ### 6.9 The Inbox
 
@@ -3888,6 +3921,7 @@ There is no register of threads and no conflict check between threads
 | `closed_at`, `closed_by` | When and by whom it was closed: `operator`, or `system` for a stale close or a failed start. |
 | `close_proposal` | The close that the attached agent proposes (TER-95): `{summary, links, by, at}`, as `handoff`, or `null`. The operator confirms it (below). |
 | `close_reason` | On a closed thread: `confirmed` (the operator confirmed the agent's proposal), `operator` (the operator closed it), `stale` (untouched, below), or `failed_start` (its agent did not start). |
+| `from_question` | The question or notice that the operator moved into this thread (§6.8, "To thread"), or absent. Each message and response of the operator then also goes to the attached agent as mail. |
 | `session_id` | The session of the thread agent, set at the close: the agent ends and its session is archived (§6.6), so `/sessions/<id>` opens it after the agent is gone. `null` for a named agent, which lives on. |
 | `reminded_at` | The time of the last Inbox reminder of the untouched thread (below), or `null`. |
 | `tracking_at` | When the attached agent moved the thread into tracking (TER-145, below), or `null`. It stays set while an operator post wakes the agent, so that the agent's reply puts the thread back into `tracking`. |
@@ -11953,8 +11987,15 @@ The daemon pins the Docker VM's public host key and owns its SSH local
 forward. Trusted relay code embedded in the daemon release, never read
 from the merged branch, creates a 0600 Unix socket in a job-private
 directory on the target. Docker byte streams travel over its executor
-session to the daemon's SSH forward. The recipe gets only
-`DOCKER_HOST=unix://<job socket>`. Teardown closes the relay, socket, and
+session to the daemon's SSH forward. The daemon starts the relay only after
+a Docker `GET /_ping` through its forward returned 200 (it retries for up to
+90 seconds after the reset). The recipe gets only
+`TERRARIUM_DOCKER_HOST=unix://<job socket>`, not `DOCKER_HOST`: on a
+`docker` target the host agent's own `docker exec` client would read
+`DOCKER_HOST` (TER-477). The gate script sets `DOCKER_HOST` from it when
+`TERRARIUM_DOCKER_CI=1`. The daemon logs the reset start and result (exit
+code and the last stdout line), the tunnel up or its failure, and the relay
+socket path. Teardown closes the relay, socket, and
 SSH child on success or failure. Other processes sharing the target OS
 account can reach that socket during the job. This is an accepted risk:
 it grants Docker control of the throwaway VM, not access to its SSH key.
@@ -11962,7 +12003,7 @@ Before opening the tunnel the daemon calls META-104's forced-command SSH
 reset as `dockerci@10.3.0.2` on port 22, with the second job-only key and
 strict checking against configured `reset_known_hosts` in its private RunDir.
 It sends no remote command. Exit 0 permits the tunnel, exit 1 fails, exit
-75 reports the reset lock busy, and a 150-second timeout fails closed.
+75 reports the reset lock busy, and a 180-second timeout per attempt fails closed.
 Both keys remain daemon-side. The VM's LAN and Tailscale egress is blocked
 outside the VM by vmlab switch rules, so branch code cannot undo it.
 The generic stream relay

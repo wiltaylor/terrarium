@@ -1,6 +1,11 @@
 //! `rust-embed` needs the dashboard folder at compile time. The dashboard is
 //! built separately (`just dashboard::build`), so make an empty folder when it
 //! is absent. The daemon then serves a placeholder page.
+//!
+//! The named schema migrations are compiled in with `include_str!`, also in
+//! debug builds: `rust-embed` reads a debug build's files from the source
+//! tree at run time, so a test binary run on another machine had no
+//! migrations (TER-492).
 
 use std::path::PathBuf;
 
@@ -35,4 +40,29 @@ fn main() {
         ),
     )
     .expect("write dashboard embed declaration");
+    write_named_migrations(&out);
+}
+
+/// Write `named_migrations.rs`: each `migrations/*.sql` file, sorted by name,
+/// as `(name, include_str!(path))`.
+fn write_named_migrations(out: &std::path::Path) {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("read migrations/")
+        .map(|e| e.expect("read migrations/ entry").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "sql"))
+        .collect();
+    files.sort();
+    let mut code = String::from("const NAMED_MIGRATIONS: &[(&str, &str)] = &[\n");
+    for path in &files {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("migration name is UTF-8");
+        let path = path.to_str().expect("migration path is UTF-8");
+        println!("cargo::rerun-if-changed={path}");
+        code.push_str(&format!("    ({name:?}, include_str!({path:?})),\n"));
+    }
+    code.push_str("];\n");
+    std::fs::write(out.join("named_migrations.rs"), code).expect("write named_migrations.rs");
 }

@@ -995,7 +995,15 @@ async fn wait_admission(td: &TestDaemon, name: &str) {
     let state = td.daemon.as_ref().unwrap().state.clone();
     let start = Instant::now();
     while state.executor.resource_pending(name) {
-        assert!(start.elapsed() < DEADLINE, "{name} admission never opened");
+        if start.elapsed() >= DEADLINE {
+            // The reconcile error is only in the daemon log (TER-492).
+            let trace = TRACE_CAPTURE
+                .get()
+                .and_then(|c| c.0.lock().unwrap().clone())
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_else(|| "(no trace capture in this test)".into());
+            panic!("{name} admission never opened; daemon trace:\n{trace}");
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -2278,6 +2286,7 @@ async fn live_docker_through_daemon_tunnel_and_release_relay() {
             .ok();
     }
     let recipe = r#"set -eu
+export DOCKER_HOST="$TERRARIUM_DOCKER_HOST"
 docker version
 docker pull alpine:3.21
 name=ter-363-relay-$$
@@ -2420,7 +2429,12 @@ with (root / 'order').open('a') as f: f.write('tunnel\n')
 s = socket.socket(socket.AF_UNIX)
 s.bind(args[args.index('-L') + 1].split(':')[0])
 s.listen()
-while True: time.sleep(1)
+# The daemon waits for a Docker /_ping answer before the relay (TER-477).
+while True:
+    c, _ = s.accept()
+    c.recv(4096)
+    c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK')
+    c.close()
 "#,
             root = fixtures.path().to_str().unwrap()
         ),
@@ -2469,7 +2483,7 @@ while True: time.sleep(1)
     let baseline: std::collections::BTreeMap<String, String> =
         serde_json::from_slice(&std::fs::read(&baseline_path).unwrap()).unwrap();
     let recipe = format!(
-        r#"test -z "${{DOCKER_CI_KEY:-}}${{DOCKER_CI_RESET_KEY:-}}${{SSH_AUTH_SOCK:-}}" && test -S "${{DOCKER_HOST#unix://}}" && python3 -I -c 'import json,os,pathlib; pathlib.Path("{}").write_text(json.dumps(dict(os.environ))); directory=pathlib.Path(os.environ["DOCKER_HOST"].removeprefix("unix://")).parent; pathlib.Path("{}").write_text(json.dumps([str(p) for p in directory.iterdir()])); assert all(not p.is_file() for p in directory.iterdir())' && touch '{}' && echo recipe-ok"#,
+        r#"test -z "${{DOCKER_CI_KEY:-}}${{DOCKER_CI_RESET_KEY:-}}${{SSH_AUTH_SOCK:-}}" && test -z "${{DOCKER_HOST:-}}" && test -S "${{TERRARIUM_DOCKER_HOST#unix://}}" && python3 -I -c 'import json,os,pathlib; pathlib.Path("{}").write_text(json.dumps(dict(os.environ))); directory=pathlib.Path(os.environ["TERRARIUM_DOCKER_HOST"].removeprefix("unix://")).parent; pathlib.Path("{}").write_text(json.dumps([str(p) for p in directory.iterdir()])); assert all(not p.is_file() for p in directory.iterdir())' && touch '{}' && echo recipe-ok"#,
         environment.display(),
         relay_snapshot.display(),
         marker.display()
@@ -2566,7 +2580,10 @@ while True: time.sleep(1)
                 .filter(|k| !baseline.contains_key(*k) && !ordinary.contains(&k.as_str()))
                 .map(String::as_str)
                 .collect();
-            assert_eq!(added, ["DOCKER_HOST"]);
+            // TER-477: a `docker` target passes the recipe env to the host's
+            // docker CLI, so the job must not set DOCKER_HOST itself.
+            assert_eq!(added, ["TERRARIUM_DOCKER_HOST"]);
+            assert!(!env.contains_key("DOCKER_HOST"));
             assert!(
                 std::fs::read_to_string(&relay_snapshot)
                     .unwrap()

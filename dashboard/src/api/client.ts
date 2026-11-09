@@ -414,6 +414,8 @@ export interface Api {
     retract(id: string, reason?: string): Promise<Question>;
     /** `POST /api/questions/{id}/ack`: acknowledge a notice, with an optional reply. 409 for a question. */
     ack(id: string, text?: string): Promise<Question>;
+    /** `POST /api/questions/{id}/to-thread`: move an open question or notice into a new Inbox thread with its agent (GitHub #30). 409 for a bundle. */
+    toThread(id: string, message?: string): Promise<{ question: Question; thread: Thread }>;
     /** `PATCH /api/questions/{id}` with only `card`: link to a card of the question's project, or unlink with `null`. Any status; the revision stays. 422 for a card of another project or an unknown card. */
     setCard(id: string, card: string | null): Promise<Question>;
   };
@@ -1232,6 +1234,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       answer: (id, body) => post(`/api/questions/${seg(id)}/answer`, body),
       retract: (id, reason) => post(`/api/questions/${seg(id)}/retract`, reason ? { reason } : {}),
       ack: (id, text) => post(`/api/questions/${seg(id)}/ack`, text ? { text } : {}),
+      toThread: (id, message) => post(`/api/questions/${seg(id)}/to-thread`, message ? { message } : {}),
       setCard: (id, card) => patch(`/api/questions/${seg(id)}`, { card }),
     },
 
