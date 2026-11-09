@@ -318,6 +318,15 @@ finally:
     for fd in reversed(fds): os.close(fd)
 "#;
 
+/// The holder of the daemon's own commands for an agent's root (probe,
+/// home fallback, prepare, measure, delete): the agent they act for,
+/// `<project>/<agent>` as [`crate::executor::holder_of`] makes it. On a
+/// host with native GPU enforcement each runs in that agent's own scope,
+/// never the operator's; the sweep of an ended agent uses the same holder.
+fn agent_holder(project: &str, name: &str) -> String {
+    format!("{project}/{name}")
+}
+
 fn command(
     mode: &str,
     base: &str,
@@ -335,6 +344,7 @@ fn command(
         .map(str::to_owned)
         .collect(),
         timeout_secs: Some(if mode == "prepare" { 120 } else { 900 }),
+        holder: Some(agent_holder(project, name)),
         ..RemoteCmd::default()
     })
 }
@@ -389,6 +399,7 @@ pub async fn prepare(
         &RemoteCmd {
             argv: vec!["sh".into(), "-c".into(), PYTHON_PROBE.into()],
             timeout_secs: Some(30),
+            holder: Some(agent_holder(&a.project, &a.name)),
             ..RemoteCmd::default()
         },
     )?
@@ -454,7 +465,7 @@ pub async fn prepare(
     {
         // Exit 3 means the agent user cannot reach the default base, so no
         // root of this agent exists there: switching the row orphans nothing.
-        current = home_fallback(state, def).await?;
+        current = home_fallback(state, def, &agent_holder(&a.project, &a.name)).await?;
         path = root(&current, &a.project, &a.name)?;
         let (id, target, fallback) = (a.id.clone(), def.name.clone(), current.clone());
         state
@@ -497,13 +508,14 @@ pub async fn prepare(
 }
 
 /// The home fallback base of the agent user on the target.
-async fn home_fallback(state: &Shared, def: &TargetDef) -> ApiResult<String> {
+async fn home_fallback(state: &Shared, def: &TargetDef, holder: &str) -> ApiResult<String> {
     let out = start_cmd(
         state,
         def,
         &RemoteCmd {
             argv: vec!["python3".into(), "-c".into(), HOME_PROBE.into()],
             timeout_secs: Some(30),
+            holder: Some(holder.to_owned()),
             ..RemoteCmd::default()
         },
     )?
@@ -744,6 +756,56 @@ pub fn spawn(state: Shared) -> tokio::task::JoinHandle<()> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// The daemon's own commands for agent X's root carry X's holder: on a
+    /// host with native GPU enforcement they pass (no "has no holder"),
+    /// run in X's own workspace scope, and name only X's root, never Y's.
+    #[test]
+    fn root_commands_run_as_the_agent_they_act_for() {
+        let mut h: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
+        h.name = "box".into();
+        let caps = terrarium_core::protocol::HostCapabilities {
+            native_gpu: Some(terrarium_core::protocol::NativeGpuCapability {
+                enforced: true,
+                version: 1,
+                reason: None,
+            }),
+            ..Default::default()
+        };
+        let ws = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(ws.path()).unwrap();
+        std::fs::create_dir_all(ws.join("terra/x")).unwrap();
+        std::fs::create_dir_all(ws.join("terra/y")).unwrap();
+        for mode in ["prepare", "measure", "delete"] {
+            let cmd = command(mode, "/srv/roots", "terra", "x", "agent-x", "").unwrap();
+            assert_eq!(cmd.holder.as_deref(), Some("terra/x"), "{mode}");
+            assert!(!cmd.operator, "{mode}");
+            assert!(cmd.argv.iter().any(|a| a == "x"));
+            assert!(!cmd.argv.iter().any(|a| a == "y" || a.contains("/y")), "{mode}");
+            let l = crate::executor::native_gpu_limits(
+                &h,
+                Some(&caps),
+                cmd.holder.as_deref(),
+                cmd.operator,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(l.holder, "terra/x");
+            // The helper's scope of that holder: X's directory only.
+            assert_eq!(
+                terrarium_host::native::holder_workspace(&ws, &l.holder).unwrap(),
+                Some(ws.join("terra/x"))
+            );
+        }
+        assert_eq!(agent_holder("terra", "x"), "terra/x");
+        // Without a holder the same command is refused on that host.
+        let bare = RemoteCmd::default();
+        assert!(
+            crate::executor::native_gpu_limits(&h, Some(&caps), bare.holder.as_deref(), false, None)
+                .is_err()
+        );
+    }
 
     #[test]
     fn missing_python_probe_preserves_legacy_execution() {

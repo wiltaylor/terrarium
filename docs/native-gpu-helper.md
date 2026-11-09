@@ -103,9 +103,11 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
         refused (see below);
       - `operator`: the whole workspace root, with no tmpfs over it (the
         operator is trusted). Only a command of the operator (the actor,
-        or a `run_as = "operator"` webhook or monitor) gets this holder: the
-        daemon refuses a command with no holder on such a host, so a path
-        that forgets the holder never gets the whole root.
+        or a `run_as = "operator"` webhook) gets this holder: the daemon
+        refuses a command with no holder on such a host, so a path that
+        forgets the holder never gets the whole root. The daemon's own
+        commands for a card agent's owned root (probe, prepare, measure,
+        delete) run as that agent `<project>/<agent>`, in its own scope.
 
       Directories outside the scope do not exist in the unit, whatever
       their modes, so a file that an earlier holder of the UID made private
