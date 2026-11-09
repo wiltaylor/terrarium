@@ -1117,7 +1117,7 @@ mod tests {
             format!("{random}\\u0040git.example:r.git"),
         ] {
             let text = format!("[[projects.repos]]\nurl = \"{url}\" # {ALLOW_MARKER}\n");
-            assert_eq!(rules(export, &text), [he.clone()], "{text}");
+            assert_eq!(rules(export, &text), std::slice::from_ref(&he), "{text}");
         }
         // In a file that a user writes the marker keeps its meaning for
         // the soft rules, and `url-userinfo` never runs there.
