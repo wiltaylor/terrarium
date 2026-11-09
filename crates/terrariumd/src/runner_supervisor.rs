@@ -1072,21 +1072,20 @@ impl Slot {
 
     /// A restart for an account swap may start now (TER-524): the runner
     /// rests (`idle` or `waiting`, not `blocked`), no restart or stop is on
-    /// its way, and no turn, recap, pointer or compaction is in flight or
-    /// queued. Unlike [`Slot::can_idle_stop`] it does not read the runner's
-    /// own status stream: that can lag behind the events, and a swap that
-    /// waits needs the next rest event to fire. The work that holds the swap
-    /// back goes out as a turn, and the end of that turn is a new rest
-    /// event.
+    /// its way, and no turn, pointer or compaction is on its way into the
+    /// harness. Queued work (turns, a recap, pointer items) does not hold
+    /// the swap back: once the caller sets `restart_requested` under the
+    /// same lock, that work waits for the new launch on the new account.
+    /// Unlike [`Slot::can_idle_stop`] it does not read the runner's own
+    /// status stream: that can lag behind the events, and a swap that waits
+    /// needs the next rest event or the end of a delivery
+    /// ([`RunnerSupervisor::finish_turn_delivery`]) to fire.
     fn can_swap_restart(&self) -> bool {
         !self.stop_requested
             && !self.restart_requested
             && self.runner.is_some()
             && self.seen.is_resting()
             && self.turns_in_flight == 0
-            && self.turns.is_empty()
-            && self.recap.is_none()
-            && self.pointer.is_empty()
             && !self.pointer_busy
             && self.compacting.is_none()
     }
@@ -3006,11 +3005,18 @@ impl RunnerSupervisor {
     }
 
     fn finish_turn_delivery(&self, id: AgentId, epoch: u64) {
-        if let Some(slot) = lock(&self.inner.slots)
+        let swap = lock(&self.inner.slots)
             .get_mut(&id)
             .filter(|s| s.epoch == epoch)
-        {
-            slot.turns_in_flight -= 1;
+            .is_some_and(|slot| {
+                slot.turns_in_flight -= 1;
+                slot.swap_pending && slot.seen.is_resting()
+            });
+        // A swap that waited for this delivery: a failed delivery runs no
+        // turn, and the rest event of a short turn can come before this
+        // end. Neither sends another rest event (TER-524).
+        if swap {
+            self.take_pending_restart(id, epoch);
         }
     }
 
