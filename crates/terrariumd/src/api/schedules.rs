@@ -1404,14 +1404,71 @@ async fn wait_ready(state: &Shared, agent: AgentId, end: tokio::time::Instant) -
     false
 }
 
+/// Why [`wake_until_ready`] could not start the agent for its queued turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NotStarted {
+    NotReady,
+    Paused,
+    Parked,
+    Error,
+    Draining,
+    Held,
+    Disabled,
+    Gone,
+    Failed(String),
+}
+
+impl NotStarted {
+    /// The reason, for the run and the mail.
+    fn why(&self) -> String {
+        match self {
+            Self::NotReady => "it did not become ready".into(),
+            Self::Paused => "it is paused".into(),
+            Self::Parked => "it is a parked bound agent".into(),
+            Self::Error => "it is in error".into(),
+            Self::Draining => "the daemon drains for a self-update".into(),
+            Self::Held => "a quota or budget hold lasts".into(),
+            Self::Disabled => "its subscription is disabled".into(),
+            Self::Gone => "it no longer exists".into(),
+            Self::Failed(e) => e.clone(),
+        }
+    }
+
+    /// What the owner can do about it (TER-231): the fix of this reason,
+    /// not always `agent start`.
+    fn hint(&self, who: &str) -> String {
+        match self {
+            Self::NotReady => format!(
+                "For a time-critical turn, start it now (`terrarium agent start {who}`)."
+            ),
+            Self::Paused => format!(
+                "The unpause delivers it (`terrarium agent unpause {who}`)."
+            ),
+            Self::Parked => "It goes in when the bound object of the agent comes back \
+                 and the agent unparks."
+                .into(),
+            Self::Error | Self::Failed(_) => format!(
+                "Fix the error, then start the agent (`terrarium agent start {who}`)."
+            ),
+            Self::Draining => {
+                "It goes in when the new daemon wakes the agent: no action is needed.".into()
+            }
+            Self::Held => "It goes in when the hold ends (`terrarium usage`).".into(),
+            Self::Disabled => "Enabling the subscription delivers it \
+                 (`terrarium admin subscription enable <subscription>`)."
+                .into(),
+            Self::Gone => "Change the agent of the schedule or delete the schedule.".into(),
+        }
+    }
+}
+
 /// Wake an agent that has a queued turn until it is ready for it: at most
 /// [`WAKE_TRIES`] wakes in [`READY_WAIT`]. The wake gives it the queued
 /// turn. `Err` says why it does not start; the turn then stays queued for
 /// the agent's next wake.
-async fn wake_until_ready(state: &Shared, agent: AgentId) -> Result<(), String> {
+async fn wake_until_ready(state: &Shared, agent: AgentId) -> Result<(), NotStarted> {
     use crate::lifecycle::Woke;
     let end = tokio::time::Instant::now() + READY_WAIT;
-    let mut why = String::from("it did not become ready");
     for n in 0..WAKE_TRIES {
         if n > 0 {
             if tokio::time::Instant::now() + WAKE_PAUSE >= end {
@@ -1430,31 +1487,31 @@ async fn wake_until_ready(state: &Shared, agent: AgentId) -> Result<(), String> 
         } else {
             crate::lifecycle::wake(state, agent, "schedule").await
         };
-        why = match woke {
+        match woke {
             Woke::Started | Woke::Running | Woke::Busy => {
                 if wait_ready(state, agent, end).await {
                     return Ok(());
                 }
-                "it did not become ready".into()
             }
             // These last longer than a retry: the turn waits for them.
-            Woke::Paused => return Err("it is paused".into()),
-            Woke::Parked => return Err("it is a parked bound agent".into()),
-            Woke::Error => return Err("it is in error".into()),
-            Woke::Draining => return Err("the daemon drains for a self-update".into()),
-            Woke::Held => return Err("a quota or budget hold lasts".into()),
-            Woke::Disabled => return Err("its subscription is disabled".into()),
-            Woke::Gone => return Err("it no longer exists".into()),
-            Woke::Failed(e) => return Err(e),
-        };
+            Woke::Paused => return Err(NotStarted::Paused),
+            Woke::Parked => return Err(NotStarted::Parked),
+            Woke::Error => return Err(NotStarted::Error),
+            Woke::Draining => return Err(NotStarted::Draining),
+            Woke::Held => return Err(NotStarted::Held),
+            Woke::Disabled => return Err(NotStarted::Disabled),
+            Woke::Gone => return Err(NotStarted::Gone),
+            Woke::Failed(e) => return Err(NotStarted::Failed(e)),
+        }
     }
-    Err(why)
+    Err(NotStarted::NotReady)
 }
 
 /// Mail the owner of schedule `s` that its turn did not reach `who`: the
 /// `run_as` actor, the project inbox, or the operator for a system-owned
-/// schedule (TER-210: never a silent skip).
-async fn tell_owner(state: &Shared, s: &Schedule, who: &str, why: &str) {
+/// schedule (TER-210: never a silent skip). The mail says what fixes the
+/// reason (TER-231).
+async fn tell_owner(state: &Shared, s: &Schedule, who: &str, why: &NotStarted) {
     let (key, sid, run_as, owner, project) = (
         s.key(),
         s.id.clone(),
@@ -1462,7 +1519,16 @@ async fn tell_owner(state: &Shared, s: &Schedule, who: &str, why: &str) {
         s.owner,
         s.project.clone(),
     );
-    let (who, why) = (who.to_owned(), why.to_owned());
+    let queue = if *why == NotStarted::Gone {
+        String::from("The turn is not delivered.")
+    } else {
+        format!("The turn waits in the queue of {who} and goes in at its next wake.")
+    };
+    let body = format!(
+        "Schedule {key} ({sid}) could not start {who} for its turn: {}. {queue} {}",
+        why.why(),
+        why.hint(who)
+    );
     let label = schedules::run_label(&s.id);
     let sent = state
         .db
@@ -1482,11 +1548,7 @@ async fn tell_owner(state: &Shared, s: &Schedule, who: &str, why: &str) {
                     from: &Address::System,
                     to: &to,
                     subject: &format!("Schedule {key}: turn not delivered"),
-                    body: &format!(
-                        "Schedule {key} ({sid}) could not start {who} for its turn: {why}. \
-                         The turn waits in the queue of {who} and goes in at its next wake. \
-                         For a time-critical turn, act now (`terrarium agent start`)."
-                    ),
+                    body: &body,
                     thread: None,
                     in_reply_to: None,
                 },
@@ -1562,8 +1624,9 @@ async fn turn(
             json!({"agent": who, "started": true, "delivery": "queued",
                    "status_before": before}),
         ),
-        Err(why) => {
-            tell_owner(state, s, who, &why).await;
+        Err(not) => {
+            tell_owner(state, s, who, &not).await;
+            let why = not.why();
             Outcome::failed(
                 format!("failed: {who} did not start ({why}); the turn waits in its queue"),
                 format!("agent {who} did not start for the turn: {why}"),

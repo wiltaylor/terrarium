@@ -322,7 +322,7 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
           {field("text", "Text of the turn", <textarea rows={3} value={f().text} onInput={(e) => dlg.set("text", e.currentTarget.value)} />)}
           <label class="row small">
             <input type="checkbox" checked={f().startIfStopped} onChange={(e) => dlg.set("startIfStopped", e.currentTarget.checked)} />
-            start the agent when it is stopped
+            start the agent first, then type the turn (also ends a usage-limit hold; without it a stopped agent wakes for the queued turn)
           </label>
         </Show>
 
