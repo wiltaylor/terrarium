@@ -308,4 +308,4 @@ push vitest.json web-unit 7b3e8d0 --card "$CARD2"
 push jest.json api 7b3e8d0
 push node.tap node 7b3e8d0
 
-echo "done: open /p/$P/board/tests"
+echo "done: open /p/$P/tests"

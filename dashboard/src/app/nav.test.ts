@@ -300,7 +300,7 @@ describe("navigation", () => {
   it("redirects the old board tab paths to the project tabs in one hop (TER-507)", () => {
     expect(movedTo("/p/terrarium/board/tests")).toBe("/p/terrarium/tests");
     expect(movedTo("/p/terrarium/board/tests/")).toBe("/p/terrarium/tests");
-    // The daemon gives a test run the URL `/p/<project>/board/tests/<id>`.
+    // Old mail and comments link a test run as `/p/<project>/board/tests/<id>`.
     expect(movedTo("/p/terrarium/board/tests/01JBTRUN1")).toBe("/p/terrarium/tests/01JBTRUN1");
     expect(movedTo("/p/terrarium/board/schedules")).toBe("/p/terrarium/schedules");
     expect(movedTo("/p/my%20app/board/schedules/")).toBe("/p/my%20app/schedules");
