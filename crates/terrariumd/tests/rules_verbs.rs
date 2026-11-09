@@ -208,6 +208,11 @@ rule "own-step" {
   when "data.n" { eq = "7" }
   group_status { key = "batch" step = "{{event.data.step}}" state = "failed" }
 }
+rule "other-group-step" {
+  on = ["test.ping"]
+  when "data.n" { eq = "8" }
+  group_status { key = "batch" step = "{{group.eta_at}}" state = "failed" }
+}
 "#;
 
 const VERSION_CUT: &str = r#"
@@ -798,6 +803,49 @@ async fn group_status_fails_steps_the_rule_itself_left_empty() {
             fail[0]
         );
     }
+}
+
+/// TER-437 (review of TER-419, minor 2): the other half of the empty
+/// `{{group.*}}` step noop. The run's card is in one group and the key's
+/// open group is another: the placeholder looks at the card's own group
+/// (`eta_at`, which it does not have), so the step renders empty while
+/// the card does have a group. The action skips, as when the card has no
+/// group at all, instead of failing the run.
+#[tokio::test]
+async fn group_status_skips_an_empty_step_when_the_cards_group_is_another() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["group"]["key"], "batch");
+    // The card leaves `batch` (which stays open) and joins `other`, which
+    // has no eta: `{{group.eta_at}}` has no value there.
+    ping(&td, "p", &a, 3).await;
+    settle(&td).await;
+    ping(&td, "p", &a, 2).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["group"]["key"], "other");
+    let seq = ping(&td, "p", &a, 8).await;
+    settle(&td).await;
+    let fail: Vec<Value> = runs(&td, "p")
+        .await
+        .into_iter()
+        .filter(|r| r["event_seq"] == seq)
+        .collect();
+    assert_eq!(fail.len(), 1, "{fail:#?}");
+    assert_eq!(fail[0]["rule"], "other-group-step", "{}", fail[0]);
+    assert_eq!(fail[0]["state"], "noop", "{}", fail[0]);
+    assert!(fail[0]["reason"].is_null(), "{}", fail[0]);
+    assert_eq!(
+        fail[0]["steps"][0]["detail"],
+        json!({"key": "batch", "reason": "the step placeholder has no value"}),
+        "{}",
+        fail[0]
+    );
+    // A noop marks no step: the key's group `batch` is unchanged.
+    assert_eq!(fail[0]["steps"][0]["changed"], false, "{}", fail[0]);
 }
 
 async fn new_card(td: &TestDaemon, project: &str, body: Value) -> String {
