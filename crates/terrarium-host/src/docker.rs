@@ -653,7 +653,10 @@ mod tests {
             std::path::Path::new("/nonexistent"),
         )
         .unwrap();
-        assert_eq!(file_env(&plan)["NVIDIA_VISIBLE_DEVICES"], "GPU-abcd,GPU-1234");
+        assert_eq!(
+            file_env(&plan)["NVIDIA_VISIBLE_DEVICES"],
+            "GPU-abcd,GPU-1234"
+        );
         assert!(
             plan.exec
                 .args
@@ -896,7 +899,10 @@ mod tests {
             "docker",
         )
         .unwrap();
-        assert_eq!(args(&plan), "exec -i --env-file <env> -e KEY -e LONG c1 sh -c id");
+        assert_eq!(
+            args(&plan),
+            "exec -i --env-file <env> -e KEY -e LONG c1 sh -c id"
+        );
         assert_eq!(plan.exec.env["KEY"], "a\nb");
         assert_eq!(plan.exec.env["LONG"], long);
         assert_eq!(file_env(&plan).len(), 1);
@@ -929,7 +935,9 @@ done
         .unwrap();
         // Run the fake CLI with `sh -c`, so no executable file is written.
         plan.exec.program = "sh".into();
-        plan.exec.args.splice(0..0, ["-c".into(), FAKE_DOCKER.into(), "docker".into()]);
+        plan.exec
+            .args
+            .splice(0..0, ["-c".into(), FAKE_DOCKER.into(), "docker".into()]);
         plan.exec.capture_stdout = true;
         let path = plan.exec.private_file.as_ref().unwrap().path().to_owned();
         let ob = std::sync::Arc::new(crate::outbox::Outbox::new(1, 1 << 20));
