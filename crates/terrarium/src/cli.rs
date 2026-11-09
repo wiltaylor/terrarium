@@ -1319,7 +1319,7 @@ pub enum CardCmd {
     /// Assign to self and move to the working column
     Claim {
         id: String,
-        /// Set the ETA too: a duration such as 45m, 2h30m, or 1d
+        /// Set the ETA too, for example 25m. Units: s, m, h, d. At most 30 days
         #[arg(long, value_name = "DURATION|TIME")]
         eta: Option<String>,
     },
@@ -1393,7 +1393,7 @@ pub enum CardCmd {
     /// another column clears it
     Eta {
         id: String,
-        /// A duration from now (45m, 2h30m, 1d) or an RFC 3339 time. For a
+        /// A duration from now (25m, units s/m/h/d, at most 30 days) or an RFC 3339 time. For a
         /// card with a queued or running job, a duration is the job's
         /// planned duration: the ETA is the job start plus it
         #[arg(required_unless_present = "clear", conflicts_with = "clear")]

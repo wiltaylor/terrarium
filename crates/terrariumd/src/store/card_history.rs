@@ -19,6 +19,42 @@ pub struct WorkSample {
     pub labels: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorkHistory {
+    pub n: usize,
+    pub median_ms: Option<f64>,
+    pub p70_ms: Option<f64>,
+}
+
+/// The same latest 30 distinct cards and type matching as worker calibration.
+fn work_history(samples: &[WorkSample], labels: &[String]) -> WorkHistory {
+    let mut seen = std::collections::HashSet::new();
+    let mut values: Vec<_> = samples
+        .iter()
+        .filter(|s| seen.insert(&s.card))
+        .filter(|s| {
+            labels
+                .iter()
+                .any(|l| l.starts_with("type:") && s.labels.contains(l))
+        })
+        .take(30)
+        .map(|s| s.actual_ms)
+        .collect();
+    values.sort_by(f64::total_cmp);
+    let n = values.len();
+    let median_ms = (n > 0).then(|| {
+        if n % 2 == 0 {
+            (values[n / 2 - 1] + values[n / 2]) / 2.0
+        } else {
+            values[n / 2]
+        }
+    });
+    WorkHistory {
+        n,
+        median_ms,
+        p70_ms: p70(values, 1),
+    }
+}
 const WORK_SAMPLES_SQL: &str = "WITH recent AS (
            SELECT DISTINCT card FROM (
              SELECT card FROM events WHERE project = ?1
@@ -152,9 +188,9 @@ pub fn work_accuracy(samples: &[WorkSample]) -> WorkAccuracy {
     }
 }
 
-/// Nearest-rank p70. Five completed cards are required for each history.
-fn p70(mut values: Vec<f64>) -> Option<f64> {
-    if values.len() < 5 {
+/// Nearest-rank p70 with the caller's minimum sample size.
+fn p70(mut values: Vec<f64>, minimum: usize) -> Option<f64> {
+    if values.is_empty() || values.len() < minimum {
         return None;
     }
     values.sort_by(f64::total_cmp);
@@ -163,24 +199,30 @@ fn p70(mut values: Vec<f64>) -> Option<f64> {
 
 pub fn calibrated_ms(samples: &[WorkSample], labels: &[String], guess: Option<f64>) -> Option<f64> {
     let mut seen = std::collections::HashSet::new();
-    let ratios = p70(samples
-        .iter()
-        .filter(|s| seen.insert(&s.card))
-        .take(30)
-        .map(|s| s.actual_ms / s.guess_ms)
-        .collect());
+    let ratios = p70(
+        samples
+            .iter()
+            .filter(|s| seen.insert(&s.card))
+            .take(30)
+            .map(|s| s.actual_ms / s.guess_ms)
+            .collect(),
+        5,
+    );
     seen.clear();
-    let actual = p70(samples
-        .iter()
-        .filter(|s| seen.insert(&s.card))
-        .filter(|s| {
-            labels
-                .iter()
-                .any(|l| l.starts_with("type:") && s.labels.contains(l))
-        })
-        .take(30)
-        .map(|s| s.actual_ms)
-        .collect());
+    let actual = p70(
+        samples
+            .iter()
+            .filter(|s| seen.insert(&s.card))
+            .filter(|s| {
+                labels
+                    .iter()
+                    .any(|l| l.starts_with("type:") && s.labels.contains(l))
+            })
+            .take(30)
+            .map(|s| s.actual_ms)
+            .collect(),
+        5,
+    );
     match guess {
         Some(guess) if guess.is_finite() && guess > 0.0 => Some((guess * ratios? * actual?).sqrt()),
         Some(_) => None,
@@ -244,6 +286,7 @@ pub struct ReviewEstimates {
     single_card: Option<String>,
     review: std::collections::HashMap<String, Option<Duration>>,
     work: std::collections::HashMap<String, Vec<WorkSample>>,
+    work_failed: std::collections::HashSet<String>,
     entries: std::collections::HashMap<String, std::collections::HashMap<String, (String, String)>>,
 }
 
@@ -261,6 +304,37 @@ const COLUMN_ENTRIES_SQL: &str = "
       AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.change') END = 'moved'";
 
 impl ReviewEstimates {
+    fn load_work(&mut self, conn: &Connection, project: &str) -> bool {
+        if self.work_failed.contains(project) {
+            return false;
+        }
+        if !self.work.contains_key(project) {
+            match work_samples(conn, project) {
+                Ok(samples) => {
+                    self.work.insert(project.to_owned(), samples);
+                }
+                Err(error) => {
+                    tracing::warn!(%project, %error, "cannot load similar-card history");
+                    self.work_failed.insert(project.to_owned());
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    pub fn history(
+        &mut self,
+        conn: &Connection,
+        project: &str,
+        labels: &[String],
+    ) -> Option<WorkHistory> {
+        if !self.load_work(conn, project) {
+            return None;
+        }
+        Some(work_history(&self.work[project], labels))
+    }
+
     pub fn for_card(card: &str) -> Self {
         Self {
             single_card: Some(card.to_owned()),
@@ -316,9 +390,8 @@ impl ReviewEstimates {
         labels: &[String],
         guess: Option<f64>,
     ) -> ApiResult<Option<f64>> {
-        if !self.work.contains_key(project) {
-            self.work
-                .insert(project.to_owned(), work_samples(conn, project)?);
+        if !self.load_work(conn, project) {
+            return Ok(None);
         }
         Ok(self
             .work
@@ -373,6 +446,33 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn similar_history_uses_latest_distinct_same_type_cards() {
+        let samples: Vec<_> = (1..=40)
+            .map(|n| WorkSample {
+                card: n.to_string(),
+                start_seq: n,
+                end_seq: n + 1,
+                actual_ms: n as f64,
+                guess_ms: 100.0,
+                labels: vec!["type:small".into()],
+            })
+            .collect();
+        let labels = vec!["type:small".into()];
+        let h = work_history(&samples, &labels);
+        assert_eq!(h.n, 30);
+        assert_eq!(h.median_ms, Some(15.5));
+        assert_eq!(h.p70_ms, Some(21.0));
+        let mut repeats = vec![samples[0].clone(); 5];
+        repeats.push(samples[1].clone());
+        assert_eq!(work_history(&repeats, &labels).n, 2);
+        let empty = work_history(&samples, &["type:impl".into()]);
+        assert_eq!(empty.n, 0);
+        assert_eq!(empty.median_ms, None);
+        assert_eq!(empty.p70_ms, None);
+        assert_eq!(work_history(&samples[..1], &labels).median_ms, Some(1.0));
+    }
 
     fn db() -> Connection {
         let c = Connection::open_in_memory().unwrap();
