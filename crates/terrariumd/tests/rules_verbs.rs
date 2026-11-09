@@ -542,6 +542,11 @@ async fn version_cut_default_pack_threshold_and_lead_notification() {
             .status,
         200
     );
+    // With six cards waiting the version-cut timer is due at once, so an
+    // engine tick between the sixth move and its planning would cut first
+    // and the move run would find nothing (TER-523). Hold the timers: only
+    // the move can cut here.
+    state(&td).rule_timers.hold(true);
     let mut members = Vec::new();
     for n in 0..5 {
         members.push(new_card(&td,"p",json!({"title":format!("member {n}"),"column":"accepted","labels":["version:vnext"]})).await);

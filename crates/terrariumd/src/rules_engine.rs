@@ -90,6 +90,24 @@ const TICK: Duration = Duration::from_secs(10);
 /// The kind of the event that the engine writes when the wait of a batch
 /// rule ends (`job_queue` with `max_wait_minutes`, TER-172).
 pub const TIMER_KIND: &str = "rule.timer";
+
+/// The hold of the engine timers (`AppState::rule_timers`): while a test
+/// holds it, the engine writes no timer event ([`fire_timers`]), so only
+/// the planned events run the rules. The group expiry still runs.
+#[derive(Debug, Default)]
+pub struct TimerHold(std::sync::atomic::AtomicBool);
+
+impl TimerHold {
+    /// Whether the timers are held.
+    pub fn held(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Tests: hold the timers (`true`) or let them fire again (`false`).
+    pub fn hold(&self, on: bool) {
+        self.0.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 /// The actor of a timer event: the engine.
 const TIMER_ACTOR: &str = "system";
 
@@ -1746,7 +1764,10 @@ async fn drive_pass(state: &Shared, cache: &mut Cache, lanes: &mut Lanes) -> Api
             {
                 warn!("the rule engine cannot close expired groups: {e}");
             }
-            if let Err(e) = fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await {
+            if !state.rule_timers.held()
+                && let Err(e) =
+                    fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await
+            {
                 warn!("the rule engine cannot check the timers: {e}");
             }
         }
