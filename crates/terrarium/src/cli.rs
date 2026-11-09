@@ -4409,6 +4409,14 @@ pub struct AdminTargetEditArgs {
     /// `true` or `false`: take a snapshot before the first task
     #[arg(long, value_name = "BOOL")]
     pub snapshot_before_task: Option<bool>,
+    /// The absolute parent of card-agent build roots
+    /// (`<work_root>/<project>/<agent>`); the default is `/src/terrarium`,
+    /// else `~/.terrarium-work` when the agent user cannot create it
+    #[arg(long, value_name = "PATH", conflicts_with = "clear_work_root")]
+    pub work_root: Option<String>,
+    /// Remove `work_root`: use the default again
+    #[arg(long)]
+    pub clear_work_root: bool,
     /// Set these limits; the other limits stay
     #[command(flatten)]
     pub limits: LimitArgs,
