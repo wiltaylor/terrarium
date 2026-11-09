@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
-// The project tree with two projects: each project row has a health dot and
-// a cog that links the project settings screen and is not a Tab stop of the
-// tree. The Agents and Repos nodes are not links, and each has a "+".
+// The project tree with two projects: one linked row per project, with a
+// health dot, a blocked count, and a settings cog that is not a Tab stop.
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
@@ -29,14 +28,8 @@ vi.mock("../stores", () => ({
     select: () => {},
   },
   agents: {
-    byId: () => undefined,
+    byId: (id: string) => agentList().find((a) => a.id === id || `${a.project}/${a.name}` === id),
     inProject: (p: string) => agentList().filter((a) => a.project === p),
-  },
-  repos: {
-    load: () => {},
-    loaded: () => true,
-    inProject: (p: string) => (p === "alpha" ? [{ id: "r1", project: "alpha", name: "infra", url: "https://x/infra.git" }] : []),
-    added: () => {},
   },
 }));
 
@@ -48,8 +41,6 @@ afterEach(() => {
   setAgentList([]);
   expanded.close("/bookmarks");
   for (const b of bookmarks.items()) bookmarks.remove(b.href);
-  // The open set is global: each test starts with its nodes closed.
-  for (const n of expanded.list()) if (/\/(agents|repos)$/.test(n)) expanded.close(n);
   dispose?.();
   document.body.innerHTML = "";
 });
@@ -73,6 +64,8 @@ const mount = (path: string) => {
   return el;
 };
 
+const projectRow = (el: HTMLElement, name: string) => el.querySelector<HTMLElement>(`[role="treeitem"][data-key="p:${name}"]`)!;
+
 describe("ProjectTree", () => {
   it("navigates the Bookmarks node and wiki links with arrow keys", () => {
     bookmarks.add("Wiki", "/p/alpha/knowledge/wiki/a%20b");
@@ -93,6 +86,45 @@ describe("ProjectTree", () => {
     key(row, "ArrowLeft");
     expect(document.activeElement?.getAttribute("data-key")).toBe("root");
   });
+
+  it("shows one linked row per project and no page, agent, or repo sub rows", () => {
+    const el = mount("/p/alpha/board");
+    const rows = Array.from(el.querySelectorAll<HTMLElement>('[role="treeitem"][data-key^="p:"]'));
+    expect(rows.map((r) => r.dataset.key)).toEqual(["p:alpha", "p:my app"]);
+    expect(rows.map((r) => r.querySelector("a.tree-project-link")?.getAttribute("href"))).toEqual(["/p/alpha", "/p/my%20app"]);
+    for (const row of rows) {
+      expect(row.hasAttribute("aria-expanded")).toBe(false);
+      expect(row.querySelector(".tree-chevron")).toBeNull();
+      expect(row.querySelector("a.tree-project-link")?.tabIndex).toBe(-1);
+    }
+    expect(el.querySelector('[data-key^="i:"]')).toBeNull();
+    expect(el.querySelector('[data-key^="pa:"]')).toBeNull();
+    expect(el.querySelector('[data-key^="pr:"]')).toBeNull();
+    expect(el.querySelector(".tree-agent, .tree-repo")).toBeNull();
+  });
+
+  it("marks the project row on the project index and every deep project path", () => {
+    for (const path of ["/p/alpha", "/p/alpha/board/schedules", "/p/alpha/knowledge/wiki/a/b", "/p/alpha/repos/infra", "/p/alpha/settings/secrets"]) {
+      const el = mount(path);
+      expect(projectRow(el, "alpha").getAttribute("aria-selected")).toBe("true");
+      expect(projectRow(el, "alpha").querySelector(".tree-row")?.classList.contains("current")).toBe(true);
+      expect(projectRow(el, "alpha").querySelector("a.tree-project-link")?.getAttribute("aria-current")).toBe("page");
+      expect(projectRow(el, "my app").getAttribute("aria-selected")).toBe("false");
+      expect(projectRow(el, "my app").querySelector("a.tree-project-link")?.hasAttribute("aria-current")).toBe(false);
+      dispose?.();
+      document.body.innerHTML = "";
+    }
+  });
+
+  it("marks the project row on a page of one of its agents", () => {
+    setAgentList([{ id: "a1", project: "alpha", name: "worker", status: "idle" }]);
+    const el = mount("/agents/a1");
+    expect(projectRow(el, "alpha").getAttribute("aria-selected")).toBe("true");
+    expect(projectRow(el, "alpha").querySelector("a.tree-project-link")?.getAttribute("aria-current")).toBe("page");
+    expect(projectRow(el, "my app").getAttribute("aria-selected")).toBe("false");
+    expect(el.querySelector('[data-key^="pa:"]')).toBeNull();
+  });
+
   it("has a cog on each project row that links the project settings screen", () => {
     const el = mount("/projects");
     const cogs = Array.from(el.querySelectorAll<HTMLAnchorElement>('a.tree-cog[aria-label^="Settings of "]'));
@@ -117,40 +149,19 @@ describe("ProjectTree", () => {
     }
   });
 
-  it("has no Templates, Secrets, or Settings row under an open project", () => {
-    const el = mount("/p/alpha/board");
-    const rows = Array.from(el.querySelectorAll<HTMLElement>('[role="group"] a[role="treeitem"]')).map((a) => a.textContent);
-    expect(rows).toContain("Board");
-    for (const gone of ["Templates", "Secrets", "Settings & repos"]) expect(rows).not.toContain(gone);
-  });
-
-  it("shows the pages of an open project in order, with the Agents node last", () => {
-    const el = mount("/p/alpha/board");
-    const group = el.querySelector<HTMLElement>('[data-project="alpha"] > [role="group"]')!;
-    const keys = Array.from(group.querySelectorAll<HTMLElement>('[role="treeitem"][data-key^="i:"]')).map((r) => r.dataset.key);
-    expect(keys).toEqual(["dashboard", "pipelines", "calendar", "board", "repos", "logs", "knowledge", "agents"].map((p) => `i:alpha/${p}`));
-  });
-
-  it("keeps the Board row active on the Schedules tab of the board", () => {
-    const el = mount("/p/alpha/board/schedules");
-    const active = Array.from(el.querySelectorAll<HTMLElement>('[role="treeitem"][data-key^="i:"].active')).map((r) => r.dataset.key);
-    expect(active).toEqual(["i:alpha/board"]);
-  });
-
   it("has a health dot on each project row that follows the agents, with the counts in the label", () => {
     setAgentList([
       { id: "1", project: "alpha", name: "a", status: "idle" },
       { id: "2", project: "alpha", name: "b", status: "working" },
     ]);
     const el = mount("/projects");
-    const row = (p: string) => el.querySelector<HTMLElement>(`[role="treeitem"][data-project="${p}"][data-key^="p:"]`)!;
-    const dot = (p: string) => row(p).querySelector<HTMLElement>(":scope > .tree-row > .project-dot")!;
+    const dot = (p: string) => projectRow(el, p).querySelector<HTMLElement>(":scope > .tree-row > .project-dot")!;
     expect(dot("alpha").className).toBe("project-dot health-yellow");
     expect(dot("alpha").getAttribute("aria-hidden")).toBe("true");
-    expect(row("alpha").getAttribute("aria-label")).toBe("alpha: 1 working, 1 idle");
-    expect(row("alpha").querySelector(".tree-name")?.getAttribute("title")).toBe("alpha: 1 working, 1 idle");
+    expect(projectRow(el, "alpha").getAttribute("aria-label")).toBe("alpha: 1 working, 1 idle");
+    expect(projectRow(el, "alpha").querySelector(".tree-name")?.getAttribute("title")).toBe("alpha: 1 working, 1 idle");
     expect(dot("my app").className).toBe("project-dot health-none");
-    expect(row("my app").getAttribute("aria-label")).toBe("my app: no agents");
+    expect(projectRow(el, "my app").getAttribute("aria-label")).toBe("my app: no agents");
 
     // A live change: one agent goes blocked, and the other ends its turn.
     setAgentList([
@@ -159,65 +170,9 @@ describe("ProjectTree", () => {
       { id: "3", project: "my app", name: "c", status: "idle" },
     ]);
     expect(dot("alpha").className).toBe("project-dot health-red");
-    expect(row("alpha").getAttribute("aria-label")).toBe("alpha: 1 blocked, 1 idle");
+    expect(projectRow(el, "alpha").getAttribute("aria-label")).toBe("alpha: 1 blocked, 1 idle");
     expect(dot("my app").className).toBe("project-dot health-green");
     // The blocked count chip stays.
-    expect(row("alpha").querySelector(".nav-count.warn")?.textContent).toBe("1");
-  });
-
-  it("makes the Agents and Repos nodes rows that only toggle, not links", () => {
-    const el = mount("/p/alpha/board");
-    for (const path of ["agents", "repos"]) {
-      const row = el.querySelector<HTMLElement>(`[data-key="i:alpha/${path}"]`)!;
-      expect(row.tagName).toBe("DIV");
-      expect(row.getAttribute("role")).toBe("treeitem");
-      expect(row.hasAttribute("href")).toBe(false);
-      expect(row.closest("a")).toBeNull();
-      expect(row.getAttribute("aria-expanded")).toBe("false");
-      row.click();
-      expect(row.getAttribute("aria-expanded")).toBe("true");
-      row.click();
-      expect(row.getAttribute("aria-expanded")).toBe("false");
-    }
-    expect(el.querySelector('a[href="/p/alpha/agents"]')).toBeNull();
-    expect(el.querySelector('a[href="/p/alpha/repos"]')).toBeNull();
-  });
-
-  it("shows the repos of an open Repos node as links, and marks the repo of the URL", () => {
-    const el = mount("/p/alpha/repos/infra");
-    const node = el.querySelector<HTMLElement>('[data-key="i:alpha/repos"]')!;
-    expect(node.getAttribute("aria-expanded")).toBe("true");
-    const repo = el.querySelector<HTMLAnchorElement>('[data-key="pr:alpha/infra"]')!;
-    expect(repo.getAttribute("href")).toBe("/p/alpha/repos/infra");
-    expect(repo.getAttribute("role")).toBe("treeitem");
-    expect(repo.getAttribute("aria-current")).toBe("page");
-    expect(repo.textContent).toBe("infra");
-  });
-
-  it("has a + on the Agents and Repos nodes that is not a Tab stop and does not toggle the node", () => {
-    const el = mount("/p/alpha/board");
-    const add = Array.from(el.querySelectorAll<HTMLButtonElement>('[data-project="alpha"] button.tree-add'));
-    expect(add.map((b) => b.getAttribute("aria-label"))).toEqual(["Add a repo to alpha", "Add an agent to alpha"]);
-    for (const b of add) {
-      expect(b.tabIndex).toBe(-1);
-      expect(b.title).toBe(`${b.getAttribute("aria-label")} (+)`);
-      expect(b.closest('[role="treeitem"]')?.getAttribute("aria-keyshortcuts")).toBe("+");
-    }
-    const repos = el.querySelector<HTMLElement>('[data-key="i:alpha/repos"]')!;
-    add[0]!.click();
-    expect(repos.getAttribute("aria-expanded")).toBe("false");
-    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
-    expect(dialog.getAttribute("aria-label")).toBe("Add a repo to alpha");
-    expect(dialog.querySelector('form[aria-label="Add a repo"]')).not.toBeNull();
-  });
-
-  it("opens the add dialog of a node with the + key", () => {
-    const el = mount("/p/alpha/board");
-    const repos = el.querySelector<HTMLElement>('[data-key="i:alpha/repos"]')!;
-    repos.dispatchEvent(new KeyboardEvent("keydown", { key: "+", bubbles: true }));
-    expect(document.querySelector('[role="dialog"]')?.getAttribute("aria-label")).toBe("Add a repo to alpha");
-    // Enter toggles the node; it does not go to a page.
-    repos.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    expect(repos.getAttribute("aria-expanded")).toBe("true");
+    expect(projectRow(el, "alpha").querySelector(".nav-count.warn")?.textContent).toBe("1");
   });
 });
