@@ -2345,7 +2345,9 @@ impl RunnerSupervisor {
         let agent = {
             let mut slots = lock(&self.inner.slots);
             match slots.get_mut(&id).filter(|s| s.epoch == epoch) {
-                Some(slot) if slot.swap_pending => {
+                // Out of a turn only: a runner `blocked` is in a turn (a
+                // question on screen, a stalled tool call).
+                Some(slot) if slot.swap_pending && slot.seen.is_resting() => {
                     slot.swap_pending = false;
                     slot.agent.clone()
                 }
@@ -2691,13 +2693,11 @@ impl RunnerSupervisor {
                 ..
             }
         );
-        // Not in a turn: a swap that waited can restart the harness now.
+        // Not in a turn: a swap that waited can restart the harness now. A
+        // runner `blocked` is still in its turn.
         let settled = matches!(
             rec.event,
-            Event::StatusChanged {
-                to: AgentStatus::Idle | AgentStatus::Waiting | AgentStatus::Blocked,
-                ..
-            }
+            Event::StatusChanged { to, .. } if to.is_resting()
         );
         match self.held(id) {
             // A held agent is `blocked`, not `idle`.
@@ -5244,11 +5244,8 @@ impl Supervisor for RunnerSupervisor {
                 // A runner of another build (after a hot swap): it
                 // restarts with resume when the turn ends (R4).
                 slot.upgrade_pending = upgrade;
-                (slot.swap_pending || slot.upgrade_pending)
-                    && matches!(
-                        slot.seen,
-                        AgentStatus::Idle | AgentStatus::Waiting | AgentStatus::Blocked
-                    )
+                // Out of a turn: a runner `blocked` is in one.
+                (slot.swap_pending || slot.upgrade_pending) && slot.seen.is_resting()
             } else {
                 false
             };
@@ -5313,9 +5310,10 @@ impl Supervisor for RunnerSupervisor {
                             Plan::Live
                         } else {
                             slot.agent = agent.clone();
-                            let busy =
-                                matches!(slot.seen, AgentStatus::Working | AgentStatus::Starting)
-                                    || slot.runner.is_none();
+                            // In a turn unless the runner rests: a runner
+                            // `blocked` has a question on screen or a
+                            // stalled tool call in its turn.
+                            let busy = !slot.seen.is_resting() || slot.runner.is_none();
                             if busy {
                                 slot.swap_pending = true;
                                 Plan::Later
