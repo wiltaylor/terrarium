@@ -172,9 +172,13 @@ impl UsageFilter {
     }
 }
 
-pub fn totals(conn: &Connection, f: &UsageFilter) -> ApiResult<Totals> {
+fn totals_sql(f: &UsageFilter) -> (String, Vec<String>) {
     let (filter, args) = f.sql();
-    let sql = format!("SELECT {SUMS} FROM usage_samples{filter}");
+    (format!("SELECT {SUMS} FROM usage_samples{filter}"), args)
+}
+
+pub fn totals(conn: &Connection, f: &UsageFilter) -> ApiResult<Totals> {
+    let (sql, args) = totals_sql(f);
     Ok(conn.query_row(&sql, params_from_iter(args), totals_row)?)
 }
 
@@ -458,6 +462,41 @@ pub fn last_turn_seq(conn: &Connection, agent: &str) -> ApiResult<Option<i64>> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_card_totals_search_the_card_time_index_after_analyze() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE usage_samples(id INTEGER PRIMARY KEY, card_id TEXT, at TEXT,
+            agent TEXT, input_tokens INTEGER, output_tokens INTEGER, cache_read INTEGER, cache_write INTEGER, turn_seq INTEGER);
+            CREATE INDEX usage_samples_card ON usage_samples(card_id, at);
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+            INSERT INTO usage_samples SELECT x, 'P-'||(x%1000), '2026-11-08T00:00:00Z', 'worker', 1, 0, 0, 0, x FROM n;
+            ANALYZE;").unwrap();
+        for since in [None, Some("2026-11-01T00:00:00Z".to_owned())] {
+            let filter = UsageFilter {
+                card: Some("P-42".into()),
+                since,
+                ..Default::default()
+            };
+            let (sql, args) = totals_sql(&filter);
+            let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let plans = q
+                .query_map(params_from_iter(args), |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(plans.iter().any(|p| p.contains("SEARCH usage_samples") && p.contains("usage_samples_card")), "{plans:?}");
+            assert!(
+                plans.iter().all(|p| !p.contains("SCAN usage_samples")),
+                "{plans:?}"
+            );
+            let total = totals(&c, &filter).unwrap();
+            assert_eq!(
+                (total.messages, total.turns, total.tokens()),
+                (100, 100, 100)
+            );
+        }
+    }
     use crate::db::Db;
     use crate::events::EventHub;
 

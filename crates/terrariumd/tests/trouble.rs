@@ -17,10 +17,7 @@ async fn setup() -> (TestDaemon, String, String, String) {
     let lead = id(&td
         .agent("p", "lead", json!({"roles": ["project_admin"]}))
         .await);
-    // These tests exercise trouble notices, not the separate card reminder.
-    let worker = id(&td
-        .agent("p", "worker", json!({"card_reminder": false}))
-        .await);
+    let worker = id(&td.agent("p", "worker", json!({})).await);
     let card = id(td
         .post_as(
             &worker,
@@ -82,14 +79,14 @@ async fn notice_is_once_across_ticks_resolution_recurrence_and_restart() {
     terrariumd::trouble::pass(&state(&td)).await;
     assert_eq!(usage(&td, &card).await["signals"], json!(["eta_overdue"]));
     assert_eq!(notices(&td, &lead).await, 1);
-    assert_eq!(notices(&td, &worker).await, 1);
+    assert_eq!(notices(&td, &worker).await, 0);
     eta(&td, &card, false).await;
     assert_signals(&td, &card, json!([])).await;
     td.boot(None, None).await;
     eta(&td, &card, true).await;
     assert_signals(&td, &card, json!(["eta_overdue"])).await;
     assert_eq!(notices(&td, &lead).await, 1);
-    assert_eq!(notices(&td, &worker).await, 1);
+    assert_eq!(notices(&td, &worker).await, 0);
     assert_eq!(
         td.get("/api/mail?to=operator")
             .await
@@ -336,12 +333,6 @@ async fn review_wait_marks_and_clears_on_return_to_work() {
 async fn real_claim_status_and_wait_events_drive_the_working_clock() {
     use std::time::Duration;
     let (td, _, worker, card) = setup().await;
-    td.patch(
-        &format!("/api/agents/{worker}"),
-        json!({"card_reminder": false}),
-    )
-    .await
-    .ok();
     td.post_empty(&format!("/api/agents/{worker}/start"))
         .await
         .ok();
@@ -388,9 +379,7 @@ async fn lead_assigned_card_is_monitored_without_a_claimed_event() {
     let lead = id(&td
         .agent("p", "lead", json!({"roles": ["project_admin"]}))
         .await);
-    let worker = id(&td
-        .agent("p", "worker", json!({"card_reminder": false}))
-        .await);
+    let worker = id(&td.agent("p", "worker", json!({})).await);
     td.post_empty(&format!("/api/agents/{worker}/start"))
         .await
         .ok();
@@ -444,9 +433,7 @@ async fn research_card_starts_its_clock_and_signals_without_working_entry() {
     let lead = id(&td
         .agent("p", "lead", json!({"roles":["project_admin"]}))
         .await);
-    let worker = id(&td
-        .agent("p", "worker", json!({"card_reminder":false}))
-        .await);
+    let worker = id(&td.agent("p", "worker", json!({})).await);
     td.post_empty(&format!("/api/agents/{worker}/start"))
         .await
         .ok();
@@ -466,5 +453,83 @@ async fn research_card_starts_its_clock_and_signals_without_working_entry() {
     assert!(usage(&td, &card).await["working_seconds"].as_u64().unwrap() >= 1);
     eta(&td, &card, true).await;
     assert_signals(&td, &card, json!(["eta_overdue"])).await;
+    assert_eq!(notices(&td, &lead).await, 1);
+}
+
+#[tokio::test]
+async fn passed_eta_has_one_worker_reminder_and_only_a_lead_trouble_mail() {
+    use std::time::{Duration, Instant};
+    use terrarium_core::config::{CompactMaxAge, IdleStop};
+    let (td, lead, worker, card) = setup().await;
+    let s = state(&td);
+    s.lifecycle.reminders.set_default(true);
+    s.lifecycle.set_tuning(terrariumd::lifecycle::Tuning {
+        idle_stop: IdleStop::Off,
+        tick: Duration::from_millis(20),
+        compact_on_idle: false,
+        compact_max_age: CompactMaxAge::Off,
+        compact_wait: Duration::from_secs(5),
+    });
+    td.post_empty(&format!("/api/agents/{worker}/start"))
+        .await
+        .ok();
+    td.wait_status(&worker, "idle").await;
+    eta(&td, &card, true).await;
+    assert_signals(&td, &card, json!(["eta_overdue"])).await;
+    assert_eq!(notices(&td, &worker).await, 0);
+    td.post(
+        &format!("/api/agents/{worker}/send"),
+        json!({"text":"work"}),
+    )
+    .await
+    .ok();
+    let aid = worker.parse().unwrap();
+    let started = Instant::now();
+    loop {
+        let reminders: Vec<_> = td
+            .sup
+            .prompts(aid)
+            .into_iter()
+            .filter(|p| p.starts_with("[System:card]"))
+            .collect();
+        if !reminders.is_empty() {
+            assert_eq!(reminders.len(), 1);
+            assert!(reminders[0].contains("ETA has passed"));
+            break;
+        }
+        assert!(
+            started.elapsed() < crate::common::WAIT,
+            "ETA reminder did not arrive"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    td.wait_status(&worker, "idle").await;
+    terrariumd::trouble::pass(&s).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        td.sup
+            .prompts(aid)
+            .iter()
+            .filter(|p| p.starts_with("[System:card]"))
+            .count(),
+        1
+    );
+    assert_eq!(notices(&td, &worker).await, 0);
+    assert_eq!(notices(&td, &lead).await, 1);
+    assert_eq!(usage(&td, &card).await["signals"], json!(["eta_overdue"]));
+}
+
+#[tokio::test]
+async fn passed_eta_still_mails_worker_when_reminders_are_disabled() {
+    let (td, lead, worker, card) = setup().await;
+    td.patch(
+        &format!("/api/agents/{worker}"),
+        json!({"card_reminder":false}),
+    )
+    .await
+    .ok();
+    eta(&td, &card, true).await;
+    assert_signals(&td, &card, json!(["eta_overdue"])).await;
+    assert_eq!(notices(&td, &worker).await, 1);
     assert_eq!(notices(&td, &lead).await, 1);
 }

@@ -322,12 +322,12 @@ fn facts(card: &str, events: &[Event], now: DateTime<Utc>) -> Facts {
 
 /// Only linked runs uploaded by this card's worker count. Different
 /// suite names are independent. A green/empty run breaks its red streak.
+const VALIDATION_SQL: &str = "SELECT r.name, r.commit_sha, r.failed + r.errored
+    FROM test_run_cards l INDEXED BY test_run_cards_card CROSS JOIN test_runs r ON r.pk = l.run
+    WHERE l.card = ?1 AND r.created_by = ?2 ORDER BY l.run DESC LIMIT 128";
+
 fn validation_red(c: &Connection, card: &str, agent: &str, s: &Settings) -> ApiResult<bool> {
-    let mut q = c.prepare(
-        "SELECT r.name, r.commit_sha, r.failed + r.errored FROM test_runs r
-        JOIN test_run_cards l ON l.run = r.pk WHERE l.card = ?1 AND r.created_by = ?2
-        ORDER BY r.pk DESC LIMIT 128",
-    )?;
+    let mut q = c.prepare(VALIDATION_SQL)?;
     let runs = q
         .query_map(params![card, agent], |r| {
             Ok((
@@ -508,7 +508,7 @@ fn desired(
     Ok((out, f, totals))
 }
 
-fn reconcile(t: &mut Tx<'_>, change: &Change) -> ApiResult<()> {
+fn reconcile(t: &mut Tx<'_>, change: &Change, reminder_default: bool) -> ApiResult<()> {
     let Change {
         card,
         signals,
@@ -586,7 +586,22 @@ fn reconcile(t: &mut Tx<'_>, change: &Change) -> ApiResult<()> {
                     },
                 )?;
             }
-            if let Ok(to @ Address::Agent { .. }) = mail::resolve(t, agent, Some(&card.project)) {
+            // The passed-ETA reminder owns the worker nudge when enabled.
+            // A trouble mail in the same tick can delay that reminder. The
+            // lead still receives this signal and all other worker signals
+            // keep their existing mail behavior. Honor the agent override.
+            let eta_reminder = signal == "eta_overdue"
+                && t.query_row(
+                    "SELECT card_reminder FROM agents WHERE id = ?1",
+                    [agent],
+                    |r| r.get::<_, Option<bool>>(0),
+                )
+                .optional()?
+                .flatten()
+                .unwrap_or(reminder_default);
+            if !eta_reminder
+                && let Ok(to @ Address::Agent { .. }) = mail::resolve(t, agent, Some(&card.project))
+            {
                 mail::send(
                     t,
                     Outgoing {
@@ -662,20 +677,20 @@ struct CardRevision {
     settings: Option<String>,
 }
 
-fn revision(c: &Connection, card: &Watched) -> ApiResult<CardRevision> {
-    Ok(c.query_row(
-        "SELECT (SELECT coalesce(max(seq), 0) FROM events WHERE card = ?1),
+const REVISION_SQL: &str = "SELECT (SELECT coalesce(max(seq), 0) FROM events WHERE card = ?1),
         (SELECT coalesce(max(run), 0) FROM test_run_cards WHERE card = ?1),
-        (SELECT settings FROM project_trouble WHERE project = ?2)",
-        params![card.id, card.project],
-        |r| {
+        (SELECT settings FROM project_trouble WHERE project = ?2)";
+
+fn revision(c: &Connection, card: &Watched) -> ApiResult<CardRevision> {
+    Ok(
+        c.query_row(REVISION_SQL, params![card.id, card.project], |r| {
             Ok(CardRevision {
                 event: r.get(0)?,
                 tests: r.get(1)?,
                 settings: r.get(2)?,
             })
-        },
-    )?)
+        })?,
+    )
 }
 
 pub async fn pass(state: &Shared) {
@@ -690,6 +705,7 @@ pub async fn pass(state: &Shared) {
     if changes.is_empty() {
         return;
     }
+    let reminder_default = state.lifecycle.reminders.default_on();
     if let Err(e) = state
         .db
         .write("system", move |t| {
@@ -698,7 +714,7 @@ pub async fn pass(state: &Shared) {
             // must not starve notices. Clock/usage growth is seen next tick.
             for change in changes {
                 if revision(t, &change.card)? == change.expected {
-                    reconcile(t, &change)?;
+                    reconcile(t, &change, reminder_default)?;
                 }
             }
             Ok(())
@@ -1033,6 +1049,38 @@ mod tests {
         let events = history(&c, "P-1").unwrap();
         assert_eq!(events.len(), 4, "only one prior status and post-entry rows");
         assert_eq!(events.iter().filter(|e| e.kind == "status").count(), 2);
+        c.execute_batch("CREATE TABLE test_runs(pk INTEGER PRIMARY KEY, name TEXT, commit_sha TEXT, failed INTEGER, errored INTEGER, created_by TEXT);
+            CREATE TABLE test_run_cards(run INTEGER, card TEXT, PRIMARY KEY(run, card));
+            CREATE INDEX test_run_cards_card ON test_run_cards(card, run);
+            CREATE TABLE project_trouble(project TEXT PRIMARY KEY, settings TEXT);
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+            INSERT INTO test_runs SELECT x, 'check', 'sha', 0, 0, 'worker' FROM n;
+            INSERT INTO test_run_cards SELECT pk, CASE WHEN pk%1000=0 THEN 'P-1' ELSE 'other-'||(pk%999) END FROM test_runs;
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
+            INSERT INTO project_trouble SELECT 'project-'||x, '{}' FROM n;
+            INSERT INTO project_trouble VALUES ('p', '{}');
+            ANALYZE;").unwrap();
+        for (sql, arg) in [(REVISION_SQL, "p"), (VALIDATION_SQL, "worker")] {
+            let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let plans = q
+                .query_map(params!["P-1", arg], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(
+                plans
+                    .iter()
+                    .any(|p| p.contains("SEARCH") && p.contains("test_run_cards_card")),
+                "{plans:?}"
+            );
+            assert!(
+                plans
+                    .iter()
+                    .all(|p| !p.contains("SCAN ") || p == "SCAN CONSTANT ROW"),
+                "{plans:?}"
+            );
+        }
+        assert!(!validation_red(&c, "P-1", "worker", &Settings::default()).unwrap());
     }
 
     #[test]
@@ -1081,7 +1129,8 @@ mod tests {
     fn validation_uses_same_suite_worker_and_red_streak() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch("CREATE TABLE test_runs(pk INTEGER PRIMARY KEY, name TEXT, commit_sha TEXT, failed INTEGER, errored INTEGER, created_by TEXT);
-            CREATE TABLE test_run_cards(run INTEGER, card TEXT);").unwrap();
+            CREATE TABLE test_run_cards(run INTEGER, card TEXT);
+            CREATE INDEX test_run_cards_card ON test_run_cards(card, run);").unwrap();
         let add = |id, suite, sha, red, who| {
             c.execute(
                 "INSERT INTO test_runs VALUES (?1, ?2, ?3, ?4, 0, ?5)",

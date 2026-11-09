@@ -5771,7 +5771,13 @@ and project threshold value, deferring only that card's stale plan. Unrelated
 events and audit traffic cannot starve notices. It does not replay history
 inside a write.
 On the lifecycle tick, each new signal sends one state request to the worker
-and one summary to each project lead, never to the operator. The once-per-card
+and one summary to each project lead, never to the operator. The worker-nudge
+exception is `eta_overdue`: when the worker's card reminder is enabled
+(agent override, otherwise the daemon default), the reminder owns its nudge.
+The trouble pass records the signal and mails the lead, but does not send a
+second worker mail that could delay the reminder. If reminders are disabled,
+the worker still gets the trouble state request. Other signals are unchanged.
+The once-per-card
 and signal record survives restarts, resolution and recurrence. A mark clears
 when its condition stops holding, its threshold is disabled, or the card
 leaves working/research/review or is archived. A recurrence can restore the
