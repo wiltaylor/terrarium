@@ -189,23 +189,47 @@ fn the_harness_update_mail_defaults_to_off() {
 /// every knob from `.env` (TER-428: `TERRARIUM_QUOTA_SAMPLE_KEEP` was
 /// missing, so the quota sample retention could not be set).
 const NOT_PASSED: &[(&str, &str)] = &[
-    ("TERRARIUM_API_SOCKET", "the operator CLI socket, fixed in the container"),
-    ("TERRARIUM_ARTIFACT_LISTEN", "the published port 8081 is fixed in the container"),
+    (
+        "TERRARIUM_API_SOCKET",
+        "the operator CLI socket, fixed in the container",
+    ),
+    (
+        "TERRARIUM_ARTIFACT_LISTEN",
+        "the published port 8081 is fixed in the container",
+    ),
     ("TERRARIUM_CLI", "the image puts the CLI next to terrariumd"),
     ("TERRARIUM_CONFIG_DIR", "the /etc/terrarium bind mount"),
     ("TERRARIUM_CONFIG_REPO", "the /config/terrarium bind mount"),
-    ("TERRARIUM_DEFAULTS_DIR", "the image fills /opt/terrarium/defaults"),
+    (
+        "TERRARIUM_DEFAULTS_DIR",
+        "the image fills /opt/terrarium/defaults",
+    ),
     ("TERRARIUM_HARNESS_HOME", "the /auth/<harness> bind mounts"),
-    ("TERRARIUM_HOST_DIST_DIR", "the image fills /opt/terrarium/dist"),
+    (
+        "TERRARIUM_HOST_DIST_DIR",
+        "the image fills /opt/terrarium/dist",
+    ),
     ("TERRARIUM_INSECURE_AGENT_HEADER", "tests only"),
-    ("TERRARIUM_LISTEN", "the published port 8080 is fixed in the container"),
+    (
+        "TERRARIUM_LISTEN",
+        "the published port 8080 is fixed in the container",
+    ),
     ("TERRARIUM_NPM", "the npm of the image"),
     ("TERRARIUM_NO_HARNESS_INSTALL", "development only"),
-    ("TERRARIUM_PASSWORD_FILE", "a deployment sets TERRARIUM_PASSWORD instead"),
+    (
+        "TERRARIUM_PASSWORD_FILE",
+        "a deployment sets TERRARIUM_PASSWORD instead",
+    ),
     ("TERRARIUM_PROMPTS_DIR", "the prompts of the config repo"),
     ("TERRARIUM_REPOS_DIR", "the /repos bind mount"),
-    ("TERRARIUM_RUNNER", "the image puts the runner next to terrariumd"),
-    ("TERRARIUM_RUNNER_MODE", "the container runs the default process mode"),
+    (
+        "TERRARIUM_RUNNER",
+        "the image puts the runner next to terrariumd",
+    ),
+    (
+        "TERRARIUM_RUNNER_MODE",
+        "the container runs the default process mode",
+    ),
     ("TERRARIUM_RUNTIME_DIR", "the /run of the container"),
     ("TERRARIUM_SANDBOX", "bwrap, the sandbox of the image"),
     ("TERRARIUM_SANDBOX_NEW_SESSION", "development only"),
@@ -240,14 +264,19 @@ fn compose_env_keys(compose: &str) -> Vec<String> {
                 continue;
             };
             let key = key.trim();
-            if key.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+            if key
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
                 && !key.is_empty()
             {
                 keys.push(key.to_string());
             }
         }
     }
-    assert!(!keys.is_empty(), "no environment keys parsed from compose.yaml");
+    assert!(
+        !keys.is_empty(),
+        "no environment keys parsed from compose.yaml"
+    );
     keys
 }
 
@@ -319,7 +348,9 @@ fn every_settings_env_key_reaches_the_compose_service() {
     let src = read(&manifest.join("src/settings.rs"));
     let mut keys = BTreeSet::new();
     for line in src.lines() {
-        let Some(at) = line.find("env = ") else { continue };
+        let Some(at) = line.find("env = ") else {
+            continue;
+        };
         let rest = &line[at + "env = ".len()..];
         let end = rest.find(&[',', ')', ']'][..]).unwrap_or(rest.len());
         let token = rest[..end].trim();
@@ -343,10 +374,14 @@ fn every_settings_env_key_reaches_the_compose_service() {
     }
     for (name, _) in NOT_PASSED {
         if passed.contains(*name) {
-            problems.push(format!("{name}: passed by compose now, remove it from NOT_PASSED"));
+            problems.push(format!(
+                "{name}: passed by compose now, remove it from NOT_PASSED"
+            ));
         }
         if !keys.contains(*name) {
-            problems.push(format!("{name}: not a Settings env key, remove it from NOT_PASSED"));
+            problems.push(format!(
+                "{name}: not a Settings env key, remove it from NOT_PASSED"
+            ));
         }
     }
     assert!(
