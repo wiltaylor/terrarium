@@ -2184,7 +2184,17 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
 /// head that is not `TERRARIUM_HEAD` (another daemon took the slot between
 /// the two steps and replaced the tree) ends the job before the recipe
 /// runs. Both fail with exit 125 and the reason on stderr; without `flock`
-/// on the target, the recipe runs as before this, unlocked.
+/// on the target, the recipe runs as before this, unlocked, and the step
+/// says so in one line.
+///
+/// Only this wrapper shell holds the lock (fd 8). The recipe runs as its
+/// child with fd 8 closed, so a process that the recipe leaves behind (a
+/// background server, a build daemon) cannot keep the slot locked after
+/// the job. The wrapper catches TERM, INT and HUP with a no-op trap (a
+/// caught signal goes back to its default in the child), so on a cancel it
+/// holds the lock until its recipe child ends; a SIGKILL of the group ends
+/// both. With the lock, a recipe that a signal ends gives exit 128+n, not
+/// the signal: both are a red end.
 fn logged_recipe(recipe: String, log: &str) -> String {
     use crate::executor::sh_quote;
     format!(
@@ -2192,23 +2202,30 @@ fn logged_recipe(recipe: String, log: &str) -> String {
 mkdir -p -- "$(dirname -- "$log")" || exit 125
 (umask 077 && : > "$log") || exit 125
 lock=${{TERRARIUM_SLOT_LOCK:-}}
-if [ -n "$lock" ] && command -v flock >/dev/null 2>&1; then
-  exec 8>>"$lock" || {{ echo "cannot open the slot lock $lock"; exit 125; }}
-  flock -n 8 || {{
-    echo "the slot tree of this job is held by another job or daemon: $lock"
-    echo "stop it, or give this project its own work_dir"
+if [ -z "$lock" ]; then
+  exec sh -c {recipe} > "$log" 2>&1
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  echo "no flock on the target: slot not locked"
+  exec sh -c {recipe} > "$log" 2>&1
+fi
+exec 8>>"$lock" || {{ echo "cannot open the slot lock $lock"; exit 125; }}
+flock -n 8 || {{
+  echo "the slot tree of this job is held by another job or daemon: $lock"
+  echo "stop it, or give this project its own work_dir"
+  exit 125
+}}
+if [ -n "${{TERRARIUM_HEAD:-}}" ]; then
+  got=$(git rev-parse -q --verify 'HEAD^{{commit}}' 2>/dev/null 8>&-)
+  if [ "$got" != "$TERRARIUM_HEAD" ]; then
+    echo "another daemon replaced the slot tree between the steps of this job"
+    echo "(HEAD is ${{got:-nothing}}, not $TERRARIUM_HEAD); the recipe did not run"
     exit 125
-  }}
-  if [ -n "${{TERRARIUM_HEAD:-}}" ]; then
-    got=$(git rev-parse -q --verify 'HEAD^{{commit}}' 2>/dev/null)
-    if [ "$got" != "$TERRARIUM_HEAD" ]; then
-      echo "another daemon replaced the slot tree between the steps of this job"
-      echo "(HEAD is ${{got:-nothing}}, not $TERRARIUM_HEAD); the recipe did not run"
-      exit 125
-    fi
   fi
 fi
-exec sh -c {recipe} > "$log" 2>&1
+trap : TERM INT HUP
+sh -c {recipe} > "$log" 2>&1 8>&-
+exit $?
 "#,
         log = sh_quote(log),
         recipe = sh_quote(&recipe),
@@ -2930,7 +2947,7 @@ res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 /// dir that a wipe keeps, and refuses the job with a clear error when
 /// another job or daemon holds it. The recipe step holds the same lock
 /// ([`logged_recipe`]). Without `flock` on the target, both run as before
-/// this, unlocked.
+/// this, unlocked, and print one line that says so.
 const RECEIVE_SCRIPT: &str = r#"dir=$1; sha=$2; kind=$3; base=${4:-}; tree=${5:-}; wipe_first=${6:-}
 case "$dir" in /*/*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
 case "$sha" in *[!0-9a-f]*|'') echo "bad commit"; res error; exit 2 ;; esac
@@ -2947,6 +2964,8 @@ if command -v flock >/dev/null 2>&1; then
     echo "the slot $dir is held by another job or daemon; stop it, or give this project its own work_dir"
     res error; exit 2
   }
+else
+  echo "no flock on the target: slot not locked"
 fi
 b=$dir.bundle
 if [ "$kind" = merge ]; then r=refs/job/merge; else r=refs/job/head; fi
@@ -3648,6 +3667,101 @@ mod tests {
         assert!(text.contains("held by another job or daemon"), "{text}");
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
         stop_holder(&mut holder);
+    }
+
+    /// TER-448 review 1: only the wrapper holds the slot lock. A process
+    /// that the recipe leaves behind does not get the lock fd, so the slot
+    /// is free as soon as the job ends, while that process still runs.
+    #[test]
+    fn a_child_that_outlives_the_recipe_does_not_hold_the_slot() {
+        if !flock_works() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = tmp.path().join("slot-1.lock");
+        let log = tmp.path().join("logs/1-1.log");
+        let pid_file = tmp.path().join("sleeper.pid");
+        let script = logged_recipe(
+            format!(
+                "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > {}; echo ran",
+                crate::executor::sh_quote(pid_file.to_str().unwrap())
+            ),
+            log.to_str().unwrap(),
+        );
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(tmp.path())
+            .env("TERRARIUM_SLOT_LOCK", &lock)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "ran\n");
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let pid = nix::unistd::Pid::from_raw(pid);
+        let alive = nix::sys::signal::kill(pid, None).is_ok();
+        // The next job of the slot can take the lock.
+        let free = std::process::Command::new("flock")
+            .arg("-n")
+            .arg(&lock)
+            .arg("true")
+            .status()
+            .unwrap()
+            .success();
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        assert!(alive, "the sleeper outlives the recipe");
+        assert!(free, "a child of the recipe holds the slot lock");
+    }
+
+    /// TER-448 review 3: without `flock` on the target the recipe runs
+    /// unlocked, and the step says so in one line.
+    #[test]
+    fn without_flock_the_recipe_says_the_slot_is_not_locked() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A PATH with the tools of the wrapper, but no flock.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for tool in ["sh", "mkdir", "dirname"] {
+            let path = String::from_utf8(
+                std::process::Command::new("sh")
+                    .args(["-c", &format!("command -v {tool}")])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(path.trim(), bin.join(tool)).unwrap();
+        }
+        let lock = tmp.path().join("slot-1.lock");
+        let log = tmp.path().join("logs/1-1.log");
+        let script = logged_recipe("echo ran".into(), log.to_str().unwrap());
+        let out = std::process::Command::new(bin.join("sh"))
+            .arg("-c")
+            .arg(&script)
+            .current_dir(tmp.path())
+            .env("PATH", &bin)
+            .env("TERRARIUM_SLOT_LOCK", &lock)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("no flock on the target: slot not locked"),
+            "{text}"
+        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "ran\n");
     }
 
     #[test]

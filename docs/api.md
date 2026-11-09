@@ -12077,8 +12077,12 @@ to the tree (TER-448), so a second daemon on the same target with the
 same project name and work dir (two daemons share the default
 `/tmp/terrarium-jobs/<project>`) cannot replace the tree of a running
 job: its job fails with a clear error, and the recipe checks the tested
-head again under the lock. The lock needs `flock` on the target; without
-it the steps run unlocked, as before TER-448. The job
+head again under the lock. Only the job's own wrapper shell holds the
+lock: the recipe runs as its child without the lock's file descriptor,
+so a process that the recipe leaves running does not keep the slot
+locked after the job. The lock needs `flock` on the target; without
+it the steps run unlocked, as before TER-448, and each step prints
+`no flock on the target: slot not locked`. The job
 row has `slot` while it runs. The step checks out the commit with
 `git checkout -f` and removes every file that the commit does not track,
 ignored ones too, except `target/` at the root (`git clean -ffdx -e
