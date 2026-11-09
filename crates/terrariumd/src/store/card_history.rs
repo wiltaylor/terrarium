@@ -230,6 +230,17 @@ pub fn calibrated_ms(samples: &[WorkSample], labels: &[String], guess: Option<f6
     }
 }
 
+/// The latest 2000 card moves of project `?1`, newest first, as the
+/// `recent` CTE body of [`completed_visits`]. The `json_valid` guard
+/// keeps a malformed event from failing the read (TER-394), and the
+/// `events_card_moves` index serves it, which the EXPLAIN QUERY PLAN
+/// test in `db.rs` asserts through this const.
+pub(crate) const RECENT_PROJECT_MOVES_SQL: &str = "SELECT seq, card, at, payload FROM events
+  WHERE project = ?1 AND kind = 'card'
+    AND CASE WHEN json_valid(payload)
+      THEN json_extract(payload, '$.change') END = 'moved'
+  ORDER BY seq DESC LIMIT 2000";
+
 /// Completed visits to a column role (falling back to its name for older
 /// events), newest exit first. This query is shared with ETA calibration.
 /// The SQL window is the latest 2000 project card moves. At most `limit`
@@ -240,12 +251,9 @@ pub fn completed_visits(
     column: &str,
     limit: usize,
 ) -> ApiResult<Vec<Duration>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "WITH recent AS (
-           SELECT seq, card, at, payload FROM events WHERE project = ?1
-             AND kind = 'card'
-             AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
-           ORDER BY seq DESC LIMIT 2000
+           {RECENT_PROJECT_MOVES_SQL}
          ), moves AS (
            SELECT seq, at, payload,
              lead(at) OVER (PARTITION BY card ORDER BY seq) AS left_at,
@@ -257,7 +265,7 @@ pub fn completed_visits(
              AND coalesce(json_extract(left_payload, '$.from_role'), json_extract(left_payload, '$.from')) = ?2
              AND coalesce(json_extract(left_payload, '$.to_role'), json_extract(left_payload, '$.to')) <> ?2
            ORDER BY left_seq DESC LIMIT ?3",
-    )?;
+    ))?;
     let rows = stmt.query_map(params![project, column, limit as i64], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })?;
