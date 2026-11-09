@@ -289,8 +289,7 @@ async fn post_message(
                     th.id
                 )));
             }
-            threads::post(t, &th.id, &author, &b.text, want)
-                .map(|th| threads::visible(&actor, th))
+            threads::post(t, &th.id, &author, &b.text, want).map(|th| threads::visible(&actor, th))
         })
         .await?;
     Ok((StatusCode::CREATED, Json(th)).into_response())

@@ -1229,12 +1229,7 @@ fn no_open_question(t: &Tx<'_>, id: &str, want: ThreadStatus) -> ApiResult<()> {
 /// `waiting_agent`: the agent works on, and the thread does not wait on
 /// the operator (no Inbox badge, no reminder, no stale close). An open
 /// question refuses it (`409`); a close proposal is withdrawn.
-pub fn set_by_agent(
-    t: &mut Tx<'_>,
-    id: &str,
-    by: &str,
-    status: ThreadStatus,
-) -> ApiResult<Thread> {
+pub fn set_by_agent(t: &mut Tx<'_>, id: &str, by: &str, status: ThreadStatus) -> ApiResult<Thread> {
     agent_status(status)?;
     if status == ThreadStatus::Tracking {
         return track(t, id, by);

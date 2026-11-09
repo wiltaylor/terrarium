@@ -10358,7 +10358,15 @@ async fn thread_commands() {
     let working = json!({"id": "T1", "status": "waiting_agent"});
     let out = ok(
         true,
-        &["thread", "post", "T1", "-m", "On it.", "--status", "waiting_agent"],
+        &[
+            "thread",
+            "post",
+            "T1",
+            "-m",
+            "On it.",
+            "--status",
+            "waiting_agent",
+        ],
         vec![(201, working.clone())],
         vec![(
             Post,
@@ -10384,7 +10392,16 @@ async fn thread_commands() {
     assert_eq!(out, "thread T1 is tracking.\n");
     for bad in [
         &["terrarium", "thread", "status", "T1", "waiting_operator"][..],
-        &["terrarium", "thread", "post", "T1", "-m", "x", "--status", "closed"][..],
+        &[
+            "terrarium",
+            "thread",
+            "post",
+            "T1",
+            "-m",
+            "x",
+            "--status",
+            "closed",
+        ][..],
     ] {
         assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
     }
