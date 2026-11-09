@@ -373,7 +373,7 @@ async fn runs_status_events_and_the_dashboard() {
     assert_eq!(d.ok()["blocks"], json!([]));
     let db = td.daemon.as_ref().unwrap().state.db.clone();
     db.write("system", |t| {
-        t.execute("INSERT INTO events(project,card,kind,at,payload) VALUES ('terra','broken','card','2026-11-08T00:00:00Z','not JSON')", [])?;
+        t.execute("INSERT INTO events(id,project,card,kind,at,payload) VALUES ('eta-accuracy-malformed','terra','broken','card','2026-11-08T00:00:00Z','not JSON')", [])?;
         Ok(())
     }).await.unwrap();
     let accuracy = td.get_as(&worker, "/api/projects/terra/eta-accuracy").await;
