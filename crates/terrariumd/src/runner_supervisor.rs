@@ -5780,7 +5780,7 @@ mod tests {
         }
     }
 
-    /// A supervisor with the claude adapter, and an idle slot that runs
+    /// A supervisor with the real adapters, and an idle slot that runs
     /// `runner` with an old session, a status reason, and one queued turn.
     fn kill_err_supervisor(
         tmp: &Path,
@@ -5791,7 +5791,7 @@ mod tests {
             tmp.join("run"),
             tmp.join("prompts"),
             SandboxConfig::default(),
-            default_adapters(&SandboxConfig::default(), &HashMap::new()),
+            HashMap::new(),
         ));
         let agent: Agent = serde_json::from_value(serde_json::json!({
             "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
