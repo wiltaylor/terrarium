@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createMockApi } from "../../api/mock";
-import { linkChip } from "./LinksPage";
+import { linkChip } from "./model";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, autoLoginMs: 0 });
 

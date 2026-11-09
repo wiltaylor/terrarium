@@ -7,14 +7,10 @@
 
 import { createResource, createSignal, For, Show } from "solid-js";
 import { ConfirmButton, CopyButton, Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
-import type { Link, NewLinkCode } from "../../api/types";
+import type { NewLinkCode } from "../../api/types";
 import { ago } from "../../lib/format";
 import { api } from "../../stores";
-
-/** The status chip class of a link. */
-export function linkChip(l: Pick<Link, "status">): string {
-  return l.status === "active" ? "ok" : l.status === "revoked" ? "bad" : "warn";
-}
+import { linkChip } from "./model";
 
 export default function LinksPage() {
   const now = useNow(30_000);
