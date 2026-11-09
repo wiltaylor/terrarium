@@ -263,12 +263,12 @@ async fn like_skips_name_only_grants_the_owner_may_read() {
     .await
     .ok();
 
-    // No skip: the first refused copied right is named, with its secret
-    // and its level.
+    // No skip: the first refused copied right is named (the grants go in
+    // name order, so `gh` comes before `openai`).
     let r = spawn_as(&td, &low, &low, json!({"like": "w"})).await;
     assert_eq!(r.status, 403, "{}", r.body);
-    assert!(message(&r).contains("global/openai"), "{}", r.body);
-    assert!(message(&r).contains("level `read`"), "{}", r.body);
+    assert!(message(&r).contains("secret `global/gh`"), "{}", r.body);
+    assert!(message(&r).contains("no grant of it"), "{}", r.body);
 
     // With the skip: a named entry for the secret whose name the owner
     // may read, one count for `gh`, whose name it may not.
@@ -411,9 +411,23 @@ async fn like_harness_and_source_errors_name_the_cause() {
         "{}",
         r.body
     );
-    // `hsub` has no login, so the alternative is tried: its harness
-    // differs, and the error names `altcase-alt`, not just `altcase`.
-    let r = spawn_as(&td, &w, &w, json!({"template": "altcase", "like": "w"})).await;
+    // `altcase` asks for `hsub`; the like source `hs` runs `hsub` under
+    // an active usage limit, so the first template has no headroom and
+    // the alternative is tried: its harness differs, and the error names
+    // `altcase-alt`, not just `altcase`.
+    let login = r#"{"claudeAiOauth": {"accessToken": "t", "refreshToken": "r", "expiresAt": 4102444800000}}"#;
+    terrariumd::accounts::write_credential(
+        &state(&td).state_dir,
+        "hsub",
+        HarnessId::Claude,
+        login.as_bytes(),
+    )
+    .unwrap();
+    let hs = id(&td
+        .agent("p", "hs", json!({"subscription": "hsub"}))
+        .await);
+    state(&td).usage.limits.mark("hsub", None);
+    let r = spawn_as(&td, &w, &w, json!({"template": "altcase", "like": "hs"})).await;
     assert_eq!(r.status, 422, "{}", r.body);
     assert!(
         message(&r).contains("same harness as the template `altcase-alt`"),
