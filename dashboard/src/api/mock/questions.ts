@@ -282,7 +282,7 @@ export function createQuestionMock(c: QuestionMockContext) {
   /** Retract an open question: by the operator (a mail tells the agent), or by its own agent (no mail). */
   const retractNow = (id: string, reason: string | undefined, byOwner: boolean): Question => {
     const q = question(id);
-    if (q.status !== "open") notOpen(q, "a retract");
+    if (q.status !== "open" && q.status !== "in_thread") notOpen(q, "a retract");
     const r = reason?.trim() || null;
     Object.assign(q, { status: "retracted", retract_reason: r, retracted_by: byOwner ? `agent:${q.agent}` : "operator", updated_at: c.iso() });
     c.questionClosed(q.id, { outcome: "retracted" });
@@ -321,7 +321,7 @@ export function createQuestionMock(c: QuestionMockContext) {
       reply(() => {
         const q = question(id);
         if (q.kind === "notice") wrongKind(q, "an answer");
-        if (q.status !== "open") notOpen(q, "an answer");
+        if (q.status !== "open" && q.status !== "in_thread") notOpen(q, "an answer");
         if (body.revision !== undefined && body.revision !== q.revision)
           fail(409, "conflict", `${q.kind} ${q.id} changed: it is at revision ${q.revision}, and the answer is for revision ${body.revision}. Read it again, then answer`, { revision: q.revision, kind: q.kind });
         if (q.kind === "bundle") return answerBundle(q, body);
@@ -354,7 +354,7 @@ export function createQuestionMock(c: QuestionMockContext) {
       reply(() => {
         const q = question(id);
         if (q.kind !== "notice") wrongKind(q, "an acknowledge");
-        if (q.status !== "open") notOpen(q, "an acknowledge");
+        if (q.status !== "open" && q.status !== "in_thread") notOpen(q, "an acknowledge");
         const t = text?.trim() || null;
         if (t && t.length > MAX_ANSWER) fail(422, "invalid", `the reply is longer than ${MAX_ANSWER} characters`);
         const at = c.iso();

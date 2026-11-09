@@ -930,9 +930,10 @@ export interface WaitEventData {
 
 /**
  * `question`: open → answered | retracted. `notice` (no options): open →
- * acknowledged | retracted.
+ * acknowledged | retracted. `in_thread`: the operator moved it into an Inbox
+ * thread with its agent (GitHub #30); it settles there as an open one.
  */
-export type QuestionStatus = "open" | "answered" | "acknowledged" | "retracted";
+export type QuestionStatus = "open" | "in_thread" | "answered" | "acknowledged" | "retracted";
 /** `critical`: the operator must act now; the dashboard shows a banner on every page and flashes its tab. */
 export type QuestionPriority = "normal" | "urgent" | "critical";
 /**
@@ -985,7 +986,7 @@ export interface Question {
   /** `operator` or `agent:<ulid>`. */
   retracted_by?: string | null;
   thread_id: string;
-  /** The Inbox thread that the question was asked in (docs/api.md §6.13). Absent on the others. */
+  /** The Inbox thread that the question was asked in, or moved into (docs/api.md §6.13). Absent on the others. */
   thread?: string;
   created_at: string;
   updated_at: string;
@@ -1577,6 +1578,8 @@ export interface Thread {
   status: ThreadStatus;
   /** When the agent moved the thread into tracking (TER-145); set while it tracks. An older daemon sends none. */
   tracking_at?: string | null;
+  /** The question or notice that the operator moved into this thread (GitHub #30). */
+  from_question?: string;
   /** The linked cards whose project the reader may read, the oldest link first (TER-146); also in a list (TER-147). An older daemon sends none. */
   cards?: ThreadCard[];
   messages?: ThreadMessage[];
