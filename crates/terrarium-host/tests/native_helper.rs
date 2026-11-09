@@ -8,7 +8,7 @@
 //! of TER-345.
 
 use std::collections::{BTreeMap, HashMap};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,17 +32,6 @@ impl DeviceNodes for FakeNodes {
             .copied()
             .ok_or_else(|| format!("{} missing", path.display()))
     }
-}
-
-/// `native::bind` sets the process umask to 0o177 while it binds. The umask
-/// is per process, so a directory that another test creates in that window
-/// gets mode 0600: no search bit, and a non-root user then gets EACCES in
-/// it (root ignores the mode). Each fixture setup and each bind holds this
-/// lock.
-static UMASK: Mutex<()> = Mutex::new(());
-
-fn umask_lock() -> std::sync::MutexGuard<'static, ()> {
-    UMASK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 struct Fake {
@@ -100,7 +89,6 @@ impl Fake {
     }
 
     async fn with(rights: Vec<Right>, agent_uid: u32, gpu: Result<(), String>) -> Self {
-        let umask = umask_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let d = dir.path();
@@ -161,7 +149,6 @@ impl Fake {
         });
         let socket = d.join("helper.sock");
         let listener = native::bind(&socket, nix::unistd::getuid().as_raw()).unwrap();
-        drop(umask);
         tokio::spawn(native::serve(helper.clone(), listener));
         Self {
             dir,
@@ -800,7 +787,6 @@ fn the_socket_belongs_to_the_agent_user() {
         eprintln!("skipped: needs root to give the socket to another UID");
         return;
     }
-    let _umask = umask_lock();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("h.sock");
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -819,6 +805,36 @@ fn the_socket_belongs_to_the_agent_user() {
         std::fs::write(&file, "").unwrap();
         assert!(native::bind(&file, 4242).is_err());
     });
+}
+
+/// `native::bind` gives the socket mode 0600 without a change of the
+/// process umask (TER-500), and leaves no temporary directory behind.
+#[tokio::test]
+async fn bind_sets_the_mode_without_the_process_umask() {
+    use nix::sys::stat::{Mode, umask};
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("h.sock");
+    // Read the umask without a lasting change: umask() returns the old one.
+    let before = umask(Mode::from_bits_truncate(0o022));
+    umask(before);
+    let listener = native::bind(&socket, nix::unistd::getuid().as_raw()).unwrap();
+    let after = umask(before);
+    umask(after);
+    assert_eq!(after, before);
+    let meta = std::fs::symlink_metadata(&socket).unwrap();
+    assert!(meta.file_type().is_socket());
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("h.sock")]);
+    // The socket accepts at the final path.
+    let (_client, accepted) = tokio::join!(
+        UnixStream::connect(&socket),
+        listener.accept()
+    );
+    accepted.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
