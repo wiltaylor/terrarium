@@ -953,7 +953,10 @@ mod tests {
         }
         // A real secret written in plain text still decodes to itself.
         let token = format!("ghp_{}", "FAKEfake0123456789".repeat(2));
-        assert_eq!(decode_escapes(&format!(r"x\n{token}")), format!("x\n{token}"));
+        assert_eq!(
+            decode_escapes(&format!(r"x\n{token}")),
+            format!("x\n{token}")
+        );
     }
 
     /// TER-459: a TOML or JSON escape inside a token does not hide it, in
@@ -970,14 +973,26 @@ mod tests {
             ("fleet.toml", format!(r#"note = "gh\u0070_{body}""#)),
             ("fleet.toml", format!(r#"note = "gh\U00000070_{body}""#)),
             ("fleet.toml", format!(r#"note = "ghp\u005f{body}""#)),
-            ("fleet.toml", format!(r#"note = "ghp_{}\u0041{}""#, &body[..4], &body[4..])),
-            ("harness/pi/models.json", format!(r#""k": "gh\u0070_{body}""#)),
-            ("harness/pi/models.json", format!(r#""k": "\u0067\u0068\u0070\u005f{body}""#)),
+            (
+                "fleet.toml",
+                format!(r#"note = "ghp_{}\u0041{}""#, &body[..4], &body[4..]),
+            ),
+            (
+                "harness/pi/models.json",
+                format!(r#""k": "gh\u0070_{body}""#),
+            ),
+            (
+                "harness/pi/models.json",
+                format!(r#""k": "\u0067\u0068\u0070\u005f{body}""#),
+            ),
             (
                 "export/projects/p1.fleet.toml",
                 format!("[[projects.repos]]\ncredential = \"gh\\u0070_{body}\""),
             ),
-            ("fleet.toml", format!(r#"note = "gh\u0070_{body}" # {ALLOW_MARKER}"#)),
+            (
+                "fleet.toml",
+                format!(r#"note = "gh\u0070_{body}" # {ALLOW_MARKER}"#),
+            ),
         ] {
             let found = rules(path, &format!("{line}\n"));
             assert!(found.contains(&gh), "{path}: {line}: {found:?}");
@@ -994,7 +1009,11 @@ mod tests {
     #[test]
     fn a_token_split_by_a_line_ending_backslash_hits() {
         let body = "FAKEfake0123456789".repeat(2);
-        let text = format!("note = \"\"\"\nghp_{}\\  \n    {}\"\"\"\n", &body[..8], &body[8..]);
+        let text = format!(
+            "note = \"\"\"\nghp_{}\\  \n    {}\"\"\"\n",
+            &body[..8],
+            &body[8..]
+        );
         let found = scan("fleet.toml", text.as_bytes());
         assert!(
             found
@@ -1004,9 +1023,17 @@ mod tests {
         );
         // A real secret on one line still blocks on its line.
         let plain = scan("fleet.toml", format!("a\nghp_{body}\n").as_bytes());
-        assert!(plain.iter().any(|f| f.rule == "github-token" && f.line == 2));
+        assert!(
+            plain
+                .iter()
+                .any(|f| f.rule == "github-token" && f.line == 2)
+        );
         // An even count of backslashes is an escaped backslash: no join.
-        let even = format!("note = \"\"\"ghp_{}\\\\\n{}\"\"\"\n", &body[..8], &body[8..]);
+        let even = format!(
+            "note = \"\"\"ghp_{}\\\\\n{}\"\"\"\n",
+            &body[..8],
+            &body[8..]
+        );
         assert!(!rules("fleet.toml", &even).contains(&"github-token".to_owned()));
     }
 
@@ -1036,7 +1063,11 @@ mod tests {
             &random[..10],
             &random[10..]
         );
-        assert!(at(&line).contains(&"high-entropy".to_owned()), "{:?}", at(&line));
+        assert!(
+            at(&line).contains(&"high-entropy".to_owned()),
+            "{:?}",
+            at(&line)
+        );
     }
 
     /// TER-459: a backslash in plain text (a Windows path, a Markdown
@@ -1050,7 +1081,11 @@ mod tests {
             r#"prompt = "Line one.\nLine two.\n\tIndented \"quote\".""#,
             r#""path": "C:\\Program Files\\Terrarium\\bin""#,
         ] {
-            assert!(rules("prompts/a.md", line).is_empty(), "{line}: {:?}", rules("prompts/a.md", line));
+            assert!(
+                rules("prompts/a.md", line).is_empty(),
+                "{line}: {:?}",
+                rules("prompts/a.md", line)
+            );
         }
         let token = format!("ghp_{}", "FAKEfake0123456789".repeat(2));
         let line = format!(r"C:\Users\name {token}");
