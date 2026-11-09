@@ -1,4 +1,4 @@
-// The Artifacts tab of the board screen (app/nav.ts BOARD_TABS): the files of
+// The Artifacts page of a project (no tab since TER-507; old links still open it): the files of
 // the project and the viewer of the artifact of the URL (/p/:project/board/artifacts/:id).
 
 import { A, useNavigate, useParams } from "@solidjs/router";

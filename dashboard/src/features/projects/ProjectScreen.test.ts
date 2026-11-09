@@ -52,7 +52,8 @@ describe("ProjectScreen", () => {
 
   it("selects the tab from the first segment on deep paths", () => {
     for (const [path, label] of [
-      ["/p/demo/board/tests/1", "Board"],
+      ["/p/demo/board/artifacts/ART-2", "Board"],
+      ["/p/demo/tests/1", "Tests"],
       ["/p/demo/knowledge/wiki/a/b", "Knowledge"],
       ["/p/demo/repos/infra", "Repos"],
       ["/p/demo/settings/secrets", "Settings"],
@@ -65,7 +66,7 @@ describe("ProjectScreen", () => {
   });
 
   it("moves between tabs with browser back and forward", async () => {
-    const { root, history } = mount("/p/demo/board/tests/1");
+    const { root, history } = mount("/p/demo/tests/1");
     links(root).find((a) => a.textContent === "Dashboard")!.click();
     await vi.waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Dashboard"]));
     links(root).find((a) => a.textContent === "Knowledge")!.click();
