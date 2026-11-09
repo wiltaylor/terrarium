@@ -22,7 +22,7 @@ const RELAY: &str = include_str!("docker_relay.py");
 pub async fn reset(state: &Shared, key: &str, config: &DockerCiDef) -> ApiResult<()> {
     let dir = RunDirs::new(&state.state_dir).run_dir()?;
     let identity = dir.write_private("reset-identity", key.as_bytes())?;
-    let hosts = crate::executor::known_hosts(&state.state_dir)?;
+    let hosts = dir.write_private("reset_known_hosts", config.reset_known_hosts.as_bytes())?;
     for attempt in 0..3 {
         let mut child = tokio::process::Command::new(&state.executor.ssh_bin)
             .args(reset_args(&identity, &hosts, config))
@@ -197,6 +197,7 @@ pub async fn open(
     let cmd = RemoteCmd {
         argv: vec![
             "python3".into(),
+            "-I".into(),
             "-u".into(),
             "-c".into(),
             RELAY.into(),
@@ -371,6 +372,7 @@ mod tests {
                 known_hosts: "pin".into(),
                 reset_destination: "reset@host".into(),
                 reset_port: 22,
+                reset_known_hosts: "reset-host ssh-ed25519 pin".into(),
             },
         );
         assert_eq!(args.last().map(String::as_str), Some("reset@host"));

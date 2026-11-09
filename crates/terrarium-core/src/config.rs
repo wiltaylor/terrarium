@@ -920,9 +920,11 @@ pub struct DockerCiDef {
     pub port: u16,
     /// OpenSSH known_hosts line for destination and port.
     pub known_hosts: String,
-    /// Forced-command reset destination, pinned in the daemon known_hosts.
+    /// Forced-command reset destination, pinned by reset_known_hosts.
     pub reset_destination: String,
     pub reset_port: u16,
+    /// Administrator-verified OpenSSH pin for the forced reset endpoint.
+    pub reset_known_hosts: String,
 }
 
 impl DeliveryDef {

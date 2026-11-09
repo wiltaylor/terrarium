@@ -2115,7 +2115,7 @@ fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
                 ));
             }
         }
-        if config.port == 0 || config.reset_port == 0 || config.known_hosts.trim().is_empty() {
+        if config.port == 0 || config.reset_port == 0 || config.known_hosts.trim().is_empty() || config.reset_known_hosts.trim().is_empty() {
             return Err(ApiError::invalid(
                 "Docker CI requires nonzero SSH ports and a pinned known_hosts line",
             ));

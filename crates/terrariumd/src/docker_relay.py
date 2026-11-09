@@ -35,7 +35,15 @@ def serve(directory):
         with state_lock:
             connection = connections.pop(ident, None)
             credit = credits.pop(ident, None)
-            writes.pop(ident, None)
+            pending = writes.pop(ident, None)
+        if pending:
+            # Wake an idle writer without ever blocking connection teardown.
+            # A full queue is consumed by the active writer, which exits on
+            # the closed socket rather than returning to pending.get().
+            try:
+                pending.put_nowait(None)
+            except queue.Full:
+                pass
         if credit:
             credit.set()
         if connection:
@@ -67,8 +75,9 @@ def serve(directory):
         try:
             while True:
                 data = pending.get()
-                if data is None:
-                    return
+                with state_lock:
+                    if data is None or ident not in connections:
+                        return
                 connection.sendall(data)
                 emit({"id": ident, "ack": True})
         except OSError:

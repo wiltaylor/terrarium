@@ -15,6 +15,52 @@ RELAY = Path(__file__).resolve().parents[1] / "crates/terrariumd/src/docker_rela
 
 
 class DockerRelayTests(unittest.TestCase):
+    def test_many_closed_connections_release_all_worker_threads(self):
+        with tempfile.TemporaryDirectory(prefix="ter-363-threads-") as root:
+            directory = Path(root, "job")
+            # Run the release module in-process in an isolated interpreter so
+            # its actual thread count, not only its socket map, is measured.
+            probe = """
+import importlib.util, json, pathlib, socket, sys, threading, time
+spec = importlib.util.spec_from_file_location('relay', sys.argv[1])
+relay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(relay)
+base = threading.active_count()
+def exercise():
+    path = pathlib.Path(sys.argv[2]) / 'docker.sock'
+    while not path.exists(): time.sleep(0.01)
+    for _ in range(200):
+        with socket.socket(socket.AF_UNIX) as client:
+            client.connect(str(path))
+        time.sleep(0.002)
+    for _ in range(500):
+        # Main + exercise + listener, with no remaining per-client workers.
+        if threading.active_count() == base + 2: break
+        time.sleep(0.01)
+    assert threading.active_count() == base + 2, threading.active_count()
+    print(json.dumps({'threads_released': True}), flush=True)
+threading.Thread(target=exercise, daemon=True).start()
+relay.serve(sys.argv[2])
+"""
+            child = subprocess.Popen([sys.executable, "-I", "-u", "-c", probe, str(RELAY), str(directory), "30"],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                while True:
+                    line = child.stdout.readline()
+                    if not line:
+                        self.fail(child.stderr.read())
+                    if json.loads(line).get("threads_released"):
+                        break
+                child.stdin.write('{"stop":true}\n')
+                child.stdin.flush()
+                self.assertEqual(child.wait(timeout=5), 0, child.stderr.read())
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+                for stream in (child.stdin, child.stdout, child.stderr):
+                    stream.close()
+
     def test_large_bidirectional_stream_with_slow_consumers(self):
         with tempfile.TemporaryDirectory(prefix="ter-363-stream-") as root:
             directory = Path(root, "job")

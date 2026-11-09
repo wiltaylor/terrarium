@@ -11628,7 +11628,7 @@ or the operator) read and set the config. The body is a JSON object:
 | `timeout_secs` | the most time the recipe may run                                | 3600                  |
 | `failure_patterns` | literal strings to extract from recipe output, with three following lines of context | `["FAILED", "panicked", "test result: FAILED", "failures:"]` |
 | `merge_secrets` | `DOCKER_CI_KEY` and `DOCKER_CI_RESET_KEY` mapped to `@secret:<name>[.<field>]`, consumed only by the daemon for merge jobs | `{}` |
-| `docker_ci` | public SSH settings: `destination`, `port`, `known_hosts`, `reset_destination`, `reset_port` | none |
+| `docker_ci` | public SSH settings: `destination`, `port`, `known_hosts`, `reset_destination`, `reset_port`, `reset_known_hosts` | none |
 
 `merge_secrets` uses the project's `delivery:<project>` principal, never
 agent or project grants. A delivery grant requires `level: run`, named
@@ -11652,7 +11652,9 @@ adding merge secret references. For example, `destination` is `root@vm`,
 `port` is its SSH port, and `known_hosts` is the administrator-verified
 OpenSSH host-key line (including `[host]:port` for a nonstandard port).
 `reset_destination` and `reset_port` identify the forced reset command;
-that host must already be pinned in the daemon's known_hosts. No endpoint
+`reset_known_hosts` supplies its administrator-verified OpenSSH pin, written
+into a job-private reset directory. Neither SSH connection uses the daemon's
+shared TOFU known_hosts file. No endpoint
 or key pin is compiled into the daemon. Reset exit 75 retries twice with
 a two-second delay; any other failure prevents opening the tunnel.
 The daemon resolves configured merge secrets and opens the tunnel for every
@@ -11681,12 +11683,16 @@ account can reach that socket during the job. This is an accepted risk:
 it grants Docker control of the throwaway VM, not access to its SSH key.
 Before opening the tunnel the daemon calls META-104's forced-command SSH
 reset as `dockerci@10.3.0.2` on port 22, with the second job-only key and
-strict checking against its existing pinned `<state>/ssh/known_hosts`.
+strict checking against configured `reset_known_hosts` in its private RunDir.
 It sends no remote command. Exit 0 permits the tunnel, exit 1 fails, exit
 75 reports the reset lock busy, and a 150-second timeout fails closed.
 Both keys remain daemon-side. The VM's LAN and Tailscale egress is blocked
 outside the VM by vmlab switch rules, so branch code cannot undo it.
 The generic stream relay
+closes both directions when either peer closes. It does not preserve TCP
+half-close semantics. Docker version/pull/run/log streaming is tested, but
+clients requiring a write-half-close followed by a response are unsupported.
+Half-close forwarding is outside this change's scope. The relay
 does not filter privileged creates or host namespaces. A Docker API
 authorization layer, not a byte-pattern filter, would be needed to
 enforce that without breaking exec/attach upgrades and streaming APIs.

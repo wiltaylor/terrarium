@@ -2261,7 +2261,7 @@ docker run --name "$name" alpine:3.21 sh -c 'yes ter-363-large-log | head -c 838
 test "$(docker logs "$name" | wc -c)" -eq 8388608
 echo real-tunnel-large-log-ok
 "#;
-    lab.td.put("/api/projects/p/delivery", json!({"target":"p-box", "recipe":recipe, "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm.private_key", "DOCKER_CI_RESET_KEY":"@secret:reset.private_key"}, "docker_ci":{"destination":"root@127.0.0.1", "port":port, "known_hosts":pin, "reset_destination":"reset@unused", "reset_port":22}})).await.ok();
+    lab.td.put("/api/projects/p/delivery", json!({"target":"p-box", "recipe":recipe, "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm.private_key", "DOCKER_CI_RESET_KEY":"@secret:reset.private_key"}, "docker_ci":{"destination":"root@127.0.0.1", "port":port, "known_hosts":pin, "reset_destination":"reset@unused", "reset_port":22,"reset_known_hosts":pin}})).await.ok();
     lab.branch("live-relay", "next", &[("live-relay", "yes\n")]);
     let card = lab.card("live relay", "live-relay").await;
     lab.td
@@ -2283,6 +2283,19 @@ echo real-tunnel-large-log-ok
 #[tokio::test]
 async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
     use std::os::unix::fs::PermissionsExt;
+    #[derive(Clone)]
+    struct Trace(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Trace {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let trace = Trace(Default::default());
+    let writer = trace.clone();
+    // Global to include job-queue and executor tasks spawned by the daemon.
+    tracing::subscriber::set_global_default(tracing_subscriber::fmt().with_ansi(false).with_writer(move || writer.clone()).finish()).unwrap();
     let fixtures = tempfile::tempdir().unwrap();
     let ssh = fixtures.path().join("ssh");
     std::fs::write(
@@ -2296,10 +2309,18 @@ key = pathlib.Path(args[args.index('-i') + 1]).read_text()
 assert 'SSH_AUTH_SOCK' not in os.environ
 if '-L' not in args:
     assert key == 'dummy-reset-key-363'
+    assert 'StrictHostKeyChecking=yes' in args
+    pin_arg = next(a for a in args if a.startswith('UserKnownHostsFile='))
+    pin_path = pathlib.Path(pin_arg.split('=', 1)[1])
+    assert pin_path.parent == pathlib.Path(args[args.index('-i') + 1]).parent
+    pin = pin_path.read_text()
     with (root / 'order').open('a') as f: f.write('reset\n')
+    if not pin.startswith('test-host '): sys.exit(255)
+    if 'public-test-pin' not in pin: sys.exit(255)
     status = root / 'status'
     code = int(status.read_text()) if status.exists() else 0
     if code == 75: status.write_text('0')
+    if code == 175: code = 75
     sys.exit(code)
 assert key == 'dummy-tunnel-key-363'
 assert (root / 'order').read_text().endswith('reset\n')
@@ -2335,15 +2356,26 @@ while True: time.sleep(1)
             .ok();
     }
     let marker = fixtures.path().join("recipe-started");
-    let config = json!({"target":"p-box", "recipe":format!("test -z \"${{DOCKER_CI_KEY:-}}${{DOCKER_CI_RESET_KEY:-}}${{SSH_AUTH_SOCK:-}}\" && test -S \"${{DOCKER_HOST#unix://}}\" && touch '{}' && echo recipe-ok", marker.display()), "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm", "DOCKER_CI_RESET_KEY":"@secret:reset"}, "docker_ci":{"destination":"root@test-vm", "port":2250, "known_hosts":"test-vm ssh-ed25519 public-test-pin\n", "reset_destination":"reset@test-host", "reset_port":22}});
-    lab.td.put("/api/projects/p/delivery", config).await.ok();
+    let environment = fixtures.path().join("recipe-env.json");
+    let relay_snapshot = fixtures.path().join("relay-files.json");
+    let recipe = format!(r#"test -z "${{DOCKER_CI_KEY:-}}${{DOCKER_CI_RESET_KEY:-}}${{SSH_AUTH_SOCK:-}}" && test -S "${{DOCKER_HOST#unix://}}" && python3 -I -c 'import json,os,pathlib; pathlib.Path("{}").write_text(json.dumps(dict(os.environ))); directory=pathlib.Path(os.environ["DOCKER_HOST"].removeprefix("unix://")).parent; pathlib.Path("{}").write_text(json.dumps([str(p) for p in directory.iterdir()])); assert all(not p.is_file() for p in directory.iterdir())' && touch '{}' && echo recipe-ok"#, environment.display(), relay_snapshot.display(), marker.display());
+    let mut config = json!({"target":"p-box", "recipe":recipe, "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm", "DOCKER_CI_RESET_KEY":"@secret:reset"}, "docker_ci":{"destination":"root@test-vm", "port":2250, "known_hosts":"test-vm ssh-ed25519 public-test-pin\n", "reset_destination":"reset@test-host", "reset_port":22,"reset_known_hosts":"test-host ssh-ed25519 public-test-pin\n"}});
     for (branch, status, expected) in [
         ("secret-ok", 0, true),
         ("secret-reset-failed", 1, false),
         ("secret-reset-busy", 75, true),
+        ("secret-reset-exhausted", 175, false),
+        ("secret-reset-unknown-pin", 255, false),
+        ("secret-reset-wrong-pin", 256, false),
         ("secret-revoked", 0, false),
     ] {
         std::fs::write(fixtures.path().join("status"), status.to_string()).unwrap();
+        config["docker_ci"]["reset_known_hosts"] = match status {
+            255 => json!("other-host ssh-ed25519 public-test-pin\n"),
+            256 => json!("test-host ssh-ed25519 wrong-key\n"),
+            _ => json!("test-host ssh-ed25519 public-test-pin\n"),
+        };
+        lab.td.put("/api/projects/p/delivery", config.clone()).await.ok();
         let _ = std::fs::remove_file(&marker);
         if branch == "secret-revoked" {
             lab.td
@@ -2372,8 +2404,18 @@ while True: time.sleep(1)
         if status == 1 {
             assert!(text.contains("reset failed"), "{text}");
         }
+        if status == 175 { assert!(text.contains("lock busy")); }
         if expected {
             assert!(text.contains("Full log on target"), "{text}");
+            let env: std::collections::BTreeMap<String,String> = serde_json::from_slice(&std::fs::read(&environment).unwrap()).unwrap();
+            for value in env.values() {
+                assert!(!value.contains("dummy-reset-key-363") && !value.contains("dummy-tunnel-key-363"));
+            }
+            let inherited: std::collections::BTreeMap<_,_> = std::env::vars().collect();
+            let ordinary = ["GIT_AUTHOR_NAME","GIT_AUTHOR_EMAIL","GIT_COMMITTER_NAME","GIT_COMMITTER_EMAIL","TERRARIUM_JOB_KIND","TERRARIUM_JOB_ID","TERRARIUM_JOB_SLOT","TERRARIUM_HEAD","TERRARIUM_BASE","TERRARIUM_CHANGED_FILES","PWD","OLDPWD","SHLVL","_"];
+            let added: Vec<_> = env.keys().filter(|k| !inherited.contains_key(*k) && !ordinary.contains(&k.as_str())).map(String::as_str).collect();
+            assert_eq!(added, ["DOCKER_HOST"]);
+            assert!(std::fs::read_to_string(&relay_snapshot).unwrap().contains("docker.sock"));
         }
     }
     let audit = lab.td.get("/api/audit").await;
@@ -2399,6 +2441,28 @@ while True: time.sleep(1)
         .unwrap();
     for key in ["dummy-reset-key-363", "dummy-tunnel-key-363"] {
         assert!(!events.contains(key), "{events}");
+    }
+    fn scan(path: &Path, logs: &mut usize) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() { scan(&entry.path(), logs); }
+            else if kind.is_file() {
+                let bytes = std::fs::read(entry.path()).unwrap();
+                for key in [b"dummy-reset-key-363".as_slice(), b"dummy-tunnel-key-363".as_slice()] {
+                    assert!(!bytes.windows(key.len()).any(|window| window == key), "key in job file");
+                }
+                if entry.path().extension().is_some_and(|e| e == "log") { *logs += 1; }
+            }
+        }
+    }
+    let mut logs = 0;
+    scan(&lab._dirs.path().join("jobs"), &mut logs);
+    assert!(logs > 0, "must inspect raw recipe logs as well as checkout files");
+    let trace = trace.0.lock().unwrap();
+    assert!(!trace.is_empty(), "daemon tracing was not captured");
+    for key in [b"dummy-reset-key-363".as_slice(), b"dummy-tunnel-key-363".as_slice()] {
+        assert!(!trace.windows(key.len()).any(|window| window == key), "key in daemon tracing");
     }
     let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
     // The queue may retry another failed card while a new merge is queued.
@@ -2430,13 +2494,6 @@ async fn delivery_secret_config_refuses_plaintext_and_arbitrary_env_injection() 
             .await
             .err(422, "invalid");
     }
-    lab.td.put("/api/projects/p/delivery", json!({
-        "target":"p-box", "recipe":"test -z \"${DOCKER_CI_KEY:-}\" && test -z \"${SSH_AUTH_SOCK:-}\"",
-        "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm", "DOCKER_CI_RESET_KEY":"@secret:reset"}
-    })).await.ok();
-    let head = lab.branch("no-recipe-key", "next", &[("OK", "yes\n")]);
-    let job = validate_card(&lab, "no-recipe-key", &head).await;
-    assert_eq!(job["state"], "passed", "{job:#}");
 }
 
 /// Review B1: the recipe commits in its clone and moves HEAD. The push
