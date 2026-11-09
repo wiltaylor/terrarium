@@ -1139,9 +1139,29 @@ fn close_after_agent_end(t: &mut Tx<'_>, th: Thread) -> ApiResult<Thread> {
 /// attached agent (then the operator must act). In a thread that tracks
 /// (`tracking_at`), the agent's message puts it back into `tracking`
 /// (TER-145, D9).
-pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thread> {
+///
+/// `want` (GitHub #28): the attached agent's message sets this status
+/// instead, `waiting_agent` (it works on) or `tracking` (as [`track`]).
+/// The operator sets none, and an open question refuses it (`409`): a
+/// question keeps the thread on the operator.
+pub fn post(
+    t: &mut Tx<'_>,
+    id: &str,
+    author: &str,
+    text: &str,
+    want: Option<ThreadStatus>,
+) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
     not_closed(&th, "a message")?;
+    if let Some(w) = want {
+        agent_status(w)?;
+        if author == "operator" {
+            return Err(ApiError::invalid(
+                "`status` is for the thread's agent: an operator message sets waiting_agent",
+            ));
+        }
+        no_open_question(t, &th.id, w)?;
+    }
     let text = t.redact_string(check_text("text", text, MAX_MESSAGE)?);
     let at = now();
     let msg = insert_message(t, &th.id, author, "message", &text, &at)?;
@@ -1151,6 +1171,8 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     }
     let status = if author == "operator" {
         ThreadStatus::WaitingAgent
+    } else if let Some(w) = want {
+        w
     } else if open_questions(t, &th.id)? > 0 {
         ThreadStatus::WaitingOperator
     } else if th.tracking_at.is_some() {
@@ -1159,15 +1181,108 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
         ThreadStatus::WaitingOperator
     };
     set_status(t, &th.id, status, &at)?;
-    if author == "operator" {
+    if author == "operator" || want.is_some() {
         // The operator writes on: a close proposal of the agent is
-        // declined (TER-95).
+        // declined (TER-95). The agent that works on or tracks withdraws
+        // its own proposal, as [`track`] does.
         clear_proposal(t, &th.id)?;
     }
     let th = get(t, &th.id)?;
     emit_with(t, &th, "message", json!({"message": msg, "author": author}))?;
+    if want == Some(ThreadStatus::Tracking) {
+        return track(t, id, author);
+    }
     flush_pending_wakes(t, id)?;
     Ok(th)
+}
+
+/// A status that the attached agent may set (GitHub #28): `waiting_agent`
+/// or `tracking`. `waiting_operator` follows from a message or a question,
+/// and `closed` from the close.
+fn agent_status(s: ThreadStatus) -> ApiResult<()> {
+    match s {
+        ThreadStatus::WaitingAgent | ThreadStatus::Tracking => Ok(()),
+        other => Err(ApiError::invalid(format!(
+            "the thread's agent sets waiting_agent or tracking, not {}: a message or a \
+             question sets waiting_operator, and `thread close` closes",
+            other.as_str()
+        ))),
+    }
+}
+
+/// An open question keeps the thread on the operator: the agent sets no
+/// other status until it is settled (`409`).
+fn no_open_question(t: &Tx<'_>, id: &str, want: ThreadStatus) -> ApiResult<()> {
+    let open = open_questions(t, id)?;
+    if open > 0 {
+        return Err(ApiError::conflict(format!(
+            "thread {id} has {open} open question(s): the operator settles them first, or you \
+             retract them; then set {}",
+            want.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// The attached agent or the operator `by` sets the status of thread
+/// `id` without a message (GitHub #28, `thread status`, TER-456):
+/// `tracking` as [`track`], or
+/// `waiting_agent`: the agent works on, and the thread does not wait on
+/// the operator (no Inbox badge, no reminder, no stale close). An open
+/// question refuses it (`409`); a close proposal is withdrawn.
+pub fn set_by_agent(t: &mut Tx<'_>, id: &str, by: &str, status: ThreadStatus) -> ApiResult<Thread> {
+    agent_status(status)?;
+    if status == ThreadStatus::Tracking {
+        return track(t, id, by);
+    }
+    let th = get_bare(t, id)?;
+    not_closed(&th, "a status change")?;
+    no_open_question(t, &th.id, status)?;
+    let at = now();
+    t.execute(
+        "UPDATE threads SET status = ?2, updated_at = ?3, close_proposal = NULL WHERE id = ?1",
+        params![th.id, status.as_str(), at],
+    )?;
+    let th = get(t, &th.id)?;
+    t.audit(
+        "thread.status",
+        &th.id,
+        th.project(),
+        json!({"by": by, "status": status.as_str()}),
+    )?;
+    emit_with(t, &th, "status", json!({"author": by}))?;
+    Ok(th)
+}
+
+/// Move thread `id` into tracking when a card is linked to it while it
+/// waits on the operator only because of the attached agent's last
+/// message: the agent handed off, and the new card is the work (GitHub
+/// #28). Nothing changes with an open question, a close proposal, an
+/// ended agent, or when the last message is not the agent's.
+pub fn track_on_link(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
+    let th = get_bare(t, id)?;
+    let Some(agent) = th.agent.as_deref() else {
+        return Ok(());
+    };
+    if th.status != ThreadStatus::WaitingOperator
+        || th.close_proposal.is_some()
+        || th.agent_end_outcome.is_some()
+        || open_questions(t, &th.id)? > 0
+    {
+        return Ok(());
+    }
+    let last: Option<String> = t
+        .query_row(
+            "SELECT author FROM thread_messages WHERE thread = ?1
+             ORDER BY at DESC, id DESC LIMIT 1",
+            [&th.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if last.as_deref() == Some(agent) {
+        track(t, &th.id, agent)?;
+    }
+    Ok(())
 }
 
 /// Mark an open thread whose bound agent ended, without an Inbox notice.

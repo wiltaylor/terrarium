@@ -37,10 +37,9 @@ fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
     Ok(Some(actor(v.agent)))
 }
 
-fn template(card: &board::Card) -> Option<String> {
+fn template(labels: &[String]) -> Option<String> {
     // Only known worker types, not arbitrary labels used as template names.
-    let types: Vec<_> = card
-        .labels
+    let types: Vec<_> = labels
         .iter()
         .filter_map(|l| l.strip_prefix("type:"))
         .collect();
@@ -52,43 +51,97 @@ fn template(card: &board::Card) -> Option<String> {
     }
 }
 
+/// Bounded working-column WIP check: one indexed column lookup plus the
+/// count of its active cards. Keep it public for plan regression tests.
+pub const WORKING_WIP: &str = "
+SELECT k.wip_limit,
+       (SELECT count(*) FROM cards c WHERE c.column_id = k.id
+         AND c.archived = 0 AND c.kind = 'card')
+FROM board_columns k WHERE k.project = ?1 AND k.role = 'working'
+ORDER BY k.position LIMIT 1";
+
+/// Page size of [`CANDIDATES`]: held cards and cards with no usable type
+/// label stay in ready, so pages are walked by the `(position, id)` keyset
+/// until one is not full and a later dispatchable card cannot be starved
+/// (TER-408).
+pub const CANDIDATE_PAGE: i64 = 16;
+
+/// Bounded ready-column lookup: cards with no assignee, no open bound
+/// agent, no unmet dependency and no cooldown, in board order, one page
+/// after the keyset `(?4, ?5)`. Keep the indexed query public for plan
+/// regression tests.
+pub const CANDIDATES: &str = "
+SELECT c.id, c.position, c.title, c.labels FROM cards c INDEXED BY cards_column
+WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
+  AND c.archived = 0 AND c.kind = 'card' AND c.assignee IS NULL
+  AND NOT EXISTS (SELECT 1 FROM spawns s WHERE s.bound_kind = 'card'
+      AND s.bound_id = c.id AND s.finished_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM card_dispatch_retries d WHERE d.card = c.id AND d.retry_at > ?3)
+  AND NOT EXISTS (SELECT 1 FROM card_deps e JOIN cards dc ON dc.id = e.depends_on
+      JOIN board_columns k ON k.id = dc.column_id
+      WHERE e.card = c.id AND dc.archived = 0
+        AND coalesce(k.role, k.name) NOT IN ('accepted', 'done'))
+  AND (c.position, c.id) > (?4, ?5)
+ORDER BY c.position, c.id LIMIT ?6";
+
+fn working_wip(r: &rusqlite::Row<'_>) -> rusqlite::Result<(Option<i64>, i64)> {
+    Ok((r.get(0)?, r.get(1)?))
+}
+
 fn candidate(c: &Connection, project: &str) -> ApiResult<Option<(String, String)>> {
-    let b = board::get_board(c, project)?;
-    let Some(working) = b
-        .columns
-        .iter()
-        .find(|col| col.role.as_deref() == Some(board::WORKING))
-    else {
-        return Ok(None);
-    };
+    let working = c
+        .query_row(WORKING_WIP, [project], working_wip)
+        .optional()?;
     // Fail closed without an explicit limit: opt-in must not create an
     // unbounded number of agents on a board with no concurrency policy.
-    if working.wip_limit.is_none_or(|limit| working.count >= limit) {
+    if !matches!(working, Some((Some(limit), count)) if count < limit) {
         return Ok(None);
     }
     let ready = board::role_name(c, project, "ready", "ready")?;
-    for card in b.cards.iter().filter(|card| card.column == ready) {
-        if card.kind != "card"
-            || card.assignee.is_some()
-            || card.agent.is_some()
-            || !card.blocked_by.is_empty()
-            || board::is_held(c, &card.id)?
+    let now = chrono::Utc::now().timestamp();
+    let mut q = c.prepare(CANDIDATES)?;
+    // Positions are neither dense nor unique (archived cards keep theirs,
+    // group cards go in at 0 with no shift, create counts active cards
+    // while a move counts all rows), so the keyset is the `(position, id)`
+    // pair: a strict total order that cannot drop a tie at a page
+    // boundary. Held cards and cards with no usable type label are skips
+    // in Rust, so a full page of them continues with the next page
+    // instead of starving an eligible card further down.
+    let mut after: (i64, String) = (-1, String::new());
+    loop {
+        let mut rows: Vec<(String, i64, String, String)> = Vec::new();
         {
-            continue;
+            let it = q.query_map(
+                params![project, ready, now, after.0, after.1, CANDIDATE_PAGE],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )?;
+            for row in it {
+                rows.push(row?);
+            }
         }
-        let cooling: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM card_dispatch_retries WHERE card = ?1 AND retry_at > ?2)",
-            params![card.id, chrono::Utc::now().timestamp()],
-            |r| r.get(0),
-        )?;
-        if cooling {
-            continue;
+        let full = rows.len() == CANDIDATE_PAGE as usize;
+        for (id, position, title, labels) in rows {
+            after = (position, id.clone());
+            let labels = crate::store::json_col::<Vec<String>>(&labels);
+            if crate::store::github_gate::is_held(&title, &labels) {
+                continue;
+            }
+            if let Some(template) = template(&labels) {
+                return Ok(Some((id, template)));
+            }
         }
-        if let Some(template) = template(card) {
-            return Ok(Some((card.id.clone(), template)));
+        // A page that is not full is the end of the ready column.
+        if !full {
+            return Ok(None);
         }
     }
-    Ok(None)
 }
 
 /// Try one card. The timer repeats after a successful claim to fill free WIP.

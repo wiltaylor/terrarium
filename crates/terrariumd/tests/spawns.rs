@@ -56,18 +56,6 @@ async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl Fn
     }
 }
 
-/// Wait until agent `a` is `idle` after its first turn (the task of an
-/// ephemeral agent), with the deadline of [`until`]. The idle right after
-/// the start comes before that turn.
-async fn idle_after_a_turn(td: &TestDaemon, a: &str) {
-    let aid: AgentId = a.parse().unwrap();
-    until("idle after the first turn", || async {
-        !td.sup.prompts(aid).is_empty()
-            && td.get(&format!("/api/agents/{a}")).await.body["status"] == "idle"
-    })
-    .await;
-}
-
 /// Wait until agent `a` has `status`, with the deadline of [`until`].
 async fn status_is(td: &TestDaemon, a: &str, status: &str) {
     until(&format!("{a} {status}"), || async {
@@ -695,7 +683,7 @@ async fn an_idle_ephemeral_agent_stays_until_its_lifetime() {
     .await
     .ok();
     let eph = id(&spawn_ok(&td, &w, "Think").await);
-    idle_after_a_turn(&td, &eph).await;
+    td.wait_task_done(&eph).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
     let a = td.get(&format!("/api/agents/{eph}")).await.ok().clone();
     assert_eq!(a["status"], "idle", "{a}");
@@ -831,7 +819,7 @@ async fn a_stop_of_the_owner_leaves_them() {
     let eph = id(&spawn_ok(&td, &w, "x").await);
     // Idle after its task turn: the check below then sees no turn end
     // (TER-109).
-    idle_after_a_turn(&td, &eph).await;
+    td.wait_task_done(&eph).await;
     td.post_empty(&format!("/api/agents/{w}/stop")).await.ok();
     status_is(&td, &w, "stopped").await;
     tokio::time::sleep(Duration::from_millis(200)).await;

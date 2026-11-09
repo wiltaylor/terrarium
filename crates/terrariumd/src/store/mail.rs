@@ -668,6 +668,13 @@ pub fn is_pause_notice(from: &Address, subject: &str) -> bool {
         && subject.ends_with(" needs a human")
 }
 
+/// [`is_pause_notice`] on a stored message: `from` is the address key of
+/// the row. A pause notice opens no mail item ([`send`] skips it), so its
+/// close emits none either (`inbox::mail_closed`).
+pub fn is_pause_notice_key(from: &str, subject: &str) -> bool {
+    from == "system" && is_pause_notice(&Address::System, subject)
+}
+
 /// `TERRARIUM_MAIL_LOOP_LIMIT`: the agent-to-agent messages a thread may
 /// have since the last operator or project-inbox message before the loop
 /// guard pauses it (PLAN §12).
@@ -1078,6 +1085,7 @@ pub fn reply(
     if first {
         audit_read(t, original, "reply")?;
     }
+    crate::store::inbox::mail_closed(t, original)?;
     Ok(out)
 }
 
@@ -1115,6 +1123,9 @@ pub fn mark_read_in_turn(t: &mut Tx<'_>, ids: &[String], reader: &str) -> ApiRes
         if changed > 0 && before.read_at.is_none() {
             audit_read(t, &before, "turn")?;
         }
+        if changed > 0 {
+            crate::store::inbox::mail_closed(t, &before)?;
+        }
         n += changed;
     }
     Ok(n)
@@ -1136,6 +1147,7 @@ pub fn mark_read(t: &mut Tx<'_>, id: &str) -> ApiResult<Message> {
     if before.read_at.is_none() {
         audit_read(t, &before, "read")?;
     }
+    crate::store::inbox::mail_closed(t, &before)?;
     get(t, id)
 }
 
@@ -1165,6 +1177,120 @@ fn audit_read(t: &Tx<'_>, m: &Message, via: &str) -> ApiResult<()> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// The `inbox` events of one item, as the daemon streams them.
+    fn inbox_events(t: &Tx<'_>, item: &str) -> Vec<serde_json::Value> {
+        let mut st = t
+            .prepare("SELECT payload FROM events WHERE kind = 'inbox'")
+            .unwrap();
+        st.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|p| serde_json::from_str::<serde_json::Value>(&p.ok()?).ok())
+            .filter(|d| d["item"] == item)
+            .collect()
+    }
+
+    /// The `inbox` closed events of one item, as the daemon streams them.
+    fn closed_events(t: &Tx<'_>, item: &str) -> Vec<serde_json::Value> {
+        inbox_events(t, item)
+            .into_iter()
+            .filter(|d| d["change"] == "closed")
+            .collect()
+    }
+
+    /// GitHub #25: every path that moves a mail to the operator out of
+    /// `queued` or `delivered` emits the `inbox` closed event of its item,
+    /// so the Inbox closes it when the operator reads or replies outside
+    /// it. Mail to an agent emits nothing, and a second read changes
+    /// nothing.
+    #[test]
+    fn operator_mail_closes_the_inbox_item_on_every_path() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        let agent_id = ulid::Ulid::new().to_string();
+        conn.execute(
+            "INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+             VALUES (?1, 'w', 'p', 'claude', '/w', 't', 't')",
+            [&agent_id],
+        )
+        .unwrap();
+        let worker = Address::Agent {
+            id: agent_id.clone(),
+            name: "w".into(),
+            project: "p".into(),
+        };
+        let mut t = Tx::for_test(conn.transaction().unwrap(), "operator");
+        let to_operator = |t: &mut Tx<'_>, from: &Address, subject: &str| {
+            send(
+                t,
+                Outgoing {
+                    from,
+                    to: &Address::Operator,
+                    subject,
+                    body: "body",
+                    thread: None,
+                    in_reply_to: None,
+                },
+            )
+        };
+
+        // A read in a turn (the daemon typed the mail into a turn) closes it.
+        let m = to_operator(&mut t, &Address::System, "One").unwrap();
+        assert_eq!(
+            mark_read_in_turn(&mut t, std::slice::from_ref(&m.id), "operator").unwrap(),
+            1
+        );
+        let closed = closed_events(&t, &format!("mail:{}", m.id));
+        assert_eq!(closed.len(), 1, "{closed:?}");
+        assert_eq!(closed[0]["kind"], "mail");
+        // Again: nothing changed, no second event.
+        assert_eq!(
+            mark_read_in_turn(&mut t, std::slice::from_ref(&m.id), "operator").unwrap(),
+            0
+        );
+        assert_eq!(closed_events(&t, &format!("mail:{}", m.id)).len(), 1);
+
+        // A read outside the Inbox (the Mail page, the CLI).
+        let m = to_operator(&mut t, &Address::System, "Two").unwrap();
+        assert_eq!(mark_read(&mut t, &m.id).unwrap().state, "read");
+        assert_eq!(mark_read(&mut t, &m.id).unwrap().state, "read");
+        assert_eq!(closed_events(&t, &format!("mail:{}", m.id)).len(), 1);
+
+        // A reply outside the Inbox closes it, with the project of the sender.
+        let m = to_operator(&mut t, &worker, "Three").unwrap();
+        assert_eq!(m.from_name, "p/w");
+        reply(&mut t, &m, &Address::Operator, None, "answer").unwrap();
+        let closed = closed_events(&t, &format!("mail:{}", m.id));
+        assert_eq!(closed.len(), 1, "{closed:?}");
+        assert_eq!(closed[0]["project"], "p");
+
+        // Mail to an agent is no Inbox item: reading it emits nothing.
+        let to_agent = send(
+            &mut t,
+            Outgoing {
+                from: &Address::Operator,
+                to: &worker,
+                subject: "Four",
+                body: "body",
+                thread: None,
+                in_reply_to: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(to_agent.state, "queued");
+        mark_read(&mut t, &to_agent.id).unwrap();
+        mark_read_in_turn(&mut t, std::slice::from_ref(&to_agent.id), &agent_id).unwrap();
+        reply(&mut t, &to_agent, &worker, None, "answer").unwrap();
+        assert!(closed_events(&t, &format!("mail:{}", to_agent.id)).is_empty());
+
+        // A pause notice opened no mail item (`send` skips it), so reading
+        // it closes none: no event at all, on any path.
+        let notice = to_operator(&mut t, &Address::System, "Thread 01J needs a human").unwrap();
+        assert!(inbox_events(&t, &format!("mail:{}", notice.id)).is_empty());
+        mark_read(&mut t, &notice.id).unwrap();
+        mark_read_in_turn(&mut t, std::slice::from_ref(&notice.id), "operator").unwrap();
+        assert!(inbox_events(&t, &format!("mail:{}", notice.id)).is_empty());
+    }
 
     /// The name reader goes through the tombstone resolver: a deleted agent
     /// shows as `project/name`, and a key that never was an agent shows as

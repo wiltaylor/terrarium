@@ -3375,7 +3375,7 @@ kinds:
 |---|---|---|---|
 | `question` | A question or a bundle of questions (§6.8). | `status` is `open`. | `POST /api/questions/{id}/answer`, `.../retract` |
 | `notice` | A notice (§6.8). | `status` is `open`. | `POST /api/questions/{id}/ack`, `.../retract` |
-| `mail` | A message to `operator` (§7). | Its `state` is `queued` or `delivered`: not acknowledged. | `POST /api/inbox/mail/{id}/ack` |
+| `mail` | A message to `operator` (§7). | Its `state` is `queued` or `delivered`: not acknowledged. | `POST /api/inbox/mail/{id}/ack`; it closes as well when the mail is read or replied outside the Inbox (§7): `POST /api/mail/{id}/read`, `.../reply` |
 | `system` | A thread of the loop guard (§7.4): it is paused now, or it has a held message that is not released. | The thread is paused, or a held message is not released. | `POST /api/mail/{id}/release`, `POST /api/mail/threads/{thread}/resume` |
 | `watch` | A question that the operator asked an agent, or a question of the Inbox that the operator forwarded to one (below, "Ask and forward"). It waits for the agent, not for the operator. | The newest message of its thread is the operator's, and it is not cancelled. | `DELETE /api/inbox/watches/{thread}` |
 | `thread` | An Inbox thread (§6.13), with its questions inside. A question asked in a thread is not an item of its own. | The thread is `waiting_operator`, or it is not closed and has an open question. | `POST /api/threads/{id}/messages`, `.../respond`, `.../close`, and the question verbs |
@@ -3465,8 +3465,10 @@ Only the operator reads the Inbox and acts on it. An agent gets `403`,
 with a message that sends it to `terrarium question ls`.
 
 Each change of an item emits an `inbox` event: `{item, kind, change,
-project?}`, where `change` is `opened`, `updated`, or `closed`. The
-acknowledgement of a mail writes an `inbox.ack` audit row.
+project?}`, where `change` is `opened`, `updated`, or `closed`. A `mail`
+item closes on every path that acknowledges its message: the ack, a read,
+a reply, wherever the operator does it. The acknowledgement of a mail
+writes an `inbox.ack` audit row.
 
 ### 6.10 Ephemeral agents
 
@@ -3557,12 +3559,24 @@ or the operator may spawn for an owner. The checks, in order:
 
 `like` (CLI `--like <agent>`) copies a same-project agent's policy targets,
 agent-level secret grant references (never values), skills settings, subscription
-and pool. The template still supplies the harness and other settings. The source
-must use the same harness. Subscription selection uses the copied pool's headroom.
-Each copied target and grant is checked against the owner through the normal
-spawn-rights checks. A missing right is `403`, with its name. With
+and pool: the copied subscription and pool replace the template's and the
+owner's, and subscription selection uses the copied pool's headroom. The
+template still supplies the harness and other settings. The source must use
+the same harness; a mismatch is `422 invalid` and names the template, also
+when it is the alternative picked for headroom. Each copied target and grant
+is checked against the owner through the normal spawn-rights checks, and a
+copied target that the body's `targets` also names is granted once. A missing
+right is `403`. A copied target is named. A copied grant is named (secret
+and level) only when the owner may already read the secret's name (a grant of
+its own, or the operator); the others are counted in one `403` with no name,
+which points at `like_skip_missing`. With
 `like_skip_missing: true` (CLI `--like-skip-missing`, requires `like`), those
-forbidden rights are omitted and listed in the response's `skipped` array.
+forbidden rights are omitted and listed in the response's `skipped` array:
+`target:<name>` and `grant:<scope>/<name>:<level>`, the grant entries only
+for secrets whose name the owner may already read (a grant of its own, or
+the operator, which reads every name). Skipped grants on secrets that the
+owner may not read are counted in one `grant:<n> hidden: the owner may not
+read their names` entry, so the list does not expose the source's grants.
 Other errors still fail the spawn. Explicit and template grants replace copied
 grants of the same secret. Project grants and leases of the source are not copied.
 
@@ -3888,6 +3902,26 @@ retract of one of its questions makes it `waiting_agent` when no question
 of the thread is open any more. A closed thread does not change, and each
 write to it is `409 conflict`.
 
+**Status set by the agent** (GitHub #28). The attached agent's message
+may name the status that follows it: `{"text", "status": "waiting_agent"}`
+when the agent starts the work now (`terrarium thread post <id> -m <text>
+--status waiting_agent`), or `"tracking"`, which also moves the thread
+into tracking as `POST .../track`. `POST .../status` with `{"status"}`
+(`terrarium thread status <id> waiting_agent|tracking`) sets it without
+a message. Both withdraw a close proposal. Only `waiting_agent` and
+`tracking` are allowed (`422`). The attached agent and the operator use
+the status verb (another agent is `403`); a `status` in an operator
+message is `422`. An open question of the thread is `409 conflict` for
+both: a question keeps the thread on the operator. A `waiting_agent` or `tracking` thread is not in the Inbox
+badge and gets no reminder or stale close.
+
+**Tracking on a card link** (GitHub #28). When a card is linked
+(`POST .../cards`, or `inbox_thread` on the card create) while the thread
+is `waiting_operator`, its last message is the attached agent's, no
+question is open, no close is proposed, and the agent has not ended, the
+thread moves into tracking as `POST .../track`: the agent handed off and
+the card is the work.
+
 **Tracking** (TER-145, TER-144 D1 and D9). After its handoff the attached
 agent moves the thread into tracking: `POST .../track` (`terrarium thread
 track <id>`) makes it `tracking`, sets `tracking_at`, and withdraws a close
@@ -4052,10 +4086,11 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `POST /api/threads` | `{"topic", "scope"?, "template"?, "agent"?, "text"?}`; `scope` defaults to `global` for the operator and to the own project for an agent; `agent` is a ULID or `project/name` | `201` the thread. An agent: `403` without `thread:open`, for another project, or for a template or agent above its rights (A1); `422` with no `template`; `404` for an unknown template |
 | `GET /api/threads` | `?status=waiting_operator\|waiting_agent\|tracking\|closed\|open\|all` (default `open`: not closed), `?scope=` | `200` the threads without `messages` and `questions`, with `message_count`, `open_questions`, and `last_at`. The ones that wait for the operator first, then the newest activity first. At most 200. |
 | `GET /api/threads/{id}` | | `200` the thread |
-| `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
+| `POST /api/threads/{id}/messages` | `{"text", "status"?}`; `status` `waiting_agent` or `tracking`, the attached agent only (GitHub #28) | `201` the thread. `409` for a `status` with an open question; `422` for another `status` or a `status` of the operator |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
 | `POST /api/threads/{id}/track` | no body, or `{"cards"?, "monitor"?}`: at most 50 cards to link first (TER-146), optional monitor `project:name` (TER-149) | The attached agent: `200` the thread, `tracking`, with `tracking_at`, `cards` and optional `monitor`. `409` with an open question; invalid links roll back the whole write |
+| `POST /api/threads/{id}/status` | `{"status"}`: `waiting_agent` or `tracking` (GitHub #28) | The attached agent: `200` the thread. `403` for anyone else, `409` with an open question, `422` for another status |
 | `POST /api/threads/{id}/cards` | `{"card"}`: `<project>:<card>` or `<card>` | `200` the thread with `cards`, also when the card was linked already. `404` without the read right on the thread, for a card that does not exist or is not in the named project, and without the read right on the card's project; `422` for an archived card; `409` on a closed thread |
 
 **Ops tracking** (TER-149, D6). `terrarium thread track <id> --monitor <project>:<monitor>`
@@ -5768,7 +5803,7 @@ defaults. Unknown fields and negative limits are rejected. Example:
 {"time_seconds":{"small":2700,"impl":7200,"impl-hard":14400},
  "tokens":{},"turns":{},"red_streak":3,"red_same_commit":2,
  "review_rounds":2,"eta_delays":3,"timer_polls":3,"compactions":3,
- "review_wait_seconds":3600}
+ "review_wait_seconds":3600,"no_progress_seconds":3600}
 ```
 
 Time, token and turn maps are keyed by the suffix of the card's `type:` label
@@ -5782,8 +5817,8 @@ they use the fixed fallbacks above (`hard` also uses four hours). Explicit
 project time overrides take precedence. A zero threshold disables that check.
 An ETA at or before now produces `eta_overdue`. The other signal names are
 `time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
-`validation_red`, `timer_polls`, `compactions` and `review_wait`. Review wait
-starts at the most recent entry into review and clears on return to work.
+`validation_red`, `timer_polls`, `compactions`, `review_wait` and `no_progress`.
+Review wait starts at the most recent entry into review and clears on return to work.
 Assignment changes while the card stays in review do not reset its age.
 Job-set ETAs do not count as agent ETA extensions.
 
@@ -5794,6 +5829,25 @@ examined per card. Three consecutive red runs, or
 two red runs on the same nonempty commit within the streak, trigger the mark.
 Short timer waits (at most one minute) and compaction requests use a rolling
 one-hour window. Review rounds and ETA extensions count the card's history.
+For a card in a working-role column with a repo, the remote scan reads the
+actual branch head with `git ls-remote`, so direct pushes count. Research
+cards are not watched and never get `no_progress`. The branch is the card's
+branch, else the lowercase card id (as for validation jobs). The scan has its
+own five-minute timer, reads at most 32 cards per pass from a rotating cursor,
+and stops a pass after 120 seconds. The cursor moves past a card only after
+its read finishes, so a read cut by the cap comes first in the next pass. The
+capacity is 32 cards per five minutes: with more watched cards, each card is
+read less often, and with slow remotes the cap cuts a pass short. Then a
+stored read can grow older than the threshold, and no mark is set for that
+card until a fresh read (no false marks). A failed repo, credential or
+`ls-remote` read is logged and changes nothing. `no_progress` starts after
+`no_progress_seconds` of agent working time (waits excluded) without a new
+head: counted from the claim while the branch was never seen on the remote,
+otherwise from the working time when the current head was first seen. A new
+head clears the mark. No mark is set while the last successful read is older
+than the threshold, or when the stored read is for another repo or branch of
+the card. A zero threshold disables it. Proxy `repo.push result=forwarded`
+audit rows are not push evidence.
 
 The lifecycle tick plans in a read, using lightweight working/review/research
 card metadata and marked cards that need clearing. It opens a write only if
@@ -5807,13 +5861,13 @@ exception is `eta_overdue`: when the worker's card reminder is enabled
 (agent override, otherwise the daemon default), the reminder owns its nudge.
 The trouble pass records the signal and mails the lead, but does not send a
 second worker mail that could delay the reminder. If reminders are disabled,
-the worker still gets the trouble state request. Other signals are unchanged.
+the worker still gets the trouble state request. `no_progress` is lead-only.
+Other signals are unchanged.
 The once-per-card
 and signal record survives restarts, resolution and recurrence. A mark clears
 when its condition stops holding, its threshold is disabled, or the card
 leaves working/research/review or is archived. A recurrence can restore the
 mark but cannot send another notice. The existing idle alert is separate.
-No-push detection is deferred to successful remote-head tracking (TER-370).
 
 The CLI calls `GET /api/usage?agent=<me>` for `terrarium usage` and
 `GET /api/usage?project=<p>` for `terrarium usage project`. Both work;
@@ -7893,12 +7947,14 @@ A schedule:
 | `created_by` | `operator` or `agent:<ulid>`. |
 | `owner` | `actor` (the default), `project`, or `system` (§19.6). |
 | `run_as` | The actor of the runs of an actor-owned schedule. It is `created_by`, until a caller changes the `action` or the `owner`, or takes the schedule over: then it is that caller. A project- or system-owned schedule does not use it. |
-| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, and always for a trigger and a project action. |
+| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, always for a trigger and a project action, and for a `day_start` schedule while no start planned its run. |
 | `last_run` | `{at, status, summary, run_id}` of the last run, or `null`. |
 | `runs_count` | The runs so far, the skipped runs too. |
 | `source` | `api`, `file` (`[[schedules]]` in `projects/<name>.toml`), or `fleet:<name>` (§18.1). |
 | `consecutive_skips` | The runs in a row that the rights check skipped. |
 | `disabled_reason` | Why the daemon disabled the schedule. Absent when it did not. |
+| `day_start_done` | A `day_start` schedule: the local day (`YYYY-MM-DD`, in its `tz`) of its last run. A start on that day, or on an earlier day, plans no run. Absent before the first run. |
+| `day_start_last` | A `day_start` schedule: `{cause, at}` of the last detected start that planned a run. `cause` is `daemon_start`, `resume`, `host_reconnect`, or `day_change`. Absent before the first plan. |
 
 The specs:
 
@@ -7909,6 +7965,7 @@ The specs:
 | `{"kind": "at", "at": "2026-11-01T02:00:00Z"}` | One run at an RFC 3339 time in the future. |
 | `{"kind": "on", "kinds": ["ci.run.failed"], "match"?, "dedupe"?, "escalate"?, "max_per_hour"?: 30}` | A trigger: each matching event starts a run. See §19.4. |
 | `{"kind": "manual"}` | A project action: no time and no event. Only `POST .../run` starts a run. See §19.10. |
+| `{"kind": "day_start", "tz"?: "UTC", "not_before"?, "not_after"?, "delay"?, "weekdays"?}` | Start of day: one run per calendar day in `tz`, at the first start of the day. See "Start of day" in §19.3. `not_before` and `not_after` are local times as `HH:MM`; `not_after` is not before `not_before`. `delay` is a duration as for `interval`, at most `12h`. `weekdays` is a list of `mon` to `sun`; empty or absent is every day. `catch_up` does not apply. |
 
 The actions:
 
@@ -7947,13 +8004,14 @@ A run:
 | Field | Meaning |
 |---|---|
 | `status` | `running`, then `ok`, `failed`, or `skipped`. |
-| `trigger` | `cron` (the timer, for each spec kind), `manual` (`POST .../run`), `catch_up`, or `event` (a trigger). |
+| `trigger` | `cron` (the timer, for each spec kind), `manual` (`POST .../run`), `catch_up`, `event` (a trigger), or `day_start` (the planned run of a `day_start` schedule). |
 | `summary` | One line. A skip starts with `skipped:`. |
 | `output` | `webhook`: `delivery` (the ID) and `url` (§19.5). `exec`: `target`, `cmd`, `exit_code`, `end`, and the last 4000 bytes of `stdout` and `stderr`. `mail`: `message_id`, `thread_id`, `to`, `held`, `held_reason`. `turn`: `agent`, `started`, `delivery`, `status_before`. `agent`: `agent`, `verb`, `status`. `probe`: the probe outcome with `windows`. `card`: `card` (the ID, or `null`), `op` (`open`, `comment`, or `close`), and `column` for a close. |
 | `error` | Why the run failed or was skipped. |
 | `actor` | Who triggered the run: `run_as` for a timed run, the caller for a run-now, the actor of the event for a trigger run (for example `source:terra/github`). |
 | `event_seq` | The `seq` of the event that started a trigger run. `null` for the other runs. |
 | `event` | `{seq, kind, summary}` of that event, while the log has it. Absent for the other runs. |
+| `day_start` | A `day_start` run: `{cause, at}` of the detected start that planned it (as `day_start_last`). Absent for the other runs. |
 
 ### 19.2 Endpoints
 
@@ -8063,6 +8121,33 @@ daemon left `running` becomes `failed` ("the daemon stopped during the
 run"). A schedule whose next run passed more than one tick before the
 start computes its next run from now; with `catch_up: once`, it also
 runs one time, with the trigger `catch_up`.
+
+**Start of day.** A `day_start` schedule has no time of its own. The
+daemon plans its run at each detected start:
+
+- `daemon_start`: the daemon starts.
+- `resume`: the timer runs again after a gap of more than 60 s (the
+  machine slept).
+- `host_reconnect`: the host agent of the target of an `exec` action
+  comes back online. An `exec` whose target is unknown, or whose host
+  agent is offline, plans no run until then.
+- `day_change`: the day changes in `tz` while the daemon is up.
+
+A start plans a run when the day in `tz` is after `day_start_done` and is
+in `weekdays`. The run is at the start plus `delay`, and not before
+`not_before`. A run that would be after `not_after` is not planned. A
+local time that a clock change skips moves on by one hour; a time that it
+shows twice is the first instant for `not_before` and the last for
+`not_after`. The planned run sets `next_run_at`, and the timer starts it
+with the trigger `day_start`. It records the day of its start in
+`day_start_done`, so the other starts of that day plan nothing: one run
+per day. A run planned before midnight for a time after midnight runs for
+the day of its start. The daemon drops a planned run when the target's
+host agent goes offline, when it is past `not_after`, or when the machine
+slept past it into a later day; the next start plans again. At a daemon
+start, a planned run that passed is dropped, with no catch-up run.
+`schedule show` gives `next run: at the first start after <day>` while no
+run is planned.
 
 **Retention.** The daily prune timer keeps the newest 500 runs of each
 schedule.
@@ -10709,6 +10794,29 @@ dashboard as `GET` does. A block:
 `json` monitor. Several blocks can show the same monitor. A bad layout is
 `422 invalid` with `details.field` such as `blocks[2].kind`.
 
+#### `GET /api/projects/{name}/eta-accuracy`
+
+How well the ETAs of the workers matched the real work time, for the
+latest 30 distinct completed cards of the project. The read right of
+§30.1 applies. An unknown project is `404 not_found`.
+
+```json
+{"raw":{"samples":30,"on_time_pct":56.7,"within_half_to_double_pct":73.3},
+ "calibrated":{"samples":24,"on_time_pct":66.7,"within_half_to_double_pct":83.3}}
+```
+
+| Field | Meaning |
+|---|---|
+| `raw` | The ETA that the worker set, against the real work time |
+| `calibrated` | The calibrated ETA of each card, computed only from the work that ended before the card started. A card without enough earlier history is left out, so `samples` can be lower than in `raw`. |
+| `samples` | The number of cards counted, at most 30 |
+| `on_time_pct` | The percent of cards whose work time was at most the ETA |
+| `within_half_to_double_pct` | The percent of cards whose work time was between half and double the ETA |
+
+With no samples, `samples` is `0` and both percentages are `null`. The
+dashboard loads it once when the dashboard page mounts, apart from the
+monitors, and does not refresh it.
+
 ### 30.7 Owners and target grants
 
 Monitors and schedules (§19.6) are often meant to outlive the agent that
@@ -11797,7 +11905,8 @@ or their environment. Output is stream-redacted with the full key and
 individual PEM lines before retention. The recipe retains its full raw target
 log because credentials never reach the target process tree.
 
-Configure `docker_ci` through the delivery API or fleet configuration before
+Configure `docker_ci` through `terrarium project delivery set`, the delivery
+API, or fleet configuration before
 adding merge secret references. For example, `destination` is `root@vm`,
 `port` is its SSH port, and `known_hosts` is the administrator-verified
 OpenSSH host-key line (including `[host]:port` for a nonstandard port).
@@ -11821,7 +11930,13 @@ Do not grant the key to `project:terrarium` or workers. The lead configures
 `--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery, with recipe
 `TERRARIUM_DOCKER_CI=1 just ci::validate-affected` to explicitly enable the
 live Docker gate. Leave the switch unset (or `0`) until the daemon and
-grant are ready. `--clear-merge-secrets` removes the references.
+grant are ready. `--clear-merge-secrets` removes the references. The same
+command sets `docker_ci` with `--docker-ci-destination`, `--docker-ci-port`,
+`--docker-ci-known-hosts`, `--docker-ci-reset-destination`,
+`--docker-ci-reset-port`, and `--docker-ci-reset-known-hosts`: a flag left
+out keeps its stored value, the first set needs all six, and
+`--clear-docker-ci` removes the whole object. `project delivery show`
+prints the endpoints and both pins.
 The daemon pins the Docker VM's public host key and owns its SSH local
 forward. Trusted relay code embedded in the daemon release, never read
 from the merged branch, creates a 0600 Unix socket in a job-private

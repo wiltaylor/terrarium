@@ -1102,20 +1102,30 @@ pub struct ActiveCard {
     pub blocked_reason: Option<String>,
 }
 
+/// The newest event that moved card `?1` to the column with role `?2`
+/// (the blocked column): when, and the comment of that move (NULL without
+/// one). The `json_valid` guards keep a malformed event from failing the
+/// lookup (TER-429); the `events_card` index serves it, which the EXPLAIN
+/// QUERY PLAN test in `db.rs` asserts through this const.
+pub(crate) const BLOCKED_INFO_SQL: &str = "SELECT at,
+  CASE WHEN json_valid(payload)
+    THEN json_extract(payload, '$.comment') END
+ FROM events
+  WHERE card = ?1 AND kind = 'card'
+    AND CASE WHEN json_valid(payload)
+      THEN json_extract(payload, '$.change') END = 'moved'
+    AND CASE WHEN json_valid(payload)
+      THEN json_extract(payload, '$.to_role') END = ?2
+  ORDER BY seq DESC LIMIT 1";
+
 /// When a card in the blocked column moved there, and the comment of that
 /// move. The move event has both; without one (a card from before the
 /// event log), `updated_at` and the newest comment.
-fn blocked_info(conn: &Connection, card: &Card) -> ApiResult<(String, Option<String>)> {
+pub(crate) fn blocked_info(conn: &Connection, card: &Card) -> ApiResult<(String, Option<String>)> {
     let ev: Option<(String, Option<String>)> = conn
-        .query_row(
-            "SELECT at, json_extract(payload, '$.comment') FROM events
-              WHERE card = ?1 AND kind = 'card'
-                AND json_extract(payload, '$.change') = 'moved'
-                AND json_extract(payload, '$.to_role') = ?2
-              ORDER BY seq DESC LIMIT 1",
-            params![card.id, BLOCKED],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+        .query_row(BLOCKED_INFO_SQL, params![card.id, BLOCKED], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .optional()?;
     let newest = || card.comments.last().map(|c| c.body.clone());
     Ok(match ev {
@@ -1125,21 +1135,22 @@ fn blocked_info(conn: &Connection, card: &Card) -> ApiResult<(String, Option<Str
     })
 }
 
+/// The newest event of card `?1` that moved it to another column: when.
+/// The `json_valid` guard keeps a malformed event from failing the lookup.
+/// Shared with the EXPLAIN QUERY PLAN test in `db.rs`.
+pub(crate) const LAST_MOVED_AT_SQL: &str = "SELECT at FROM events
+  WHERE card = ?1 AND kind = 'card'
+    AND CASE WHEN json_valid(payload)
+      THEN json_extract(payload, '$.change') END = 'moved'
+  ORDER BY seq DESC LIMIT 1";
+
 /// When the card `id` last moved to another column (its newest `moved`
 /// event), if it ever did. The `json_valid` guard keeps a malformed
 /// event from failing the lookup (the `events_card` index serves it),
 /// like the per-card lookup in `card_history.rs`.
 pub fn last_moved_at(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
     Ok(conn
-        .query_row(
-            "SELECT at FROM events
-              WHERE card = ?1 AND kind = 'card'
-                AND CASE WHEN json_valid(payload)
-                  THEN json_extract(payload, '$.change') END = 'moved'
-              ORDER BY seq DESC LIMIT 1",
-            [id],
-            |r| r.get(0),
-        )
+        .query_row(LAST_MOVED_AT_SQL, [id], |r| r.get(0))
         .optional()?)
 }
 
@@ -2127,7 +2138,10 @@ pub(crate) fn create_card_with_author(
     )?;
     set_deps(t, &id, &new.depends_on)?;
     if let Some(th) = new.inbox_thread.as_deref().filter(|s| !s.trim().is_empty()) {
-        crate::store::threads::link_card(t, actor, th, &id)?;
+        let th = crate::store::threads::link_card(t, actor, th, &id)?;
+        // A card made after the agent's hand-off message moves the thread
+        // into tracking (GitHub #28).
+        crate::store::threads::track_on_link(t, &th.id)?;
     }
     if let Some(thread) = &thread {
         t.execute(

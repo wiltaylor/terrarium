@@ -506,7 +506,7 @@ pub enum DeliveryCmd {
     Show,
     /// Change the queue config; flags that you leave out keep their value
     /// (project_admin; a global target needs sysadmin)
-    Set(DeliverySetArgs),
+    Set(Box<DeliverySetArgs>),
 }
 
 #[derive(Debug, Args)]
@@ -536,6 +536,34 @@ pub struct DeliverySetArgs {
     /// The most seconds a recipe may run (default 3600)
     #[arg(long)]
     pub timeout: Option<u64>,
+    /// Docker CI SSH destination, for example `root@vm` (docs/api.md 35.1)
+    #[arg(long)]
+    pub docker_ci_destination: Option<String>,
+    /// The SSH port of the Docker CI destination
+    #[arg(long)]
+    pub docker_ci_port: Option<u16>,
+    /// The administrator-verified known_hosts line of the destination
+    #[arg(long)]
+    pub docker_ci_known_hosts: Option<String>,
+    /// The forced-command reset SSH destination
+    #[arg(long)]
+    pub docker_ci_reset_destination: Option<String>,
+    /// The SSH port of the reset destination
+    #[arg(long)]
+    pub docker_ci_reset_port: Option<u16>,
+    /// The administrator-verified known_hosts line of the reset destination
+    #[arg(long)]
+    pub docker_ci_reset_known_hosts: Option<String>,
+    /// Remove the whole Docker CI SSH configuration (docs/api.md 35.1)
+    #[arg(long, conflicts_with_all = [
+        "docker_ci_destination",
+        "docker_ci_port",
+        "docker_ci_known_hosts",
+        "docker_ci_reset_destination",
+        "docker_ci_reset_port",
+        "docker_ci_reset_known_hosts",
+    ])]
+    pub clear_docker_ci: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2618,6 +2646,19 @@ pub enum ThreadCmd {
         /// The message, as Markdown (`-` reads stdin)
         #[arg(short = 'm', long = "message")]
         message: String,
+        /// The thread's status after the message (the attached agent):
+        /// `waiting_agent` when you start the work now, `tracking` when you
+        /// hand it off. Without it, your message waits on the operator
+        #[arg(long, value_parser = ["waiting_agent", "tracking"])]
+        status: Option<String>,
+    },
+    /// Set the status of your thread without a message (the attached
+    /// agent): `waiting_agent` while you work, `tracking` after the
+    /// handoff. An open question keeps it on the operator
+    Status {
+        id: String,
+        #[arg(value_parser = ["waiting_agent", "tracking"])]
+        status: String,
     },
     /// Ask the operator a question in your thread; with --bundle, several
     /// related questions as one bundle. The operator answers in the thread
@@ -3905,11 +3946,36 @@ pub enum ScheduleCmd {
 #[derive(Debug, Args)]
 pub struct ScheduleArgs {
     /// A five-field cron expression, for example "*/15 * * * *", or @hourly, @daily
-    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json", "manual"])]
+    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json", "manual", "day_start"])]
     pub cron: Option<String>,
+    /// Start of day: one run per calendar day (in --tz), at the first start
+    /// of the day: the daemon start, a resume from sleep, the reconnect of
+    /// the host agent of the --exec target, or the change of day while the
+    /// daemon is up
+    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json", "manual"])]
+    pub day_start: bool,
+    /// Start of day: a start before this local time (HH:MM) runs at it
+    #[arg(long, value_name = "HH:MM", requires = "day_start")]
+    pub not_before: Option<String>,
+    /// Start of day: no run that day when the run would be after this
+    /// local time (HH:MM)
+    #[arg(long, value_name = "HH:MM", requires = "day_start")]
+    pub not_after: Option<String>,
+    /// Start of day: wait this long after the start (5m, 1h; at most 12h)
+    #[arg(long, value_name = "DUR", requires = "day_start")]
+    pub delay: Option<String>,
+    /// Start of day: only on these days (mon,tue,...,sun; repeat or
+    /// separate with commas). Default: every day
+    #[arg(
+        long,
+        value_name = "DAY",
+        value_delimiter = ',',
+        requires = "day_start"
+    )]
+    pub weekdays: Vec<String>,
     /// A project action: no time and no event; it runs only on demand
     /// (`schedule run`, or its button on the project dashboard and Home)
-    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json"])]
+    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json", "day_start"])]
     pub manual: bool,
     /// An interval: 90s, 30m, 2h, 1d, or 1h30m (60 s or more)
     #[arg(long, conflicts_with_all = ["at", "on", "spec_json", "manual"])]
@@ -3961,8 +4027,9 @@ pub struct ScheduleArgs {
     /// The action as JSON (docs/api.md §19), in place of the action flags
     #[arg(long, value_name = "JSON", conflicts_with_all = ["mail", "turn", "exec", "agent", "probe", "card", "webhook", "webhook_url_secret"])]
     pub action_json: Option<String>,
-    /// The zone of a cron expression: UTC (the default) or an IANA zone
-    #[arg(long, requires = "cron")]
+    /// The zone of a cron expression or of a start-of-day schedule: UTC
+    /// (the default) or an IANA zone
+    #[arg(long)]
     pub tz: Option<String>,
     /// Action: send mail to an agent, `project:<name>`, or `operator`
     #[arg(long, value_name = "TO", conflicts_with_all = ["turn", "exec", "agent", "probe", "card", "webhook", "webhook_url_secret"])]

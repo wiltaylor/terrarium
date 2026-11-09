@@ -4679,6 +4679,106 @@ async fn admin_harness_update_prints_npm_output_on_failure_and_the_old_agents() 
     );
 }
 
+/// `schedule new --day-start` (GitHub #29): the flags make the spec, and
+/// `show` and `runs` give the next start and the detected start.
+#[tokio::test]
+async fn schedule_day_start_flags_show_and_runs() {
+    let sched = json!({"id": "01DAY", "name": "morning", "project": "terra", "enabled": true,
+        "spec": {"kind": "day_start", "tz": "Australia/Brisbane", "not_before": "07:00",
+                 "not_after": "11:00", "delay": "5m", "weekdays": ["mon", "fri"]},
+        "action": {"type": "exec", "target": "laptop", "cmd": ["./sync.sh"]},
+        "catch_up": "skip", "run_as": "operator", "created_by": "operator", "source": "api",
+        "next_run_at": null, "runs_count": 1, "day_start_done": "2026-11-09",
+        "day_start_last": {"cause": "resume", "at": "2026-11-09T07:42:00.000Z"}});
+    let out = ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "morning",
+            "--day-start",
+            "--tz",
+            "Australia/Brisbane",
+            "--not-before",
+            "07:00",
+            "--not-after",
+            "11:00",
+            "--delay",
+            "5m",
+            "--weekdays",
+            "mon,fri",
+            "--exec",
+            "laptop",
+            "--",
+            "./sync.sh",
+        ],
+        vec![(201, sched.clone())],
+        vec![(
+            Post,
+            "/api/schedules",
+            vec![],
+            Some(json!({"name": "morning", "project": "terra",
+                "spec": {"kind": "day_start", "tz": "Australia/Brisbane", "not_before": "07:00",
+                         "not_after": "11:00", "delay": "5m", "weekdays": ["mon", "fri"]},
+                "action": {"type": "exec", "target": "laptop", "cmd": ["./sync.sh"]}})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("next run at the first start after 2026-11-09"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["schedule", "show", "terra/morning"],
+        vec![(200, sched.clone())],
+        vec![req(Get, "/api/schedules/terra%2Fmorning")],
+    )
+    .await;
+    assert!(
+        out.contains("when:      start of day (Australia/Brisbane) 07:00-11:00 +5m on mon,fri"),
+        "{out}"
+    );
+    assert!(
+        out.contains("next run:  at the first start after 2026-11-09"),
+        "{out}"
+    );
+    assert!(
+        out.contains("last start: resume at 2026-11-09 07:42"),
+        "{out}"
+    );
+    let run = json!({"id": "01RUN", "schedule": "01DAY", "trigger": "day_start",
+        "status": "ok", "started_at": "2026-11-09T07:47:00.000Z", "summary": "exit 0",
+        "actor": "operator", "event_seq": null,
+        "day_start": {"cause": "resume", "at": "2026-11-09T07:42:00.000Z"}});
+    let out = ok(
+        false,
+        &["schedule", "runs", "terra/morning"],
+        vec![(200, json!([run]))],
+        vec![(
+            Get,
+            "/api/schedules/terra%2Fmorning/runs",
+            vec![("limit", "20")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("day_start"), "{out}");
+    assert!(out.contains("resume 2026-11-09 07:42"), "{out}");
+    // --tz without --cron or --day-start is a usage error, and nothing is
+    // sent.
+    let args = &[
+        "-p", "terra", "schedule", "new", "x", "--every", "1h", "--tz", "UTC", "--mail", "lead",
+    ][..];
+    let r = exec(false, args, vec![], None).await;
+    let e = r.result.unwrap_err();
+    assert_eq!(exit_code_of(&e), exit::USAGE);
+    assert!(e.to_string().contains("--tz goes with"), "{e}");
+    assert!(r.reqs.is_empty());
+}
+
 /// `schedule` (docs/api.md §19): every command, both modes.
 #[tokio::test]
 async fn schedules_every_command() {
@@ -10353,6 +10453,58 @@ async fn thread_commands() {
     )
     .await;
     assert_eq!(out, "posted to thread T1 (waiting_operator).\n");
+
+    // GitHub #28: the agent sets the status with its message, or alone.
+    let working = json!({"id": "T1", "status": "waiting_agent"});
+    let out = ok(
+        true,
+        &[
+            "thread",
+            "post",
+            "T1",
+            "-m",
+            "On it.",
+            "--status",
+            "waiting_agent",
+        ],
+        vec![(201, working.clone())],
+        vec![(
+            Post,
+            "/api/threads/T1/messages",
+            vec![],
+            Some(json!({"text": "On it.", "status": "waiting_agent"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "posted to thread T1 (waiting_agent).\n");
+    let out = ok(
+        true,
+        &["thread", "status", "T1", "tracking"],
+        vec![(200, json!({"id": "T1", "status": "tracking"}))],
+        vec![(
+            Post,
+            "/api/threads/T1/status",
+            vec![],
+            Some(json!({"status": "tracking"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "thread T1 is tracking.\n");
+    for bad in [
+        &["terrarium", "thread", "status", "T1", "waiting_operator"][..],
+        &[
+            "terrarium",
+            "thread",
+            "post",
+            "T1",
+            "-m",
+            "x",
+            "--status",
+            "closed",
+        ][..],
+    ] {
+        assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
+    }
 
     let mine = || Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()) as &str;
     let out = ok(

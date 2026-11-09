@@ -603,6 +603,56 @@ pub fn list(conn: &Connection, secret: &SecretInfo) -> ApiResult<Vec<Grant>> {
         .collect()
 }
 
+/// The direct grants of one grantee (a stored key such as `agent:<ulid>`),
+/// each with its secret, in one query (TER-391): no scan over every
+/// secret of every scope. Only secrets that the grantee's project
+/// reaches count (a global one, or one of that project), as in
+/// [`effective`]. Project grants are not included: this is one grantee.
+pub fn list_by_grantee(conn: &Connection, grantee: &str, project: &str) -> ApiResult<Vec<Grant>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.scope, s.name, g.level, g.env, g.targets, g.created_by, g.created_at
+         FROM secret_grants g JOIN secrets s ON s.id = g.secret_id
+         WHERE g.grantee = ?1 AND (s.scope = 'global' OR s.scope = ?2)
+         ORDER BY (s.scope = 'global'), s.name, s.scope",
+    )?;
+    let rows = stmt
+        .query_map(params![grantee, project], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let label = label_of(conn, grantee)?;
+    rows.into_iter()
+        .map(
+            |(scope, name, level, env, targets, created_by, created_at)| {
+                let level = Level::parse(&level).unwrap_or(Level::Use);
+                Ok(Grant {
+                    grantee_label: label.clone(),
+                    grantee: grantee.to_owned(),
+                    level,
+                    env,
+                    targets: if level == Level::Run {
+                        targets_of(targets)
+                    } else {
+                        Vec::new()
+                    },
+                    scope,
+                    name,
+                    created_by,
+                    created_at,
+                })
+            },
+        )
+        .collect()
+}
+
 /// The agent was removed: its grants go.
 pub fn on_agent_deleted(conn: &Connection, id: &str) -> ApiResult<usize> {
     Ok(conn.execute(

@@ -17,8 +17,13 @@
 //! - `POST /api/threads/{id}/track` (the attached agent): move the thread
 //!   into tracking after the handoff (TER-145), and link the `cards` of
 //!   the body first (TER-146).
+//! - `POST /api/threads/{id}/status` (the attached agent): set
+//!   `waiting_agent` or `tracking` without a message (GitHub #28). A
+//!   message of the agent can set them too (`status` in the body).
 //! - `POST /api/threads/{id}/cards`: link a card of any project (TER-146,
 //!   TER-144 D2). A reader of the thread who reads the card's project.
+//!   A card linked while the thread waits on the operator only because of
+//!   the agent's last message moves the thread into tracking (GitHub #28).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -45,6 +50,7 @@ pub fn routes() -> Router<Shared> {
         .route("/threads/{id}/respond", post(respond))
         .route("/threads/{id}/close", post(close))
         .route("/threads/{id}/track", post(track))
+        .route("/threads/{id}/status", post(set_status))
         .route("/threads/{id}/cards", post(link_card))
 }
 
@@ -241,12 +247,33 @@ struct TextBody {
     text: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PostBody {
+    text: String,
+    /// The attached agent's status after the message (GitHub #28):
+    /// `waiting_agent` or `tracking`.
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// A status of a body: `waiting_agent` or `tracking` for the agent.
+fn agent_status(s: &str) -> ApiResult<ThreadStatus> {
+    match ThreadStatus::parse(s) {
+        Some(st @ (ThreadStatus::WaitingAgent | ThreadStatus::Tracking)) => Ok(st),
+        _ => Err(ApiError::invalid(format!(
+            "bad status `{s}`: the thread's agent sets waiting_agent or tracking"
+        ))),
+    }
+}
+
 async fn post_message(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-    ApiJson(b): ApiJson<TextBody>,
+    ApiJson(b): ApiJson<PostBody>,
 ) -> ApiResult<Response> {
+    let want = b.status.as_deref().map(agent_status).transpose()?;
     let author = actor.address();
     let label = actor.label();
     let th = state
@@ -262,7 +289,7 @@ async fn post_message(
                     th.id
                 )));
             }
-            threads::post(t, &th.id, &author, &b.text).map(|th| threads::visible(&actor, th))
+            threads::post(t, &th.id, &author, &b.text, want).map(|th| threads::visible(&actor, th))
         })
         .await?;
     Ok((StatusCode::CREATED, Json(th)).into_response())
@@ -417,6 +444,49 @@ async fn track(
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct StatusBody {
+    /// `waiting_agent` or `tracking`.
+    status: String,
+}
+
+/// The attached agent or the operator sets the status of the thread
+/// without a message (GitHub #28, TER-456): `waiting_agent` (the agent
+/// works on) or `tracking` (as `/track`). An open question refuses it
+/// (`409`).
+async fn set_status(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(b): ApiJson<StatusBody>,
+) -> ApiResult<Json<Thread>> {
+    let status = agent_status(&b.status)?;
+    let by = actor.address();
+    let label = actor.label();
+    Ok(Json(
+        state
+            .db
+            .write(label, move |t| {
+                let th = readable(&actor, threads::get_bare(t, &id)?)?;
+                match &actor {
+                    Actor::Agent(a) if th.agent.as_deref() == Some(a.id.as_str()) => {
+                        threads::set_by_agent(t, &th.id, &by, status)
+                            .map(|th| threads::visible(&actor, th))
+                    }
+                    Actor::Operator => threads::set_by_agent(t, &th.id, &by, status)
+                        .map(|th| threads::visible(&actor, th)),
+                    _ => Err(ApiError::forbidden(format!(
+                        "setting the status of thread {}: only its attached agent or the \
+                         operator sets it",
+                        th.id
+                    ))),
+                }
+            })
+            .await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CardBody {
     /// `<project>:<card>` or `<card>`.
     card: String,
@@ -436,7 +506,13 @@ async fn link_card(
     Ok(Json(
         state
             .db
-            .write(label, move |t| threads::link_card(t, &actor, &id, &b.card))
+            .write(label, move |t| {
+                let th = threads::link_card(t, &actor, &id, &b.card)?;
+                // A card linked after the agent's hand-off message moves
+                // the thread into tracking (GitHub #28).
+                threads::track_on_link(t, &th.id)?;
+                Ok(threads::visible(&actor, threads::get(t, &th.id)?))
+            })
             .await?,
     ))
 }

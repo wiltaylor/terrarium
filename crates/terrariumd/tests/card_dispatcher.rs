@@ -92,15 +92,328 @@ async fn review_candidate_query_uses_only_indexed_searches() {
                 "EXPLAIN QUERY PLAN {}",
                 terrariumd::review_dispatcher::CANDIDATES
             ))?;
-            Ok(q.query_map(rusqlite::params!["p", "review", 0], |r| {
-                r.get::<_, String>(3)
-            })?
+            Ok(q.query_map(
+                rusqlite::params![
+                    "p",
+                    "review",
+                    0,
+                    -1,
+                    "",
+                    terrariumd::review_dispatcher::CANDIDATE_PAGE
+                ],
+                |r| r.get::<_, String>(3),
+            )?
             .collect::<Result<Vec<_>, _>>()?)
         })
         .await
         .unwrap();
     assert!(plan.iter().any(|s| s.contains("cards_column")), "{plan:?}");
+    // Only the per-card label `json_each` virtual tables may scan; every
+    // table access, the cards lookup included, must stay an index search.
+    assert!(
+        plan.iter()
+            .filter(|s| s.contains("SCAN"))
+            .all(|s| s.starts_with("SCAN github_label") || s.starts_with("SCAN hold_label")),
+        "{plan:?}"
+    );
+}
+
+async fn review_card(td: &TestDaemon, title: &str, labels: Value) -> String {
+    let id = ready_card(
+        td,
+        json!({"title":title, "column":"ready", "labels":labels}),
+    )
+    .await;
+    td.post(&format!("/api/cards/{id}/move"), json!({"column":"review"}))
+        .await
+        .ok();
+    id
+}
+
+/// The ids that one page of the review candidate query returns.
+async fn review_page(td: &TestDaemon) -> Vec<String> {
+    state(td)
+        .db
+        .read(|c| {
+            let mut q = c.prepare(terrariumd::review_dispatcher::CANDIDATES)?;
+            let ids = q.query_map(
+                rusqlite::params![
+                    "p",
+                    "review",
+                    0,
+                    -1,
+                    "",
+                    terrariumd::review_dispatcher::CANDIDATE_PAGE
+                ],
+                |r| r.get::<_, String>(0),
+            )?;
+            Ok(ids.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap()
+}
+
+async fn review_picked(td: &TestDaemon) -> Vec<String> {
+    state(td)
+        .db
+        .read(|c| {
+            let mut q = c.prepare("SELECT card FROM card_reviews ORDER BY card")?;
+            let ids = q.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(ids.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn review_held_cards_cannot_starve_the_candidate_list() {
+    let td = setup(2, 4, 20).await;
+    td.post(
+        "/api/templates",
+        json!({"name":"card-review","project":"p","spec":{"harness":"codex"}}),
+    )
+    .await
+    .ok();
+    td.patch("/api/projects/p", json!({"review_dispatcher":"lead"}))
+        .await
+        .ok();
+    let page = terrariumd::review_dispatcher::CANDIDATE_PAGE;
+    // Cards with the labels `github` and `hold` (any ASCII case, spaces
+    // around) are dropped by the SQL itself: a full page of them returns
+    // no rows, so the LIMIT window is not spent on them.
+    for i in 0..page {
+        let labels = if i % 2 == 0 {
+            json!(["github", "hold"])
+        } else {
+            json!([" GitHub ", "HOLD "])
+        };
+        review_card(&td, "Task", labels).await;
+    }
+    assert_eq!(review_page(&td).await, Vec::<String>::new());
+    // Cards held only by a `GitHub #<n>:` title (one-digit numbers too)
+    // pass the SQL and are skipped in Rust. More than a page of them is
+    // walked page by page.
+    let mut title_held = Vec::new();
+    for i in 0..page + 1 {
+        let title = format!("GitHub #{}: imported", i % 10);
+        title_held.push(review_card(&td, &title, json!(["hold"])).await);
+    }
+    assert_eq!(review_page(&td).await, title_held[..page as usize]);
+    assert!(
+        !terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+            .await
+            .unwrap()
+    );
+    // Titles that `github_title` rejects are no GitHub cards: with a
+    // `hold` label alone they are not held and are offered for review.
+    let mut free = Vec::new();
+    for title in ["GitHub #12 fix: crash", "Git Hub #12: x", "GitHub #1 2: x"] {
+        free.push(review_card(&td, title, json!(["hold"])).await);
+    }
+    for _ in &free {
+        assert!(
+            terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+                .await
+                .unwrap()
+        );
+    }
+    free.sort();
+    assert_eq!(review_picked(&td).await, free);
+}
+
+#[tokio::test]
+async fn review_owner_error_keeps_the_verdict_and_records_the_reason() {
+    // An owner that lost project admin, or was deleted, must not reject
+    // the reviewer's comment: the findings stay on the card.
+    for broken in ["demoted", "deleted"] {
+        let (td, id) = review_setup().await;
+        assert!(
+            terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+                .await
+                .unwrap()
+        );
+        let agent = reviewer(&td, &id).await;
+        if broken == "demoted" {
+            let lead = lead_id(&td).await;
+            td.put(&format!("/api/agents/{lead}/roles"), json!({"roles":[]}))
+                .await
+                .ok();
+        } else {
+            state(&td)
+                .db
+                .write("operator", |t| {
+                    t.execute("UPDATE projects SET review_dispatcher = 'ghost'", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let body = "Review verdict: accept\nF1: Kept findings.".to_owned();
+        td.post_as(
+            &agent,
+            &format!("/api/cards/{id}/comments"),
+            json!({"body":body}),
+        )
+        .await
+        .ok();
+        let c = get(&td, &id).await;
+        assert_eq!(c["column"], "review");
+        assert!(
+            c["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["body"] == body),
+            "{broken}: {}",
+            c["comments"]
+        );
+        assert!(
+            c["comments"].as_array().unwrap().iter().any(|x| x["body"]
+                .as_str()
+                .unwrap()
+                .contains("review dispatcher owner is no longer valid")),
+            "{broken}: {}",
+            c["comments"]
+        );
+        // Like a project without a dispatcher, the round stays open.
+        let key = id.clone();
+        let applied: i64 = state(&td)
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT applied FROM card_reviews WHERE card = ?1",
+                    [&key],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(applied, 0, "{broken}");
+    }
+}
+
+#[tokio::test]
+async fn dispatch_candidate_query_uses_only_indexed_searches() {
+    let td = setup(2, 4, 20).await;
+    enabled(&td).await;
+    card(&td, "small").await;
+    let plan = state(&td)
+        .db
+        .read(|c| {
+            let mut plan = Vec::new();
+            let queries: [(&str, &[&dyn rusqlite::ToSql]); 2] = [
+                (
+                    terrariumd::card_dispatcher::CANDIDATES,
+                    rusqlite::params![
+                        "p",
+                        "ready",
+                        0,
+                        -1,
+                        "",
+                        terrariumd::card_dispatcher::CANDIDATE_PAGE
+                    ],
+                ),
+                (
+                    terrariumd::card_dispatcher::WORKING_WIP,
+                    rusqlite::params!["p"],
+                ),
+            ];
+            for (sql, params) in queries {
+                let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                let rows = q.query_map(params, |r| r.get::<_, String>(3))?;
+                plan.extend(rows.collect::<Result<Vec<_>, _>>()?);
+            }
+            Ok(plan)
+        })
+        .await
+        .unwrap();
+    assert!(plan.iter().any(|s| s.contains("cards_column")), "{plan:?}");
     assert!(plan.iter().all(|s| !s.contains("SCAN")), "{plan:?}");
+}
+
+async fn ready_card(td: &TestDaemon, body: Value) -> String {
+    td.post("/api/projects/p/cards", body).await.ok()["id"]
+        .as_str()
+        .unwrap()
+        .into()
+}
+
+/// A held GitHub card above an eligible card is skipped, not dispatched.
+/// The held card carries a usable type label, so only the hold gate
+/// skips it: without `github_gate::is_held` the dispatcher would pick it.
+#[tokio::test]
+async fn held_card_is_skipped_and_next_card_dispatched() {
+    let td = setup(2, 3, 10).await;
+    let held = ready_card(
+        &td,
+        json!({"title": "GitHub #7: held",
+               "labels": ["github", "hold", "type:small"],
+               "column": "ready"}),
+    )
+    .await;
+    let next = card(&td, "small").await;
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    let c = get(&td, &held).await;
+    assert_eq!(c["column"], "ready");
+    assert!(c["agent"].is_null());
+    assert_eq!(get(&td, &next).await["column"], "coding");
+}
+
+/// Held cards and cards without a usable type label must not starve the
+/// bounded page: the card after a full page of skips is still dispatched.
+/// The held cards carry a usable type label, so each skip kind is a skip
+/// for exactly one reason: the hold gate, or a missing template.
+#[tokio::test]
+async fn skips_beyond_one_page_do_not_starve_a_later_card() {
+    let td = setup(2, 4, 20).await;
+    for i in 0..terrariumd::card_dispatcher::CANDIDATE_PAGE + 1 {
+        let body = if i % 2 == 0 {
+            json!({"title": format!("GitHub #{i}: held"),
+                   "labels": ["github", "hold", "type:small"],
+                   "column": "ready"})
+        } else {
+            json!({"title": "No type label", "column": "ready"})
+        };
+        ready_card(&td, body).await;
+    }
+    let last = card(&td, "small").await;
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    assert_eq!(get(&td, &last).await["column"], "coding");
+}
+
+/// Positions can tie (archived cards keep theirs, group cards go in at 0
+/// with no shift). A tie at a page boundary must not drop the tied card,
+/// so the keyset is `(position, id)`, not `position` alone.
+#[tokio::test]
+async fn a_tie_at_a_page_boundary_does_not_drop_the_tied_card() {
+    let td = setup(2, 4, 20).await;
+    let mut skips = Vec::new();
+    for _ in 0..terrariumd::card_dispatcher::CANDIDATE_PAGE {
+        skips.push(ready_card(&td, json!({"title": "No type label", "column": "ready"})).await);
+    }
+    let tied = card(&td, "small").await;
+    // The eligible card ties with the last skip of the first page, and its
+    // id orders after that skip, so it is the first row of the next page.
+    let tied_to = skips[terrariumd::card_dispatcher::CANDIDATE_PAGE as usize - 1].clone();
+    assert!(tied_to < tied, "{tied_to} must order before {tied}");
+    let id = tied.clone();
+    state(&td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE cards SET position = ?2 WHERE id = ?1",
+                rusqlite::params![id, terrariumd::card_dispatcher::CANDIDATE_PAGE - 1],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    assert_eq!(get(&td, &tied).await["column"], "coding");
+    assert_eq!(get(&td, &tied_to).await["column"], "ready");
 }
 
 #[tokio::test]
