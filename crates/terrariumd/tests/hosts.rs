@@ -4894,6 +4894,13 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         );
         serde_json::from_slice::<Value>(&out.stdout).unwrap()[0].clone()
     };
+    // Facts from earlier steps (the inspect before recreate, the docker cp
+    // probe), printed at once and again in each failure.
+    let notes = std::cell::RefCell::new(Vec::<String>::new());
+    let note = |line: String| {
+        println!("{line}");
+        notes.borrow_mut().push(line);
+    };
     // On failure: the container, the workspace dir as the container sees
     // it, and the daemon trace, so that a gate failure names its step.
     let diag = |step: &str| {
@@ -4909,7 +4916,8 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
             )
         };
         format!(
-            "{step}\ndocker inspect: {}\nworkspace dir:\n{}\ndaemon trace:\n{}",
+            "{step}\n{}\ndocker inspect: {}\nworkspace dir:\n{}\ndaemon trace:\n{}",
+            notes.borrow().join("\n"),
             run(&[
                 "inspect",
                 "--format",
@@ -4957,6 +4965,10 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
     };
     wait_running("up").await;
     let before = inspect();
+    note(format!(
+        "docker inspect before: {}",
+        json!({"Id":before["Id"],"Image":before["Image"],"Mounts":before["Mounts"]})
+    ));
     // With DOCKER_HOST set, this bind source is on the Docker daemon's
     // machine, not on the test host. Write the seed in the container, as
     // root because Docker creates a missing bind source as root, and read
@@ -4983,6 +4995,32 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         ))
     );
     read_seed("before down");
+    // Probe, not an assert: does `docker cp` (the archive API, through the
+    // gate's relay) keep the body of a file in the workspace? The source is
+    // outside the work root, so only docker cp can put it in the bind
+    // source, also with a local Docker daemon (TER-527).
+    let probe = lab.bins.path().join("seed-cp");
+    std::fs::write(&probe, "docker-cp-probe\n").unwrap();
+    let copied = std::process::Command::new("docker")
+        .args([
+            "cp",
+            probe.to_str().unwrap(),
+            &format!("{name}:/work/terra/worker/seed-cp"),
+        ])
+        .output()
+        .unwrap();
+    let read = std::process::Command::new("docker")
+        .args(["exec", &name, "cat", "/work/terra/worker/seed-cp"])
+        .output()
+        .unwrap();
+    note(format!(
+        "docker cp probe: cp exited {:?} (stderr {:?}), cat exited {:?}, {} bytes, content ok: {}",
+        copied.status.code(),
+        String::from_utf8_lossy(&copied.stderr).trim(),
+        read.status.code(),
+        read.stdout.len(),
+        read.stdout == b"docker-cp-probe\n"
+    ));
     let down = lab.td.post_empty("/api/targets/dbox/down").await;
     down.ok();
     assert_eq!(down.body["state"], "stopped", "{}", diag("down"));
@@ -4996,10 +5034,6 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
     wait_running("recreate").await;
     let after = inspect();
     read_seed("after recreate");
-    println!(
-        "docker inspect before: {}",
-        json!({"Id":before["Id"],"Image":before["Image"],"Mounts":before["Mounts"]})
-    );
     println!(
         "docker inspect after: {}",
         json!({"Id":after["Id"],"Image":after["Image"],"Mounts":after["Mounts"]})
