@@ -39,7 +39,10 @@ fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
 
 fn template(labels: &[String]) -> Option<String> {
     // Only known worker types, not arbitrary labels used as template names.
-    let types: Vec<_> = labels.iter().filter_map(|l| l.strip_prefix("type:")).collect();
+    let types: Vec<_> = labels
+        .iter()
+        .filter_map(|l| l.strip_prefix("type:"))
+        .collect();
     match types.as_slice() {
         ["small"] => Some("card-small".into()),
         ["impl"] => Some("card-impl".into()),
