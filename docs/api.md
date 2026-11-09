@@ -10446,7 +10446,7 @@ A run (the list items, and the answer of an upload and a link change):
  "file_name":"junit.xml","raw_size":12345,"notes":[],
  "cards":["DEMO-12"],"labels":["version:1.2.0"],
  "created_by":"01M5PA0T…","created_by_name":"demo/worker",
- "created_at":"2026-11-02T01:03:00.000Z","url":"/p/demo/board/tests/01JB7…"}
+ "created_at":"2026-11-02T01:03:00.000Z","url":"/p/demo/tests/01JB7…"}
 ```
 
 | Field | Meaning |

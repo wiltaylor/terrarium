@@ -8950,7 +8950,7 @@ async fn test_runs() {
         "status": "failed", "duration_ms": 5321,
         "counts": {"passed": 120, "failed": 2, "errored": 1, "skipped": 0, "total": 123},
         "cards": ["TER-1"], "labels": ["version:1.0.0"], "notes": [],
-        "url": "/p/terra/board/tests/01RUN"
+        "url": "/p/terra/tests/01RUN"
     });
     let args = [
         "test",
@@ -8998,7 +8998,7 @@ async fn test_runs() {
         r.out
     );
     assert!(
-        r.out.contains("dashboard: /p/terra/board/tests/01RUN"),
+        r.out.contains("dashboard: /p/terra/tests/01RUN"),
         "{}",
         r.out
     );
