@@ -1227,3 +1227,351 @@ async fn probe_actions_run_the_quota_probe() {
     assert_eq!(run.ok()["status"], "failed", "{}", run.body);
     assert!(run.body["error"].is_string());
 }
+
+// ------------------------------------------- start-of-day (GitHub #29)
+
+use chrono::Datelike;
+use terrariumd::scheduler::{DayStartWatch, day_start_pass};
+use terrariumd::store::schedules::StartCause;
+
+/// Midnight UTC nine days ahead. It and the four days after it fall on
+/// weekdays that are neither today nor tomorrow; [`allowed_days`] lists
+/// only those, so the daemon's own timer never plans these runs.
+fn day0() -> DateTime<Utc> {
+    (Utc::now() + Duration::days(9))
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+}
+
+fn at(day: i64, h: u32, m: u32) -> DateTime<Utc> {
+    day0() + Duration::days(day) + Duration::hours(h.into()) + Duration::minutes(m.into())
+}
+
+fn day_text(day: i64) -> String {
+    (day0() + Duration::days(day)).date_naive().to_string()
+}
+
+fn allowed_days() -> Vec<String> {
+    (2..7)
+        .map(|k| {
+            (Utc::now() + Duration::days(k))
+                .weekday()
+                .to_string()
+                .to_lowercase()
+        })
+        .collect()
+}
+
+fn day_start_body(name: &str, extra: Value) -> Value {
+    let mut spec = json!({"kind": "day_start", "weekdays": allowed_days()});
+    for (k, v) in extra.as_object().unwrap() {
+        spec[k] = v.clone();
+    }
+    json!({"name": name, "project": "terra", "spec": spec,
+           "action": {"type": "mail", "to": "worker", "subject": "morning", "body": "start the day"}})
+}
+
+/// One start-of-day pass at `now` with a fake reachability.
+async fn pass(
+    td: &TestDaemon,
+    now: DateTime<Utc>,
+    cause: StartCause,
+    watch: &mut DayStartWatch,
+    up: bool,
+) -> Vec<String> {
+    day_start_pass(&state(td), now, cause, watch, move |_, _| up).await
+}
+
+async fn schedule(td: &TestDaemon, sid: &str) -> Value {
+    td.get(&format!("/api/schedules/{sid}")).await.ok().clone()
+}
+
+#[tokio::test]
+async fn day_start_runs_once_per_day_whatever_the_starts() {
+    let td = TestDaemon::start().await;
+    let (_lead, worker, _) = setup(&td).await;
+    let sid = id(td
+        .post("/api/schedules", day_start_body("morning", json!({})))
+        .await
+        .ok());
+    let s = schedule(&td, &sid).await;
+    assert!(s["next_run_at"].is_null(), "{s:#}");
+    assert!(s["day_start_done"].is_null());
+    let mut w = DayStartWatch::default();
+
+    // The daemon starts: the run of the day is planned and runs.
+    assert_eq!(
+        pass(&td, at(0, 8, 0), StartCause::DaemonStart, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    let runs = tick(&td, at(0, 8, 0)).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].trigger, "day_start");
+    assert_eq!(runs[0].status, "ok", "{:?}", runs[0]);
+    let start = runs[0].day_start.as_ref().unwrap();
+    assert_eq!(start.cause, "daemon_start");
+    let s = schedule(&td, &sid).await;
+    assert_eq!(s["day_start_done"], day_text(0));
+    assert!(s["next_run_at"].is_null());
+    assert_eq!(s["day_start_last"]["cause"], "daemon_start");
+    let runs = td.get(&format!("/api/schedules/{sid}/runs")).await;
+    assert_eq!(runs.ok()[0]["day_start"]["cause"], "daemon_start");
+
+    // Every other start on the same day plans nothing: a resume, a host
+    // reconnect, a tick, and a daemon start again.
+    assert!(
+        pass(&td, at(0, 10, 0), StartCause::Resume, &mut w, true)
+            .await
+            .is_empty()
+    );
+    assert!(
+        pass(&td, at(0, 10, 1), StartCause::DayChange, &mut w, false)
+            .await
+            .is_empty()
+    );
+    assert!(
+        pass(&td, at(0, 10, 2), StartCause::DayChange, &mut w, true)
+            .await
+            .is_empty()
+    );
+    assert!(
+        terrariumd::scheduler::startup(&state(&td), at(0, 11, 0))
+            .await
+            .is_empty()
+    );
+    let mut fresh = DayStartWatch::default();
+    assert!(
+        pass(&td, at(0, 11, 0), StartCause::DaemonStart, &mut fresh, true)
+            .await
+            .is_empty()
+    );
+    assert!(tick(&td, at(0, 23, 59)).await.is_empty());
+
+    // The day changes while the daemon is up: the next day runs once.
+    assert_eq!(
+        pass(&td, at(1, 0, 0), StartCause::DayChange, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    let runs = tick(&td, at(1, 0, 0)).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].day_start.as_ref().unwrap().cause, "day_change");
+    assert!(tick(&td, at(1, 0, 1)).await.is_empty());
+    assert_eq!(schedule(&td, &sid).await["day_start_done"], day_text(1));
+    assert_eq!(td.mail_of(&worker).await.len(), 2);
+}
+
+#[tokio::test]
+async fn day_start_on_resume_from_sleep() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    let sid = id(td
+        .post("/api/schedules", day_start_body("morning", json!({})))
+        .await
+        .ok());
+    let mut w = DayStartWatch::default();
+    pass(&td, at(0, 22, 0), StartCause::DaemonStart, &mut w, true).await;
+    assert_eq!(tick(&td, at(0, 22, 0)).await.len(), 1);
+    // The next tick is one tick on: no resume. A tick after a gap of
+    // hours (the machine slept) is a resume.
+    assert_eq!(w.tick_cause(at(0, 22, 0) + Duration::seconds(10)), StartCause::DayChange);
+    let cause = w.tick_cause(at(1, 7, 30));
+    assert_eq!(cause, StartCause::Resume);
+    assert_eq!(
+        pass(&td, at(1, 7, 30), cause, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    let runs = tick(&td, at(1, 7, 30)).await;
+    assert_eq!(runs.len(), 1);
+    let start = runs[0].day_start.as_ref().unwrap();
+    assert_eq!(start.cause, "resume");
+    assert!(start.at.starts_with(&day_text(1)), "{start:?}");
+    // A daemon start later that day does not run it again.
+    let mut fresh = DayStartWatch::default();
+    assert!(
+        pass(&td, at(1, 9, 0), StartCause::DaemonStart, &mut fresh, true)
+            .await
+            .is_empty()
+    );
+    assert!(tick(&td, at(1, 9, 0)).await.is_empty());
+}
+
+#[tokio::test]
+async fn day_start_waits_for_the_host_agent_of_its_target() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    let sid = id(td
+        .post(
+            "/api/schedules",
+            day_start_body("morning", json!({"delay": "10m"})),
+        )
+        .await
+        .ok());
+    let mut w = DayStartWatch::default();
+    // The daemon starts with the host agent offline: no run is planned.
+    assert!(
+        pass(&td, at(0, 8, 0), StartCause::DaemonStart, &mut w, false)
+            .await
+            .is_empty()
+    );
+    assert!(
+        pass(&td, at(0, 8, 1), StartCause::DayChange, &mut w, false)
+            .await
+            .is_empty()
+    );
+    assert!(tick(&td, at(0, 9, 0)).await.is_empty());
+    // It reconnects: the run is planned at the reconnect plus the delay.
+    assert_eq!(
+        pass(&td, at(0, 9, 0), StartCause::DayChange, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    let s = schedule(&td, &sid).await;
+    let next = DateTime::parse_from_rfc3339(s["next_run_at"].as_str().unwrap()).unwrap();
+    assert_eq!(next, at(0, 9, 10));
+    assert!(tick(&td, at(0, 9, 5)).await.is_empty());
+    let runs = tick(&td, at(0, 9, 10)).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].day_start.as_ref().unwrap().cause, "host_reconnect");
+
+    // The next day: planned, then the host goes offline before the run.
+    // The plan is dropped; the reconnect plans it again.
+    assert_eq!(
+        pass(&td, at(1, 8, 0), StartCause::DayChange, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    assert!(
+        pass(&td, at(1, 8, 5), StartCause::DayChange, &mut w, false)
+            .await
+            .is_empty()
+    );
+    assert!(schedule(&td, &sid).await["next_run_at"].is_null());
+    assert!(tick(&td, at(1, 8, 10)).await.is_empty());
+    assert_eq!(
+        pass(&td, at(1, 8, 30), StartCause::DayChange, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    let runs = tick(&td, at(1, 8, 40)).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].day_start.as_ref().unwrap().cause, "host_reconnect");
+}
+
+#[tokio::test]
+async fn day_start_window_delay_and_weekdays() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    let sid = id(td
+        .post(
+            "/api/schedules",
+            day_start_body(
+                "window",
+                json!({"not_before": "07:00", "not_after": "09:00", "delay": "5m"}),
+            ),
+        )
+        .await
+        .ok());
+    let mut w = DayStartWatch::default();
+    // A start before `not_before` runs at it.
+    pass(&td, at(0, 6, 0), StartCause::DaemonStart, &mut w, true).await;
+    let s = schedule(&td, &sid).await;
+    let next = DateTime::parse_from_rfc3339(s["next_run_at"].as_str().unwrap()).unwrap();
+    assert_eq!(next, at(0, 7, 0));
+    assert!(tick(&td, at(0, 6, 30)).await.is_empty());
+    assert_eq!(tick(&td, at(0, 7, 0)).await.len(), 1);
+    // A start whose run (start plus delay) is after `not_after`: no run.
+    assert!(
+        pass(&td, at(1, 8, 58), StartCause::DaemonStart, &mut w, true)
+            .await
+            .is_empty()
+    );
+    // A planned run that the machine slept past `not_after` is dropped.
+    assert_eq!(
+        pass(&td, at(1, 8, 50), StartCause::DaemonStart, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    assert!(
+        pass(&td, at(1, 9, 30), StartCause::Resume, &mut w, true)
+            .await
+            .is_empty()
+    );
+    assert!(tick(&td, at(1, 9, 30)).await.is_empty());
+    assert!(schedule(&td, &sid).await["next_run_at"].is_null());
+    // Day 5 is on today's weekday, which `weekdays` leaves out.
+    assert!(
+        pass(&td, at(5, 8, 0), StartCause::DaemonStart, &mut w, true)
+            .await
+            .is_empty()
+    );
+
+    // A run planned late on one day that the machine slept through to
+    // the next is dropped; the resume plans the new day's run once.
+    let late = id(td
+        .post(
+            "/api/schedules",
+            day_start_body("late", json!({"delay": "30m"})),
+        )
+        .await
+        .ok());
+    let mut w = DayStartWatch::default();
+    pass(&td, at(2, 23, 50), StartCause::DaemonStart, &mut w, true).await;
+    pass(&td, at(3, 7, 0), StartCause::Resume, &mut w, true).await;
+    let runs: Vec<Run> = tick(&td, at(3, 7, 30))
+        .await
+        .into_iter()
+        .filter(|r| r.schedule == late)
+        .collect();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].day_start.as_ref().unwrap().cause, "resume");
+    assert_eq!(schedule(&td, &late).await["day_start_done"], day_text(3));
+}
+
+#[tokio::test]
+async fn day_start_has_no_catch_up_at_a_daemon_start() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    let mut body = day_start_body("morning", json!({"delay": "10m"}));
+    body["catch_up"] = json!("once");
+    let sid = id(td.post("/api/schedules", body).await.ok());
+    let mut w = DayStartWatch::default();
+    pass(&td, at(0, 8, 0), StartCause::DaemonStart, &mut w, true).await;
+    // The daemon stops before the run and starts an hour later: no
+    // catch-up run; the plan is dropped and the start plans it again.
+    assert!(
+        terrariumd::scheduler::startup(&state(&td), at(0, 9, 0))
+            .await
+            .is_empty()
+    );
+    assert!(schedule(&td, &sid).await["next_run_at"].is_null());
+    let mut w = DayStartWatch::default();
+    assert_eq!(
+        pass(&td, at(0, 9, 0), StartCause::DaemonStart, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    let runs = tick(&td, at(0, 9, 10)).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].trigger, "day_start");
+}
+
+#[tokio::test]
+async fn day_start_spec_errors_name_the_field() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    for (extra, field) in [
+        (json!({"not_before": "7am"}), "spec.not_before"),
+        (json!({"not_after": "25:00"}), "spec.not_after"),
+        (
+            json!({"not_before": "10:00", "not_after": "09:00"}),
+            "spec.not_after",
+        ),
+        (json!({"delay": "13h"}), "spec.delay"),
+        (json!({"delay": "soon"}), "spec.delay"),
+        (json!({"weekdays": ["funday"]}), "spec.weekdays"),
+        (json!({"tz": "Nowhere/City"}), "spec.tz"),
+    ] {
+        let r = td
+            .post("/api/schedules", day_start_body("bad", extra.clone()))
+            .await;
+        r.err(422, "invalid");
+        assert_eq!(r.body["error"]["details"]["field"], field, "{extra}");
+    }
+}
