@@ -15,6 +15,9 @@
 //!   operator and the card's creator.
 //! - `done` is terminal for members. On `done`, every linked mail thread gets
 //!   a notice, and dependent cards that are now free raise `unblocked`.
+//! - With `board_flow = rules` the rules `card-blocked-mail` and
+//!   `card-done-mail` of the built-in pack send these two mails, not the
+//!   move (TER-162 D10).
 //! - A move of a card that an Inbox thread tracks can wake the thread's
 //!   agent ([`crate::store::threads::on_card_moved`], TER-148).
 
@@ -1390,7 +1393,11 @@ fn touch(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
 }
 
 /// The daemon mails the blocked notice (PLAN §13): the sender is `system`.
-fn notify_blocked(t: &mut Tx<'_>, actor: &Actor, card: &CardRow, comment: &str) -> ApiResult<()> {
+/// `author` is the mover as [`author_of`] gives it (the `author` of the
+/// `moved` event): an agent ID, `operator`, or `system`. The mover gets no
+/// copy. With `board_flow = rules` the rule `card-blocked-mail` of the
+/// built-in pack sends it (TER-162 D10).
+fn notify_blocked(t: &mut Tx<'_>, author: &str, card: &CardRow, comment: &str) -> ApiResult<()> {
     let from = Address::System;
     let mut to = vec![Address::Operator];
     if card.created_by != "operator"
@@ -1399,16 +1406,14 @@ fn notify_blocked(t: &mut Tx<'_>, actor: &Actor, card: &CardRow, comment: &str) 
     {
         to.push(Address::Agent { id, name, project });
     }
-    let me = actor.address();
-    let author = author_of(t, actor);
-    let by = name_of(t, &author)?;
+    let by = name_of(t, author)?;
     let subject = format!("{} blocked: {}", card.id, card.title);
     let body = format!(
         "Card {} \"{}\" moved to {} (the blocked column) by {by}.\n\nComment:\n{comment}\n\nRun `terrarium card show {}`.",
         card.id, card.title, card.column, card.id
     );
     let mut thread: Option<String> = None;
-    for recipient in to.iter().filter(|a| a.key() != me || author != me) {
+    for recipient in to.iter().filter(|a| a.key() != author) {
         let m = mail::send(
             t,
             Outgoing {
@@ -1425,6 +1430,8 @@ fn notify_blocked(t: &mut Tx<'_>, actor: &Actor, card: &CardRow, comment: &str) 
     Ok(())
 }
 
+/// The done notice on each linked mail thread. With `board_flow = rules`
+/// the rule `card-done-mail` of the built-in pack sends it (TER-162 D10).
 fn notify_done(t: &mut Tx<'_>, card: &CardRow, closing: &str) -> ApiResult<()> {
     let from = Address::Project(card.project.clone());
     let mut stmt =
@@ -1758,8 +1765,8 @@ fn apply_move(
          WHERE id = ?1",
         params![card.id, to.id, at, now(), same, to.name == DONE],
     )?;
+    let author = author_of(t, actor);
     if let Some(c) = comment {
-        let author = author_of(t, actor);
         insert_comment(t, &card.id, &author, c)?;
     }
     let moved = find_row(t, &card.id)?;
@@ -1773,7 +1780,7 @@ fn apply_move(
         "moved",
         json!({"from": card.column, "to": to.name, "from_role": card.column_role,
                "to_role": to.role, "comment": comment, "assignee": moved.assignee,
-               "previous_eta_at": card.eta_at}),
+               "previous_eta_at": card.eta_at, "author": author}),
     )?;
     // A thread that tracks this card wakes its agent on a move to blocked,
     // and when all its cards are in review or later (TER-148).
@@ -1793,25 +1800,60 @@ fn apply_move(
             json!({"to": to.name}),
         )?;
     }
-    if to.is(BLOCKED) {
-        notify_blocked(t, actor, &moved, comment.unwrap_or_default())?;
-    }
-    if to.name == DONE {
-        let closing = match comment {
-            Some(c) => c.to_owned(),
-            None => t
-                .query_row(
-                    "SELECT body FROM card_comments WHERE card = ?1
-                     ORDER BY created_at DESC, id DESC LIMIT 1",
-                    [&card.id],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .unwrap_or_default(),
-        };
-        notify_done(t, &moved, &closing)?;
+    // With `board_flow = rules` the rules `card-blocked-mail` and
+    // `card-done-mail` of the built-in pack send these mails (TER-162 D10).
+    if (to.is(BLOCKED) || to.name == DONE)
+        && !crate::store::projects::rules_flow(t, &card.project)?
+    {
+        if to.is(BLOCKED) {
+            notify_blocked(t, &author, &moved, comment.unwrap_or_default())?;
+        }
+        if to.name == DONE {
+            let closing = closing_comment(t, &card.id, comment)?;
+            notify_done(t, &moved, &closing)?;
+        }
     }
     Ok(())
+}
+
+/// The blocked notice of card `id`, as a move to blocked by `author`
+/// sends it (the rule verb `card.blocked_mail`).
+/// `column` is the blocked column of the move: the card may have moved on.
+pub(crate) fn mail_blocked(
+    t: &mut Tx<'_>,
+    id: &str,
+    column: &str,
+    author: &str,
+    comment: &str,
+) -> ApiResult<()> {
+    let mut card = find_row(t, id)?;
+    column.clone_into(&mut card.column);
+    notify_blocked(t, author, &card, comment)
+}
+
+/// The done notice of card `id`, as a move to `done` with `comment`
+/// sends it (the rule verb `card.done_mail`).
+pub(crate) fn mail_done(t: &mut Tx<'_>, id: &str, comment: Option<&str>) -> ApiResult<()> {
+    let card = find_row(t, id)?;
+    let closing = closing_comment(t, &card.id, comment)?;
+    notify_done(t, &card, &closing)
+}
+
+/// The closing comment of a move to `done`: the move's comment, else the
+/// newest comment of the card.
+fn closing_comment(conn: &Connection, card: &str, comment: Option<&str>) -> ApiResult<String> {
+    if let Some(c) = comment.map(str::trim).filter(|c| !c.is_empty()) {
+        return Ok(c.to_owned());
+    }
+    Ok(conn
+        .query_row(
+            "SELECT body FROM card_comments WHERE card = ?1
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            [card],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default())
 }
 
 /// Move a card to a column, with the rules of §13.

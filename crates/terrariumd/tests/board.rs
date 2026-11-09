@@ -2179,3 +2179,152 @@ async fn blocked_cards_have_the_time_and_the_reason_of_the_move() {
     assert!(w[0].get("blocked_since").is_none(), "{w:#?}");
     assert!(w[0].get("blocked_reason").is_none());
 }
+
+/// The mails of `agent` (or of `/api/mail?to=operator` for `operator`)
+/// whose subject starts with `prefix`, once there are `n` of them. A
+/// deadline, not a count of tries: with `board_flow = rules` the rules
+/// engine sends them after the move.
+async fn mails_of(td: &TestDaemon, who: &str, prefix: &str, n: usize) -> Vec<Value> {
+    let start = std::time::Instant::now();
+    loop {
+        let all = if who == "operator" {
+            td.get("/api/mail?to=operator")
+                .await
+                .ok()
+                .as_array()
+                .unwrap()
+                .clone()
+        } else {
+            td.mail_of(who).await
+        };
+        let got: Vec<Value> = all
+            .into_iter()
+            .filter(|m| m["subject"].as_str().unwrap_or_default().starts_with(prefix))
+            .collect();
+        if got.len() >= n || start.elapsed() > std::time::Duration::from_secs(60) {
+            return got;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// TER-174 (TER-162 D10): the blocked and done mails of a move are the
+/// same with `board_flow = code` (the move sends them) and with
+/// `board_flow = rules` (the rules `card-blocked-mail` and
+/// `card-done-mail` of the built-in pack).
+async fn move_mails_match(flow: &str) {
+    let td = setup().await;
+    if flow != "code" {
+        let r = td
+            .patch("/api/projects/proj", json!({"board_flow": flow}))
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    // w2 blocks a card that w1 made: the operator and w1 get the notice
+    // on one thread, from `system`; w2, the mover, gets none.
+    let id = card(&td, "proj/w1", json!({"title": "Hard"})).await;
+    td.post_as(
+        "proj/lead",
+        &format!("/api/cards/{id}/assign"),
+        json!({"assignee": "w2"}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        "proj/w2",
+        &format!("/api/cards/{id}/move"),
+        json!({"column": "blocked", "comment": "need DB access"}),
+    )
+    .await
+    .ok();
+    let subject = format!("{id} blocked: Hard");
+    let ops = mails_of(&td, "operator", &subject, 1).await;
+    assert_eq!(ops.len(), 1, "{flow}: {ops:#?}");
+    assert_eq!(ops[0]["subject"], subject.as_str());
+    assert_eq!(ops[0]["from"], "system");
+    let body = ops[0]["body"].as_str().unwrap();
+    assert!(
+        body.starts_with(&format!(
+            "Card {id} \"Hard\" moved to blocked (the blocked column) by "
+        )),
+        "{flow}: {body}"
+    );
+    assert!(body.contains("w2"), "{flow}: {body}");
+    assert!(body.contains("Comment:\nneed DB access"), "{flow}: {body}");
+    let w1 = mails_of(&td, "proj/w1", &subject, 1).await;
+    assert_eq!(w1.len(), 1, "{flow}: {w1:#?}");
+    assert_eq!(w1[0]["thread_id"], ops[0]["thread_id"]);
+    assert_eq!(w1[0]["body"], ops[0]["body"]);
+    assert!(mails_of(&td, "proj/w2", &subject, 0).await.is_empty());
+
+    // w1 blocks its own card: the operator gets it, w1 does not.
+    let own = card(&td, "proj/w1", json!({"title": "Mine"})).await;
+    td.post_empty_as("proj/w1", &format!("/api/cards/{own}/claim"))
+        .await
+        .ok();
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{own}/move"),
+        json!({"column": "blocked", "comment": "stuck"}),
+    )
+    .await
+    .ok();
+    let own_subject = format!("{own} blocked: Mine");
+    assert_eq!(
+        mails_of(&td, "operator", &own_subject, 1).await.len(),
+        1,
+        "{flow}"
+    );
+    assert!(mails_of(&td, "proj/w1", &own_subject, 0).await.is_empty());
+
+    // Done: each participant of a linked thread gets the notice on that
+    // thread, from the project, with the closing comment.
+    let sent = td
+        .post_as(
+            "proj/w1",
+            "/api/mail",
+            json!({"to": "w2", "subject": "about Hard", "body": "see the card"}),
+        )
+        .await;
+    let thread = sent.ok()["thread_id"].as_str().unwrap().to_owned();
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{id}/links"),
+        json!({"kind": "thread", "ref": thread}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        "proj/lead",
+        &format!("/api/cards/{id}/move"),
+        json!({"column": "done", "comment": "shipped"}),
+    )
+    .await
+    .ok();
+    let done = format!("Done: {id} Hard");
+    for who in ["proj/w1", "proj/w2"] {
+        let got = mails_of(&td, who, &done, 1).await;
+        assert_eq!(got.len(), 1, "{flow} {who}: {got:#?}");
+        assert_eq!(got[0]["thread_id"], thread.as_str());
+        assert_eq!(got[0]["from"], "project:proj");
+        assert_eq!(
+            got[0]["body"],
+            format!("Card {id} \"Hard\" is done.\n\nClosing comment:\nshipped")
+        );
+    }
+    // No second copy comes later (the move and the rule both sending).
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(mails_of(&td, "operator", &subject, 0).await.len(), 1);
+    assert_eq!(mails_of(&td, "proj/w1", &subject, 0).await.len(), 1);
+    assert_eq!(mails_of(&td, "proj/w2", &done, 0).await.len(), 1);
+}
+
+#[tokio::test]
+async fn move_mails_match_code() {
+    move_mails_match("code").await;
+}
+
+#[tokio::test]
+async fn move_mails_match_rules() {
+    move_mails_match("rules").await;
+}

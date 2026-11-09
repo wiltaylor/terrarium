@@ -289,6 +289,7 @@ pub fn perform(
         "card.assign" => card_assign(t, actor, ctx, &a)?,
         "card.prepend" => card_prepend(t, actor, ctx, &a)?,
         "mail" => send_mail(t, actor, ctx, &a)?,
+        "card.blocked_mail" | "card.done_mail" => move_mail(t, actor, ctx, verb)?,
         "job.queue" => job_queue(t, actor, ctx, &a, &mut effects)?,
         "job.cancel" => job_cancel(t, actor, ctx, &mut effects)?,
         "job.rerun" => job_rerun(t, actor, ctx, &a, &mut effects)?,
@@ -570,6 +571,57 @@ fn send_mail(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiRe
         sent.push(json!({"id": m.id, "to": addr.key()}));
     }
     Ok(changed(json!({"messages": sent, "subject": subject})))
+}
+
+/// The mails of a card move that the coded flow sends in `apply_move`
+/// (TER-162 D10): `card.blocked_mail` mails the blocked notice from
+/// `system` to the operator and the card's creator, not to the mover;
+/// `card.done_mail` mails the done notice to the participants of each
+/// linked thread. The texts are the coded flow's. Only on the `moved`
+/// event of a move to a blocked column, or to `done`: else a no-op.
+fn move_mail(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, verb: &str) -> ApiResult<Done> {
+    let card = the_card(ctx, verb)?;
+    let event = ctx
+        .event
+        .as_ref()
+        .filter(|e| e.kind == "card")
+        .ok_or_else(|| ApiError::invalid(format!("{verb} needs a `card` event")))?;
+    let data = &event.data;
+    let blocked = verb == "card.blocked_mail";
+    let fits = data["change"] == "moved"
+        && if blocked {
+            data["to_role"] == board::BLOCKED
+        } else {
+            data["to"] == board::DONE
+        };
+    if !fits {
+        return Ok(noop(
+            json!({"card": card.id, "reason": "not a move to the column of the mail"}),
+        ));
+    }
+    policy::admin_project(
+        actor,
+        &card.project,
+        &format!("sending the move mail of {}", card.id),
+    )?;
+    let comment = data["comment"].as_str();
+    if blocked {
+        // The mover: `author` of the event; an older event has only its
+        // actor (`agent:<id>`, `operator`, `system`, ...).
+        let author = match data["author"].as_str() {
+            Some(a) => a.to_owned(),
+            None => match event.actor.as_deref() {
+                Some("operator") => "operator".to_owned(),
+                Some(a) => a.strip_prefix("agent:").unwrap_or("system").to_owned(),
+                None => "system".to_owned(),
+            },
+        };
+        let column = data["to"].as_str().unwrap_or(&card.column);
+        board::mail_blocked(t, &card.id, column, &author, comment.unwrap_or_default())?;
+    } else {
+        board::mail_done(t, &card.id, comment)?;
+    }
+    Ok(changed(json!({"card": card.id})))
 }
 
 // ------------------------------------------------------------- job verbs
