@@ -245,7 +245,7 @@ async fn like_rejects_cross_project_sources() {
 /// the source's grant list is not exposed (the caller may not read it).
 #[tokio::test]
 async fn like_skips_name_only_grants_the_owner_may_read() {
-    let (td, _, w) = setup().await;
+    let (td, _, _w) = setup().await;
     // `low` may use `box` and holds `global/openai` at `use`: it can read
     // the names of `box` and `global/openai`, not of `global/gh`.
     let low = id(&td
@@ -345,7 +345,7 @@ async fn a_body_grant_replaces_the_copied_grant() {
 #[tokio::test]
 async fn a_copied_target_is_granted_once() {
     let (td, _, w) = setup().await;
-    let src = id(&td
+    let _src = id(&td
         .agent("p", "src", json!({"policy": {"targets": ["p-pbox"]}}))
         .await);
     td.post(
@@ -423,7 +423,7 @@ async fn like_harness_and_source_errors_name_the_cause() {
         login.as_bytes(),
     )
     .unwrap();
-    let hs = id(&td.agent("p", "hs", json!({"subscription": "hsub"})).await);
+    let _hs = id(&td.agent("p", "hs", json!({"subscription": "hsub"})).await);
     state(&td).usage.limits.mark("hsub", None);
     let r = spawn_as(&td, &w, &w, json!({"template": "altcase", "like": "hs"})).await;
     assert_eq!(r.status, 422, "{}", r.body);
@@ -469,8 +469,8 @@ async fn like_replaces_the_subscription_and_pool() {
                    "policy": {"spawn": {"templates": ["worker", "fixed"], "max_concurrent": 8}}}),
         )
         .await);
-    let bare = id(&td.agent("p", "bare", json!({})).await);
-    let rich = id(&td
+    let _bare = id(&td.agent("p", "bare", json!({})).await);
+    let _rich = id(&td
         .agent(
             "p",
             "rich",
