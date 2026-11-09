@@ -3553,6 +3553,18 @@ or the operator may spawn for an owner. The checks, in order:
   the owner (below), also when a lead or the operator spawns for it.
 
 **Rights from the owner** (TER-65, `crates/terrariumd/src/spawn_rights.rs`).
+
+`like` (CLI `--like <agent>`) copies a same-project agent's policy targets,
+agent-level secret grant references (never values), skills settings, subscription
+and pool. The template still supplies the harness and other settings. The source
+must use the same harness. Subscription selection uses the copied pool's headroom.
+Each copied target and grant is checked against the owner through the normal
+spawn-rights checks. A missing right is `403`, with its name. With
+`like_skip_missing: true` (CLI `--like-skip-missing`, requires `like`), those
+forbidden rights are omitted and listed in the response's `skipped` array.
+Other errors still fail the spawn. Explicit and template grants replace copied
+grants of the same secret. Project grants and leases of the source are not copied.
+
 A spawn gives the ephemeral agent rights beyond its template, each one
 checked against the owner at the spawn. None goes past what the owner
 holds.
