@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { DashboardBlock, Monitor, MonitorResult } from "../../api/types";
-import { blockFor, blockState, columnsOf, isStale, kindsFor, layoutProblems, linePath, moveBlock, nearestIndex, newBlockId, niceTicks, noteBlock, numericPoints, ownerText, rangeOf, stateCounts, unitOf, valueText, yScale } from "./model";
+import type { DashboardBlock, JobStats, Monitor, MonitorResult } from "../../api/types";
+import { blockFor, blockState, columnsOf, isStale, jobStatNotes, kindsFor, layoutProblems, linePath, moveBlock, nearestIndex, newBlockId, niceTicks, noteBlock, numericPoints, ownerText, passRateText, rangeOf, roundHalfEven, stateCounts, unitOf, valueText, yScale } from "./model";
 
 const NOW = Date.parse("2026-11-02T12:00:00Z");
 const result = (over: Partial<MonitorResult> = {}): MonitorResult => ({ id: 1, monitor: "m", at: new Date(NOW - 10_000).toISOString(), status: "ok", duration_ms: 5, ...over });
@@ -186,5 +186,40 @@ describe("ownerText", () => {
     expect(ownerText({ owner: "system", run_as: "operator" })).toBe("owned by the system");
     expect(ownerText({ owner: "actor", run_as: "agent:01X" })).toBe("runs as agent:01X");
     expect(ownerText({ run_as: "operator" })).toBe("runs as operator");
+  });
+});
+
+describe("job queue strip", () => {
+  it("shows a pass rate as a whole percent, or the dash with none", () => {
+    expect(passRateText(0.846)).toBe("85%");
+    expect(passRateText(1 / 3)).toBe("33%");
+    expect(passRateText(1)).toBe("100%");
+    expect(passRateText(0)).toBe("0%");
+    expect(passRateText(null)).toBe("–");
+    expect(passRateText(undefined)).toBe("–");
+  });
+
+  it("rounds ties to even like the CLI (format!(\"{:.0}\"))", () => {
+    // 1 of 8 is 12.5%: the CLI prints 12%, Math.round would give 13%.
+    expect(passRateText(1 / 8)).toBe("12%");
+    expect(passRateText(3 / 8)).toBe("38%");
+    expect(passRateText(5 / 8)).toBe("62%");
+    expect(passRateText(0.135)).toBe("14%");
+    expect(passRateText(0.845)).toBe("84%");
+    expect(roundHalfEven(0.5)).toBe(0);
+    expect(roundHalfEven(1.5)).toBe(2);
+    expect(roundHalfEven(2.4999)).toBe(2);
+    expect(roundHalfEven(2.5001)).toBe(3);
+  });
+
+  it("lists only the counts that are not zero", () => {
+    expect(jobStatNotes(null)).toEqual([]);
+    expect(jobStatNotes({ reruns: { ended: 0, passed: 0, failed: 0, pass_rate: null }, conflicts: 0, errors: 0, open: 0 } as JobStats)).toEqual([]);
+    expect(
+      jobStatNotes({ reruns: { ended: 5, passed: 3, failed: 2, pass_rate: 0.6 }, conflicts: 1, errors: 2, open: 1 } as JobStats),
+    ).toEqual(["3 of 5 reruns passed", "1 conflict", "2 errors", "1 open"]);
+    expect(jobStatNotes({ reruns: { ended: 1, passed: 0, failed: 1, pass_rate: 0 }, conflicts: 0, errors: 0, open: 0 } as JobStats)).toEqual([
+      "0 of 1 rerun passed",
+    ]);
   });
 });

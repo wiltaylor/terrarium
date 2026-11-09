@@ -1819,6 +1819,61 @@ export interface CardJob {
   planned_secs?: number;
 }
 
+/** The first-attempt numbers of the jobs of one kind, or of all (docs/api.md §35.4, TER-135). */
+export interface FirstAttempts {
+  /** Ended first attempts that ran the recipe: `passed + failed`. */
+  ended: number;
+  passed: number;
+  /** Failed with `red` (or a timeout). A `conflict` and an `error` never ran the tests, so they count outside this. */
+  failed: number;
+  /** `passed / ended`, from 0 to 1. `null` with no ended first attempt. */
+  pass_rate: number | null;
+}
+
+/** A test target that failed, and how often (TER-135). */
+export interface TargetFails {
+  /** As cargo names it: `-p terrariumd --test jobs`. */
+  target: string;
+  /** The failed jobs whose tail names the target, all attempts. */
+  failed: number;
+  /** Of them, the first attempts. */
+  first_attempt: number;
+}
+
+/** A recipe step that failed, and how often (TER-135). */
+export interface StepFails {
+  step: string;
+  failed: number;
+}
+
+/** The pass rate of a project's job queue over a window: `GET /api/projects/{name}/jobs/stats` (docs/api.md §35.4, TER-135). */
+export interface JobStats {
+  project: string;
+  since: string;
+  /** All jobs in the window, in all states. */
+  jobs: number;
+  first_attempt: FirstAttempts;
+  validate: FirstAttempts;
+  merge: FirstAttempts;
+  /** Ended reruns (attempt 2 or more): `passed` is a failure that the rerun did not repeat. */
+  reruns: FirstAttempts;
+  /** First attempts that ended in a merge conflict. */
+  conflicts: number;
+  /** First attempts and reruns that could not run (outcome `error`). */
+  errors: number;
+  cancelled: number;
+  /** Queued or running. */
+  open: number;
+  /** The halves of a split batch. */
+  splits: number;
+  /** The failed recipe steps (`test`, `lint`, ...; `timeout` when the job was killed), most first. */
+  failed_steps: StepFails[];
+  /** The test targets that failed, most first. */
+  failed_targets: TargetFails[];
+  /** Failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off). */
+  untargeted_test_fails: number;
+}
+
 /** A card of `GET /api/cards` (docs/api.md §8, TER-43): a card in the working or research column of a board, with its column kind and the status of its assignee agent. */
 export interface ActiveCard extends Card {
   /** `working` (the column with that role), `research`, or another column that the query named. */
