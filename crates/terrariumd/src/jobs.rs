@@ -3145,7 +3145,7 @@ mod tests {
         let log = dir.path().join("logs with 'quotes/job.log");
         let recipe = "printf 'test early_failure ... FAILED\\n'\nprintf \"thread 'early_failure' panicked at test.rs:1:2:\\nexpected value\\n\" >&2\ni=0; while [ \"$i\" -lt 2000 ]; do printf 'unrelated build noise\\n'; i=$((i + 1)); done\nexit 101";
         let script = logged_recipe(recipe.into(), log.to_str().unwrap());
-        let out = std::process::Command::new("sh")
+        let out = recipe_sh()
             .args(["-c", &script])
             .output()
             .unwrap();
@@ -3179,7 +3179,7 @@ mod tests {
                 "printf \"custom [failure] 'marker'\\nmessage\\n\"; exit 7".into(),
                 log.to_str().unwrap(),
             );
-            let out = std::process::Command::new("sh")
+            let out = recipe_sh()
                 .args(["-c", &script])
                 .output()
                 .unwrap();
@@ -3209,7 +3209,7 @@ mod tests {
             "umask 022\n{}",
             logged_recipe("umask; touch output".into(), log.to_str().unwrap())
         );
-        let out = std::process::Command::new("sh")
+        let out = recipe_sh()
             .current_dir(dir.path())
             .args(["-c", &script])
             .output()
@@ -3515,6 +3515,28 @@ mod tests {
         }
     }
 
+    /// A shell for a [`logged_recipe`] script, without the job env of an
+    /// outer job: a merge job runs these tests inside its own recipe, and
+    /// its `TERRARIUM_HEAD` (a head this test's dir does not have) and
+    /// `TERRARIUM_SLOT_LOCK` (the lock that job holds) would end the
+    /// wrapper with exit 125 before the recipe.
+    fn recipe_sh() -> std::process::Command {
+        let mut c = std::process::Command::new("sh");
+        c.env_remove("TERRARIUM_HEAD")
+            .env_remove("TERRARIUM_SLOT_LOCK");
+        c
+    }
+
+    /// The exit status and both outputs of a step, for an assertion.
+    fn shown(out: &std::process::Output) -> String {
+        format!(
+            "{:?}\nstdout:\n{}\nstderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+
     /// True when `flock` works here: the TER-448 lock tests need it.
     fn flock_works() -> bool {
         std::process::Command::new("sh")
@@ -3627,7 +3649,7 @@ mod tests {
             log.to_str().unwrap(),
         );
         let run = |head: &str| {
-            std::process::Command::new("sh")
+            recipe_sh()
                 .arg("-c")
                 .arg(&script)
                 .current_dir(&slot)
@@ -3688,19 +3710,20 @@ mod tests {
             ),
             log.to_str().unwrap(),
         );
-        let out = std::process::Command::new("sh")
+        let out = recipe_sh()
             .arg("-c")
             .arg(&script)
             .current_dir(tmp.path())
             .env("TERRARIUM_SLOT_LOCK", &lock)
             .output()
             .unwrap();
-        assert!(
-            out.status.success(),
+        assert!(out.status.success(), "the wrapper failed: {}", shown(&out));
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "ran\n",
             "{}",
-            String::from_utf8_lossy(&out.stderr)
+            shown(&out)
         );
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "ran\n");
         let pid: i32 = std::fs::read_to_string(&pid_file)
             .unwrap()
             .trim()
@@ -3747,15 +3770,12 @@ mod tests {
             .arg("-c")
             .arg(&script)
             .current_dir(tmp.path())
+            .env_remove("TERRARIUM_HEAD")
             .env("PATH", &bin)
             .env("TERRARIUM_SLOT_LOCK", &lock)
             .output()
             .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        assert!(out.status.success(), "the wrapper failed: {}", shown(&out));
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(
             text.contains("no flock on the target: slot not locked"),
