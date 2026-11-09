@@ -194,7 +194,20 @@ fn env_wrapper(root: &Path) -> PathBuf {
     bin
 }
 
-fn supervisor(root: &Path, tools: Option<&Path>, cli: bool) -> Arc<RunnerSupervisor> {
+/// The daemon build that the supervisor compares runners with, and its
+/// upgrade limit ([`Td::upgrade`]).
+#[derive(Clone, Default)]
+struct Upgrade {
+    version: Option<String>,
+    limit: Option<usize>,
+}
+
+fn supervisor(
+    root: &Path,
+    tools: Option<&Path>,
+    cli: bool,
+    upgrade: &Upgrade,
+) -> Arc<RunnerSupervisor> {
     let mut homes = HashMap::new();
     for h in [
         HarnessId::Claude,
@@ -245,6 +258,18 @@ fn supervisor(root: &Path, tools: Option<&Path>, cli: bool) -> Arc<RunnerSupervi
         ..RunnerTuning::default()
     };
     cfg.mode = RunnerMode::Process { bin: runner_bin() };
+    match &upgrade.version {
+        Some(v) => cfg.version = v.clone(),
+        // The pinned N-1 runner tests the control protocol across a
+        // restart; a version with no ref keeps it (no upgrade restart).
+        None if std::env::var_os("TERRARIUM_TEST_OLD_RUNNER").is_some() => {
+            cfg.version = "0.0.0".into();
+        }
+        None => {}
+    }
+    if let Some(n) = upgrade.limit {
+        cfg.upgrade_limit = n;
+    }
     Arc::new(RunnerSupervisor::new(cfg))
 }
 
@@ -261,6 +286,8 @@ struct Td {
     /// The sandbox binds the real `terrarium` CLI, and the harness writes
     /// its env ([`Td::start_with_cli`]).
     cli: bool,
+    /// The next [`Td::boot`] claims this daemon build.
+    upgrade: Upgrade,
 }
 
 impl Td {
@@ -325,6 +352,7 @@ impl Td {
             daemon: None,
             tools,
             cli,
+            upgrade: Upgrade::default(),
         }
     }
 
@@ -344,6 +372,7 @@ impl Td {
                 self.dir.path(),
                 self.tools.as_ref().map(|t| t.dir.as_path()),
                 self.cli,
+                &self.upgrade,
             ),
             insecure_agent_header: true,
             artifact_listen: None,
@@ -966,6 +995,100 @@ async fn hot_swap_probation(rollback: bool) {
                 .count(),
             1
         );
+    }
+}
+
+/// R4 (TER-262): after a hot swap, a runner of an older build gets
+/// `restart_scheduled` (reason `upgrade`). An agent out of its turn
+/// restarts with resume at once, one in a turn when the turn ends. Here the
+/// new daemon claims another build. With a limit of 1, the upgrades run
+/// one after the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_runner_upgrades_after_its_turn() {
+    let mut td = Td::start().await;
+    let calm = td.agent("calm", json!({})).await;
+    let rest = td.agent("rest", json!({})).await;
+    let busy = td.agent("busy", json!({})).await;
+    for id in [&calm, &rest, &busy] {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_status(id, "idle").await;
+    }
+    td.post(
+        &format!("/api/agents/{busy}/send"),
+        Some(json!({"text": "/hold"})),
+    )
+    .await;
+    td.wait_status(&busy, "working").await;
+    let pids: Vec<u32> = [&calm, &rest, &busy]
+        .iter()
+        .map(|id| td.runner_pid(id).unwrap())
+        .collect();
+
+    td.shutdown();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    td.upgrade = Upgrade {
+        version: Some("0.0.0+0000000".into()),
+        limit: Some(1),
+    };
+    td.boot().await;
+
+    // Each agent out of a turn restarts with resume on a new runner.
+    for (id, old) in [(&calm, pids[0]), (&rest, pids[1])] {
+        let notices = td
+            .wait_events(id, "system", |e| {
+                e.iter().any(|n| {
+                    n["data"]["message"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with("restart_scheduled (reason upgrade)"))
+                })
+            })
+            .await;
+        assert!(!notices.is_empty());
+        td.wait_events(id, "session_started", |e| e.len() == 2)
+            .await;
+        td.wait_status(id, "idle").await;
+        let now = td.runner_pid(id).unwrap();
+        assert_ne!(now, old, "a new runner process");
+        let statuses = td.events(id, "status").await;
+        let reasons: Vec<&str> = statuses
+            .iter()
+            .filter_map(|s| s["data"]["reason"].as_str())
+            .collect();
+        assert!(reasons.contains(&"upgrade"), "{reasons:?}");
+        assert!(
+            reasons.iter().any(|r| r.starts_with("resuming session")),
+            "{reasons:?}"
+        );
+    }
+
+    // The agent in a turn keeps its runner until the turn ends.
+    assert_eq!(td.runner_pid(&busy), Some(pids[2]), "no restart in a turn");
+    assert_eq!(td.status(&busy).await, "working");
+    assert_eq!(td.events(&busy, "session_started").await.len(), 1);
+    td.post(
+        &format!("/api/agents/{busy}/send"),
+        Some(json!({"text": "go", "raw": true})),
+    )
+    .await;
+    let starts = td
+        .wait_events(&busy, "session_started", |e| e.len() == 2)
+        .await;
+    let ends = td.events(&busy, "turn_end").await;
+    assert!(
+        ends.last().unwrap()["seq"].as_u64() < starts[1]["seq"].as_u64(),
+        "the restart came after the turn: {ends:#?} {starts:#?}"
+    );
+    td.wait_status(&busy, "idle").await;
+    assert_ne!(td.runner_pid(&busy), Some(pids[2]), "a new runner process");
+
+    // The new runners are not upgraded again.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for id in [&calm, &rest, &busy] {
+        assert_eq!(td.events(id, "session_started").await.len(), 2);
+    }
+    for id in [&calm, &rest, &busy] {
+        td.post(&format!("/api/agents/{id}/stop"), None).await;
+        td.wait_status(id, "stopped").await;
     }
 }
 

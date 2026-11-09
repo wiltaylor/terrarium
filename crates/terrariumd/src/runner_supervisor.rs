@@ -213,7 +213,17 @@ pub struct RunnerSupervisorConfig {
     /// reads the user settings of its harness from
     /// `<repo>/harness/<harness>/`. `None`: no user settings.
     pub config_repo: Option<PathBuf>,
+    /// The build that runner processes should run: a recovered runner of
+    /// another build (`terrarium_version::is_stale`) restarts with resume
+    /// after its turn. A version with no git ref turns this off.
+    pub version: String,
+    /// The most agents that restart for an upgrade at one time
+    /// ([`DEFAULT_UPGRADE_LIMIT`]).
+    pub upgrade_limit: usize,
 }
+
+/// The default of [`RunnerSupervisorConfig::upgrade_limit`].
+pub const DEFAULT_UPGRADE_LIMIT: usize = 3;
 
 /// The default of [`RunnerSupervisorConfig::lead_nudge_interval`].
 pub const DEFAULT_LEAD_NUDGE_INTERVAL: Duration = Duration::from_secs(10);
@@ -241,6 +251,8 @@ impl RunnerSupervisorConfig {
             mode: RunnerMode::InProcess,
             lead_nudge_interval: DEFAULT_LEAD_NUDGE_INTERVAL,
             config_repo: None,
+            version: terrarium_version::FULL.to_owned(),
+            upgrade_limit: DEFAULT_UPGRADE_LIMIT,
         }
     }
 
@@ -994,6 +1006,16 @@ struct Slot {
     /// A swap waits for the end of the turn: then the agent restarts with
     /// resume on `agent.subscription`.
     swap_pending: bool,
+    /// The runner process runs an older build than the daemon: the agent
+    /// restarts with resume when it is out of a turn (`restart_scheduled`,
+    /// reason `upgrade`).
+    upgrade_pending: bool,
+    /// A task waits for the end of the hot swap and for a free upgrade
+    /// slot ([`RunnerSupervisor::upgrade_after_turn`]).
+    upgrade_waiting: bool,
+    /// The upgrade slot of the restart that runs: it frees when the new
+    /// runner is in, or when the agent ends.
+    upgrade_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     /// The compaction that runs ([`Supervisor::compact`]). A drop of its
     /// sender (an exit, a new launch) ends the wait of the caller.
     compacting: Option<Compacting>,
@@ -1057,6 +1079,9 @@ impl Slot {
             account: None,
             bound: Vec::new(),
             swap_pending: false,
+            upgrade_pending: false,
+            upgrade_waiting: false,
+            upgrade_permit: None,
             compacting: None,
             reset_gate: false,
             start_reason: None,
@@ -1173,6 +1198,8 @@ struct Inner {
     /// True after the shutdown: the forward and attach tasks end, and drop
     /// their runner handles, so the control connections close.
     stop_tx: watch::Sender<bool>,
+    /// The upgrade slots ([`RunnerSupervisorConfig::upgrade_limit`]).
+    upgrades: Arc<tokio::sync::Semaphore>,
 }
 
 /// Runs each agent in a runner (see [`RunnerMode`]). Cheap to clone.
@@ -1275,6 +1302,7 @@ fn check_subscription(
 impl RunnerSupervisor {
     pub fn new(cfg: RunnerSupervisorConfig) -> Self {
         let (tx, _) = broadcast::channel(4096);
+        let upgrades = Arc::new(tokio::sync::Semaphore::new(cfg.upgrade_limit.max(1)));
         Self {
             inner: Arc::new(Inner {
                 #[cfg(test)]
@@ -1292,6 +1320,7 @@ impl RunnerSupervisor {
                 ssh_agents: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
                 stop_tx: watch::Sender::new(false),
+                upgrades,
             }),
         }
     }
@@ -2175,6 +2204,9 @@ impl RunnerSupervisor {
                     slot.account = accounts.account.clone();
                     slot.bound = accounts.bound.clone();
                     slot.swap_pending = false;
+                    // The new runner is this build: the upgrade is done.
+                    slot.upgrade_pending = false;
+                    slot.upgrade_permit = None;
                     for m in view.queued {
                         slot.pointer.add_mail(m);
                     }
@@ -2253,20 +2285,25 @@ impl RunnerSupervisor {
             .unwrap_or_default()
     }
 
-    /// The account swap that waited for the end of a turn: restart with
-    /// resume on the new account. True when it restarts.
-    fn take_pending_swap(&self, id: AgentId, epoch: u64) -> bool {
+    /// The restart that waited for the end of a turn: an account swap
+    /// restarts with resume on the new account at once (true), an upgrade
+    /// when the hot swap is in and an upgrade slot is free.
+    fn take_pending_restart(&self, id: AgentId, epoch: u64) -> bool {
         let agent = {
             let mut slots = lock(&self.inner.slots);
-            match slots
-                .get_mut(&id)
-                .filter(|s| s.epoch == epoch && s.swap_pending)
-            {
-                Some(slot) => {
+            match slots.get_mut(&id).filter(|s| s.epoch == epoch) {
+                Some(slot) if slot.swap_pending => {
                     slot.swap_pending = false;
                     slot.agent.clone()
                 }
-                None => return false,
+                Some(slot) if slot.upgrade_pending && !slot.upgrade_waiting => {
+                    slot.upgrade_waiting = true;
+                    drop(slots);
+                    let me = self.clone();
+                    tokio::spawn(async move { me.upgrade_after_turn(id, epoch).await });
+                    return false;
+                }
+                _ => return false,
             }
         };
         info!(
@@ -2281,6 +2318,60 @@ impl RunnerSupervisor {
             }
         });
         true
+    }
+
+    /// Restart an agent whose runner is an older build (`restart_scheduled`,
+    /// reason `upgrade`): after the hot swap is committed, with one of the
+    /// [`RunnerSupervisorConfig::upgrade_limit`] slots, and only while the
+    /// agent is still out of a turn. A turn that started meanwhile keeps the
+    /// upgrade pending for its end.
+    async fn upgrade_after_turn(self, id: AgentId, epoch: u64) {
+        let ready = match self.state() {
+            Some(state) => state.agent_calls.wait_until_ready().await,
+            None => Err("the daemon state is gone".to_owned()),
+        };
+        let permit = match ready {
+            Ok(()) => self.inner.upgrades.clone().acquire_owned().await.ok(),
+            Err(e) => {
+                debug!(agent = %id, "no upgrade restart: {e}");
+                None
+            }
+        };
+        let agent = {
+            let mut slots = lock(&self.inner.slots);
+            let Some(slot) = slots.get_mut(&id).filter(|s| s.epoch == epoch) else {
+                return;
+            };
+            slot.upgrade_waiting = false;
+            let rests = |s: AgentStatus| {
+                matches!(
+                    s,
+                    AgentStatus::Idle | AgentStatus::Waiting | AgentStatus::Blocked
+                )
+            };
+            let settled = !slot.stop_requested
+                && rests(slot.seen)
+                && slot.runner.as_ref().is_some_and(|r| rests(r.status()))
+                && slot.turns_in_flight == 0
+                && slot.compacting.is_none();
+            let Some(permit) = permit.filter(|_| slot.upgrade_pending && settled) else {
+                return;
+            };
+            slot.upgrade_pending = false;
+            slot.upgrade_permit = Some(permit);
+            slot.agent.clone()
+        };
+        info!(
+            agent = %id,
+            version = %self.inner.cfg.version,
+            "upgrade: the agent is out of its turn; restarting with resume on the new runner"
+        );
+        if let Err(e) = self.restart(agent).await {
+            warn!(agent = %id, "the restart for the upgrade failed: {e}");
+            if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
+                slot.upgrade_permit = None;
+            }
+        }
     }
 
     /// Write [`HARNESS_VERSION_FILE`] for the launch of `id`.
@@ -2526,7 +2617,7 @@ impl RunnerSupervisor {
             ),
             _ => self.emit_seq(id, SupervisorEventKind::Harness(rec.event), rec.seq),
         }
-        if settled && self.take_pending_swap(id, epoch) {
+        if settled && self.take_pending_restart(id, epoch) {
             return exit;
         }
         if idle {
@@ -2916,6 +3007,8 @@ impl RunnerSupervisor {
                 slot.restart_requested = false;
                 let reason = if slot.start_reason.is_some() {
                     "new session"
+                } else if slot.upgrade_permit.is_some() {
+                    "upgrade"
                 } else {
                     "restart"
                 };
@@ -2986,6 +3079,7 @@ impl RunnerSupervisor {
             match &next {
                 Next::Done(s, _) => {
                     slot.phase = Phase::Down(*s);
+                    slot.upgrade_permit = None;
                     ended_agent = Some(slot.agent.clone());
                 }
                 Next::Relaunch { .. } => slot.phase = Phase::Restarting,
@@ -3024,6 +3118,7 @@ impl RunnerSupervisor {
                         warn!(agent = %id, "restart failed: {e}");
                         let agent = lock(&me.inner.slots).get_mut(&id).map(|slot| {
                             slot.phase = Phase::Down(AgentStatus::Error);
+                            slot.upgrade_permit = None;
                             slot.agent.clone()
                         });
                         me.emit_status(id, AgentStatus::Error, format!("restart failed: {e}"));
@@ -3093,6 +3188,8 @@ impl RunnerSupervisor {
         slot.turns_in_flight = 0;
         slot.restart_requested = false;
         slot.restarts.clear();
+        slot.upgrade_pending = false;
+        slot.upgrade_waiting = false;
         slot.resume = resume;
         slot.session = None;
         slot.recap = None;
@@ -4786,6 +4883,7 @@ impl Supervisor for RunnerSupervisor {
                     || slot.pointer_busy
                     || waiting
                     || slot.swap_pending
+                    || slot.upgrade_pending
                 {
                     return Err(SupervisorError::NotReady(format!(
                         "the agent is not idle ({status}); it compacts only at rest"
@@ -5009,6 +5107,8 @@ impl Supervisor for RunnerSupervisor {
                     return Err(e);
                 }
             };
+            let runner_version = remote.hello().version.clone();
+            let upgrade = terrarium_version::is_stale(&runner_version, &cfg.version);
             self.adopt(id, epoch, remote, Some(events_since));
             let version = self.recorded_version(id, agent.harness);
             let launched = self.recorded_accounts(id);
@@ -5020,7 +5120,10 @@ impl Supervisor for RunnerSupervisor {
                     launched.account.is_some() && launched.account != agent.subscription;
                 slot.account = launched.account;
                 slot.bound = launched.bound;
-                slot.swap_pending
+                // A runner of an older build (after a hot swap): it
+                // restarts with resume when the turn ends (R4).
+                slot.upgrade_pending = upgrade;
+                (slot.swap_pending || slot.upgrade_pending)
                     && matches!(
                         slot.seen,
                         AgentStatus::Idle | AgentStatus::Waiting | AgentStatus::Blocked
@@ -5028,10 +5131,28 @@ impl Supervisor for RunnerSupervisor {
             } else {
                 false
             };
+            if upgrade {
+                info!(
+                    agent = %id,
+                    runner = %runner_version,
+                    daemon = %cfg.version,
+                    "restart_scheduled (upgrade): the runner is an older build"
+                );
+                self.emit(
+                    id,
+                    SupervisorEventKind::Harness(Event::System {
+                        message: format!(
+                            "restart_scheduled (reason upgrade): the runner runs {runner_version} \
+                             and the daemon {}; the agent restarts with resume when its turn ends",
+                            cfg.version
+                        ),
+                    }),
+                );
+            }
             if settled {
                 let epoch = lock(&self.inner.slots).get(&id).map(|s| s.epoch);
                 if let Some(e) = epoch {
-                    self.take_pending_swap(id, e);
+                    self.take_pending_restart(id, e);
                 }
             }
             Ok(Recovery::Attached)

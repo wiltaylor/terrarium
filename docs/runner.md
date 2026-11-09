@@ -673,6 +673,20 @@ that it passed on, and adopts the new connection. Only when that connect
 fails does the supervisor treat the agent as exited. In `inprocess` mode,
 `recover` always returns `Gone`.
 
+### Upgrade after the turn
+
+After a hot swap, `recover` compares `hello().version` with the daemon
+build (`terrarium_version::is_stale`). A runner of another build gets
+`restart_scheduled` with the reason `upgrade` (a `system` event and a log
+line). When the agent is out of a turn (`idle`, `waiting` or `blocked`),
+and the hot swap is committed (no probation), the agent restarts with
+`--resume`, as for an account swap that waits for the end of the turn. At
+most `upgrade_limit` agents (3) restart for an upgrade at one time. A
+turn that starts while the agent waits for a slot keeps the upgrade
+pending until the turn ends. The new launch runs the new runner binary,
+the active harness pin, the sandbox spec and the skills. A daemon build
+with no git ref (`+unknown`) does not schedule upgrades.
+
 ## Tests
 
 The integration tests in `crates/terrarium-runner/tests` drive the fake TUI
