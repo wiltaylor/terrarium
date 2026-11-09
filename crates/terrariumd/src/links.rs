@@ -1,5 +1,5 @@
 //! Link keys at run time (TER-61, wiki design/linked-instances D2, D3, D5;
-//! `docs/api.md` §35).
+//! `docs/api.md` §36).
 //!
 //! - [`LinkCaller`]: the link of a request that a `tlk_` key let in. The
 //!   TCP auth sets it as a request extension and as the task-local

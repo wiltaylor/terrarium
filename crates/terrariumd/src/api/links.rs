@@ -1,4 +1,4 @@
-//! `/api/links` (TER-61, `docs/api.md` §35, wiki design/linked-instances
+//! `/api/links` (TER-61, `docs/api.md` §36, wiki design/linked-instances
 //! D2): the link keys with which another Terrarium daemon (the home) calls
 //! this one, and `GET /api/system/instance`.
 //!

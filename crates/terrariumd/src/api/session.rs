@@ -512,7 +512,7 @@ pub enum AuthVia {
     CliToken,
     /// The session cookie.
     Cookie,
-    /// A link key (`tlk_`, `docs/api.md` §35).
+    /// A link key (`tlk_`, `docs/api.md` §36).
     Link,
 }
 
@@ -525,7 +525,7 @@ pub struct CurrentSession(pub Session);
 #[derive(Debug, Serialize)]
 pub struct SessionAnswer {
     /// `browser`, `cli`, `token` (the static bearer token), `link` (a link
-    /// key, `docs/api.md` §35), or `local` (the Unix socket).
+    /// key, `docs/api.md` §36), or `local` (the Unix socket).
     pub kind: &'static str,
     /// Browser: send it as `X-CSRF-Token` on every `POST`, `PUT`, `PATCH`,
     /// and `DELETE` that the cookie authenticates.

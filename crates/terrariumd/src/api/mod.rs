@@ -521,7 +521,7 @@ impl TokenAuth {
         }
     }
 
-    /// Also take link keys (`tlk_`, `docs/api.md` §35).
+    /// Also take link keys (`tlk_`, `docs/api.md` §36).
     #[must_use]
     pub fn with_links(mut self, links: LinkAuth) -> Self {
         self.links = Some(links);
@@ -792,7 +792,7 @@ async fn require_token(
     }
 }
 
-/// A request with a link key (`docs/api.md` §35, wiki
+/// A request with a link key (`docs/api.md` §36, wiki
 /// design/linked-instances D3): the operator's rights minus the deny list
 /// of [`crate::links::denied`], with the actor label `link:<id>`. The
 /// request holds the key's revocation signal from before the lookup, so a
@@ -2822,7 +2822,7 @@ mod tests {
         assert_eq!(renewed.claims.sid, "sid-near");
     }
 
-    // ---- link keys (TER-61, docs/api.md §35) ----
+    // ---- link keys (TER-61, docs/api.md §36) ----
 
     fn link_app(s: &Shared) -> Router {
         tcp_router_with(

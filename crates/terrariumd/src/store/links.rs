@@ -1,5 +1,5 @@
 //! The link rows (TER-61, wiki design/linked-instances D2, `docs/api.md`
-//! §35): the keys with which another Terrarium daemon (the home) calls
+//! §36): the keys with which another Terrarium daemon (the home) calls
 //! this one.
 //!
 //! A link is made with a one-time pairing code (`tlp_`, 10 minutes). The

@@ -431,8 +431,9 @@ refused it. Do not parse the message; use `code`.
 | HTTP | `code` | When |
 |---|---|---|
 | 400 | `bad_request` | Bad JSON, an unknown field, a bad query value, an ambiguous agent name, a non-WebSocket request to a WebSocket endpoint. |
-| 401 | `unauthorized` | No token or a wrong token on TCP; `X-Terrarium-Agent` without `--insecure-agent-header`, or an unknown agent in it. |
+| 401 | `unauthorized` | No token or a wrong token on TCP (also a wrong, rotated, or revoked link key, and a failed link pairing, §36); `X-Terrarium-Agent` without `--insecure-agent-header`, or an unknown agent in it. |
 | 403 | `forbidden` | The actor does not have the capability (§3). |
+| 403 | `link_forbidden` | A link key called a route of the link deny list, or a read-only link tried to write (§36.4). |
 | 404 | `not_found` | No such route or object, or the actor may not read the message. |
 | 405 | `method_not_allowed` | The route exists, but not with this method. |
 | 409 | `conflict` | The name exists, the card is archived or assigned, a column has cards. |
@@ -12388,6 +12389,130 @@ line of the end. `failure_block` is the `Validation failed:` block for
 `red`, `conflict`, and `error`, else `null`. The verdict says what the run
 found, not what the queue does next: the rerun and the split stay as
 above.
+
+## 36. Linked instances: link keys
+
+Another Terrarium daemon (the **home**) can show this daemon (the
+**remote**) in its dashboard and act on it (TER-49, wiki page
+`design/linked-instances`, approved 2026-11-06). This section is the remote
+side (TER-61): the instance ID, the link keys, their pairing, and the rights
+of a link. The home side (the proxy, `/api/remotes`) is TER-62.
+
+The link goes one way: the home calls the remote. A link key works only on
+the TCP listener. The remote's API port is plaintext: put a reverse proxy
+with TLS in front of it, as for `terrarium --url https://... login`.
+
+### 36.1 The instance
+
+`GET /api/system/instance`: `{id, name, version}`. Every caller may read it.
+
+- `id`: a ULID, made at the first start in `<state>/instance.id` and kept.
+  A file that holds no ULID is an error; the daemon never replaces it, so
+  the ID that a home pinned does not change. A restore onto a new host
+  keeps the file with the state dir.
+- `name`: the host of `TERRARIUM_PUBLIC_URL`, else the host name.
+- `version`: the crate version (as `cargo_version` of `GET /api/system/version`).
+
+### 36.2 Link rows and pairing
+
+Only the operator manages links (`403 forbidden` for an agent). A link key
+calls none of these routes except `DELETE /api/links/self` (§36.4).
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /api/links` | `?revoked=true` adds the revoked links | The links, newest first. |
+| `GET /api/links/{id}` | | One link. |
+| `POST /api/links` | `{label, read_only?}` | `201` `{link, code, code_expires_at, instance, url}`, `Cache-Control: no-store`. |
+| `POST /api/links/{id}/rotate` | | `{link, code, code_expires_at, instance, url}`. The old key stops now (§36.3). |
+| `DELETE /api/links/{id}` | | `204`. The key and an open code stop, and the open streams of the key close. |
+| `DELETE /api/links/self` | | `204`: a link key ends its own link (the home's Remove). Another caller gets `400`. |
+| `POST /api/links/pair` | `{code, home_instance_id, home_name?}` | `200` `{link_id, label, read_only, key, instance}`, `Cache-Control: no-store`. |
+
+A link: `{id, label, read_only, status, home_instance_id, home_name,
+paired_at, paired_from, created_by, created_at, rotated_at, first_used_at,
+last_used_at, last_used_from, pair_expires_at, revoked_at}`. `status` is
+`pending` (no key: a code is open, ran out, or the link was rotated),
+`active`, or `revoked`. A revoked link keeps its row without hashes, so the
+audit rows of its actor keep their label. `label`: 1 to 64 characters, no
+control characters. `url` is `TERRARIUM_PUBLIC_URL` or `null`.
+
+Pairing, as the host agent enrol (§17.1):
+
+1. On the remote, the operator makes a link (`terrarium admin link new
+   <label> [--read-only]`, or Settings, Links). The answer has a one-time
+   **pairing code**: `tlp_` and 64 hex digits, good for 10 minutes.
+2. On the home, the operator gives the remote's URL and the code (TER-62).
+3. The home calls `POST /api/links/pair` with the code and its own instance
+   ID. The call needs no `Authorization`: the code is the proof. One
+   database update swaps the code for the long-lived **link key** (`tlk_`
+   and 64 hex digits), so of two calls with one code only one wins. The key
+   is in this answer only; it never passes through the operator's
+   clipboard.
+4. The home compares `instance.id` (and the TLS certificate it saw) with
+   what the remote's operator sees.
+
+A wrong, used, or expired code, and a code without the `tlp_` prefix, all
+get the same `401 unauthorized`. `home_instance_id` must be a ULID
+(`422 invalid`), and not the remote's own ID. The daemon keeps only the
+SHA-256 of the code and of the key; neither is in a log, an event, or an
+audit row.
+
+### 36.3 Rotate and revoke
+
+- `POST /api/links/{id}/rotate`: a new pairing code. The old key stops at
+  once and its open streams close, so a rotate after a leak cuts the key
+  now. The home takes the new code with its Re-pair.
+- `DELETE /api/links/{id}`: the key stops. A call that is in flight with the
+  key (a long poll, an SSE stream, a WebSocket of the events, a PTY, or a
+  target shell) ends at once: the request holds the key's revocation signal
+  from before the key lookup. A pending answer becomes `401`, a stream ends,
+  a WebSocket drops.
+- A revoked or rotated key gets `401 unauthorized`, as a wrong token.
+
+### 36.4 The rights of a link
+
+A link key is `Authorization: Bearer tlk_...` (on a WebSocket upgrade also
+the subprotocol `bearer.tlk_...`). For the rules the caller is the operator,
+minus a deny list. Audit rows and events of its actions carry the actor
+`link:<id>`; `GET /api/audit` adds `link_label` to those rows. Mail, card
+authors, and pins stay `operator`. `GET /api/session` gives `kind: "link"`.
+
+The deny list (`403 link_forbidden`):
+
+- The credentials of the remote: `POST` and `DELETE /api/session`,
+  `/api/sessions`, `/api/auth/...`, `POST /api/secrets/{scope}/{name}/reveal`,
+  `/api/agent/secrets/...`, the writes of `/api/credentials`,
+  `POST /api/hosts`, `DELETE /api/hosts/{name}`,
+  `/api/hosts/{name}/rotate`, `/api/subscriptions/login...` (§16.4), and
+  `/api/subscriptions/{name}/api-key`.
+- `/api/links/...`, except `DELETE /api/links/self`: a link cannot make,
+  list, or pair another link.
+- The backups (§32): `POST /api/backups` and `GET /api/backups/{name}`. A
+  backup holds `secrets.key`, `session.key`, and every sealed secret.
+- The daemon itself: `/api/system/update...` (status, update, check,
+  rollback, drain, resume).
+- The config repo push (§25): `POST /api/config/push`,
+  `POST /api/config/sync`, and the writes of `/api/config/remote`.
+- Any path outside `/api` (`/install/...`, `/hosts/connect`, `/a/...`).
+
+The check decodes the path, drops empty and `.` segments, and ignores case,
+so no other spelling of a denied route passes; a path with `..` is denied.
+A deny list hit writes a `link.forbidden` audit row (`{label, method, path,
+read_only, from, reason}`), at most one a minute per link, method, and path.
+
+A **read-only** link (`read_only: true`) may only `GET` (and `HEAD`): reads,
+SSE, and the WebSocket of an `.../events` route. No PTY, no target shell,
+no turn, no write, and no `DELETE /api/links/self`.
+
+### 36.5 The use record and the audit
+
+- The remote writes `first_used_at`, `last_used_at`, and `last_used_from`
+  (the peer address; a reverse proxy shows as itself) at the first call of
+  a key, at a new address, and at most once a minute after that.
+- Audit rows: `link.new`, `link.rotate`, `link.revoke` (`by_self` when the
+  link ended itself), `link.pair` (actor `link:<id>`, with `home`,
+  `home_name`, and `from`), and `link.forbidden`. No row holds a code or a
+  key.
 
 ## Agent calls during daemon restarts
 

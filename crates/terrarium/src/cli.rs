@@ -3205,7 +3205,7 @@ pub enum AdminCmd {
         command: HostCmd,
     },
     /// Link keys: another Terrarium daemon (the home) that shows and runs
-    /// this one in its dashboard (docs/api.md §35). The operator only
+    /// this one in its dashboard (docs/api.md §36). The operator only
     Link {
         #[command(subcommand)]
         command: LinkCmd,

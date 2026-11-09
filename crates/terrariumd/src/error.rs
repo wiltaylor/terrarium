@@ -20,7 +20,7 @@ pub enum Code {
     /// The actor may not do this. The message says which rule refused it.
     Forbidden,
     /// A link key called a route of the link deny list (`docs/api.md`
-    /// §35), or a read-only link tried to write.
+    /// §36), or a read-only link tried to write.
     LinkForbidden,
     /// The object does not exist, or the actor may not see it.
     NotFound,

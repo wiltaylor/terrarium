@@ -876,7 +876,7 @@ pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
     }
 }
 
-/// `admin link ...`: the link keys of this daemon (docs/api.md §35). The
+/// `admin link ...`: the link keys of this daemon (docs/api.md §36). The
 /// pairing code prints alone on stdout; the long-lived key never reaches
 /// the CLI (the home gets it from `POST /api/links/pair`).
 pub async fn links(ctx: &Ctx, cmd: &LinkCmd) -> anyhow::Result<()> {
