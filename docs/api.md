@@ -10711,6 +10711,29 @@ dashboard as `GET` does. A block:
 `json` monitor. Several blocks can show the same monitor. A bad layout is
 `422 invalid` with `details.field` such as `blocks[2].kind`.
 
+#### `GET /api/projects/{name}/eta-accuracy`
+
+How well the ETAs of the workers matched the real work time, for the
+latest 30 distinct completed cards of the project. The read right of
+§30.1 applies. An unknown project is `404 not_found`.
+
+```json
+{"raw":{"samples":30,"on_time_pct":56.7,"within_half_to_double_pct":73.3},
+ "calibrated":{"samples":24,"on_time_pct":66.7,"within_half_to_double_pct":83.3}}
+```
+
+| Field | Meaning |
+|---|---|
+| `raw` | The ETA that the worker set, against the real work time |
+| `calibrated` | The calibrated ETA of each card, computed only from the work that ended before the card started. A card without enough earlier history is left out, so `samples` can be lower than in `raw`. |
+| `samples` | The number of cards counted, at most 30 |
+| `on_time_pct` | The percent of cards whose work time was at most the ETA |
+| `within_half_to_double_pct` | The percent of cards whose work time was between half and double the ETA |
+
+With no samples, `samples` is `0` and both percentages are `null`. The
+dashboard loads it once when the dashboard page mounts, apart from the
+monitors, and does not refresh it.
+
 ### 30.7 Owners and target grants
 
 Monitors and schedules (§19.6) are often meant to outlive the agent that
