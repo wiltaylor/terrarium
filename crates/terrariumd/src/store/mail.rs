@@ -1222,7 +1222,7 @@ mod tests {
         // A read in a turn (the daemon typed the mail into a turn) closes it.
         let m = to_operator(&mut t, &Address::System, "One").unwrap();
         assert_eq!(
-            mark_read_in_turn(&mut t, &[m.id.clone()], "operator").unwrap(),
+            mark_read_in_turn(&mut t, std::slice::from_ref(&m.id), "operator").unwrap(),
             1
         );
         let closed = closed_events(&t, &format!("mail:{}", m.id));
@@ -1230,7 +1230,7 @@ mod tests {
         assert_eq!(closed[0]["kind"], "mail");
         // Again: nothing changed, no second event.
         assert_eq!(
-            mark_read_in_turn(&mut t, &[m.id.clone()], "operator").unwrap(),
+            mark_read_in_turn(&mut t, std::slice::from_ref(&m.id), "operator").unwrap(),
             0
         );
         assert_eq!(closed_events(&t, &format!("mail:{}", m.id)).len(), 1);
@@ -1264,7 +1264,7 @@ mod tests {
         .unwrap();
         assert_eq!(to_agent.state, "queued");
         mark_read(&mut t, &to_agent.id).unwrap();
-        mark_read_in_turn(&mut t, &[to_agent.id.clone()], &agent_id).unwrap();
+        mark_read_in_turn(&mut t, std::slice::from_ref(&to_agent.id), &agent_id).unwrap();
         reply(&mut t, &to_agent, &worker, None, "answer").unwrap();
         assert!(closed_events(&t, &format!("mail:{}", to_agent.id)).is_empty());
     }
