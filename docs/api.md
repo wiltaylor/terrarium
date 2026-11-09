@@ -11812,7 +11812,8 @@ or their environment. Output is stream-redacted with the full key and
 individual PEM lines before retention. The recipe retains its full raw target
 log because credentials never reach the target process tree.
 
-Configure `docker_ci` through the delivery API or fleet configuration before
+Configure `docker_ci` through `terrarium project delivery set`, the delivery
+API, or fleet configuration before
 adding merge secret references. For example, `destination` is `root@vm`,
 `port` is its SSH port, and `known_hosts` is the administrator-verified
 OpenSSH host-key line (including `[host]:port` for a nonstandard port).
@@ -11836,7 +11837,13 @@ Do not grant the key to `project:terrarium` or workers. The lead configures
 `--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery, with recipe
 `TERRARIUM_DOCKER_CI=1 just ci::validate-affected` to explicitly enable the
 live Docker gate. Leave the switch unset (or `0`) until the daemon and
-grant are ready. `--clear-merge-secrets` removes the references.
+grant are ready. `--clear-merge-secrets` removes the references. The same
+command sets `docker_ci` with `--docker-ci-destination`, `--docker-ci-port`,
+`--docker-ci-known-hosts`, `--docker-ci-reset-destination`,
+`--docker-ci-reset-port`, and `--docker-ci-reset-known-hosts`: a flag left
+out keeps its stored value, the first set needs all six, and
+`--clear-docker-ci` removes the whole object. `project delivery show`
+prints the endpoints and both pins.
 The daemon pins the Docker VM's public host key and owns its SSH local
 forward. Trusted relay code embedded in the daemon release, never read
 from the merged branch, creates a 0600 Unix socket in a job-private
