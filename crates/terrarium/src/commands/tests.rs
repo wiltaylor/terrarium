@@ -11111,7 +11111,10 @@ async fn admin_link_prints_the_pairing_code_alone() {
     .await;
     // The code is the first line (stdout); the hints follow (stderr).
     assert_eq!(out.lines().next(), Some("tlp_abc"), "{out}");
-    assert!(out.contains("one use") && out.contains("instance: 01I"), "{out}");
+    assert!(
+        out.contains("one use") && out.contains("instance: 01I"),
+        "{out}"
+    );
     let out = ok(
         false,
         &["admin", "link", "rotate", "L1"],
@@ -11121,7 +11124,10 @@ async fn admin_link_prints_the_pairing_code_alone() {
     .await;
     // The code is the first line (stdout); the hints follow (stderr).
     assert_eq!(out.lines().next(), Some("tlp_abc"), "{out}");
-    assert!(out.contains("one use") && out.contains("instance: 01I"), "{out}");
+    assert!(
+        out.contains("one use") && out.contains("instance: 01I"),
+        "{out}"
+    );
     let out = ok(
         false,
         &["admin", "link", "revoke", "L1"],
