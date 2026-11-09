@@ -706,10 +706,9 @@ mod tests {
         }
         // The token sits inside the quotes, so nothing else hits on the
         // line: this rule alone blocks it.
-        assert_eq!(
-            at(&format!("https://bot:{random}@git.example/o/r.git")),
-            [rule.clone()]
-        );
+        let found = at(&format!("https://bot:{random}@git.example/o/r.git"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0], "url-userinfo");
         // A low-entropy user part (never a `high-entropy` hit) hits too.
         assert!(at("https://bot:password123@git.example/o/r.git").contains(&rule));
         for url in [
