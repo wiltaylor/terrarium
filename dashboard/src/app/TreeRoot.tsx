@@ -1,7 +1,7 @@
 // The root of the sidebar tree (Projects): a link to the list page, with a
 // chevron that only opens or closes the root, an optional filter, and the
-// group of child rows. TreeNode is the Agents and Repos node of a project:
-// the same, but its row is not a link.
+// group of child rows. TreeNode is the Bookmarks node: the same, but its row
+// is not a link.
 
 import { A } from "@solidjs/router";
 import { Show, type JSX } from "solid-js";
@@ -11,7 +11,7 @@ import { createExpandedStore } from "./treeModel";
 /** The `data-key` of a tree root row. */
 export const ROOT_KEY = "root";
 
-/** The open set of the sidebar tree: the Projects root, the projects, and their Agents and Repos nodes. */
+/** The open set of the sidebar tree: the Projects root, folders, and Bookmarks. */
 export const expanded = createExpandedStore(
   (() => {
     try {
@@ -116,8 +116,8 @@ export function TreeRoot(props: {
 }
 
 /**
- * A node under a project (Agents, Repos): its row only opens and closes the
- * node, so it is not a link and not selectable. A click on the row, Enter, or
+ * The Bookmarks node: its row only opens and closes the node, so it is not a
+ * link and not selectable. A click on the row, Enter, or
  * Space toggles it (the tree gives the keys). `action` goes at the right of
  * the row (the "+" button). Its children follow the row, as on the root.
  */

@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 import app from "./App.tsx?raw";
 import layout from "./Layout.tsx?raw";
-import { BOARD_TABS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_TABS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
+import { BOARD_TABS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_TABS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
 
 describe("navigation", () => {
   it("has no Spend item; the project has Logs, not Inbox or Mail, with a route", () => {
-    const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
+    const paths = PROJECT_TABS.map((i) => i.path) as string[];
     expect(paths).not.toContain("spend");
     expect(paths).not.toContain("inbox");
     expect(paths).not.toContain("mail");
-    expect(PROJECT_ITEMS.find((i) => i.path === "logs")?.label).toBe("Logs");
+    expect(PROJECT_TABS.find((i) => i.path === "logs")?.label).toBe("Logs");
     expect(app).toMatch(/<Route path="\/logs" component=\{LogsPage\}>/);
   });
 
@@ -54,8 +54,8 @@ describe("navigation", () => {
     expect(app).not.toMatch(/<Navigate href=\{`\/p\/\$\{params\.project\}\/dashboard`\} \/>/);
   });
 
-  it("has Agents last under the project, with a route to the Agents page", () => {
-    expect(PROJECT_ITEMS.at(-1)).toEqual({ path: "agents", label: "Agents" });
+  it("has an Agents project tab with a route to the Agents page", () => {
+    expect(PROJECT_TABS.find((i) => i.path === "agents")?.label).toBe("Agents");
     expect(app).toMatch(/path="\/agents" component=\{AgentsPage\}/);
   });
 
@@ -75,10 +75,7 @@ describe("navigation", () => {
     expect(movedTo("/p/terrarium/agents")).toBeUndefined();
   });
 
-  it("has no Templates, Secrets, or Settings item under the project: they are tabs of the project settings screen, each with a route", () => {
-    const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
-    for (const gone of ["templates", "secrets", "settings"]) expect(paths).not.toContain(gone);
-    expect(paths).toEqual(["dashboard", "pipelines", "calendar", "board", "repos", "logs", "knowledge", "agents"]);
+  it("has General, Secrets, and Templates as tabs of the project settings screen, each with a route", () => {
     expect(PROJECT_SETTINGS_TABS).toEqual([
       { path: "general", label: "General" },
       { path: "secrets", label: "Secrets" },
@@ -106,17 +103,15 @@ describe("navigation", () => {
     expect(movedTo("/templates")).toBe("/settings/templates");
   });
 
-  it("has Repos under the project after Board, with a list route and a repo route", () => {
-    const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
-    expect(paths.indexOf("repos")).toBe(paths.indexOf("board") + 1);
-    expect(PROJECT_ITEMS.find((i) => i.path === "repos")?.label).toBe("Repos");
+  it("has a Repos project tab with a list route and a repo route", () => {
+    expect(PROJECT_TABS.find((i) => i.path === "repos")?.label).toBe("Repos");
     expect(app).toMatch(/path="\/repos" component=\{ReposPage\}/);
     expect(app).toMatch(/path="\/repos\/:repo" component=\{RepoPage\}/);
     expect(movedTo("/p/terrarium/repos")).toBeUndefined();
   });
 
   it("has Schedules after Logs in the top list with a route, and the project schedules as a board tab, not a project item", () => {
-    expect(PROJECT_ITEMS.map((i) => i.path)).not.toContain("schedules");
+    expect(PROJECT_TABS.map((i) => i.path)).not.toContain("schedules");
     const hrefs = TOP_ITEMS.map((i) => i.href) as string[];
     expect(hrefs.indexOf("/schedules")).toBe(hrefs.indexOf("/logs") + 1);
     expect(app).toMatch(/path="\/schedules" component=\{SchedulesPage\}/);
@@ -305,7 +300,7 @@ describe("navigation", () => {
   });
 
   it("has Knowledge with the tabs Wiki, Memory, and DB, each with a route; /p/:project/knowledge opens the Wiki tab", () => {
-    expect(PROJECT_ITEMS.find((i) => i.path === "knowledge")?.label).toBe("Knowledge");
+    expect(PROJECT_TABS.find((i) => i.path === "knowledge")?.label).toBe("Knowledge");
     expect(KNOWLEDGE_TABS).toEqual([
       { path: "wiki", label: "Wiki" },
       { path: "memory", label: "Memory" },
