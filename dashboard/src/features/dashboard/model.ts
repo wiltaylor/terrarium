@@ -282,9 +282,17 @@ export const JOB_WINDOWS = [
   { id: "30d", label: "30 days" },
 ] as const;
 
-/** A pass rate (0 to 1, `null` with no ended attempt) as a whole percent. */
+/** Round to a whole number, ties to even, as Rust's `format!("{:.0}")` does: 12.5 gives 12, 13.5 gives 14. */
+export function roundHalfEven(x: number): number {
+  const f = Math.floor(x);
+  const d = x - f;
+  return d === 0.5 ? (f % 2 === 0 ? f : f + 1) : Math.round(x);
+}
+
+/** A pass rate (0 to 1, `null` with no ended attempt) as a whole percent, rounded like `terrarium job stats` (the
+ * CLI formats `rate * 100.0` with `{:.0}`, ties to even), so 1 of 8 is 12% in both. */
 export const passRateText = (rate: number | null | undefined): string =>
-  rate === null || rate === undefined || !Number.isFinite(rate) ? "–" : `${Math.round(rate * 100)}%`;
+  rate === null || rate === undefined || !Number.isFinite(rate) ? "–" : `${roundHalfEven(rate * 100)}%`;
 
 /** The quiet counts beside the rate of the job-queue strip: only the parts that are not zero, in this order. */
 export function jobStatNotes(s: JobStats | null | undefined): string[] {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DashboardBlock, JobStats, Monitor, MonitorResult } from "../../api/types";
-import { blockFor, blockState, columnsOf, isStale, jobStatNotes, kindsFor, layoutProblems, linePath, moveBlock, nearestIndex, newBlockId, niceTicks, noteBlock, numericPoints, ownerText, passRateText, rangeOf, stateCounts, unitOf, valueText, yScale } from "./model";
+import { blockFor, blockState, columnsOf, isStale, jobStatNotes, kindsFor, layoutProblems, linePath, moveBlock, nearestIndex, newBlockId, niceTicks, noteBlock, numericPoints, ownerText, passRateText, rangeOf, roundHalfEven, stateCounts, unitOf, valueText, yScale } from "./model";
 
 const NOW = Date.parse("2026-11-02T12:00:00Z");
 const result = (over: Partial<MonitorResult> = {}): MonitorResult => ({ id: 1, monitor: "m", at: new Date(NOW - 10_000).toISOString(), status: "ok", duration_ms: 5, ...over });
@@ -191,11 +191,25 @@ describe("ownerText", () => {
 
 describe("job queue strip", () => {
   it("shows a pass rate as a whole percent, or the dash with none", () => {
-    expect(passRateText(0.845)).toBe("85%");
+    expect(passRateText(0.846)).toBe("85%");
+    expect(passRateText(1 / 3)).toBe("33%");
     expect(passRateText(1)).toBe("100%");
     expect(passRateText(0)).toBe("0%");
     expect(passRateText(null)).toBe("–");
     expect(passRateText(undefined)).toBe("–");
+  });
+
+  it("rounds ties to even like the CLI (format!(\"{:.0}\"))", () => {
+    // 1 of 8 is 12.5%: the CLI prints 12%, Math.round would give 13%.
+    expect(passRateText(1 / 8)).toBe("12%");
+    expect(passRateText(3 / 8)).toBe("38%");
+    expect(passRateText(5 / 8)).toBe("62%");
+    expect(passRateText(0.135)).toBe("14%");
+    expect(passRateText(0.845)).toBe("84%");
+    expect(roundHalfEven(0.5)).toBe(0);
+    expect(roundHalfEven(1.5)).toBe(2);
+    expect(roundHalfEven(2.4999)).toBe(2);
+    expect(roundHalfEven(2.5001)).toBe(3);
   });
 
   it("lists only the counts that are not zero", () => {

@@ -1016,13 +1016,17 @@ and closes the node.
 
 - **Job queue.** Above the grid, the strip of the job queue (TER-178,
   `JobQueuePanel.tsx`) shows the first-attempt pass rate of the project's
-  jobs (`GET .../jobs/stats?since=`, docs/api.md §35.4): the rate as a
-  whole percent, "N of M first attempts passed", and the quiet counts
-  that sit outside the rate (reruns that passed, conflicts, errors, open
-  jobs). The window select reads 24 hours, 7 days (the default), or 30
-  days again. A daemon without the route, or a queue with no job in 30
-  days, hides the strip. A `job` event of the project reads the stats
-  again (debounced). The helpers are `model.ts` `passRateText`,
+  merge jobs (`GET .../jobs/stats?since=`, docs/api.md §35.4, field
+  `merge`; validate jobs from before 2026-11-07 stay out): the rate as a
+  whole percent rounded half to even like `terrarium job stats`, "N of M
+  first attempts passed", and the quiet counts that sit outside the rate
+  (reruns that passed, conflicts, errors, open jobs; all kinds). The
+  window select reads 24 hours, 7 days (the default), or 30 days again.
+  One stats call per mount and per window change, and one more,
+  debounced, after a merge job of the project ends. The strip hides
+  until an answer shows a job in the window, and on a failed call (a
+  daemon without the route, a 403, the network) without a page error.
+  The helpers are `model.ts` `passRateText`, `roundHalfEven`,
   `jobStatNotes`, and `JOB_WINDOWS`; the mock is `api/mock/jobs.ts`.
 
 - **Grid.** CSS grid of four columns on a desktop, two up to 1100 px, one
