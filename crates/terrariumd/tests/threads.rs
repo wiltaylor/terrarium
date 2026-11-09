@@ -490,10 +490,7 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
         let r = lab.td.get(&format!("/api/inbox{q}")).await;
         assert_eq!(r.headers["x-inbox-open"], kinds.to_string(), "{q}");
         let rows = r.ok().as_array().unwrap().clone();
-        assert!(
-            !rows.iter().any(|i| i["kind"] == "thread"),
-            "{q}: {rows:?}"
-        );
+        assert!(!rows.iter().any(|i| i["kind"] == "thread"), "{q}: {rows:?}");
     }
 
     // Answering the bundle makes the thread wait for the agent.
