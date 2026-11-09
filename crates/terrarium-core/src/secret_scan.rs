@@ -1061,6 +1061,7 @@ mod tests {
     /// line inside the prompt exempts nothing, and the repo URL after
     /// the prompt keeps the exemption of issue #27. A commit that the
     /// daemon writes takes no false `high-entropy` hit on it.
+    #[test]
     fn the_export_writer_output_keeps_the_exemption() {
         let text = r#"version = 1
 name = "p1"
