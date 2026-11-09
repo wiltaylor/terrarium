@@ -861,7 +861,12 @@ fn the_workspace_scope_follows_the_holders_trust_domain() {
         // Never another project's.
         let e = plan_for(&holder, &other.join("slot-1")).err().unwrap();
         assert!(e.message.contains("outside the workspace"), "{}", e.message);
-        assert!(!plan.args.iter().any(|x| x.contains(&*other.to_string_lossy())));
+        assert!(
+            !plan
+                .args
+                .iter()
+                .any(|x| x.contains(&*other.to_string_lossy()))
+        );
     }
     // An agent of the project still gets only its own directory.
     assert!(plan_for("terra/w-1", &slot).is_err());
