@@ -863,7 +863,7 @@ async fn owned_target_roots_fall_back_to_the_agent_home() {
         .td
         .post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["true"]}))
         .await;
-    r.err(400, "invalid");
+    r.err(422, "invalid");
     let msg = r.body["error"]["message"].as_str().unwrap();
     assert!(msg.contains("has no work_root"), "{msg}");
     assert!(msg.contains("/home/agent/.terrarium-work"), "{msg}");
