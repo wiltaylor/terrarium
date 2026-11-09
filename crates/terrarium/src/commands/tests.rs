@@ -134,9 +134,9 @@ async fn test_ls_limit_and_all() {
     }
     let r = |id: &str| json!({"id": id, "name": "unit", "status": "passed"});
 
-    // Default: one request with limit=50, the cursor is not followed.
+    // Default: one request with limit=50.
     let m = MockTransport::new();
-    m.reply_with(200, &[("x-next-cursor", "c1")], json!([r("R2"), r("R1")]));
+    m.reply(200, json!([r("R2"), r("R1")]));
     let out = run(&["--json", "test", "ls"], &m).await;
     let reqs = m.requests();
     assert_eq!(reqs.len(), 1);
@@ -146,7 +146,8 @@ async fn test_ls_limit_and_all() {
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v, json!([r("R2"), r("R1")]));
 
-    // --limit N asks for N and keeps at most N.
+    // --limit N asks for N, keeps at most N, and a full page does not
+    // follow the cursor.
     let m = MockTransport::new();
     m.reply_with(
         200,
