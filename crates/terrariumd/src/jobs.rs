@@ -2105,7 +2105,9 @@ async fn merge_secrets(
 
 fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
     if !delivery.merge_secrets.is_empty() && delivery.docker_ci.is_none() {
-        return Err(ApiError::invalid("merge_secrets requires docker_ci with separate tunnel and reset pins"));
+        return Err(ApiError::invalid(
+            "merge_secrets requires docker_ci with separate tunnel and reset pins",
+        ));
     }
     if let Some(config) = &delivery.docker_ci {
         for destination in [&config.destination, &config.reset_destination] {
@@ -2118,7 +2120,11 @@ fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
                 ));
             }
         }
-        if config.port == 0 || config.reset_port == 0 || config.known_hosts.trim().is_empty() || config.reset_known_hosts.trim().is_empty() {
+        if config.port == 0
+            || config.reset_port == 0
+            || config.known_hosts.trim().is_empty()
+            || config.reset_known_hosts.trim().is_empty()
+        {
             return Err(ApiError::invalid(
                 "Docker CI requires nonzero SSH ports and a pinned known_hosts line",
             ));
@@ -3042,13 +3048,16 @@ mod tests {
         );
         assert!(check_merge_refs(&delivery).is_err());
         delivery.docker_ci = Some(terrarium_core::config::DockerCiDef {
-            destination: "root@vm".into(), port: 2250,
+            destination: "root@vm".into(),
+            port: 2250,
             known_hosts: "vm ssh-ed25519 test-pin".into(),
-            reset_destination: "reset@host".into(), reset_port: 22,
+            reset_destination: "reset@host".into(),
+            reset_port: 22,
             reset_known_hosts: "".into(),
         });
         assert!(check_merge_refs(&delivery).is_err());
-        delivery.docker_ci.as_mut().unwrap().reset_known_hosts = "host ssh-ed25519 reset-pin".into();
+        delivery.docker_ci.as_mut().unwrap().reset_known_hosts =
+            "host ssh-ed25519 reset-pin".into();
         assert!(check_merge_refs(&delivery).is_ok());
     }
 
