@@ -467,7 +467,11 @@ async fn remote_head_change_resolves_no_progress_after_a_lead_only_notice() {
             .args(args)
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     git(&["init", "-b", "card"]);
     git(&["config", "user.name", "Test"]);
@@ -502,9 +506,13 @@ async fn remote_head_change_resolves_no_progress_after_a_lead_only_notice() {
                 rusqlite::params![c, base.to_rfc3339()],
             )?;
             let e = t.emit(
-                terrariumd::events::EventDraft::new("status", "working", json!({"status": "working"}))
-                    .project("p")
-                    .agent(&w, "worker"),
+                terrariumd::events::EventDraft::new(
+                    "status",
+                    "working",
+                    json!({"status": "working"}),
+                )
+                .project("p")
+                .agent(&w, "worker"),
             )?;
             t.execute(
                 "UPDATE events SET at = ?2 WHERE seq = ?1",

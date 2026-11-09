@@ -385,11 +385,9 @@ const PROGRESS_BASELINE_SQL: &str =
     "SELECT head IS NOT NULL, working_seconds FROM card_branch_heads WHERE card = ?1";
 
 fn progress_baseline(c: &Connection, card: &str) -> ApiResult<Option<(bool, u64)>> {
-    Ok(c.query_row(
-        PROGRESS_BASELINE_SQL,
-        [card],
-        |r| Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?.max(0) as u64)),
-    )
+    Ok(c.query_row(PROGRESS_BASELINE_SQL, [card], |r| {
+        Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+    })
     .optional()?)
 }
 
@@ -1233,7 +1231,11 @@ mod tests {
             .unwrap();
         for (sql, key, index) in [
             (BRANCH_CARDS_SQL, "cards_branch_watch", "c"),
-            (PROGRESS_BASELINE_SQL, "card_branch_heads", "card_branch_heads"),
+            (
+                PROGRESS_BASELINE_SQL,
+                "card_branch_heads",
+                "card_branch_heads",
+            ),
         ] {
             let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             let plans = if sql == BRANCH_CARDS_SQL {
@@ -1248,9 +1250,9 @@ mod tests {
                     .unwrap()
             };
             assert!(
-                plans.iter().any(|p| {
-                    p.contains(&format!("SEARCH {key}")) && p.contains(index)
-                }),
+                plans
+                    .iter()
+                    .any(|p| { p.contains(&format!("SEARCH {key}")) && p.contains(index) }),
                 "{plans:?}"
             );
             assert!(plans.iter().all(|p| !p.contains("SCAN c\n")), "{plans:?}");
