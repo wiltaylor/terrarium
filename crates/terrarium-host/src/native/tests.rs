@@ -794,15 +794,82 @@ fn a_session_sees_only_its_own_holders_workspace() {
     // B may not start in A's workspace.
     let e = plan_for("terra/w-2", &a.join("repo")).err().unwrap();
     assert!(e.message.contains("outside the workspace"), "{}", e.message);
-    // The operator (no workspace) starts only in the empty root.
-    let po = plan_for("operator", &real).unwrap();
-    assert!(!props(&po.args).iter().any(|x| x.starts_with("BindPaths=")));
-    assert!(plan_for("operator", &a).is_err());
+    // A holder that is neither an agent, a project service, nor the
+    // operator gets the empty root only.
+    let pn = plan_for("terra", &real).unwrap();
+    assert!(!props(&pn.args).iter().any(|x| x.starts_with("BindPaths=")));
+    assert!(plan_for("terra", &a).is_err());
+    // A path with ':' is fine for WorkingDirectory= (only the mount
+    // properties refuse it).
+    let colon = a.join("repo/a:b");
+    std::fs::create_dir_all(&colon).unwrap();
+    plan_for("terra/w-1", &colon).unwrap();
     // A symlinked workspace is refused.
     std::os::unix::fs::symlink(&a, real.join("terra/w-3")).unwrap();
     assert!(holder_workspace(&real, "terra/w-3").is_err());
     assert!(holder_workspace(&real, "terra/..").is_err());
     assert_eq!(holder_workspace(&real, "terra/missing").unwrap(), None);
+}
+
+/// The bind scope follows the holder's trust domain: a project service
+/// (jobs, pipelines, monitors) gets its project's directory, never another
+/// project's; the operator gets the whole workspace root.
+#[test]
+fn the_workspace_scope_follows_the_holders_trust_domain() {
+    let root = tempfile::tempdir().unwrap();
+    let real = std::fs::canonicalize(root.path()).unwrap();
+    let terra = real.join("terra");
+    let other = real.join("other");
+    let slot = terra.join("slot-3");
+    std::fs::create_dir_all(&slot).unwrap();
+    std::fs::create_dir_all(terra.join("w-1")).unwrap();
+    std::fs::create_dir_all(other.join("slot-1")).unwrap();
+    let ctx = ctx(root.path());
+    let plan_for = |holder: &str, cwd: &Path| {
+        let mut req = request(root.path());
+        req.holder = holder.into();
+        req.gpus.clear();
+        req.exclusive_gpus.clear();
+        req.lease = None;
+        req.cwd = cwd.to_string_lossy().into_owned();
+        plan_start(&ctx, &req, &inventory(), &nodes(), 1, &W)
+    };
+    let bind = |plan: &Plan| -> Vec<String> {
+        props(&plan.args)
+            .into_iter()
+            .filter(|x| x.starts_with("BindPaths=") || x.starts_with("TemporaryFileSystem="))
+            .map(str::to_owned)
+            .collect()
+    };
+    // A job in a slot of its project: the project's directory is bound.
+    for service in ["jobs", "pipelines", "monitors"] {
+        let holder = format!("terra/{service}");
+        let plan = plan_for(&holder, &slot).unwrap();
+        assert_eq!(
+            bind(&plan),
+            [
+                format!("TemporaryFileSystem={}:ro", real.display()),
+                format!("BindPaths={}", terra.display()),
+            ],
+            "{holder}"
+        );
+        assert!(
+            props(&plan.args).contains(&format!("ReadWritePaths={}", terra.display()).as_str())
+        );
+        // Also an agent's directory of the same project (one trust domain).
+        plan_for(&holder, &terra.join("w-1")).unwrap();
+        // Never another project's.
+        let e = plan_for(&holder, &other.join("slot-1")).err().unwrap();
+        assert!(e.message.contains("outside the workspace"), "{}", e.message);
+        assert!(!plan.args.iter().any(|x| x.contains(&*other.to_string_lossy())));
+    }
+    // An agent of the project still gets only its own directory.
+    assert!(plan_for("terra/w-1", &slot).is_err());
+    // The operator: the whole root, writable, no tmpfs over it, any cwd.
+    let plan = plan_for("operator", &other.join("slot-1")).unwrap();
+    let p = props(&plan.args);
+    assert!(bind(&plan).is_empty(), "{p:?}");
+    assert!(p.contains(&format!("ReadWritePaths={}", real.display()).as_str()));
 }
 
 #[test]

@@ -864,12 +864,12 @@ pub fn plan_start(
         l.validate().map_err(Refusal::invalid)?;
     }
     let cwd = safe_cwd(&ctx.workspace_root, &req.cwd)?;
-    for p in [&ctx.workspace_root, &cwd] {
-        systemd_path(p)?;
-    }
-    // Each session sees only its own holder's workspace (see
-    // [`holder_workspace`]): its working directory is there, or the empty
-    // workspace root itself.
+    // `safe_cwd` checks the working directory for WorkingDirectory=; the
+    // path list rules below are only for the mount properties.
+    systemd_path(&ctx.workspace_root)?;
+    // Each session sees only the workspace scope of its holder (see
+    // [`holder_workspace`]): its working directory is in it, or is the
+    // empty workspace root itself.
     let own = holder_workspace(&ctx.workspace_root, &req.holder)?;
     if cwd != ctx.workspace_root && !own.as_ref().is_some_and(|w| cwd.starts_with(w)) {
         return Err(Refusal::invalid(format!(
@@ -947,9 +947,10 @@ pub fn plan_start(
         // of the UID stops; the rest of the tree is read-only, so no
         // world-writable directory (/run/lock, /var/crash, ...) keeps a
         // file of the UID. The workspace root is an empty read-only tmpfs
-        // with only this holder's workspace bound in (below): a file that
-        // an earlier holder of the UID left in its own workspace, also a
-        // 0600 one, does not exist in the unit.
+        // with only this holder's workspace scope bound in (below,
+        // [`holder_workspace`]): a file that an earlier holder of the UID
+        // left in another trust domain, also a 0600 one, does not exist in
+        // the unit.
         "PrivateTmp=yes",
         "RemoveIPC=yes",
         "ProtectSystem=strict",
@@ -964,16 +965,25 @@ pub fn plan_start(
         args.push("-p".into());
         args.push(format!("DeviceAllow={} rw", d.display()));
     }
-    args.push("-p".into());
-    args.push(format!(
-        "TemporaryFileSystem={}:ro",
-        ctx.workspace_root.display()
-    ));
-    if let Some(w) = &own {
-        args.push("-p".into());
-        args.push(format!("BindPaths={}", w.display()));
-        args.push("-p".into());
-        args.push(format!("ReadWritePaths={}", w.display()));
+    match &own {
+        // The operator: the whole workspace root, as it is.
+        Some(w) if *w == ctx.workspace_root => {
+            args.push("-p".into());
+            args.push(format!("ReadWritePaths={}", w.display()));
+        }
+        own => {
+            args.push("-p".into());
+            args.push(format!(
+                "TemporaryFileSystem={}:ro",
+                ctx.workspace_root.display()
+            ));
+            if let Some(w) = own {
+                args.push("-p".into());
+                args.push(format!("BindPaths={}", w.display()));
+                args.push("-p".into());
+                args.push(format!("ReadWritePaths={}", w.display()));
+            }
+        }
     }
     args.push("-p".into());
     args.push(format!("WorkingDirectory={}", cwd.display()));
@@ -1063,22 +1073,38 @@ fn systemd_path(p: &Path) -> Result<(), Refusal> {
     }
 }
 
-/// The workspace of a holder `<project>/<agent>`: `<root>/<project>/<agent>`
-/// (the host agent's layout), when it exists. `None` for another holder
-/// (`operator`) or a workspace that is not there yet: the session then
-/// gets no workspace. A workspace that is a symlink, leads out of `root`,
-/// or is not a directory is refused.
+/// The project services whose holder is `<project>/<service>`: they run in
+/// the project's trust domain, not as one agent.
+pub const PROJECT_SERVICES: &[&str] = &["jobs", "pipelines", "monitors"];
+
+/// The workspace scope of a holder, by its trust domain (the host agent's
+/// layout is `<root>/<project>/<agent>`):
+/// - `operator`: the whole `root` (trusted);
+/// - a project service `<project>/jobs`, `/pipelines`, `/monitors`: the
+///   project's directory `<root>/<project>`, never another project's;
+/// - an agent `<project>/<agent>`: only `<root>/<project>/<agent>`.
+///
+/// `None` for any other holder, or a scope directory that is not there
+/// yet: the session then gets no workspace (the empty root). A scope that
+/// is a symlink, leads out of `root`, or is not a directory is refused.
 pub fn holder_workspace(root: &Path, holder: &str) -> Result<Option<PathBuf>, Refusal> {
+    if holder == "operator" {
+        return Ok(Some(root.to_path_buf()));
+    }
     let mut parts = holder.split('/');
-    let (Some(project), Some(agent), None) = (parts.next(), parts.next(), parts.next()) else {
+    let (Some(project), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
         return Ok(None);
     };
-    for part in [project, agent] {
+    for part in [project, name] {
         if part.is_empty() || part == "." || part == ".." {
             return Err(Refusal::invalid(format!("bad holder {holder:?}")));
         }
     }
-    let dir = root.join(project).join(agent);
+    let dir = if PROJECT_SERVICES.contains(&name) {
+        root.join(project)
+    } else {
+        root.join(project).join(name)
+    };
     match std::fs::canonicalize(&dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(Refusal::invalid(format!(

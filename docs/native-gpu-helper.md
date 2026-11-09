@@ -75,9 +75,9 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
     (`nvidiactl`, `nvidia-uvm`, `nvidia-uvm-tools`) fail closed;
   - the slice limits: only from typed `RuntimeLimits`
     (`crate::limits::reservation_properties`);
-  - the working directory: resolved by root, in the holder's own workspace
-    `<workspace_root>/<project>/<agent>` or the workspace root itself, no
-    `%`, no control characters;
+  - the working directory: resolved by root, in the holder's workspace
+    scope (see UID reuse below) or the workspace root itself, no `%`, no
+    control characters;
   - the user: the holder's UID from `workload_users`. A holder keeps its
     UID while it has a live (or stuck) session; a UID never serves two
     holders at once; with no free UID the session is refused (`busy`, "no
@@ -88,14 +88,25 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
     last session is confirmed stopped. Nothing that the UID owns from the
     old holder is reachable by the new one:
     - The workspace: each unit gets `TemporaryFileSystem=<workspace_root>:ro`
-      (an empty read-only tmpfs) with only its holder's workspace
-      `<workspace_root>/<project>/<agent>` bound in (`BindPaths=`,
-      `ReadWritePaths=`). The workspaces of other holders do not exist in
-      the unit, whatever their modes, so a file that an earlier holder of
-      the UID made private (a credential store, a key, a `mkstemp` file)
-      cannot be opened. A holder without a workspace (`operator`, or an
-      agent that has not started yet) gets the empty root only. A
-      workspace that is a symlink is refused.
+      (an empty read-only tmpfs) with only its holder's workspace scope
+      bound in (`BindPaths=`, `ReadWritePaths=`). The scope follows the
+      holder's trust domain:
+      - an agent `<project>/<agent>`: only
+        `<workspace_root>/<project>/<agent>`;
+      - a project service `<project>/jobs`, `<project>/pipelines`, or
+        `<project>/monitors`: the project's directory
+        `<workspace_root>/<project>` (job slots `slot-<n>` and the agent
+        directories of that project), never another project's;
+      - `operator`: the whole workspace root, with no tmpfs over it (the
+        operator is trusted).
+
+      Directories outside the scope do not exist in the unit, whatever
+      their modes, so a file that an earlier holder of the UID made private
+      (a credential store, a key, a `mkstemp` file) cannot be opened from
+      another trust domain. The working directory must lie in the scope.
+      Any other holder, or a scope directory that does not exist yet, gets
+      the empty root only. A scope that is a symlink is refused. An agent
+      named `jobs`, `pipelines`, or `monitors` gets the project scope.
     - The rest of the tree: `ProtectSystem=strict` makes it read-only
       except the API trees (`/dev`, `/proc`, `/sys`), so no world-writable
       directory such as `/run/lock` or `/var/crash` keeps a file of the UID.
@@ -105,9 +116,11 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
       last unit of that UID stops.
     - The pool users have no home directory (see the install steps).
     - `workspace_root` must not be under `/tmp` or `/var/tmp` (each unit
-      gets a private copy of them): the helper refuses to start. Paths with
-      whitespace, quotes, `%`, `:`, or a backslash are refused, since they
-      go in systemd path lists.
+      gets a private copy of them): the helper refuses to start. A workspace
+      root or scope path with whitespace, quotes, `%`, `:`, or a backslash
+      is refused, since it goes in systemd path lists. The working
+      directory is not in such a list: only `%` and control characters are
+      refused there.
 - **The session** is a transient system service, not a scope: systemd sets
   the user, the groups, and the device policy before `exec`, and
   `KillMode=control-group` ends every descendant with the main process.
@@ -115,7 +128,7 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   `NoNewPrivileges=yes`, `CapabilityBoundingSet=`, `AmbientCapabilities=`,
   `RestrictSUIDSGID=yes`, `PrivateTmp=yes`, `RemoveIPC=yes`,
   `ProtectSystem=strict`, `TemporaryFileSystem=<workspace_root>:ro`,
-  `BindPaths=` and `ReadWritePaths=` of the holder's workspace,
+  `BindPaths=` and `ReadWritePaths=` of the holder's workspace scope,
   `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
   each granted GPU and support node, `--expand-environment=no`. The
   environment goes in a root-only `EnvironmentFile` under `state_dir`, not
@@ -246,7 +259,7 @@ Known limits:
 - File ownership: sessions write the workspace as their pool user. The
   workspace root needs a shared group with the setgid bit, or ACLs, so the
   host agent and the sessions can both write (install step 4). A native
-  session sees only its own holder's workspace (see UID reuse above);
+  session sees only its holder's workspace scope (see UID reuse above);
   outside native sessions, holders can read and write each other's
   workspaces through that group, as with the host agent today.
 - **The agent user must never run content from the workspace** (scripts,
