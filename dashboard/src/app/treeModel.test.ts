@@ -86,7 +86,7 @@ describe("filterProjects", () => {
   const ps = [{ name: "Alpha" }, { name: "beta" }, { name: "alphabet" }];
   it("matches part of the name, case-insensitive", () => {
     expect(filterProjects(ps, "ALPHA").map((p) => p.name)).toEqual(["Alpha", "alphabet"]);
-    expect(filterProjects(ps, " bet ")).toEqual(["beta"]);
+    expect(filterProjects(ps, " bet ").map((p) => p.name)).toEqual(["beta", "alphabet"]);
   });
   it("keeps all for an empty query and none for no match", () => {
     expect(filterProjects(ps, "  ")).toHaveLength(3);
