@@ -210,7 +210,8 @@ fn the_job<'a>(ctx: &'a RunCtx, verb: &str) -> ApiResult<&'a Job> {
     })
 }
 
-/// The GitHub author gate (TER-85): no verb acts on a held card. The
+/// The GitHub author gate (TER-85): no verb but the move mails acts on a
+/// held card (TER-536). The
 /// run's card, and for a `job.*` verb each card of the event's job.
 fn refuse_held(conn: &Connection, ctx: &RunCtx, verb: &str) -> ApiResult<()> {
     let mut cards: Vec<String> = ctx.card.iter().map(|c| c.id.clone()).collect();
@@ -249,7 +250,11 @@ pub fn perform(
     action: &Action,
 ) -> ApiResult<(Done, Vec<Effect>)> {
     let verb = action.verb.as_str();
-    refuse_held(t, ctx, verb)?;
+    // The move mails only notify: a held card moved to blocked or done
+    // gets its mail in rules flow as in code flow (TER-536).
+    if !matches!(verb, "card.blocked_mail" | "card.done_mail") {
+        refuse_held(t, ctx, verb)?;
+    }
     let a = Args { action, ctx };
     let mut effects = Vec::new();
     let done = match verb {
@@ -586,6 +591,13 @@ fn move_mail(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, verb: &str) -> ApiResu
         .as_ref()
         .filter(|e| e.kind == "card")
         .ok_or_else(|| ApiError::invalid(format!("{verb} needs a `card` event")))?;
+    // With `board_flow = code` the daemon's move sends the mail: the verb
+    // would send it twice (TER-536).
+    if crate::jobs::code_flow(t, &card.project)? {
+        return Ok(noop(
+            json!({"card": card.id, "reason": "board_flow = code sends the move mail"}),
+        ));
+    }
     let data = &event.data;
     let blocked = verb == "card.blocked_mail";
     let fits = data["change"] == "moved"

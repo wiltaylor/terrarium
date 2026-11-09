@@ -2322,6 +2322,26 @@ async fn move_mails_match(flow: &str) {
     assert_eq!(mails_of(&td, "operator", &subject, 0).await.len(), 1);
     assert_eq!(mails_of(&td, "proj/w1", &subject, 0).await.len(), 1);
     assert_eq!(mails_of(&td, "proj/w2", &done, 0).await.len(), 1);
+    if flow == "rules" {
+        // The mails come from the rules, not from the move (TER-536): two
+        // blocked moves and one move to done, each a run that changed.
+        let runs = td
+            .get("/api/projects/proj/rules/runs?limit=500")
+            .await
+            .ok()["runs"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for (rule, n) in [("card-blocked-mail", 2), ("card-done-mail", 1)] {
+            let did: Vec<&Value> = runs
+                .iter()
+                .filter(|r| {
+                    r["rule"] == rule && r["state"] == "done" && r["steps"][0]["changed"] == true
+                })
+                .collect();
+            assert_eq!(did.len(), n, "{rule}: {runs:#?}");
+        }
+    }
 }
 
 #[tokio::test]

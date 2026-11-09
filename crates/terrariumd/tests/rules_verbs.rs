@@ -2513,8 +2513,8 @@ rule "h-group-close" {
 }
 "#;
 
-/// The GitHub author gate (TER-85): every verb refuses a held card, and
-/// the card does not change.
+/// The GitHub author gate (TER-85): every verb but the move mails refuses
+/// a held card, and the card does not change.
 #[tokio::test]
 async fn every_verb_refuses_a_held_card() {
     let td = TestDaemon::start().await;
@@ -2542,6 +2542,13 @@ async fn every_verb_refuses_a_held_card() {
     got.sort_unstable();
     assert_eq!(got, want, "one run for each verb");
     for run in &r {
+        // The move mails only notify: the hold does not stop them
+        // (TER-536). With `board_flow = code` they do nothing.
+        let verb = run["steps"][0]["verb"].as_str().unwrap();
+        if matches!(verb, "card.blocked_mail" | "card.done_mail") {
+            assert_eq!(run["state"], "noop", "{run}");
+            continue;
+        }
         assert_eq!(run["state"], "failed", "{run}");
         let reason = run["reason"].as_str().unwrap();
         assert!(reason.contains("held by the GitHub author gate"), "{run}");
@@ -2552,6 +2559,157 @@ async fn every_verb_refuses_a_held_card() {
     assert_eq!(after["body"], before["body"]);
     assert!(bodies(&after).is_empty());
     assert!(all_jobs(&td).await.is_empty());
+}
+
+// ------------------------------------------------------------ move mails
+
+/// The mails with `subject`, as (recipient, body), oldest first.
+async fn sent(td: &TestDaemon, subject: &str) -> Vec<(String, String)> {
+    let subject = subject.to_owned();
+    state(td)
+        .db
+        .read(move |c| {
+            let mut st = c.prepare(
+                "SELECT to_agent, body FROM messages WHERE subject = ?1 ORDER BY created_at, id",
+            )?;
+            let rows = st
+                .query_map([subject], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap()
+}
+
+/// The runs of rule `rule` about `card`, oldest first.
+async fn card_runs(td: &TestDaemon, project: &str, rule: &str, card: &str) -> Vec<Value> {
+    runs_of(td, project, rule)
+        .await
+        .into_iter()
+        .filter(|r| r["card"] == card)
+        .collect()
+}
+
+const ANY_BLOCKED_MAIL: &str = r#"rule "edited-mail" {
+  on = ["card"]
+  when "data.change" { eq = "edited" }
+  card_blocked_mail {}
+}
+"#;
+
+/// TER-536: with `board_flow = rules` the move mails of the pack reach a
+/// card held by the GitHub author gate; a late run uses the event's
+/// column, not the card's; an event that is not a move to the column of
+/// the mail is a no-op; an event without `author` names its actor.
+#[tokio::test]
+async fn move_mail_verbs_in_rules_flow() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let r = td
+        .patch("/api/projects/p", json!({"board_flow": "rules"}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let w1 = td.agent("p", "w1", json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    put_rules(&td, "p", ANY_BLOCKED_MAIL).await;
+    let held = new_card(
+        &td,
+        "p",
+        json!({"title": "From GitHub", "labels": ["github", "hold"]}),
+    )
+    .await;
+    let late = new_card(&td, "p", json!({"title": "Late"})).await;
+    let anon = new_card(&td, "p", json!({"title": "Anon"})).await;
+    settle(&td).await;
+
+    let moved = |to: &str, author: Option<&str>| {
+        let mut d = json!({"change": "moved", "from": "backlog", "to": to,
+                           "to_role": if to == "blocked" { json!("blocked") } else { Value::Null },
+                           "comment": "why"});
+        if let Some(a) = author {
+            d["author"] = json!(a);
+        }
+        d
+    };
+    // The held card: both mails run and change.
+    emit(&td, "card", "p", &held, moved("blocked", Some(&w1))).await;
+    emit(&td, "card", "p", &held, moved("done", Some(&w1))).await;
+    // The late card moved to blocked and is back in the backlog when the
+    // rule runs.
+    emit(&td, "card", "p", &late, moved("blocked", Some(&w1))).await;
+    // No `author`: the actor of the event, a source, is `system`.
+    emit(&td, "card", "p", &anon, moved("blocked", None)).await;
+    // Not a move: the own rule plans the verb, which does nothing.
+    emit(&td, "card", "p", &anon, json!({"change": "edited"})).await;
+    settle(&td).await;
+
+    for rule in ["card-blocked-mail", "card-done-mail"] {
+        let r = card_runs(&td, "p", rule, &held).await;
+        assert_eq!(states(&r), vec!["done"], "{rule}: {r:#?}");
+        assert_eq!(r[0]["steps"][0]["changed"], true, "{rule}: {r:#?}");
+    }
+    let m = sent(&td, &format!("{held} blocked: From GitHub")).await;
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert_eq!(m[0].0, "operator");
+    assert!(m[0].1.contains("by w1."), "{m:?}");
+
+    assert_eq!(card(&td, &late).await["column"], "backlog");
+    let m = sent(&td, &format!("{late} blocked: Late")).await;
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert!(
+        m[0].1.starts_with(&format!(
+            "Card {late} \"Late\" moved to blocked (the blocked column) by w1."
+        )),
+        "{m:?}"
+    );
+
+    let m = sent(&td, &format!("{anon} blocked: Anon")).await;
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert!(m[0].1.contains("(the blocked column) by system."), "{m:?}");
+    let r = card_runs(&td, "p", "edited-mail", &anon).await;
+    assert_eq!(states(&r), vec!["noop"], "{r:#?}");
+    assert_eq!(r[0]["steps"][0]["changed"], false, "{r:#?}");
+}
+
+const CODE_BLOCKED_MAIL: &str = r#"rule "my-blocked-mail" {
+  on = ["card"]
+  when "data.change" { eq = "moved" }
+  when "data.to_role" { eq = "blocked" }
+  card_blocked_mail {}
+}
+"#;
+
+/// TER-536: with `board_flow = code` the move sends the mail, and a rule
+/// with the verb does nothing: one mail, not two.
+#[tokio::test]
+async fn move_mail_verbs_are_noops_in_code_flow() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.agent("p", "w1", json!({})).await;
+    put_rules(&td, "p", CODE_BLOCKED_MAIL).await;
+    let a = td
+        .post_as("p/w1", "/api/projects/p/cards", json!({"title": "Once"}))
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    settle(&td).await;
+    td.post(
+        &format!("/api/cards/{a}/move"),
+        json!({"column": "blocked", "comment": "stuck"}),
+    )
+    .await
+    .ok();
+    settle(&td).await;
+    let r = card_runs(&td, "p", "my-blocked-mail", &a).await;
+    assert_eq!(states(&r), vec!["noop"], "{r:#?}");
+    // The operator moved the card of w1: the move mails w1 once.
+    let m = sent(&td, &format!("{a} blocked: Once")).await;
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert_ne!(m[0].0, "operator", "{m:?}");
 }
 
 /// A rule actor without `project_admin` cannot queue a merge; the rule
