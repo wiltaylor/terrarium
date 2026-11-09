@@ -777,6 +777,9 @@ async fn remote_head(
         .ok()?
 }
 
+const BRANCH_HEAD_SAME_SQL: &str = "SELECT repo IS ?2 AND branch IS ?3 AND head IS ?4
+         FROM card_branch_heads WHERE card = ?1";
+
 /// Observe real remote heads rather than proxy audit rows, which also covers
 /// direct pushes. The first observation and every changed head start a new
 /// working-time interval. A missing branch stays unsignalled.
@@ -805,6 +808,18 @@ pub async fn observe_remote_heads(state: &Shared) {
         if let Err(e) = state
             .db
             .write("system", move |t| {
+                // Primary-key read first: an unchanged head costs no history scan.
+                let same: bool = t
+                    .query_row(
+                        BRANCH_HEAD_SAME_SQL,
+                        params![card.id, card.repo, card.branch, head],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+                if same {
+                    return Ok(());
+                }
                 let seconds = view(t, &card.id, Utc::now())?.working_seconds as i64;
                 t.execute(
                     "INSERT INTO card_branch_heads(card, repo, branch, head, working_seconds, observed_at)
@@ -1257,6 +1272,14 @@ mod tests {
             );
             assert!(plans.iter().all(|p| !p.contains("SCAN c\n")), "{plans:?}");
         }
+        let plan: String = c
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {BRANCH_HEAD_SAME_SQL}"),
+                params!["P-1", "app", "card", "abc"],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("SEARCH card_branch_heads"), "{plan}");
         assert!(BRANCH_CARDS_SQL.contains("LIMIT 256"));
     }
 
