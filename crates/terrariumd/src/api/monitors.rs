@@ -521,11 +521,16 @@ async fn eta_accuracy(
     Path(name): Path<String>,
 ) -> ApiResult<Json<Value>> {
     policy::read_project(&actor, &name)?;
-    let samples = state.db.read(move |c| {
-        crate::store::projects::get(c, &name)?;
-        crate::store::card_history::work_samples(c, &name)
-    }).await?;
-    Ok(Json(json!(crate::store::card_history::accuracy_view(&samples))))
+    let samples = state
+        .db
+        .read(move |c| {
+            crate::store::projects::get(c, &name)?;
+            crate::store::card_history::work_samples(c, &name)
+        })
+        .await?;
+    Ok(Json(json!(crate::store::card_history::accuracy_view(
+        &samples
+    ))))
 }
 
 async fn put_dashboard(
