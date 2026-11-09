@@ -106,6 +106,24 @@ describe("App project routes", () => {
     }
   });
 
+  it("keeps the nested tab rows encoded and active on deep paths", async () => {
+    const cases = [
+      ["/p/my%20app/board/tests/1", "Test run page", "Board", "Tests", "/p/my%20app/board/tests"],
+      ["/p/my%20app/knowledge/wiki/a/b", "Wiki page", "Knowledge", "Wiki", "/p/my%20app/knowledge/wiki"],
+      ["/p/my%20app/logs/mail", "Mail page", "Logs", "Mail", "/p/my%20app/logs/mail"],
+      ["/p/my%20app/settings/secrets", "Secrets page", "Settings", "Secrets", "/p/my%20app/settings/secrets"],
+    ] as const;
+    for (const [path, page, label, tab, href] of cases) {
+      const root = mount(path);
+      await vi.waitFor(() => expect(root.textContent).toContain(page));
+      const links = Array.from(root.querySelectorAll<HTMLAnchorElement>(`nav[aria-label="${label}"] a`));
+      expect(links.find((a) => a.textContent === tab)?.getAttribute("href")).toBe(href);
+      expect(links.filter((a) => a.classList.contains("active")).map((a) => a.textContent)).toEqual([tab]);
+      dispose?.();
+      document.body.replaceChildren();
+    }
+  });
+
   it("resolves every moved route to a real destination", async () => {
     for (const route of MOVED_ROUTES) {
       const from = route.path.replace(":project", "terrarium").replace(":id", "x1").replace(":name", "code-review").replace("*path", "a/b");

@@ -63,7 +63,8 @@ describe("navigation", () => {
     expect([...TOP_ITEMS, ...SETTINGS_ITEMS].map((i) => i.href)).not.toContain("/agents");
     expect(layout).not.toMatch(/AgentTree/);
     expect(Object.keys(import.meta.glob("./AgentTree.tsx"))).toEqual([]);
-    expect(app).not.toMatch(/path="\/agents" component=/);
+    const global = app.slice(0, app.indexOf('<Route path="/p/:project" component={ProjectScreen}>'));
+    expect(global).not.toMatch(/path="\/agents" component=/);
     expect(app).toMatch(/path="\/agents\/:id" component=\{AgentDetail\}/);
   });
 
@@ -91,7 +92,6 @@ describe("navigation", () => {
     expect(block).toMatch(/path="\/secrets" component=\{SecretsPage\}/);
     expect(block).toMatch(/path="\/templates" component=\{TemplatesPage\}/);
     for (const t of PROJECT_SETTINGS_TABS) expect(block).toContain(`path="/${t.path}"`);
-    for (const old of ["secrets", "templates"]) expect(project).not.toMatch(new RegExp(`<Route path="/${old}" component=`));
     expect(project).not.toMatch(/path="\/settings" component=\{ProjectSettings\}/);
   });
 

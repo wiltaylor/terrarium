@@ -28,6 +28,11 @@ export default function ProjectScreen(props: RouteSectionProps) {
   // encode the name once for every tab URL (including names with spaces).
   const project = () => decodeURIComponent(params.project);
   const base = () => `/p/${encodeURIComponent(project())}`;
+  const active = (path: string) => {
+    const current = decodeURI(location.pathname).replace(/\/$/, "");
+    const target = decodeURI(`${base()}/${path}`);
+    return current === target || current.startsWith(`${target}/`);
+  };
   return (
     <>
       <PageHead title={project()} />
@@ -35,7 +40,7 @@ export default function ProjectScreen(props: RouteSectionProps) {
       <nav ref={tabs} class="tabs project-tabs" aria-label="Project">
         <For each={PROJECT_TABS}>
           {(tab) => (
-            <A href={`${base()}/${tab.path}`} activeClass="active">
+            <A href={`${base()}/${tab.path}`} class={active(tab.path) ? "active" : undefined} activeClass="" inactiveClass="">
               {tab.label}
             </A>
           )}
