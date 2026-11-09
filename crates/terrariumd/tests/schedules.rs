@@ -1364,6 +1364,57 @@ async fn day_start_runs_once_per_day_whatever_the_starts() {
     assert_eq!(td.mail_of(&worker).await.len(), 2);
 }
 
+/// TER-465: a disarm checks the spec kind in its write. A PATCH to another
+/// kind between the read of a pass and its write keeps the next run that
+/// the PATCH set.
+#[tokio::test]
+async fn day_start_disarm_keeps_the_next_run_of_a_patched_spec() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    let sid = id(td
+        .post("/api/schedules", day_start_body("morning", json!({})))
+        .await
+        .ok());
+    let mut w = DayStartWatch::default();
+    let disarm = |sid: String| {
+        let st = state(&td);
+        async move {
+            st.db
+                .write("system", move |t| {
+                    terrariumd::store::schedules::disarm_day_start(t, &sid)
+                })
+                .await
+                .unwrap();
+        }
+    };
+
+    // A planned day_start run: the disarm drops it.
+    assert_eq!(
+        pass(&td, at(0, 8, 0), StartCause::DaemonStart, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    assert!(schedule(&td, &sid).await["next_run_at"].is_string());
+    disarm(sid.clone()).await;
+    assert!(schedule(&td, &sid).await["next_run_at"].is_null());
+
+    // Planned again, then a PATCH to an interval spec before the write of
+    // the disarm: the interval keeps its next run.
+    assert_eq!(
+        pass(&td, at(0, 8, 1), StartCause::Resume, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    let p = td
+        .patch(
+            &format!("/api/schedules/{sid}"),
+            json!({"spec": {"kind": "interval", "every": "1h"}}),
+        )
+        .await;
+    let next = p.ok()["next_run_at"].clone();
+    assert!(next.is_string(), "{:#}", p.body);
+    disarm(sid.clone()).await;
+    assert_eq!(schedule(&td, &sid).await["next_run_at"], next);
+}
+
 #[tokio::test]
 async fn day_start_on_resume_from_sleep() {
     let td = TestDaemon::start().await;
