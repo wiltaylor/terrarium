@@ -752,7 +752,12 @@ async fn group_status_skips_when_the_step_placeholder_has_no_value() {
     assert_eq!(closed.len(), 1, "{closed:#?}");
     assert_eq!(closed[0]["rule"], "fail-step", "{}", closed[0]);
     assert_eq!(closed[0]["state"], "noop", "{}", closed[0]);
-    assert_eq!(closed[0]["steps"][0]["detail"], json!({"key": "batch"}), "{}", closed[0]);
+    assert_eq!(
+        closed[0]["steps"][0]["detail"],
+        json!({"key": "batch"}),
+        "{}",
+        closed[0]
+    );
 }
 
 /// TER-419: only a `{{group.*}}` step placeholder of a run whose card
@@ -780,8 +785,7 @@ async fn group_status_fails_steps_the_rule_itself_left_empty() {
         assert_eq!(fail[0]["rule"], rule, "{}", fail[0]);
         assert_eq!(fail[0]["state"], "failed", "{}", fail[0]);
         assert_eq!(
-            fail[0]["steps"][0]["error"],
-            "Invalid: group step name must not be empty",
+            fail[0]["steps"][0]["error"], "Invalid: group step name must not be empty",
             "{}",
             fail[0]
         );
@@ -1290,8 +1294,18 @@ async fn merge_group_failure_tracks_the_phase_that_actually_started() {
 async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
-    let a = new_card(&td, "p", json!({"title":"a", "column":"review", "repo":"app"})).await;
-    let b = new_card(&td, "p", json!({"title":"b", "column":"review", "repo":"app"})).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
     let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
@@ -1349,8 +1363,18 @@ async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
 async fn default_merge_group_finds_members_after_a_manual_fix_card() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
-    let a = new_card(&td, "p", json!({"title":"a", "column":"review", "repo":"app"})).await;
-    let b = new_card(&td, "p", json!({"title":"b", "column":"review", "repo":"app"})).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
     let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
@@ -1358,7 +1382,12 @@ async fn default_merge_group_finds_members_after_a_manual_fix_card() {
         .unwrap()
         .to_owned();
     fail_job(&td, &job, "red").await;
-    let fix = new_card(&td, "p", json!({"title":"manual fix", "column":"review", "repo":"app"})).await;
+    let fix = new_card(
+        &td,
+        "p",
+        json!({"title":"manual fix", "column":"review", "repo":"app"}),
+    )
+    .await;
     assert!(card(&td, &fix).await.get("group").is_none());
     let retry = store_job(&td, JobKind::Merge, &[&fix, &a, &b]).await;
     settle(&td).await;
