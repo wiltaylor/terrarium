@@ -77,8 +77,7 @@ fn main() -> anyhow::Result<()> {
     let linger = Path::new("/var/lib/systemd/linger")
         .join(&workload.name)
         .exists();
-    native::check_workload(agent.uid.as_raw(), &id, &groups, linger)
-        .map_err(anyhow::Error::msg)?;
+    native::check_workload(agent.uid.as_raw(), &id, &groups, linger).map_err(anyhow::Error::msg)?;
 
     for bin in [&cfg.systemd_run, &cfg.systemctl] {
         root_owned(bin)?;

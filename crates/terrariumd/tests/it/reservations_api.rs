@@ -537,7 +537,8 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
 
 #[tokio::test]
 async fn native_exclusive_gpu_needs_enforced_helper_support() {
-    let body = json!({"target":"p-native","gpus":[{"uuid":"GPU-abcd","exclusive":true}],"until":"30m"});
+    let body =
+        json!({"target":"p-native","gpus":[{"uuid":"GPU-abcd","exclusive":true}],"until":"30m"});
     let native = json!({"name":"p-native","kind":"host","host":"h","project":"p"});
     // A helper that does not answer: refused, with its reason.
     let (td, server, client) = setup_opts(
@@ -646,9 +647,7 @@ async fn native_exclusive_gpu_needs_enforced_helper_support() {
     assert_eq!(bare.native_gpu, Some(Default::default()));
     assert!(bare.reservation.is_none());
     // Without the capability the grant is dropped.
-    assert!(
-        terrariumd::executor::native_gpu_limits(&other, None, None, None).is_none()
-    );
+    assert!(terrariumd::executor::native_gpu_limits(&other, None, None, None).is_none());
     client.abort();
     server.abort();
 }

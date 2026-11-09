@@ -1350,14 +1350,16 @@ impl Client {
         let Some(native) = &self.opts.native else {
             return Err(BuildError {
                 code: ErrorCode::Unsupported,
-                message: "native GPU enforcement is off on this host agent ([native_gpu] in its config)"
-                    .into(),
+                message:
+                    "native GPU enforcement is off on this host agent ([native_gpu] in its config)"
+                        .into(),
             });
         };
         let req =
             crate::native::start_request(&plan.exec, session, Some(l), &self.opts.paths.work_dir);
         tracing::info!(session, holder = %req.holder, gpus = ?req.gpus, lease = ?req.lease, "native session");
-        plan.exec = crate::native::shim_plan(native, &crate::native::Request::Start(req), plan.exec);
+        plan.exec =
+            crate::native::shim_plan(native, &crate::native::Request::Start(req), plan.exec);
         Ok(plan)
     }
 

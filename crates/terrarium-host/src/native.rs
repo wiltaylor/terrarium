@@ -283,18 +283,10 @@ pub enum ErrorKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Reply {
-    Hello {
-        version: u32,
-        rights: Vec<Right>,
-    },
+    Hello { version: u32, rights: Vec<Right> },
     Ok,
-    Started {
-        unit: String,
-    },
-    Error {
-        code: ErrorKind,
-        message: String,
-    },
+    Started { unit: String },
+    Error { code: ErrorKind, message: String },
 }
 
 /// The end of a session.
@@ -693,7 +685,10 @@ pub fn plan_start(
                 .find(|(u, _)| u == g)
                 .map(|(_, m)| *m)
                 .ok_or_else(|| {
-                    Refusal::new(ErrorKind::Unsupported, format!("GPU {g} is not on this host"))
+                    Refusal::new(
+                        ErrorKind::Unsupported,
+                        format!("GPU {g} is not on this host"),
+                    )
                 })?;
             let node = ctx.dev_dir.join(format!("nvidia{minor}"));
             let found = nodes
@@ -849,8 +844,7 @@ impl Sessions {
     /// another holder is a forged holder.
     pub fn admit(&mut self, unit: &str, claim: Claim) -> Result<(), Refusal> {
         for other in self.live.values() {
-            if claim.lease.is_some() && other.lease == claim.lease && other.holder != claim.holder
-            {
+            if claim.lease.is_some() && other.lease == claim.lease && other.holder != claim.holder {
                 return Err(Refusal::new(
                     ErrorKind::Forbidden,
                     "the lease belongs to another holder",
@@ -924,7 +918,10 @@ async fn call(bin: &Path, args: &[String]) -> Result<String, String> {
         bin.display(),
         args.first().map(String::as_str).unwrap_or(""),
         out.status,
-        err.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()
+        err.lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
     ))
 }
 
@@ -1054,7 +1051,9 @@ impl Helper {
         self.allowed(Right::Session)?;
         let slice = holder_slice(&a.target, &a.holder, false)?;
         tracing::info!(%slice, "apply limits");
-        self.systemctl(slice_args(&slice, &a.limits)?).await.map(|_| ())
+        self.systemctl(slice_args(&slice, &a.limits)?)
+            .await
+            .map(|_| ())
     }
 
     async fn stop(&self, s: &SliceRequest) -> Result<(), Refusal> {
@@ -1083,10 +1082,7 @@ impl Helper {
         let exit = self.clone().run(&req, &plan, rd, wr).await;
         self.kill_unit(&plan.unit, 9).await;
         let _ = std::fs::remove_file(&plan.env_file);
-        self.sessions
-            .lock()
-            .expect("sessions lock")
-            .end(&plan.unit);
+        self.sessions.lock().expect("sessions lock").end(&plan.unit);
         tracing::info!(unit = %plan.unit, ?exit, "session ended");
     }
 
@@ -1121,10 +1117,7 @@ impl Helper {
         .await;
         if let Err(r) = ready {
             let _ = std::fs::remove_file(&plan.env_file);
-            self.sessions
-                .lock()
-                .expect("sessions lock")
-                .end(&plan.unit);
+            self.sessions.lock().expect("sessions lock").end(&plan.unit);
             return Err(r);
         }
         tracing::info!(unit = %plan.unit, slice = %plan.slice, holder = %req.holder, lease = ?req.lease, gpus = ?req.gpus, "session start");
@@ -1147,14 +1140,20 @@ impl Helper {
             unit: plan.unit.clone(),
         };
         let _ = out_tx
-            .send((Kind::Reply, serde_json::to_vec(&started).unwrap_or_default()))
+            .send((
+                Kind::Reply,
+                serde_json::to_vec(&started).unwrap_or_default(),
+            ))
             .await;
         let child = match spawn_child(&self.systemd_run, &plan.args, req.pty, out_tx.clone()) {
             Ok(c) => c,
             Err(e) => {
                 let r = Refusal::new(ErrorKind::Failed, format!("cannot start systemd-run: {e}"));
                 let _ = out_tx
-                    .send((Kind::Reply, serde_json::to_vec(&r.reply()).unwrap_or_default()))
+                    .send((
+                        Kind::Reply,
+                        serde_json::to_vec(&r.reply()).unwrap_or_default(),
+                    ))
                     .await;
                 drop(out_tx);
                 let _ = writer.await;
@@ -1236,7 +1235,12 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 async fn send_reply<W: AsyncWrite + Unpin>(w: &mut W, reply: &Reply) -> std::io::Result<()> {
-    write_frame(w, Kind::Reply, &serde_json::to_vec(reply).unwrap_or_default()).await
+    write_frame(
+        w,
+        Kind::Reply,
+        &serde_json::to_vec(reply).unwrap_or_default(),
+    )
+    .await
 }
 
 async fn write_all_frames(
@@ -1278,8 +1282,9 @@ fn spawn_child(
 ) -> std::io::Result<Child> {
     match pty {
         None => spawn_pipes(program, args, out),
-        Some(size) => spawn_pty(program, args, size, out)
-            .map_err(|e| std::io::Error::other(format!("{e:#}"))),
+        Some(size) => {
+            spawn_pty(program, args, size, out).map_err(|e| std::io::Error::other(format!("{e:#}")))
+        }
     }
 }
 
@@ -1292,7 +1297,10 @@ fn spawn_pipes(
     let mut child = tokio::process::Command::new(program)
         .args(args)
         .env_clear()
-        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1491,15 +1499,19 @@ pub async fn hello(socket: &Path) -> Result<Vec<Right>, String> {
         let req = Request::Hello(HelloRequest {
             version: PROTOCOL_VERSION,
         });
-        write_frame(&mut s, Kind::Request, &serde_json::to_vec(&req).unwrap_or_default())
-            .await
-            .map_err(|e| format!("helper: {e}"))?;
+        write_frame(
+            &mut s,
+            Kind::Request,
+            &serde_json::to_vec(&req).unwrap_or_default(),
+        )
+        .await
+        .map_err(|e| format!("helper: {e}"))?;
         match read_frame(&mut s).await {
             Ok(Some((Kind::Reply, body))) => match serde_json::from_slice::<Reply>(&body) {
                 Ok(Reply::Hello { version, rights }) if version == PROTOCOL_VERSION => Ok(rights),
-                Ok(Reply::Hello { version, .. }) => {
-                    Err(format!("helper protocol version {version}, need {PROTOCOL_VERSION}"))
-                }
+                Ok(Reply::Hello { version, .. }) => Err(format!(
+                    "helper protocol version {version}, need {PROTOCOL_VERSION}"
+                )),
                 Ok(Reply::Error { message, .. }) => Err(format!("helper: {message}")),
                 Ok(other) => Err(format!("helper: unexpected reply {other:?}")),
                 Err(e) => Err(format!("helper: bad reply: {e}")),
@@ -1689,7 +1701,11 @@ pub async fn shim(socket: &Path) -> i32 {
                     break;
                 }
                 Ok(n) => {
-                    if stdin_tx.send((Kind::Stdin, buf[..n].to_vec())).await.is_err() {
+                    if stdin_tx
+                        .send((Kind::Stdin, buf[..n].to_vec()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1744,7 +1760,11 @@ fn forward_signals(tx: mpsc::Sender<(Kind, Vec<u8>)>, pty: bool) {
         let sig = *sig;
         tokio::spawn(async move {
             while stream.recv().await.is_some() {
-                if tx.send((Kind::Signal, sig.to_be_bytes().to_vec())).await.is_err() {
+                if tx
+                    .send((Kind::Signal, sig.to_be_bytes().to_vec()))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -1761,8 +1781,7 @@ fn forward_signals(tx: mpsc::Sender<(Kind, Vec<u8>)>, pty: bool) {
                 else {
                     continue;
                 };
-                if let Some((rows, cols)) = parse_stty_size(&String::from_utf8_lossy(&out.stdout))
-                {
+                if let Some((rows, cols)) = parse_stty_size(&String::from_utf8_lossy(&out.stdout)) {
                     let mut data = rows.to_be_bytes().to_vec();
                     data.extend_from_slice(&cols.to_be_bytes());
                     if tx.send((Kind::Resize, data)).await.is_err() {

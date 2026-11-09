@@ -85,11 +85,19 @@ async fn frames_round_trip_and_refuse_oversized_frames() {
     );
     assert_eq!(read_frame(&mut r).await.unwrap(), None);
     let big = vec![0u8; MAX_FRAME + 1];
-    assert!(write_frame(&mut Vec::new(), Kind::Stdin, &big).await.is_err());
+    assert!(
+        write_frame(&mut Vec::new(), Kind::Stdin, &big)
+            .await
+            .is_err()
+    );
     let mut forged = vec![2u8];
     forged.extend_from_slice(&u32::try_from(MAX_FRAME + 1).unwrap().to_be_bytes());
     assert!(read_frame(&mut forged.as_slice()).await.is_err());
-    assert!(read_frame(&mut [99u8, 0, 0, 0, 0].as_slice()).await.is_err());
+    assert!(
+        read_frame(&mut [99u8, 0, 0, 0, 0].as_slice())
+            .await
+            .is_err()
+    );
 }
 
 #[test]
@@ -140,11 +148,17 @@ fn workload_identity_is_checked() {
         uid: 2001,
         gid: 2001,
     };
-    let groups = vec![(2001, "terrarium-work".to_owned()), (44, "video".to_owned())];
+    let groups = vec![
+        (2001, "terrarium-work".to_owned()),
+        (44, "video".to_owned()),
+    ];
     check_workload(1000, &w, &groups, false).unwrap();
     assert!(check_workload(2001, &w, &groups, false).is_err());
     assert!(check_workload(0, &w, &groups, false).is_err());
-    let root = Identity { uid: 0, ..w.clone() };
+    let root = Identity {
+        uid: 0,
+        ..w.clone()
+    };
     assert!(check_workload(1000, &root, &groups, false).is_err());
     for g in ["docker", "sudo", "wheel", "root"] {
         let mut more = groups.clone();
@@ -210,11 +224,16 @@ fn a_gpu_session_allows_only_its_gpu_and_the_support_nodes() {
     assert!(plan.args.contains(&"--expand-environment=no".to_owned()));
     // The command comes last, after `--`, unchanged.
     let dashes = plan.args.iter().position(|a| a == "--").unwrap();
-    assert_eq!(&plan.args[dashes + 1..], request(root.path()).argv.as_slice());
+    assert_eq!(
+        &plan.args[dashes + 1..],
+        request(root.path()).argv.as_slice()
+    );
     assert_eq!(plan.env, "TOKEN=\"a\\\"b\\\\c\\$d\\`e\"\n");
     assert_eq!(
         plan.env_file,
-        PathBuf::from("/run/terrarium-host-helper/sessions/terrarium-native-7-000000ab.service.env")
+        PathBuf::from(
+            "/run/terrarium-host-helper/sessions/terrarium-native-7-000000ab.service.env"
+        )
     );
     assert!(plan.slice_args.is_none());
     assert_eq!(plan.claim.exclusive, [A]);
@@ -228,14 +247,7 @@ fn a_session_without_gpus_gets_no_gpu_node() {
     req.exclusive_gpus.clear();
     req.pty = Some((24, 80));
     // No inventory and no device nodes needed.
-    let plan = plan_start(
-        &ctx(root.path()),
-        &req,
-        &[],
-        &FakeNodes(HashMap::new()),
-        1,
-    )
-    .unwrap();
+    let plan = plan_start(&ctx(root.path()), &req, &[], &FakeNodes(HashMap::new()), 1).unwrap();
     let p = props(&plan.args);
     assert!(p.contains(&"DevicePolicy=closed"));
     assert_eq!(
@@ -261,7 +273,10 @@ fn limits_go_on_the_slice_from_typed_values_only() {
     });
     let plan = plan_start(&ctx(root.path()), &req, &inventory(), &nodes(), 1).unwrap();
     let a = plan.slice_args.unwrap();
-    assert_eq!(&a[..4], ["set-property", "--runtime", "--", plan.slice.as_str()]);
+    assert_eq!(
+        &a[..4],
+        ["set-property", "--runtime", "--", plan.slice.as_str()]
+    );
     assert!(a.contains(&"CPUQuota=200%".to_owned()));
     assert!(a.contains(&"AllowedCPUs=2,3".to_owned()));
     let mut bad = request(root.path());
@@ -473,7 +488,11 @@ fn an_exclusive_gpu_is_never_shared_across_reservations() {
         ("u5", claim("p/b", None, &[A], &[])),
         ("u6", claim("p/a", Some("L0"), &[A], &[A])),
     ] {
-        assert_eq!(s.admit(unit, c).unwrap_err().code, ErrorKind::Busy, "{unit}");
+        assert_eq!(
+            s.admit(unit, c).unwrap_err().code,
+            ErrorKind::Busy,
+            "{unit}"
+        );
     }
     // A forged holder on the live lease.
     assert_eq!(
@@ -550,7 +569,10 @@ fn an_exec_becomes_a_shim_call_with_the_request_in_the_environment() {
         args: vec!["-L".into()],
         cwd: Some("/work/terra/w-1".into()),
         env: BTreeMap::from([("SECRET".into(), "s3".into())]),
-        pty: Some(crate::protocol::PtySize { rows: 30, cols: 100 }),
+        pty: Some(crate::protocol::PtySize {
+            rows: 30,
+            cols: 100,
+        }),
         ..Default::default()
     };
     let l = crate::protocol::ExecLimits {
@@ -590,7 +612,12 @@ fn an_exec_becomes_a_shim_call_with_the_request_in_the_environment() {
     );
     assert!(shim.pty.is_some() && shim.scope.is_none());
     // No limits and no reservation: no GPU, the operator's slice.
-    let bare = start_request(&crate::session::ExecPlan::default(), 1, None, Path::new("/w"));
+    let bare = start_request(
+        &crate::session::ExecPlan::default(),
+        1,
+        None,
+        Path::new("/w"),
+    );
     assert!(bare.gpus.is_empty() && bare.limits.is_none());
     assert_eq!(bare.holder, "operator");
     assert_eq!(bare.cwd, "/w");

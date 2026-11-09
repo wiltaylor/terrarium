@@ -63,7 +63,10 @@ impl Fake {
         );
         script(
             &d.join("systemctl"),
-            &format!("printf '%s\\n' \"$*\" >> '{}'\n", d.join("ctl.log").display()),
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'\n",
+                d.join("ctl.log").display()
+            ),
         );
         script(
             &d.join("nvidia-smi"),
@@ -109,7 +112,14 @@ impl Fake {
         std::fs::read_to_string(self.dir.path().join(name)).unwrap_or_default()
     }
 
-    fn start(&self, holder: &str, lease: Option<&str>, gpus: &[&str], exclusive: &[&str], argv: &[&str]) -> StartRequest {
+    fn start(
+        &self,
+        holder: &str,
+        lease: Option<&str>,
+        gpus: &[&str],
+        exclusive: &[&str],
+        argv: &[&str],
+    ) -> StartRequest {
         StartRequest {
             session: 3,
             target: "box".into(),
@@ -202,7 +212,10 @@ async fn without_the_session_right_nothing_starts() {
         target: "box".into(),
         holder: "p/a".into(),
     });
-    assert_eq!(code(&send(&f.socket, &stop).await.1), Some(ErrorKind::Forbidden));
+    assert_eq!(
+        code(&send(&f.socket, &stop).await.1),
+        Some(ErrorKind::Forbidden)
+    );
     assert!(f.log("run.log").is_empty() && f.log("ctl.log").is_empty());
 }
 
@@ -222,8 +235,12 @@ async fn a_session_starts_in_its_device_policy_and_relays_stdio() {
     };
     assert!(unit.starts_with("terrarium-native-3-"), "{unit}");
     let (mut rd, mut wr) = s.into_split();
-    native::write_frame(&mut wr, Kind::Stdin, b"hi\n").await.unwrap();
-    native::write_frame(&mut wr, Kind::StdinEof, b"").await.unwrap();
+    native::write_frame(&mut wr, Kind::Stdin, b"hi\n")
+        .await
+        .unwrap();
+    native::write_frame(&mut wr, Kind::StdinEof, b"")
+        .await
+        .unwrap();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let exit = loop {
         match native::read_frame(&mut rd).await.unwrap() {
@@ -253,9 +270,14 @@ async fn a_session_starts_in_its_device_policy_and_relays_stdio() {
     f.wait_idle().await;
     // The unit is killed at the end, so no descendant keeps a GPU handle,
     // and its environment file is gone.
-    assert!(f.log("ctl.log").contains(&format!("kill --signal=9 -- {unit}")));
+    assert!(
+        f.log("ctl.log")
+            .contains(&format!("kill --signal=9 -- {unit}"))
+    );
     assert_eq!(
-        std::fs::read_dir(f.dir.path().join("state")).unwrap().count(),
+        std::fs::read_dir(f.dir.path().join("state"))
+            .unwrap()
+            .count(),
         0
     );
 }
@@ -270,12 +292,17 @@ async fn a_caller_that_goes_away_kills_the_unit() {
     };
     drop(s);
     for _ in 0..40 {
-        if f.log("ctl.log").contains(&format!("kill --signal=9 -- {unit}")) {
+        if f.log("ctl.log")
+            .contains(&format!("kill --signal=9 -- {unit}"))
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(f.log("ctl.log").contains(&format!("kill --signal=9 -- {unit}")));
+    assert!(
+        f.log("ctl.log")
+            .contains(&format!("kill --signal=9 -- {unit}"))
+    );
     f.wait_idle().await;
 }
 
@@ -334,7 +361,10 @@ async fn apply_and_stop_use_slices_that_the_helper_derives() {
         target: String::new(),
         holder: String::new(),
     });
-    assert_eq!(code(&send(&f.socket, &shared).await.1), Some(ErrorKind::Invalid));
+    assert_eq!(
+        code(&send(&f.socket, &shared).await.1),
+        Some(ErrorKind::Invalid)
+    );
     let stop = Request::Stop(SliceRequest {
         target: "box".into(),
         holder: "p/a".into(),
@@ -378,7 +408,10 @@ async fn the_shim_relays_a_session_and_its_exit_code() {
     .unwrap();
     assert_eq!(out.status.code(), Some(3), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "out:hi\n");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("err"), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("err"),
+        "{out:?}"
+    );
 
     // A refusal is exit 125 with the reason.
     let refused = Request::Start(f.start("p/a", None, &["GPU-cccc"], &[], &["true"]));
@@ -387,7 +420,10 @@ async fn the_shim_relays_a_session_and_its_exit_code() {
         .await
         .unwrap();
     assert_eq!(out.status.code(), Some(125), "{out:?}");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not on this host"), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not on this host"),
+        "{out:?}"
+    );
 
     // `stop` through the shim: exit 0.
     let stop = Request::Stop(SliceRequest {
@@ -423,7 +459,9 @@ async fn the_shim_forwards_a_signal_to_the_unit() {
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).unwrap();
     let mut seen = false;
     for _ in 0..50 {
-        if f.log("ctl.log").contains("kill --signal=15 -- terrarium-native-3-") {
+        if f.log("ctl.log")
+            .contains("kill --signal=15 -- terrarium-native-3-")
+        {
             seen = true;
             break;
         }
