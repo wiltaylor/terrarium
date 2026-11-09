@@ -6,7 +6,7 @@ use crate::actor::Actor;
 use crate::api::Shared;
 use crate::card_dispatcher::{actor, defer_project, project_limit};
 use crate::db::Tx;
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, Code};
 use crate::spawn::{Internal, SpawnBody};
 use crate::store::{agents, board, mail, projects, spawns};
 
@@ -23,9 +23,21 @@ fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
     Ok((!v.paused).then(|| actor(v.agent)))
 }
 
-/// Bounded review-column lookup. Keep the indexed query public for plan regression tests.
+/// Page size of [`CANDIDATES`]: cards held by a `GitHub #<n>:` title stay
+/// in review, so pages are walked by the `(position, id)` keyset until one
+/// is not full, and a later card cannot be starved (TER-408, TER-412).
+pub const CANDIDATE_PAGE: i64 = 16;
+
+/// Bounded review-column lookup, one page after the keyset `(?4, ?5)`. Keep
+/// the indexed query public for plan regression tests. Cards with both the
+/// `github` and the `hold` label (every gate-held card, see
+/// [`crate::store::github_gate::hold_labels`]) are dropped here. The SQL
+/// `trim` and `lower` match a subset of what
+/// [`crate::store::github_gate::is_held`] matches, never more, so the SQL
+/// cannot drop a card that Rust would dispatch. The title rule stays in
+/// Rust in [`candidate`].
 pub const CANDIDATES: &str = "
-SELECT c.id, c.title, c.labels FROM cards c INDEXED BY cards_column
+SELECT c.id, c.position, c.title, c.labels FROM cards c INDEXED BY cards_column
 WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
   AND c.archived = 0 AND c.kind = 'card'
   AND NOT EXISTS (SELECT 1 FROM spawns s WHERE s.bound_kind = 'review'
@@ -33,31 +45,54 @@ WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = 
   AND NOT EXISTS (SELECT 1 FROM card_dispatch_retries d WHERE d.card = c.id AND d.retry_at > ?3)
   AND NOT EXISTS (SELECT 1 FROM card_reviews r WHERE r.card = c.id
       AND (r.applied = 2 OR r.cap_notified = 1))
-ORDER BY c.position LIMIT 16";
+  AND NOT (EXISTS (SELECT 1 FROM json_each(c.labels) github_label
+               WHERE trim(lower(github_label.value)) = 'github')
+       AND EXISTS (SELECT 1 FROM json_each(c.labels) hold_label
+               WHERE trim(lower(hold_label.value)) = 'hold'))
+  AND (c.position, c.id) > (?4, ?5)
+ORDER BY c.position, c.id LIMIT ?6";
 
 fn candidate(c: &Connection, project: &str) -> ApiResult<Option<String>> {
     let review = board::role_name(c, project, "review", "review")?;
+    let now = chrono::Utc::now().timestamp();
     let mut q = c.prepare(CANDIDATES)?;
-    let rows = q.query_map(
-        params![project, review, chrono::Utc::now().timestamp()],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        },
-    )?;
-    for row in rows {
-        let (id, title, labels) = row?;
-        if !crate::store::github_gate::is_held(
-            &title,
-            &crate::store::json_col::<Vec<String>>(&labels),
-        ) {
-            return Ok(Some(id));
+    // `(position, id)` is a strict total order, so a tie at a page boundary
+    // is not dropped. A full page of title-held cards continues with the
+    // next page.
+    let mut after: (i64, String) = (-1, String::new());
+    loop {
+        let mut rows: Vec<(String, i64, String, String)> = Vec::new();
+        {
+            let it = q.query_map(
+                params![project, review, now, after.0, after.1, CANDIDATE_PAGE],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )?;
+            for row in it {
+                rows.push(row?);
+            }
+        }
+        let full = rows.len() == CANDIDATE_PAGE as usize;
+        for (id, position, title, labels) in rows {
+            after = (position, id.clone());
+            if !crate::store::github_gate::is_held(
+                &title,
+                &crate::store::json_col::<Vec<String>>(&labels),
+            ) {
+                return Ok(Some(id));
+            }
+        }
+        // A page that is not full is the end of the review column.
+        if !full {
+            return Ok(None);
         }
     }
-    Ok(None)
 }
 
 fn tell_owner(t: &mut Tx<'_>, who: &Actor, id: &str, reason: &str) -> ApiResult<()> {
@@ -215,14 +250,33 @@ pub fn verdict(t: &mut Tx<'_>, reviewer: &Actor, id: &str, body: &str) -> ApiRes
     if card.archived || card.column != review {
         return Ok(());
     }
-    let Some(who) = owner(t, &card.project)? else {
-        return Ok(());
-    };
     let first = body.lines().next().unwrap_or_default().trim();
     let destination = match first.strip_prefix("Review verdict: ").unwrap_or(first) {
         "accept" => "merge_queue",
         "changes" => "ready",
         _ => return Ok(()),
+    };
+    // An unusable owner (lost project admin, deleted) must not reject the
+    // comment and lose the findings: keep the verdict, record why nothing
+    // was applied, and leave the round open like a project without a
+    // review dispatcher. Any other error (a database error) still fails.
+    let who = match owner(t, &card.project) {
+        Ok(Some(who)) => who,
+        Ok(None) => return Ok(()),
+        Err(e) if matches!(e.code, Code::Forbidden | Code::NotFound) => {
+            board::system_comment(
+                t,
+                id,
+                &format!(
+                    "Review verdict retained, but the review dispatcher owner is no longer \
+                     valid: {}. Card remains in review for the lead.",
+                    e.message
+                ),
+                None,
+            )?;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
     };
     // Mark this round consumed even when the decision is reserved for the lead.
     t.execute("UPDATE card_reviews SET applied = 2 WHERE card = ?1", [id])?;
