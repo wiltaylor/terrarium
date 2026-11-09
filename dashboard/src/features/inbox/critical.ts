@@ -1,10 +1,11 @@
-// Critical notices and questions (docs/api.md §6.8, priority `critical`):
-// the banner on every page and the flashing browser tab. Pure helpers and a
+// Critical notices and questions (docs/api.md §6.8, priority `critical`),
+// also the ones inside an open thread (TER-488): the banner on every page and the flashing browser tab. Pure helpers and a
 // small state machine with its timers and document injected. No Solid
 // imports, so the tests drive them with fake timers.
 
 import type { InboxItem } from "../../api/types";
 import { isCritical } from "./model";
+import { threadHref } from "./threads";
 
 /** What the banner shows: the newest open critical item, and how many more there are. */
 export interface CriticalBanner {
@@ -15,7 +16,10 @@ export interface CriticalBanner {
   from: string;
   /** The short text of the item: its first line, at most `SHORT` characters. */
   text: string;
-  /** The Inbox link that scrolls to the item and highlights it. */
+  /**
+   * The Inbox link that scrolls to the item and highlights it. For a thread (TER-488): the thread at
+   * `/threads/:id`, or the Threads screen when more than one thread has a critical question.
+   */
   href: string;
 }
 
@@ -33,15 +37,32 @@ export const inboxItemHref = (id: string): string => `/inbox?item=${encodeURICom
 /** The DOM id of an item on the Inbox page. */
 export const inboxItemDomId = (id: string): string => `inbox-item-${id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
 
-/** The banner for the open items, or `null` when no open item is critical. The newest critical item shows. */
+/** The asker of a thread item: its agent, else who opened it, as `project/name`; else the project. */
+function threadFrom(item: InboxItem): string {
+  const th = item.thread;
+  const name = th?.agent_name ?? (th && th.opened_by !== "operator" ? th.opened_by_name : null);
+  if (!name) return item.project ?? "";
+  return name.includes("/") || !item.project ? name : `${item.project}/${name}`;
+}
+
+/**
+ * The banner for the open items, or `null` when no open item is critical. The newest critical item shows.
+ * A thread item (kind `thread`, TER-488) is critical while the thread has an open critical question; the
+ * banner shows its topic, as a thread row has no question text.
+ */
 export function criticalBanner(open: InboxItem[]): CriticalBanner | null {
   const crit = open.filter(isCritical).sort((a, b) => b.at.localeCompare(a.at) || b.id.localeCompare(a.id));
   const item = crit[0];
   if (!item) return null;
+  const more = crit.length - 1;
+  if (item.kind === "thread" && item.thread) {
+    const threads = crit.filter((i) => i.kind === "thread").length;
+    return { item, more, from: threadFrom(item), text: shortText(item.thread.topic), href: threads > 1 ? "/threads" : threadHref(item.thread.id) };
+  }
   const q = item.question;
   const from = q ? (q.agent_name.includes("/") ? q.agent_name : `${q.project}/${q.agent_name}`) : (item.project ?? "");
   const raw = q?.text ?? item.message?.subject ?? item.system?.subject ?? "";
-  return { item, more: crit.length - 1, from, text: shortText(raw), href: inboxItemHref(item.id) };
+  return { item, more, from, text: shortText(raw), href: inboxItemHref(item.id) };
 }
 
 /**
