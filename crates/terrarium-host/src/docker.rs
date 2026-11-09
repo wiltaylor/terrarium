@@ -817,17 +817,7 @@ mod tests {
             std::path::Path::new("/nonexistent"),
         )
         .unwrap();
-        assert_eq!(
-            plan.exec.args,
-            [
-                "run",
-                "-i",
-                "-t",
-                "-e",
-                "NVIDIA_VISIBLE_DEVICES",
-                "alpine:3"
-            ]
-        );
+        assert_eq!(args(&plan), "run -i -t --env-file <env> alpine:3");
         assert!(plan.exec.pty.is_some());
         assert_eq!(plan.parser, None);
     }
