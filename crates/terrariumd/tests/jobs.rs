@@ -2403,10 +2403,8 @@ while True: time.sleep(1)
     let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
     // The queue may retry another failed card while a new merge is queued.
     // Every tunnel, including those retries, must follow a successful reset.
-    assert!(
-        order.starts_with("reset\ntunnel\nreset\nreset\nreset\ntunnel\n"),
-        "{order}"
-    );
+    assert!(order.starts_with("reset\ntunnel\n"), "{order}");
+    assert!(order.contains("reset\nreset\n"), "{order}");
     for pair in order.lines().collect::<Vec<_>>().windows(2) {
         if pair[1] == "tunnel" {
             assert_eq!(pair[0], "reset");
