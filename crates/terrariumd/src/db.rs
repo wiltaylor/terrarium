@@ -3307,6 +3307,46 @@ mod tests {
     }
 
     #[test]
+    fn last_moved_at_tolerates_malformed_events_and_uses_the_card_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        // A valid move, then a malformed event with a higher seq, so the
+        // scan meets the malformed payload first.
+        conn.execute(
+            "INSERT INTO events(id,project,card,kind,payload,at) VALUES
+             ('ok','p','T-1','card','{\"change\":\"moved\",\"to\":\"review\"}','2026-11-08T12:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events(id,project,card,kind,payload,at) VALUES
+             ('bad','p','T-1','card','not JSON','2026-11-08T13:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE events SET payload = '{broken' WHERE id = 'bad'", [])
+            .unwrap();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT at FROM events WHERE card = 'T-1' AND kind = 'card'
+             AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
+             ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("SEARCH events USING INDEX"), "{plan}");
+        assert!(!plan.contains("SCAN"), "{plan}");
+        assert_eq!(
+            crate::store::board::last_moved_at(&conn, "T-1")
+                .unwrap()
+                .as_deref(),
+            Some("2026-11-08T12:00:00Z")
+        );
+        assert!(crate::store::board::last_moved_at(&conn, "T-9").unwrap().is_none());
+    }
+
+    #[test]
     fn agent_rpc_journal_upgrades_legacy_once_and_preserves_answers() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate_with(&mut conn, MIGRATIONS).unwrap();
