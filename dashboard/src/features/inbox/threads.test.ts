@@ -79,6 +79,26 @@ describe("Inbox threads", () => {
     expect(threadIcon(thread({ status: "closed", open_questions: 1, close_proposal: p }))).toEqual({ icon: "closed", label: "Closed" });
   });
 
+  it("bases waitsOnYou and the icon on one predicate: a close proposal waits on you too (TER-488)", () => {
+    const p = { summary: "Done.", links: [], by: "A1", at: "2026-11-06T09:00:00.000Z" };
+    const cases: Partial<Thread>[] = [
+      {},
+      { status: "waiting_operator" },
+      { status: "tracking" },
+      { status: "closed" },
+      { open_questions: 1 },
+      { status: "tracking", open_questions: 2 },
+      { status: "closed", open_questions: 1 },
+      { status: "waiting_agent", close_proposal: p },
+      { status: "tracking", close_proposal: p },
+      { status: "closed", close_proposal: p },
+    ];
+    for (const c of cases) expect(waitsOnYou(thread(c))).toBe(threadIcon(thread(c)).icon === "you");
+    expect(waitsOnYou(thread({ close_proposal: p }))).toBe(true);
+    expect(threadIcon(thread({ close_proposal: p }))).toEqual({ icon: "you", label: "Waiting on you: a close proposal" });
+    expect(waitsOnYou(thread({ status: "closed", close_proposal: p }))).toBe(false);
+  });
+
   it("makes the Threads badge from the counts: red when one of the threads is urgent or critical (TER-466)", () => {
     expect(threadsBadge({ thread: 0, thread_urgent: 0, thread_critical: 0 })).toBeNull();
     expect(threadsBadge({})).toBeNull();

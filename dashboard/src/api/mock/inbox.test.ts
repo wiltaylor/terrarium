@@ -185,6 +185,33 @@ describe("the inbox in the mock", () => {
     expect(criticalBanner(store.open())).toBeNull();
   });
 
+  it("shows a critical question inside a thread in the queue and the banner, and drops it after the answer (TER-488)", async () => {
+    const api = mock();
+    const calls: unknown[] = [];
+    const spy = { ...api, inbox: { ...api.inbox, list: (q?: Parameters<typeof api.inbox.list>[0]) => (calls.push(q), api.inbox.list(q)) } };
+    const store = createInboxStore(spy, { on: (fn) => api.events.stream({ since: api.world.seq }).subscribe(fn) }, { debounceMs: 0 });
+    await store.refresh();
+    expect(criticalBanner(store.open())).toBeNull();
+    // No critical thread: no read of the thread items.
+    expect(calls).toEqual([{ status: "open" }]);
+    // The agent of a thread asks a critical question.
+    const q = api.world.questions!.find((x) => x.thread && x.status === "open")!;
+    q.priority = "critical";
+    await store.refresh();
+    expect(store.counts()).toMatchObject({ critical: 0, thread_critical: 1 });
+    expect(calls.at(-1)).toEqual({ status: "open", kind: "thread" });
+    const item = store.open()[0]!;
+    expect(item).toMatchObject({ kind: "thread", critical: true });
+    expect(store.open().filter((i) => i.kind === "thread")).toHaveLength(1);
+    const b = criticalBanner(store.open())!;
+    expect(b).toMatchObject({ more: 0, text: item.thread!.topic, href: `/threads/${encodeURIComponent(item.thread!.id)}` });
+    await wait();
+    await api.questions.answer(q.id, { answer: "yes" });
+    await waitFor(() => expect(store.counts()).toMatchObject({ thread_critical: 0 }));
+    expect(criticalBanner(store.open())).toBeNull();
+    expect(store.open().some((i) => i.kind === "thread")).toBe(false);
+  });
+
   it("asks an agent: one mail on a new thread, an open watch that the badge does not count, and the answer closes it", async () => {
     const api = mock();
     const { frames, close } = await listen(api);

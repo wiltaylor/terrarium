@@ -18,11 +18,25 @@ export const threadHref = (id: string) => `/threads/${encodeURIComponent(id)}`;
 /** The open questions of a thread: the `questions` of a full thread, else `open_questions` of a list row. */
 export const openQuestionCount = (t: Pick<Thread, "questions" | "open_questions">): number => (t.questions ? t.questions.filter((q) => q.status === "open").length : (t.open_questions ?? 0));
 
-/** Does the thread wait for the operator? It is `waiting_operator`, or it is not closed and has an open question (as the Inbox item). */
-export const waitsOnYou = (t: Pick<Thread, "status" | "questions" | "open_questions">): boolean => t.status === "waiting_operator" || (t.status !== "closed" && openQuestionCount(t) > 0);
-
 /** The agent's close proposal that waits for the operator (TER-95), or `null`: none, or the thread is closed. */
 export const pendingProposal = (t: Pick<Thread, "status" | "close_proposal">): ThreadHandoff | null => (t.status === "closed" ? null : (t.close_proposal ?? null));
+
+/**
+ * Why the thread waits for the operator, or `null` when it does not (TER-488: the one predicate of
+ * {@link waitsOnYou} and {@link threadIcon}). An open thread waits on you with a close proposal, an
+ * open question, or the status `waiting_operator`; a closed thread never does.
+ */
+export function waitReason(t: Pick<Thread, "status" | "questions" | "open_questions" | "close_proposal">): string | null {
+  if (t.status === "closed") return null;
+  if (pendingProposal(t)) return "a close proposal";
+  const n = openQuestionCount(t);
+  if (n > 0) return n === 1 ? "an open question" : `${n} open questions`;
+  if (t.status === "waiting_operator") return "your turn";
+  return null;
+}
+
+/** Does the thread wait for the operator? See {@link waitReason}. */
+export const waitsOnYou = (t: Pick<Thread, "status" | "questions" | "open_questions" | "close_proposal">): boolean => waitReason(t) !== null;
 
 /** The status chip of a thread. */
 export function threadChip(t: Pick<Thread, "status" | "questions" | "open_questions" | "close_proposal">): { label: string; chip: string } {
@@ -54,10 +68,8 @@ export type ThreadIconId = "you" | "agent" | "tracking" | "closed";
 /** The icon of a thread and its tooltip. The tooltip of the person says why the thread waits on you. */
 export function threadIcon(t: Pick<Thread, "status" | "questions" | "open_questions" | "close_proposal">): { icon: ThreadIconId; label: string } {
   if (t.status === "closed") return { icon: "closed", label: "Closed" };
-  if (pendingProposal(t)) return { icon: "you", label: "Waiting on you: a close proposal" };
-  const n = openQuestionCount(t);
-  if (n > 0) return { icon: "you", label: `Waiting on you: ${n === 1 ? "an open question" : `${n} open questions`}` };
-  if (t.status === "waiting_operator") return { icon: "you", label: "Waiting on you: your turn" };
+  const why = waitReason(t);
+  if (why) return { icon: "you", label: `Waiting on you: ${why}` };
   if (t.status === "tracking") return { icon: "tracking", label: "Tracking: the work is handed off" };
   return { icon: "agent", label: "Waiting on the agent" };
 }
