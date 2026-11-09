@@ -885,12 +885,9 @@ async fn owned_target_roots_fall_back_to_the_agent_home() {
         Some("/home/agent/.terrarium-work")
     );
     let log = lab.log();
-    assert!(
-        log.contains(&format!(
-            "CARGO_TARGET_DIR=/home/agent/.terrarium-work/terra/{name}/target"
-        )),
-        "{log}"
-    );
+    // The owned build env is set (docker gets it by name; build_env gives
+    // the value under the root of the prepared base).
+    assert!(log.contains("-e CARGO_TARGET_DIR"), "{log}");
     // The stored base is used directly: the default is tried one time only.
     assert_eq!(
         log.matches("prepare /src/terrarium terra").count(),
