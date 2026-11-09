@@ -213,9 +213,15 @@ async fn like_never_copies_authority_past_owner() {
             .iter()
             .any(|g| g["grantee"] == format!("agent:{child}"))
     );
-    // A lead spawning for w still uses w's rights.
+    // A lead spawning for w still uses w's rights: the child of that
+    // spawn gets w's target and grant (TER-391 review: more than the 201).
     let r = spawn_as(&td, &lead, &w, json!({"like": "w"})).await;
     assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["agent"]["policy"]["targets"], json!(["box"]));
+    let child = id(&r.body);
+    let g = grants_to(&td, "global/openai", &child).await;
+    assert_eq!(g.len(), 1, "{g:?}");
+    assert_eq!(g[0]["level"], "read");
 }
 
 #[tokio::test]
@@ -231,6 +237,247 @@ async fn like_rejects_cross_project_sources() {
     )
     .await;
     assert_eq!(r.status, 403, "{}", r.body);
+}
+
+/// TER-391 (TER-89 review): a copy from another agent, a 403 that names
+/// the refused right, and `skipped` entries that name a grant only when
+/// the owner may already read the secret's name. The others are counted:
+/// the source's grant list is not exposed (the caller may not read it).
+#[tokio::test]
+async fn like_skips_name_only_grants_the_owner_may_read() {
+    let (td, _, w) = setup().await;
+    // `low` may use `box` and holds `global/openai` at `use`: it can read
+    // the names of `box` and `global/openai`, not of `global/gh`.
+    let low = id(&td
+        .agent(
+            "p",
+            "low",
+            json!({"policy": {"targets": ["box"],
+                              "spawn": {"templates": ["worker"], "max_concurrent": 4}}}),
+        )
+        .await);
+    td.post(
+        "/api/secrets/global/openai/grants",
+        json!({"grantee": "agent:p/low", "level": "use"}),
+    )
+    .await
+    .ok();
+
+    // No skip: the first refused copied right is named, with its secret
+    // and its level.
+    let r = spawn_as(&td, &low, &low, json!({"like": "w"})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("global/openai"), "{}", r.body);
+    assert!(message(&r).contains("level `read`"), "{}", r.body);
+
+    // With the skip: a named entry for the secret whose name the owner
+    // may read, one count for `gh`, whose name it may not.
+    let r = spawn_as(
+        &td,
+        &low,
+        &low,
+        json!({"like": "w", "like_skip_missing": true}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(
+        r.body["skipped"],
+        json!(["grant:global/openai:read",
+               "grant:1 hidden: the owner may not read their names"])
+    );
+    let child = id(&r.body);
+    assert_eq!(r.body["agent"]["policy"]["targets"], json!(["box"]));
+    assert!(grants_to(&td, "global/openai", &child).await.is_empty());
+    assert!(grants_to(&td, "global/gh", &child).await.is_empty());
+
+    // An owner with no right at all learns no name, only the counts.
+    let weak = id(&td
+        .agent("p", "weak", json!({"policy": {"spawn": {"templates": ["worker"]}}}))
+        .await);
+    let r = spawn_as(
+        &td,
+        &weak,
+        &weak,
+        json!({"like": "w", "like_skip_missing": true}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(
+        r.body["skipped"],
+        json!(["target:box", "grant:2 hidden: the owner may not read their names"])
+    );
+    let body = r.body.to_string();
+    assert!(!body.contains("openai") && !body.contains("/gh"), "{body}");
+    let child = id(&r.body);
+    assert!(grants_to(&td, "global/openai", &child).await.is_empty());
+    assert!(grants_to(&td, "global/gh", &child).await.is_empty());
+}
+
+/// TER-391 (TER-89 review): a body grant replaces the copied grant of
+/// the same secret, also at a lower level.
+#[tokio::test]
+async fn a_body_grant_replaces_the_copied_grant() {
+    let (td, _, w) = setup().await;
+    let r = spawn_as(&td, &w, &w, json!({"like": "w", "grants": ["openai:use"]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child = id(&r.body);
+    let g = grants_to(&td, "global/openai", &child).await;
+    assert_eq!(g.len(), 1, "{g:?}");
+    assert_eq!(g[0]["level"], "use");
+    assert!(g[0].get("env").is_none(), "{g:?}");
+    // The other copied grant still comes.
+    let g = grants_to(&td, "global/gh", &child).await;
+    assert_eq!(g.len(), 1, "{g:?}");
+    assert_eq!(g[0]["level"], "use");
+}
+
+/// TER-391 (TER-89 review): a copied target that the body also names is
+/// granted once, also when the owner holds it by a lease.
+#[tokio::test]
+async fn a_copied_target_is_granted_once() {
+    let (td, _, w) = setup().await;
+    let src = id(&td
+        .agent("p", "src", json!({"policy": {"targets": ["p-pbox"]}}))
+        .await);
+    td.post(
+        "/api/targets/p-pbox/leases",
+        json!({"agent": "w", "until": "2099-01-01T00:00:00.000Z"}),
+    )
+    .await
+    .ok();
+    let r = spawn_as(&td, &w, &w, json!({"targets": ["p-pbox"], "like": "src"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child = id(&r.body);
+    let held: Vec<Value> = leases_of(&td, &child)
+        .await
+        .into_iter()
+        .filter(|l| l["target"] == "p-pbox")
+        .collect();
+    assert_eq!(held.len(), 1, "{held:?}");
+    // A policy target twice is still one entry in the child's policy.
+    let r = spawn_as(&td, &w, &w, json!({"targets": ["box"], "like": "w"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["agent"]["policy"]["targets"], json!(["box"]));
+}
+
+/// TER-391 (TER-89 review): the source's harness must match the chosen
+/// template, and the error names it, also when it is the alternative
+/// picked for headroom. An unknown source is 404.
+#[tokio::test]
+async fn like_harness_and_source_errors_name_the_cause() {
+    let (td, _, w) = setup().await;
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "hsub", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    for (name, spec) in [
+        ("pitemp", json!({"harness": "pi"})),
+        ("altcase", json!({"harness": "claude", "subscription": "hsub"})),
+        ("altcase-alt", json!({"harness": "pi"})),
+    ] {
+        td.post(
+            "/api/templates",
+            json!({"name": name, "project": "p", "spec": spec}),
+        )
+        .await
+        .ok();
+    }
+    td.patch(
+        &format!("/api/agents/{w}"),
+        json!({"policy": {"targets": ["box"],
+                          "spawn": {"templates": ["worker", "pitemp", "altcase", "altcase-alt"],
+                                    "max_concurrent": 4}}}),
+    )
+    .await
+    .ok();
+    let r = spawn_as(&td, &w, &w, json!({"template": "pitemp", "like": "w"})).await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    assert!(
+        message(&r).contains("same harness as the template `pitemp`"),
+        "{}",
+        r.body
+    );
+    // `hsub` has no login, so the alternative is tried: its harness
+    // differs, and the error names `altcase-alt`, not just `altcase`.
+    let r = spawn_as(&td, &w, &w, json!({"template": "altcase", "like": "w"})).await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    assert!(
+        message(&r).contains("same harness as the template `altcase-alt`"),
+        "{}",
+        r.body
+    );
+    let r = spawn_as(&td, &w, &w, json!({"like": "nope"})).await;
+    assert_eq!(r.status, 404, "{}", r.body);
+    assert!(message(&r).contains("no agent `nope`"), "{}", r.body);
+}
+
+/// TER-391 (TER-89 review): `--like` copies the source's subscription
+/// and pool over the template's and the owner's, one rule in the
+/// selection and the write.
+#[tokio::test]
+async fn like_replaces_the_subscription_and_pool() {
+    let (td, _, _w) = setup().await;
+    let s = state(&td).state_dir.clone();
+    for n in ["like-a", "like-b"] {
+        td.post(
+            "/api/subscriptions",
+            json!({"name": n, "provider": "anthropic", "harnesses": ["claude"]}),
+        )
+        .await
+        .ok();
+        let login = r#"{"claudeAiOauth": {"accessToken": "t", "refreshToken": "r", "expiresAt": 4102444800000}}"#;
+        terrariumd::accounts::write_credential(&s, n, HarnessId::Claude, login.as_bytes()).unwrap();
+    }
+    td.post(
+        "/api/templates",
+        json!({"name": "fixed", "project": "p",
+               "spec": {"harness": "claude", "subscription": "like-b"}}),
+    )
+    .await
+    .ok();
+    let pooled = id(&td
+        .agent(
+            "p",
+            "pooled",
+            json!({"subscription": "like-a", "subscription_pool": ["like-b"],
+                   "policy": {"spawn": {"templates": ["worker", "fixed"], "max_concurrent": 8}}}),
+        )
+        .await);
+    let bare = id(&td.agent("p", "bare", json!({})).await);
+    let rich = id(&td
+        .agent(
+            "p",
+            "rich",
+            json!({"subscription": "like-a", "subscription_pool": ["like-b"]}),
+        )
+        .await);
+
+    // A source with none: the child gets none, not the owner's, not the
+    // template's, and the inherited pool is cleared.
+    let r = spawn_as(&td, &pooled, &pooled, json!({"like": "bare"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert!(r.body["agent"]["subscription"].is_null(), "{}", r.body);
+    assert!(r.body["agent"]["subscription_pool"].is_null(), "{}", r.body);
+    let r = spawn_as(
+        &td,
+        &pooled,
+        &pooled,
+        json!({"template": "fixed", "like": "bare"}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert!(r.body["agent"]["subscription"].is_null(), "{}", r.body);
+
+    // A source with its own: the child gets the source's pick and pool.
+    let r = spawn_as(&td, &pooled, &pooled, json!({"like": "rich"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["agent"]["subscription"], "like-a");
+    assert_eq!(
+        r.body["agent"]["subscription_pool"],
+        json!(["like-a", "like-b"])
+    );
 }
 
 /// A target in the owner's policy goes into the child's policy, also a

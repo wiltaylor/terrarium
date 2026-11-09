@@ -25,8 +25,10 @@ subscription and pool. The source must belong to the owner's project and use the
 template's harness. Secret values are never copied. Each copied right must be
 one the owner can grant, not just one the source holds. Otherwise the spawn is
 refused with the right named. Add `--like-skip-missing` to omit forbidden copied
-rights and list them in the response. Explicit or template grants replace copied
-grants of the same secret. Source leases and project grants are not copied.
+rights and list them in the response; a skipped grant names its secret only when
+you may already read that name, the others are only counted. Explicit or template
+grants replace copied grants of the same secret. Source leases and project
+grants are not copied.
 
 You can spawn only with spawn rights: the `spawn` block of your policy. A
 lead (project_admin) or the operator sets it. It gives:

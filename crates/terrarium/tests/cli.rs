@@ -111,6 +111,7 @@ fn stub() -> axum::Router {
         .route("/api/skills", post(skill_create))
         .route("/api/skills/{name}", axum::routing::put(skill_update))
         .route("/api/agents/{id}/interrupt", post(interrupt))
+        .route("/api/agents/{owner}/spawn", post(spawn_post))
         .route("/api/cards/{id}", axum::routing::patch(card_patch))
         .route(
             "/api/cards/{id}/claim",
@@ -120,6 +121,23 @@ fn stub() -> axum::Router {
             }),
         )
         .fallback(missing)
+}
+
+/// `POST /api/agents/{owner}/spawn` of the stub: echoes the body in
+/// `sent`, so that a test sees what the CLI sent.
+async fn spawn_post(
+    axum::extract::Path(owner): axum::extract::Path<String>,
+    Json(b): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CREATED,
+        Json(json!({"id": "S1", "sent": b,
+             "skipped": ["target:box",
+                         "grant:1 hidden: the owner may not read their names"],
+             "project": "terra", "name": "lead-worker-1", "template": b["template"],
+             "harness": "claude", "owner": owner, "owner_name": "lead",
+             "deadline_at": "2099-01-01T00:00:00.000Z"})),
+    )
 }
 
 /// `PATCH /api/cards/{id}` of the stub: the card with the patch in
@@ -1039,4 +1057,79 @@ fn hook_stays_quiet_and_exits_zero() {
     let o = bin().args(["hook", "Stop"]).output().unwrap();
     assert!(o.status.success());
     assert!(text(&o.stderr).contains("TERRARIUM_SOCKET is not set"));
+}
+
+/// TER-391 (TER-89 review): `agent spawn --like` sends the copy flags, and
+/// the skipped list prints, also the count entry for grants whose names
+/// the owner may not read. `--like-skip-missing` without `--like` is a
+/// usage error.
+#[test]
+fn agent_spawn_like_sends_the_flags_and_prints_skipped() {
+    let dir = temp_dir("spawn-like");
+    let socket = serve_unix(&dir);
+
+    let o = run(
+        &socket,
+        &[
+            "--json",
+            "agent",
+            "spawn",
+            "worker",
+            "--task",
+            "do it",
+            "--like",
+            "w",
+            "--like-skip-missing",
+            "--for",
+            "w",
+        ],
+    );
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["sent"]["template"], "worker");
+    assert_eq!(v["sent"]["task"], "do it");
+    assert_eq!(v["sent"]["like"], "w");
+    assert_eq!(v["sent"]["like_skip_missing"], true);
+
+    let o = run(
+        &socket,
+        &[
+            "agent",
+            "spawn",
+            "worker",
+            "--task",
+            "do it",
+            "--like",
+            "w",
+            "--like-skip-missing",
+            "--for",
+            "w",
+        ],
+    );
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    assert!(out.contains("skipped copied right: target:box"), "{out}");
+    assert!(
+        out.contains(
+            "skipped copied right: grant:1 hidden: the owner may not read their names"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("spawned terra/lead-worker-1"), "{out}");
+
+    // No like: the flag is not sent. Without one: a usage error.
+    let o = run(
+        &socket,
+        &["--json", "agent", "spawn", "worker", "--task", "t", "--for", "w"],
+    );
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(v["sent"].get("like").is_none(), "{}", v);
+    assert!(v["sent"].get("like_skip_missing").is_none(), "{}", v);
+    let o = run(
+        &socket,
+        &["agent", "spawn", "worker", "--task", "t", "--like-skip-missing"],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    std::fs::remove_dir_all(&dir).ok();
 }

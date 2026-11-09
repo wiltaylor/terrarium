@@ -3557,12 +3557,22 @@ or the operator may spawn for an owner. The checks, in order:
 
 `like` (CLI `--like <agent>`) copies a same-project agent's policy targets,
 agent-level secret grant references (never values), skills settings, subscription
-and pool. The template still supplies the harness and other settings. The source
-must use the same harness. Subscription selection uses the copied pool's headroom.
-Each copied target and grant is checked against the owner through the normal
-spawn-rights checks. A missing right is `403`, with its name. With
+and pool: the copied subscription and pool replace the template's and the
+owner's, and subscription selection uses the copied pool's headroom. The
+template still supplies the harness and other settings. The source must use
+the same harness; a mismatch is `422 invalid` and names the template, also
+when it is the alternative picked for headroom. Each copied target and grant
+is checked against the owner through the normal spawn-rights checks, and a
+copied target that the body's `targets` also names is granted once. A missing
+right is `403`, with its name: for a copied grant the message names the
+source's secret and level, the price of a precise refusal. With
 `like_skip_missing: true` (CLI `--like-skip-missing`, requires `like`), those
-forbidden rights are omitted and listed in the response's `skipped` array.
+forbidden rights are omitted and listed in the response's `skipped` array:
+`target:<name>` and `grant:<scope>/<name>:<level>`, the grant entries only
+for secrets whose name the owner may already read (a grant of its own, or
+the operator, which reads every name). Skipped grants on secrets that the
+owner may not read are counted in one `grant:<n> hidden: the owner may not
+read their names` entry, so the list does not expose the source's grants.
 Other errors still fail the spawn. Explicit and template grants replace copied
 grants of the same secret. Project grants and leases of the source are not copied.
 
