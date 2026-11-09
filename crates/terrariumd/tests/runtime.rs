@@ -3375,40 +3375,6 @@ async fn a_swap_by_restart_waits_for_the_end_of_the_turn() {
     assert_eq!(r["applied"], "restarted", "{r}");
     td.wait_events(&id, "session_started", |e| e.len() == 3)
         .await;
-    td.wait_status(&id, "idle").await;
-
-    // Blocked on a question is in the turn (TER-524): the swap waits for
-    // the answer and the end of the turn.
-    td.post(
-        &format!("/api/agents/{id}/send"),
-        Some(json!({"text": "/question"})),
-    )
-    .await;
-    td.wait_status(&id, "blocked").await;
-    let r = td
-        .post(
-            &format!("/api/agents/{id}/subscription"),
-            Some(json!({"subscription": "max-y"})),
-        )
-        .await;
-    assert_eq!(r["applied"], "restart_scheduled", "{r}");
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    assert_eq!(td.events(&id, "session_started").await.len(), 3);
-    assert_eq!(td.status(&id).await, "blocked");
-    td.post(
-        &format!("/api/agents/{id}/send"),
-        Some(json!({"text": "y", "raw": true})),
-    )
-    .await;
-    let starts = td
-        .wait_events(&id, "session_started", |e| e.len() == 4)
-        .await;
-    let ends = td.events(&id, "turn_end").await;
-    assert!(
-        ends.last().unwrap()["seq"].as_u64() < starts[3]["seq"].as_u64(),
-        "the restart came after the turn: {ends:#?} {starts:#?}"
-    );
-    td.wait_status(&id, "idle").await;
 }
 
 /// PLAN §18 with the real supervisor: work for a stopped agent wakes it

@@ -1167,6 +1167,65 @@ async fn an_older_runner_upgrades_after_its_turn() {
     }
 }
 
+/// TER-524: a runner `blocked` on a question is in its turn. An account
+/// swap that cannot be live waits for the answer and the end of the turn,
+/// then restarts the harness with resume. It does not restart at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_swap_waits_for_a_blocked_turn() {
+    let td = Td::start().await;
+    for n in ["max-x", "max-y"] {
+        td.post(
+            "/api/subscriptions",
+            Some(json!({"name": n, "provider": "anthropic", "harnesses": ["claude"]})),
+        )
+        .await;
+    }
+    let id = td
+        .agent(
+            "asks",
+            json!({"subscription": "max-x", "subscription_pool": ["max-x", "max-y"]}),
+        )
+        .await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let old = td.runner_pid(&id).unwrap();
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/question"})),
+    )
+    .await;
+    td.wait_status(&id, "blocked").await;
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": "max-y"})),
+        )
+        .await;
+    assert_eq!(r["applied"], "restart_scheduled", "{r}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(td.runner_pid(&id), Some(old), "no restart in a turn");
+    assert_eq!(td.events(&id, "session_started").await.len(), 1);
+    assert_eq!(td.status(&id).await, "blocked");
+
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "y", "raw": true})),
+    )
+    .await;
+    let starts = td
+        .wait_events(&id, "session_started", |e| e.len() == 2)
+        .await;
+    let ends = td.events(&id, "turn_end").await;
+    assert!(
+        ends.last().unwrap()["seq"].as_u64() < starts[1]["seq"].as_u64(),
+        "the restart came after the turn: {ends:#?} {starts:#?}"
+    );
+    td.wait_status(&id, "idle").await;
+    assert_ne!(td.runner_pid(&id), Some(old), "a new runner process");
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+}
+
 /// M2 (TER-262): a stop between the kill of the old runner and the launch
 /// of the new one frees the upgrade slot: the next upgrade still runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
