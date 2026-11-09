@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use super::{event_line, print_generic, print_table, set_opt};
 use crate::api::{ServerError, query};
 use crate::cli::{
-    AdminTargetCmd, AuditArgs, BackupCmd, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, LinkCmd, SnapshotArgs,
-    SnapshotCmd, SnapshotOn, SubscriptionCmd, UsageCmd,
+    AdminTargetCmd, AuditArgs, BackupCmd, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, LinkCmd,
+    SnapshotArgs, SnapshotCmd, SnapshotOn, SubscriptionCmd, UsageCmd,
 };
 use crate::ctx::Ctx;
 use crate::output::field;
@@ -941,7 +941,11 @@ fn print_pairing_code(ctx: &Ctx, v: &Value) {
          the TLS certificate SHA-256 of your reverse proxy\n",
         field(link, "label"),
         field(link, "id"),
-        if link["read_only"] == true { ", read-only" } else { "" },
+        if link["read_only"] == true {
+            ", read-only"
+        } else {
+            ""
+        },
         field(v, "code_expires_at"),
         match v["url"].as_str() {
             Some(u) => u.to_owned(),

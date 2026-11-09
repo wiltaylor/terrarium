@@ -80,9 +80,9 @@ use tracing::{error, info};
 
 pub use artifacts::{artifact_router, run_prune};
 pub use config::spawn_config_sync;
+pub use links::this_instance;
 pub use schedules::{run_schedule, run_triggered};
 pub use subscriptions::settle_defaults as settle_account_defaults;
-pub use links::this_instance;
 pub use system::{DefinitionCounts, Health, VersionInfo};
 
 use crate::actor::{Transport, resolve_actor};
@@ -998,21 +998,22 @@ pub fn tcp_router(state: Shared, token: String) -> anyhow::Result<Router> {
             state.state_dir.join(session::KEY_FILE).display()
         )
     })?;
-    let auth = TokenAuth::new(token, state.web.ws_query_token).with_sessions(
-        session::Sessions {
-            key,
-            ttl: state.web.session_ttl,
-            cli_ttl: state.web.cli_session_ttl,
-            max_age: state.web.session_max_age,
+    let auth = TokenAuth::new(token, state.web.ws_query_token)
+        .with_sessions(
+            session::Sessions {
+                key,
+                ttl: state.web.session_ttl,
+                cli_ttl: state.web.cli_session_ttl,
+                max_age: state.web.session_max_age,
+                db: state.db.clone(),
+                operator: state.operator_auth.clone(),
+            },
+            state.web.public_origin(),
+        )
+        .with_links(LinkAuth {
             db: state.db.clone(),
-            operator: state.operator_auth.clone(),
-        },
-        state.web.public_origin(),
-    )
-    .with_links(LinkAuth {
-        db: state.db.clone(),
-        runtime: state.links.clone(),
-    });
+            runtime: state.links.clone(),
+        });
     let on_dashboard = artifacts_on_dashboard(&state);
     Ok(tcp_router_with(state, auth, on_dashboard))
 }
@@ -2851,7 +2852,13 @@ mod tests {
         let code = v["code"].as_str().unwrap().to_owned();
         assert!(code.starts_with("tlp_"));
         assert_eq!(v["link"]["status"], "pending");
-        assert!(v["instance"]["id"].as_str().unwrap().parse::<ulid::Ulid>().is_ok());
+        assert!(
+            v["instance"]["id"]
+                .as_str()
+                .unwrap()
+                .parse::<ulid::Ulid>()
+                .is_ok()
+        );
         let body = serde_json::json!({"code": code, "home_instance_id": ulid::Ulid::new().to_string(),
                                       "home_name": "home"});
         // No `Authorization`: the code is the proof.
@@ -2895,16 +2902,19 @@ mod tests {
         ] {
             let r = send(link_app(&s), m, p, &h).await;
             assert_eq!(r.status(), StatusCode::FORBIDDEN, "{m} {p}");
-            assert_eq!(json_of(r).await["error"]["code"], "link_forbidden", "{m} {p}");
+            assert_eq!(
+                json_of(r).await["error"]["code"],
+                "link_forbidden",
+                "{m} {p}"
+            );
         }
         let rows = audit_rows(&s, "link.forbidden").await;
         assert!(!rows.is_empty());
         assert!(rows.iter().all(|(a, _)| *a == format!("link:{id}")));
         // The key is in no audit row and no event.
         let k = key.clone();
-        let leaked: i64 = s
-            .db
-            .read(move |c| {
+        let leaked: i64 =
+            s.db.read(move |c| {
                 Ok(c.query_row(
                     "SELECT (SELECT count(*) FROM audit WHERE instr(detail, ?1) > 0)
                           + (SELECT count(*) FROM events WHERE instr(payload, ?1) > 0)",
@@ -2972,7 +2982,10 @@ mod tests {
             link_app(&s),
             "GET",
             "/api/events?live=1",
-            &[("authorization", auth.as_str()), ("accept", "text/event-stream")],
+            &[
+                ("authorization", auth.as_str()),
+                ("accept", "text/event-stream"),
+            ],
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);
@@ -2992,7 +3005,13 @@ mod tests {
             .expect("the stream stays open after the revoke")
             .unwrap()
             .unwrap();
-        let r = send(link_app(&s), "GET", "/api/agents", &[("authorization", auth.as_str())]).await;
+        let r = send(
+            link_app(&s),
+            "GET",
+            "/api/agents",
+            &[("authorization", auth.as_str())],
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     }
 

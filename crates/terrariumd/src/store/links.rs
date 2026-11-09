@@ -184,15 +184,7 @@ pub fn create(t: &mut Tx<'_>, label: &str, read_only: bool) -> ApiResult<(Link, 
         "INSERT INTO links (id, label, read_only, pair_code_hash, pair_expires_at,
                             created_by, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            id,
-            label,
-            read_only,
-            hash,
-            code.expires_at,
-            t.actor,
-            now()
-        ],
+        params![id, label, read_only, hash, code.expires_at, t.actor, now()],
     )?;
     Ok((get(t, &id)?, code))
 }
@@ -397,13 +389,15 @@ mod tests {
             .unwrap()
             .unwrap();
         let id = link.id.clone();
-        let (_, new_code, old) = db
-            .write("operator", move |t| rotate(t, &id))
-            .await
-            .unwrap();
+        let (_, new_code, old) = db.write("operator", move |t| rotate(t, &id)).await.unwrap();
         assert_eq!(old, Some(token_hash(&key)));
         let h = token_hash(&key);
-        assert!(db.read(move |c| by_key_hash(c, &h)).await.unwrap().is_none());
+        assert!(
+            db.read(move |c| by_key_hash(c, &h))
+                .await
+                .unwrap()
+                .is_none()
+        );
         let (_, key2) = db
             .write("operator", move |t| pair(t, &new_code.code, &home()))
             .await
@@ -413,7 +407,12 @@ mod tests {
         let (_, old) = db.write("operator", move |t| revoke(t, &id)).await.unwrap();
         assert_eq!(old, Some(token_hash(&key2)));
         let h = token_hash(&key2);
-        assert!(db.read(move |c| by_key_hash(c, &h)).await.unwrap().is_none());
+        assert!(
+            db.read(move |c| by_key_hash(c, &h))
+                .await
+                .unwrap()
+                .is_none()
+        );
         let id = link.id.clone();
         let shown = db.read(move |c| get(c, &id)).await.unwrap();
         assert_eq!(shown.status, "revoked");

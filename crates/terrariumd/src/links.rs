@@ -59,7 +59,12 @@ pub fn current_label() -> Option<String> {
 /// The path is compared after percent-decoding, with empty and `.`
 /// segments dropped, in lower case, so that no spelling of a denied route
 /// passes (the router itself matches only the plain spelling).
-pub fn denied(method: &Method, path: &str, websocket: bool, read_only: bool) -> Option<&'static str> {
+pub fn denied(
+    method: &Method,
+    path: &str,
+    websocket: bool,
+    read_only: bool,
+) -> Option<&'static str> {
     let decoded = crate::api::percent_decode(path).to_ascii_lowercase();
     let segs: Vec<&str> = decoded
         .split(['/', '\\'])
@@ -295,13 +300,10 @@ pub fn load_or_create_instance_id(state_dir: &Path) -> ApiResult<String> {
                         _ => Ok(()),
                     }
                 })
-                .map_err(|e| {
-                    ApiError::internal(format!("cannot write {}: {e}", path.display()))
-                })?;
+                .map_err(|e| ApiError::internal(format!("cannot write {}: {e}", path.display())))?;
             let _ = std::fs::remove_file(&tmp);
-            let s = std::fs::read_to_string(&path).map_err(|e| {
-                ApiError::internal(format!("cannot read {}: {e}", path.display()))
-            })?;
+            let s = std::fs::read_to_string(&path)
+                .map_err(|e| ApiError::internal(format!("cannot read {}: {e}", path.display())))?;
             Ok(s.trim().to_owned())
         }
         Err(e) => Err(ApiError::internal(format!(

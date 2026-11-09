@@ -8,13 +8,13 @@
 //! one-time pairing code is the proof.
 
 use axum::extract::{ConnectInfo, Path, State};
-use std::net::SocketAddr;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 
 use super::{ApiJson, ApiQuery, Shared};
 use crate::actor::Actor;
