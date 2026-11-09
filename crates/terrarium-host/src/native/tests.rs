@@ -168,7 +168,7 @@ fn inventory_is_strict() {
         format!("{A}, 0\n{B}, 0"),
         format!("{A}, 255"),
         "MIG-abcd, 0".to_owned(),
-        format!("{A}"),
+        A.to_owned(),
     ] {
         assert!(parse_minors(&bad).is_err(), "{bad}");
     }
