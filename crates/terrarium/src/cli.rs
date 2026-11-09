@@ -1968,6 +1968,12 @@ pub enum TestCmd {
         /// Only runs with a failed or errored test
         #[arg(long)]
         failed: bool,
+        /// At most this many runs, the newest
+        #[arg(long, default_value_t = 50, conflicts_with = "all")]
+        limit: usize,
+        /// Every run: follow every page
+        #[arg(long)]
+        all: bool,
     },
     /// Show a run: the counts, and each failed case with its message
     Show {
