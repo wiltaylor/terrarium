@@ -84,6 +84,9 @@ pub struct ClientOptions {
     pub version: String,
     /// Self-update ([`crate::selfupdate`]). `None`: off.
     pub self_update: Option<SelfUpdateOptions>,
+    /// Native GPU enforcement through the root helper (`[native_gpu]`,
+    /// TER-345). `None`: off.
+    pub native: Option<crate::native::NativeOptions>,
 }
 
 impl ClientOptions {
@@ -113,6 +116,7 @@ impl ClientOptions {
             metrics_interval: Duration::from_secs(METRICS_INTERVAL_SECS),
             version: terrarium_version::FULL.to_owned(),
             self_update: None,
+            native: None,
         }
     }
 }
@@ -254,6 +258,10 @@ struct Shared {
     remotes: Arc<crate::display::remote::Remotes>,
     /// A self-update runs (only one at a time).
     updating: std::sync::atomic::AtomicBool,
+    /// The helper answered with enforcement at the last `hello`
+    /// (`capabilities.native_gpu.enforced`). Native routing follows it,
+    /// not the config.
+    native_enforced: std::sync::atomic::AtomicBool,
     /// The last offered version that this process refused or failed to
     /// install: it does not try that version again.
     update_refused: Mutex<Option<String>>,
@@ -292,6 +300,12 @@ impl Client {
             bearer: Mutex::new(opts.token.clone()),
             remotes: crate::display::remote::Remotes::new(opts.display.rdp_known_hosts_path()),
             updating: std::sync::atomic::AtomicBool::new(false),
+            native_enforced: std::sync::atomic::AtomicBool::new(
+                opts.capabilities
+                    .native_gpu
+                    .as_ref()
+                    .is_some_and(|n| n.enforced),
+            ),
             update_refused: Mutex::new(None),
             restart: tokio::sync::Notify::new(),
         };
@@ -409,6 +423,15 @@ impl Client {
             capabilities.gpus = crate::gpu::sample_with(&self.opts.nvidia_smi_bin)
                 .await
                 .unwrap_or_default();
+        }
+        if let Some(native) = &self.opts.native {
+            // A helper that went away or changed its version since the
+            // start closes native GPU admission on the daemon.
+            let cap = crate::native::capability(&native.socket).await;
+            self.shared
+                .native_enforced
+                .store(cap.enforced, std::sync::atomic::Ordering::SeqCst);
+            capabilities.native_gpu = Some(cap);
         }
         let token = self.token().clone();
         let resume = token.map(|token| {
@@ -881,6 +904,7 @@ impl Client {
                 let id = req.session;
                 let plan = crate::verb::plan_exec(&req, p);
                 let plan = match (plan, &req.limits) {
+                    (Ok(plan), Some(l)) if l.native_gpu.is_some() => self.native(plan, l, id),
                     (Ok(plan), Some(l)) => self.limited(plan, l, id).await,
                     (plan, _) => plan,
                 };
@@ -902,20 +926,11 @@ impl Client {
                     need(docker_ok, "docker")
                         .and_then(|_| docker::plan_update(container, &r.limits, db))
                 } else {
-                    r.limits
-                        .host_support(o.capabilities.limits.as_ref())
-                        .map_err(BuildError::bad)
-                        .and_then(|_| {
-                            crate::limits::reservation_plan(&r.target, &r.holder, &r.limits)
-                        })
+                    self.slice_apply_plan(&r)
                 };
                 self.start(r.session, plan, tx);
             }
-            F::ResourceStop(r) => self.start(
-                r.session,
-                crate::limits::reservation_stop_plan(&r.target, &r.holder),
-                tx,
-            ),
+            F::ResourceStop(r) => self.start(r.session, self.slice_stop_plan(&r), tx),
             F::DockerStart(r) => self.start(
                 r.session,
                 need(docker_ok, "docker").and_then(|_| docker::plan_start(&r, db)),
@@ -1307,6 +1322,90 @@ impl Client {
         Ok(plan)
     }
 
+    /// The helper, when `[native_gpu]` is on and the helper answered with
+    /// enforcement at the last `hello`.
+    fn native_live(&self) -> Option<&crate::native::NativeOptions> {
+        self.opts.native.as_ref().filter(|_| {
+            self.shared
+                .native_enforced
+                .load(std::sync::atomic::Ordering::SeqCst)
+        })
+    }
+
+    /// `resource.apply` of a holder slice: to the helper's system slice
+    /// when the helper enforces (native sessions are there), else to the
+    /// user slice.
+    pub(crate) fn slice_apply_plan(
+        &self,
+        r: &crate::protocol::ResourceApply,
+    ) -> Result<VerbPlan, BuildError> {
+        if let Some(native) = self.native_live() {
+            r.limits.validate().map_err(BuildError::bad)?;
+            return crate::native::verb_plan(
+                native,
+                &crate::native::Request::Apply(crate::native::ApplyRequest {
+                    target: r.target.clone(),
+                    holder: r.holder.clone(),
+                    limits: r.limits.clone(),
+                }),
+            );
+        }
+        r.limits
+            .host_support(self.opts.capabilities.limits.as_ref())
+            .map_err(BuildError::bad)?;
+        crate::limits::reservation_plan(&r.target, &r.holder, &r.limits)
+    }
+
+    /// `resource.stop`, routed like [`Self::slice_apply_plan`].
+    pub(crate) fn slice_stop_plan(
+        &self,
+        r: &crate::protocol::ResourceStop,
+    ) -> Result<VerbPlan, BuildError> {
+        match self.native_live() {
+            Some(native) => crate::native::verb_plan(
+                native,
+                &crate::native::Request::Stop(crate::native::SliceRequest {
+                    target: r.target.clone(),
+                    holder: r.holder.clone(),
+                }),
+            ),
+            None => crate::limits::reservation_stop_plan(&r.target, &r.holder),
+        }
+    }
+
+    /// Run an `exec` through the native GPU helper (TER-345): the daemon
+    /// marked it with `native_gpu`. A host agent without `[native_gpu]`, or
+    /// whose helper did not answer with enforcement at the last `hello`,
+    /// refuses it: the session never runs without its device policy.
+    pub(crate) fn native(
+        &self,
+        mut plan: VerbPlan,
+        l: &crate::protocol::ExecLimits,
+        session: SessionId,
+    ) -> Result<VerbPlan, BuildError> {
+        let refuse = |message: &str| BuildError {
+            code: ErrorCode::Unsupported,
+            message: message.to_owned(),
+        };
+        if self.opts.native.is_none() {
+            return Err(refuse(
+                "native GPU enforcement is off on this host agent ([native_gpu] in its config)",
+            ));
+        }
+        let Some(native) = self.native_live() else {
+            return Err(refuse(
+                "the native GPU helper did not answer with enforcement at the last hello",
+            ));
+        };
+        let req =
+            crate::native::start_request(&plan.exec, session, Some(l), &self.opts.paths.work_dir);
+        tracing::info!(session, holder = %req.holder, gpus = ?req.gpus, lease = ?req.lease, "native session");
+        plan.exec =
+            crate::native::shim_plan(native, &crate::native::Request::Start(req), plan.exec)
+                .map_err(BuildError::bad)?;
+        Ok(plan)
+    }
+
     fn prepare_ctx(&self) -> crate::prepare::Ctx {
         crate::prepare::Ctx {
             paths: self.opts.paths.clone(),
@@ -1585,6 +1684,142 @@ mod tests {
         assert_eq!(hello.capabilities.gpus[0].memory_bytes, 16 << 30);
         std::fs::write(&inventory, "unavailable\n").unwrap();
         assert!(client.hello().await.capabilities.gpus.is_empty());
+    }
+
+    /// A helper that answers `hello` with the `session` right.
+    async fn fake_helper(socket: &std::path::Path) -> tokio::task::JoinHandle<()> {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let _ = crate::native::read_frame(&mut s).await;
+                let reply = crate::native::Reply::Hello {
+                    version: crate::native::PROTOCOL_VERSION,
+                    rights: vec![crate::native::Right::Session],
+                };
+                let _ = crate::native::write_frame(
+                    &mut s,
+                    crate::native::Kind::Reply,
+                    &serde_json::to_vec(&reply).unwrap(),
+                )
+                .await;
+            }
+        })
+    }
+
+    fn native_client(socket: &std::path::Path) -> Client {
+        let mut opts = ClientOptions::new("ws://localhost", "test", "test");
+        opts.native = Some(crate::native::NativeOptions {
+            socket: socket.to_path_buf(),
+            shim: "/opt/terrarium-host".into(),
+        });
+        opts.capabilities.limits = Some(crate::protocol::LimitsCapability {
+            systemd: true,
+            controllers: vec!["cpu".into(), "memory".into(), "cpuset".into()],
+            ..Default::default()
+        });
+        Client::new(opts)
+    }
+
+    fn native_exec() -> (VerbPlan, crate::protocol::ExecLimits) {
+        let plan = VerbPlan::plain(crate::session::ExecPlan {
+            program: "true".into(),
+            ..Default::default()
+        });
+        let l = crate::protocol::ExecLimits {
+            target: "box".into(),
+            holder: "p/a".into(),
+            limits: Default::default(),
+            reservation: None,
+            native_gpu: Some(Default::default()),
+        };
+        (plan, l)
+    }
+
+    #[tokio::test]
+    async fn native_routing_follows_the_helper_answer_at_hello() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("helper.sock");
+        let apply = crate::protocol::ResourceApply {
+            session: 1,
+            target: "box".into(),
+            holder: "p/a".into(),
+            container: None,
+            limits: terrarium_core::resources::RuntimeLimits {
+                cpus: Some(vec![1]),
+                ..Default::default()
+            },
+        };
+        let stop = crate::protocol::ResourceStop {
+            session: 2,
+            target: "box".into(),
+            holder: "p/a".into(),
+        };
+        // [native_gpu] on, but the helper does not answer: user slices, and
+        // a native exec is refused rather than run without device policy.
+        let client = native_client(&socket);
+        let hello = client.hello().await;
+        assert!(!hello.capabilities.native_gpu.unwrap().enforced);
+        assert_eq!(
+            client.slice_apply_plan(&apply).unwrap().exec.program,
+            "systemctl"
+        );
+        assert_eq!(
+            client.slice_stop_plan(&stop).unwrap().exec.program,
+            "systemctl"
+        );
+        let (plan, l) = native_exec();
+        let e = client.native(plan, &l, 3).err().unwrap();
+        assert!(e.message.contains("did not answer"), "{}", e.message);
+
+        // The helper answers: apply, stop, and exec go through the shim.
+        let helper = fake_helper(&socket).await;
+        assert!(
+            client
+                .hello()
+                .await
+                .capabilities
+                .native_gpu
+                .unwrap()
+                .enforced
+        );
+        for plan in [
+            client.slice_apply_plan(&apply).unwrap(),
+            client.slice_stop_plan(&stop).unwrap(),
+        ] {
+            assert_eq!(plan.exec.program, "/opt/terrarium-host");
+            assert_eq!(plan.exec.args[0], "native");
+            assert!(plan.exec.env.contains_key(crate::native::REQUEST_ENV));
+        }
+        let (plan, l) = native_exec();
+        let plan = client.native(plan, &l, 3).unwrap();
+        assert_eq!(plan.exec.program, "/opt/terrarium-host");
+
+        // The helper goes away: the next hello turns routing back.
+        helper.abort();
+        let _ = helper.await;
+        std::fs::remove_file(&socket).unwrap();
+        assert!(
+            !client
+                .hello()
+                .await
+                .capabilities
+                .native_gpu
+                .unwrap()
+                .enforced
+        );
+        assert_eq!(
+            client.slice_stop_plan(&stop).unwrap().exec.program,
+            "systemctl"
+        );
+    }
+
+    #[test]
+    fn a_native_exec_without_native_gpu_config_is_refused() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
+        let (plan, l) = native_exec();
+        let e = client.native(plan, &l, 1).err().unwrap();
+        assert_eq!(e.code, ErrorCode::Unsupported);
+        assert!(e.message.contains("[native_gpu]"), "{}", e.message);
     }
 
     #[test]

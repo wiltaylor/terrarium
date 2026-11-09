@@ -6554,9 +6554,18 @@ The top-level `exclusive` remains the CPU affinity option, independent of each
 GPU claim's `exclusive`. The CLI accepts the array through `reserve new --gpus
 '[...]'`. No MIG partitions are created.
 
-Exclusive GPUs require a managed **ephemeral Docker target**. Native host,
-SSH and vmlab exclusive GPU requests are refused, never granted as unenforced
-exclusive access. Shared claims are supported for native host targets and
+Exclusive GPUs require a managed **ephemeral Docker target**, or a native
+`host` target on a host agent whose `capabilities.native_gpu.enforced` is
+true (the root helper of docs/native-gpu-helper.md, TER-345). On any other
+native host the request is a `409` that gives the helper's reason. SSH and
+vmlab exclusive GPU requests are refused, never granted as unenforced
+exclusive access. On a host with native enforcement, every command of a
+`host` target runs in a device policy with only its reservation's GPUs,
+and a command with no GPU reservation gets no GPU. When the host agent
+stops reporting enforcement while a native exclusive GPU reservation is
+managed on the host, every command of a `host` target on that host is a
+`409` that names the reservation and the reason, until enforcement is
+back or the reservation ended. Shared claims are supported for native host targets and
 managed ephemeral Docker targets. Docker reservations belong to the target,
 not individual agents. SSH and vmlab GPU reservations are unsupported.
 

@@ -854,7 +854,42 @@ it sets the variable to those UUIDs and adds `--gpus` with the same device list.
 GPU exposure is create-only. `resource.apply` with nonempty `gpu_devices` for
 a Docker update is rejected. The daemon supports GPU claims on managed
 ephemeral containers, whose next `up` recreates the device exposure. No MIG
-configuration or privileged native device control is added.
+configuration is added. Native device control is the root helper of
+[native-gpu-helper.md](native-gpu-helper.md) (below).
+
+### Native GPU enforcement
+
+A host agent with `[native_gpu] enabled = true` asks the root helper
+`terrarium-host-helper` for its version and rights before each `hello`,
+and sends `capabilities.native_gpu`: `{enforced, version, reason}`.
+`enforced` is true only when the helper answers with protocol version 1
+and grants the `session` right. Older host agents send none.
+
+To such a host agent the daemon sends `exec.limits.native_gpu` on every
+`exec` of a `host` target: `{lease, exclusive}`, the reservation ID and
+its exclusively reserved UUIDs. The granted GPUs are
+`exec.limits.reservation.gpu_devices`; with no reservation the field is
+`{}` and the session gets no GPU. The host agent then starts the command
+through the helper, as the helper's workload user, in a transient system
+service with `DevicePolicy=closed` and one `DeviceAllow=` for each granted
+GPU and the NVIDIA support nodes. A host agent without `[native_gpu]`
+refuses such an `exec` (`unsupported`), and so does one whose helper did
+not answer with enforcement at the last `hello`. The helper refuses a
+session while another reservation's session holds one of its exclusive
+GPUs, or while no workload user of its pool is free: the `exec` ends with
+exit code 125 and the reason on stderr. A native session that a signal
+ended reports exit code 128 + N in `exit.code` and no `exit.signal`. A
+command whose request (argv and env as JSON) is over 128 KiB is refused
+before the start.
+
+When the helper answered with enforcement at the last `hello`,
+`resource.apply` and `resource.stop` for a holder go to the helper
+(`apply`, `stop`), which sets or stops the holder's system slice; otherwise
+they act on the user slice, as without `[native_gpu]`. The slice has the same name as the user slice of
+"Applying CPU, memory and IO limits", so `metrics.gpu_usage` attribution
+by slice segment is unchanged, and the session unit
+`terrarium-native-<session>-<nonce>.service` in the cgroup path names the
+session.
 
 `metrics.gpus` carries device inventory and sampled total usage.
 `metrics.gpu_usage` contains `{uuid, container, cgroup, used_bytes}` entries
@@ -1335,6 +1370,10 @@ allowed_cwd_roots = ["/home/alice/labs", "/srv/build"]   # optional; absent mean
 # runtime_dir = "/run/user/1000"            # XDG_RUNTIME_DIR for the Wayland tools
 # tesseract_bin = "tesseract"               # OCR for the backends that have none
 # rdp_known_hosts = "/var/lib/terrarium-host/rdp-known-hosts"  # RDP certificate pins; default $XDG_DATA_HOME/terrarium-host/rdp-known-hosts
+#
+# [native_gpu]                              # native GPU enforcement (docs/native-gpu-helper.md)
+# enabled = false                           # run host-target commands through the root helper
+# socket = "/run/terrarium-host-helper/helper.sock"
 ```
 
 **`[display] enabled = true` is a risk.** An agent with an exclusive lease
