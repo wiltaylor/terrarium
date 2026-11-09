@@ -3265,6 +3265,8 @@ fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> anyhow::Result<us
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::store::board::{BLOCKED, BLOCKED_INFO_SQL, Card, LAST_MOVED_AT_SQL};
+    use crate::store::card_history::RECENT_PROJECT_MOVES_SQL;
 
     fn migration_count() -> usize {
         MIGRATIONS.len()
@@ -3291,10 +3293,8 @@ mod tests {
             .unwrap();
         let plan: String = conn
             .query_row(
-                "EXPLAIN QUERY PLAN SELECT seq FROM events WHERE project = 'p' AND kind = 'card'
-             AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
-             ORDER BY seq DESC LIMIT 2000",
-                [],
+                &format!("EXPLAIN QUERY PLAN {RECENT_PROJECT_MOVES_SQL}"),
+                ["p"],
                 |r| r.get(3),
             )
             .unwrap();
@@ -3328,10 +3328,8 @@ mod tests {
             .unwrap();
         let plan: String = conn
             .query_row(
-                "EXPLAIN QUERY PLAN SELECT at FROM events WHERE card = 'T-1' AND kind = 'card'
-             AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
-             ORDER BY seq DESC LIMIT 1",
-                [],
+                &format!("EXPLAIN QUERY PLAN {LAST_MOVED_AT_SQL}"),
+                ["T-1"],
                 |r| r.get(3),
             )
             .unwrap();
@@ -3347,6 +3345,82 @@ mod tests {
             crate::store::board::last_moved_at(&conn, "T-9")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A card in the blocked column for [`crate::store::board::blocked_info`]:
+    /// only `id`, `updated_at`, and `comments` reach the SQL.
+    fn blocked_card(id: &str, updated_at: &str, comments: &[&str]) -> Card {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "project": "p", "column": "blocked", "position": 1,
+            "title": "t", "body": "b", "labels": [], "depends_on": [],
+            "blocked_by": [],
+            "comments": comments.iter().enumerate().map(|(i, body)| serde_json::json!({
+                "id": format!("c-{i}"),
+                "author": "operator", "author_name": "operator", "body": body,
+                "created_at": "2026-11-08T00:00:00Z"
+            })).collect::<Vec<_>>(),
+            "links": [], "created_by": "operator", "created_by_name": "operator",
+            "created_at": updated_at, "updated_at": updated_at, "archived": false
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn blocked_info_tolerates_malformed_events_and_uses_the_card_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        // A move to the blocked column with its comment, then a malformed
+        // event with a higher seq, so the scan meets the malformed payload
+        // first.
+        conn.execute(
+            "INSERT INTO events(id,project,card,kind,payload,at) VALUES
+             ('ok','p','T-1','card','{\"change\":\"moved\",\"to_role\":\"blocked\",\"comment\":\"need a target\"}','2026-11-08T12:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events(id,project,card,kind,payload,at) VALUES
+             ('bad','p','T-1','card','not JSON','2026-11-08T13:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE events SET payload = '{broken' WHERE id = 'bad'", [])
+            .unwrap();
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {BLOCKED_INFO_SQL}"))
+            .unwrap();
+        let plan = stmt
+            .query_map(["T-1", BLOCKED], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("SEARCH events USING INDEX"), "{plan}");
+        assert!(!plan.contains("SCAN"), "{plan}");
+        assert_eq!(
+            crate::store::board::blocked_info(
+                &conn,
+                &blocked_card("T-1", "2026-11-08T10:00:00Z", &["older"]),
+            )
+            .unwrap(),
+            (
+                "2026-11-08T12:00:00Z".to_owned(),
+                Some("need a target".to_owned())
+            )
+        );
+        // Without a blocked move (a card from before the event log), the
+        // card's `updated_at` and its newest comment.
+        assert_eq!(
+            crate::store::board::blocked_info(
+                &conn,
+                &blocked_card("T-2", "2026-11-08T14:00:00Z", &["first", "still waiting"]),
+            )
+            .unwrap(),
+            (
+                "2026-11-08T14:00:00Z".to_owned(),
+                Some("still waiting".to_owned())
+            )
         );
     }
 
