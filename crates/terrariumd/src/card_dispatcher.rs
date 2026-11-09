@@ -61,13 +61,15 @@ FROM board_columns k WHERE k.project = ?1 AND k.role = 'working'
 ORDER BY k.position LIMIT 1";
 
 /// Page size of [`CANDIDATES`]: held cards and cards with no usable type
-/// label stay in ready, so pages are walked by position until one is not
-/// full and a later dispatchable card cannot be starved (TER-408).
+/// label stay in ready, so pages are walked by the `(position, id)` keyset
+/// until one is not full and a later dispatchable card cannot be starved
+/// (TER-408).
 pub const CANDIDATE_PAGE: i64 = 16;
 
 /// Bounded ready-column lookup: cards with no assignee, no open bound
 /// agent, no unmet dependency and no cooldown, in board order, one page
-/// after `?4`. Keep the indexed query public for plan regression tests.
+/// after the keyset `(?4, ?5)`. Keep the indexed query public for plan
+/// regression tests.
 pub const CANDIDATES: &str = "
 SELECT c.id, c.position, c.title, c.labels FROM cards c INDEXED BY cards_column
 WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
@@ -79,8 +81,8 @@ WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = 
       JOIN board_columns k ON k.id = dc.column_id
       WHERE e.card = c.id AND dc.archived = 0
         AND coalesce(k.role, k.name) NOT IN ('accepted', 'done'))
-  AND c.position > ?4
-ORDER BY c.position LIMIT ?5";
+  AND (c.position, c.id) > (?4, ?5)
+ORDER BY c.position, c.id LIMIT ?6";
 
 fn working_wip(r: &rusqlite::Row<'_>) -> rusqlite::Result<(Option<i64>, i64)> {
     Ok((r.get(0)?, r.get(1)?))
@@ -98,29 +100,35 @@ fn candidate(c: &Connection, project: &str) -> ApiResult<Option<(String, String)
     let ready = board::role_name(c, project, "ready", "ready")?;
     let now = chrono::Utc::now().timestamp();
     let mut q = c.prepare(CANDIDATES)?;
-    // Positions are dense per column, so `> last seen` pages without gaps.
-    // Held cards and cards with no usable type label are skips in Rust, so
-    // a full page of them continues with the next page instead of starving
-    // an eligible card at position 17 or lower.
-    let mut after: i64 = -1;
+    // Positions are neither dense nor unique (archived cards keep theirs,
+    // group cards go in at 0 with no shift, create counts active cards
+    // while a move counts all rows), so the keyset is the `(position, id)`
+    // pair: a strict total order that cannot drop a tie at a page
+    // boundary. Held cards and cards with no usable type label are skips
+    // in Rust, so a full page of them continues with the next page
+    // instead of starving an eligible card further down.
+    let mut after: (i64, String) = (-1, String::new());
     loop {
         let mut rows: Vec<(String, i64, String, String)> = Vec::new();
         {
-            let it = q.query_map(params![project, ready, now, after, CANDIDATE_PAGE], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })?;
+            let it = q.query_map(
+                params![project, ready, now, after.0, after.1, CANDIDATE_PAGE],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )?;
             for row in it {
                 rows.push(row?);
             }
         }
         let full = rows.len() == CANDIDATE_PAGE as usize;
         for (id, position, title, labels) in rows {
-            after = position;
+            after = (position, id.clone());
             let labels = crate::store::json_col::<Vec<String>>(&labels);
             if crate::store::github_gate::is_held(&title, &labels) {
                 continue;
