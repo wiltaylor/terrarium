@@ -434,9 +434,10 @@ pub async fn spawn_with(
                         ));
                     }
                     if source.agent.harness != def.harness {
-                        return Err(ApiError::invalid(
-                            "--like requires the same harness as the template",
-                        ));
+                        return Err(ApiError::invalid(format!(
+                            "--like requires the same harness as the template `{}`",
+                            t.use_key()
+                        )));
                     }
                     def.subscription = source.agent.subscription;
                     def.subscription_pool = source.agent.subscription_pool;
@@ -530,8 +531,8 @@ pub async fn spawn_with(
         def.policy.spawn = None;
     }
     spawn_rights::inherit_pool(&mut def, owner.view.as_ref());
-    if let Some(subscription) = subscription {
-        def.subscription = Some(subscription);
+    if let Some(subscription) = subscription.as_deref() {
+        def.subscription = Some(subscription.to_owned());
     }
     spawn_rights::limit_thread_open(
         &mut def.policy,
@@ -558,6 +559,10 @@ pub async fn spawn_with(
         (None, None) => TurnSource::User,
     };
     let turn = turn_tag::render(&source, &task);
+    // The pick of the selection phase (TER-391): with `--like` it wins
+    // over the source's own subscription, because it was picked from the
+    // source's subscription and pool.
+    let picked_sub = subscription.clone();
     let (work_dir, who, rules2) = (state.work_dir.clone(), actor.clone(), rules.clone());
     let owner_view = owner.view.clone();
     let (oid, oname, tref, tkey) = (
@@ -619,11 +624,18 @@ pub async fn spawn_with(
                 def.default_skills = source.agent.default_skills;
                 crate::skills::check_assignment(skills.as_deref(), &def.skills)?;
                 if source.agent.harness != def.harness {
-                    return Err(ApiError::invalid("--like requires the same harness as the template"));
+                    return Err(ApiError::invalid(format!(
+                        "--like requires the same harness as the template `{tkey}`"
+                    )));
                 }
-                if def.subscription.is_none() {
-                    def.subscription = source.agent.subscription.clone();
-                }
+                // One rule for the selection and the write (TER-391):
+                // `--like` copies the source's subscription and pool over
+                // the template's and the owner's, and the pick of the
+                // selection replaces the source's own subscription when
+                // it chose from the pool.
+                def.subscription = picked_sub
+                    .clone()
+                    .or_else(|| source.agent.subscription.clone());
                 def.subscription_pool = source.agent.subscription_pool.clone();
                 for name in &source.agent.policy.targets {
                     match spawn_rights::check_targets(t, owner_view.as_ref(), &def.project, std::slice::from_ref(name)) {
@@ -632,23 +644,61 @@ pub async fn spawn_with(
                         Err(e) => return Err(e),
                     }
                 }
+                // The grants of the source, by grantee in one query: no
+                // scan over every secret of every scope (TER-391).
                 let grantee = format!("agent:{}", source.agent.id);
-                for secret in crate::secrets::list(t, None)? {
-                    for grant in crate::secrets::grants::list(t, &secret)?.into_iter().filter(|g| g.grantee == grantee) {
-                        let suffix = if grant.targets.is_empty() { String::new() } else { format!("={}", grant.targets.join(",")) };
-                        let label = format!("{}/{}:{}{suffix}", grant.scope, grant.name, grant.level);
-                        let ask = spawn_rights::parse_grant(&label)?;
-                        match spawn_rights::check_spawn_grants(t, owner_view.as_ref(), &def.project, &spawn_rights::TemplateGrants::default(), &[ask]) {
-                            Ok(mut rights) => {
-                                for right in &mut rights {
-                                    right.env = grant.env.clone();
-                                }
-                                copied_grants.append(&mut rights);
+                // A skipped grant names its secret only when the owner
+                // may already read that name: its own grants, or the
+                // operator, which reads every name. Otherwise the count
+                // is all the caller learns (TER-391).
+                let mut readable: std::collections::BTreeSet<(String, String)> =
+                    Default::default();
+                if let Some(v) = owner_view.as_ref() {
+                    readable = crate::secrets::grants::effective(
+                        t,
+                        &v.agent.id.to_string(),
+                        &v.agent.project,
+                    )?
+                    .into_iter()
+                    .map(|e| (e.scope, e.name))
+                    .collect();
+                }
+                let mut hidden = 0usize;
+                for grant in crate::secrets::grants::list_by_grantee(t, &grantee, &def.project)? {
+                    let suffix = if grant.targets.is_empty() { String::new() } else { format!("={}", grant.targets.join(",")) };
+                    let label = format!("{}/{}:{}{suffix}", grant.scope, grant.name, grant.level);
+                    let ask = spawn_rights::parse_grant(&label)?;
+                    match spawn_rights::check_spawn_grants(t, owner_view.as_ref(), &def.project, &spawn_rights::TemplateGrants::default(), &[ask]) {
+                        Ok(mut rights) => {
+                            for right in &mut rights {
+                                right.env = grant.env.clone();
                             }
-                            Err(e) if body.like_skip_missing && e.code == crate::error::Code::Forbidden => skipped.push(format!("grant:{label}")),
-                            Err(e) => return Err(e),
+                            copied_grants.append(&mut rights);
                         }
+                        Err(e) if e.code == crate::error::Code::Forbidden => {
+                            let named = owner_view.is_none()
+                                || readable.contains(&(grant.scope.clone(), grant.name.clone()));
+                            match (named, body.like_skip_missing) {
+                                (true, true) => skipped.push(format!("grant:{label}")),
+                                // The owner may read the name: the
+                                // precise 403 of TER-89 stays.
+                                (true, false) => return Err(e),
+                                // A hidden name never shows, with or
+                                // without the skip (TER-391 round 2).
+                                (false, _) => hidden += 1,
+                            }
+                        }
+                        Err(e) => return Err(e),
                     }
+                }
+                if hidden > 0 {
+                    if !body.like_skip_missing {
+                        return Err(ApiError::forbidden(format!(
+                            "{hidden} copied secret grant(s) of `{}` are not grantable by the owner and hidden: the owner may not read their names; use like_skip_missing to omit them",
+                            source.agent.name
+                        )));
+                    }
+                    skipped.push(format!("grant:{hidden} hidden: the owner may not read their names"));
                 }
             } else if body.like_skip_missing {
                 return Err(ApiError::invalid("like_skip_missing requires like"));
@@ -663,6 +713,9 @@ pub async fn spawn_with(
             let ov = owner_view.as_ref();
             let mut target_grants =
                 spawn_rights::check_targets(t, ov, &def.project, &target_names)?;
+            // A copied target that the body also names is granted once
+            // (TER-391): `--target box --like w` gives one lease, not two.
+            copied_targets.retain(|g| !target_grants.iter().any(|e| e.name() == g.name()));
             target_grants.extend(copied_targets);
             let mut secret_grants = spawn_rights::check_spawn_grants(
                 t,
