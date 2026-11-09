@@ -9,7 +9,7 @@ import { KNOWLEDGE_TABS } from "../../app/nav";
 export default function KnowledgePage(props: RouteSectionProps) {
   const params = useParams<{ project: string }>();
   return (
-    <TabScreen title={`Knowledge · ${params.project}`} label="Knowledge" base={`/p/${encodeURIComponent(params.project)}/knowledge`} tabs={KNOWLEDGE_TABS}>
+    <TabScreen title={`Knowledge · ${params.project}`} label="Knowledge" base={`/p/${encodeURIComponent(decodeURIComponent(params.project))}/knowledge`} tabs={KNOWLEDGE_TABS} level={2}>
       {props.children}
     </TabScreen>
   );

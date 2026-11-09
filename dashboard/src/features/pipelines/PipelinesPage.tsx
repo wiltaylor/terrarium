@@ -435,7 +435,7 @@ export default function PipelinesPage() {
 
   return (
     <>
-      <PageHead title="Pipelines">
+      <PageHead title="Pipelines" level={2}>
         <button class="primary" onClick={() => setEditing("new")}>
           New pipeline
         </button>

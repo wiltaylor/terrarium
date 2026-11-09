@@ -75,6 +75,7 @@ const TOP_KEYS: &[&str] = &[
     "projects",
 ];
 const PROJECT_KEYS: &[&str] = &[
+    "review_dispatcher",
     "card_dispatcher",
     "name",
     "description",

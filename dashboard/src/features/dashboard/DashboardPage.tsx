@@ -104,7 +104,7 @@ export default function DashboardPage() {
 
   return (
     <>
-      <PageHead title="Dashboard">
+      <PageHead title="Dashboard" level={2}>
         <Show when={tab() === "blocks"}>
           <Show
             when={draft()}

@@ -787,12 +787,16 @@ pub fn insert_sample(
 }
 
 /// The newest sample of each window of a subscription, by window name.
+///
+/// One pass over the subscription's index entries (TER-394). The older
+/// correlated `max(id)` subquery scanned all samples of a window for each
+/// sample, quadratic in the never-pruned `quota_samples`, and held the
+/// database lock for many seconds on spawns and subscription lists.
 pub fn latest_windows(conn: &Connection, subscription: &str) -> ApiResult<Vec<QuotaSample>> {
     let mut stmt = conn.prepare(
-        "SELECT q.* FROM quota_samples q
-         WHERE q.subscription = ?1
-           AND q.id = (SELECT max(id) FROM quota_samples
-                       WHERE subscription = q.subscription AND window = q.window)
+        "SELECT q.* FROM (SELECT max(id) AS id FROM quota_samples
+                          WHERE subscription = ?1 GROUP BY window) m
+         JOIN quota_samples q ON q.id = m.id
          ORDER BY q.window",
     )?;
     let rows = stmt.query_map([subscription], sample_row)?;
@@ -847,6 +851,49 @@ pub fn samples(
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let rows = stmt.query_map(params![subscription, since, window, limit], sample_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The most `quota_samples` rows that one prune transaction deletes
+/// (TER-395): the daemon has one connection behind a mutex, so each batch
+/// holds the lock only briefly.
+pub const SAMPLE_PRUNE_BATCH: usize = 500;
+
+/// [`sample_windows`]: one range of `quota_samples_sub`.
+const SAMPLE_WINDOWS_SQL: &str = "SELECT window, max(id) FROM quota_samples
+     WHERE subscription = ?1 GROUP BY window ORDER BY window";
+
+/// [`prune_window_samples`]: one range of `quota_samples_sub`, then the
+/// rows by ID.
+const PRUNE_WINDOW_SQL: &str = "DELETE FROM quota_samples WHERE id IN (
+     SELECT id FROM quota_samples
+     WHERE subscription = ?1 AND window = ?2 AND at < ?3 AND id < ?4
+     ORDER BY at LIMIT ?5)";
+
+/// The windows of a subscription with the ID of each window's newest
+/// sample (the row that [`latest_windows`] reads), by window name.
+pub fn sample_windows(conn: &Connection, subscription: &str) -> ApiResult<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(SAMPLE_WINDOWS_SQL)?;
+    let rows = stmt.query_map([subscription], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Delete at most `batch` samples of one window that are older than
+/// `before` (an RFC 3339 time as stored) and older than the sample
+/// `newest` (from [`sample_windows`]), which always stays. Returns the
+/// rows deleted. The range read uses `quota_samples_sub`.
+pub fn prune_window_samples(
+    t: &Tx<'_>,
+    subscription: &str,
+    window: &str,
+    newest: i64,
+    before: &str,
+    batch: usize,
+) -> ApiResult<usize> {
+    let batch = i64::try_from(batch).unwrap_or(i64::MAX);
+    Ok(t.execute(
+        PRUNE_WINDOW_SQL,
+        params![subscription, window, before, newest, batch],
+    )?)
 }
 
 // ---- Default plan accounts (PLAN §16.3) ----
@@ -1294,6 +1341,89 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    /// TER-394: the newest window rows come from one pass over the index,
+    /// with no correlated subquery per sample, so many samples stay fast.
+    #[tokio::test]
+    async fn latest_windows_stays_linear_with_many_samples() {
+        let db = db();
+        db.write("system", |t| {
+            upsert_def(t, &def("s1"), SOURCE_API)?;
+            upsert_def(t, &def("s2"), SOURCE_API)?;
+            t.execute_batch(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30000)
+                 INSERT INTO quota_samples (subscription, window, used_pct, at)
+                 SELECT 's1', CASE x % 3 WHEN 0 THEN '5h' WHEN 1 THEN '7d' ELSE '7d_opus' END,
+                        x % 100, '2026-11-01T00:00:00Z' FROM n;",
+            )?;
+            insert_sample(t, "s1", "7d", 42.0, None, &Value::Null)?;
+            insert_sample(t, "s2", "7d", 7.0, None, &Value::Null)
+        })
+        .await
+        .unwrap();
+        let started = std::time::Instant::now();
+        let w = db.read(|c| latest_windows(c, "s1")).await.unwrap();
+        let took = started.elapsed();
+        assert_eq!(
+            w.iter()
+                .map(|w| (w.window.as_str(), w.used_pct))
+                .collect::<Vec<_>>(),
+            vec![("5h", 0.0), ("7d", 42.0), ("7d_opus", 99.0)]
+        );
+        // The quadratic query took about 20 s here; the linear one is
+        // well under a second even on a loaded debug build.
+        assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+        let plan: Vec<String> = db
+            .read(|c| {
+                let mut stmt = c.prepare(
+                    "EXPLAIN QUERY PLAN SELECT q.* FROM (SELECT max(id) AS id FROM quota_samples
+                          WHERE subscription = ?1 GROUP BY window) m
+                     JOIN quota_samples q ON q.id = m.id ORDER BY q.window",
+                )?;
+                let rows = stmt.query_map(["s1"], |r| r.get::<_, String>(3))?;
+                Ok(rows.collect::<Result<_, _>>()?)
+            })
+            .await
+            .unwrap();
+        assert!(!plan.iter().any(|p| p.contains("CORRELATED")), "{plan:?}");
+    }
+
+    /// TER-395: the prune reads only index ranges of `quota_samples_sub`
+    /// and rows by ID, never all of `quota_samples`, so each batch holds
+    /// the lock briefly however large the table is.
+    #[tokio::test]
+    async fn the_sample_prune_queries_use_the_index() {
+        let db = db();
+        db.write("system", |t| {
+            upsert_def(t, &def("s1"), SOURCE_API)?;
+            insert_sample(t, "s1", "5h", 10.0, None, &Value::Null)?;
+            insert_sample(t, "s1", "7d", 20.0, None, &Value::Null)
+        })
+        .await
+        .unwrap();
+        for (sql, args) in [(SAMPLE_WINDOWS_SQL, 1), (PRUNE_WINDOW_SQL, 5)] {
+            let plan: Vec<String> = db
+                .read(move |c| {
+                    let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let values: Vec<rusqlite::types::Value> =
+                        vec![rusqlite::types::Value::Text("s1".into()); args];
+                    let rows = stmt.query_map(rusqlite::params_from_iter(values), |r| {
+                        r.get::<_, String>(3)
+                    })?;
+                    Ok(rows.collect::<Result<_, _>>()?)
+                })
+                .await
+                .unwrap();
+            assert!(
+                plan.iter().any(|p| p.contains("quota_samples_sub")),
+                "{sql}: {plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|p| p.contains("SCAN quota_samples")),
+                "{sql}: {plan:?}"
+            );
+        }
     }
 
     /// A login check renames the plan of an API subscription (Max 20x is
