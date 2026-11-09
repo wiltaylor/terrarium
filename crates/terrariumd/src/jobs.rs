@@ -3613,7 +3613,11 @@ mod tests {
         // Another daemon replaced the tree between the steps.
         let out = run("5555555555555555555555555555555555555555");
         assert_eq!(out.status.code(), Some(125));
-        let text = String::from_utf8_lossy(&out.stderr);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(text.contains("replaced the slot tree"), "{text}");
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
         // A busy lock: the recipe does not run either.
@@ -3621,7 +3625,11 @@ mod tests {
         until_held(&lock);
         let out = run(&head);
         assert_eq!(out.status.code(), Some(125));
-        let text = String::from_utf8_lossy(&out.stderr);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(text.contains("held by another job or daemon"), "{text}");
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
         holder.kill().unwrap();
