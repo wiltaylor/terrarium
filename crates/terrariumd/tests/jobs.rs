@@ -2332,32 +2332,53 @@ echo real-tunnel-large-log-ok
     assert!(!detail.contains(&key));
 }
 
+/// A daemon-tracing capture shared by this whole test binary (TER-425):
+/// `set_global_default` succeeds only once per process, so a test that
+/// installs its own subscriber makes every later install panic. The layer
+/// is installed exactly once, through a `OnceLock`; acquiring the handle
+/// empties the buffer, so each test captures its own run and drains it
+/// with `take`. Tests that drain it must not run at the same time.
+#[derive(Clone)]
+struct TraceCapture(std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>);
+impl std::io::Write for TraceCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Some(buffer) = self.0.lock().unwrap().as_mut() {
+            buffer.extend_from_slice(bytes);
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+static TRACE_CAPTURE: std::sync::OnceLock<TraceCapture> = std::sync::OnceLock::new();
+
+/// Global to include job-queue and executor tasks spawned by the daemon.
+fn daemon_trace_capture() -> TraceCapture {
+    let capture = TRACE_CAPTURE
+        .get_or_init(|| {
+            let buffer = std::sync::Arc::new(std::sync::Mutex::new(Some(Vec::new())));
+            let capture = TraceCapture(buffer);
+            let writer = capture.clone();
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            )
+            .expect("the shared capture is the only global subscriber");
+            capture
+        })
+        .clone();
+    *capture.0.lock().unwrap() = Some(Vec::new());
+    capture
+}
+
 #[tokio::test]
 async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
     use std::os::unix::fs::PermissionsExt;
-    #[derive(Clone)]
-    struct Trace(std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>);
-    impl std::io::Write for Trace {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if let Some(buffer) = self.0.lock().unwrap().as_mut() {
-                buffer.extend_from_slice(bytes);
-            }
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let trace = Trace(std::sync::Arc::new(std::sync::Mutex::new(Some(Vec::new()))));
-    let writer = trace.clone();
-    // Global to include job-queue and executor tasks spawned by the daemon.
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish(),
-    )
-    .unwrap();
+    let trace = daemon_trace_capture();
     let fixtures = tempfile::tempdir().unwrap();
     let ssh = fixtures.path().join("ssh");
     std::fs::write(
