@@ -161,7 +161,9 @@ impl DayStartWatch {
 
 /// Can the action of `s` run now? An `exec` on a target with a host agent
 /// needs that agent online. Other actions can always run.
-pub fn reachable(state: &Shared) -> impl Fn(&rusqlite::Connection, &Schedule) -> bool + Send + 'static {
+pub fn reachable(
+    state: &Shared,
+) -> impl Fn(&rusqlite::Connection, &Schedule) -> bool + Send + 'static {
     let state = state.clone();
     move |conn, s| {
         let terrarium_core::schedule::ScheduleAction::Exec { target, .. } = &s.action else {

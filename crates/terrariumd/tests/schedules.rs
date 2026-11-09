@@ -1375,7 +1375,10 @@ async fn day_start_on_resume_from_sleep() {
     assert_eq!(tick(&td, at(0, 22, 0)).await.len(), 1);
     // The next tick is one tick on: no resume. A tick after a gap of
     // hours (the machine slept) is a resume.
-    assert_eq!(w.tick_cause(at(0, 22, 0) + Duration::seconds(10)), StartCause::DayChange);
+    assert_eq!(
+        w.tick_cause(at(0, 22, 0) + Duration::seconds(10)),
+        StartCause::DayChange
+    );
     let cause = w.tick_cause(at(1, 7, 30));
     assert_eq!(cause, StartCause::Resume);
     assert_eq!(

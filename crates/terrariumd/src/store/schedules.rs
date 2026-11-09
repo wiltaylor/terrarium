@@ -483,7 +483,8 @@ pub const MAX_DAY_START_DELAY: i64 = 12 * 3600;
 
 /// Parse a local time as `HH:MM`.
 pub fn parse_hhmm(s: &str) -> Result<NaiveTime, String> {
-    NaiveTime::parse_from_str(s.trim(), "%H:%M").map_err(|_| format!("`{s}` is not a time as HH:MM"))
+    NaiveTime::parse_from_str(s.trim(), "%H:%M")
+        .map_err(|_| format!("`{s}` is not a time as HH:MM"))
 }
 
 /// Parse a day of the week: `mon` to `sun`, or the full name.
