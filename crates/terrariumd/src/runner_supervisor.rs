@@ -1985,12 +1985,29 @@ impl RunnerSupervisor {
     /// The kill of a requested restart failed and the harness runs on:
     /// clear the request (and the set-up of a new session), so that the
     /// work that waited for the relaunch goes out to this harness.
-    fn restart_not_on_its_way(&self, id: AgentId, undo: Option<NewSessionUndo>) {
+    ///
+    /// Only for `r`, the handle whose kill failed, while the slot still
+    /// holds it and it has no exit status: a harness that died during the
+    /// kill takes the requested relaunch on its exit, and a runner that
+    /// a later start installed keeps its own set-up.
+    fn restart_not_on_its_way(
+        &self,
+        id: AgentId,
+        r: &Arc<dyn RunnerHandle>,
+        undo: Option<NewSessionUndo>,
+    ) {
+        use futures_util::FutureExt as _;
         {
             let mut slots = lock(&self.inner.slots);
-            let Some(slot) = slots.get_mut(&id).filter(|s| s.runner.is_some()) else {
+            let Some(slot) = slots
+                .get_mut(&id)
+                .filter(|s| s.runner.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, r)))
+            else {
                 return;
             };
+            if r.wait().now_or_never().is_some() {
+                return;
+            }
             slot.restart_requested = false;
             if let Some(u) = undo {
                 slot.resume = u.resume;
@@ -2063,11 +2080,16 @@ impl RunnerSupervisor {
     /// exit keys gets them, and a kill only when it has not exited in
     /// time. Else a kill now. With an exit-key pause, the final CR goes
     /// after the pause.
+    ///
+    /// `restart`: the end is for a new session, with the set-up to put
+    /// back when the kill fails ([`RunnerSupervisor::restart_not_on_its_way`]),
+    /// also for the kill after the exit keys.
     async fn exit_gracefully(
         &self,
         agent: AgentId,
         r: Arc<dyn RunnerHandle>,
         harness: HarnessId,
+        restart: Option<NewSessionUndo>,
     ) -> Result<(), SupervisorError> {
         let (writes, pause) = self
             .entry(harness)
@@ -2084,6 +2106,7 @@ impl RunnerSupervisor {
             && r.status() == AgentStatus::Idle
             && r.write(&first).await.is_ok()
         {
+            let me = self.clone();
             tokio::spawn(async move {
                 for w in writes {
                     tokio::time::sleep(pause).await;
@@ -2093,12 +2116,23 @@ impl RunnerSupervisor {
                 }
                 if tokio::time::timeout(GRACEFUL_STOP, r.wait()).await.is_err() {
                     debug!(agent = %agent, "the harness did not exit on its exit keys; killing it");
-                    let _ = r.kill().await;
+                    if let Err(e) = r.kill().await {
+                        debug!(agent = %agent, "cannot kill the harness: {e}");
+                        if let Some(undo) = restart {
+                            me.restart_not_on_its_way(agent, &r, Some(undo));
+                        }
+                    }
                 }
             });
             return Ok(());
         }
-        r.kill().await.map_err(other)
+        let killed = r.kill().await.map_err(other);
+        if killed.is_err()
+            && let Some(undo) = restart
+        {
+            self.restart_not_on_its_way(agent, &r, Some(undo));
+        }
+        killed
     }
 
     fn launch(&self, id: AgentId, epoch: u64) -> BoxFuture<'_, Result<(), SupervisorError>> {
@@ -4362,7 +4396,7 @@ impl RunnerSupervisor {
             if let Err(e) = r.set_stopped_by(by).await {
                 debug!(agent = %agent, "cannot record the stop reason: {e}");
             }
-            self.exit_gracefully(agent, r, harness).await
+            self.exit_gracefully(agent, r, harness, None).await
         })
     }
 }
@@ -4539,11 +4573,7 @@ impl Supervisor for RunnerSupervisor {
                     if let Err(e) = r.set_stopped_by(StoppedBy::Policy).await {
                         debug!(agent = %id, "cannot record the stop reason: {e}");
                     }
-                    let ended = self.exit_gracefully(id, r, harness).await;
-                    if ended.is_err() {
-                        self.restart_not_on_its_way(id, Some(undo));
-                    }
-                    ended
+                    self.exit_gracefully(id, r, harness, Some(undo)).await
                 }
                 _ => self.start_with(agent, None, Some(plan)).await,
             }
@@ -4615,7 +4645,7 @@ impl Supervisor for RunnerSupervisor {
                     let _ = r.set_stopped_by(StoppedBy::Policy).await;
                     let killed = r.kill().await.map_err(other);
                     if killed.is_err() {
-                        self.restart_not_on_its_way(id, None);
+                        self.restart_not_on_its_way(id, &r, None);
                     }
                     killed
                 }
@@ -5637,6 +5667,258 @@ mod tests {
                 Ok(())
             })
         }
+    }
+
+    /// A harness whose kill fails (TER-530). `write_ok`: the exit keys go
+    /// out (the graceful path). `exited`: the handle has its exit status.
+    struct KillErrRunner {
+        id: AgentId,
+        write_ok: bool,
+        exited: bool,
+        kills: std::sync::atomic::AtomicUsize,
+        typed: Mutex<Vec<String>>,
+        typed_ready: tokio::sync::Notify,
+    }
+
+    impl KillErrRunner {
+        fn new(id: AgentId, write_ok: bool, exited: bool) -> Arc<Self> {
+            Arc::new(Self {
+                id,
+                write_ok,
+                exited,
+                kills: std::sync::atomic::AtomicUsize::new(0),
+                typed: Mutex::default(),
+                typed_ready: tokio::sync::Notify::new(),
+            })
+        }
+    }
+
+    impl RunnerHandle for KillErrRunner {
+        fn agent(&self) -> AgentId {
+            self.id
+        }
+        fn socket_path(&self) -> &Path {
+            Path::new("unused")
+        }
+        fn events_path(&self) -> &Path {
+            Path::new("unused")
+        }
+        fn status(&self) -> AgentStatus {
+            AgentStatus::Idle
+        }
+        fn watch_status(&self) -> watch::Receiver<AgentStatus> {
+            watch::channel(AgentStatus::Idle).1
+        }
+        fn subscribe_events(&self) -> broadcast::Receiver<terrarium_core::EventRecord> {
+            broadcast::channel(1).1
+        }
+        fn screen(
+            &self,
+        ) -> BoxFuture<'_, terrarium_runner::Result<terrarium_runner::ScreenSnapshot>> {
+            panic!("unused")
+        }
+        fn attach(
+            &self,
+        ) -> BoxFuture<
+            '_,
+            terrarium_runner::Result<(
+                terrarium_runner::ScreenSnapshot,
+                terrarium_runner::AttachStream,
+            )>,
+        > {
+            panic!("unused")
+        }
+        fn write<'a>(&'a self, _: &'a [u8]) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            let ok = self.write_ok;
+            Box::pin(async move {
+                if ok {
+                    Ok(())
+                } else {
+                    Err(terrarium_runner::RunnerError::Disconnected)
+                }
+            })
+        }
+        fn write_person<'a>(&'a self, _: &'a [u8]) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn resize(&self, _: u16, _: u16) -> BoxFuture<'_, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn answer<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a terrarium_core::Answer,
+        ) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn answer_keys<'a>(&'a self, _: &'a str) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn interrupt(&self) -> BoxFuture<'_, terrarium_runner::Result<bool>> {
+            panic!("unused")
+        }
+        fn kill(&self) -> BoxFuture<'_, terrarium_runner::Result<()>> {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(terrarium_runner::RunnerError::Disconnected) })
+        }
+        fn wait(&self) -> BoxFuture<'_, terrarium_runner::ExitStatus> {
+            let exited = self.exited;
+            Box::pin(async move {
+                if !exited {
+                    std::future::pending::<()>().await;
+                }
+                terrarium_runner::ExitStatus {
+                    code: 0,
+                    signal: None,
+                }
+            })
+        }
+        fn type_turn(&self, text: String) -> terrarium_runner::Delivery {
+            lock(&self.typed).push(text);
+            self.typed_ready.notify_one();
+            terrarium_runner::test_support::delivered_turn()
+        }
+    }
+
+    /// A supervisor with the claude adapter, and an idle slot that runs
+    /// `runner` with an old session, a status reason, and one queued turn.
+    fn kill_err_supervisor(
+        tmp: &Path,
+        make: impl FnOnce(AgentId) -> Arc<KillErrRunner>,
+    ) -> (RunnerSupervisor, Agent, Arc<KillErrRunner>) {
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            tmp.join("state"),
+            tmp.join("run"),
+            tmp.join("prompts"),
+            SandboxConfig::default(),
+            default_adapters(&SandboxConfig::default(), &HashMap::new()),
+        ));
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
+        }))
+        .unwrap();
+        let runner = make(agent.id);
+        let mut slot = Slot::new(agent.clone());
+        slot.runner = Some(runner.clone());
+        slot.phase = Phase::Running;
+        slot.seen = AgentStatus::Idle;
+        slot.reached_idle = true;
+        slot.resume = Some(HarnessSessionId("old".into()));
+        slot.session = Some(HarnessSessionId("old".into()));
+        slot.start_reason = Some("before".into());
+        slot.turns.push(String::from("queued").into());
+        lock(&sup.inner.slots).insert(agent.id, slot);
+        (sup, agent, runner)
+    }
+
+    fn kill_err_plan() -> NewSessionPlan {
+        NewSessionPlan {
+            reason: "new session: requested by test".into(),
+            recap: Some("recap".into()),
+            then: Some("then".into()),
+        }
+    }
+
+    fn assert_set_up_undone(sup: &RunnerSupervisor, id: AgentId) {
+        let slots = lock(&sup.inner.slots);
+        let slot = &slots[&id];
+        assert!(!slot.restart_requested);
+        assert_eq!(slot.resume, Some(HarnessSessionId("old".into())));
+        assert_eq!(slot.session, Some(HarnessSessionId("old".into())));
+        assert_eq!(slot.start_reason.as_deref(), Some("before"));
+        assert_eq!(slot.recap, None);
+        assert!(slot.turns.is_empty(), "the queued turn went out");
+    }
+
+    async fn typed_once(runner: &KillErrRunner, within: Duration) -> Vec<String> {
+        tokio::time::timeout(within, runner.typed_ready.notified())
+            .await
+            .expect("a turn is typed");
+        // Let a second turn, if any, be typed too.
+        tokio::task::yield_now().await;
+        lock(&runner.typed).clone()
+    }
+
+    /// TER-530: the kill of a new session fails and the harness runs on:
+    /// the set-up of the new session is undone, and only the queued turn
+    /// goes out, to this harness.
+    #[tokio::test]
+    async fn new_session_kill_error_undoes_the_set_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, agent, runner) =
+            kill_err_supervisor(tmp.path(), |id| KillErrRunner::new(id, false, false));
+        let id = agent.id;
+        assert!(sup.new_session(agent, kill_err_plan()).await.is_err());
+        assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
+        assert_set_up_undone(&sup, id);
+        let typed = typed_once(&runner, Duration::from_secs(5)).await;
+        assert_eq!(typed, ["queued"]);
+    }
+
+    /// TER-530: the harness died during the kill: the request stays, so
+    /// that its exit takes the relaunch, with the new-session set-up.
+    #[tokio::test]
+    async fn new_session_kill_error_of_an_exited_harness_keeps_the_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, agent, runner) =
+            kill_err_supervisor(tmp.path(), |id| KillErrRunner::new(id, false, true));
+        let id = agent.id;
+        assert!(sup.new_session(agent, kill_err_plan()).await.is_err());
+        let slots = lock(&sup.inner.slots);
+        let slot = &slots[&id];
+        assert!(slot.restart_requested);
+        assert_eq!(slot.resume, None);
+        assert_eq!(slot.session, None);
+        assert_eq!(slot.recap.as_deref(), Some("recap"));
+        assert_eq!(slot.turns.len(), 2, "the then turn and the queued turn wait");
+        assert!(lock(&runner.typed).is_empty());
+    }
+
+    /// TER-530: a kill error of an old handle does not undo the set-up of
+    /// the runner that the slot holds now.
+    #[tokio::test]
+    async fn kill_error_of_another_handle_leaves_the_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, agent, runner) =
+            kill_err_supervisor(tmp.path(), |id| KillErrRunner::new(id, false, false));
+        let id = agent.id;
+        lock(&sup.inner.slots).get_mut(&id).unwrap().restart_requested = true;
+        let old: Arc<dyn RunnerHandle> = KillErrRunner::new(id, false, false);
+        sup.restart_not_on_its_way(
+            id,
+            &old,
+            Some(NewSessionUndo {
+                resume: None,
+                session: None,
+                start_reason: None,
+                recap: None,
+                then: true,
+                reset_gate: false,
+            }),
+        );
+        let slots = lock(&sup.inner.slots);
+        let slot = &slots[&id];
+        assert!(slot.restart_requested);
+        assert_eq!(slot.session, Some(HarnessSessionId("old".into())));
+        assert_eq!(slot.turns.len(), 1);
+        assert!(lock(&runner.typed).is_empty());
+    }
+
+    /// TER-530: the exit keys went out, the harness did not exit, and the
+    /// kill after `GRACEFUL_STOP` fails: the set-up is undone and the held
+    /// turn goes out.
+    #[tokio::test]
+    async fn new_session_kill_error_after_exit_keys_releases_deliveries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, agent, runner) =
+            kill_err_supervisor(tmp.path(), |id| KillErrRunner::new(id, true, false));
+        let id = agent.id;
+        sup.new_session(agent, kill_err_plan()).await.unwrap();
+        assert!(lock(&sup.inner.slots)[&id].restart_requested);
+        let typed = typed_once(&runner, GRACEFUL_STOP + Duration::from_secs(10)).await;
+        assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(typed, ["queued"]);
+        assert_set_up_undone(&sup, id);
     }
 
     #[tokio::test]
