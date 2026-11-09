@@ -995,7 +995,15 @@ async fn wait_admission(td: &TestDaemon, name: &str) {
     let state = td.daemon.as_ref().unwrap().state.clone();
     let start = Instant::now();
     while state.executor.resource_pending(name) {
-        assert!(start.elapsed() < DEADLINE, "{name} admission never opened");
+        if start.elapsed() >= DEADLINE {
+            // The reconcile error is only in the daemon log (TER-492).
+            let trace = TRACE_CAPTURE
+                .get()
+                .and_then(|c| c.0.lock().unwrap().clone())
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_else(|| "(no trace capture in this test)".into());
+            panic!("{name} admission never opened; daemon trace:\n{trace}");
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
