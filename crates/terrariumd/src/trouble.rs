@@ -1362,7 +1362,7 @@ mod tests {
             (
                 WATCH_COLUMNS_SQL,
                 0,
-                "SEARCH board_columns USING INDEX board_columns_name_watch (<expr>=?)",
+                "SEARCH board_columns USING COVERING INDEX board_columns_name_watch (<expr>=?)",
             ),
             (
                 PROGRESS_BASELINE_SQL,
