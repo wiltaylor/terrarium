@@ -402,6 +402,47 @@ async fn a_long_repo_url_commits_and_a_token_in_another_export_field_blocks() {
     );
 }
 
+/// Round 2 of issue #27: the exemption is scoped to the repo table. A
+/// schedule webhook action of the same export file also writes a `url`,
+/// and its path can hold the secret (a Slack webhook), so the commit is
+/// refused there, on that line.
+#[tokio::test]
+async fn a_webhook_url_with_a_high_entropy_path_in_the_export_blocks_the_commit() {
+    let (td, repo) = instance().await;
+    td.project("p1").await;
+    let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+    let hook = format!("https://hooks.example.com/services/T0001/B0001/{random}");
+    td.post(
+        "/api/schedules",
+        json!({"name": "warn", "project": "p1",
+               "spec": {"kind": "interval", "every": "1h"},
+               "action": {"type": "webhook", "url": hook}}),
+    )
+    .await
+    .ok();
+    let r = td
+        .post("/api/config/commit", json!({"message": "hook"}))
+        .await;
+    r.err(422, "invalid");
+    let shown = r.body.to_string();
+    assert!(shown.contains("high-entropy"), "{shown}");
+    // The finding is the `url` line of the webhook action table, not a
+    // repo table.
+    let text = std::fs::read_to_string(repo.join("export/projects/p1.fleet.toml")).unwrap();
+    assert!(text.contains("[projects.schedules.action]"), "{text}");
+    let line = text
+        .lines()
+        .position(|l| l.trim_start().starts_with("url = "))
+        .expect("the url line");
+    let findings = r.body["error"]["details"]["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().any(|f| f["rule"] == "high-entropy"
+            && f["path"] == "export/projects/p1.fleet.toml"
+            && f["line"] == (line + 1)),
+        "{shown}\n{text}"
+    );
+}
+
 /// Two instances share a prompt edit both ways through a bare remote. The
 /// remote URL and the credential stay out of `.git/config` and the repo.
 #[tokio::test]

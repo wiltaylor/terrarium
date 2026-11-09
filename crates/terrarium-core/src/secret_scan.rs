@@ -22,7 +22,8 @@
 //! | `jwt` | `eyJ...` `.` `eyJ...` `.` (a JWT, as the CLI session tokens) |
 //! | `terrarium-host-token` | `thk_...` (a host agent token), `the_...` (an enrol token) |
 //! | `credential-key` | a key named like `token`, `secret`, `password`, `api_key`, or `authorization`, with a value of 16 characters or more |
-//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) or the line is one of the non-secret fields of the daemon-written export ([`is_exempt_export_field`], issue #27) |
+//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) or sits inside the quoted value of a non-secret repo field of the daemon-written export ([`exempt_export_value_span`], issue #27) |
+//! | `url-userinfo` | a repo URL of the export with a credential in its user part (`https://token@x/y`, `https://user:pass@x/y`, `ssh://user:pass@x/y`), on the same exempt lines (issue #27) |
 //! | `credential-file` | a file name that holds credentials: `.env`, `auth.json`, `.credentials.json`, `id_rsa`, `*.pem`, `*.key`, ... |
 //!
 //! A line with the marker `terrarium-scan: allow` skips the
@@ -30,13 +31,19 @@
 //! patterns and the file names have no such marker.
 //!
 //! The daemon writes the export of the config repo, so no marker can
-//! stay on its lines (issue #27). The fields of the export that hold no
-//! secret skip the `high-entropy` rule instead, by field and only in the
-//! export ([`EXPORT_EXEMPT_FIELDS`]): the `url` of a repo, its
-//! `default_branch`, and a `credential` name. A real secret in another
-//! field of the same export file still hits, the token patterns still
-//! run on the line, and a file that a user writes keeps the rule, with
-//! the marker as the way out.
+//! stay on its lines (issue #27). Instead, only the runs inside the
+//! quoted value of a repo field of the export fleet files that holds no
+//! secret skip the `high-entropy` rule ([`EXPORT_EXEMPT_FIELDS`]):
+//! the `url` of a repo, its `default_branch`, and a `credential` name,
+//! under a `[[projects.repos]]` table header. Another table of the same
+//! file (a schedule webhook action also writes a `url`, and its path
+//! can hold the secret) and the rest of the line (a trailing comment)
+//! keep the rule. A real secret in another field of the same export
+//! file still hits, the token patterns still run on the line, and a
+//! file that a user writes keeps the rule, with the marker as the way
+//! out. A credential in the user part of such a URL hits as
+//! `url-userinfo` on the same lines: the daemon drops the user part of
+//! a repo URL before it writes the export, so one there is a hand edit.
 
 use std::sync::OnceLock;
 
@@ -123,6 +130,19 @@ fn long_runs() -> Option<&'static Regex> {
     static R: OnceLock<Option<Regex>> = OnceLock::new();
     R.get_or_init(|| Regex::new(r"[A-Za-z0-9+/=_\-]{32,}").ok())
         .as_ref()
+}
+
+/// A URL with a credential in its user part: any user part of an
+/// `http(s)` URL (`https://token@x/y`, `https://user:pass@x/y`), or a
+/// `user:password@` of any other scheme (`ssh://git:pw@x/y`). A user
+/// part without a password of another scheme (`ssh://git@x/y`) and the
+/// scp form (`git@host:x/y`) are not credentials.
+fn url_userinfo() -> Option<&'static Regex> {
+    static R: OnceLock<Option<Regex>> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)\bhttps?://[^\s/?#]*@|://[^\s/:@]+:[^\s/@]*@").ok()
+    })
+    .as_ref()
 }
 
 /// A value that names a secret and is not one: an env reference, a
@@ -212,27 +232,67 @@ fn is_word(part: &str) -> bool {
 /// it holds the same string.
 const EXPORT_PREFIX: &str = "export/";
 
-/// The fields of the daemon-written export that hold no secret (issue
-/// #27): the `url` of a repo, its `default_branch`, and a `credential`
-/// name (a name in the secret store, never a value). Only the
-/// `high-entropy` rule skips them ([`is_exempt_export_field`]).
+/// The suffix of the fleet files of the export
+/// (`export/projects/<name>.fleet.toml`, `export/global.fleet.toml`):
+/// the only export files with repo tables.
+const EXPORT_FLEET_SUFFIX: &str = ".fleet.toml";
+
+/// The table header under which the fleet writer writes each repo table
+/// (`[[projects.repos]]`, `crates/terrarium-core/src/fleet.rs`). Only
+/// the fields of that table are exempt: another table of the same file
+/// (a schedule webhook action) also writes a `url`, and its path can
+/// hold the secret.
+const REPOS_TABLE: &str = "projects.repos";
+
+/// The fields of a repo table that hold no secret (issue #27): the
+/// `url` of a repo, its `default_branch`, and a `credential` name (a
+/// name in the secret store, never a value). Only the runs inside their
+/// quoted value skip the `high-entropy` rule
+/// ([`exempt_export_value_span`]).
 const EXPORT_EXEMPT_FIELDS: &[&str] = &["url", "default_branch", "credential"];
 
-/// Is `line` one of the [`EXPORT_EXEMPT_FIELDS`] of the daemon-written
-/// export (issue #27)? The daemon writes the export, so the
-/// [`ALLOW_MARKER`] cannot stay on its lines; the fields that hold no
-/// secret skip the `high-entropy` rule instead, by field and only in the
-/// export: the key stands at the start of the line, bare or quoted, and
-/// the rest of the line is not looked at.
-fn is_exempt_export_field(path: &str, line: &str) -> bool {
-    if !path.starts_with(EXPORT_PREFIX) {
-        return false;
+/// The table header of `line` (`[[projects.repos]]`, `[defaults]`),
+/// without its brackets, or `None` when the line is not one.
+fn table_header(line: &str) -> Option<&str> {
+    let t = line.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let t = t.strip_prefix('[').unwrap_or(t);
+    let t = t.strip_suffix(']').unwrap_or(t);
+    Some(t.trim())
+}
+
+/// The span of the quoted value of `line`, when `line` is one of the
+/// [`EXPORT_EXEMPT_FIELDS`] of a repo table of the daemon-written
+/// export (issue #27): the key stands before the first `=`, and the
+/// value is a quoted string. Only the runs inside that span skip the
+/// `high-entropy` rule, so a trailing comment on the line keeps it. The
+/// daemon writes the export, so the [`ALLOW_MARKER`] cannot stay on
+/// its lines. The scan is line-based: a `[[projects.repos]]` line
+/// inside a multi-line string counts as a header, and the token
+/// patterns still run on every line.
+fn exempt_export_value_span(
+    path: &str,
+    header: Option<&str>,
+    line: &str,
+) -> Option<std::ops::Range<usize>> {
+    if !path.starts_with(EXPORT_PREFIX) || !path.ends_with(EXPORT_FLEET_SUFFIX) {
+        return None;
     }
-    let Some((key, _)) = line.trim_start().split_once('=') else {
-        return false;
-    };
-    let key = key.trim().trim_matches(['"', '\'']);
-    EXPORT_EXEMPT_FIELDS.contains(&key)
+    if header != Some(REPOS_TABLE) {
+        return None;
+    }
+    let eq = line.find('=')?;
+    let key = line[..eq].trim().trim_matches(['"', '\'']);
+    if !EXPORT_EXEMPT_FIELDS.contains(&key) {
+        return None;
+    }
+    let value = line[eq + 1..].trim_start();
+    let first = *value.as_bytes().first()?;
+    if first != b'"' && first != b'\'' {
+        return None;
+    }
+    let start = line.len() - value.len() + 1;
+    let end = start + value[1..].find(char::from(first))?;
+    Some(start..end)
 }
 
 /// Is `name` (the last part of a path) a file that holds credentials?
@@ -289,7 +349,13 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
         return out;
     }
     let text = String::from_utf8_lossy(text);
+    // The table header that the last `[...]` or `[[...]]` line opened:
+    // the export exemption below is scoped to the repos table.
+    let mut header: Option<String> = None;
     for (i, line) in text.lines().enumerate() {
+        if let Some(h) = table_header(line) {
+            header = Some(h.to_owned());
+        }
         let mut hit = |rule: &str| {
             if !out.iter().any(|f| f.line == i + 1 && f.rule == rule) {
                 out.push(Finding {
@@ -307,10 +373,12 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
         if line.contains(ALLOW_MARKER) {
             continue;
         }
-        // Issue #27: the non-secret fields of the daemon-written export
-        // skip the high-entropy rule only; the token patterns above and
-        // the credential-key rule below still run on the line.
-        let exempt_field = is_exempt_export_field(path, line);
+        // Issue #27: only the runs inside the quoted value of a
+        // non-secret repo field of the export fleet files skip the
+        // high-entropy rule; the token patterns above and the
+        // credential-key rule below still run on the line, and a
+        // credential in the user part of the URL hits as `url-userinfo`.
+        let exempt = exempt_export_value_span(path, header.as_deref(), line);
         if let Some(re) = key_value() {
             for c in re.captures_iter(line) {
                 if let Some(v) = c.get(1)
@@ -321,11 +389,18 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
                 }
             }
         }
-        if !exempt_field && let Some(re) = long_runs() {
+        if exempt.is_some()
+            && let Some(re) = url_userinfo()
+            && re.is_match(line)
+        {
+            hit("url-userinfo");
+        }
+        if let Some(re) = long_runs() {
             for m in re.find_iter(line) {
                 if m.as_str().len() >= ENTROPY_MIN_LEN
                     && shannon_entropy(m.as_str()) > ENTROPY_THRESHOLD
                     && !is_word_path(m.as_str())
+                    && !exempt.as_ref().is_some_and(|e| e.contains(&m.range()))
                 {
                     hit("high-entropy");
                 }
@@ -529,13 +604,13 @@ mod tests {
         assert!(!is_word_path("abc/def+ghi=="));
     }
 
-    /// The non-secret fields of the daemon-written export skip the
-    /// `high-entropy` rule (issue #27): a repo URL with a long mixed-case
-    /// path commits. The same value in a field that is not exempt, or in
-    /// a file outside the export, still hits, and so does a token pattern
-    /// on the exempt line.
+    /// The non-secret repo fields of the daemon-written export fleet
+    /// files skip the `high-entropy` rule (issue #27): a repo URL with
+    /// a long mixed-case path commits. The same value in a field that
+    /// is not exempt, or in a file outside the export, still hits, and
+    /// so does a token pattern on the exempt line.
     #[test]
-    fn export_fields_known_not_secret_skip_high_entropy() {
+    fn export_repo_fields_known_not_secret_skip_high_entropy() {
         let he = "high-entropy".to_owned();
         let export = "export/projects/p1.fleet.toml";
         let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
@@ -544,38 +619,129 @@ mod tests {
         let url = "https://github.com/wiltaylor-daf/ExampleReportingService.git";
         let run = "com/wiltaylor-daf/ExampleReportingService";
         assert!(run.len() >= ENTROPY_MIN_LEN && shannon_entropy(run) > ENTROPY_THRESHOLD);
-        for line in [
-            format!("url = \"{url}\""),
-            format!("default_branch = \"{random}\""),
-            format!("credential = \"{random}\""),
-        ] {
-            assert!(!rules(export, &line).contains(&he), "{line}");
-        }
-        // By field, not by file: another field of the same export hits.
+        let repos = format!(
+            "[[projects]]\nname = \"p1\"\n\n[[projects.repos]]\nname = \"app\"\nurl = \"{url}\"\ndefault_branch = \"{random}\"\ncredential = \"{random}\"\n"
+        );
+        assert!(!rules(export, &repos).contains(&he), "{repos}");
+        // By field, not by file: another field of the same table hits.
         for line in [
             format!("description = \"{random}\""),
             format!("host = \"{random}\""),
             format!("name = \"{random}\""),
         ] {
-            assert!(rules(export, &line).contains(&he), "{line}");
+            let text = format!("[[projects.repos]]\n{line}\n");
+            assert!(rules(export, &text).contains(&he), "{line}");
         }
         // Only in the export: a file that a user writes keeps the rule,
         // with the marker as the way out.
         for path in ["fleets/prod.fleet.toml", "prompts/a.md"] {
-            let line = format!("url = \"{url}\"");
-            assert!(rules(path, &line).contains(&he), "{path}");
-            let line = format!("url = \"{url}\" # {ALLOW_MARKER}");
-            assert!(!rules(path, &line).contains(&he), "{path}");
+            let text = format!("[[projects.repos]]\nurl = \"{url}\"\n");
+            assert!(rules(path, &text).contains(&he), "{path}");
+            let text = format!("[[projects.repos]]\nurl = \"{url}\" # {ALLOW_MARKER}\n");
+            assert!(!rules(path, &text).contains(&he), "{path}");
         }
         // The token patterns and the `credential-key` rule still run on
         // the exempt line.
         let ghp = format!("ghp_{}", "FAKEfake0123456789".repeat(2));
-        assert!(
-            rules(export, &format!("url = \"https://x.example/{ghp}\""))
-                .contains(&"github-token".to_owned())
-        );
+        let text = format!("[[projects.repos]]\nurl = \"https://x.example/{ghp}\"\n");
+        assert!(rules(export, &text).contains(&"github-token".to_owned()));
         let feed = "https://example.com/feed?token=0123456789abcdef0123456789abcdef";
-        assert!(rules(export, &format!("url = \"{feed}\"")).contains(&"credential-key".to_owned()));
+        let text = format!("[[projects.repos]]\nurl = \"{feed}\"\n");
+        assert!(rules(export, &text).contains(&"credential-key".to_owned()));
+    }
+
+    /// Only the `[[projects.repos]]` table of an export fleet file is
+    /// exempt (round 2): a schedule webhook action of the same file
+    /// also writes a `url`, and its path can hold the secret. A repo
+    /// line with no table above it, and an export file that is not a
+    /// fleet file, keep the rule.
+    #[test]
+    fn only_the_repos_table_of_an_export_fleet_file_is_exempt() {
+        let he = "high-entropy".to_owned();
+        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+        // A webhook URL with a random path segment (a Slack webhook).
+        let hook = format!("https://hooks.example.com/services/T0001/B0001/{random}");
+        let export = "export/projects/p1.fleet.toml";
+        let text = format!(
+            "[[projects.schedules]]\nname = \"warn\"\n\n[projects.schedules.action]\ntype = \"webhook\"\nurl = \"{hook}\"\n"
+        );
+        assert!(rules(export, &text).contains(&he), "{text}");
+        // The same line under a repos header is exempt, in both header
+        // forms.
+        for head in ["[[projects.repos]]", "[projects.repos]"] {
+            let text = format!("{head}\nurl = \"{hook}\"\n");
+            assert!(!rules(export, &text).contains(&he), "{text}");
+        }
+        // No table header above it: not a repo line.
+        let text = format!("url = \"{hook}\"\n");
+        assert!(rules(export, &text).contains(&he), "{text}");
+        // An export file that is not a fleet file keeps the rule.
+        let text = format!("[[projects.repos]]\nurl = \"{hook}\"\n");
+        assert!(rules("export/secrets/p1.toml", &text).contains(&he));
+        assert!(rules("export/rules/p1.rules.wcl", &text).contains(&he));
+    }
+
+    /// A credential in the user part of an exempt repo URL hits as
+    /// `url-userinfo` (round 2): the daemon drops the user part of a
+    /// repo URL before it writes the export, so one on an exempt line
+    /// is a hand edit that `high-entropy` alone can miss. A user part
+    /// without a password of another scheme and the scp form are not
+    /// credentials.
+    #[test]
+    fn a_credential_in_the_user_part_of_an_exempt_repo_url_hits() {
+        let rule = "url-userinfo".to_owned();
+        let export = "export/projects/p1.fleet.toml";
+        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+        let at = |url: &str| {
+            let text = format!("[[projects.repos]]\nurl = \"{url}\"\n");
+            rules(export, &text)
+        };
+        for url in [
+            format!("https://bot:{random}@git.example/o/r.git"),
+            "https://bot:password123@git.example/o/r.git".to_owned(),
+            format!("https://{random}@git.example/o/r.git"),
+            format!("ssh://git:{random}@git.example/o/r.git"),
+        ] {
+            assert!(at(&url).contains(&rule), "{url}: {:?}", at(&url));
+        }
+        // The token sits inside the quotes, so nothing else hits on the
+        // line: this rule alone blocks it.
+        assert_eq!(
+            at(&format!("https://bot:{random}@git.example/o/r.git")),
+            [rule.clone()]
+        );
+        // A low-entropy user part (never a `high-entropy` hit) hits too.
+        assert!(at("https://bot:password123@git.example/o/r.git").contains(&rule));
+        for url in [
+            "https://github.com/wiltaylor-daf/ExampleReportingService.git",
+            "https://example.com:8080/o/r.git",
+            "ssh://git@git.example/o/r.git",
+            "git@github.com:wiltaylor-daf/terrarium.git",
+        ] {
+            assert!(!at(url).contains(&rule), "{url}: {:?}", at(url));
+        }
+    }
+
+    /// Only the runs inside the quoted value of an exempt line skip the
+    /// rule (round 2): a trailing comment on the line, and a value that
+    /// is not a quoted string, keep `high-entropy`.
+    #[test]
+    fn only_the_quoted_value_of_an_exempt_repo_line_is_exempt() {
+        let he = "high-entropy".to_owned();
+        let export = "export/projects/p1.fleet.toml";
+        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+        // A run in a trailing comment, outside the quotes, hits.
+        let text = format!(
+            "[[projects.repos]]\nurl = \"https://x/o/r.git\" # {random}\n"
+        );
+        assert!(rules(export, &text).contains(&he), "{text}");
+        // A value that is not a quoted string is not exempt.
+        let text = format!("[[projects.repos]]\nurl = {random}\n");
+        assert!(rules(export, &text).contains(&he), "{text}");
+        // Runs inside the quotes still skip the rule.
+        let url = "https://github.com/wiltaylor-daf/ExampleReportingService.git";
+        let text = format!("[[projects.repos]]\nurl = \"{url}\"\n");
+        assert!(!rules(export, &text).contains(&he), "{text}");
     }
 
     #[test]
