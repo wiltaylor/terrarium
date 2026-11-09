@@ -830,10 +830,7 @@ async fn bind_sets_the_mode_without_the_process_umask() {
         .collect();
     assert_eq!(names, vec![std::ffi::OsString::from("h.sock")]);
     // The socket accepts at the final path.
-    let (_client, accepted) = tokio::join!(
-        UnixStream::connect(&socket),
-        listener.accept()
-    );
+    let (_client, accepted) = tokio::join!(UnixStream::connect(&socket), listener.accept());
     accepted.unwrap();
 }
 
