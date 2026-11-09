@@ -584,7 +584,7 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
                     && shannon_entropy(m.as_str()) > ENTROPY_THRESHOLD
                     && !is_word_path(m.as_str())
                     && (exempt.is_some()
-                        && user_parts.iter().any(|u| m.start() < u.end && u.start < m.end)
+                        && user_parts.iter().any(|u| m.start() < u.end && u.start < m.end())
                         || !marked
                             && !exempt
                                 .as_ref()
@@ -1032,7 +1032,7 @@ mod tests {
     /// keeps its meaning for the soft rules.
     #[test]
     fn the_allow_marker_does_not_skip_url_userinfo() {
-        let he = "high-entropy"to_owned();
+        let he = "high-entropy".to_owned();
         let export = "export/projects/p1.fleet.toml";
         let text = format!(
             "[[projects.repos]]\nurl = \"https://bot:password123@git.example/o/r.git\" # {ALLOW_MARKER}\n"
