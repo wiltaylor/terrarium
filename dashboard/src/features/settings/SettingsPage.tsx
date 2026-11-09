@@ -6,15 +6,17 @@
 import { useParams, type RouteSectionProps } from "@solidjs/router";
 import { TabScreen } from "../../components/TabScreen";
 import { PROJECT_SETTINGS_TABS, SETTINGS_TABS } from "../../app/nav";
+import { decodePathParam, projectBase } from "../../lib/url";
 
 export default function SettingsPage(props: RouteSectionProps) {
   const params = useParams<{ project?: string }>();
   return (
     <TabScreen
-      title={params.project ? `Settings · ${params.project}` : "Settings"}
+      title={params.project ? `Settings · ${decodePathParam(params.project)}` : "Settings"}
       label="Settings"
-      base={params.project ? `/p/${encodeURIComponent(params.project)}/settings` : "/settings"}
+      base={params.project ? `${projectBase(params.project)}/settings` : "/settings"}
       tabs={params.project ? PROJECT_SETTINGS_TABS : SETTINGS_TABS}
+      level={params.project ? 2 : 1}
     >
       {props.children}
     </TabScreen>

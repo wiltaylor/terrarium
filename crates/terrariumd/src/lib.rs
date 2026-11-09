@@ -20,6 +20,7 @@ pub mod conflict_hints;
 pub mod db;
 pub mod defaults;
 pub mod display;
+mod docker_tunnel;
 pub mod error;
 pub mod events;
 pub mod executor;
@@ -54,6 +55,7 @@ pub mod repo_browse;
 pub mod research_helpers;
 pub mod reservations;
 pub mod reset;
+pub mod review_dispatcher;
 pub mod rules_engine;
 pub mod rules_verbs;
 pub mod run_kill;
@@ -83,6 +85,7 @@ pub mod time_param;
 pub mod tool_run;
 pub mod transcripts;
 pub mod trash;
+pub mod trouble;
 pub mod usage_collector;
 pub mod usage_limit;
 pub mod waits;
@@ -186,7 +189,15 @@ fn log_definitions(defs: &Definitions, errors: &[String], dir: &std::path::Path)
 /// subsystem takes its settings from the environment
 /// ([`usage_collector::UsageConfig::from_env`]).
 pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
-    start_with_usage(cfg, usage_collector::UsageConfig::from_env()).await
+    start_with_executor(cfg, executor::Executor::default()).await
+}
+
+/// Start with an explicit executor, avoiding process-global SSH overrides in tests.
+pub async fn start_with_executor(
+    cfg: DaemonConfig,
+    executor: executor::Executor,
+) -> anyhow::Result<Daemon> {
+    start_with_usage_and_executor(cfg, usage_collector::UsageConfig::from_env(), executor).await
 }
 
 /// [`start`] with the settings of usage accounting, quota probes, and login
@@ -194,6 +205,14 @@ pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
 pub async fn start_with_usage(
     cfg: DaemonConfig,
     usage: usage_collector::UsageConfig,
+) -> anyhow::Result<Daemon> {
+    start_with_usage_and_executor(cfg, usage, executor::Executor::default()).await
+}
+
+async fn start_with_usage_and_executor(
+    cfg: DaemonConfig,
+    usage: usage_collector::UsageConfig,
+    executor: executor::Executor,
 ) -> anyhow::Result<Daemon> {
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("cannot create state dir {}", cfg.state_dir.display()))?;
@@ -206,7 +225,9 @@ pub async fn start_with_usage(
     log_definitions(&defs, &errors, &cfg.config_dir);
 
     let state: Shared = Arc::new(AppState {
-        agent_calls: Default::default(),
+        agent_calls: crate::agent_rpc::CallGate::with_probation(Some(
+            cfg.state_dir.join("releases/probation"),
+        )),
         started: Instant::now(),
         started_at: chrono::Utc::now(),
         db: Db::new(conn, EventHub::default()),
@@ -219,7 +240,7 @@ pub async fn start_with_usage(
         repos_dir: cfg.repos_dir.clone(),
         insecure_agent_header: cfg.insecure_agent_header,
         usage: Arc::new(usage_collector::UsageRuntime::new(usage)),
-        executor: Arc::default(),
+        executor: Arc::new(executor),
         harness_latest: Arc::default(),
         harness_tools: Arc::default(),
         agent_tools: Arc::default(),
@@ -249,61 +270,32 @@ pub async fn start_with_usage(
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");
     }
-    // The secret store (PLAN §16b): the master key, then the move of the
-    // old credential files.
-    state
-        .db
-        .read_now(|c| {
-            secrets::ensure_key(c, &state.state_dir).map_err(crate::error::ApiError::from)
-        })
-        .map_err(|e| anyhow::anyhow!("secret store: {e}"))?;
-    secrets::migrate::run_at_start(&state).await;
-    // The redaction matcher (PLAN §16b.6), from the store as it is now.
-    secrets::redact::rebuild(&state).await;
-    // A project named `global` from before the name was reserved (S7): it
-    // stays, but it has no secrets of its own.
-    if let Ok(true) = state.db.read_now(store::projects::has_reserved_name) {
-        warn!(
-            "project `global` has a reserved name: its project_admin cannot manage the global \
-             secrets, and it has no project secrets; rename it (make a new project and move \
-             the agents)"
-        );
-    }
-
+    // A probation daemon serves reads/health before activating background
+    // effects that could escape the database snapshot (jobs, webhooks, etc.).
     let mut tasks = Vec::new();
-    tasks.push(spawn_pump(state.clone()));
-    tasks.push(usage_collector::spawn(state.clone()));
-    tasks.push(tool_run::spawn_sweep(state.clone()));
-    tasks.extend(question_guard::spawn(state.clone()));
-    state.supervisor.bind(&state);
-
-    let report = apply_definitions(&state, defs, errors, "system".into())
-        .await
-        .map_err(|e| anyhow::anyhow!("definition sync failed: {e}"))?;
-    info!(
-        projects_added = report.projects.added.len(),
-        agents_added = report.agents.added.len(),
-        agents_removed = report.agents.removed.len(),
-        "definitions synced"
-    );
-    let work_dir = state.work_dir.clone();
-    if let Err(e) = std::fs::create_dir_all(&work_dir) {
-        warn!(dir = %work_dir.display(), "cannot create the work root: {e}");
+    if state.agent_calls.has_probation_marker() {
+        let activation_state = state.clone();
+        tasks.push(tokio::spawn(async move {
+            activation_state.agent_calls.wait_for_commit().await;
+            match activate(activation_state.clone(), defs, errors).await {
+                Ok(handles) => {
+                    activation_state.agent_calls.activation_ready();
+                    let _owned = ActivationTasks(handles);
+                    std::future::pending::<()>().await;
+                }
+                Err(e) => {
+                    error!(error = %e, "post-commit daemon activation failed");
+                    activation_state.supervisor.shutdown();
+                    activation_state
+                        .agent_calls
+                        .activation_failed(e.to_string());
+                }
+            }
+        }));
+    } else {
+        tasks.extend(activate(state.clone(), defs, errors).await?);
+        state.agent_calls.activation_ready();
     }
-    let moved = state
-        .db
-        .write("system", move |t| {
-            store::agents::set_workspaces(t, &work_dir)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("workspace paths: {e}"))?;
-    if moved > 0 {
-        info!(agents = moved, work_dir = %state.work_dir.display(),
-              "agent workspaces now live under the work root; each moves at its next start");
-    }
-    reconcile(&state)
-        .await
-        .map_err(|e| anyhow::anyhow!("reconcile failed: {e}"))?;
 
     tasks.push(api::serve_unix(state.clone(), &cfg.socket).await?);
     let mut tcp_addr = None;
@@ -339,10 +331,110 @@ pub async fn start_with_usage(
     // of a proxied repo gets its proxy URL.
     let mut git_proxy_addr = None;
     if let Some(addr) = cfg.web.git_proxy_listen.as_deref() {
-        let (task, local) = git_proxy::serve(state.clone(), addr).await?;
-        tasks.push(task);
-        git_proxy_addr = Some(local);
+        if state.agent_calls.has_probation_marker() {
+            let proxy_state = state.clone();
+            let addr = addr.to_owned();
+            tasks.push(tokio::spawn(async move {
+                proxy_state.agent_calls.wait_for_commit().await;
+                match git_proxy::serve(proxy_state.clone(), &addr).await {
+                    Ok((task, _)) => {
+                        let _owned = ActivationTasks(vec![task]);
+                        std::future::pending::<()>().await;
+                    }
+                    Err(e) => {
+                        error!(error = %e, "post-commit git proxy failed");
+                        proxy_state.agent_calls.activation_failed(e.to_string());
+                    }
+                }
+            }));
+        } else {
+            let (task, local) = git_proxy::serve(state.clone(), addr).await?;
+            tasks.push(task);
+            git_proxy_addr = Some(local);
+        }
     }
+    Ok(Daemon {
+        state,
+        socket: cfg.socket,
+        tcp_addr,
+        artifact_addr,
+        git_proxy_addr,
+        tasks,
+    })
+}
+
+// Aborting probation activation also stops the services it owns.
+struct ActivationTasks(Vec<JoinHandle<()>>);
+impl Drop for ActivationTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
+async fn activate(
+    state: Shared,
+    defs: Definitions,
+    errors: Vec<String>,
+) -> anyhow::Result<Vec<JoinHandle<()>>> {
+    // The secret store (PLAN §16b): the master key, then the move of the
+    // old credential files.
+    state
+        .db
+        .read_now(|c| {
+            secrets::ensure_key(c, &state.state_dir).map_err(crate::error::ApiError::from)
+        })
+        .map_err(|e| anyhow::anyhow!("secret store: {e}"))?;
+    secrets::migrate::run_at_start(&state).await;
+    // The redaction matcher (PLAN §16b.6), from the store as it is now.
+    secrets::redact::rebuild(&state).await;
+    // A project named `global` from before the name was reserved (S7): it
+    // stays, but it has no secrets of its own.
+    if let Ok(true) = state.db.read_now(store::projects::has_reserved_name) {
+        warn!(
+            "project `global` has a reserved name: its project_admin cannot manage the global \
+             secrets, and it has no project secrets; rename it (make a new project and move \
+             the agents)"
+        );
+    }
+
+    let mut owned = ActivationTasks(Vec::new());
+    let tasks = &mut owned.0;
+    tasks.push(spawn_pump(state.clone()));
+    tasks.push(usage_collector::spawn(state.clone()));
+    tasks.push(tool_run::spawn_sweep(state.clone()));
+    tasks.extend(question_guard::spawn(state.clone()));
+    state.supervisor.bind(&state);
+
+    let report = apply_definitions(&state, defs, errors, "system".into())
+        .await
+        .map_err(|e| anyhow::anyhow!("definition sync failed: {e}"))?;
+    info!(
+        projects_added = report.projects.added.len(),
+        agents_added = report.agents.added.len(),
+        agents_removed = report.agents.removed.len(),
+        "definitions synced"
+    );
+    let work_dir = state.work_dir.clone();
+    if let Err(e) = std::fs::create_dir_all(&work_dir) {
+        warn!(dir = %work_dir.display(), "cannot create the work root: {e}");
+    }
+    let moved = state
+        .db
+        .write("system", move |t| {
+            store::agents::set_workspaces(t, &work_dir)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("workspace paths: {e}"))?;
+    if moved > 0 {
+        info!(agents = moved, work_dir = %state.work_dir.display(),
+              "agent workspaces now live under the work root; each moves at its next start");
+    }
+    reconcile(&state)
+        .await
+        .map_err(|e| anyhow::anyhow!("reconcile failed: {e}"))?;
+
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(target_roots::spawn(state.clone()));
@@ -365,14 +457,7 @@ pub async fn start_with_usage(
     // The agents bound to cards: park, unpark, and end (TER-74).
     tasks.push(bound::spawn(&state));
     tasks.extend(start_usage(&state).await);
-    Ok(Daemon {
-        state,
-        socket: cfg.socket,
-        tcp_addr,
-        artifact_addr,
-        git_proxy_addr,
-        tasks,
-    })
+    Ok(std::mem::take(&mut owned.0))
 }
 
 /// Log a warning for each repo with `push_deny` whose checkouts go

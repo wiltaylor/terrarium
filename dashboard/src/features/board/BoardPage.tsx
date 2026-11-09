@@ -6,6 +6,7 @@ import { HoldBadge } from "../../components/HoldBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
 import type { Card, CardSummary, Column, NewCard, Question } from "../../api/types";
 import { ago, compact } from "../../lib/format";
+import { projectBase } from "../../lib/url";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { idleBadge } from "../../lib/idle";
 import { cardState, type CardState, tileLabels } from "../../lib/cardState";
@@ -264,7 +265,7 @@ export function BoardPage(props: { done?: boolean }) {
   return (
     <div class="board-page">
       <PageHead title={props.done ? "Done cards" : "Cards"} level={2}>
-        <button type="button" onClick={() => navigate(`/p/${encodeURIComponent(params.project)}/board${props.done ? "" : "/done"}`)}>
+        <button type="button" onClick={() => navigate(`${projectBase(params.project)}/board${props.done ? "" : "/done"}`)}>
           {props.done ? "Back to cards" : "Show done cards"}
         </button>
         {/* A phone folds the two filters into this button; a wider screen shows them in the row and hides the button. */}
@@ -550,6 +551,9 @@ function KCard(props: {
       <EtaChip card={props.card} now={props.now} />
       <div class="row small">
         <Show when={props.card.tests}>{(t) => <CardTestsChip project={props.card.project} tests={t()} />}</Show>
+        <Show when={props.card.trouble?.length}>
+          <span class="chip warn" title={props.card.trouble?.map((s) => s.replaceAll("_", " ")).join(", ")}>Trouble: {props.card.trouble?.length}</span>
+        </Show>
         <Show when={props.card.comment_count}><span class="small muted" title={props.card.last_comment_at ?? undefined}>{props.card.comment_count} comments</span></Show>
         <For each={tileLabels(props.card.labels)}>{(l) => <span class="chip">{l}</span>}</For>
       </div>
@@ -766,15 +770,16 @@ function CardDrawer(props: {
   const sessionRows = () => cardSessionRows(sessions.latest ?? commentSessions(props.card), props.card);
   // docs/api.md §16.3 `GET /api/cards/{id}/usage`. A daemon without it gives no line.
   const [usage] = createResource(
-    () => props.card.id,
-    (id) => api.usage.card(id).catch(() => null),
+    () => [props.card.id, props.card.updated_at] as const,
+    ([id]) => api.usage.card(id).catch(() => null),
   );
   const usageLine = () => {
     const u = usage.latest;
     if (!u) return null;
-    if (!u.total.messages) return "No usage recorded on this card.";
+    const time = u.working_seconds == null ? "" : `, ${Math.floor(u.working_seconds / 60)} working minutes`;
+    if (!u.total.messages) return `No token usage recorded on this card${time}.`;
     const tok = (t: { input_tokens: number; output_tokens: number }) => compact(t.input_tokens + t.output_tokens);
-    return `${tok(u.total)} tokens: ${u.models.map((m) => `${m.model} ${tok(m)}`).join(", ")}`;
+    return `${u.total.turns} turns, ${tok(u.total)} tokens${time}: ${u.models.map((m) => `${m.model} ${tok(m)}`).join(", ")}`;
   };
 
   const save = async (patch: Parameters<typeof api.cards.update>[1]) => {
@@ -936,6 +941,10 @@ function CardDrawer(props: {
           <dd class="small" title="Input plus output tokens of the samples attributed to this card, by model">
             {usageLine()}
           </dd>
+        </Show>
+        <Show when={usage()?.signals?.length}>
+          <dt>Trouble</dt>
+          <dd role="status">{usage()?.signals?.map((s) => s.replaceAll("_", " ")).join(", ")}</dd>
         </Show>
       </dl>
 

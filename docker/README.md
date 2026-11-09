@@ -43,10 +43,122 @@ live runner again. The harness does not restart.
 When `terrariumd` exits with status 0 and the container got no stop signal,
 the entrypoint stops the runners (see below) and the container exits.
 
-The entrypoint supervises only `terrariumd` with no subcommand. Other
-commands (for example `bash`, or `terrariumd sandbox-dry-run`) run once.
+The Compose service explicitly runs `--daemon-service terrariumd`. Only this
+mode initializes releases and supervises the daemon. The image defaults to the
+same command, so direct `docker run` and older Compose files work too. Other commands (for example `bash`, backup
+subcommands, or `terrariumd --version`) run once using bundled binaries and
+never change the live release or probation marker. A state-volume lock rejects
+a second service, including an accidental `compose run terrarium` without a
+replacement command.
 
-## The shutdown sequence
+The updater normalizes the service prefix for the destination image when it
+creates a long-running container. This installs the new supervisor from an old
+image default command, and strips the prefix again for rollback to an old image.
+One-off offline commands never receive this prefix.
+
+## Binary-only upgrades
+
+The image has one final release-payload layer. All preceding RootFS layer
+digests, the runtime image configuration and `io.terrarium.runner-compat-epoch`
+must match for a hot swap. Missing metadata, a changed runtime base, deployment
+environment changes, or a protocol break selects the drained container path.
+The first upgrade from an image without this supervisor therefore replaces
+the container, putting pre-TER-260 runners onto hold/replay-capable binaries.
+
+The updater verifies and pulls by digest before staging the immutable payload
+under `/state/releases/<content-hash>`. `current` is an atomic symlink. Besides
+the daemon, runner and CLI, the payload includes packaged defaults, harness
+pins and host distribution files so a binary upgrade cannot silently retain
+old release assets. Docker's physical container image does not change. The
+updater reports the selected payload's `image.json` instead.
+
+The supervisor pauses only its own daemon child, with graceful RPC drain, and
+keeps the runners alive. The updater takes the full backup for explicit
+rollback and a separate offline SQLite snapshot for automatic rollback. It
+then selects the new payload and starts the daemon in probation. Health and
+reads work, but agent RPCs retry, HTTP writes return `503` with `Retry-After`,
+and background work is not activated until commit. On failed health it stops
+the probation daemon, restores only the database, selects the old payload,
+checks health and releases admission. Live runner logs and sockets stay intact.
+An ambiguous commit response never causes a database rewind.
+
+An explicit rollback after successful commit uses container replacement and
+the full backup, because admitted writes may already have external effects.
+Release binaries are not part of application backups. The selected release
+survives a restart of the same container, while a new container boots its own
+bundled release. The updater process itself stays on its bundled binary until
+its container is replaced.
+
+The total hold budget is 15 minutes, including drain, backup and health.
+The updater reserves the last minute for recovery and retries commit three
+times. Admission remains closed until activation finishes. An activation
+failure exits the daemon nonzero so the supervisor can restart it. Once any
+commit was attempted, automatic journal rollback is forbidden.
+After commit the updater starts a separate wait of up to 30 seconds for core
+activation. A failure reports Failed without a journal rewind.
+Use explicit rollback if the committed release cannot activate.
+
+Post-commit activation has two remaining ordering windows: harness pin install
+and default seeding in the executable follow core activation, and the git proxy
+binds asynchronously. An agent admitted in that interval can see the previous
+pins/defaults or a not-yet-ready proxy. Core reconcile and background activation
+must finish before admission, but auxiliary provisioning is not atomic with it.
+Do not treat probation health as proof that post-commit provisioning succeeded.
+
+Commit prunes unused payloads, keeping `current`, `previous`, and releases
+with a live executable under `/proc`. Thus retained runners keep their binaries.
+
+### Interrupted transaction recovery
+
+Stop automatic update attempts first. Keep the existing daemon container and
+runners alive. Use its actual container name in place of `terrarium` below:
+
+```sh
+docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py status
+```
+
+This reads durable `/state/releases/transaction.json` plus current marker
+state. Record `old`, `new`, `backup`, `phase` and `admission_attempted`.
+Use the literal values from this trusted local record as quoted arguments.
+Do not delete markers by hand or replace the container during probation.
+The helper is private to administrators, not exposed to agents.
+
+* If `admission_attempted` is true, **never restore the database with retained
+  runners**, even if `phase` is `commit_attempted` or the response was lost.
+  Retry `docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py commit`.
+  It is idempotent. Check daemon logs and health. If activation failed, fix
+  the reported cause and let the supervisor restart the selected release.
+  A later rollback must use the updater's drained container-replacement path.
+* For `staged` or `snapshotting`, with `current` equal to `old` and no probation,
+  run `docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py cancel-pause`.
+  The old daemon resumes. A partial snapshot is not a valid rollback source.
+* For `backed_up`, `probation`, `restoring` or `restored` with
+  `admission_attempted: false`, restore the old release with the sequence below.
+  An interrupted SQLite restore is safe to repeat from the completed snapshot.
+  Do not use this sequence if admission was ever attempted.
+
+`paused` and `pause_requested` are independent status flags, not transaction
+phases. A pause during rollback preserves `probation`, `restoring` or `restored`.
+After interruption at any pause, use the durable phase and admission flag above,
+not the pause flag, to choose recovery. `cancel-pause` refuses probation/restore
+states rather than incorrectly marking an unfinished rollback aborted.
+
+```sh
+docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py pause
+docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py restore-database 'BACKUP_PATH'
+docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py start 'OLD_RELEASE_HASH'
+docker exec terrarium terrarium daemon status
+# Only after health succeeds:
+docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py commit 'BACKUP_PATH' 'OLD_RELEASE_HASH'
+```
+
+Read `status` again and confirm probation is absent and health succeeds.
+After manual rollback, align the deployment's image setting with the restored
+release before enabling automatic updates. `committed`, `rolled_back` and
+`aborted` are terminal phases. If the durable record or completed snapshot is
+missing, stop and use a drained full-backup recovery instead of guessing.
+
+## Container shutdown sequence
 
 `docker compose down` and `docker stop` send SIGTERM to tini. tini sends it
 to the entrypoint only (no `-g`). Then the entrypoint:

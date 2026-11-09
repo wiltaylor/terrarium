@@ -1,23 +1,16 @@
 // The sidebar items and the routes that moved. Pure, so tests can read them.
 
-export const PROJECT_ITEMS = [
-  // The monitors of the project as blocks (docs/api.md §30); the first item, and the page of /p/:project.
-  { path: "dashboard", label: "Dashboard" },
-  // The CI/CD pipelines of the project and their runs (docs/api.md §31).
-  { path: "pipelines", label: "Pipelines" },
-  // The calendar of the project with the global events (docs/api.md §33).
-  { path: "calendar", label: "Calendar" },
+/** The project shell tabs, in order. The first path segment selects the tab. */
+export const PROJECT_TABS = [
   { path: "board", label: "Board" },
-  // The repos of the project (PLAN §9a). In the tree a node, not a link: open, it shows the repos, each a link to its browser.
-  // The page /p/:project/repos stays (other links go to it).
-  { path: "repos", label: "Repos" },
-  // The logs of the project (PROJECT_LOGS_TABS): every message and every event that touches it.
-  { path: "logs", label: "Logs" },
-  // The wiki and the memory of the project (KNOWLEDGE_TABS).
-  { path: "knowledge", label: "Knowledge" },
-  // Every agent of the project, in any status. In the tree a node, not a link: open, it shows the agents.
-  // Last, so the agent rows of the open node do not push the pages down. The page /p/:project/agents stays.
+  { path: "dashboard", label: "Dashboard" },
   { path: "agents", label: "Agents" },
+  { path: "repos", label: "Repos" },
+  { path: "knowledge", label: "Knowledge" },
+  { path: "pipelines", label: "Pipelines" },
+  { path: "calendar", label: "Calendar" },
+  { path: "logs", label: "Logs" },
+  { path: "settings", label: "Settings" },
 ] as const;
 
 /**
@@ -50,7 +43,7 @@ export const KNOWLEDGE_TABS = [
  * /p/:project/settings. The cog of the project row in the tree opens it.
  */
 export const PROJECT_SETTINGS_TABS = [
-  // The project edit and delete, and the Targets panel. The repos have their own item (PROJECT_ITEMS).
+  // The project edit and delete, and the Targets panel. The repos have their own project tab.
   { path: "general", label: "General" },
   // The project's secrets and the global ones it can use (PLAN §16b).
   { path: "secrets", label: "Secrets" },

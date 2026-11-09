@@ -6,15 +6,17 @@
 import { useParams, type RouteSectionProps } from "@solidjs/router";
 import { TabScreen } from "../../components/TabScreen";
 import { LOGS_TABS, PROJECT_LOGS_TABS } from "../../app/nav";
+import { decodePathParam, projectBase } from "../../lib/url";
 
 export default function LogsPage(props: RouteSectionProps) {
   const params = useParams<{ project?: string }>();
   return (
     <TabScreen
-      title={params.project ? `Logs · ${params.project}` : "Logs"}
+      title={params.project ? `Logs · ${decodePathParam(params.project)}` : "Logs"}
       label="Logs"
-      base={params.project ? `/p/${encodeURIComponent(params.project)}/logs` : "/logs"}
+      base={params.project ? `${projectBase(params.project)}/logs` : "/logs"}
       tabs={params.project ? PROJECT_LOGS_TABS : LOGS_TABS}
+      level={params.project ? 2 : 1}
     >
       {props.children}
     </TabScreen>

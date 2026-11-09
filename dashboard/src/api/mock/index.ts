@@ -121,6 +121,7 @@ import { createToolMock } from "./tools";
 import { createSystemPromptMock } from "./systemPrompts";
 import { createDbMock } from "./db";
 import { createTestRunMock } from "./testRuns";
+import { createJobsMock } from "./jobs";
 import { createRulesMock } from "./rules";
 import { createMonitorMock } from "./monitors";
 import { createPipelineMock } from "./pipelines";
@@ -863,6 +864,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   // The board rules (docs/api.md §19.12): ./rules. The seed gives project `terrarium` two runs.
   const rulesMock = createRulesMock({ reply, fail, audit, project: (name) => project(name), columns: (name) => w.columns[name] ?? [], iso });
   if (w.projects.some((x) => x.name === "terrarium")) rulesMock.seed();
+  // The job queue (docs/api.md §35.4): ./jobs. The seed gives project `terrarium` a month of merge jobs with flakes,
+  // a conflict, an error, a split batch, and one queued job.
+  const jobsMock = createJobsMock({ reply, fail, project: (name) => project(name), now });
+  if (w.projects.some((x) => x.name === "terrarium")) jobsMock.seed();
   // The files of the cards (docs/api.md §8.4): ./cardFiles. The seed gives one assigned card a brief (two versions), a JSON file, and an image.
   const cardFileMock = createCardFileMock({ iso, reply, fail, emit, audit, card: (id) => cardById(id) });
   cardFileMock.seed(w.cards);
@@ -4094,6 +4099,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     // The project DB (./db).
     db: dbMock.api,
     testRuns: testRunMock.api,
+    jobs: jobsMock.api,
     rules: rulesMock.api,
     monitors: monitorMock.api,
     pipelines: pipelineMock.api,

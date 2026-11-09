@@ -10,7 +10,9 @@ use crate::common;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
@@ -20,6 +22,9 @@ use base64::Engine as _;
 use common::TestDaemon;
 use http_body_util::BodyExt;
 use serde_json::json;
+use terrariumd::git::{Action, Checkout, clone_or_update};
+use terrariumd::secrets::{RunDirs, Secret};
+use zeroize::Zeroizing;
 
 /// The forge token: the agent must never see it.
 const FORGE_TOKEN: &str = "forge-s3cret-T0ken-0123456789abcdef";
@@ -1234,4 +1239,75 @@ async fn a_refused_push_shows_the_forge_reason() {
         !err.contains(&FORGE_TOKEN[FORGE_TOKEN.len() - 4..]),
         "{err}"
     );
+}
+
+/// TER-415: many concurrent checkouts with a token credential, with
+/// children spawning in other threads the whole time. Between its fork
+/// and its exec such a child holds a copy of every open fd, the write fd
+/// of the one-shot helper included, and an exec of the helper file in
+/// that window failed with ETXTBSY (a failed merge batch). The checkout
+/// runs the helper as `sh <path>`, so the file is never exec'd; every
+/// clone must succeed, 20 rounds in a row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_token_checkouts_survive_concurrent_forks() {
+    let forge_dir = tempfile::tempdir().unwrap();
+    let root = forge_dir.path();
+    forge_repo(root);
+    let (forge_addr, _seen) = start_forge(root).await;
+
+    // The fork pressure: children of this process, spawned without pause
+    // while the checkouts run. Each one, between its fork and its exec,
+    // holds a copy of any write fd that is open at that moment.
+    let done = Arc::new(AtomicBool::new(false));
+    let mut spawners = Vec::new();
+    for _ in 0..2 {
+        let done = done.clone();
+        spawners.push(std::thread::spawn(move || {
+            while !done.load(Ordering::Relaxed) {
+                let st = Command::new("sh").arg("-c").arg("exit 0").status().unwrap();
+                assert!(st.success());
+            }
+        }));
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    for round in 0..20 {
+        let mut joins = Vec::new();
+        for i in 0..4 {
+            let url = format!("http://{forge_addr}/app.git");
+            let base = root.join(format!("stress/{round}-{i}"));
+            joins.push(std::thread::spawn(move || {
+                let c = Checkout {
+                    url,
+                    dest: base.join("ws/app"),
+                    branch: None,
+                    depth: None,
+                    secret: Some(Secret::Token {
+                        username: "bot".into(),
+                        token: Zeroizing::new(FORGE_TOKEN.into()),
+                    }),
+                    store: RunDirs::new(&base.join("state")),
+                    deny_local_under: vec![],
+                    timeout: Duration::from_secs(60),
+                    hooks: terrariumd::git::Hooks::default(),
+                    origin: terrariumd::git::Origin::default(),
+                    fetch_from: None,
+                };
+                let out = clone_or_update(&c, &mut |_| {});
+                (round, i, out.map(|o| o.action))
+            }));
+        }
+        for j in joins {
+            let (round, i, out) = j.join().unwrap();
+            if !matches!(out, Ok(Action::Cloned)) {
+                failures.push(format!("round {round} clone {i}: {out:?}"));
+            }
+        }
+    }
+    done.store(true, Ordering::Relaxed);
+    for s in spawners {
+        s.join().unwrap();
+    }
+    assert!(!failures.join("\n").contains(FORGE_TOKEN));
+    assert!(failures.is_empty(), "{failures:?}");
 }

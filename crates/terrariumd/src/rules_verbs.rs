@@ -187,6 +187,15 @@ fn noop(detail: Value) -> Done {
     }
 }
 
+/// Are all placeholders of a raw text `group.*` ones (`{{group.failed_step}}`)?
+/// A text without a placeholder answers true; the caller checks that first.
+fn only_group_placeholders(raw: &str) -> bool {
+    raw.split("{{").skip(1).all(|rest| {
+        rest.find("}}")
+            .is_some_and(|close| rest[..close].trim().starts_with("group."))
+    })
+}
+
 fn the_card<'a>(ctx: &'a RunCtx, verb: &str) -> ApiResult<&'a Card> {
     ctx.card
         .as_ref()
@@ -342,6 +351,32 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
             }
             "group.remove" => groups::remove(t, &g, &the_card(ctx, verb)?.id)?,
             "group.status" => match a.text("step") {
+                // The group of the key is open (`g`), but the run's card
+                // left it, so a `{{group.*}}` step placeholder has no
+                // value (`{{group.failed_step}}` of the pack, on
+                // `merge-group-failed`: a red split re-groups the batch
+                // while the per-card lanes of the old verdict still mark
+                // the old group). There is no step to mark then: skip, as
+                // a key without a group skips. A closed group noops in
+                // `groups::step`, which stays first, and any other step
+                // that renders empty (a literal one, or the rule's own
+                // placeholder) stays invalid.
+                Some(step) if step.trim().is_empty() && g.closed_at.is_none() => {
+                    let raw = a.raw("step").unwrap_or_default();
+                    let cardless = ctx.card.as_ref().is_none_or(|c| c.group.is_none());
+                    if raw.contains("{{") && (cardless || only_group_placeholders(raw)) {
+                        return Ok(noop(json!({
+                            "key": key,
+                            "reason": if cardless {
+                                "the step placeholder has no value \
+                                 (the card has no group)"
+                            } else {
+                                "the step placeholder has no value"
+                            },
+                        })));
+                    }
+                    return Err(ApiError::invalid("group step name must not be empty"));
+                }
                 Some(step) => groups::step(
                     t,
                     &g,

@@ -5,11 +5,12 @@
 import { useParams, type RouteSectionProps } from "@solidjs/router";
 import { TabScreen } from "../../components/TabScreen";
 import { KNOWLEDGE_TABS } from "../../app/nav";
+import { decodePathParam, projectBase } from "../../lib/url";
 
 export default function KnowledgePage(props: RouteSectionProps) {
   const params = useParams<{ project: string }>();
   return (
-    <TabScreen title={`Knowledge · ${params.project}`} label="Knowledge" base={`/p/${encodeURIComponent(params.project)}/knowledge`} tabs={KNOWLEDGE_TABS}>
+    <TabScreen title={`Knowledge · ${decodePathParam(params.project)}`} label="Knowledge" base={`${projectBase(params.project)}/knowledge`} tabs={KNOWLEDGE_TABS} level={2}>
       {props.children}
     </TabScreen>
   );

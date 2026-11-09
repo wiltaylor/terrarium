@@ -5,6 +5,7 @@
 //! `targets/`, and `subscriptions/` directories. When a file has no `name`,
 //! the file stem is the name.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -874,6 +875,15 @@ pub struct CheckoutDef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryDef {
+    /// Public SSH endpoints and pinned VM host key for daemon-owned Docker access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_ci: Option<DockerCiDef>,
+    /// Daemon-consumed Docker SSH key references under DOCKER_CI_KEY
+    /// and DOCKER_CI_RESET_KEY (both required when configured).
+    /// Values must be @secret:<name>[.<field>], authorized by delivery
+    /// run grants. The recipe receives only a Docker endpoint, never a key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub merge_secrets: BTreeMap<String, String>,
     /// Literal failure markers to extract from job logs. None uses Rust's
     /// FAILED, panicked, test result: FAILED, and failures: markers.
     /// An empty list disables extraction. Matching lines include three
@@ -900,6 +910,21 @@ pub struct DeliveryDef {
     /// The most time a job may run, in seconds. Default 3600.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerCiDef {
+    /// SSH destination, for example root@host. No SSH options are accepted.
+    pub destination: String,
+    pub port: u16,
+    /// OpenSSH known_hosts line for destination and port.
+    pub known_hosts: String,
+    /// Forced-command reset destination, pinned by reset_known_hosts.
+    pub reset_destination: String,
+    pub reset_port: u16,
+    /// Administrator-verified OpenSSH pin for the forced reset endpoint.
+    pub reset_known_hosts: String,
 }
 
 impl DeliveryDef {
@@ -937,6 +962,9 @@ pub struct ProjectDef {
     /// Opt-in ready-card dispatcher owner (a project admin). `off` disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card_dispatcher: Option<String>,
+    /// Opt-in admin owner for review dispatch, or `off` to disable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_dispatcher: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

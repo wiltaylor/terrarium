@@ -86,6 +86,10 @@ pub struct UsageConfig {
     /// Move an agent that hits a usage limit to the next account of its
     /// pool (`TERRARIUM_AUTO_SWAP`, PLAN §16.3). Default on.
     pub auto_swap: bool,
+    /// The quota probe samples younger than this stay
+    /// (`TERRARIUM_QUOTA_SAMPLE_KEEP`, TER-395). The newest sample of each
+    /// window stays at any age.
+    pub quota_sample_keep: Duration,
     pub http: Arc<dyn HttpGet>,
 }
 
@@ -102,6 +106,7 @@ impl Default for UsageConfig {
             detect_on_start: false,
             per_agent_sessions: true,
             auto_swap: true,
+            quota_sample_keep: crate::settings::DEFAULT_QUOTA_SAMPLE_KEEP,
             http: Arc::new(ReqwestHttp::new()),
         }
     }

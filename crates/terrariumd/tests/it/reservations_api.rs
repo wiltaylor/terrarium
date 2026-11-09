@@ -127,21 +127,41 @@ async fn setup_docker(
     };
     if live {
         options.docker_bin = "docker".into();
-        options.capabilities.capacity =
-            terrarium_host::capabilities::detect_capacity(std::path::Path::new("/proc"));
+        // The Docker daemon may be remote. Local /proc is not its CPU
+        // or memory capacity and can produce invalid cpusets there.
+        let output = std::process::Command::new("docker")
+            .args(["info", "--format", "{{json .}}"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let info: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let count = u32::try_from(info["NCPU"].as_u64().unwrap()).unwrap();
+        options.capabilities.capacity = Some(HostCapacity {
+            cpu_ids: (0..count).collect(),
+            memory_bytes: info["MemTotal"].as_u64().unwrap(),
+        });
     }
     let client = tokio::spawn(Client::new(options).run());
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !state.executor.hosts.is_online("h") || state.executor.resource_pending("h") {
+        while !state.executor.hosts.is_online("h")
+            || (!live && state.executor.resource_pending("h"))
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .unwrap();
+    if live {
+        terrariumd::reservations::reconcile_host(&state, "h")
+            .await
+            .unwrap();
+    }
     for name in ["p-box", "p-box2"] {
         td.post(
             "/api/targets",
-            json!({"name":name,"kind":"docker","host":"h","project":"p","image":if live { "alpine:3.22" } else { "fake" }}),
+            json!({"name":name,"kind":"docker","host":"h","project":"p",
+                "container":if live { Some(live_container(name)) } else { None },
+                "image":if live { "alpine:3.22" } else { "fake" }}),
         )
         .await
         .ok();
@@ -750,7 +770,23 @@ async fn command_waits_briefly_for_admission_and_lock_keys_do_not_collide() {
 #[tokio::test]
 #[ignore = "requires an exclusive Docker scratch host, alpine:3.22 and TERRARIUM_LIVE_IO_DEVICE"]
 async fn live_docker_release_and_create_only_io() {
+    live_docker_release_impl(true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run explicitly by the merge Docker gate"]
+async fn live_docker_release() {
+    live_docker_release_impl(false).await;
+}
+
+fn live_container(target: &str) -> String {
+    format!("ter-363-{}-{target}", std::process::id())
+}
+
+async fn live_docker_release_impl(check_io: bool) {
     use std::process::Command;
+    let box1 = live_container("p-box");
+    let box2 = live_container("p-box2");
     fn inspect(name: &str) -> serde_json::Value {
         let output = Command::new("docker")
             .args(["inspect", name])
@@ -762,14 +798,17 @@ async fn live_docker_release_and_create_only_io() {
     struct Cleanup;
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            for name in ["terrarium-p-box", "terrarium-p-box2"] {
-                let _ = Command::new("docker").args(["rm", "-f", name]).output();
+            for name in [live_container("p-box"), live_container("p-box2")] {
+                let _ = Command::new("docker").args(["rm", "-f", &name]).output();
             }
         }
     }
-    let device =
-        std::env::var("TERRARIUM_LIVE_IO_DEVICE").expect("explicit scratch block device required");
-    for name in ["terrarium-p-box", "terrarium-p-box2"] {
+    let device = if check_io {
+        std::env::var("TERRARIUM_LIVE_IO_DEVICE").expect("explicit scratch block device required")
+    } else {
+        String::new()
+    };
+    for name in [&box1, &box2] {
         assert!(
             !Command::new("docker")
                 .args(["inspect", name])
@@ -790,20 +829,20 @@ async fn live_docker_release_and_create_only_io() {
         .unwrap()
         .capacity
         .unwrap();
-    td.put(
-        "/api/hosts/h/capacity",
-        json!({"percentage":100,"io":{device.clone():{"read_bps":1048576}}}),
-    )
-    .await
-    .ok();
+    let capacity = if check_io {
+        json!({"percentage":100,"io":{device.clone():{"read_bps":1048576}}})
+    } else {
+        json!({"percentage":100})
+    };
+    td.put("/api/hosts/h/capacity", capacity).await.ok();
     td.post("/api/targets/p-box/up", json!({})).await.ok();
     let granted = td.post("/api/hosts/h/reservations", json!({"target":"p-box","amounts":{"cpu_millis":500,"memory_bytes":67108864},"until":"30m"})).await;
     let id = granted.ok()["id"].as_str().unwrap();
-    let limited = inspect("terrarium-p-box");
+    let limited = inspect(&box1);
     assert_eq!(limited["HostConfig"]["NanoCpus"], 500000000_u64);
     assert_eq!(limited["HostConfig"]["Memory"], 67108864_u64);
     td.delete(&format!("/api/reservations/{id}")).await.ok();
-    let released = inspect("terrarium-p-box");
+    let released = inspect(&box1);
     assert_eq!(released["State"]["Running"], true);
     assert_eq!(
         released["HostConfig"]["NanoCpus"],
@@ -820,6 +859,11 @@ async fn live_docker_release_and_create_only_io() {
             .join(",")
     );
     println!("released: {}", released["HostConfig"]);
+    if !check_io {
+        client.abort();
+        server.abort();
+        return;
+    }
     td.post(
         "/api/hosts/h/reservations",
         json!({"target":"p-box","amounts":{"io":{device.clone():{"read_bps":1024}}},"until":"30m"}),
@@ -833,16 +877,16 @@ async fn live_docker_release_and_create_only_io() {
     let io_id = io.ok()["id"].as_str().unwrap();
     td.post("/api/targets/p-box2/up", json!({})).await.ok();
     assert_eq!(
-        inspect("terrarium-p-box2")["HostConfig"]["BlkioDeviceReadBps"][0]["Rate"],
+        inspect(&box2)["HostConfig"]["BlkioDeviceReadBps"][0]["Rate"],
         1048576_u64
     );
     td.delete(&format!("/api/reservations/{io_id}")).await.ok();
     let output = Command::new("docker")
-        .args(["inspect", "terrarium-p-box2"])
+        .args(["inspect", &box2])
         .output()
         .unwrap();
     if output.status.success() {
-        assert_ne!(inspect("terrarium-p-box2")["State"]["Running"], true);
+        assert_ne!(inspect(&box2)["State"]["Running"], true);
     }
     client.abort();
     server.abort();

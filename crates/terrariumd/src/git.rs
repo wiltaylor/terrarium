@@ -7,7 +7,10 @@
 //!   0700 run dir under `<state>/credentials/.run/`. The script answers only
 //!   for the protocol and host of the repo URL. The run dir is removed after
 //!   the run. The secret is never on the command line, in the env, or in
-//!   the repo's `.git/config`.
+//!   the repo's `.git/config`. Git runs the script as `sh <path>` (the
+//!   `!`-helper is `exec sh <path>`), never as an exec of the file: a fork
+//!   of the daemon in flight holds a copy of the write fd that wrote it,
+//!   and an exec in that window fails with ETXTBSY (TER-415).
 //! - An SSH key goes to `ssh -i` through `GIT_SSH_COMMAND`, as a 0600 copy in
 //!   the same run dir.
 //! - ssh records the host keys (trust on first use) in
@@ -810,8 +813,14 @@ impl Runner {
                     let script = dir
                         .write_script("helper", &token_helper(&loc, &answer))
                         .map_err(|e| io(e.message))?;
+                    // `!`-helpers run as `sh -c '<snippet> "$@"'`, so this
+                    // makes git run `sh <script> get`: the shell reads the
+                    // script, and the file is never exec'd. A fork of the
+                    // daemon that still holds the write fd of the script
+                    // (or of the answer) then cannot make git fail with
+                    // ETXTBSY (TER-415).
                     config.push(format!(
-                        "credential.helper=!{}",
+                        "credential.helper=!exec sh {}",
                         sh_quote(&script.to_string_lossy())
                     ));
                     run = Some(dir);
@@ -3539,6 +3548,97 @@ mod tests {
         let run = r._run.as_ref().unwrap().path().to_owned();
         drop(r);
         assert!(!run.exists(), "the run dir is removed");
+    }
+
+    /// TER-415: a fork of the daemon in flight holds a copy of the write
+    /// fd that wrote the helper, and an exec of the file in that window
+    /// fails with ETXTBSY (Text file busy). The `!`-helper runs the script
+    /// through `sh`, which only reads it, so a write fd held open cannot
+    /// stop it.
+    #[test]
+    fn the_helper_script_is_read_not_execd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RunDirs::new(tmp.path());
+        let c = Checkout {
+            url: "https://github.com/a/b.git".into(),
+            dest: tmp.path().join("d"),
+            branch: None,
+            depth: None,
+            secret: Some(Secret::Token {
+                username: "bot".into(),
+                token: zeroize::Zeroizing::new("tok".into()),
+            }),
+            store,
+            deny_local_under: vec![],
+            timeout: Duration::from_secs(5),
+            hooks: Hooks::default(),
+            origin: Origin::default(),
+            fetch_from: None,
+        };
+        let r = Runner::new(&c).unwrap();
+        let helper = r
+            .config
+            .iter()
+            .find_map(|kv| kv.strip_prefix("credential.helper=!"))
+            .unwrap()
+            .to_owned();
+        assert!(helper.starts_with("exec sh "), "{helper}");
+        let script = r._run.as_ref().unwrap().path().join("helper");
+        // A write fd on the script, as a fork in flight would hold one.
+        // `write(true)` alone does not truncate the file.
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&script)
+            .unwrap();
+        // The `sh -c '<snippet> get'` form that git runs for a
+        // `!`-helper: it reads the script and answers for its host.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{helper} get"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"protocol=https\nhost=github.com\n\n")
+            .unwrap();
+        let o = child.wait_with_output().unwrap();
+        assert!(
+            o.status.success(),
+            "{:?}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout),
+            "username=bot\npassword=tok\n"
+        );
+        // What the snippet avoids: an exec of the script while a write fd
+        // is open. The kernel refuses that with ETXTBSY; LC_ALL=C pins the
+        // shell's strerror message to English, whatever the environment
+        // of the run.
+        let mut direct = Command::new("sh")
+            .env("LC_ALL", "C")
+            .arg("-c")
+            .arg(format!("{} get", sh_quote(&script.to_string_lossy())))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(direct.stdin.take().unwrap());
+        let o = direct.wait_with_output().unwrap();
+        assert!(!o.status.success(), "an exec must fail with the fd open");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("Text file busy"),
+            "{:?}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        drop(held);
     }
 
     /// TER-103: the daemon's job repo fetches, merges without a work tree

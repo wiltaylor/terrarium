@@ -100,7 +100,11 @@ class Release(unittest.TestCase):
         self.assertIn("/opt/terrarium/dist/terrarium-host-x86_64-linux", TEXT)
         self.assertIn("sha256sum \"$asset\" > SHA256SUMS", TEXT)
         # The Dockerfile puts the binary and its .sha256 there.
-        self.assertIn("COPY --from=host-build /dist/ /opt/terrarium/dist/", DOCKERFILE)
+        self.assertIn("COPY --from=host-build /dist/ /payload/dist/", DOCKERFILE)
+        # docker create/cp in release CI does not run the entrypoint, so this
+        # path must resolve to bundled files without an initialized volume.
+        self.assertIn("ln -s /opt/terrarium/bundled/dist /opt/terrarium/dist", DOCKERFILE)
+        self.assertIn("TERRARIUM_HOST_DIST_DIR=/state/releases/current/dist", DOCKERFILE)
         self.assertIn('sha256sum "$dist" > "$dist.sha256"', DOCKERFILE)
 
     def test_the_dockerfile_labels_the_image(self):

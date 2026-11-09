@@ -812,9 +812,11 @@ replay, and no `ack`. The code is `crates/terrarium-host/src/metrics.rs`.
   `statvfs`. A mount counts when its source is a block device (`/dev/...`,
   not `/dev/loop*`) or a ZFS dataset, its type is not `tmpfs`, `devtmpfs`,
   `ramfs`, `overlay`, `squashfs`, `iso9660`, `udf`, `proc`, `sysfs`,
-  `cgroup`, `cgroup2`, `nsfs`, `autofs`, or `fuse.*`, and its mount point
+  `cgroup`, `cgroup2`, `nsfs`, `autofs`, or `fuse.*`, its mount point
   is not under `/proc`, `/sys`, `/dev`, `/run`, `/snap`, `/var/lib/docker`,
-  `/var/lib/containers`, or `/var/lib/kubelet`. Network filesystems (NFS,
+  `/var/lib/containers`, or `/var/lib/kubelet`, and its mount options do
+  not contain `ro` (a read-only image, like the WSL kernel tools and
+  headers, cannot fill or free, so its usage is not an alert). Network filesystems (NFS,
   SMB, rclone) have no `/dev` source, so they are out: a `statvfs` on a
   hung network mount can block. Each device shows one time, at its
   shortest mount point (a btrfs volume with many subvolumes is one
