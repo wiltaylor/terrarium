@@ -668,6 +668,13 @@ pub fn is_pause_notice(from: &Address, subject: &str) -> bool {
         && subject.ends_with(" needs a human")
 }
 
+/// [`is_pause_notice`] on a stored message: `from` is the address key of
+/// the row. A pause notice opens no mail item ([`send`] skips it), so its
+/// close emits none either (`inbox::mail_closed`).
+pub fn is_pause_notice_key(from: &str, subject: &str) -> bool {
+    from == "system" && is_pause_notice(&Address::System, subject)
+}
+
 /// `TERRARIUM_MAIL_LOOP_LIMIT`: the agent-to-agent messages a thread may
 /// have since the last operator or project-inbox message before the loop
 /// guard pauses it (PLAN §12).
@@ -1171,15 +1178,23 @@ fn audit_read(t: &Tx<'_>, m: &Message, via: &str) -> ApiResult<()> {
 mod tests {
     use super::*;
 
-    /// The `inbox` closed events of one item, as the daemon streams them.
-    fn closed_events(t: &Tx<'_>, item: &str) -> Vec<serde_json::Value> {
+    /// The `inbox` events of one item, as the daemon streams them.
+    fn inbox_events(t: &Tx<'_>, item: &str) -> Vec<serde_json::Value> {
         let mut st = t
             .prepare("SELECT payload FROM events WHERE kind = 'inbox'")
             .unwrap();
         st.query_map([], |r| r.get::<_, String>(0))
             .unwrap()
             .filter_map(|p| serde_json::from_str::<serde_json::Value>(&p.ok()?).ok())
-            .filter(|d| d["item"] == item && d["change"] == "closed")
+            .filter(|d| d["item"] == item)
+            .collect()
+    }
+
+    /// The `inbox` closed events of one item, as the daemon streams them.
+    fn closed_events(t: &Tx<'_>, item: &str) -> Vec<serde_json::Value> {
+        inbox_events(t, item)
+            .into_iter()
+            .filter(|d| d["change"] == "closed")
             .collect()
     }
 
@@ -1267,6 +1282,14 @@ mod tests {
         mark_read_in_turn(&mut t, std::slice::from_ref(&to_agent.id), &agent_id).unwrap();
         reply(&mut t, &to_agent, &worker, None, "answer").unwrap();
         assert!(closed_events(&t, &format!("mail:{}", to_agent.id)).is_empty());
+
+        // A pause notice opened no mail item (`send` skips it), so reading
+        // it closes none: no event at all, on any path.
+        let notice = to_operator(&mut t, &Address::System, "Thread 01J needs a human").unwrap();
+        assert!(inbox_events(&t, &format!("mail:{}", notice.id)).is_empty());
+        mark_read(&mut t, &notice.id).unwrap();
+        mark_read_in_turn(&mut t, std::slice::from_ref(&notice.id), "operator").unwrap();
+        assert!(inbox_events(&t, &format!("mail:{}", notice.id)).is_empty());
     }
 
     /// The name reader goes through the tombstone resolver: a deleted agent
