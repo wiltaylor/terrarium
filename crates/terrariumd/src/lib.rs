@@ -38,6 +38,7 @@ pub mod ingest;
 pub mod input_watchdog;
 pub mod jobs;
 pub mod leases;
+pub mod links;
 pub mod lifecycle;
 pub mod login_session;
 pub mod models;
@@ -266,7 +267,13 @@ async fn start_with_usage_and_executor(
         pipelines: Arc::default(),
         git_proxy: Arc::default(),
         job_queue: Arc::default(),
+        links: Arc::default(),
     });
+    // The instance ID of the links (TER-61): made at the first start.
+    match state.links.instance_id(&state.state_dir) {
+        Ok(id) => info!(instance = %id, "instance ID"),
+        Err(e) => warn!("no instance ID: {}", e.message),
+    }
     // No webhook may carry the API token (docs/security-review.md).
     state.webhooks.set_own_token(cfg.token.as_deref());
     if cfg.insecure_agent_header {

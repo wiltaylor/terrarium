@@ -19,6 +19,9 @@ pub enum Code {
     Unauthorized,
     /// The actor may not do this. The message says which rule refused it.
     Forbidden,
+    /// A link key called a route of the link deny list (`docs/api.md`
+    /// §35), or a read-only link tried to write.
+    LinkForbidden,
     /// The object does not exist, or the actor may not see it.
     NotFound,
     /// The route exists, but not with this method.
@@ -69,7 +72,7 @@ impl Code {
         match self {
             Self::BadRequest => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::Forbidden | Self::LinkForbidden => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::Conflict

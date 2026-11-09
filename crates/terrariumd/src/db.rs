@@ -3004,6 +3004,7 @@ impl<'c> Tx<'c> {
             project: project.map(str::to_owned),
             detail,
             link: Default::default(),
+            link_label: None,
         };
         // The live `audit` frame carries the session too.
         crate::store::audit::attach_links(&self.tx, std::slice::from_mut(&mut row))?;

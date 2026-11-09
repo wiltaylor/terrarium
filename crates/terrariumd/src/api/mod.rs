@@ -17,6 +17,7 @@ mod hosts;
 mod inbox;
 pub mod install;
 pub(crate) mod jobs;
+mod links;
 mod longpoll;
 pub(crate) mod mail;
 mod memory;
@@ -81,6 +82,7 @@ pub use artifacts::{artifact_router, run_prune};
 pub use config::spawn_config_sync;
 pub use schedules::{run_schedule, run_triggered};
 pub use subscriptions::settle_defaults as settle_account_defaults;
+pub use links::this_instance;
 pub use system::{DefinitionCounts, Health, VersionInfo};
 
 use crate::actor::{Transport, resolve_actor};
@@ -170,6 +172,9 @@ pub struct AppState {
     /// The job queue: whether the start has taken up the jobs of the last
     /// daemon (`crate::jobs`).
     pub job_queue: Arc<crate::jobs::Runtime>,
+    /// The link keys: the revocation signals, the use throttle, and the
+    /// instance ID (`crate::links`, TER-61).
+    pub links: Arc<crate::links::Runtime>,
 }
 
 impl AppState {
@@ -339,6 +344,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(config::routes())
         .merge(skills::routes())
         .merge(system_prompts::routes())
+        .merge(links::routes())
         .route(
             "/session",
             get(session::current)
@@ -441,7 +447,7 @@ fn query_token(req: &Request) -> Option<String> {
     })
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -492,6 +498,15 @@ pub struct TokenAuth {
     public_origin: Option<String>,
     /// The client addresses that got the `?token=` warning.
     warned: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The link keys (`tlk_`, TER-61). `None`: a link key is a wrong token.
+    links: Option<LinkAuth>,
+}
+
+/// What the TCP auth needs to check a link key.
+#[derive(Clone)]
+pub struct LinkAuth {
+    pub db: Db,
+    pub runtime: Arc<crate::links::Runtime>,
 }
 
 impl TokenAuth {
@@ -502,7 +517,15 @@ impl TokenAuth {
             sessions: None,
             public_origin: None,
             warned: std::sync::Mutex::default(),
+            links: None,
         }
+    }
+
+    /// Also take link keys (`tlk_`, `docs/api.md` §35).
+    #[must_use]
+    pub fn with_links(mut self, links: LinkAuth) -> Self {
+        self.links = Some(links);
+        self
     }
 
     /// Also take the session cookie. `public_origin`: the dashboard origin
@@ -616,6 +639,15 @@ async fn require_token(
         req.extensions_mut().insert(Transport::Tcp);
         return next.run(req).await;
     }
+    // A link pairing: `POST /api/links/pair` with no `Authorization`. The
+    // one-time pairing code in the body is the proof (`api::links::pair`).
+    if req.uri().path() == "/api/links/pair"
+        && req.method() == axum::http::Method::POST
+        && header_token.is_none()
+    {
+        req.extensions_mut().insert(Transport::Tcp);
+        return next.run(req).await;
+    }
     // The subprotocol that carried the token: the answer must name it, or
     // the browser drops the connection.
     let mut echo = None;
@@ -640,6 +672,11 @@ async fn require_token(
         // The static token, else a CLI session token.
         let via = if token_matches(given.as_bytes(), auth.token.as_bytes()) {
             session::AuthVia::Bearer
+        } else if given.starts_with(crate::store::links::KEY_PREFIX) {
+            return match &auth.links {
+                Some(links) => link_request(links, &given, req, next, echo).await,
+                None => unauthorized("missing or wrong bearer token"),
+            };
         } else {
             let found = match &auth.sessions {
                 Some(s) => s.check(&given, session::TokenKind::Cli, now).await,
@@ -755,6 +792,122 @@ async fn require_token(
     }
 }
 
+/// A request with a link key (`docs/api.md` §35, wiki
+/// design/linked-instances D3): the operator's rights minus the deny list
+/// of [`crate::links::denied`], with the actor label `link:<id>`. The
+/// request holds the key's revocation signal from before the lookup, so a
+/// revoke ends a long poll, a stream, or a WebSocket of the key at once.
+async fn link_request(
+    links: &LinkAuth,
+    key: &str,
+    mut req: Request,
+    next: Next,
+    echo: Option<String>,
+) -> Response {
+    use crate::links::{CALLER, LinkCaller};
+    let hash = crate::store::hosts::token_hash(key);
+    let guard = links.runtime.guard(&hash);
+    let h = hash.clone();
+    let found = links
+        .db
+        .read(move |c| crate::store::links::by_key_hash(c, &h))
+        .await;
+    let link = match found {
+        Ok(Some(l)) => l,
+        Ok(None) => return unauthorized("the link key is wrong or was revoked"),
+        Err(e) => return e.into_response(),
+    };
+    let caller = LinkCaller {
+        id: link.id,
+        label: link.label,
+        read_only: link.read_only,
+        key_hash: hash,
+    };
+    let from = client_addr(&req);
+    let websocket = is_websocket(&req);
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    if let Some(why) = crate::links::denied(&method, &path, websocket, caller.read_only) {
+        if links
+            .runtime
+            .should_audit_forbidden(&caller.id, &method, &path)
+        {
+            let (id, label, ro) = (caller.id.clone(), caller.label.clone(), caller.read_only);
+            let m = method.to_string();
+            let p = path.clone();
+            let r = links
+                .db
+                .write(format!("link:{id}"), move |t| {
+                    t.audit(
+                        "link.forbidden",
+                        &id,
+                        None,
+                        serde_json::json!({"label": label, "method": m, "path": p,
+                                           "read_only": ro, "from": from, "reason": why}),
+                    )
+                })
+                .await;
+            if let Err(e) = r {
+                tracing::warn!("cannot write the link.forbidden audit row: {}", e.message);
+            }
+        }
+        return ApiError::new(
+            Code::LinkForbidden,
+            format!("a link key may not call {method} {path}: {why}"),
+        )
+        .into_response();
+    }
+    if links.runtime.should_mark(&caller.id, &from) {
+        let id = caller.id.clone();
+        let r = links
+            .db
+            .write(format!("link:{id}"), move |t| {
+                crate::store::links::mark_used(t, &id, &from)
+            })
+            .await;
+        if let Err(e) = r {
+            tracing::warn!("cannot record the use of a link key: {}", e.message);
+        }
+    }
+    req.extensions_mut().insert(session::AuthVia::Link);
+    req.extensions_mut().insert(Transport::Tcp);
+    req.extensions_mut().insert(caller.clone());
+    req.extensions_mut().insert(guard.clone());
+    let g = guard.clone();
+    let run = CALLER.scope(caller, async move {
+        tokio::select! {
+            r = next.run(req) => Some(r),
+            () = g.revoked() => None,
+        }
+    });
+    let Some(mut resp) = run.await else {
+        return unauthorized("the link was revoked");
+    };
+    if let Some(proto) = echo
+        && resp.status() == axum::http::StatusCode::SWITCHING_PROTOCOLS
+        && !resp.headers().contains_key(header::SEC_WEBSOCKET_PROTOCOL)
+        && let Ok(v) = HeaderValue::from_str(&proto)
+    {
+        resp.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, v);
+    }
+    revocable_body(resp, guard)
+}
+
+/// End a streamed answer body (SSE, a download) when the link is revoked.
+/// An answer of a known size is sent as it is.
+fn revocable_body(resp: Response, guard: crate::links::LinkGuard) -> Response {
+    use axum::body::HttpBody;
+    if resp.body().size_hint().exact().is_some() {
+        return resp;
+    }
+    let (parts, body) = resp.into_parts();
+    let stream = futures_util::StreamExt::take_until(
+        body.into_data_stream(),
+        Box::pin(async move { guard.revoked().await }),
+    );
+    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
 /// The CSP of an API answer: it loads nothing and is never framed.
 pub const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
 
@@ -855,7 +1008,11 @@ pub fn tcp_router(state: Shared, token: String) -> anyhow::Result<Router> {
             operator: state.operator_auth.clone(),
         },
         state.web.public_origin(),
-    );
+    )
+    .with_links(LinkAuth {
+        db: state.db.clone(),
+        runtime: state.links.clone(),
+    });
     let on_dashboard = artifacts_on_dashboard(&state);
     Ok(tcp_router_with(state, auth, on_dashboard))
 }
@@ -983,6 +1140,7 @@ mod tests {
             pipelines: Arc::default(),
             git_proxy: Arc::default(),
             job_queue: Arc::default(),
+            links: Arc::default(),
         })
     }
 

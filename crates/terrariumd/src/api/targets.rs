@@ -1018,11 +1018,12 @@ async fn session_ws(
             "this endpoint is a WebSocket; send an upgrade request",
         ));
     }
+    let guard = req.extensions().get::<crate::links::LinkGuard>().cloned();
     let (mut parts, _) = req.into_parts();
     let ws = WebSocketUpgrade::from_request_parts(&mut parts, &())
         .await
         .map_err(|e| ApiError::bad_request(e.body_text()))?;
-    Ok(ws.on_upgrade(move |socket| ws_bridge(socket, s)))
+    Ok(ws.on_upgrade(move |socket| crate::links::until_revoked(guard, ws_bridge(socket, s))))
 }
 
 async fn ws_bridge(socket: WebSocket, s: std::sync::Arc<ExecSession>) {
