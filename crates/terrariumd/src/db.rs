@@ -3343,7 +3343,11 @@ mod tests {
                 .as_deref(),
             Some("2026-11-08T12:00:00Z")
         );
-        assert!(crate::store::board::last_moved_at(&conn, "T-9").unwrap().is_none());
+        assert!(
+            crate::store::board::last_moved_at(&conn, "T-9")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
