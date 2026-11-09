@@ -450,40 +450,89 @@ pub fn check_root_owned(path: &Path, meta: &std::fs::Metadata) -> Result<(), Str
     Ok(())
 }
 
-/// [`check_root_owned`] for the path and each of its parent directories:
-/// a writable parent could swap the file. Symlinks do not hide a parent:
-/// the path is checked as written (each symlink on it must be root-owned,
-/// in a checked directory) and then as resolved (each directory that a
-/// symlink points into is checked too).
-pub fn check_root_chain(path: &Path) -> Result<(), String> {
+/// The most symlinks that [`check_root_chain`] follows in one path.
+pub const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Resolve `path` one component at a time and check each step: every
+/// directory and the final file must pass [`check_root_owned`], and every
+/// symlink on the way (also one in the middle of a chain, or a directory
+/// symlink) must be owned by root and sit in a directory that passed. So
+/// no step can be repointed by another user. Returns the resolved path:
+/// the helper runs and reads through it, not through the path as written.
+pub fn check_root_chain(path: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
     if !path.is_absolute() {
         return Err(format!("{} must be an absolute path", path.display()));
     }
-    walk_root_chain(path)?;
-    let real = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if real != path {
-        walk_root_chain(&real)
-            .map_err(|e| format!("{} resolves to {}: {e}", path.display(), real.display()))?;
-    }
-    Ok(())
-}
-
-/// The path and its parents, without following the last component of
-/// each: a symlink only needs a root owner (its mode means nothing).
-fn walk_root_chain(path: &Path) -> Result<(), String> {
-    let mut p = Some(path);
-    while let Some(dir) = p {
-        let meta = std::fs::symlink_metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        if meta.file_type().is_symlink() {
-            if meta.uid() != 0 {
-                return Err(format!("symlink {} must be owned by root", dir.display()));
-            }
-        } else {
-            check_root_owned(dir, &meta)?;
+    let root = Path::new("/");
+    let meta = std::fs::symlink_metadata(root).map_err(|e| format!("/: {e}"))?;
+    check_root_owned(root, &meta)?;
+    // The checked real path so far, and the components still to resolve.
+    let mut done = PathBuf::from("/");
+    let mut todo: std::collections::VecDeque<std::ffi::OsString> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_owned()),
+            Component::ParentDir => Some("..".into()),
+            _ => None,
+        })
+        .collect();
+    let mut hops = 0;
+    while let Some(name) = todo.pop_front() {
+        if name == ".." {
+            // `done` holds no symlink, so its parent is the real parent.
+            done.pop();
+            continue;
         }
-        p = dir.parent();
+        let next = done.join(&name);
+        let meta =
+            std::fs::symlink_metadata(&next).map_err(|e| format!("{}: {e}", next.display()))?;
+        if meta.file_type().is_symlink() {
+            hops += 1;
+            if hops > MAX_SYMLINK_HOPS {
+                return Err(format!(
+                    "{}: more than {MAX_SYMLINK_HOPS} symlinks",
+                    path.display()
+                ));
+            }
+            if meta.uid() != 0 {
+                return Err(format!(
+                    "{}: symlink {} must be owned by root",
+                    path.display(),
+                    next.display()
+                ));
+            }
+            let target =
+                std::fs::read_link(&next).map_err(|e| format!("{}: {e}", next.display()))?;
+            if target.is_absolute() {
+                done = PathBuf::from("/");
+            }
+            let rest: Vec<std::ffi::OsString> = target
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(n) => Some(n.to_owned()),
+                    Component::ParentDir => Some("..".into()),
+                    _ => None,
+                })
+                .collect();
+            for c in rest.into_iter().rev() {
+                todo.push_front(c);
+            }
+            continue;
+        }
+        if !todo.is_empty() && !meta.is_dir() {
+            return Err(format!("{}: not a directory", next.display()));
+        }
+        check_root_owned(&next, &meta).map_err(|e| {
+            if next == path {
+                e
+            } else {
+                format!("{} resolves through {e}", path.display())
+            }
+        })?;
+        done = next;
     }
-    Ok(())
+    Ok(done)
 }
 
 /// Check the helper's state directory before it is created or changed:
@@ -510,7 +559,7 @@ pub fn check_state_dir(path: &Path) -> Result<(), String> {
     let mut parent = path.parent();
     while let Some(p) = parent {
         match std::fs::symlink_metadata(p) {
-            Ok(_) => return check_root_chain(p),
+            Ok(_) => return check_root_chain(p).map(|_| ()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => parent = p.parent(),
             Err(e) => return Err(format!("{}: {e}", p.display())),
         }
@@ -815,6 +864,24 @@ pub fn plan_start(
         l.validate().map_err(Refusal::invalid)?;
     }
     let cwd = safe_cwd(&ctx.workspace_root, &req.cwd)?;
+    // One path in a space-separated systemd list: no quoting needed.
+    let rw = &ctx.workspace_root;
+    match rw.to_str() {
+        Some(t)
+            if t.starts_with('/')
+                && !t.contains(|c: char| {
+                    c.is_whitespace() || c.is_control() || matches!(c, '%' | '"' | '\'' | '\\')
+                }) => {}
+        _ => {
+            return Err(Refusal::new(
+                ErrorKind::Unsupported,
+                format!(
+                    "workspace_root {} cannot be a ReadWritePaths= entry",
+                    rw.display()
+                ),
+            ));
+        }
+    }
 
     let mut devices = Vec::new();
     if !req.gpus.is_empty() {
@@ -884,6 +951,10 @@ pub fn plan_start(
         // unit of the UID stops.
         "PrivateTmp=yes",
         "RemoveIPC=yes",
+        // And nowhere else: the whole tree is read-only but the workspace
+        // root (below), so no world-writable directory (/run/lock,
+        // /var/crash, ...) can keep a file of the UID.
+        "ProtectSystem=strict",
         "KillMode=control-group",
         "DevicePolicy=closed",
         "DeviceAllow=char-pts rw",
@@ -895,6 +966,8 @@ pub fn plan_start(
         args.push("-p".into());
         args.push(format!("DeviceAllow={} rw", d.display()));
     }
+    args.push("-p".into());
+    args.push(format!("ReadWritePaths={}", rw.display()));
     args.push("-p".into());
     args.push(format!("WorkingDirectory={}", cwd.display()));
     args.push("-p".into());
@@ -1091,6 +1164,8 @@ pub struct Helper {
     pub systemd_run: PathBuf,
     pub systemctl: PathBuf,
     pub nvidia_smi: PathBuf,
+    /// The cgroup v2 mount ([`CGROUP_ROOT`]; a fake tree in tests).
+    pub cgroup_root: PathBuf,
     /// `Ok` when `nvidia_smi` was verified root-owned at start. Otherwise
     /// GPU sessions are refused with the reason.
     pub gpu: Result<(), String>,
@@ -1105,9 +1180,25 @@ pub struct Helper {
 /// Where the cgroup v2 tree is mounted.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
+/// Fail unless `root` is a cgroup v2 tree (`cgroup.controllers` at its
+/// top). On v1 or hybrid hosts the unit cgroups are not under it, and a
+/// stop could not be confirmed from `cgroup.events`.
+pub fn check_cgroup_v2(root: &Path) -> Result<(), String> {
+    if root.join("cgroup.controllers").is_file() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is not a cgroup v2 tree (no cgroup.controllers): the helper needs cgroup v2",
+            root.display()
+        ))
+    }
+}
+
 /// True when the cgroup `cgroup` (a `ControlGroup` value, relative to
-/// `root`) holds no process: no cgroup, or `populated 0` in its
-/// `cgroup.events`. A value that is not a clean absolute path is an error.
+/// `root`) holds no process: no cgroup value, a cgroup directory that is
+/// gone, or `populated 0` in its `cgroup.events`. Fails closed: a root that
+/// is not cgroup v2, a cgroup directory without `cgroup.events`, or a value
+/// that is not a clean absolute path is an error, not "empty".
 pub fn cgroup_empty(root: &Path, cgroup: &str) -> Result<bool, String> {
     if cgroup.is_empty() {
         return Ok(true);
@@ -1121,20 +1212,21 @@ pub fn cgroup_empty(root: &Path, cgroup: &str) -> Result<bool, String> {
     {
         return Err(format!("bad ControlGroup {cgroup:?}"));
     }
-    let events = root
-        .join(rel.strip_prefix("/").unwrap_or(rel))
-        .join("cgroup.events");
-    match std::fs::read_to_string(&events) {
-        Ok(text) => {
-            let populated = text
-                .lines()
-                .find_map(|l| l.strip_prefix("populated "))
-                .ok_or_else(|| format!("{}: no populated line", events.display()))?;
-            Ok(populated.trim() == "0")
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
-        Err(e) => Err(format!("{}: {e}", events.display())),
+    check_cgroup_v2(root)?;
+    let dir = root.join(rel.strip_prefix("/").unwrap_or(rel));
+    match std::fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+        Ok(m) if !m.is_dir() => return Err(format!("{} is not a cgroup", dir.display())),
+        Ok(_) => {}
     }
+    let events = dir.join("cgroup.events");
+    let text = std::fs::read_to_string(&events).map_err(|e| format!("{}: {e}", events.display()))?;
+    let populated = text
+        .lines()
+        .find_map(|l| l.strip_prefix("populated "))
+        .ok_or_else(|| format!("{}: no populated line", events.display()))?;
+    Ok(populated.trim() == "0")
 }
 
 /// The default [`Helper::stop_timeout`].
@@ -1244,7 +1336,7 @@ impl Helper {
             return Ok(false);
         }
         let cgroup = self.unit_property(unit, "ControlGroup").await?;
-        cgroup_empty(Path::new(CGROUP_ROOT), &cgroup)
+        cgroup_empty(&self.cgroup_root, &cgroup)
     }
 
     /// SIGKILL the unit and wait until systemd reports it stopped, at most

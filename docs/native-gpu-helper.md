@@ -84,20 +84,27 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
     again and checks its groups and linger, so a later `usermod` or
     `loginctl enable-linger` does not reach a new session.
   - UID reuse: a pool UID can pass to another holder once its holder's
-    last session is confirmed stopped. So that nothing of the old holder
-    stays for the new one, each unit has `PrivateTmp=yes` (its own `/tmp`
-    and `/var/tmp`, removed with the unit) and `RemoveIPC=yes` (systemd
-    removes the System V and POSIX IPC objects of the UID, also its files
-    in `/dev/shm`, when the last unit of that UID stops). The pool users
-    have no home directory (see the install steps). Files that a session
-    writes in its workspace stay: the workspace belongs to the target, not
-    to the UID.
+    last session is confirmed stopped. A session can write only in the
+    workspace root and in places that end with the UID's units:
+    `ProtectSystem=strict` makes the whole tree read-only except
+    `ReadWritePaths=<workspace_root>` and the API trees (`/dev`, `/proc`,
+    `/sys`), so no world-writable directory such as `/run/lock` or
+    `/var/crash` can keep a file of the UID. `PrivateTmp=yes` gives the unit
+    its own `/tmp` and `/var/tmp`, removed with the unit. `RemoveIPC=yes`
+    makes systemd remove the System V and POSIX IPC objects of the UID,
+    also its files in `/dev/shm`, when the last unit of that UID stops. The
+    pool users have no home directory (see the install steps). Files in the
+    workspace stay: they belong to the target and are writable through the
+    shared workspace group anyway. A later holder of the UID gains only the
+    owner's right to change their mode, inside the workspace root. A `workspace_root` path with whitespace, quotes, `%`,
+    or a backslash is refused (it goes in a systemd path list).
 - **The session** is a transient system service, not a scope: systemd sets
   the user, the groups, and the device policy before `exec`, and
   `KillMode=control-group` ends every descendant with the main process.
   Properties: `--uid`/`--gid` of the holder's workload user, `NoNewPrivileges=yes`,
   `CapabilityBoundingSet=`, `AmbientCapabilities=`, `RestrictSUIDSGID=yes`,
-  `PrivateTmp=yes`, `RemoveIPC=yes`, `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
+  `PrivateTmp=yes`, `RemoveIPC=yes`, `ProtectSystem=strict`,
+  `ReadWritePaths=<workspace_root>`, `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
   each granted GPU and support node, `--expand-environment=no`. The
   environment goes in a root-only `EnvironmentFile` under `state_dir`, not
   on a command line.
@@ -118,17 +125,23 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   to the unit and waits, at most 30 s, until `systemctl show
   --property=ActiveState` reports it inactive, failed, or unknown, and its
   `ControlGroup` is gone or `populated 0` in `cgroup.events` (a failed unit
-  can keep processes after a stop timed out). Only then is the claim
-  freed. Otherwise it logs a warning, keeps the claim marked
+  can keep processes after a stop timed out). A cgroup directory without
+  `cgroup.events`, or a tree that is not cgroup v2, counts as not stopped.
+  Only then is the claim freed. Otherwise it logs a warning, keeps the claim marked
   stuck, and checks again every 10 s.
 - **Start**: the helper stops the `terrarium-native-*.service` units of an
   earlier run before it serves, and waits until each is inactive. When the
   list fails or a unit does not stop, it exits (fail closed). It checks
   that the config, the binaries, the socket directory, and the state
   directory, and every parent of each, are owned by root and not writable
-  by group or others. A path with a symlink is checked as written (each
-  symlink root-owned) and as resolved, so a root-owned link into a
-  writable directory is refused. The state directory must not be a
+  by group or others. A path is resolved one component at a time: each
+  directory on the way, also one that a symlink leads to, must pass that
+  check, and each symlink (also the middle links of a chain) must be owned
+  by root and sit in a directory that passed, at most 40 symlinks. So no
+  link on the way can be repointed by another user. The helper then runs
+  `systemd_run`, `systemctl`, and `nvidia_smi`, and reads the config,
+  through the resolved paths. It refuses to start without cgroup v2
+  (`/sys/fs/cgroup/cgroup.controllers`). The state directory must not be a
   symlink, and its existing parents are checked before the helper creates
   it or changes its mode. GPU sessions need `nvidia_smi` verified the same way
   at start; otherwise they are refused with the reason.

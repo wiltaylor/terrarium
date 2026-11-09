@@ -126,6 +126,9 @@ impl Fake {
             &format!("printf '{A}, 0\\n{B}, 1\\n'\n"),
         );
         std::fs::create_dir(d.join("sessions")).unwrap();
+        // A fake cgroup v2 tree: `cgroup` names a unit cgroup under it.
+        std::fs::create_dir(d.join("cgroupfs")).unwrap();
+        std::fs::write(d.join("cgroupfs/cgroup.controllers"), "cpu memory\n").unwrap();
         let check_ok = Arc::new(AtomicBool::new(true));
         let helper = Arc::new(Helper {
             ctx: Ctx {
@@ -141,6 +144,7 @@ impl Fake {
             systemd_run: d.join("systemd-run"),
             systemctl: d.join("systemctl"),
             nvidia_smi: d.join("nvidia-smi"),
+            cgroup_root: d.join("cgroupfs"),
             gpu,
             nodes: Box::new(FakeNodes(HashMap::from([
                 (PathBuf::from("/dev/nvidia0"), (195, 0)),
@@ -756,6 +760,46 @@ async fn a_unit_not_confirmed_stopped_keeps_its_gpu() {
     )
     .await;
     assert!(matches!(r, Reply::Started { .. }), "{r:?}");
+}
+
+/// A failed unit whose cgroup still holds a process is not stopped: its
+/// claim stays stuck until the cgroup is empty.
+#[tokio::test]
+async fn a_failed_unit_with_a_populated_cgroup_keeps_its_gpu() {
+    let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
+    let cg = f.dir.path().join("cgroupfs/system.slice/u.service");
+    std::fs::create_dir_all(&cg).unwrap();
+    std::fs::write(cg.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+    f.write("state", "failed\n");
+    f.write("cgroup", "/system.slice/u.service\n");
+    let (s, r) = send(
+        &f.socket,
+        &Request::Start(f.start("p/a", Some("L1"), &[A], &[A], &["true"])),
+    )
+    .await;
+    let Reply::Started { unit } = r else {
+        panic!("{r:?}")
+    };
+    drop(s);
+    let mut stuck = false;
+    for _ in 0..100 {
+        if f.helper
+            .sessions
+            .lock()
+            .unwrap()
+            .claim(&unit)
+            .is_some_and(|c| c.stuck)
+        {
+            stuck = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(stuck, "a failed unit with live processes freed its claim");
+    assert!(f.log("ctl.log").contains("--property=ControlGroup"));
+    // The last process ends: the retry frees the claim.
+    std::fs::write(cg.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+    f.wait_idle().await;
 }
 
 #[tokio::test]
