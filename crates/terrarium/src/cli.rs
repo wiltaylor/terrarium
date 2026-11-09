@@ -2843,7 +2843,7 @@ pub enum QuestionCmd {
     Ls {
         #[arg(long)]
         all: bool,
-        /// open, answered, acknowledged, or retracted
+        /// open, in_thread, answered, acknowledged, or retracted
         #[arg(long)]
         status: Option<String>,
         /// question, notice, or bundle (default: all)
@@ -2893,6 +2893,15 @@ pub enum QuestionCmd {
         #[arg(long, short = 'm')]
         reason: Option<String>,
     },
+    /// Move an open question or notice into a new Inbox thread with its
+    /// agent (the operator): the thread starts with the question, and the
+    /// question is `in_thread` until it is answered or retracted there
+    ToThread {
+        id: String,
+        /// A message to the agent after the question (`-` reads stdin)
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+    },
 }
 
 /// `terrarium admin question ...`: the operator answers.
@@ -2907,7 +2916,7 @@ pub enum AdminQuestionCmd {
         /// Only the open questions (the default)
         #[arg(long, conflicts_with_all = ["status", "all"])]
         open: bool,
-        /// open, answered, acknowledged, or retracted
+        /// open, in_thread, answered, acknowledged, or retracted
         #[arg(long)]
         status: Option<String>,
         /// Every status
@@ -2950,6 +2959,15 @@ pub enum AdminQuestionCmd {
         id: String,
         #[arg(long, short = 'm')]
         reason: Option<String>,
+    },
+    /// Move an open question or notice into a new Inbox thread with its
+    /// agent (the operator): the thread starts with the question, and the
+    /// question is `in_thread` until it is answered or retracted there
+    ToThread {
+        id: String,
+        /// A message to the agent after the question (`-` reads stdin)
+        #[arg(long, short = 'm')]
+        message: Option<String>,
     },
 }
 

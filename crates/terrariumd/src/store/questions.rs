@@ -169,6 +169,10 @@ impl BundleItem {
 #[serde(rename_all = "snake_case")]
 pub enum QuestionStatus {
     Open,
+    /// The operator moved it into an Inbox thread with its agent (GitHub
+    /// #30, [`to_thread`]): not open any more, and settled there by an
+    /// answer, an acknowledgement, or a retract.
+    InThread,
     Answered,
     /// A notice that the operator acknowledged.
     Acknowledged,
@@ -179,20 +183,28 @@ impl QuestionStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
+            Self::InThread => "in_thread",
             Self::Answered => "answered",
             Self::Acknowledged => "acknowledged",
             Self::Retracted => "retracted",
         }
     }
 
+    /// Open, or moved into an Inbox thread: an answer, an
+    /// acknowledgement, or a retract settles it.
+    pub fn unsettled(self) -> bool {
+        matches!(self, Self::Open | Self::InThread)
+    }
+
     pub fn parse(s: &str) -> ApiResult<Self> {
         match s.trim() {
             "open" => Ok(Self::Open),
+            "in_thread" => Ok(Self::InThread),
             "answered" => Ok(Self::Answered),
             "acknowledged" => Ok(Self::Acknowledged),
             "retracted" => Ok(Self::Retracted),
             other => Err(ApiError::invalid(format!(
-                "bad status `{other}`: use open, answered, acknowledged, or retracted"
+                "bad status `{other}`: use open, in_thread, answered, acknowledged, or retracted"
             ))),
         }
     }
@@ -411,7 +423,7 @@ fn list_with_limit(conn: &Connection, f: &Filter, limit: i64) -> ApiResult<Vec<Q
             args.push(s.as_str().to_owned());
         }
         (None, true) => {
-            sql.push_str(" AND (status = 'open' OR (status IN ('answered', 'acknowledged') AND answered_at >= ?))");
+            sql.push_str(" AND (status IN ('open', 'in_thread') OR (status IN ('answered', 'acknowledged') AND answered_at >= ?))");
             args.push(
                 (chrono::Utc::now() - chrono::Duration::hours(24))
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -1326,7 +1338,7 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
             &format!("acknowledge it with `terrarium admin inbox ack {}`", q.id),
         ));
     }
-    if q.status != QuestionStatus::Open {
+    if !q.status.unsettled() {
         return Err(not_open(&q, "an answer"));
     }
     if q.kind == QuestionKind::ToolRun && *by != mail::Address::Operator {
@@ -1378,7 +1390,7 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
     t.execute(
         "UPDATE questions SET status = 'answered', answer = ?2, answer_option = ?3,
                 answered_by = ?4, answered_at = ?5, updated_at = ?5
-         WHERE id = ?1 AND status = 'open'",
+         WHERE id = ?1 AND status IN ('open', 'in_thread')",
         params![
             q.id,
             t.redact(&answer),
@@ -1462,7 +1474,7 @@ fn answer_bundle(
     t.execute(
         "UPDATE questions SET status = 'answered', items = ?2, answered_by = ?3,
                 answered_at = ?4, updated_at = ?4
-         WHERE id = ?1 AND status = 'open'",
+         WHERE id = ?1 AND status IN ('open', 'in_thread')",
         params![q.id, items_json(q.kind, &items), by.key(), at],
     )?;
     let q = get(t, &q.id)?;
@@ -1503,7 +1515,7 @@ pub fn retract(
     reason: Option<&str>,
 ) -> ApiResult<Question> {
     let q = get(t, id)?;
-    if q.status != QuestionStatus::Open {
+    if !q.status.unsettled() {
         return Err(not_open(&q, "a retract"));
     }
     if q.hold_card.is_some() && t.actor != "operator" {
@@ -1521,7 +1533,7 @@ pub fn retract(
     t.execute(
         "UPDATE questions SET status = 'retracted', retract_reason = ?2, retracted_by = ?3,
                 updated_at = ?4
-         WHERE id = ?1 AND status = 'open'",
+         WHERE id = ?1 AND status IN ('open', 'in_thread')",
         params![q.id, t.redact_opt(reason), t.actor, at],
     )?;
     let q = get(t, &q.id)?;
@@ -1592,7 +1604,7 @@ pub fn acknowledge(
             &format!("answer it with `terrarium admin question answer {}`", q.id),
         ));
     }
-    if q.status != QuestionStatus::Open {
+    if !q.status.unsettled() {
         return Err(not_open(&q, "an acknowledgement"));
     }
     let text = text.map(str::trim).filter(|s| !s.is_empty());
@@ -1605,7 +1617,7 @@ pub fn acknowledge(
     t.execute(
         "UPDATE questions SET status = 'acknowledged', answer = ?2, answered_by = ?3,
                 answered_at = ?4, updated_at = ?4
-         WHERE id = ?1 AND status = 'open'",
+         WHERE id = ?1 AND status IN ('open', 'in_thread')",
         params![q.id, t.redact_opt(text), by.key(), at],
     )?;
     let q = get(t, &q.id)?;
@@ -1655,13 +1667,184 @@ pub fn acknowledge(
     Ok(q)
 }
 
+/// Move the open question or notice `id` into a new Inbox thread between
+/// the operator and its agent (GitHub #30, TER-469). The API layer checks
+/// that the caller is the operator.
+///
+/// - The thread is in the project of the question, with the asking agent
+///   attached and the operator as its opener. Its first message, by the
+///   operator, has the question, its options, and its context quoted, and
+///   then `message` when there is one. It waits on the agent.
+/// - The thread links back to the question (`from_question`), and to its
+///   card when it has one that is not archived.
+/// - The question gets the status `in_thread` and the `thread` link: it is
+///   out of the open count and no Inbox item of its own. An answer, an
+///   acknowledgement, or a retract settles it as for an open one. Its
+///   `question` waits stay open until then.
+/// - The agent gets one mail from the operator on the thread of the
+///   question; each later message or response of the operator in the
+///   thread comes as mail too ([`crate::store::threads::post`]).
+///
+/// A bundle, a tool run approval, and a hold question are `409`. A
+/// question that is not open, or that was asked in a thread, is `409`.
+pub fn to_thread(
+    t: &mut Tx<'_>,
+    id: &str,
+    message: Option<&str>,
+) -> ApiResult<(Question, crate::store::threads::Thread)> {
+    use crate::store::{inbox, threads};
+    let q = get(t, id)?;
+    match q.kind {
+        QuestionKind::Question | QuestionKind::Notice => {}
+        QuestionKind::Bundle => {
+            return Err(wrong_kind(
+                &q,
+                "a bundle does not move into a thread",
+                "answer it in the Inbox",
+            ));
+        }
+        QuestionKind::ToolRun => {
+            return Err(ApiError::conflict(
+                "a tool run approval does not move into a thread; approve or refuse it",
+            ));
+        }
+    }
+    if q.hold_card.is_some() {
+        return Err(ApiError::conflict(
+            "a hold question of the GitHub author gate does not move into a thread; answer it",
+        ));
+    }
+    if q.status != QuestionStatus::Open {
+        return Err(not_open(&q, "a move into a thread"));
+    }
+    if let Some(th) = &q.thread {
+        return Err(ApiError::conflict(format!(
+            "{} {} is in Inbox thread {th} already; write there",
+            q.noun(),
+            q.id
+        ))
+        .with_details(json!({"thread": th})));
+    }
+    let message = message.map(str::trim).filter(|m| !m.is_empty());
+    if message.is_some_and(|m| m.chars().count() > MAX_ANSWER) {
+        return Err(ApiError::invalid(format!(
+            "the message is longer than {MAX_ANSWER} characters"
+        )));
+    }
+    let noun = q.noun();
+    let mut first = format!(
+        "The operator moved this {noun} of {} into a thread.\n\nThe {noun} ({}):\n{}",
+        q.agent_name,
+        q.id,
+        quoted(&q.text)
+    );
+    if !q.options.is_empty() {
+        first.push_str("\nThe options:\n");
+        for (i, o) in q.options.iter().enumerate() {
+            first.push_str(&format!("> {}. {o}\n", i + 1));
+        }
+    }
+    if let Some(c) = &q.context {
+        first.push_str(&format!("\nThe context:\n{}", quoted(c)));
+    }
+    if let Some(m) = message {
+        first.push_str(&format!("\n{m}\n"));
+    }
+    let th = threads::open(
+        t,
+        threads::NewThread {
+            topic: short(&q.text, 150),
+            scope: q.project.clone(),
+            template: None,
+            opened_by: "operator".into(),
+            agent: Some(q.agent.clone()),
+            text: Some(first),
+        },
+    )?;
+    let at = now();
+    t.execute(
+        "UPDATE threads SET from_question = ?2 WHERE id = ?1",
+        params![th.id, q.id],
+    )?;
+    t.execute(
+        "UPDATE questions SET status = 'in_thread', thread = ?2, updated_at = ?3
+         WHERE id = ?1 AND status = 'open'",
+        params![q.id, th.id, at],
+    )?;
+    if let Some(card) = &q.card {
+        // An archived card is not linked (422); the move goes on.
+        match threads::link_card(t, &crate::actor::Actor::Operator, &th.id, card) {
+            Err(e) if e.code == Code::Invalid => {}
+            r => {
+                r?;
+            }
+        }
+    }
+    // The question leaves the Inbox: its thread is the item now.
+    let inbox_kind = if q.kind == QuestionKind::Notice {
+        "notice"
+    } else {
+        "question"
+    };
+    inbox::emit(t, &q.item_id(), inbox_kind, "closed", Some(&q.project))?;
+    let moved = get(t, &q.id)?;
+    if let Ok(to) = mail::resolve(t, &q.agent, None) {
+        let settle = match q.kind {
+            QuestionKind::Notice => "an acknowledgement",
+            _ => "an answer",
+        };
+        let mut body = format!(
+            "The operator moved your {noun} {} into the Inbox thread {} to talk it over with \
+             you. It is not open in the Inbox any more: its status is in_thread.\n\nYour \
+             {noun}:\n{}",
+            q.id,
+            th.id,
+            quoted(&q.text)
+        );
+        if let Some(m) = message {
+            body.push_str(&format!("\nThe message of the operator:\n{}", quoted(m)));
+        }
+        body.push_str(&format!(
+            "\nRead the thread with `terrarium thread show {th}` and reply there with \
+             `terrarium thread post {th} -m \"...\"`. Each message of the operator in the \
+             thread comes to you as mail. The operator settles the {noun} from the thread: \
+             {settle} comes by mail as usual. When you do not need it any more, retract it \
+             with `terrarium question retract {qid}`. To ask a changed question, retract \
+             this one and ask in the thread with `terrarium thread ask {th} \"...\"`.\n",
+            th = th.id,
+            qid = q.id
+        ));
+        mail::send(
+            t,
+            mail::Outgoing {
+                from: &mail::Address::Operator,
+                to: &to,
+                subject: &format!("In a thread: {}", short(&q.text, 60)),
+                body: &body,
+                thread: Some(&q.thread_id),
+                in_reply_to: None,
+            },
+        )?;
+    }
+    t.audit(
+        "question.to_thread",
+        &q.id,
+        Some(&q.project),
+        json!({"agent": q.agent, "kind": q.kind, "thread": th.id, "card": q.card,
+               "message": message.map(|m| short(m, 200))}),
+    )?;
+    emit(t, &moved, "to_thread")?;
+    let th = threads::get(t, &th.id)?;
+    Ok((moved, th))
+}
+
 /// A deleted agent: its open questions are retracted, with no mail. Call
 /// it before the row goes.
 pub fn on_agent_deleted(t: &mut Tx<'_>, agent: &str) -> ApiResult<()> {
     t.execute(
         "UPDATE questions SET status = 'retracted', retract_reason = 'the agent was deleted',
                 retracted_by = 'system', updated_at = ?2
-         WHERE agent = ?1 AND status = 'open'",
+         WHERE agent = ?1 AND status IN ('open', 'in_thread')",
         params![agent, now()],
     )?;
     Ok(())
@@ -1896,6 +2079,11 @@ pub fn recap(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
     let mut open_q = list(conn, &of(QuestionKind::Question, QuestionStatus::Open))?;
     open_q.extend(list(conn, &of(QuestionKind::Bundle, QuestionStatus::Open))?);
     let open_n = list(conn, &of(QuestionKind::Notice, QuestionStatus::Open))?;
+    let mut moved = list(conn, &of(QuestionKind::Question, QuestionStatus::InThread))?;
+    moved.extend(list(
+        conn,
+        &of(QuestionKind::Notice, QuestionStatus::InThread),
+    )?);
     let since = last_turn(conn, agent)?.unwrap_or_default();
     let newer = |rows: Vec<Question>| -> Vec<Question> {
         rows.into_iter()
@@ -1914,7 +2102,12 @@ pub fn recap(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
         conn,
         &of(QuestionKind::Notice, QuestionStatus::Acknowledged),
     )?);
-    if open_q.is_empty() && open_n.is_empty() && answered.is_empty() && acked.is_empty() {
+    if open_q.is_empty()
+        && open_n.is_empty()
+        && moved.is_empty()
+        && answered.is_empty()
+        && acked.is_empty()
+    {
         return Ok(None);
     }
     let mut text = String::from(
@@ -1953,6 +2146,17 @@ pub fn recap(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
         &open_q,
     );
     open_lines(&mut text, "\nOpen notices, not acknowledged yet:", &open_n);
+    if !moved.is_empty() {
+        text.push_str("\nMoved into an Inbox thread with the operator (reply there):");
+        for q in moved.iter().take(20) {
+            text.push_str(&format!(
+                "\n- {} in thread {}: {}",
+                q.id,
+                q.thread.as_deref().unwrap_or("?"),
+                short(&q.text, 200)
+            ));
+        }
+    }
     if !answered.is_empty() {
         text.push_str("\nAnswered since your last turn:");
         for q in &answered {
