@@ -112,16 +112,17 @@ async fn dispatch_candidate_query_uses_only_indexed_searches() {
         .db
         .read(|c| {
             let mut plan = Vec::new();
-            for (sql, params) in [
+            let queries: [(&str, &[&dyn rusqlite::ToSql]); 2] = [
                 (
-                    terrariumd::card_dispatcher::CANDIDATES.as_ref(),
+                    terrariumd::card_dispatcher::CANDIDATES,
                     rusqlite::params!["p", "ready", 0],
                 ),
                 (
-                    terrariumd::card_dispatcher::WORKING_WIP.as_ref(),
+                    terrariumd::card_dispatcher::WORKING_WIP,
                     rusqlite::params!["p"],
                 ),
-            ] {
+            ];
+            for (sql, params) in queries {
                 let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
                 let rows = q.query_map(params, |r| r.get::<_, String>(3))?;
                 plan.extend(rows.collect::<Result<Vec<_>, _>>()?);
