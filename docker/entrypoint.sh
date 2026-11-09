@@ -51,9 +51,9 @@ for dir in "${AUTH_DIRS[@]}" "${STATE_DIRS[@]}"; do
 done
 chmod 700 /state/credentials 2>/dev/null || true
 
-# Compose opts its long-running service into initialization with a command
-# prefix. `compose run SERVICE COMMAND` replaces that command, so backups and
-# shells never select a release or remove the live daemon's probation marker.
+# The image CMD opts the long-running service into initialization with a
+# command prefix. `compose run SERVICE COMMAND` replaces the CMD, so backups
+# and shells never select a release or remove the live daemon's probation marker.
 service=0
 if [ "${1:-}" = --daemon-service ]; then service=1; shift; fi
 supervise=0
@@ -65,7 +65,7 @@ if [ "$supervise" = 0 ]; then
 	exec "$@"
 fi
 if [ "$service" != 1 ]; then
-	log "daemon initialization requires --daemon-service (set by the Compose service command)"
+	log "daemon initialization requires --daemon-service (set by the image CMD)"
 	exit 1
 fi
 if [ -f /usr/local/lib/terrarium-hot-swap.py ]; then
