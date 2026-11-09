@@ -262,6 +262,10 @@ struct Shared {
     /// (`capabilities.native_gpu.enforced`). Native routing follows it,
     /// not the config.
     native_enforced: std::sync::atomic::AtomicBool,
+    /// The helper answered with enforcement at some `hello` of this
+    /// process: native units may still be in the helper's slices, also
+    /// after the helper stopped answering.
+    native_seen: std::sync::atomic::AtomicBool,
     /// The last offered version that this process refused or failed to
     /// install: it does not try that version again.
     update_refused: Mutex<Option<String>>,
@@ -301,6 +305,12 @@ impl Client {
             remotes: crate::display::remote::Remotes::new(opts.display.rdp_known_hosts_path()),
             updating: std::sync::atomic::AtomicBool::new(false),
             native_enforced: std::sync::atomic::AtomicBool::new(
+                opts.capabilities
+                    .native_gpu
+                    .as_ref()
+                    .is_some_and(|n| n.enforced),
+            ),
+            native_seen: std::sync::atomic::AtomicBool::new(
                 opts.capabilities
                     .native_gpu
                     .as_ref()
@@ -431,6 +441,9 @@ impl Client {
             self.shared
                 .native_enforced
                 .store(cap.enforced, std::sync::atomic::Ordering::SeqCst);
+            self.shared
+                .native_seen
+                .fetch_or(cap.enforced, std::sync::atomic::Ordering::SeqCst);
             capabilities.native_gpu = Some(cap);
         }
         let token = self.token().clone();
@@ -1356,18 +1369,27 @@ impl Client {
         crate::limits::reservation_plan(&r.target, &r.holder, &r.limits)
     }
 
-    /// `resource.stop`, routed like [`Self::slice_apply_plan`].
+    /// `resource.stop` of a holder slice. Once the helper has enforced in
+    /// this process, the holder can have native units in the helper's
+    /// system slice and sessions in the user slice (from a time the
+    /// helper did not answer): the stop goes through the shim, which
+    /// stops both and fails when the helper cannot be reached. Before
+    /// that, only the user slice.
     pub(crate) fn slice_stop_plan(
         &self,
         r: &crate::protocol::ResourceStop,
     ) -> Result<VerbPlan, BuildError> {
-        match self.native_live() {
-            Some(native) => crate::native::verb_plan(
+        let seen = self
+            .shared
+            .native_seen
+            .load(std::sync::atomic::Ordering::SeqCst);
+        match self.opts.native.as_ref().filter(|_| seen) {
+            Some(native) => crate::native::stop_plan(
                 native,
-                &crate::native::Request::Stop(crate::native::SliceRequest {
+                &crate::native::SliceRequest {
                     target: r.target.clone(),
                     holder: r.holder.clone(),
-                }),
+                },
             ),
             None => crate::limits::reservation_stop_plan(&r.target, &r.holder),
         }
@@ -1794,7 +1816,9 @@ mod tests {
         let plan = client.native(plan, &l, 3).unwrap();
         assert_eq!(plan.exec.program, "/opt/terrarium-host");
 
-        // The helper goes away: the next hello turns routing back.
+        // The helper goes away: the next hello turns apply and exec back,
+        // but a stop still goes to the helper (its native units may still
+        // run) and to the user slice.
         helper.abort();
         let _ = helper.await;
         std::fs::remove_file(&socket).unwrap();
@@ -1808,9 +1832,14 @@ mod tests {
                 .enforced
         );
         assert_eq!(
-            client.slice_stop_plan(&stop).unwrap().exec.program,
+            client.slice_apply_plan(&apply).unwrap().exec.program,
             "systemctl"
         );
+        let plan = client.slice_stop_plan(&stop).unwrap();
+        assert_eq!(plan.exec.program, "/opt/terrarium-host");
+        assert_eq!(plan.exec.args.last().unwrap(), "--user-slice");
+        let (plan, l) = native_exec();
+        assert!(client.native(plan, &l, 3).is_err());
     }
 
     #[test]

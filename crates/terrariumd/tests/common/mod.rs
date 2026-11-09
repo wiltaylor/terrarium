@@ -20,7 +20,10 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 pub const DELAY: Duration = Duration::from_millis(20);
 /// The longest time a helper waits for a state before the test fails.
-pub const WAIT: Duration = Duration::from_secs(15);
+/// Only a failing test waits it out. 15 s was too short under load: with
+/// load 90 on 32 cores, agent starts stayed `starting` and stops stayed
+/// `idle` for over 15 s, and each test passed alone (TER-471).
+pub const WAIT: Duration = Duration::from_secs(60);
 /// The longest time daemon boot waits for job queue recovery.
 pub const RECOVERY_WAIT: Duration = Duration::from_secs(90);
 
@@ -405,7 +408,7 @@ impl TestDaemon {
             // Longer than WAIT: under load a start alone took up to 16 s
             // (TER-108), and the task turn comes after it.
             assert!(
-                start.elapsed() < Duration::from_secs(60),
+                start.elapsed() < 2 * WAIT,
                 "agent {agent} never ended a turn"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;

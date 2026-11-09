@@ -199,7 +199,11 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    for _ in 0..400 {
+    // A deadline, not 400 tries: under load the collector's 2 s compaction
+    // poll and its database reads took longer than the 10 s of the tries
+    // (TER-471).
+    let start = std::time::Instant::now();
+    while start.elapsed() < common::WAIT {
         if f().await {
             return;
         }

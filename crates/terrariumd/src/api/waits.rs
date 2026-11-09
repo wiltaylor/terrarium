@@ -488,8 +488,9 @@ async fn run(
         shell: false,
         agent: b.agent.clone(),
 
-        // `start_exec` sets it from the caller.
+        // `start_exec` sets these from the caller.
         holder: None,
+        operator: false,
     };
     let own: Vec<(String, zeroize::Zeroizing<String>)> = injected
         .iter()

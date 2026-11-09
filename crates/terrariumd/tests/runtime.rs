@@ -375,6 +375,8 @@ fn supervisor(root: &Path, adapter: Arc<FakeAdapter>) -> RunnerSupervisor {
             pattern: None,
         });
         cfg.mode = terrariumd::runner_supervisor::RunnerMode::Process { bin };
+        // The runner binary can be of another build: no upgrade restart.
+        cfg.version = "0.0.0".into();
     }
     cfg.adapters.clear();
     // Also as `pi`, so a pi agent reaches the subscription checks.

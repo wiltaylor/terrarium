@@ -339,6 +339,20 @@ describe("the agent's close proposal (TER-114)", () => {
     ({ el } = mount("/threads?status=archived"));
     await waitFor(() => expect(el.textContent).toContain("Row confirm"));
   });
+
+  it("counts a question moved into the thread (in_thread) in both close warnings (TER-495)", async () => {
+    const q = (await api.questions.ofAgent("terrarium/lead")).find((x) => x.kind === "question" && x.status === "open" && !x.thread)!;
+    const { thread: t } = await api.questions.toThread(q.id);
+    api.sim.threadPropose(t.id, { summary: "Settled in the thread." });
+    const { el } = mount(`/threads/${t.id}`);
+    await waitFor(() => expect(proposal(el)).not.toBeNull());
+    expect(proposal(el)!.querySelector("[data-testid=proposal-retracts]")!.textContent).toBe("A confirm retracts 1 open question.");
+    button("Close the thread")!.click();
+    await waitFor(() => expect(document.querySelector("[data-testid=close-retracts]")?.textContent).toContain("1 open question is retracted"));
+    button("Yes, close the thread")!.click();
+    await waitFor(() => expect(status(el)).toBe("closed"));
+    expect((await api.questions.get(q.id)).status).toBe("retracted");
+  });
 });
 
 describe("the linked cards of a thread (TER-147)", () => {

@@ -313,6 +313,31 @@ pub fn reservation_stop_plan(
     }))
 }
 
+/// `systemctl --user stop` of a holder slice, from the native shim
+/// ([`crate::native::shim`]). A slice that is not loaded (exit 5) has
+/// nothing to stop.
+pub async fn stop_user_slice(target: &str, holder: &str) -> Result<(), String> {
+    let slice = slice_name(target, holder);
+    let mut cmd = tokio::process::Command::new(SYSTEMCTL);
+    cmd.args(["--user", "stop", "--", &slice])
+        .envs(user_bus_env())
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let out = match tokio::time::timeout(CALL_TIMEOUT, cmd.output()).await {
+        Err(_) => return Err(format!("`{SYSTEMCTL} --user stop {slice}` did not end")),
+        Ok(Err(e)) => return Err(format!("cannot run `{SYSTEMCTL}`: {e}")),
+        Ok(Ok(out)) => out,
+    };
+    match out.status.code() {
+        Some(0 | 5) => Ok(()),
+        _ => Err(format!(
+            "`{SYSTEMCTL} --user stop {slice}` failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
 pub fn kill_scope(scope: &str) {
     let args = [
         "--user".to_owned(),

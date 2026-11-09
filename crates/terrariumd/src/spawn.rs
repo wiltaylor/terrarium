@@ -327,7 +327,7 @@ pub async fn spawn_with(
         )));
     }
     if let Some(n) = &body.name {
-        crate::store::check_name("agent", n)?;
+        crate::store::check_new_agent_name(n)?;
     }
     let target_names = spawn_rights::clean_list("targets", &body.targets)?;
     let grant_asks = spawn_rights::clean_list("grants", &body.grants)?

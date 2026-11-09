@@ -1042,6 +1042,15 @@ fn render_action(s: &Schedule, event: Option<&EventView<'_>>) -> ScheduleAction 
 
 /// Check the rights of the owner again (the `run_as` actor, or the
 /// project's or the system's), then do the action.
+/// The holder of a project- or system-owned schedule's commands: the
+/// project service holder `<project>/@schedules`. On a host with native GPU
+/// enforcement its exec gets the project's workspace scope (a cwd in the
+/// project, never another project's). A system-owned schedule is in the
+/// `global` project's scope.
+fn owned_holder(project: Option<&str>) -> String {
+    terrarium_host::native::service_holder(project.unwrap_or("global"), "schedules")
+}
+
 async fn perform(state: &Shared, s: &Schedule, ctx: &RunCtx) -> Outcome {
     // A project- or system-owned schedule acts with the operator's paths
     // after the owner's check below; its writes show the schedule.
@@ -1053,10 +1062,7 @@ async fn perform(state: &Shared, s: &Schedule, ctx: &RunCtx) -> Outcome {
             (Owner::Project, Some(p)) => Address::Project(p.clone()),
             _ => Address::System,
         });
-        c.holder = Some(format!(
-            "{}/schedules",
-            s.project.as_deref().unwrap_or("global")
-        ));
+        c.holder = Some(owned_holder(s.project.as_deref()));
         owned_ctx = c;
         &owned_ctx
     } else {
@@ -1732,6 +1738,22 @@ async fn probe(state: &Shared, name: &str) -> Outcome {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// An owned schedule runs as a project service, so the native helper
+    /// gives its exec the project's workspace (a cwd in the project) and
+    /// no agent can take its holder.
+    #[test]
+    fn an_owned_schedule_runs_as_a_project_service() {
+        assert_eq!(owned_holder(Some("terra")), "terra/@schedules");
+        assert_eq!(owned_holder(None), "global/@schedules");
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::create_dir_all(root.join("terra/slot-1")).unwrap();
+        assert_eq!(
+            terrarium_host::native::holder_workspace(&root, &owned_holder(Some("terra"))).unwrap(),
+            Some(root.join("terra"))
+        );
+    }
 
     fn trigger(action: ScheduleAction) -> Schedule {
         Schedule {
