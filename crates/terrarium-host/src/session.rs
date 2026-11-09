@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,7 +44,41 @@ pub struct ExecPlan {
     /// limits, [`crate::limits::wrap`]). A kill of the session kills the
     /// scope too.
     pub scope: Option<String>,
+    /// A private file that the program reads (a `docker --env-file`). The
+    /// session holds it until the process exits, then it is removed.
+    pub private_file: Option<PrivateFile>,
 }
+
+/// A file with mode 0600 in the temp dir, removed when the last clone is
+/// dropped. It carries values that must not show in `ps` or reach the env of
+/// the program itself.
+#[derive(Debug, Clone)]
+pub struct PrivateFile(Arc<tempfile::TempPath>);
+
+impl PrivateFile {
+    pub fn new(prefix: &str, data: &[u8]) -> std::io::Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut f = tempfile::Builder::new()
+            .prefix(prefix)
+            .permissions(std::fs::Permissions::from_mode(0o600))
+            .tempfile()?;
+        f.write_all(data)?;
+        f.flush()?;
+        Ok(Self(Arc::new(f.into_temp_path())))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl PartialEq for PrivateFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.path() == other.path()
+    }
+}
+
+impl Eq for PrivateFile {}
 
 /// Input for a running session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,7 +238,10 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
 
     let timeout = plan.timeout;
     let scope = plan.scope.clone();
+    let private_file = plan.private_file;
     let done = tokio::spawn(async move {
+        // Removed when the task ends, after the process has exited.
+        let _private_file = private_file;
         let scope = scope.as_deref();
         let mut stdin_tx = Some(stdin_tx);
         let mut forced: Option<ExitReason> = None;
@@ -405,7 +442,10 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
 
     let timeout = plan.timeout;
     let scope = plan.scope.clone();
+    let private_file = plan.private_file;
     let done = tokio::spawn(async move {
+        // Removed when the task ends, after the process has exited.
+        let _private_file = private_file;
         let scope = scope.as_deref();
         let mut forced: Option<ExitReason> = None;
         let timer = deadline(timeout);

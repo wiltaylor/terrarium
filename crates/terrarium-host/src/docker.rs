@@ -1,9 +1,11 @@
 //! `docker.*` verbs: command builders and output parsers.
 //!
 //! Each verb becomes one `docker` CLI process, run as an exec session.
-//! Environment values never go on the command line: the builder passes
-//! `-e KEY` and sets `KEY` in the CLI's own environment, so the values do not
-//! show in `ps`.
+//! Environment values never go on the command line or into the CLI's own
+//! environment: the builder writes them to a 0600 `--env-file`, removed when
+//! the CLI exits. So the CLI keeps the host agent's own `DOCKER_*` env
+//! (`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, ...), and a command
+//! env cannot change which daemon the CLI talks to, or how.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +16,7 @@ use crate::protocol::{
     DockerExec, DockerInspect, DockerPs, DockerRm, DockerRun, DockerStart, DockerStop,
     DockerVolumeCreate, DockerVolumeRm, Limits, TargetState, ToolCapability,
 };
-use crate::session::ExecPlan;
+use crate::session::{ExecPlan, PrivateFile};
 use crate::verb::{BuildError, ResultParser, VerbPlan, env_key, ident, secs};
 
 fn base(bin: &str, args: Vec<String>, timeout: Option<u64>) -> ExecPlan {
@@ -30,16 +32,78 @@ fn s(v: &str) -> String {
     v.to_owned()
 }
 
+/// The longest `KEY=VALUE` line that goes into the env file. The CLI reads
+/// the file line by line with a 64 KiB limit.
+const ENV_FILE_LINE_MAX: usize = 60 * 1024;
+
+/// Names that steer the `docker` CLI itself. They may reach the command only
+/// through the env file, never through the CLI's own environment.
+fn steers_the_cli(k: &str) -> bool {
+    k.starts_with("DOCKER_")
+        || matches!(k, "HOME" | "PATH" | "SSH_AUTH_SOCK")
+        || matches!(
+            k.to_ascii_uppercase().as_str(),
+            "HTTP_PROXY" | "HTTPS_PROXY" | "NO_PROXY" | "ALL_PROXY"
+        )
+}
+
+/// Can the CLI read `KEY=VALUE` back from one env file line unchanged?
+fn fits_env_file(k: &str, v: &str) -> bool {
+    !k.starts_with('#')
+        && !k.chars().any(char::is_whitespace)
+        && !k.starts_with('\u{feff}')
+        && !v.contains(['\n', '\r'])
+        && k.len() + 1 + v.len() <= ENV_FILE_LINE_MAX
+}
+
+/// Add the command env to `args`. Each value goes into a 0600 env file
+/// (`--env-file`). A value that one line cannot hold (a newline, a very long
+/// value, a name with whitespace) falls back to `-e KEY` with the value in
+/// the CLI's own environment, which the returned map holds. That fallback
+/// refuses the names that steer the CLI ([`steers_the_cli`]).
 fn push_env(
     args: &mut Vec<String>,
     env: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, String>, BuildError> {
-    for k in env.keys() {
+) -> Result<(BTreeMap<String, String>, Option<PrivateFile>), BuildError> {
+    let mut file = String::new();
+    let mut cli_env = BTreeMap::new();
+    for (k, v) in env {
         env_key(k)?;
+        if fits_env_file(k, v) {
+            file.push_str(k);
+            file.push('=');
+            file.push_str(v);
+            file.push('\n');
+        } else if steers_the_cli(k) {
+            return Err(BuildError::bad(format!(
+                "environment {k:?} has a value that an env file cannot hold \
+                 (a newline or over {ENV_FILE_LINE_MAX} bytes), and {k} would change the host's docker CLI"
+            )));
+        } else {
+            cli_env.insert(k.clone(), v.clone());
+        }
+    }
+    let private = if file.is_empty() {
+        None
+    } else {
+        let f = PrivateFile::new("terrarium-env-", file.as_bytes()).map_err(|e| BuildError {
+            code: crate::protocol::ErrorCode::SpawnFailed,
+            message: format!("cannot write the env file: {e}"),
+        })?;
+        let path = f
+            .path()
+            .to_str()
+            .ok_or_else(|| BuildError::bad("the temp dir path is not UTF-8"))?
+            .to_owned();
+        args.push(s("--env-file"));
+        args.push(path);
+        Some(f)
+    };
+    for k in cli_env.keys() {
         args.push(s("-e"));
         args.push(k.clone());
     }
-    Ok(env.clone())
+    Ok((cli_env, private))
 }
 
 fn push_labels(
@@ -133,7 +197,7 @@ pub fn plan_run(
             .entry("HOME".into())
             .or_insert_with(|| "/tmp".into());
     }
-    let env = push_env(&mut a, &req_env)?;
+    let (env, env_file) = push_env(&mut a, &req_env)?;
     for v in &req.volumes {
         if v.source.is_empty()
             || v.target.is_empty()
@@ -185,6 +249,7 @@ pub fn plan_run(
     a.extend(req.command.iter().cloned());
     let mut exec = base(bin, a, req.timeout_secs);
     exec.env = env;
+    exec.private_file = env_file;
     exec.pty = req.pty;
     Ok(if req.detach {
         VerbPlan::parsed(exec, ResultParser::DockerRunId)
@@ -304,7 +369,7 @@ pub fn plan_exec(req: &DockerExec, bin: &str) -> Result<VerbPlan, BuildError> {
         a.push(s("-w"));
         a.push(ident("cwd", cwd)?.to_owned());
     }
-    let env = push_env(&mut a, &req.env)?;
+    let (env, env_file) = push_env(&mut a, &req.env)?;
     if let Some(u) = &req.user {
         a.push(s("-u"));
         a.push(ident("user", u)?.to_owned());
@@ -317,6 +382,7 @@ pub fn plan_exec(req: &DockerExec, bin: &str) -> Result<VerbPlan, BuildError> {
     a.extend(req.args.iter().cloned());
     let mut exec = base(bin, a, req.timeout_secs);
     exec.env = env;
+    exec.private_file = env_file;
     exec.pty = req.pty;
     Ok(VerbPlan::plain(exec))
 }
@@ -540,6 +606,28 @@ mod tests {
         serde_json::from_value(json!({"session":1,"image":"alpine:3"})).unwrap()
     }
 
+    /// The env file of a plan, as a map.
+    fn file_env(plan: &VerbPlan) -> BTreeMap<String, String> {
+        let f = plan.exec.private_file.as_ref().expect("an env file");
+        std::fs::read_to_string(f.path())
+            .unwrap()
+            .lines()
+            .map(|l| {
+                let (k, v) = l.split_once('=').unwrap();
+                (k.to_owned(), v.to_owned())
+            })
+            .collect()
+    }
+
+    /// The args, with the env file path as `<env>`.
+    fn args(plan: &VerbPlan) -> String {
+        let mut a = plan.exec.args.join(" ");
+        if let Some(f) = &plan.exec.private_file {
+            a = a.replace(f.path().to_str().unwrap(), "<env>");
+        }
+        a
+    }
+
     #[test]
     fn gpu_allowlist_overrides_caller_and_image_defaults() {
         let mut r = run_req();
@@ -551,7 +639,8 @@ mod tests {
             std::path::Path::new("/nonexistent"),
         )
         .unwrap();
-        assert_eq!(plan.exec.env["NVIDIA_VISIBLE_DEVICES"], "void");
+        assert_eq!(file_env(&plan)["NVIDIA_VISIBLE_DEVICES"], "void");
+        assert!(plan.exec.env.is_empty());
         assert!(!plan.exec.args.contains(&"--gpus".into()));
         r.reservation = Some(terrarium_core::resources::RuntimeLimits {
             gpu_devices: vec!["GPU-abcd".into(), "GPU-1234".into()],
@@ -564,7 +653,7 @@ mod tests {
             std::path::Path::new("/nonexistent"),
         )
         .unwrap();
-        assert_eq!(plan.exec.env["NVIDIA_VISIBLE_DEVICES"], "GPU-abcd,GPU-1234");
+        assert_eq!(file_env(&plan)["NVIDIA_VISIBLE_DEVICES"], "GPU-abcd,GPU-1234");
         assert!(
             plan.exec
                 .args
@@ -615,12 +704,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.exec.args.join(" "),
-            "run -d --rm --init --name t-buildbox -e NVIDIA_VISIBLE_DEVICES -e TOKEN -v /srv/work:/work -v cache:/cache:ro \
+            args(&plan),
+            "run -d --rm --init --name t-buildbox --env-file <env> -v /srv/work:/work -v cache:/cache:ro \
              -w /work --network lab -u 1000:1000 --label terrarium.target=buildbox \
              alpine:3 sleep infinity"
         );
-        assert_eq!(plan.exec.env["TOKEN"], "secret");
+        assert_eq!(file_env(&plan)["TOKEN"], "secret");
+        assert!(plan.exec.env.is_empty());
         assert!(!plan.exec.args.iter().any(|a| a.contains("secret")));
         assert_eq!(plan.parser, Some(ResultParser::DockerRunId));
     }
@@ -644,9 +734,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.exec.args.join(" "),
+            args(&plan),
             "run -d --init --cpus=1.5 --memory=4294967296 --memory-swap=4294967296 \
-             --pids-limit=256 --blkio-weight=20 -e NVIDIA_VISIBLE_DEVICES alpine:3"
+             --pids-limit=256 --blkio-weight=20 --env-file <env> alpine:3"
         );
         // Swap comes on top of the memory.
         let swap = Limits {
@@ -685,21 +775,23 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
         let m = std::fs::metadata(work.join("terra/w1")).unwrap();
         assert_eq!(
-            plan.exec.args.join(" "),
+            args(&plan),
             format!(
-                "run -d -e HOME -e NVIDIA_VISIBLE_DEVICES -v {w}/terra/w1:/work/terra/w1 -v {w}/terra/w2:/work/terra/w2 \
+                "run -d --env-file <env> -v {w}/terra/w1:/work/terra/w1 -v {w}/terra/w2:/work/terra/w2 \
                  -u {u}:{g} alpine:3",
                 w = real.display(),
                 u = m.uid(),
                 g = m.gid()
             )
         );
-        assert_eq!(plan.exec.env["HOME"], "/tmp");
+        // HOME is the container's: the CLI keeps the host agent's HOME.
+        assert_eq!(file_env(&plan)["HOME"], "/tmp");
+        assert!(plan.exec.env.is_empty());
         // A `user` of the frame wins.
         r.user = Some("0:0".into());
         let plan = plan_run(&r, "docker", &PathPolicy::default(), &work).unwrap();
         assert!(plan.exec.args.join(" ").contains("-u 0:0 alpine:3"));
-        assert!(!plan.exec.args.contains(&"HOME".to_owned()));
+        assert!(!file_env(&plan).contains_key("HOME"));
         r.user = None;
         r.workspaces = vec![crate::protocol::WorkspaceMount {
             path: "terra/nobody".into(),
@@ -767,6 +859,108 @@ mod tests {
         assert_eq!(err.code, crate::protocol::ErrorCode::PathDenied);
     }
 
+    fn exec_req(env: serde_json::Value) -> DockerExec {
+        serde_json::from_value(json!({
+            "session":1,"container":"c1","cmd":"sh","args":["-c","id"],"env":env
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn exec_env_stays_out_of_the_cli_env() {
+        let plan = plan_exec(
+            &exec_req(json!({
+                "DOCKER_HOST":"unix:///tmp/terrarium-jobs/j1/docker.sock",
+                "DOCKER_CONTEXT":"job","DOCKER_CONFIG":"/tmp/cfg","A":"1 two=3"
+            })),
+            "docker",
+        )
+        .unwrap();
+        assert!(plan.exec.env.is_empty(), "{:?}", plan.exec.env);
+        assert_eq!(args(&plan), "exec -i --env-file <env> c1 sh -c id");
+        let env = file_env(&plan);
+        assert_eq!(
+            env["DOCKER_HOST"],
+            "unix:///tmp/terrarium-jobs/j1/docker.sock"
+        );
+        assert_eq!(env["DOCKER_CONTEXT"], "job");
+        assert_eq!(env["DOCKER_CONFIG"], "/tmp/cfg");
+        assert_eq!(env["A"], "1 two=3");
+        let path = plan.exec.private_file.as_ref().unwrap().path().to_owned();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        drop(plan);
+        assert!(!path.exists());
+        // No env, no file.
+        let plan = plan_exec(&exec_req(json!({})), "docker").unwrap();
+        assert!(plan.exec.private_file.is_none());
+        assert_eq!(args(&plan), "exec -i c1 sh -c id");
+    }
+
+    #[test]
+    fn values_that_a_line_cannot_hold_fall_back_to_the_cli_env() {
+        let long = "x".repeat(ENV_FILE_LINE_MAX);
+        let plan = plan_exec(
+            &exec_req(json!({"KEY":"a\nb","LONG":long,"B":"1"})),
+            "docker",
+        )
+        .unwrap();
+        assert_eq!(args(&plan), "exec -i --env-file <env> -e KEY -e LONG c1 sh -c id");
+        assert_eq!(plan.exec.env["KEY"], "a\nb");
+        assert_eq!(plan.exec.env["LONG"], long);
+        assert_eq!(file_env(&plan).len(), 1);
+        // A name that steers the CLI never goes into the CLI env.
+        for k in ["DOCKER_HOST", "HOME", "PATH", "https_proxy"] {
+            let err = plan_exec(&exec_req(json!({ k: "a\rb" })), "docker").unwrap_err();
+            assert_eq!(err.code, crate::protocol::ErrorCode::BadRequest);
+            assert!(err.message.contains(k), "{}", err.message);
+        }
+    }
+
+    /// A fake `docker` CLI: it prints the DOCKER_* env that it runs with, and
+    /// the mode and content of its env file.
+    const FAKE_DOCKER: &str = r#"
+echo "cli DOCKER_HOST=${DOCKER_HOST-unset} DOCKER_CONTEXT=${DOCKER_CONTEXT-unset}"
+while [ $# -gt 0 ]; do
+  if [ "$1" = --env-file ]; then shift; stat -c %a "$1"; cat "$1"; fi
+  shift
+done
+"#;
+
+    #[tokio::test]
+    async fn the_cli_keeps_its_own_docker_env_and_the_command_gets_its_values() {
+        let mut plan = plan_exec(
+            &exec_req(json!({
+                "DOCKER_HOST":"unix:///tmp/job.sock","DOCKER_CONTEXT":"job"
+            })),
+            "docker",
+        )
+        .unwrap();
+        // Run the fake CLI with `sh -c`, so no executable file is written.
+        plan.exec.program = "sh".into();
+        plan.exec.args.splice(0..0, ["-c".into(), FAKE_DOCKER.into(), "docker".into()]);
+        plan.exec.capture_stdout = true;
+        let path = plan.exec.private_file.as_ref().unwrap().path().to_owned();
+        let ob = std::sync::Arc::new(crate::outbox::Outbox::new(1, 1 << 20));
+        let run = crate::session::spawn(plan.exec, ob).unwrap();
+        let info = run.done.await.unwrap();
+        assert_eq!(info.code, Some(0));
+        let out = String::from_utf8(info.stdout).unwrap();
+        let own = |k: &str| std::env::var(k).unwrap_or_else(|_| "unset".into());
+        assert_eq!(
+            out,
+            format!(
+                "cli DOCKER_HOST={} DOCKER_CONTEXT={}\n600\n\
+                 DOCKER_CONTEXT=job\nDOCKER_HOST=unix:///tmp/job.sock\n",
+                own("DOCKER_HOST"),
+                own("DOCKER_CONTEXT")
+            )
+        );
+        // The session removed the file after the CLI exited.
+        assert!(!path.exists());
+    }
+
     #[test]
     fn other_verbs_golden() {
         let exec: DockerExec = serde_json::from_value(json!({
@@ -775,8 +969,8 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            plan_exec(&exec, "docker").unwrap().exec.args.join(" "),
-            "exec -i -t -w /work -e A -u root c1 sh -c id"
+            args(&plan_exec(&exec, "docker").unwrap()),
+            "exec -i -t -w /work --env-file <env> -u root c1 sh -c id"
         );
         let stop: DockerStop =
             serde_json::from_value(json!({"session":1,"container":"c1","grace_secs":5})).unwrap();
