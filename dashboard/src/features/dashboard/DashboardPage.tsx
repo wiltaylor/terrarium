@@ -18,6 +18,7 @@ import { BlockDialog } from "./BlockDialog";
 import { BlockView } from "./blocks";
 import { layoutProblems, moveBlock, SIZES, STATE_META, stateCounts, type BlockState } from "./model";
 import { MonitorsPanel } from "./MonitorsPanel";
+import { EtaAccuracy } from "./EtaAccuracy";
 
 const TABS = [
   { id: "blocks", label: "Dashboard" },
@@ -30,6 +31,8 @@ export default function DashboardPage() {
   const tab = () => (search.tab === "monitors" ? "monitors" : "blocks");
   const now = useNow(5_000);
   const [error, setError] = createSignal<unknown>(null);
+  // One load per project mount, independent of monitor and layout updates.
+  const [accuracy] = createResource(() => params.project, (p) => api.monitors.etaAccuracy(p));
   const [view, { refetch, mutate }] = createResource(
     () => params.project,
     (p) => api.monitors.dashboard(p),
@@ -148,6 +151,10 @@ export default function DashboardPage() {
         <MonitorsPanel project={params.project} monitors={view.latest?.monitors ?? []} now={now()} onChanged={() => void refetch()} />
       </Show>
       <Show when={tab() === "blocks"}>
+        <ErrorBanner error={accuracy.error} />
+        <Show when={accuracy()}>
+          {(accuracy) => <EtaAccuracy value={accuracy()} />}
+        </Show>
         <Show when={draft()}>
           <div class="dash-editbar small" role="status">
             Edit mode: drag a block, or use its arrows, to move it. Save to keep the layout.
