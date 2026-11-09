@@ -485,8 +485,11 @@ fn daemon_env_reads(manifest: &Path) -> BTreeSet<String> {
             .map(|c| c[1].trim().to_string())
             .collect();
         for name in &lookups {
-            let at = Regex::new(&format!(r"(?m)(?:^|[^\w.:])({})\(([^),]*)", regex::escape(name)))
-                .unwrap();
+            let at = Regex::new(&format!(
+                r"(?m)(?:^|[^\w.:])({})\(([^),]*)",
+                regex::escape(name)
+            ))
+            .unwrap();
             for c in at.captures_iter(text) {
                 if text[..c.get(1).unwrap().start()].ends_with("fn ") {
                     continue;
