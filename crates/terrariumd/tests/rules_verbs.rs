@@ -719,7 +719,13 @@ async fn group_status_skips_when_the_step_placeholder_has_no_value() {
     assert_eq!(fail.len(), 1, "{fail:#?}");
     assert_eq!(fail[0]["rule"], "fail-step", "{}", fail[0]);
     assert_eq!(fail[0]["state"], "noop", "{}", fail[0]);
-    assert_eq!(fail[0]["reason"], "", "{}", fail[0]);
+    assert!(fail[0]["reason"].is_null(), "{}", fail[0]);
+    assert_eq!(
+        fail[0]["steps"][0]["detail"]["reason"],
+        "the step placeholder has no value (the card has no group)",
+        "{}",
+        fail[0]
+    );
 }
 
 async fn new_card(td: &TestDaemon, project: &str, body: Value) -> String {
