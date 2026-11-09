@@ -6,6 +6,7 @@ import { HoldBadge } from "../../components/HoldBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
 import type { Card, CardSummary, Column, NewCard, Question } from "../../api/types";
 import { ago, compact } from "../../lib/format";
+import { projectBase } from "../../lib/url";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { idleBadge } from "../../lib/idle";
 import { cardState, type CardState, tileLabels } from "../../lib/cardState";
@@ -264,7 +265,7 @@ export function BoardPage(props: { done?: boolean }) {
   return (
     <div class="board-page">
       <PageHead title={props.done ? "Done cards" : "Cards"} level={2}>
-        <button type="button" onClick={() => navigate(`/p/${encodeURIComponent(params.project)}/board${props.done ? "" : "/done"}`)}>
+        <button type="button" onClick={() => navigate(`${projectBase(params.project)}/board${props.done ? "" : "/done"}`)}>
           {props.done ? "Back to cards" : "Show done cards"}
         </button>
         {/* A phone folds the two filters into this button; a wider screen shows them in the row and hides the button. */}

@@ -44,6 +44,7 @@ const { ProjectTree } = await import("./ProjectTree");
 const { expanded } = await import("./TreeRoot");
 
 let dispose: (() => void) | undefined;
+let lastHistory: ReturnType<typeof createMemoryHistory>;
 afterEach(() => {
   setAgentList([]);
   expanded.close("/bookmarks");
@@ -58,6 +59,7 @@ const mount = (path: string) => {
   const el = document.createElement("div");
   document.body.append(el);
   const history = createMemoryHistory();
+  lastHistory = history;
   history.set({ value: path });
   // No JSX in a .test.ts file: the same tree as <MemoryRouter><Route path="*" component={ProjectTree} /></MemoryRouter>.
   dispose = render(
@@ -74,6 +76,23 @@ const mount = (path: string) => {
 };
 
 describe("ProjectTree", () => {
+  it.each(["Enter", "name link", "row"])("opens an encoded project URL with %s", async (activation) => {
+    const el = mount("/projects");
+    const row = el.querySelector<HTMLElement>('[role="treeitem"][data-project="my app"][data-key^="p:"]')!;
+    if (activation === "Enter") row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    else if (activation === "name link") row.querySelector<HTMLAnchorElement>("a.tree-name")!.click();
+    else row.querySelector<HTMLElement>(":scope > .tree-row")!.click();
+    await vi.waitFor(() => expect(lastHistory.get()).toBe("/p/my%20app"));
+    expect(row.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("highlights the decoded project row of the URL", () => {
+    const el = mount("/p/my%20app/board");
+    const row = el.querySelector<HTMLElement>('[role="treeitem"][data-project="my app"][data-key^="p:"]')!;
+    expect(row.getAttribute("aria-selected")).toBe("true");
+    expect(row.querySelector(":scope > .tree-row")!.classList.contains("current")).toBe(true);
+  });
+
   it("navigates the Bookmarks node and wiki links with arrow keys", () => {
     bookmarks.add("Wiki", "/p/alpha/knowledge/wiki/a%20b");
     const el = mount("/projects");

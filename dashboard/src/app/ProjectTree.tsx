@@ -273,14 +273,15 @@ export function ProjectTree() {
   const blocked = (name: string) => agents.inProject(name).filter((a) => a.status === "blocked" || a.status === "error").length;
 
   /**
-   * The name toggles the node. Off a project page it also selects the project,
-   * so global pages (Agents, the Events tab of Logs) scope to it. On a project page the URL
-   * is the selection, so the name only toggles.
+   * The row toggles the node and opens the project. Off a project page it also
+   * selects the project, so global pages (Agents, the Events tab of Logs) scope
+   * to it. On a project page the URL is the selection.
    */
   const activate = (name: string) => {
     expanded.toggle(name);
     setFocusKey(projectKey(name));
     if (!urlProject() && projects.selected() !== name) projects.select(name);
+    navigate(`/p/${encodeURIComponent(name)}`);
   };
 
   const onKeyDown = (e: KeyboardEvent) =>
@@ -401,9 +402,9 @@ export function ProjectTree() {
             ▸
           </span>
           <ProjectDot level={health().level} />
-          <span class="tree-name" title={label()}>
+          <A class="tree-name" href={`/p/${encodeURIComponent(p.name)}`} title={label()} tabIndex={-1} onClick={(e) => e.stopPropagation()}>
             {p.name}
-          </span>
+          </A>
           <Show when={blocked(p.name) > 0}>
             <span class="nav-count warn" title="Agents blocked or in error in this project">
               {blocked(p.name)}

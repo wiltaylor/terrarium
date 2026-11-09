@@ -10,6 +10,7 @@ import { createEffect, createResource, createSignal, For, on, onCleanup, Show } 
 import type { TestCase, TestRun } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";
 import { ago, bytes } from "../../lib/format";
+import { projectBase } from "../../lib/url";
 import { api } from "../../stores";
 import { CASE_ICON, caseDetails, compareSections, countsText, defaultFailedOnly, failing, groupBySuite, shortCommit, STATUS_TONE, testDuration } from "./model";
 import { CountsBar, runHref, RunStatusChip } from "./parts";
@@ -122,12 +123,12 @@ export default function TestRunPage() {
     }
   };
 
-  const p = () => encodeURIComponent(params.project);
+  const p = () => projectBase(params.project);
 
   return (
     <>
       <div class="small">
-        <A href={`/p/${p()}/board/tests`}>← All test runs</A>
+        <A href={`${p()}/board/tests`}>← All test runs</A>
       </div>
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
       <Show when={run()} fallback={<Show when={!error()}><Empty>Loading…</Empty></Show>}>
@@ -186,7 +187,7 @@ export default function TestRunPage() {
                   <For each={r().cards}>
                     {(c) => (
                       <span class="chip">
-                        <A href={`/p/${p()}/board?card=${encodeURIComponent(c)}`}>{c}</A>
+                        <A href={`${p()}/board?card=${encodeURIComponent(c)}`}>{c}</A>
                         <button type="button" class="ghost small" aria-label={`Unlink ${c}`} title={`Unlink ${c}`} onClick={() => void links({ remove_cards: [c] })}>
                           ×
                         </button>

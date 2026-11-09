@@ -425,6 +425,12 @@ th {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.tree a.tree-name,
+.tree a.tree-name:hover {
+  padding: 0;
+  color: inherit;
+  background: none;
+}
 .nav-count.warn {
   background: var(--warn-soft);
   color: var(--warn);
