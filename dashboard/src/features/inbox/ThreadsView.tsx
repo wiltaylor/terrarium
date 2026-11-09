@@ -1,6 +1,6 @@
 // The Threads tab of the Inbox (docs/api.md §6.13): `GET /api/threads`.
-// Open lists the threads that are not closed and do not track, the ones that
-// wait on the operator first and marked; Tracking lists the threads whose
+// Open lists the threads that are not closed and do not track, in two groups:
+// Waiting on you, then In progress (the agent works, GitHub #28); Tracking lists the threads whose
 // agent tracks handed-off work (TER-145); Done lists the closed ones. The project filter
 // of the Inbox is the scope. `thread` and `inbox` events read the list again.
 // Each row with linked cards has the n/m chip (TER-147): the boards of the
@@ -13,7 +13,7 @@ import { Empty, ErrorBanner } from "../../components/ui";
 import { api, events, inbox } from "../../stores";
 import { ThreadRow } from "./ThreadRow";
 import { loadBoards } from "./TrackedCards";
-import { inThreadsView, sortThreads, threadListStatus, type ThreadsViewId } from "./threads";
+import { inThreadsView, sortThreads, threadGroups, threadListStatus, type ThreadsViewId } from "./threads";
 
 const EMPTY: Record<ThreadsViewId, string> = {
   open: "No open threads. Open one with New thread.",
@@ -67,12 +67,22 @@ export function ThreadsView(props: { view: ThreadsViewId; project: string; now: 
     });
     onCleanup(() => (off(), clearTimeout(t), clearTimeout(tb)));
   });
+  const row = (t: Thread) => <ThreadRow thread={t} now={props.now} boards={boards()} onChange={() => (void reload(), void inbox.refresh())} />;
   return (
     <div class="stack">
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
       <Show when={list().length} fallback={<Empty>{loading() ? "Loading…" : EMPTY[props.view]}</Empty>}>
         <div class="stack" aria-label="Threads">
-          <For each={list()}>{(t) => <ThreadRow thread={t} now={props.now} boards={boards()} onChange={() => (void reload(), void inbox.refresh())} />}</For>
+          <Show when={props.view === "open"} fallback={<For each={list()}>{row}</For>}>
+            <For each={threadGroups(list())}>
+              {(g) => (
+                <section class="stack" aria-label={g.label} data-testid={`thread-group-${g.id}`}>
+                  <h3 class="thread-group">{g.label}</h3>
+                  <For each={g.threads}>{row}</For>
+                </section>
+              )}
+            </For>
+          </Show>
         </div>
       </Show>
     </div>
