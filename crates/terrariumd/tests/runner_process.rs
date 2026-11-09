@@ -1239,6 +1239,58 @@ async fn an_account_swap_waits_for_a_blocked_turn() {
     .await;
     restarted_after_turn(&td, &id, mark, 3, old).await;
 
+    // Queued work does not hold the swap back, and it goes to the new
+    // launch: a mail that comes during the turn queues a pointer, and the
+    // pointer turn starts only in the new session.
+    let old = td.runner_pid(&id).unwrap();
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/hold"})),
+    )
+    .await;
+    td.wait_status(&id, "working").await;
+    let mark = last_seq(&td, &id).await;
+    let m = td
+        .post(
+            "/api/mail",
+            Some(json!({"to": "demo/asks", "body": "mail during the turn"})),
+        )
+        .await;
+    let thread = m["thread_id"].as_str().unwrap().to_owned();
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": "max-y"})),
+        )
+        .await;
+    assert_eq!(r["applied"], "restart_scheduled", "{r}");
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "go", "raw": true})),
+    )
+    .await;
+    restarted_after_turn(&td, &id, mark, 4, old).await;
+    let start = td.events(&id, "session_started").await[3]["seq"]
+        .as_u64()
+        .unwrap();
+    let pointed = |e: &Value| {
+        e["data"]["prompt"]
+            .as_str()
+            .is_some_and(|p| p.contains(&thread))
+    };
+    let turns = td
+        .wait_events(&id, "turn_start", |e| e.iter().any(pointed))
+        .await;
+    let seqs: Vec<u64> = turns
+        .iter()
+        .filter(|e| pointed(e))
+        .filter_map(|e| e["seq"].as_u64())
+        .collect();
+    assert!(
+        seqs.iter().all(|s| *s > start),
+        "the pointer went to the old harness: {start} {seqs:?} {turns:#?}"
+    );
+
     td.post(&format!("/api/agents/{id}/stop"), None).await;
     td.wait_status(&id, "stopped").await;
 }
