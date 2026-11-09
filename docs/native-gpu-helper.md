@@ -108,6 +108,10 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
         forgets the holder never gets the whole root. The daemon's own
         commands for a card agent's owned root (probe, prepare, measure,
         delete) run as that agent `<project>/<agent>`, in its own scope.
+        So on such a host set the target's `work_root` to `workspace_root`:
+        the owned root `<work_root>/<project>/<agent>` is then the agent's
+        own directory. The default `/src/terrarium` is outside the scope
+        and read-only in the unit.
 
       Directories outside the scope do not exist in the unit, whatever
       their modes, so a file that an earlier holder of the UID made private
