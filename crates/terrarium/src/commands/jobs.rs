@@ -237,7 +237,7 @@ pub async fn delivery(ctx: &Ctx, cmd: &DeliveryCmd) -> anyhow::Result<()> {
         }
         DeliveryCmd::Set(a) => {
             let cur = ctx.api.get(&path, vec![]).await?;
-            let body = merged(&cur["delivery"], a);
+            let body = merged(&cur["delivery"], a)?;
             let v = ctx.api.put(&path, body).await?;
             ctx.emit(&v, print_delivery)
         }
@@ -245,7 +245,7 @@ pub async fn delivery(ctx: &Ctx, cmd: &DeliveryCmd) -> anyhow::Result<()> {
 }
 
 /// The current config with the given flags over it.
-fn merged(cur: &Value, a: &DeliverySetArgs) -> Value {
+fn merged(cur: &Value, a: &DeliverySetArgs) -> anyhow::Result<Value> {
     let mut d = if cur.is_object() {
         cur.clone()
     } else {
@@ -268,10 +268,23 @@ fn merged(cur: &Value, a: &DeliverySetArgs) -> Value {
     if !a.next_repos.is_empty() {
         d["next_repos"] = json!(a.next_repos);
     }
+    if a.clear_merge_secrets || !a.merge_secrets.is_empty() {
+        let mut refs = serde_json::Map::new();
+        for entry in &a.merge_secrets {
+            let (name, reference) = entry
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("--merge-secret needs NAME=@secret:name[.field]"))?;
+            if name.is_empty() || !reference.starts_with("@secret:") {
+                anyhow::bail!("--merge-secret needs NAME=@secret:name[.field]");
+            }
+            refs.insert(name.to_owned(), Value::from(reference));
+        }
+        d["merge_secrets"] = Value::Object(refs);
+    }
     if let Some(o) = d.as_object_mut() {
         o.retain(|_, v| !v.is_null());
     }
-    d
+    Ok(d)
 }
 
 fn print_delivery(c: &Ctx, v: &Value) {
@@ -425,6 +438,31 @@ fn queued_line(c: &Ctx, v: &Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merge_secret_flags_parse_clear_and_refuse_literals() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Args {
+            #[command(flatten)]
+            delivery: super::DeliverySetArgs,
+        }
+        let parse = |flags: &[&str]| {
+            Args::try_parse_from(std::iter::once("test").chain(flags.iter().copied()))
+        };
+        let args = parse(&["--merge-secret", "KEY=@secret:vm.private_key"]).unwrap();
+        let value = super::merged(&serde_json::json!({}), &args.delivery).unwrap();
+        assert_eq!(value["merge_secrets"]["KEY"], "@secret:vm.private_key");
+        let clear = parse(&["--clear-merge-secrets"]).unwrap();
+        assert_eq!(
+            super::merged(&value, &clear.delivery).unwrap()["merge_secrets"],
+            serde_json::json!({})
+        );
+        for value in ["KEY=literal", "KEY", "=@secret:vm"] {
+            let args = parse(&["--merge-secret", value]).unwrap();
+            assert!(super::merged(&serde_json::json!({}), &args.delivery).is_err());
+        }
+        assert!(parse(&["--clear-merge-secrets", "--merge-secret", "KEY=@secret:vm"]).is_err());
+    }
     use std::sync::Arc;
 
     use super::*;

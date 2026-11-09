@@ -878,6 +878,24 @@ address per 10 min with a `count`), `auth.lockout` (`scope`: `address` or
 
 ## 5. Projects
 
+Projects may opt into automatic reviews with `review_dispatcher: "<project-admin>"`
+in a project file, fleet project, or project PATCH. The default is off, and
+`"off"` disables it. This is independent of ready-card dispatch. The dispatcher
+uses the project's `card-review` template, falling back to `global:card-review`,
+and that admin's spawn rights, caps, and template grants.
+
+Each card in review gets at most one review agent at a time. `review_round`
+on the card counts successful review spawns. Only the current review agent's
+comment can supply a verdict: its first line must be `Review verdict: accept` or
+`Review verdict: changes` (bare `accept` and `changes` also work), with findings below it.
+At three rounds, automatic reviews stop and the owner is notified.
+If a verdict move fails, the findings stay on the card and the owner is notified.
+Accept moves to `merge_queue`, never
+merges. Changes moves to the top of `ready`, carrying the findings and
+waking the bound implementation agent through the normal card-move flow.
+The `review:lead` label retains both decisions for the lead without an
+automatic move. Moving the card invalidates the previous round's verdict.
+
 A project:
 
 ```json
@@ -3535,6 +3553,18 @@ or the operator may spawn for an owner. The checks, in order:
   the owner (below), also when a lead or the operator spawns for it.
 
 **Rights from the owner** (TER-65, `crates/terrariumd/src/spawn_rights.rs`).
+
+`like` (CLI `--like <agent>`) copies a same-project agent's policy targets,
+agent-level secret grant references (never values), skills settings, subscription
+and pool. The template still supplies the harness and other settings. The source
+must use the same harness. Subscription selection uses the copied pool's headroom.
+Each copied target and grant is checked against the owner through the normal
+spawn-rights checks. A missing right is `403`, with its name. With
+`like_skip_missing: true` (CLI `--like-skip-missing`, requires `like`), those
+forbidden rights are omitted and listed in the response's `skipped` array.
+Other errors still fail the spawn. Explicit and template grants replace copied
+grants of the same secret. Project grants and leases of the source are not copied.
+
 A spawn gives the ephemeral agent rights beyond its template, each one
 checked against the owner at the spawn. None goes past what the owner
 holds.
@@ -5709,6 +5739,80 @@ Agents with no usage are in the list with zero totals and no `share_pct`.
 
 `models` and `agents` are biggest spender (input plus output tokens)
 first. `since` and `until` are in the answer when the query gives them.
+
+The card usage answer also includes `working_seconds` and active
+trouble `signals` (arrays of signal names). The card and board summary expose
+the same active names as `trouble`. Working time is replayed from card
+assignment, status and wait events: only an agent working on this card in a
+working/research column counts. Idle time, open waits and time in other
+columns do not count. Usage query date filters apply to token/turn totals,
+not the working clock or current marks. To avoid a deploy-time burst, only
+cards entering the working-role or research column after the trouble baseline migration
+are monitored, including cards assigned by a lead. The
+baseline survives daemon restarts. Clock/history replay starts at the first
+such entry and reads only explicit assignees' status, wait and reset events,
+not the lifetime history of agents who commented on the card. Card and agent
+histories use separate indexed sequence ranges after entry. Only one prior
+status per assignee is fetched, by an indexed descending seek with LIMIT 1.
+The query plans are tested after ANALYZE with 100,000 historical events.
+Budget usage
+starts at that entry. Interactive token usage totals retain their existing
+all-time/date-filtered meaning.
+
+`GET /api/projects/{name}/trouble` reads the project's trouble thresholds.
+`PUT` replaces them and requires project admin rights. Omitted fields use
+defaults. Unknown fields and negative limits are rejected. Example:
+
+```json
+{"time_seconds":{"small":2700,"impl":7200,"impl-hard":14400},
+ "tokens":{},"turns":{},"red_streak":3,"red_same_commit":2,
+ "review_rounds":2,"eta_delays":3,"timer_polls":3,"compactions":3,
+ "review_wait_seconds":3600}
+```
+
+Time, token and turn maps are keyed by the suffix of the card's `type:` label
+(untyped cards use `impl`). Token/turn budgets are off until set. Time budgets
+use four times the project's type-specific p70 from completed card history
+(TER-316), requiring at least five distinct cards. Calibration reuses
+TER-394's shared work_samples implementation and existing indexes: it selects
+cards from the newest 2000 project moves, then pairs their ETA/move events
+with a window function. With too few samples,
+they use the fixed fallbacks above (`hard` also uses four hours). Explicit
+project time overrides take precedence. A zero threshold disables that check.
+An ETA at or before now produces `eta_overdue`. The other signal names are
+`time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
+`validation_red`, `timer_polls`, `compactions` and `review_wait`. Review wait
+starts at the most recent entry into review and clears on return to work.
+Assignment changes while the card stays in review do not reset its age.
+Job-set ETAs do not count as agent ETA extensions.
+
+Validation counts linked test runs uploaded by the current assignee, or the
+bound card agent while unassigned. Each suite name has its own streak. A
+green/empty run breaks that suite's streak. The latest 128 linked runs are
+examined per card. Three consecutive red runs, or
+two red runs on the same nonempty commit within the streak, trigger the mark.
+Short timer waits (at most one minute) and compaction requests use a rolling
+one-hour window. Review rounds and ETA extensions count the card's history.
+
+The lifecycle tick plans in a read, using lightweight working/review/research
+card metadata and marked cards that need clearing. It opens a write only if
+signals changed. That write checks each card's event/linked-test revision
+and project threshold value, deferring only that card's stale plan. Unrelated
+events and audit traffic cannot starve notices. It does not replay history
+inside a write.
+On the lifecycle tick, each new signal sends one state request to the worker
+and one summary to each project lead, never to the operator. The worker-nudge
+exception is `eta_overdue`: when the worker's card reminder is enabled
+(agent override, otherwise the daemon default), the reminder owns its nudge.
+The trouble pass records the signal and mails the lead, but does not send a
+second worker mail that could delay the reminder. If reminders are disabled,
+the worker still gets the trouble state request. Other signals are unchanged.
+The once-per-card
+and signal record survives restarts, resolution and recurrence. A mark clears
+when its condition stops holding, its threshold is disabled, or the card
+leaves working/research/review or is archived. A recurrence can restore the
+mark but cannot send another notice. The existing idle alert is separate.
+No-push detection is deferred to successful remote-head tracking (TER-370).
 
 The CLI calls `GET /api/usage?agent=<me>` for `terrarium usage` and
 `GET /api/usage?project=<p>` for `terrarium usage project`. Both work;
@@ -11672,6 +11776,82 @@ or the operator) read and set the config. The body is a JSON object:
 | `work_dir`     | the dir on the target for the work trees of the slots           | `/tmp/terrarium-jobs` |
 | `timeout_secs` | the most time the recipe may run                                | 3600                  |
 | `failure_patterns` | literal strings to extract from recipe output, with three following lines of context | `["FAILED", "panicked", "test result: FAILED", "failures:"]` |
+| `merge_secrets` | `DOCKER_CI_KEY` and `DOCKER_CI_RESET_KEY` mapped to `@secret:<name>[.<field>]`, consumed only by the daemon for merge jobs | `{}` |
+| `docker_ci` | public SSH settings: `destination`, `port`, `known_hosts`, `reset_destination`, `reset_port`, `reset_known_hosts` | none |
+
+`merge_secrets` uses the project's `delivery:<project>` principal, never
+agent or project grants. A delivery grant requires `level: run`, named
+targets, and no startup `env`. Worker runs, launches, secret reads, and
+brokers do not consider delivery grants. No database migration is needed:
+the existing grantee column stores principal strings without a type CHECK.
+Both `DOCKER_CI_KEY` and `DOCKER_CI_RESET_KEY` must be present when enabled.
+Literal values and arbitrary recipe
+env injection are refused.
+References resolve against current grants at each merge recipe, including
+reruns, and fail closed on a missing grant, wrong target, or proxy-only
+credential. Each use emits `secret.run` with the job, principal,
+target, field, and reference name, never the value. The SSH key remains in
+a private daemon run directory and is never sent to the target, recipe,
+or their environment. Output is stream-redacted with the full key and
+individual PEM lines before retention. The recipe retains its full raw target
+log because credentials never reach the target process tree.
+
+Configure `docker_ci` through the delivery API or fleet configuration before
+adding merge secret references. For example, `destination` is `root@vm`,
+`port` is its SSH port, and `known_hosts` is the administrator-verified
+OpenSSH host-key line (including `[host]:port` for a nonstandard port).
+`reset_destination` and `reset_port` identify the forced reset command;
+`reset_known_hosts` supplies its administrator-verified OpenSSH pin, written
+into a job-private reset directory. Neither SSH connection uses the daemon's
+shared TOFU known_hosts file. No endpoint
+or key pin is compiled into the daemon. Reset exit 75 retries twice with
+a two-second delay; any other failure prevents opening the tunnel.
+The daemon resolves configured merge secrets and opens the tunnel for every
+merge, independently of the recipe's `TERRARIUM_DOCKER_CI` gate switch.
+
+The Docker gate is off by default: merges continue to run the full
+`ci::validate` without requiring Docker or a key. To roll it out in order:
+deploy the job-runner support first, then
+the secret administrator grants `terrarium/docker-ci-vm` and
+`terrarium/docker-ci-reset` to
+`delivery:terrarium` with `--level run --target terrarium-helios-build`.
+Do not grant the key to `project:terrarium` or workers. The lead configures
+`--merge-secret DOCKER_CI_KEY=@secret:docker-ci-vm` and
+`--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery, with recipe
+`TERRARIUM_DOCKER_CI=1 just ci::validate-affected` to explicitly enable the
+live Docker gate. Leave the switch unset (or `0`) until the daemon and
+grant are ready. `--clear-merge-secrets` removes the references.
+The daemon pins the Docker VM's public host key and owns its SSH local
+forward. Trusted relay code embedded in the daemon release, never read
+from the merged branch, creates a 0600 Unix socket in a job-private
+directory on the target. Docker byte streams travel over its executor
+session to the daemon's SSH forward. The recipe gets only
+`DOCKER_HOST=unix://<job socket>`. Teardown closes the relay, socket, and
+SSH child on success or failure. Other processes sharing the target OS
+account can reach that socket during the job. This is an accepted risk:
+it grants Docker control of the throwaway VM, not access to its SSH key.
+Before opening the tunnel the daemon calls META-104's forced-command SSH
+reset as `dockerci@10.3.0.2` on port 22, with the second job-only key and
+strict checking against configured `reset_known_hosts` in its private RunDir.
+It sends no remote command. Exit 0 permits the tunnel, exit 1 fails, exit
+75 reports the reset lock busy, and a 150-second timeout fails closed.
+Both keys remain daemon-side. The VM's LAN and Tailscale egress is blocked
+outside the VM by vmlab switch rules, so branch code cannot undo it.
+The generic stream relay
+closes both directions when either peer closes. It does not preserve TCP
+half-close semantics. Docker version/pull/run/log streaming is tested, but
+clients requiring a write-half-close followed by a response are unsupported.
+Half-close forwarding is outside this change's scope. The relay
+does not filter privileged creates or host namespaces. A Docker API
+authorization layer, not a byte-pattern filter, would be needed to
+enforce that without breaking exec/attach upgrades and streaming APIs.
+Do not enable rollout until both grants and the pinned port-22 host key
+are installed and reset has been verified by the authorized operator.
+The gate runs the full suite, then explicitly runs the lifecycle/workspace and
+reservation/release Docker tests, rejecting ignored or unmatched results.
+The create-only device-IO test remains manual: its host-side `/dev/block`
+resolution requires a host agent colocated with Docker, not a remote
+`DOCKER_HOST`. The separate reservation/release case runs remotely.
 
 `failure_patterns: []` disables extraction. The patterns are literal, not
 regular expressions, must not be empty or whitespace-only, and can also be
@@ -11706,7 +11886,8 @@ validate or a merge is a `409 conflict` that says how to set it.
   (`[{card, branch, by_agent?, outcome?, note?}]`); `card`, `branch`, and
   `by_agent` are those of the first card. See 35.3 for the results.
 
-The recipe gets this env (TER-100), and no credential:
+The recipe gets this env (TER-100), plus any configured merge-only secrets
+for a merge job. It never receives the repository credential:
 
 | variable                  | value                                                                 |
 |---------------------------|-----------------------------------------------------------------------|
@@ -11724,7 +11905,8 @@ no `next`, or the commit has no merge-base with it, `TERRARIUM_BASE` and
 must run all of them. The terrarium repo's recipe for this is `just
 ci::validate-affected`: a validate job runs the checks that its changed
 files reach (the rules are in `scripts/affected.py`), and a merge job runs
-the full `just ci::validate`.
+the full `just ci::validate` through `just ci::merge`, plus the Docker
+gate only when `TERRARIUM_DOCKER_CI=1` is explicitly enabled.
 
 Jobs start first in, first out across all projects. A job starts when:
 

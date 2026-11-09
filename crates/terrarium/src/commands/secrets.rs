@@ -327,7 +327,7 @@ fn set_body(ctx: &Ctx, a: &SecretSetArgs) -> anyhow::Result<Value> {
 /// A grantee as the API takes it: `<project>/<name>` and a bare agent ID
 /// get `agent:`.
 pub fn grantee(s: &str) -> String {
-    if s.starts_with("agent:") || s.starts_with("project:") {
+    if s.starts_with("agent:") || s.starts_with("project:") || s.starts_with("delivery:") {
         s.to_owned()
     } else {
         format!("agent:{s}")
@@ -562,5 +562,15 @@ pub async fn secret(ctx: &Ctx, cmd: &SecretCmd) -> anyhow::Result<()> {
                 }
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn delivery_principal_passes_through_cli() {
+        assert_eq!(super::grantee("delivery:p"), "delivery:p");
+        assert_eq!(super::grantee("project:p"), "project:p");
+        assert_eq!(super::grantee("p/worker"), "agent:p/worker");
     }
 }

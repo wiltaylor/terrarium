@@ -13,8 +13,9 @@ export default function SettingsPage(props: RouteSectionProps) {
     <TabScreen
       title={params.project ? `Settings · ${params.project}` : "Settings"}
       label="Settings"
-      base={params.project ? `/p/${encodeURIComponent(params.project)}/settings` : "/settings"}
+      base={params.project ? `/p/${encodeURIComponent(decodeURIComponent(params.project))}/settings` : "/settings"}
       tabs={params.project ? PROJECT_SETTINGS_TABS : SETTINGS_TABS}
+      level={params.project ? 2 : 1}
     >
       {props.children}
     </TabScreen>

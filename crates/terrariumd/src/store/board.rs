@@ -144,6 +144,10 @@ fn normal_card_kind() -> String {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Card {
+    /// Active trouble signals (TER-79). The durable notification history
+    /// stays separate, so resolving a mark cannot send another notice.
+    #[serde(default)]
+    pub trouble: Vec<String>,
     #[serde(default = "normal_card_kind")]
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,6 +181,8 @@ pub struct Card {
     /// The dependencies that are neither accepted nor done yet.
     pub blocked_by: Vec<String>,
     pub comments: Vec<Comment>,
+    #[serde(default)]
+    pub review_round: u32,
     pub links: Vec<Link>,
     pub created_by: String,
     pub created_by_name: String,
@@ -200,6 +206,9 @@ pub struct Card {
     /// Worker ETA calibration status. Absent for review and job estimates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta_calibrated: Option<bool>,
+    /// Recent completed worker estimates in this project with the same type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_history: Option<super::card_history::WorkHistory>,
     /// When the card last moved to `done`. A reopen clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<String>,
@@ -648,14 +657,7 @@ fn render(
             || (row.column_role.is_none() && row.column == WORKING))
     {
         if worker_start.is_none() {
-            worker_start = conn
-                .query_row(
-                    "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
-                 AND json_extract(payload, '$.change') = 'moved' ORDER BY seq DESC LIMIT 1",
-                    [&row.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            worker_start = estimates.entered_at(conn, &row.project, &row.id, None)?;
         }
         if let Some(start) = worker_start
             .as_deref()
@@ -694,7 +696,25 @@ fn render(
     } else {
         (worker_eta, worker_start, row.eta_set_by, eta_set_by_name)
     };
+    let eta_history = if !row.archived
+        && job.is_none()
+        && (row.column_role.as_deref() == Some(WORKING)
+            || (row.column_role.is_none() && row.column == WORKING))
+    {
+        estimates.history(conn, &row.project, &json_col::<Vec<String>>(&row.labels))
+    } else {
+        None
+    };
     Ok(Card {
+        trouble: crate::trouble::active_signals(conn, &row.id)?,
+        review_round: conn
+            .query_row(
+                "SELECT round FROM card_reviews WHERE card = ?1",
+                [&row.id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0),
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,
         tests: crate::store::test_runs::card_chip(conn, &row.id)?,
@@ -728,6 +748,7 @@ fn render(
         eta_set_by,
         eta_set_by_name,
         eta_calibrated,
+        eta_history,
         done_at: row.done_at,
         idle_since: row.idle_since,
     })
@@ -735,7 +756,11 @@ fn render(
 
 pub fn get_card(conn: &Connection, id: &str) -> ApiResult<Card> {
     let row = find_row(conn, id)?;
-    render(conn, row, &mut Default::default())
+    render(
+        conn,
+        row,
+        &mut super::card_history::ReviewEstimates::for_card(id),
+    )
 }
 
 pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
@@ -817,6 +842,8 @@ pub fn board_summary(
           'eta_set_by', c.eta_set_by,
           'eta_set_by_name', coalesce(eb.project || '/' || eb.name, ebr.project || '/' || ebr.name, c.eta_set_by),
           'done_at', c.done_at, 'idle_since', c.idle_since,
+          'trouble', (SELECT json_group_array(signal) FROM
+            (SELECT signal FROM card_trouble WHERE card = c.id AND active = 1 ORDER BY signal)),
           'tests', (SELECT json_object('id', r.id, 'name', r.name, 'created_at', r.created_at,
             'status', CASE WHEN r.failed + r.errored > 0 THEN 'failed' WHEN r.total = 0 THEN 'empty' ELSE 'passed' END,
             'counts', json_object('passed', r.passed, 'failed', r.failed, 'errored', r.errored, 'skipped', r.skipped, 'total', r.total))
@@ -868,7 +895,7 @@ pub fn board_summary(
             if super::jobs::card_job(conn, id)?.is_none() {
                 let mut start = card["eta_set_at"].as_str().map(str::to_owned);
                 if start.is_none() {
-                    start = last_moved_at(conn, id)?;
+                    start = estimates.entered_at(conn, project, id, None)?;
                 }
                 if let Some(at) = start
                     .as_deref()
@@ -2606,6 +2633,7 @@ pub fn reply_comment(
     insert_reply(t, &card.id, &author, body, human_reply)?;
     touch(t, &card.id)?;
     card_event(t, &card, "commented", json!({"comment": body}))?;
+    crate::review_dispatcher::verdict(t, actor, &card.id, body)?;
     get_card(t, &card.id)
 }
 

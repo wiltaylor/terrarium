@@ -75,6 +75,7 @@ const TOP_KEYS: &[&str] = &[
     "projects",
 ];
 const PROJECT_KEYS: &[&str] = &[
+    "review_dispatcher",
     "card_dispatcher",
     "name",
     "description",
@@ -89,6 +90,8 @@ const PROJECT_KEYS: &[&str] = &[
 ];
 /// The keys of `[projects.delivery]` (TER-87), in the order of the schema.
 const DELIVERY_KEYS: &[&str] = &[
+    "merge_secrets",
+    "docker_ci",
     "target",
     "recipe",
     "slots",
@@ -1674,6 +1677,8 @@ name = "beta"
         assert_eq!(
             *d,
             DeliveryDef {
+                docker_ci: None,
+                merge_secrets: BTreeMap::new(),
                 failure_patterns: None,
                 target: Some("build".into()),
                 recipe: Some("just ci::validate".into()),

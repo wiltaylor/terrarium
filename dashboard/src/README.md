@@ -933,6 +933,13 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 
 ## Pages and the API
 
+Every `/p/:project/...` page sits in the project shell
+(`features/projects/ProjectScreen.tsx`). Its route tabs are Board, Dashboard,
+Agents, Repos, Knowledge, Pipelines, Calendar, Logs, and Settings, in that
+order (`app/nav.ts` `PROJECT_TABS`). `/p/:project` opens Board. The first path
+segment selects the tab, including on deep links. Board, Knowledge, Logs, and
+Settings keep their own tab row below the project tabs.
+
 | Route | View | API calls |
 |---|---|---|
 | `/` | Home: usage strip (each tile has the `display_name` of the subscription, its name in small text, and the windows of the last good probe, shortest first, with clear labels: "5-hour", "Weekly", "Weekly, Fable"; an Anthropic Ultra plan has no 5-hour window, so its weekly window leads; `lib/format.ts` `orderWindows`, `windowLabel`), host cards (see "Home: hosts"); the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; hosts: `GET /api/hosts`, `GET /api/hosts/{name}/metrics?minutes=15` |
@@ -953,7 +960,8 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/logs/mail` | Project logs, Mail tab: the mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
-| `/p/:project/dashboard`, `/p/:project` | Dashboard: the blocks of the monitors (stat, status, chart, text, table, note), Edit dashboard (add, change, drag or move, remove, save), and the Monitors tab (`?tab=monitors`: state, last and next run, on/off, Run now, the edit dialog with Test run); see "The project dashboard". `/p/:project` redirects here. | `GET`, `PUT .../dashboard`, `GET .../monitors`, `POST .../monitors`, `POST .../monitors/test`, `PATCH`, `DELETE /api/monitors/{id}`, `POST .../run`, `GET .../results?since=&bucket=`, `GET .../target-grants` |
+| `/p/:project` | Redirects to `/p/:project/board`, the first tab of the project shell. | none |
+| `/p/:project/dashboard` | Dashboard: the blocks of the monitors (stat, status, chart, text, table, note), the job-queue strip (below), Edit dashboard (add, change, drag or move, remove, save), and the Monitors tab (`?tab=monitors`: state, last and next run, on/off, Run now, the edit dialog with Test run); see "The project dashboard". | `GET`, `PUT .../dashboard`, `GET .../monitors`, `POST .../monitors`, `POST .../monitors/test`, `PATCH`, `DELETE /api/monitors/{id}`, `POST .../run`, `GET .../results?since=&bucket=`, `GET .../target-grants`, `GET .../jobs/stats?since=` (TER-178) |
 | `/p/:project/pipelines` | Pipelines: each CI/CD pipeline with the state of its newest run, the last poll, on/off, Refresh, Edit, Delete; a row opens the recent runs, a run opens its steps; the dialog (GitHub Actions or a script) has a Test poll; see "Pipelines". | `GET`, `POST .../pipelines`, `POST .../pipelines/test`, `PATCH`, `DELETE /api/pipelines/{id}`, `POST .../refresh`, `GET .../runs`, `GET .../runs/{run}` |
 | `/p/:project/calendar` | Calendar: the project's events and the global ones in a month grid, a week, or an agenda; an occurrence opens the event (Edit, Remove, Skip); the dialog makes or changes an event; see "Calendar". | `GET .../calendar`, `POST .../calendar/events`, `GET`, `PATCH`, `DELETE /api/calendar/events/{id}`, `POST .../skip`, `GET`, `POST`, `DELETE .../calendar/watches` |
 | `/calendar` | The combined calendar of every project and the global calendar (the operator). | `GET /api/calendar`, `GET /api/calendar/global`, `POST /api/calendar/global/events` |
@@ -1010,9 +1018,24 @@ target. The mock applies the daemon's rules and merges a `PATCH` of
 ## The project dashboard
 
 `features/dashboard/` (docs/api.md §30). The Dashboard item is the first
-item of each project in the tree (`app/nav.ts` `PROJECT_ITEMS`), and
-`/p/:project` opens it. The project name in the tree still only opens
-and closes the node.
+item of each project in the tree (`app/nav.ts` `PROJECT_ITEMS`). In the project
+shell, Board is the first tab and `/p/:project` opens it. The project name in
+the tree still only opens and closes the node.
+
+- **Job queue.** Above the grid, the strip of the job queue (TER-178,
+  `JobQueuePanel.tsx`) shows the first-attempt pass rate of the project's
+  merge jobs (`GET .../jobs/stats?since=`, docs/api.md §35.4, field
+  `merge`; validate jobs from before 2026-11-07 stay out): the rate as a
+  whole percent rounded half to even like `terrarium job stats`, "N of M
+  first attempts passed", and the quiet counts that sit outside the rate
+  (reruns that passed, conflicts, errors, open jobs; all kinds). The
+  window select reads 24 hours, 7 days (the default), or 30 days again.
+  One stats call per mount and per window change, and one more,
+  debounced, after a merge job of the project ends. The strip hides
+  until an answer shows a job in the window, and on a failed call (a
+  daemon without the route, a 403, the network) without a page error.
+  The helpers are `model.ts` `passRateText`, `roundHalfEven`,
+  `jobStatNotes`, and `JOB_WINDOWS`; the mock is `api/mock/jobs.ts`.
 
 - **Grid.** CSS grid of four columns on a desktop, two up to 1100 px, one
   on a phone. A block is `s` (one column), `m` (two), or `l` (the full

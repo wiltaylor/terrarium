@@ -511,6 +511,12 @@ pub enum DeliveryCmd {
 
 #[derive(Debug, Args)]
 pub struct DeliverySetArgs {
+    /// Daemon key reference, DOCKER_CI_KEY or DOCKER_CI_RESET_KEY=@secret:name[.field].
+    #[arg(long = "merge-secret")]
+    pub merge_secrets: Vec<String>,
+    /// Remove all merge-only secret references.
+    #[arg(long, conflicts_with = "merge_secrets")]
+    pub clear_merge_secrets: bool,
     /// The target that runs the jobs; `""` turns the queue off
     #[arg(long)]
     pub target: Option<String>,
@@ -1313,7 +1319,7 @@ pub enum CardCmd {
     /// Assign to self and move to the working column
     Claim {
         id: String,
-        /// Set the ETA too: a duration such as 45m, 2h30m, or 1d
+        /// Set the ETA too, for example 25m. Units: s, m, h, d. At most 30 days
         #[arg(long, value_name = "DURATION|TIME")]
         eta: Option<String>,
     },
@@ -1387,7 +1393,7 @@ pub enum CardCmd {
     /// another column clears it
     Eta {
         id: String,
-        /// A duration from now (45m, 2h30m, 1d) or an RFC 3339 time. For a
+        /// A duration from now (25m, units s/m/h/d, at most 30 days) or an RFC 3339 time. For a
         /// card with a queued or running job, a duration is the job's
         /// planned duration: the ETA is the job start plus it
         #[arg(required_unless_present = "clear", conflicts_with = "clear")]
@@ -1968,6 +1974,12 @@ pub enum TestCmd {
         /// Only runs with a failed or errored test
         #[arg(long)]
         failed: bool,
+        /// At most this many runs, the newest
+        #[arg(long, default_value_t = 50, conflicts_with = "all")]
+        limit: usize,
+        /// Every run: follow every page
+        #[arg(long)]
+        all: bool,
     },
     /// Show a run: the counts, and each failed case with its message
     Show {
@@ -3222,6 +3234,7 @@ pub enum SecretCmd {
     /// applies at the next start of the agent
     Grant {
         name: String,
+        /// `delivery:<project>` (merge-only, run level),
         /// `agent:<project>/<name>`, `agent:<id>`, `project:<name>`, or
         /// `<project>/<name>` (an agent)
         grantee: String,

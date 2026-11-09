@@ -49,6 +49,13 @@ fn fake_tui() -> PathBuf {
 /// The `terrarium-runner` binary next to the test binaries. A missing one
 /// is built once.
 fn runner_bin() -> PathBuf {
+    // CI builds the pinned N-1 runner separately and drives it with this
+    // daemon, rather than pretending that a current binary is an old one.
+    if let Some(path) = std::env::var_os("TERRARIUM_TEST_OLD_RUNNER") {
+        let path = PathBuf::from(path);
+        assert!(path.is_file(), "old runner fixture is missing");
+        return path;
+    }
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let exe = std::env::current_exe().unwrap();
@@ -674,6 +681,143 @@ async fn interrupt_stops_the_turn_and_keeps_the_harness() {
 /// Actual CLI calls wait through a hold and reach the next daemon exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_rpc_cli_calls_cross_a_graceful_restart() {
+    hot_swap_probation(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_hot_swap_failed_health_restores_then_replays_once() {
+    hot_swap_probation(true).await;
+}
+
+#[tokio::test]
+async fn agent_rpc_health_reports_activating_until_admission_is_ready() {
+    let mut td = Td::start().await;
+    td.shutdown();
+    let releases = td.dir.path().join("state/releases");
+    std::fs::create_dir_all(&releases).unwrap();
+    let marker = releases.join("probation");
+    std::fs::write(&marker, "").unwrap();
+    td.boot().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    // Current-thread runtime plus direct handler calls keep activation from
+    // racing the assertion between marker removal and activation_ready.
+    std::fs::remove_file(marker).unwrap();
+    let response = terrariumd::api::system::health(axum::extract::State(state.clone())).await;
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["status"],
+        "activating"
+    );
+    state.agent_calls.activation_ready();
+    let response = terrariumd::api::system::health(axum::extract::State(state)).await;
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["status"],
+        "ok"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_activation_failure_keeps_writes_closed_and_can_restart() {
+    let mut td = Td::start().await;
+    let state = td.dir.path().join("state");
+    let key = state.join("secrets.key");
+    let original = std::fs::read(&key).unwrap();
+    td.shutdown();
+    std::fs::create_dir_all(state.join("releases")).unwrap();
+    let marker = state.join("releases/probation");
+    std::fs::write(&marker, "").unwrap();
+    std::fs::write(&key, b"invalid test key").unwrap();
+    td.boot().await;
+    std::fs::remove_file(marker).unwrap();
+    let error = timeout(
+        WAIT,
+        td.daemon.as_ref().unwrap().state.agent_calls.wait_failure(),
+    )
+    .await
+    .unwrap();
+    assert!(error.contains("secret store"));
+    assert_eq!(
+        td.req_as(None, Method::GET, "/api/health", None).await.0,
+        503
+    );
+    assert_eq!(
+        td.req_as(
+            None,
+            Method::POST,
+            "/api/projects",
+            Some(json!({"name":"not-admitted"}))
+        )
+        .await
+        .0,
+        503
+    );
+    td.shutdown();
+    std::fs::write(key, original).unwrap();
+    td.boot().await;
+    assert_eq!(
+        td.req_as(None, Method::GET, "/api/health", None).await.0,
+        200
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_activation_failure_exits_the_daemon_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(state.join("releases")).unwrap();
+    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+    let marker = state.join("releases/probation");
+    std::fs::write(&marker, "").unwrap();
+    std::fs::write(state.join("secrets.key"), b"invalid test key").unwrap();
+    let socket = dir.path().join("api.sock");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_terrariumd"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap())
+        .env("TERRARIUM_STATE_DIR", &state)
+        .env("TERRARIUM_API_SOCKET", &socket)
+        .env("TERRARIUM_CONFIG_DIR", dir.path().join("config"))
+        .env("TERRARIUM_CONFIG_REPO", dir.path().join("config"))
+        .env("TERRARIUM_RUNTIME_DIR", dir.path().join("run"))
+        .env("TERRARIUM_HOST_LISTEN", "")
+        .env("TERRARIUM_ARTIFACT_LISTEN", "")
+        .env("TERRARIUM_RUNNER", runner_bin())
+        .args([
+            "--sandbox",
+            "none",
+            "--tools-dir",
+            "",
+            "--no-harness-install",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    timeout(WAIT, async {
+        while !socket.exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "daemon exited before probation health"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(child.try_wait().unwrap().is_none());
+    std::fs::remove_file(marker).unwrap();
+    let output = timeout(WAIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("activation failed after health commit")
+    );
+}
+
+async fn hot_swap_probation(rollback: bool) {
     let cli = cli_bin();
     let mut td = Td::start().await;
     let bob = td.agent("bob", json!({})).await;
@@ -718,8 +862,92 @@ async fn agent_rpc_cli_calls_cross_a_graceful_restart() {
         "calls must wait for hello from the next daemon"
     );
     td.shutdown();
+    let state = td.dir.path().join("state");
+    let releases = state.join("releases");
+    std::fs::create_dir_all(&releases).unwrap();
+    let probation = releases.join("probation");
+    std::fs::write(&probation, "held").unwrap();
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker/hot-swap.py");
+    let backup = state.join("test-backup");
+    let control = |command: &str| {
+        let out = std::process::Command::new("python3")
+            .arg(&helper)
+            .arg(command)
+            .arg(&backup)
+            .env("TERRARIUM_STATE_DIR", &state)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    control("snapshot");
+    let audit_count = || {
+        rusqlite::Connection::open(state.join("terrarium.db"))
+            .unwrap()
+            .query_row("SELECT count(*) FROM audit", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    let before_probation = audit_count();
     td.boot().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (health, _) = td.req_as(None, Method::GET, "/api/health", None).await;
+    assert_eq!(
+        health, 200,
+        "health reads remain available during probation"
+    );
+    let write = json!({"name": "probation-dashboard"});
+    let (status, response) = td
+        .req_as(None, Method::POST, "/api/projects", Some(write.clone()))
+        .await;
+    assert_eq!(status, 503);
+    assert_eq!(response["error"], "upgrade_probation");
+    let (status, _) = td
+        .req_as(None, Method::GET, "/api/projects/probation-dashboard", None)
+        .await;
+    assert_eq!(status, 404, "refused dashboard write has no effect to lose");
+    assert_eq!(
+        audit_count(),
+        before_probation,
+        "definition sync, reconciliation, jobs and background writers must not run during probation"
+    );
+    assert!(
+        !calls.is_finished(),
+        "healthy probation must not admit held calls"
+    );
+    if rollback {
+        let conn = rusqlite::Connection::open(state.join("terrarium.db")).unwrap();
+        conn.execute_batch("CREATE TABLE hot_swap_test_migration(value TEXT)")
+            .unwrap();
+        drop(conn);
+        terrariumd::agent_rpc::drain(&td.daemon.as_ref().unwrap().state, Duration::from_secs(2))
+            .await
+            .unwrap();
+        td.shutdown();
+        control("restore-database");
+        td.boot().await;
+        let conn = rusqlite::Connection::open(state.join("terrarium.db")).unwrap();
+        assert!(
+            conn.prepare("SELECT * FROM hot_swap_test_migration")
+                .is_err()
+        );
+        assert!(
+            !calls.is_finished(),
+            "restored daemon still awaits health commit"
+        );
+    }
+    std::fs::remove_file(&probation).unwrap();
     timeout(WAIT, calls).await.unwrap().unwrap();
+    let (status, _) = td
+        .req_as(None, Method::POST, "/api/projects", Some(write))
+        .await;
+    assert_eq!(status, 201, "dashboard retry succeeds after commit");
+    let (status, _) = td
+        .req_as(None, Method::GET, "/api/projects/probation-dashboard", None)
+        .await;
+    assert_eq!(status, 200);
     assert_eq!(
         td.runner_pid(&bob),
         Some(pid),

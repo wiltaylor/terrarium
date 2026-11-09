@@ -19,6 +19,15 @@ your agent page (the Spawned tab), with a link to the session of each.
 
 ## Spawn rights
 
+Use `terrarium agent spawn <template> --like <agent> --task "<task>"` to copy
+a worker's policy targets, agent-level secret grant references, skills settings,
+subscription and pool. The source must belong to the owner's project and use the
+template's harness. Secret values are never copied. Each copied right must be
+one the owner can grant, not just one the source holds. Otherwise the spawn is
+refused with the right named. Add `--like-skip-missing` to omit forbidden copied
+rights and list them in the response. Explicit or template grants replace copied
+grants of the same secret. Source leases and project grants are not copied.
+
 You can spawn only with spawn rights: the `spawn` block of your policy. A
 lead (project_admin) or the operator sets it. It gives:
 
