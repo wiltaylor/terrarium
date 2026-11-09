@@ -263,12 +263,29 @@ async fn like_skips_name_only_grants_the_owner_may_read() {
     .await
     .ok();
 
-    // No skip: the first refused copied right is named (the grants go in
-    // name order, so `gh` comes before `openai`).
+    // No skip: a refused copied grant is named only when the owner may
+    // read its name (`openai`), never `gh` (TER-391 round 2).
     let r = spawn_as(&td, &low, &low, json!({"like": "w"})).await;
     assert_eq!(r.status, 403, "{}", r.body);
-    assert!(message(&r).contains("secret `global/gh`"), "{}", r.body);
-    assert!(message(&r).contains("no grant of it"), "{}", r.body);
+    assert!(message(&r).contains("secret `global/openai`"), "{}", r.body);
+    assert!(!r.body.to_string().contains("global/gh"), "{}", r.body);
+
+    // No skip, and every refused grant is hidden: a 403 with the count
+    // and no secret name.
+    let mid = id(&td
+        .agent(
+            "p",
+            "mid",
+            json!({"policy": {"targets": ["box"],
+                              "spawn": {"templates": ["worker"], "max_concurrent": 4}}}),
+        )
+        .await);
+    let r = spawn_as(&td, &mid, &mid, json!({"like": "w"})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("2 copied secret grant(s)"), "{}", r.body);
+    assert!(message(&r).contains("like_skip_missing"), "{}", r.body);
+    let body = r.body.to_string();
+    assert!(!body.contains("openai") && !body.contains("global/gh"), "{body}");
 
     // With the skip: a named entry for the secret whose name the owner
     // may read, one count for `gh`, whose name it may not.

@@ -3566,8 +3566,10 @@ the same harness; a mismatch is `422 invalid` and names the template, also
 when it is the alternative picked for headroom. Each copied target and grant
 is checked against the owner through the normal spawn-rights checks, and a
 copied target that the body's `targets` also names is granted once. A missing
-right is `403`, with its name: for a copied grant the message names the
-source's secret and level, the price of a precise refusal. With
+right is `403`. A copied target is named. A copied grant is named (secret
+and level) only when the owner may already read the secret's name (a grant of
+its own, or the operator); the others are counted in one `403` with no name,
+which points at `like_skip_missing`. With
 `like_skip_missing: true` (CLI `--like-skip-missing`, requires `like`), those
 forbidden rights are omitted and listed in the response's `skipped` array:
 `target:<name>` and `grant:<scope>/<name>:<level>`, the grant entries only

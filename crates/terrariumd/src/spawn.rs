@@ -675,19 +675,29 @@ pub async fn spawn_with(
                             }
                             copied_grants.append(&mut rights);
                         }
-                        Err(e) if body.like_skip_missing && e.code == crate::error::Code::Forbidden => {
-                            if owner_view.is_none()
-                                || readable.contains(&(grant.scope.clone(), grant.name.clone()))
-                            {
-                                skipped.push(format!("grant:{label}"));
-                            } else {
-                                hidden += 1;
+                        Err(e) if e.code == crate::error::Code::Forbidden => {
+                            let named = owner_view.is_none()
+                                || readable.contains(&(grant.scope.clone(), grant.name.clone()));
+                            match (named, body.like_skip_missing) {
+                                (true, true) => skipped.push(format!("grant:{label}")),
+                                // The owner may read the name: the
+                                // precise 403 of TER-89 stays.
+                                (true, false) => return Err(e),
+                                // A hidden name never shows, with or
+                                // without the skip (TER-391 round 2).
+                                (false, _) => hidden += 1,
                             }
                         }
                         Err(e) => return Err(e),
                     }
                 }
                 if hidden > 0 {
+                    if !body.like_skip_missing {
+                        return Err(ApiError::forbidden(format!(
+                            "{hidden} copied secret grant(s) of `{}` are not grantable by the owner and hidden: the owner may not read their names; use like_skip_missing to omit them",
+                            source.agent.name
+                        )));
+                    }
                     skipped.push(format!("grant:{hidden} hidden: the owner may not read their names"));
                 }
             } else if body.like_skip_missing {
