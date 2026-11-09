@@ -2242,13 +2242,22 @@ async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let jobs = b.until_idle().await;
-    let job = jobs.iter().find(|j| j["card"] == cb).unwrap();
-    assert_eq!(job["state"], "failed", "{job:#}");
+    let mut jobs: Vec<Value> = jobs
+        .iter()
+        .filter(|j| j["card"] == cb)
+        .cloned()
+        .collect();
+    jobs.sort_by_key(|j| j["attempt"].as_i64().unwrap_or(0));
+    assert_eq!(jobs.len(), 2, "a clash is rerun once: {jobs:#?}");
+    for job in &jobs {
+        assert_eq!(job["state"], "failed", "{job:#}");
+        let id = job["id"].as_str().unwrap();
+        let full = b.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+        let tail = full["tail"].as_str().unwrap_or_default();
+        assert!(tail.contains("held by another job or daemon"), "{tail}");
+    }
+    let job = jobs.last().unwrap();
     assert_eq!(job["attempt"], 2, "a clash is rerun once: {job:#}");
-    let id = job["id"].as_str().unwrap();
-    let full = b.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
-    let tail = full["tail"].as_str().unwrap();
-    assert!(tail.contains("held by another job or daemon"), "{tail}");
     // B never touched A's tree: it is still at A's head, with A's file.
     assert_eq!(git(&wd.join("p/slot-1"), &["rev-parse", "HEAD"]), head_a);
     assert_eq!(std::fs::read_to_string(wd.join("p/slot-1/OK")).unwrap(), "a1\n");
