@@ -499,7 +499,11 @@ async fn branch_watch(
     )
     .await
     .ok();
-    let (c, w, b) = (card.to_owned(), worker.to_owned(), branch.map(str::to_owned));
+    let (c, w, b) = (
+        card.to_owned(),
+        worker.to_owned(),
+        branch.map(str::to_owned),
+    );
     state(td)
         .db
         .write("system", move |t| {

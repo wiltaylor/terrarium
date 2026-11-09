@@ -470,9 +470,8 @@ fn desired(
         && (card.column_role.as_deref() == Some("working")
             || card.column.eq_ignore_ascii_case("research"))
         && let Some((baseline, checked)) = progress_baseline(c, &card.id)?
-        && parse(&checked).is_some_and(|at| {
-            (now - at).num_seconds() <= s.no_progress_seconds as i64
-        })
+        && parse(&checked)
+            .is_some_and(|at| (now - at).num_seconds() <= s.no_progress_seconds as i64)
         && f.seconds.saturating_sub(baseline) >= s.no_progress_seconds
     {
         out.insert("no_progress".into());
@@ -751,7 +750,8 @@ const BRANCH_CARDS_SQL: &str = "SELECT c.id, c.project, c.repo, coalesce(c.branc
          WHERE c.column_id = ?1 AND c.archived = 0 AND c.repo IS NOT NULL AND c.id > ?2
          ORDER BY c.id LIMIT ?3";
 /// The same from the start up to the cursor, after a wrap.
-const BRANCH_CARDS_WRAP_SQL: &str = "SELECT c.id, c.project, c.repo, coalesce(c.branch, lower(c.id))
+const BRANCH_CARDS_WRAP_SQL: &str =
+    "SELECT c.id, c.project, c.repo, coalesce(c.branch, lower(c.id))
          FROM cards c INDEXED BY cards_branch_watch
          WHERE c.column_id = ?1 AND c.archived = 0 AND c.repo IS NOT NULL AND c.id <= ?2
          ORDER BY c.id LIMIT ?3";
@@ -767,17 +767,14 @@ fn branch_cards(c: &Connection, cursor: &str) -> ApiResult<Vec<BranchCard>> {
         let mut q = c.prepare(sql)?;
         let mut out = Vec::new();
         for column in &columns {
-            let rows = q.query_map(
-                params![column, cursor, BRANCH_PAGE as i64],
-                |r| {
-                    Ok(BranchCard {
-                        id: r.get(0)?,
-                        project: r.get(1)?,
-                        repo: r.get(2)?,
-                        branch: r.get(3)?,
-                    })
-                },
-            )?;
+            let rows = q.query_map(params![column, cursor, BRANCH_PAGE as i64], |r| {
+                Ok(BranchCard {
+                    id: r.get(0)?,
+                    project: r.get(1)?,
+                    repo: r.get(2)?,
+                    branch: r.get(3)?,
+                })
+            })?;
             for row in rows {
                 out.push(row?);
             }
@@ -834,7 +831,11 @@ async fn remote_head(state: &Shared, card: &BranchCard) -> Option<Option<String>
     match tokio::task::spawn_blocking(move || crate::git::ls_remote(&checkout, &branch)).await {
         Ok(Ok(head)) => Some(head),
         Ok(Err(e)) => {
-            tracing::warn!("card branch watch {}: ls-remote {}: {e}", card.id, card.branch);
+            tracing::warn!(
+                "card branch watch {}: ls-remote {}: {e}",
+                card.id,
+                card.branch
+            );
             None
         }
         Err(e) => {
@@ -1343,12 +1344,36 @@ mod tests {
                 .unwrap()
         };
         for (sql, args, uses) in [
-            (BRANCH_CARDS_SQL, 3, "SEARCH c USING INDEX cards_branch_watch (column_id=? AND id>?)"),
-            (BRANCH_CARDS_WRAP_SQL, 3, "SEARCH c USING INDEX cards_branch_watch (column_id=? AND id<?)"),
-            (WATCH_COLUMNS_SQL, 0, "SEARCH board_columns USING COVERING INDEX board_columns_role_watch (role=?)"),
-            (WATCH_COLUMNS_SQL, 0, "SEARCH board_columns USING INDEX board_columns_name_watch (<expr>=?)"),
-            (PROGRESS_BASELINE_SQL, 1, "SEARCH h USING INDEX sqlite_autoindex_card_branch_heads_1 (card=?)"),
-            (BRANCH_HEAD_SQL, 3, "SEARCH card_branch_heads USING INDEX sqlite_autoindex_card_branch_heads_1 (card=?)"),
+            (
+                BRANCH_CARDS_SQL,
+                3,
+                "SEARCH c USING INDEX cards_branch_watch (column_id=? AND id>?)",
+            ),
+            (
+                BRANCH_CARDS_WRAP_SQL,
+                3,
+                "SEARCH c USING INDEX cards_branch_watch (column_id=? AND id<?)",
+            ),
+            (
+                WATCH_COLUMNS_SQL,
+                0,
+                "SEARCH board_columns USING COVERING INDEX board_columns_role_watch (role=?)",
+            ),
+            (
+                WATCH_COLUMNS_SQL,
+                0,
+                "SEARCH board_columns USING INDEX board_columns_name_watch (<expr>=?)",
+            ),
+            (
+                PROGRESS_BASELINE_SQL,
+                1,
+                "SEARCH h USING INDEX sqlite_autoindex_card_branch_heads_1 (card=?)",
+            ),
+            (
+                BRANCH_HEAD_SQL,
+                3,
+                "SEARCH card_branch_heads USING INDEX sqlite_autoindex_card_branch_heads_1 (card=?)",
+            ),
         ] {
             let plans = plan(sql, args);
             assert!(plans.iter().any(|p| p == uses), "{uses}: {plans:?}");
