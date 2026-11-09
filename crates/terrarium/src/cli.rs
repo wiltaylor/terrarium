@@ -3204,6 +3204,12 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: HostCmd,
     },
+    /// Link keys: another Terrarium daemon (the home) that shows and runs
+    /// this one in its dashboard (docs/api.md §35). The operator only
+    Link {
+        #[command(subcommand)]
+        command: LinkCmd,
+    },
     /// Subscriptions: the plans and their accounts, and the default
     /// account of each harness
     Subscription {
@@ -4447,6 +4453,33 @@ pub enum HostCmd {
     },
     /// Revoke a host agent's token and remove the host agent
     Rm { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LinkCmd {
+    /// List the links: label, status, read-only, the home, and the last use
+    Ls {
+        /// Also the revoked links
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show a link: the home, the pairing, and the key use record
+    Show { id: String },
+    /// Make a link; prints its one-time pairing code (10 minutes) alone on
+    /// stdout, and on stderr what to type and compare on the home
+    New {
+        /// A name for the link, for example the home's name
+        label: String,
+        /// Reads only: GET, the event streams; no turn, no PTY, no write
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Stop the link's key now and print a new pairing code for the home's
+    /// Re-pair
+    Rotate { id: String },
+    /// Revoke a link: its key stops working and its open streams close
+    #[command(visible_alias = "rm")]
+    Revoke { id: String },
 }
 
 #[derive(Debug, Subcommand)]

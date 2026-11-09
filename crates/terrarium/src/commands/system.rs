@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use super::{event_line, print_generic, print_table, set_opt};
 use crate::api::{ServerError, query};
 use crate::cli::{
-    AdminTargetCmd, AuditArgs, BackupCmd, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, SnapshotArgs,
+    AdminTargetCmd, AuditArgs, BackupCmd, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, LinkCmd, SnapshotArgs,
     SnapshotCmd, SnapshotOn, SubscriptionCmd, UsageCmd,
 };
 use crate::ctx::Ctx;
@@ -874,6 +874,84 @@ pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
             ctx.emit(&v, |c, _| c.line(format!("revoked host agent {name}")))
         }
     }
+}
+
+/// `admin link ...`: the link keys of this daemon (docs/api.md §35). The
+/// pairing code prints alone on stdout; the long-lived key never reaches
+/// the CLI (the home gets it from `POST /api/links/pair`).
+pub async fn links(ctx: &Ctx, cmd: &LinkCmd) -> anyhow::Result<()> {
+    match cmd {
+        LinkCmd::Ls { all } => {
+            let q = if *all {
+                vec![("revoked".to_owned(), "true".to_owned())]
+            } else {
+                vec![]
+            };
+            let v = Value::Array(ctx.api.list("/api/links", q, None).await?);
+            ctx.emit(&v, |c, v| {
+                print_table(
+                    c,
+                    &as_items(v),
+                    &[
+                        ("ID", "id"),
+                        ("LABEL", "label"),
+                        ("STATUS", "status"),
+                        ("READ ONLY", "read_only"),
+                        ("HOME", "home_name"),
+                        ("LAST USED", "last_used_at"),
+                        ("FROM", "last_used_from"),
+                    ],
+                    "no links",
+                )
+            })
+        }
+        LinkCmd::Show { id } => {
+            let path = format!("/api/links/{}", crate::transport::encode(id));
+            let v = ctx.api.get(&path, vec![]).await?;
+            ctx.emit(&v, |c, v| print_generic(c, v, "no link"))
+        }
+        LinkCmd::New { label, read_only } => {
+            let body = json!({"label": label, "read_only": read_only});
+            let v = ctx.api.post("/api/links", Some(body)).await?;
+            ctx.emit(&v, print_pairing_code)
+        }
+        LinkCmd::Rotate { id } => {
+            let path = format!("/api/links/{}/rotate", crate::transport::encode(id));
+            let v = ctx.api.post(&path, None).await?;
+            ctx.emit(&v, print_pairing_code)
+        }
+        LinkCmd::Revoke { id } => {
+            let path = format!("/api/links/{}", crate::transport::encode(id));
+            let v = ctx.api.delete(&path, vec![]).await?;
+            ctx.emit(&v, |c, _| c.line(format!("revoked link {id}")))
+        }
+    }
+}
+
+/// The pairing code alone on stdout; on stderr the link, the expiry, and
+/// what the operator types and compares on the home.
+fn print_pairing_code(ctx: &Ctx, v: &Value) {
+    ctx.line(field(v, "code"));
+    let link = &v["link"];
+    let inst = &v["instance"];
+    let text = format!(
+        "pairing code for link {} ({}{}): one use, expires {}\n\
+         on the home, add a remote with:\n  url: {}\n  the code above\n\
+         then compare what the home shows with:\n  instance: {} ({}, {})\n  \
+         the TLS certificate SHA-256 of your reverse proxy\n",
+        field(link, "label"),
+        field(link, "id"),
+        if link["read_only"] == true { ", read-only" } else { "" },
+        field(v, "code_expires_at"),
+        match v["url"].as_str() {
+            Some(u) => u.to_owned(),
+            None => "<this daemon's https URL> (set TERRARIUM_PUBLIC_URL to print it)".to_owned(),
+        },
+        field(inst, "id"),
+        field(inst, "name"),
+        field(inst, "version"),
+    );
+    ctx.out.write_bytes(true, text.as_bytes());
 }
 
 /// `admin harness ls`: `GET /api/harnesses`; `admin harness update`:

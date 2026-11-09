@@ -2821,4 +2821,204 @@ mod tests {
         assert_eq!(renewed.claims.exp, now - max + 600 + max);
         assert_eq!(renewed.claims.sid, "sid-near");
     }
+
+    // ---- link keys (TER-61, docs/api.md §35) ----
+
+    fn link_app(s: &Shared) -> Router {
+        tcp_router_with(
+            s.clone(),
+            TokenAuth::new("t".into(), false).with_links(LinkAuth {
+                db: s.db.clone(),
+                runtime: s.links.clone(),
+            }),
+            false,
+        )
+    }
+
+    /// A new link and its key: `POST /api/links`, then the pairing.
+    async fn paired(s: &Shared, read_only: bool) -> (String, String) {
+        let r = send_body(
+            link_app(s),
+            "POST",
+            "/api/links",
+            &[("authorization", "Bearer t")],
+            &serde_json::json!({"label": "home", "read_only": read_only}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        assert_eq!(hdr(&r, "cache-control"), "no-store");
+        let v = json_of(r).await;
+        let code = v["code"].as_str().unwrap().to_owned();
+        assert!(code.starts_with("tlp_"));
+        assert_eq!(v["link"]["status"], "pending");
+        assert!(v["instance"]["id"].as_str().unwrap().parse::<ulid::Ulid>().is_ok());
+        let body = serde_json::json!({"code": code, "home_instance_id": ulid::Ulid::new().to_string(),
+                                      "home_name": "home"});
+        // No `Authorization`: the code is the proof.
+        let r = send_body(link_app(s), "POST", "/api/links/pair", &[], &body).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(hdr(&r, "cache-control"), "no-store");
+        let v = json_of(r).await;
+        let key = v["key"].as_str().unwrap().to_owned();
+        assert!(key.starts_with("tlk_"));
+        // The same code a second time fails.
+        let r = send_body(link_app(s), "POST", "/api/links/pair", &[], &body).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        (v["link_id"].as_str().unwrap().to_owned(), key)
+    }
+
+    #[tokio::test]
+    async fn a_link_key_acts_as_the_operator_minus_the_deny_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (id, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let r = send(link_app(&s), "GET", "/api/agents", &h).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = send(link_app(&s), "GET", "/api/session", &h).await;
+        assert_eq!(json_of(r).await["kind"], "link");
+        let r = send(link_app(&s), "GET", "/api/system/instance", &h).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        for (m, p) in [
+            ("POST", "/api/backups"),
+            ("GET", "/api/backups/x.tar"),
+            ("GET", "/api/links"),
+            ("POST", "/api/links"),
+            ("POST", "/api/hosts"),
+            ("PUT", "/api/auth/password"),
+            ("POST", "/api/secrets/global/x/reveal"),
+            ("POST", "/api/system/update"),
+            ("POST", "/api/config/push"),
+            ("POST", "/api/session"),
+            ("DELETE", "/api/sessions"),
+        ] {
+            let r = send(link_app(&s), m, p, &h).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "{m} {p}");
+            assert_eq!(json_of(r).await["error"]["code"], "link_forbidden", "{m} {p}");
+        }
+        let rows = audit_rows(&s, "link.forbidden").await;
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|(a, _)| *a == format!("link:{id}")));
+        // The key is in no audit row and no event.
+        let k = key.clone();
+        let leaked: i64 = s
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT (SELECT count(*) FROM audit WHERE instr(detail, ?1) > 0)
+                          + (SELECT count(*) FROM events WHERE instr(payload, ?1) > 0)",
+                    [k],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(leaked, 0);
+        // The link ends itself; the audit row names the link.
+        let r = send(link_app(&s), "DELETE", "/api/links/self", &h).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let rows = audit_rows(&s, "link.revoke").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, format!("link:{id}"));
+        let r = send(link_app(&s), "GET", "/api/agents", &h).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // The audit list gives the label of the link actor.
+        let r = send(
+            link_app(&s),
+            "GET",
+            "/api/audit?action=link.revoke",
+            &[("authorization", "Bearer t")],
+        )
+        .await;
+        let v = json_of(r).await;
+        let items = v.as_array().or_else(|| v["items"].as_array()).unwrap();
+        assert_eq!(items[0]["link_label"], "home");
+        // The operator's own writes keep the actor `operator`.
+        let rows = audit_rows(&s, "link.new").await;
+        assert_eq!(rows[0].0, "operator");
+    }
+
+    #[tokio::test]
+    async fn a_read_only_link_only_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (_, key) = paired(&s, true).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let r = send(link_app(&s), "GET", "/api/agents", &h).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            "/api/projects",
+            &h,
+            &serde_json::json!({"name": "p"}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        let r = send(link_app(&s), "DELETE", "/api/links/self", &h).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_revoke_closes_the_open_streams_of_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (id, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let r = send(
+            link_app(&s),
+            "GET",
+            "/api/events?live=1",
+            &[("authorization", auth.as_str()), ("accept", "text/event-stream")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = tokio::spawn(async move { r.into_body().collect().await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!body.is_finished(), "the stream ended before the revoke");
+        let r = send(
+            link_app(&s),
+            "DELETE",
+            &format!("/api/links/{id}"),
+            &[("authorization", "Bearer t")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        tokio::time::timeout(std::time::Duration::from_secs(5), body)
+            .await
+            .expect("the stream stays open after the revoke")
+            .unwrap()
+            .unwrap();
+        let r = send(link_app(&s), "GET", "/api/agents", &[("authorization", auth.as_str())]).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_or_missing_pairing_code_fails_alike() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        for code in ["tlp_00", "nope", ""] {
+            let r = send_body(
+                link_app(&s),
+                "POST",
+                "/api/links/pair",
+                &[],
+                &serde_json::json!({"code": code, "home_instance_id": ulid::Ulid::new().to_string()}),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{code}");
+        }
+        // A wrong link key is a plain 401, as a wrong token.
+        let r = send(
+            link_app(&s),
+            "GET",
+            "/api/agents",
+            &[("authorization", "Bearer tlk_00")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
 }
