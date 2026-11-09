@@ -3553,7 +3553,7 @@ mod tests {
         let slot = s.slot();
         let lock = slot.with_file_name("slot-1.lock");
         assert!(lock.exists(), "the receive step leaves the slot lock");
-        let holder = flock_holder(&lock);
+        let mut holder = flock_holder(&lock);
         until_held(&lock);
         let (two, t2) = s.commit("two");
         let (ok, text) = s.receive(&two, &t2, "");
@@ -3617,7 +3617,7 @@ mod tests {
         assert!(text.contains("replaced the slot tree"), "{text}");
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
         // A busy lock: the recipe does not run either.
-        let holder = flock_holder(&lock);
+        let mut holder = flock_holder(&lock);
         until_held(&lock);
         let out = run(&head);
         assert_eq!(out.status.code(), Some(125));
