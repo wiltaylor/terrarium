@@ -400,7 +400,9 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
                 if m.as_str().len() >= ENTROPY_MIN_LEN
                     && shannon_entropy(m.as_str()) > ENTROPY_THRESHOLD
                     && !is_word_path(m.as_str())
-                    && !exempt.as_ref().is_some_and(|e| e.contains(&m.range()))
+                    && !exempt
+                        .as_ref()
+                        .is_some_and(|e| m.start() >= e.start && m.end() <= e.end)
                 {
                     hit("high-entropy");
                 }
