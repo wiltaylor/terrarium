@@ -5817,11 +5817,17 @@ examined per card. Three consecutive red runs, or
 two red runs on the same nonempty commit within the streak, trigger the mark.
 Short timer waits (at most one minute) and compaction requests use a rolling
 one-hour window. Review rounds and ETA extensions count the card's history.
-For a working or research card with a repo, the remote scan reads the actual
-branch head with `git ls-remote`, so direct pushes count. The branch is the
-card's branch, else the lowercase card id (as for validation jobs). The scan
-has its own five-minute timer, reads at most 32 cards per pass from a rotating
-cursor, and stops a pass after two minutes. A failed repo, credential or
+For a card in a working-role column with a repo, the remote scan reads the
+actual branch head with `git ls-remote`, so direct pushes count. Research
+cards are not watched and never get `no_progress`. The branch is the card's
+branch, else the lowercase card id (as for validation jobs). The scan has its
+own five-minute timer, reads at most 32 cards per pass from a rotating cursor,
+and stops a pass after 120 seconds. The cursor moves past a card only after
+its read finishes, so a read cut by the cap comes first in the next pass. The
+capacity is 32 cards per five minutes: with more watched cards, each card is
+read less often, and with slow remotes the cap cuts a pass short. Then a
+stored read can grow older than the threshold, and no mark is set for that
+card until a fresh read (no false marks). A failed repo, credential or
 `ls-remote` read is logged and changes nothing. `no_progress` starts after
 `no_progress_seconds` of agent working time (waits excluded) without a new
 head: counted from the claim while the branch was never seen on the remote,
