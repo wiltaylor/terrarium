@@ -4934,7 +4934,10 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("{}", diag(&format!("{step}: not running after {LINK_WAIT:?}")));
+        panic!(
+            "{}",
+            diag(&format!("{step}: not running after {LINK_WAIT:?}"))
+        );
     };
     let read_seed = |step: &str| {
         let out = std::process::Command::new("docker")
