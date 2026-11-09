@@ -71,5 +71,5 @@ it("does not fetch full cards when the board has no open drawer", async () => {
   expect(get).not.toHaveBeenCalled();
   const chip = host.querySelector("[data-card='TER-12'] .test-chip");
   expect(chip?.getAttribute("title")).toContain("Latest test run");
-  expect(chip?.getAttribute("href")).toContain("/board/tests/");
+  expect(chip?.getAttribute("href")).toContain("/p/terrarium/tests/");
 });

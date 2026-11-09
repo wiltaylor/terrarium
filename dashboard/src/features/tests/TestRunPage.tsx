@@ -1,4 +1,4 @@
-// The page of one test run (/p/:project/board/tests/:id, docs/api.md, test
+// The page of one test run (/p/:project/tests/:id, docs/api.md, test
 // runs): the summary, the compare with the previous run of the same name, the
 // suites with their cases, and the output of a case. The output is plain text in
 // <pre> text nodes, with no ANSI codes (model.ts stripAnsi); it never renders as
@@ -128,7 +128,7 @@ export default function TestRunPage() {
   return (
     <>
       <div class="small">
-        <A href={`${p()}/board/tests`}>← All test runs</A>
+        <A href={`${p()}/tests`}>← All test runs</A>
       </div>
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
       <Show when={run()} fallback={<Show when={!error()}><Empty>Loading…</Empty></Show>}>
@@ -148,7 +148,7 @@ export default function TestRunPage() {
               <ConfirmButton label="Delete" onConfirm={async () => {
                 try {
                   await api.testRuns.remove(r().id);
-                  navigate(`/p/${p()}/board/tests`);
+                  navigate(`/p/${p()}/tests`);
                 } catch (e) {
                   setError(e);
                 }

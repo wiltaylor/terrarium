@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import app from "./App.tsx?raw";
 import layout from "./Layout.tsx?raw";
-import { BOARD_TABS, inboxRedirect, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_TABS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
+import nav from "./nav.ts?raw";
+import { inboxRedirect, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_TABS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
 
 describe("navigation", () => {
   it("has no Spend item; the project has Logs, not Inbox or Mail, with a route", () => {
@@ -39,6 +40,9 @@ describe("navigation", () => {
   it("has a project shell with Board first and every former view as a route tab", () => {
     expect(PROJECT_TABS).toEqual([
       { path: "board", label: "Board" },
+      { path: "tests", label: "Tests" },
+      { path: "schedules", label: "Schedules" },
+      { path: "rules", label: "Rules" },
       { path: "dashboard", label: "Dashboard" },
       { path: "agents", label: "Agents" },
       { path: "repos", label: "Repos" },
@@ -110,12 +114,11 @@ describe("navigation", () => {
     expect(movedTo("/p/terrarium/repos")).toBeUndefined();
   });
 
-  it("has Schedules after Logs in the top list with a route, and the project schedules as a board tab, not a project item", () => {
-    expect(PROJECT_TABS.map((i) => i.path)).not.toContain("schedules");
+  it("has Schedules after Logs in the top list with a route, and the project schedules as a project tab", () => {
+    expect(PROJECT_TABS.find((i) => i.path === "schedules")?.label).toBe("Schedules");
     const hrefs = TOP_ITEMS.map((i) => i.href) as string[];
     expect(hrefs.indexOf("/schedules")).toBe(hrefs.indexOf("/logs") + 1);
     expect(app).toMatch(/path="\/schedules" component=\{SchedulesPage\}/);
-    expect(BOARD_TABS.map((t) => t.path)).toContain("schedules");
   });
 
   it("has Home, Inbox, Threads, Logs, Schedules, then Calendar above the project tree, with a route, and no Questions item", () => {
@@ -235,9 +238,10 @@ describe("navigation", () => {
       "/p/:project/board/versions/:id",
       "/p/:project/artifacts",
       "/p/:project/artifacts/:id",
-      "/p/:project/schedules",
-      "/p/:project/tests",
-      "/p/:project/tests/:id",
+      "/p/:project/board/schedules",
+      "/p/:project/board/rules",
+      "/p/:project/board/tests",
+      "/p/:project/board/tests/:id",
       "/p/:project/wiki/*path",
       "/p/:project/memory",
       "/p/:project/knowledge",
@@ -272,32 +276,39 @@ describe("navigation", () => {
     }
   });
 
-  it("has Board with the tabs Cards, Artifacts, Tests, Schedules, Rules, each with a route; Cards is the index route at /p/:project/board", () => {
-    expect(BOARD_TABS).toEqual([
-      { path: "", label: "Cards" },
-      { path: "artifacts", label: "Artifacts" },
-      { path: "tests", label: "Tests" },
-      { path: "schedules", label: "Schedules" },
-      { path: "rules", label: "Rules" },
-    ]);
+  it("has no board tab row (TER-507): Tests, Schedules, and Rules are project tabs with a route, and Artifacts has no tab", () => {
+    expect(nav).not.toMatch(/BOARD_TABS/);
+    expect(PROJECT_TABS.map((i) => i.label)).not.toContain("Artifacts");
+    expect(PROJECT_TABS.map((i) => i.path).slice(0, 4)).toEqual(["board", "tests", "schedules", "rules"]);
     const project = app.slice(app.indexOf('<Route path="/p/:project" component={ProjectScreen}>'));
-    expect(project).toMatch(/<Route path="\/board" component=\{BoardScreen\}>/);
-    const start = project.indexOf('<Route path="/board" component={BoardScreen}>');
-    const block = project.slice(start, project.indexOf("</Route>", start));
-    expect(block).toMatch(/path="\/" component=\{BoardPage\}/);
+    expect(app).not.toMatch(/BoardScreen/);
+    expect(project).toMatch(/<Route path="\/board" component=\{BoardPage\} \/>/);
+    expect(project).toMatch(/<Route path="\/board\/done" component=\{DoneCardsPage\} \/>/);
     // Versions are card labels (TER-58): no Versions tab.
     expect(app).not.toMatch(/VersionsPage/);
-    expect(block).toMatch(/path="\/artifacts\/:id\?" component=\{ArtifactsPage\}/);
-    expect(block).toMatch(/path="\/schedules" component=\{SchedulesPage\}/);
-    expect(block).toMatch(/path="\/rules" component=\{RulesPage\}/);
-    expect(block).toMatch(/path="\/tests" component=\{TestRunsPage\}/);
-    expect(block).toMatch(/path="\/tests\/:id" component=\{TestRunPage\}/);
-    expect(movedTo("/p/terrarium/tests")).toBe("/p/terrarium/board/tests");
-    expect(movedTo("/p/terrarium/tests/01JBTRUN1")).toBe("/p/terrarium/board/tests/01JBTRUN1");
-    for (const gone of ["versions", "wiki", "memory"]) expect(block).not.toMatch(new RegExp(`<Route path="/${gone}[^"]*" component=`));
-    // The Cards tab and its `?card=` links keep the path.
+    // The Artifacts page keeps its path with no tab, so old links still open it.
+    expect(project).toMatch(/path="\/board\/artifacts\/:id\?" component=\{ArtifactsPage\}/);
+    expect(project).toMatch(/<Route path="\/schedules" component=\{SchedulesPage\} \/>/);
+    expect(project).toMatch(/<Route path="\/rules" component=\{RulesPage\} \/>/);
+    expect(project).toMatch(/<Route path="\/tests" component=\{TestRunsPage\} \/>/);
+    expect(project).toMatch(/<Route path="\/tests\/:id" component=\{TestRunPage\} \/>/);
+    // The board and its `?card=` links keep the path.
     expect(movedTo("/p/terrarium/board")).toBeUndefined();
-    for (const now of ["/p/terrarium/board/artifacts/ART-2", "/p/terrarium/board/schedules", "/p/terrarium/board/rules", "/p/terrarium/board/tests", "/p/terrarium/board/tests/01JBTRUN1"]) expect(movedTo(now)).toBeUndefined();
+    for (const now of ["/p/terrarium/board/done", "/p/terrarium/board/artifacts", "/p/terrarium/board/artifacts/ART-2", "/p/terrarium/tests", "/p/terrarium/tests/01JBTRUN1", "/p/terrarium/schedules", "/p/terrarium/rules"]) expect(movedTo(now)).toBeUndefined();
+  });
+
+  it("redirects the old board tab paths to the project tabs in one hop (TER-507)", () => {
+    expect(movedTo("/p/terrarium/board/tests")).toBe("/p/terrarium/tests");
+    expect(movedTo("/p/terrarium/board/tests/")).toBe("/p/terrarium/tests");
+    // The daemon gives a test run the URL `/p/<project>/board/tests/<id>`.
+    expect(movedTo("/p/terrarium/board/tests/01JBTRUN1")).toBe("/p/terrarium/tests/01JBTRUN1");
+    expect(movedTo("/p/terrarium/board/schedules")).toBe("/p/terrarium/schedules");
+    expect(movedTo("/p/my%20app/board/schedules/")).toBe("/p/my%20app/schedules");
+    expect(movedTo("/p/terrarium/board/rules")).toBe("/p/terrarium/rules");
+    // A schedule link keeps its query.
+    expect(withQuery(movedTo("/p/terrarium/board/schedules")!, "?open=S1&tab=triggers")).toBe("/p/terrarium/schedules?open=S1&tab=triggers");
+    for (const old of ["/p/terrarium/board/tests/01JBTRUN1", "/p/terrarium/board/schedules", "/p/terrarium/board/rules"]) expect(movedTo(movedTo(old)!)).toBeUndefined();
+    expect(movedTo("/p/terrarium/board/rules/x")).toBeUndefined();
   });
 
   it("has Knowledge with the tabs Wiki, Memory, and DB, each with a route; /p/:project/knowledge opens the Wiki tab", () => {
@@ -320,7 +331,7 @@ describe("navigation", () => {
     for (const now of ["/p/terrarium/knowledge/wiki", "/p/terrarium/knowledge/wiki/designs/runner-v2", "/p/terrarium/knowledge/memory", "/p/terrarium/knowledge/db", "/p/terrarium/knowledge/db/bug"]) expect(movedTo(now)).toBeUndefined();
   });
 
-  it("redirects the old Versions paths in one hop to the Cards tab, and the Artifacts paths to the board tab", () => {
+  it("redirects the old Versions paths in one hop to the Cards tab, and the Artifacts paths to the Artifacts page", () => {
     expect(movedTo("/p/terrarium/versions")).toBe("/p/terrarium/board");
     expect(movedTo("/p/terrarium/versions/")).toBe("/p/terrarium/board");
     // An old mail links `/p/<project>/versions/<id>`: version objects are gone (TER-58), so it opens the board.
@@ -340,14 +351,10 @@ describe("navigation", () => {
     expect(movedTo("/p/terrarium/versions/a/b")).toBeUndefined();
   });
 
-  it("redirects the old project Schedules path to the board tab", () => {
-    expect(movedTo("/p/terrarium/schedules")).toBe("/p/terrarium/board/schedules");
-    expect(movedTo("/p/terrarium/schedules/")).toBe("/p/terrarium/board/schedules");
-    expect(movedTo("/p/my%20app/schedules")).toBe("/p/my%20app/board/schedules");
-    // The global Schedules page stays.
+  it("keeps the project Schedules path and the global Schedules page", () => {
+    expect(movedTo("/p/terrarium/schedules")).toBeUndefined();
+    expect(movedTo("/p/my%20app/schedules")).toBeUndefined();
     expect(movedTo("/schedules")).toBeUndefined();
-    // No chains: the new place is not moved again.
-    expect(movedTo(movedTo("/p/terrarium/schedules")!)).toBeUndefined();
   });
 
   it("redirects the old Wiki path with its page path (a splat), and the old Memory path", () => {

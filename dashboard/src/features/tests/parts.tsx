@@ -13,7 +13,7 @@ import { labelHref } from "../board/versionLabels";
 import { barSegments, CASE_ICON, chipText, combinedStatus, countsText, latestByName, STATUS_TONE, sumCounts, testDuration } from "./model";
 
 /** The page of a run. */
-export const runHref = (project: string, id: string) => `/p/${encodeURIComponent(project)}/board/tests/${encodeURIComponent(id)}`;
+export const runHref = (project: string, id: string) => `/p/${encodeURIComponent(project)}/tests/${encodeURIComponent(id)}`;
 
 /** The chip of a label that a run links to. A version label opens the board filtered by that version. */
 export function LabelChip(props: { project: string; label: string }) {

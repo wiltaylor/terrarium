@@ -1,5 +1,5 @@
 // Rules (docs/api.md §19.8, §19.9, §19.12, TER-171): the Rules tab of the
-// board screen (`/p/:project/board/rules`), beside Schedules. It shows who
+// project (`/p/:project/rules`), beside Schedules. It shows who
 // runs the card flow (`board_flow`), the lint of the rules that run, the
 // rules in their order (the built-in pack and the project's rules.wcl) with
 // a switch for each, the last runs, and the migration of the project to
