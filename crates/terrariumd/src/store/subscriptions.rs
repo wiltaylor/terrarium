@@ -890,7 +890,10 @@ pub fn prune_window_samples(
     batch: usize,
 ) -> ApiResult<usize> {
     let batch = i64::try_from(batch).unwrap_or(i64::MAX);
-    Ok(t.execute(PRUNE_WINDOW_SQL, params![subscription, window, before, newest, batch])?)
+    Ok(t.execute(
+        PRUNE_WINDOW_SQL,
+        params![subscription, window, before, newest, batch],
+    )?)
 }
 
 // ---- Default plan accounts (PLAN §16.3) ----
