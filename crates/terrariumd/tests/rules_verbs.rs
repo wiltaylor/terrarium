@@ -2519,9 +2519,7 @@ rule "h-script" {
 async fn every_verb_refuses_a_held_card() {
     // The script step (TER-173) runs in a child of the daemon binary; the
     // verbs it returns meet the same gate.
-    terrariumd::rule_script::set_runner(std::path::PathBuf::from(env!(
-        "CARGO_BIN_EXE_terrariumd"
-    )));
+    terrariumd::rule_script::set_runner(std::path::PathBuf::from(env!("CARGO_BIN_EXE_terrariumd")));
     let td = TestDaemon::start().await;
     td.project("p").await;
     put_rules(&td, "p", HELD).await;
