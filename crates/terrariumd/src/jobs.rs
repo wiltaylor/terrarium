@@ -3145,10 +3145,7 @@ mod tests {
         let log = dir.path().join("logs with 'quotes/job.log");
         let recipe = "printf 'test early_failure ... FAILED\\n'\nprintf \"thread 'early_failure' panicked at test.rs:1:2:\\nexpected value\\n\" >&2\ni=0; while [ \"$i\" -lt 2000 ]; do printf 'unrelated build noise\\n'; i=$((i + 1)); done\nexit 101";
         let script = logged_recipe(recipe.into(), log.to_str().unwrap());
-        let out = recipe_sh()
-            .args(["-c", &script])
-            .output()
-            .unwrap();
+        let out = recipe_sh().args(["-c", &script]).output().unwrap();
         assert_eq!(out.status.code(), Some(101));
         let full = std::fs::read_to_string(&log).unwrap();
         assert!(full.len() > RECIPE_MAX / 32);
@@ -3179,10 +3176,7 @@ mod tests {
                 "printf \"custom [failure] 'marker'\\nmessage\\n\"; exit 7".into(),
                 log.to_str().unwrap(),
             );
-            let out = recipe_sh()
-                .args(["-c", &script])
-                .output()
-                .unwrap();
+            let out = recipe_sh().args(["-c", &script]).output().unwrap();
             assert_eq!(out.status.code(), Some(7));
             let summary = std::process::Command::new("sh")
                 .args([
@@ -3550,14 +3544,22 @@ mod tests {
 
     /// Hold the lock of `path` (as another daemon would) until the holder
     /// is stopped. The holder runs in its own process group, so
-    /// [`stop_holder`] can end the whole tree: the lock goes with it.
+    /// [`stop_holder`] can end the whole tree: the lock goes with it. It
+    /// waits for the lock (up to 60 s, so a slow start or a step that ends
+    /// late under load does not make it give up), then prints `held`:
+    /// [`until_held`] reads that line.
     fn flock_holder(path: &std::path::Path) -> std::process::Child {
         use std::os::unix::process::CommandExt;
         std::process::Command::new("flock")
-            .arg("-n")
+            .arg("-w")
+            .arg("60")
             .arg(path)
-            .arg("sleep")
-            .arg("30")
+            .arg("sh")
+            .arg("-c")
+            .arg("echo held; exec sleep 60")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .process_group(0)
             .spawn()
             .unwrap()
@@ -3573,24 +3575,23 @@ mod tests {
         let _ = holder.wait();
     }
 
-    /// Wait until a holder holds `path`: a second non-blocking flock fails.
-    fn until_held(path: &std::path::Path) {
-        let start = std::time::Instant::now();
-        while std::process::Command::new("flock")
-            .arg("-n")
-            .arg(path)
-            .arg("true")
-            .output()
-            .unwrap()
-            .status
-            .success()
-        {
-            assert!(
-                start.elapsed() < std::time::Duration::from_secs(10),
-                "the holder never took {}",
+    /// Wait until the holder holds `path`: it prints `held` once it has the
+    /// lock. A holder that ends first (it could not take the lock) fails
+    /// the test with its exit status and stderr.
+    fn until_held(holder: &mut std::process::Child, path: &std::path::Path) {
+        use std::io::{BufRead, Read};
+        let mut line = String::new();
+        std::io::BufReader::new(holder.stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        if line.trim() != "held" {
+            let status = holder.wait().unwrap();
+            let mut err = String::new();
+            let _ = holder.stderr.as_mut().unwrap().read_to_string(&mut err);
+            panic!(
+                "the holder never took {}: {status:?}, stdout {line:?}, stderr {err:?}",
                 path.display()
             );
-            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 
@@ -3611,7 +3612,7 @@ mod tests {
         let lock = slot.with_file_name("slot-1.lock");
         assert!(lock.exists(), "the receive step leaves the slot lock");
         let mut holder = flock_holder(&lock);
-        until_held(&lock);
+        until_held(&mut holder, &lock);
         let (two, t2) = s.commit("two");
         let (ok, text) = s.receive(&two, &t2, "");
         assert!(!ok, "{text}");
@@ -3678,7 +3679,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
         // A busy lock: the recipe does not run either.
         let mut holder = flock_holder(&lock);
-        until_held(&lock);
+        until_held(&mut holder, &lock);
         let out = run(&head);
         assert_eq!(out.status.code(), Some(125));
         let text = format!(
