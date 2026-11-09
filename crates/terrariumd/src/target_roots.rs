@@ -99,6 +99,9 @@ fn base(def: &TargetDef) -> &str {
 
 /// The fallback base for a home directory, checked like a `work_root`.
 fn fallback_base(home: &str) -> ApiResult<String> {
+    if !home.starts_with('/') {
+        return Err(ApiError::invalid("the home must be an absolute path"));
+    }
     let fallback = format!("{}/{FALLBACK_DIR}", home.trim_end_matches('/'));
     check_base(&fallback)?;
     Ok(fallback)
@@ -949,7 +952,8 @@ mod tests {
             fallback_base("/home/agent/").unwrap(),
             "/home/agent/.terrarium-work"
         );
-        for bad in ["", "/", "relative", "/home/../root", "~"] {
+        assert_eq!(fallback_base("/").unwrap(), "/.terrarium-work");
+        for bad in ["", "relative", "/home/../root", "~"] {
             assert!(fallback_base(bad).is_err(), "{bad}");
         }
     }
