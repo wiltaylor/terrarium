@@ -695,7 +695,8 @@ mod tests {
     fn read_only_mounts_are_skipped() {
         // The /proc/mounts lines of GitHub issue #26: the read-only ext4
         // images that WSL mounts for the kernel tools and headers.
-        let wsl = "/dev/sdb /usr/lib/linux-tools/6.18.54.1-microsoft-standard-WSL2 ext4 ro,relatime 0 0
+        let wsl =
+            "/dev/sdb /usr/lib/linux-tools/6.18.54.1-microsoft-standard-WSL2 ext4 ro,relatime 0 0
 /dev/sdb /usr/src/linux-headers-6.18.54.1-microsoft-standard-WSL2 ext4 ro,relatime 0 0
 /dev/sdc / ext4 rw,relatime 0 0";
         let mounts = parse_mounts(wsl);
