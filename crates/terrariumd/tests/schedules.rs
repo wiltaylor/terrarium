@@ -686,6 +686,118 @@ async fn a_turn_that_cannot_start_the_agent_mails_the_owner() {
     );
 }
 
+/// The mail that `system` sent to `to` for schedule `name`.
+async fn owner_mail(td: &TestDaemon, to: &str, name: &str) -> Vec<Value> {
+    let r = td.get(&format!("/api/mail?to={to}&from=system")).await;
+    r.ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| {
+            m["subject"]
+                .as_str()
+                .is_some_and(|s| s.contains(name) && s.contains("turn not delivered"))
+        })
+        .cloned()
+        .collect()
+}
+
+/// TER-231: an agent that stops at its start is woken again, and the
+/// retry delivers the queued turn.
+#[tokio::test]
+async fn a_turn_wakes_again_when_the_agent_stops_at_its_start() {
+    let td = TestDaemon::start().await;
+    let (lead, worker, _) = setup(&td).await;
+    td.sup.stop_after_starts(worker.parse().unwrap(), 1);
+    let sid = id(td
+        .post_as(&lead, "/api/schedules", turn_body("retry", false))
+        .await
+        .ok());
+    let run = td.post_empty(&format!("/api/schedules/{sid}/run")).await;
+    let run = run.ok();
+    assert_eq!(run["status"], "ok", "{run}");
+    assert_eq!(run["output"]["delivery"], "queued");
+    assert_eq!(
+        turn_starts(&td, "[System:schedule retry] turn from retry").await,
+        1
+    );
+    let woken = td
+        .get(&format!("/api/agents/{worker}/events?kind=agent.woken"))
+        .await;
+    let woken = woken.ok().as_array().unwrap().len();
+    assert!(woken >= 2, "one wake after the failed start: {woken}");
+    assert!(td.mail_of(&lead).await.is_empty());
+}
+
+/// TER-231: an agent that never becomes ready: the run fails after its
+/// wakes, and the owner's mail says to start it.
+#[tokio::test]
+async fn a_turn_for_an_agent_that_never_becomes_ready_mails_the_owner() {
+    let td = TestDaemon::start().await;
+    let (lead, worker, _) = setup(&td).await;
+    // More than the wakes of the send and of the run.
+    td.sup.stop_after_starts(worker.parse().unwrap(), 100);
+    let sid = id(td
+        .post_as(&lead, "/api/schedules", turn_body("never", false))
+        .await
+        .ok());
+    let run = td.post_empty(&format!("/api/schedules/{sid}/run")).await;
+    let run = run.ok();
+    assert_eq!(run["status"], "failed", "{run}");
+    assert!(
+        run["error"]
+            .as_str()
+            .unwrap()
+            .contains("did not become ready"),
+        "{run}"
+    );
+    let mail = td.mail_of(&lead).await;
+    assert_eq!(mail.len(), 1, "{mail:?}");
+    let body = mail[0]["body"].as_str().unwrap();
+    assert!(body.contains("terrarium agent start"), "{body}");
+}
+
+/// TER-231: a project-owned schedule mails the project inbox, a
+/// system-owned one the operator. The hint fits the reason (paused).
+#[tokio::test]
+async fn a_turn_that_cannot_start_mails_the_project_inbox_or_the_operator() {
+    let td = TestDaemon::start().await;
+    let (lead, worker, _) = setup(&td).await;
+    td.post(&format!("/api/agents/{worker}/pause"), json!({}))
+        .await
+        .ok();
+    for (owner, name, to) in [
+        ("project", "by-project", "project:terra"),
+        ("system", "by-system", "operator"),
+    ] {
+        let mut body = turn_body(name, false);
+        body["owner"] = json!(owner);
+        let s = td.post("/api/schedules", body).await;
+        assert_eq!(s.ok()["owner"], owner, "{}", s.body);
+        let run = td
+            .post_empty(&format!("/api/schedules/{}/run", id(&s.body)))
+            .await;
+        let run = run.ok();
+        assert_eq!(run["status"], "failed", "{run}");
+        let mail = owner_mail(&td, to, name).await;
+        assert_eq!(mail.len(), 1, "{owner}: {mail:?}");
+        assert_eq!(mail[0]["to"], to, "{mail:?}");
+        let text = mail[0]["body"].as_str().unwrap();
+        assert!(text.contains("terrarium agent unpause"), "{text}");
+        assert!(!text.contains("terrarium agent start"), "{text}");
+    }
+    // The project inbox goes to the lead; the operator's mail does not.
+    let lead_mail = td.mail_of(&lead).await;
+    assert_eq!(lead_mail.len(), 1, "{lead_mail:?}");
+    assert!(
+        lead_mail[0]["subject"]
+            .as_str()
+            .unwrap()
+            .contains("by-project"),
+        "{lead_mail:?}"
+    );
+}
+
 #[tokio::test]
 async fn agent_verbs_and_overlapping_runs() {
     let td = TestDaemon::start().await;
