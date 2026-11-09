@@ -2428,9 +2428,8 @@ impl RunnerSupervisor {
                     slot.resume = slot.agent.session.clone().or(slot.session.clone());
                     break runner;
                 }
-                let behind = slot.upgrade_pending
-                    && slot.seen.is_resting()
-                    && !runner.status().is_resting();
+                let behind =
+                    slot.upgrade_pending && slot.seen.is_resting() && !runner.status().is_resting();
                 if lagged || !behind {
                     slot.upgrade_waiting = false;
                     return;
