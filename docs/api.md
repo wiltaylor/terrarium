@@ -3559,12 +3559,24 @@ or the operator may spawn for an owner. The checks, in order:
 
 `like` (CLI `--like <agent>`) copies a same-project agent's policy targets,
 agent-level secret grant references (never values), skills settings, subscription
-and pool. The template still supplies the harness and other settings. The source
-must use the same harness. Subscription selection uses the copied pool's headroom.
-Each copied target and grant is checked against the owner through the normal
-spawn-rights checks. A missing right is `403`, with its name. With
+and pool: the copied subscription and pool replace the template's and the
+owner's, and subscription selection uses the copied pool's headroom. The
+template still supplies the harness and other settings. The source must use
+the same harness; a mismatch is `422 invalid` and names the template, also
+when it is the alternative picked for headroom. Each copied target and grant
+is checked against the owner through the normal spawn-rights checks, and a
+copied target that the body's `targets` also names is granted once. A missing
+right is `403`. A copied target is named. A copied grant is named (secret
+and level) only when the owner may already read the secret's name (a grant of
+its own, or the operator); the others are counted in one `403` with no name,
+which points at `like_skip_missing`. With
 `like_skip_missing: true` (CLI `--like-skip-missing`, requires `like`), those
-forbidden rights are omitted and listed in the response's `skipped` array.
+forbidden rights are omitted and listed in the response's `skipped` array:
+`target:<name>` and `grant:<scope>/<name>:<level>`, the grant entries only
+for secrets whose name the owner may already read (a grant of its own, or
+the operator, which reads every name). Skipped grants on secrets that the
+owner may not read are counted in one `grant:<n> hidden: the owner may not
+read their names` entry, so the list does not expose the source's grants.
 Other errors still fail the spawn. Explicit and template grants replace copied
 grants of the same secret. Project grants and leases of the source are not copied.
 
@@ -3890,6 +3902,26 @@ retract of one of its questions makes it `waiting_agent` when no question
 of the thread is open any more. A closed thread does not change, and each
 write to it is `409 conflict`.
 
+**Status set by the agent** (GitHub #28). The attached agent's message
+may name the status that follows it: `{"text", "status": "waiting_agent"}`
+when the agent starts the work now (`terrarium thread post <id> -m <text>
+--status waiting_agent`), or `"tracking"`, which also moves the thread
+into tracking as `POST .../track`. `POST .../status` with `{"status"}`
+(`terrarium thread status <id> waiting_agent|tracking`) sets it without
+a message. Both withdraw a close proposal. Only `waiting_agent` and
+`tracking` are allowed (`422`), only for the attached agent (a `status`
+in an operator message is `422`, the status verb `403`), and an open
+question of the thread is `409 conflict`: a question keeps the thread on
+the operator. A `waiting_agent` or `tracking` thread is not in the Inbox
+badge and gets no reminder or stale close.
+
+**Tracking on a card link** (GitHub #28). When a card is linked
+(`POST .../cards`, or `inbox_thread` on the card create) while the thread
+is `waiting_operator`, its last message is the attached agent's, no
+question is open, no close is proposed, and the agent has not ended, the
+thread moves into tracking as `POST .../track`: the agent handed off and
+the card is the work.
+
 **Tracking** (TER-145, TER-144 D1 and D9). After its handoff the attached
 agent moves the thread into tracking: `POST .../track` (`terrarium thread
 track <id>`) makes it `tracking`, sets `tracking_at`, and withdraws a close
@@ -4054,10 +4086,11 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `POST /api/threads` | `{"topic", "scope"?, "template"?, "agent"?, "text"?}`; `scope` defaults to `global` for the operator and to the own project for an agent; `agent` is a ULID or `project/name` | `201` the thread. An agent: `403` without `thread:open`, for another project, or for a template or agent above its rights (A1); `422` with no `template`; `404` for an unknown template |
 | `GET /api/threads` | `?status=waiting_operator\|waiting_agent\|tracking\|closed\|open\|all` (default `open`: not closed), `?scope=` | `200` the threads without `messages` and `questions`, with `message_count`, `open_questions`, and `last_at`. The ones that wait for the operator first, then the newest activity first. At most 200. |
 | `GET /api/threads/{id}` | | `200` the thread |
-| `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
+| `POST /api/threads/{id}/messages` | `{"text", "status"?}`; `status` `waiting_agent` or `tracking`, the attached agent only (GitHub #28) | `201` the thread. `409` for a `status` with an open question; `422` for another `status` or a `status` of the operator |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
 | `POST /api/threads/{id}/track` | no body, or `{"cards"?, "monitor"?}`: at most 50 cards to link first (TER-146), optional monitor `project:name` (TER-149) | The attached agent: `200` the thread, `tracking`, with `tracking_at`, `cards` and optional `monitor`. `409` with an open question; invalid links roll back the whole write |
+| `POST /api/threads/{id}/status` | `{"status"}`: `waiting_agent` or `tracking` (GitHub #28) | The attached agent: `200` the thread. `403` for anyone else, `409` with an open question, `422` for another status |
 | `POST /api/threads/{id}/cards` | `{"card"}`: `<project>:<card>` or `<card>` | `200` the thread with `cards`, also when the card was linked already. `404` without the read right on the thread, for a card that does not exist or is not in the named project, and without the read right on the card's project; `422` for an archived card; `409` on a closed thread |
 
 **Ops tracking** (TER-149, D6). `terrarium thread track <id> --monitor <project>:<monitor>`
@@ -10742,6 +10775,29 @@ dashboard as `GET` does. A block:
 `json` monitor. Several blocks can show the same monitor. A bad layout is
 `422 invalid` with `details.field` such as `blocks[2].kind`.
 
+#### `GET /api/projects/{name}/eta-accuracy`
+
+How well the ETAs of the workers matched the real work time, for the
+latest 30 distinct completed cards of the project. The read right of
+§30.1 applies. An unknown project is `404 not_found`.
+
+```json
+{"raw":{"samples":30,"on_time_pct":56.7,"within_half_to_double_pct":73.3},
+ "calibrated":{"samples":24,"on_time_pct":66.7,"within_half_to_double_pct":83.3}}
+```
+
+| Field | Meaning |
+|---|---|
+| `raw` | The ETA that the worker set, against the real work time |
+| `calibrated` | The calibrated ETA of each card, computed only from the work that ended before the card started. A card without enough earlier history is left out, so `samples` can be lower than in `raw`. |
+| `samples` | The number of cards counted, at most 30 |
+| `on_time_pct` | The percent of cards whose work time was at most the ETA |
+| `within_half_to_double_pct` | The percent of cards whose work time was between half and double the ETA |
+
+With no samples, `samples` is `0` and both percentages are `null`. The
+dashboard loads it once when the dashboard page mounts, apart from the
+monitors, and does not refresh it.
+
 ### 30.7 Owners and target grants
 
 Monitors and schedules (§19.6) are often meant to outlive the agent that
@@ -11830,7 +11886,8 @@ or their environment. Output is stream-redacted with the full key and
 individual PEM lines before retention. The recipe retains its full raw target
 log because credentials never reach the target process tree.
 
-Configure `docker_ci` through the delivery API or fleet configuration before
+Configure `docker_ci` through `terrarium project delivery set`, the delivery
+API, or fleet configuration before
 adding merge secret references. For example, `destination` is `root@vm`,
 `port` is its SSH port, and `known_hosts` is the administrator-verified
 OpenSSH host-key line (including `[host]:port` for a nonstandard port).
@@ -11854,7 +11911,13 @@ Do not grant the key to `project:terrarium` or workers. The lead configures
 `--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery, with recipe
 `TERRARIUM_DOCKER_CI=1 just ci::validate-affected` to explicitly enable the
 live Docker gate. Leave the switch unset (or `0`) until the daemon and
-grant are ready. `--clear-merge-secrets` removes the references.
+grant are ready. `--clear-merge-secrets` removes the references. The same
+command sets `docker_ci` with `--docker-ci-destination`, `--docker-ci-port`,
+`--docker-ci-known-hosts`, `--docker-ci-reset-destination`,
+`--docker-ci-reset-port`, and `--docker-ci-reset-known-hosts`: a flag left
+out keeps its stored value, the first set needs all six, and
+`--clear-docker-ci` removes the whole object. `project delivery show`
+prints the endpoints and both pins.
 The daemon pins the Docker VM's public host key and owns its SSH local
 forward. Trusted relay code embedded in the daemon release, never read
 from the merged branch, creates a 0600 Unix socket in a job-private

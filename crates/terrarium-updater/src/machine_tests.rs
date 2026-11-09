@@ -399,6 +399,9 @@ async fn hot_swap_keeps_container_and_commits_only_after_health() {
         calls.iter().position(|c| c == "hot:pause").unwrap()
             < calls.iter().position(|c| c == "offline-backup").unwrap()
     );
+    // The hot swap records the original engine spec: a rollback replaces
+    // the container with it instead of reusing the hot-swapped one.
+    assert!(r.store.previous().is_some_and(|p| p.spec.is_some()));
     let rollback = r
         .updater
         .run_now(RunKind::Rollback, "previous", "operator")

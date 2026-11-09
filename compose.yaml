@@ -15,7 +15,8 @@ services:
       # from git. Empty: the binaries report `+unknown`.
       args: { UID: "${TERRARIUM_UID:-1000}", GID: "${TERRARIUM_GID:-1000}", TERRARIUM_GIT_REF: "${TERRARIUM_GIT_REF:-}" }
     image: ${TERRARIUM_IMAGE:-terrarium:dev}
-    command: ["--daemon-service", "terrariumd"]
+    # No command: the image CMD is the service command, so the same file
+    # runs a pre-hot-swap image (a manual rollback by image tag) too.
     restart: unless-stopped
     # The entrypoint stops terrariumd, then gives the agent runners
     # TERRARIUM_SHUTDOWN_GRACE (20 s) to end their harnesses (docker/README.md).

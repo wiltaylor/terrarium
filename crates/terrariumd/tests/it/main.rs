@@ -166,6 +166,8 @@ mod thread_agents;
 mod thread_cards;
 #[path = "../thread_close.rs"]
 mod thread_close;
+#[path = "../thread_status.rs"]
+mod thread_status;
 #[path = "../thread_tracking.rs"]
 mod thread_tracking;
 #[path = "../thread_wake.rs"]

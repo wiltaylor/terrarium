@@ -2079,6 +2079,13 @@ a.chip.card-link:hover {
 .thread-row.waits {
   border-left: 3px solid var(--warn);
 }
+/* The groups of the Open thread list: waiting on you, in progress (GitHub #28). */
+.thread-group {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
 .thread-msg {
   max-width: 85%;
   justify-self: start;

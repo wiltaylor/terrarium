@@ -281,10 +281,69 @@ fn merged(cur: &Value, a: &DeliverySetArgs) -> anyhow::Result<Value> {
         }
         d["merge_secrets"] = Value::Object(refs);
     }
+    merged_docker_ci(&mut d, a)?;
     if let Some(o) = d.as_object_mut() {
         o.retain(|_, v| !v.is_null());
     }
     Ok(d)
+}
+
+/// The six fields of the daemon's `docker_ci` object, with the flag that
+/// sets each. The object is all-or-nothing: the API needs every field, so
+/// a flag left out keeps the stored value, and the first set needs all
+/// six (docs/api.md 35.1).
+const DOCKER_CI_FIELDS: [(&str, &str); 6] = [
+    ("destination", "--docker-ci-destination"),
+    ("port", "--docker-ci-port"),
+    ("known_hosts", "--docker-ci-known-hosts"),
+    ("reset_destination", "--docker-ci-reset-destination"),
+    ("reset_port", "--docker-ci-reset-port"),
+    ("reset_known_hosts", "--docker-ci-reset-known-hosts"),
+];
+
+/// Lay the `--docker-ci-*` flags over `d`, or remove the object with
+/// `--clear-docker-ci`. With no flag the object stays as it is.
+fn merged_docker_ci(d: &mut Value, a: &DeliverySetArgs) -> anyhow::Result<()> {
+    if a.clear_docker_ci {
+        if let Some(o) = d.as_object_mut() {
+            o.remove("docker_ci");
+        }
+        return Ok(());
+    }
+    let given = [
+        a.docker_ci_destination.clone().map(Value::from),
+        a.docker_ci_port.map(Value::from),
+        a.docker_ci_known_hosts.clone().map(Value::from),
+        a.docker_ci_reset_destination.clone().map(Value::from),
+        a.docker_ci_reset_port.map(Value::from),
+        a.docker_ci_reset_known_hosts.clone().map(Value::from),
+    ];
+    if given.iter().all(Option::is_none) {
+        return Ok(());
+    }
+    let mut docker = if d["docker_ci"].is_object() {
+        d["docker_ci"].clone()
+    } else {
+        json!({})
+    };
+    for ((field, _), v) in DOCKER_CI_FIELDS.iter().zip(given) {
+        if let Some(v) = v {
+            docker[field] = v;
+        }
+    }
+    let missing: Vec<&str> = DOCKER_CI_FIELDS
+        .iter()
+        .filter(|(f, _)| docker[f].is_null())
+        .map(|(_, flag)| *flag)
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "docker_ci needs all six values, also set {}",
+            missing.join(", ")
+        );
+    }
+    d["docker_ci"] = docker;
+    Ok(())
 }
 
 fn print_delivery(c: &Ctx, v: &Value) {
@@ -308,6 +367,23 @@ fn print_delivery(c: &Ctx, v: &Value) {
     ));
     c.line(format!("work dir:   {}", field(d, "work_dir")));
     c.line(format!("timeout:    {}", field(d, "timeout_secs")));
+    let docker = &d["docker_ci"];
+    if docker.is_object() {
+        c.line(format!(
+            "docker ci:  {}:{} (reset {}:{})",
+            field(docker, "destination"),
+            field(docker, "port"),
+            field(docker, "reset_destination"),
+            field(docker, "reset_port")
+        ));
+        c.line(format!("docker pin: {}", field(docker, "known_hosts")));
+        c.line(format!(
+            "reset pin:  {}",
+            field(docker, "reset_known_hosts")
+        ));
+    } else {
+        c.line("docker ci:  -");
+    }
 }
 
 /// `card validate`.
@@ -438,9 +514,143 @@ fn queued_line(c: &Ctx, v: &Value) {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct SetArgs {
+        #[command(flatten)]
+        delivery: super::DeliverySetArgs,
+    }
+
+    fn parse_set(flags: &[&str]) -> Result<SetArgs, clap::Error> {
+        SetArgs::try_parse_from(std::iter::once("test").chain(flags.iter().copied()))
+    }
+
+    /// A complete `docker_ci` object as the daemon stores it, with
+    /// placeholder values (never a real pin).
+    fn docker_ci() -> serde_json::Value {
+        serde_json::json!({
+            "destination": "root@vm.example", "port": 2250,
+            "known_hosts": "vm.example ssh-ed25519 AAAAplace-holder-pin\n",
+            "reset_destination": "reset@reset.example", "reset_port": 22,
+            "reset_known_hosts": "reset.example ssh-ed25519 AAAAplace-holder-reset\n",
+        })
+    }
+
+    #[test]
+    fn docker_ci_flags_set_keep_and_clear() {
+        let args = parse_set(&[
+            "--docker-ci-destination",
+            "root@vm.example",
+            "--docker-ci-port",
+            "2250",
+            "--docker-ci-known-hosts",
+            "vm.example ssh-ed25519 AAAAplace-holder-pin\n",
+            "--docker-ci-reset-destination",
+            "reset@reset.example",
+            "--docker-ci-reset-port",
+            "22",
+            "--docker-ci-reset-known-hosts",
+            "reset.example ssh-ed25519 AAAAplace-holder-reset\n",
+        ])
+        .unwrap();
+        let cur = serde_json::json!({"target": "p-box", "recipe": "just ci::validate"});
+        let value = super::merged(&cur, &args.delivery).unwrap();
+        assert_eq!(value["docker_ci"], docker_ci());
+        // The other fields stay untouched.
+        assert_eq!(value["target"], "p-box");
+
+        // A flag left out keeps the stored value, the given one replaces it.
+        let args = parse_set(&[
+            "--docker-ci-port",
+            "2251",
+            "--docker-ci-reset-known-hosts",
+            "reset.example ssh-ed25519 AAAAnew\n",
+        ])
+        .unwrap();
+        let cur = serde_json::json!({"docker_ci": docker_ci()});
+        let value = super::merged(&cur, &args.delivery).unwrap();
+        let mut want = docker_ci();
+        want["port"] = serde_json::json!(2251);
+        want["reset_known_hosts"] = serde_json::json!("reset.example ssh-ed25519 AAAAnew\n");
+        assert_eq!(value["docker_ci"], want);
+
+        // Clearing drops the whole object, the rest of the config stays.
+        let args = parse_set(&["--clear-docker-ci"]).unwrap();
+        let cur = serde_json::json!({"target": "p-box", "docker_ci": docker_ci()});
+        let value = super::merged(&cur, &args.delivery).unwrap();
+        assert!(value.get("docker_ci").is_none());
+        assert_eq!(value["target"], "p-box");
+
+        // No docker_ci flag at all leaves the stored object alone.
+        let args = parse_set(&["--slots", "3"]).unwrap();
+        let cur = serde_json::json!({"docker_ci": docker_ci()});
+        let value = super::merged(&cur, &args.delivery).unwrap();
+        assert_eq!(value["docker_ci"], docker_ci());
+    }
+
+    #[test]
+    fn docker_ci_needs_all_six_values_and_clear_conflicts() {
+        // Nothing stored: a partial set names the flags that are missing.
+        let args = parse_set(&["--docker-ci-destination", "root@vm.example"]).unwrap();
+        let err = super::merged(&serde_json::json!({}), &args.delivery)
+            .unwrap_err()
+            .to_string();
+        for flag in [
+            "--docker-ci-port",
+            "--docker-ci-known-hosts",
+            "--docker-ci-reset-destination",
+            "--docker-ci-reset-port",
+            "--docker-ci-reset-known-hosts",
+        ] {
+            assert!(err.contains(flag), "{err}");
+        }
+        // With a stored object, one flag is enough.
+        let args = parse_set(&["--docker-ci-port", "2251"]).unwrap();
+        let cur = serde_json::json!({"docker_ci": docker_ci()});
+        assert!(super::merged(&cur, &args.delivery).is_ok());
+
+        // Clear and set at once is a usage error.
+        assert!(parse_set(&["--clear-docker-ci", "--docker-ci-port", "2251"]).is_err());
+    }
+
+    #[test]
+    fn delivery_show_prints_the_docker_ci_endpoints_and_pins() {
+        let ctx = Ctx::for_test(Arc::new(MockTransport::new()), None);
+        super::print_delivery(
+            &ctx,
+            &serde_json::json!({
+                "delivery": {
+                    "target": "p-box", "recipe": "just ci::validate",
+                    "docker_ci": docker_ci(),
+                },
+                "enabled": true, "slots": 2,
+            }),
+        );
+        let out = ctx.out.captured();
+        assert!(
+            out.contains("docker ci:  root@vm.example:2250 (reset reset@reset.example:22)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("docker pin: vm.example ssh-ed25519 AAAAplace-holder-pin"),
+            "{out}"
+        );
+        assert!(
+            out.contains("reset pin:  reset.example ssh-ed25519 AAAAplace-holder-reset"),
+            "{out}"
+        );
+
+        let ctx = Ctx::for_test(Arc::new(MockTransport::new()), None);
+        super::print_delivery(
+            &ctx,
+            &serde_json::json!({"delivery": {}, "enabled": false, "slots": 2}),
+        );
+        assert!(ctx.out.captured().contains("docker ci:  -"));
+    }
+
     #[test]
     fn merge_secret_flags_parse_clear_and_refuse_literals() {
-        use clap::Parser;
         #[derive(Parser)]
         struct Args {
             #[command(flatten)]

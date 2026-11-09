@@ -10454,6 +10454,58 @@ async fn thread_commands() {
     .await;
     assert_eq!(out, "posted to thread T1 (waiting_operator).\n");
 
+    // GitHub #28: the agent sets the status with its message, or alone.
+    let working = json!({"id": "T1", "status": "waiting_agent"});
+    let out = ok(
+        true,
+        &[
+            "thread",
+            "post",
+            "T1",
+            "-m",
+            "On it.",
+            "--status",
+            "waiting_agent",
+        ],
+        vec![(201, working.clone())],
+        vec![(
+            Post,
+            "/api/threads/T1/messages",
+            vec![],
+            Some(json!({"text": "On it.", "status": "waiting_agent"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "posted to thread T1 (waiting_agent).\n");
+    let out = ok(
+        true,
+        &["thread", "status", "T1", "tracking"],
+        vec![(200, json!({"id": "T1", "status": "tracking"}))],
+        vec![(
+            Post,
+            "/api/threads/T1/status",
+            vec![],
+            Some(json!({"status": "tracking"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "thread T1 is tracking.\n");
+    for bad in [
+        &["terrarium", "thread", "status", "T1", "waiting_operator"][..],
+        &[
+            "terrarium",
+            "thread",
+            "post",
+            "T1",
+            "-m",
+            "x",
+            "--status",
+            "closed",
+        ][..],
+    ] {
+        assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
+    }
+
     let mine = || Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()) as &str;
     let out = ok(
         true,
