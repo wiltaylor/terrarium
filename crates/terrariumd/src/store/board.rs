@@ -1123,11 +1123,9 @@ pub(crate) const BLOCKED_INFO_SQL: &str = "SELECT at,
 /// event log), `updated_at` and the newest comment.
 pub(crate) fn blocked_info(conn: &Connection, card: &Card) -> ApiResult<(String, Option<String>)> {
     let ev: Option<(String, Option<String>)> = conn
-        .query_row(
-            BLOCKED_INFO_SQL,
-            params![card.id, BLOCKED],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+        .query_row(BLOCKED_INFO_SQL, params![card.id, BLOCKED], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .optional()?;
     let newest = || card.comments.last().map(|c| c.body.clone());
     Ok(match ev {
