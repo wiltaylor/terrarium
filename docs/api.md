@@ -3375,7 +3375,7 @@ kinds:
 |---|---|---|---|
 | `question` | A question or a bundle of questions (§6.8). | `status` is `open`. | `POST /api/questions/{id}/answer`, `.../retract` |
 | `notice` | A notice (§6.8). | `status` is `open`. | `POST /api/questions/{id}/ack`, `.../retract` |
-| `mail` | A message to `operator` (§7). | Its `state` is `queued` or `delivered`: not acknowledged. | `POST /api/inbox/mail/{id}/ack` |
+| `mail` | A message to `operator` (§7). | Its `state` is `queued` or `delivered`: not acknowledged. | `POST /api/inbox/mail/{id}/ack`; it closes as well when the mail is read or replied outside the Inbox (§7): `POST /api/mail/{id}/read`, `.../reply` |
 | `system` | A thread of the loop guard (§7.4): it is paused now, or it has a held message that is not released. | The thread is paused, or a held message is not released. | `POST /api/mail/{id}/release`, `POST /api/mail/threads/{thread}/resume` |
 | `watch` | A question that the operator asked an agent, or a question of the Inbox that the operator forwarded to one (below, "Ask and forward"). It waits for the agent, not for the operator. | The newest message of its thread is the operator's, and it is not cancelled. | `DELETE /api/inbox/watches/{thread}` |
 | `thread` | An Inbox thread (§6.13), with its questions inside. A question asked in a thread is not an item of its own. | The thread is `waiting_operator`, or it is not closed and has an open question. | `POST /api/threads/{id}/messages`, `.../respond`, `.../close`, and the question verbs |
@@ -3465,8 +3465,10 @@ Only the operator reads the Inbox and acts on it. An agent gets `403`,
 with a message that sends it to `terrarium question ls`.
 
 Each change of an item emits an `inbox` event: `{item, kind, change,
-project?}`, where `change` is `opened`, `updated`, or `closed`. The
-acknowledgement of a mail writes an `inbox.ack` audit row.
+project?}`, where `change` is `opened`, `updated`, or `closed`. A `mail`
+item closes on every path that acknowledges its message: the ack, a read,
+a reply, wherever the operator does it. The acknowledgement of a mail
+writes an `inbox.ack` audit row.
 
 ### 6.10 Ephemeral agents
 

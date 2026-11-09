@@ -198,13 +198,9 @@ async fn ack_mail(
                 project.as_deref(),
                 json!({"from": m.from, "thread": m.thread_id, "reply": replies.len()}),
             )?;
-            inbox::emit(
-                t,
-                &format!("mail:{}", m.id),
-                "mail",
-                "closed",
-                project.as_deref(),
-            )?;
+            // The closed event comes from the store: `mail::mark_read` and
+            // `mail::reply` emit it on every path that closes operator mail
+            // (GitHub #25), not only this one.
             Ok(Acked {
                 message: mail::get(t, &m.id)?,
                 replies,
