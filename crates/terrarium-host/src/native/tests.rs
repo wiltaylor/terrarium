@@ -772,13 +772,19 @@ fn a_session_sees_only_its_own_holders_workspace() {
     // A: its own workspace bound read-write, its cwd there.
     let pa = plan_for("terra/w-1", &a.join("repo")).unwrap();
     let p = props(&pa.args);
-    assert!(p.contains(&format!("BindPaths={}", a.display()).as_str()), "{p:?}");
+    assert!(
+        p.contains(&format!("BindPaths={}", a.display()).as_str()),
+        "{p:?}"
+    );
     assert!(p.contains(&format!("ReadWritePaths={}", a.display()).as_str()));
     // B, same pool UID later: only B's workspace; A's path is nowhere.
     let pb = plan_for("terra/w-2", &b).unwrap();
     let p = props(&pb.args);
     assert!(p.contains(&format!("TemporaryFileSystem={}:ro", real.display()).as_str()));
-    assert!(p.contains(&format!("BindPaths={}", b.display()).as_str()), "{p:?}");
+    assert!(
+        p.contains(&format!("BindPaths={}", b.display()).as_str()),
+        "{p:?}"
+    );
     let a_text = a.display().to_string();
     assert!(
         !pb.args.iter().any(|x| x.contains(&a_text)),

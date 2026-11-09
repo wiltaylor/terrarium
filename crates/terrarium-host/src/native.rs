@@ -1081,7 +1081,10 @@ pub fn holder_workspace(root: &Path, holder: &str) -> Result<Option<PathBuf>, Re
     let dir = root.join(project).join(agent);
     match std::fs::canonicalize(&dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(Refusal::invalid(format!("workspace {}: {e}", dir.display()))),
+        Err(e) => Err(Refusal::invalid(format!(
+            "workspace {}: {e}",
+            dir.display()
+        ))),
         Ok(real) if real != dir || !real.is_dir() => Err(Refusal::invalid(format!(
             "workspace {} must be a directory, not a symlink",
             dir.display()
