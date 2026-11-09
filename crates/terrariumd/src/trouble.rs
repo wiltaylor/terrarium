@@ -1229,8 +1229,8 @@ mod tests {
         .unwrap();
         c.execute_batch(include_str!("../migrations/ter-370-card-branch-head.sql"))
             .unwrap();
-        for (sql, key, index) in [
-            (BRANCH_CARDS_SQL, "cards_branch_watch", "c"),
+        for (sql, table, index) in [
+            (BRANCH_CARDS_SQL, "c", "cards_branch_watch"),
             (
                 PROGRESS_BASELINE_SQL,
                 "card_branch_heads",
@@ -1252,7 +1252,7 @@ mod tests {
             assert!(
                 plans
                     .iter()
-                    .any(|p| { p.contains(&format!("SEARCH {key}")) && p.contains(index) }),
+                    .any(|p| { p.contains(&format!("SEARCH {table}")) && p.contains(index) }),
                 "{plans:?}"
             );
             assert!(plans.iter().all(|p| !p.contains("SCAN c\n")), "{plans:?}");
