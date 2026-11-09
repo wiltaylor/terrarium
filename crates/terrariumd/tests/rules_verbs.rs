@@ -2447,6 +2447,14 @@ rule "h-mail" {
   on = ["test.ping"]
   mail { to = ["operator"]  subject = "x" }
 }
+rule "h-blocked-mail" {
+  on = ["test.ping"]
+  card_blocked_mail {}
+}
+rule "h-done-mail" {
+  on = ["test.ping"]
+  card_done_mail {}
+}
 rule "h-queue" {
   on = ["test.ping"]
   job_queue { kind = "validate" }
