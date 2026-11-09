@@ -449,9 +449,10 @@ struct StatusBody {
     status: String,
 }
 
-/// The attached agent sets the status of its thread without a message
-/// (GitHub #28): `waiting_agent` (it works on) or `tracking` (as
-/// `/track`). An open question refuses it (`409`).
+/// The attached agent or the operator sets the status of the thread
+/// without a message (GitHub #28, TER-456): `waiting_agent` (the agent
+/// works on) or `tracking` (as `/track`). An open question refuses it
+/// (`409`).
 async fn set_status(
     State(state): State<Shared>,
     actor: Actor,
@@ -471,9 +472,11 @@ async fn set_status(
                         threads::set_by_agent(t, &th.id, &by, status)
                             .map(|th| threads::visible(&actor, th))
                     }
+                    Actor::Operator => threads::set_by_agent(t, &th.id, &by, status)
+                        .map(|th| threads::visible(&actor, th)),
                     _ => Err(ApiError::forbidden(format!(
-                        "setting the status of thread {}: only its attached agent sets it; \
-                         an operator message sets waiting_agent",
+                        "setting the status of thread {}: only its attached agent or the \
+                         operator sets it",
                         th.id
                     ))),
                 }
