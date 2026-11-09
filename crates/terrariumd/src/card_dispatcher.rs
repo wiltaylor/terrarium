@@ -149,6 +149,8 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
         &who,
         who.address(),
         SpawnBody {
+            like: None,
+            like_skip_missing: false,
             template,
             task: format!(
                 "Work on {id}. Read `terrarium card show {id}` and the repo AGENTS.md. \

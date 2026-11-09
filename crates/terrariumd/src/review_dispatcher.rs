@@ -168,6 +168,8 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
         &who,
         who.address(),
         SpawnBody {
+            like: None,
+            like_skip_missing: false,
             template: "card-review".into(),
             task,
             name: None,
