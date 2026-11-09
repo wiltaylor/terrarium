@@ -976,7 +976,8 @@ async fn owned_target_roots_fall_back_to_the_agent_home() {
     // The owned build env is set (docker gets it by name; build_env gives
     // the value under the root of the prepared base).
     assert!(
-        log.lines().any(|l| env_file_names(l).contains(&"CARGO_TARGET_DIR")),
+        log.lines()
+            .any(|l| env_file_names(l).contains(&"CARGO_TARGET_DIR")),
         "{log}"
     );
     // Any later failure at the stored fallback names work_root too.
@@ -3618,7 +3619,8 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
     assert_eq!(r.len(), 1, "{r:?}");
     let v1 = format!("-v {}:/work/terra/w1", ws("w1").display());
     assert!(
-        r[0].contains("--name terrarium-terra-dbox --env-file HOME,NVIDIA_VISIBLE_DEVICES") && r[0].contains(&v1),
+        r[0].contains("--name terrarium-terra-dbox --env-file HOME,NVIDIA_VISIBLE_DEVICES")
+            && r[0].contains(&v1),
         "{}",
         r[0]
     );
