@@ -103,63 +103,98 @@ fn parse(s: &str) -> Option<DateTime<Utc>> {
         .map(|t| t.with_timezone(&Utc))
 }
 
+const START_SQL: &str = "SELECT e.seq FROM events e INDEXED BY events_card
+    WHERE e.card = ?1 AND e.seq > (SELECT seq FROM card_trouble_baseline WHERE singleton = 1)
+      AND e.kind = 'card' AND json_valid(e.payload) AND (
+        (json_extract(e.payload, '$.change') = 'moved' AND (
+          (json_extract(e.payload, '$.to_role') = 'working' AND coalesce(json_extract(e.payload, '$.from_role'), '') <> 'working')
+          OR (lower(json_extract(e.payload, '$.to')) = 'research' AND lower(coalesce(json_extract(e.payload, '$.from'), '')) <> 'research')))
+        OR (json_extract(e.payload, '$.change') = 'created' AND (
+          json_extract(e.payload, '$.column_role') = 'working' OR lower(json_extract(e.payload, '$.column')) = 'research')))
+    ORDER BY e.seq LIMIT 1";
+
+const CARD_HISTORY_SQL: &str = "SELECT e.seq, e.at, e.kind, e.agent_id, e.card,
+    CASE WHEN e.kind = 'wait' AND json_valid(e.payload) THEN json_set(e.payload, '$.due_at', w.due_at) ELSE e.payload END
+    FROM events e INDEXED BY events_card
+    LEFT JOIN waits w ON w.id = CASE WHEN e.kind = 'wait' AND json_valid(e.payload) THEN json_extract(e.payload, '$.wait_id') END
+    WHERE e.card = ?1 AND e.seq >= ?2 ORDER BY e.seq";
+
+const AGENT_HISTORY_SQL: &str = "SELECT e.seq, e.at, e.kind, e.agent_id, e.card,
+    CASE WHEN e.kind = 'wait' AND json_valid(e.payload) THEN json_set(e.payload, '$.due_at', w.due_at) ELSE e.payload END
+    FROM events e INDEXED BY events_trouble_agent
+    LEFT JOIN waits w ON w.id = CASE WHEN e.kind = 'wait' AND json_valid(e.payload) THEN json_extract(e.payload, '$.wait_id') END
+    WHERE e.agent_id = ?1 AND e.kind IN ('status', 'wait', 'agent.reset') AND e.seq >= ?2 ORDER BY e.seq";
+
+const PRIOR_STATUS_SQL: &str = "SELECT e.seq, e.at, e.kind, e.agent_id, e.card, e.payload
+    FROM events e INDEXED BY events_trouble_agent
+    WHERE e.agent_id = ?1 AND e.kind IN ('status', 'wait', 'agent.reset') AND e.kind = 'status' AND e.seq < ?2
+    ORDER BY e.seq DESC LIMIT 1";
+
+fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, Option<Event>)> {
+    let at: String = r.get(1)?;
+    let payload: String = r.get(5)?;
+    let event = match (parse(&at), serde_json::from_str(&payload)) {
+        (Some(at), Ok(data)) => Some(Event {
+            at,
+            data,
+            kind: r.get(2)?,
+            agent: r.get(3)?,
+            card: r.get(4)?,
+        }),
+        _ => None,
+    };
+    Ok((r.get(0)?, event))
+}
+
 fn history(c: &Connection, card: &str) -> ApiResult<Vec<Event>> {
-    // Start at the first working-role entry after installation, regardless
-    // of who assigned/moved the card. A claim need not emit 'claimed'.
-    // Only explicit assignees contribute status/wait/reset events. A lead
-    // commenting on the card cannot pull in the lead's lifetime history.
-    let start: Option<i64> = c.query_row(
-        "SELECT min(seq) FROM events
-        WHERE card = ?1 AND kind = 'card' AND (
-          (json_extract(payload, '$.change') = 'moved' AND json_extract(payload, '$.to_role') = 'working'
-           AND coalesce(json_extract(payload, '$.from_role'), '') <> 'working')
-          OR (json_extract(payload, '$.change') = 'created' AND json_extract(payload, '$.column_role') = 'working'))
-        AND seq > (SELECT seq FROM card_trouble_baseline WHERE singleton = 1)",
-        [card],
-        |r| r.get(0),
-    )?;
+    // Each query is an indexed card/agent range after entry. The one
+    // pre-entry status per assignee is a LIMIT 1 index seek, not a GROUP BY
+    // over the assignee's lifetime. Avoid OR/IN plans that scan events.
+    let start: Option<i64> = c.query_row(START_SQL, [card], |r| r.get(0)).optional()?;
     let Some(start) = start else {
         return Ok(Vec::new());
     };
-    let mut q = c.prepare(
-        "WITH assignees AS (
-            SELECT DISTINCT coalesce(json_extract(payload, '$.assignee'),
-                CASE WHEN json_extract(payload, '$.change') = 'created' THEN agent_id END) AS agent FROM events
-            WHERE card = ?1 AND seq >= ?2 AND kind = 'card'
-            AND json_extract(payload, '$.change') IN ('created', 'claimed', 'assigned', 'moved')
-        ) SELECT e.at, e.kind, e.agent_id, e.card,
-          CASE WHEN e.kind = 'wait' THEN json_set(e.payload, '$.due_at', w.due_at) ELSE e.payload END
-        FROM events e LEFT JOIN waits w ON e.kind = 'wait' AND w.id = json_extract(e.payload, '$.wait_id')
-        WHERE (e.card = ?1 AND e.seq >= ?2)
-          OR (e.seq >= ?2 AND e.kind IN ('status', 'wait', 'agent.reset')
-              AND e.agent_id IN (SELECT agent FROM assignees))
-          OR e.seq IN (SELECT max(s.seq) FROM events s JOIN assignees a ON a.agent = s.agent_id
-              WHERE s.kind = 'status' AND s.seq < ?2 GROUP BY s.agent_id)
-        ORDER BY e.seq",
-    )?;
-    let rows = q
-        .query_map(params![card, start], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, String>(4)?,
-            ))
-        })?
+    let mut card_query = c.prepare(CARD_HISTORY_SQL)?;
+    let mut rows = card_query
+        .query_map(params![card, start], event_row)?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(at, kind, agent, card, data)| {
-            Some(Event {
-                at: parse(&at)?,
-                kind,
-                agent,
-                card,
-                data: serde_json::from_str(&data).ok()?,
-            })
+    let assignees: BTreeSet<String> = rows
+        .iter()
+        .filter_map(|(_, e)| e.as_ref())
+        .filter_map(|e| {
+            if e.kind != "card" {
+                return None;
+            }
+            match e.data["change"].as_str() {
+                Some("created" | "claimed" | "assigned" | "moved") => {
+                    e.data["assignee"].as_str().map(str::to_owned).or_else(|| {
+                        (e.data["change"] == "created")
+                            .then(|| e.agent.clone())
+                            .flatten()
+                    })
+                }
+                _ => None,
+            }
         })
-        .collect())
+        .collect();
+    let mut agent_query = c.prepare(AGENT_HISTORY_SQL)?;
+    let mut prior_query = c.prepare(PRIOR_STATUS_SQL)?;
+    for agent in assignees {
+        if let Some(prior) = prior_query
+            .query_row(params![agent, start], event_row)
+            .optional()?
+        {
+            rows.push(prior);
+        }
+        rows.extend(
+            agent_query
+                .query_map(params![agent, start], event_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
+    rows.sort_by_key(|(seq, _)| *seq);
+    rows.dedup_by_key(|(seq, _)| *seq);
+    Ok(rows.into_iter().filter_map(|(_, event)| event).collect())
 }
 
 #[derive(Default, Debug)]
@@ -235,7 +270,10 @@ fn facts(card: &str, events: &[Event], now: DateTime<Utc>) -> Facts {
         if e.card.as_deref() == Some(card) && e.kind == "card" {
             match d["change"].as_str().unwrap_or_default() {
                 "created" | "claimed" | "assigned" | "moved" => {
-                    working = d["column_role"] == "working" || d["column"] == "research";
+                    working = d["column_role"] == "working"
+                        || d["column"]
+                            .as_str()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("research"));
                     agent = d["assignee"].as_str().map(str::to_owned).or_else(|| {
                         (d["change"] == "created")
                             .then(|| e.agent.clone())
@@ -383,7 +421,7 @@ fn desired(
         return Ok((out, Facts::default(), usage::Totals::default()));
     }
     if !matches!(card.column_role.as_deref(), Some("working" | "review"))
-        && card.column != "research"
+        && !card.column.eq_ignore_ascii_case("research")
     {
         return Ok((out, Facts::default(), usage::Totals::default()));
     }
@@ -582,7 +620,7 @@ fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
         coalesce(c.assignee, (SELECT s.id FROM spawns s WHERE s.bound_kind = 'card'
             AND s.bound_id = c.id AND s.finished_at IS NULL LIMIT 1)), c.labels, c.eta_at, c.archived
         FROM cards c JOIN board_columns k ON k.id = c.column_id
-        WHERE (c.archived = 0 AND (k.role IN ('working', 'review') OR k.name = 'research'))
+        WHERE (c.archived = 0 AND (k.role IN ('working', 'review') OR lower(k.name) = 'research'))
         OR EXISTS (SELECT 1 FROM card_trouble m WHERE m.card = c.id AND m.active = 1)")?;
     let rows = q
         .query_map([], |r| {
@@ -860,9 +898,12 @@ mod tests {
     fn read_only_history_excludes_preclaim_and_commenting_lead_statuses() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, at TEXT, kind TEXT, agent_id TEXT, card TEXT, payload TEXT);
-            CREATE TABLE waits(id TEXT, due_at TEXT);
+            CREATE TABLE waits(id TEXT PRIMARY KEY, due_at TEXT);
+            CREATE INDEX events_card ON events(card, seq);
             CREATE TABLE card_trouble_baseline(singleton INTEGER PRIMARY KEY, seq INTEGER);
             INSERT INTO card_trouble_baseline VALUES (1, 100);").unwrap();
+        c.execute_batch(include_str!("../migrations/ter-79-trouble-agent-index.sql"))
+            .unwrap();
         let add = |seq, kind, agent, card, data: Value| {
             c.execute(
                 "INSERT INTO events VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -939,6 +980,59 @@ mod tests {
         let f = facts("P-1", &e, at(40));
         assert_eq!(f.review_since, Some(at(10)));
         assert_eq!(f.reviews, 1);
+    }
+
+    #[test]
+    fn history_plans_search_indexes_after_analyze_with_large_prior_history() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, at TEXT, kind TEXT, agent_id TEXT, card TEXT, payload TEXT);
+            CREATE INDEX events_card ON events(card, seq);
+            CREATE TABLE waits(id TEXT PRIMARY KEY, due_at TEXT);
+            CREATE TABLE card_trouble_baseline(singleton INTEGER PRIMARY KEY, seq INTEGER);
+            INSERT INTO card_trouble_baseline VALUES (1, 0);
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+            INSERT INTO events SELECT x, '2026-11-01T00:00:00Z', CASE WHEN x%5=0 THEN 'status' ELSE 'output' END,
+                CASE WHEN x%7=0 THEN 'other' ELSE 'worker' END, NULL, '{\"status\":\"working\"}' FROM n;
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
+            INSERT INTO waits SELECT 'w'||x, '2026-11-01T00:00:00Z' FROM n;
+            INSERT INTO events VALUES
+                (100001,'2026-11-02T00:00:00Z','card','worker','P-1','{\"change\":\"moved\",\"to_role\":\"working\",\"column_role\":\"working\",\"assignee\":\"worker\"}'),
+                (100002,'2026-11-02T00:00:01Z','status','worker',NULL,'{\"status\":\"working\"}'),
+                (100003,'2026-11-02T00:00:02Z','output','worker',NULL,'{}'),
+                (100004,'2026-11-02T00:00:03Z','status','other',NULL,'{\"status\":\"working\"}'),
+                (100005,'2026-11-02T00:00:04Z','card','lead','P-1','{\"change\":\"commented\"}');").unwrap();
+        c.execute_batch(include_str!("../migrations/ter-79-trouble-agent-index.sql"))
+            .unwrap();
+        c.execute_batch("ANALYZE;").unwrap();
+        for (sql, key, index) in [
+            (START_SQL, "P-1", "events_card"),
+            (CARD_HISTORY_SQL, "P-1", "events_card"),
+            (AGENT_HISTORY_SQL, "worker", "events_trouble_agent"),
+            (PRIOR_STATUS_SQL, "worker", "events_trouble_agent"),
+        ] {
+            let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let plans = if sql == START_SQL {
+                q.query_map([key], |r| r.get::<_, String>(3))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            } else {
+                q.query_map(params![key, 100001], |r| r.get::<_, String>(3))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            assert!(
+                plans
+                    .iter()
+                    .any(|p| p.contains("SEARCH e") && p.contains(index)),
+                "{plans:?}"
+            );
+            assert!(plans.iter().all(|p| !p.contains("SCAN ")), "{plans:?}");
+        }
+        let events = history(&c, "P-1").unwrap();
+        assert_eq!(events.len(), 4, "only one prior status and post-entry rows");
+        assert_eq!(events.iter().filter(|e| e.kind == "status").count(), 2);
     }
 
     #[test]

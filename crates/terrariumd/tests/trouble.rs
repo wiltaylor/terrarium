@@ -426,3 +426,45 @@ async fn lead_assigned_card_is_monitored_without_a_claimed_event() {
     assert_signals(&td, &card, json!(["eta_overdue"])).await;
     assert_eq!(notices(&td, &lead).await, 1);
 }
+
+#[tokio::test]
+async fn research_card_starts_its_clock_and_signals_without_working_entry() {
+    use std::time::Duration;
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.patch(
+        "/api/projects/p/board",
+        json!({"columns": [
+            {"name":"backlog"}, {"name":"ready"}, {"name":"research"},
+            {"name":"in_progress"}, {"name":"review"}, {"name":"blocked"}, {"name":"done"}
+        ]}),
+    )
+    .await
+    .ok();
+    let lead = id(&td
+        .agent("p", "lead", json!({"roles":["project_admin"]}))
+        .await);
+    let worker = id(&td
+        .agent("p", "worker", json!({"card_reminder":false}))
+        .await);
+    td.post_empty(&format!("/api/agents/{worker}/start"))
+        .await
+        .ok();
+    td.wait_status(&worker, "idle").await;
+    let card = id(td
+        .post_as(
+            &worker,
+            "/api/projects/p/cards",
+            json!({"title":"Research", "column":"research", "assignee":worker}),
+        )
+        .await
+        .ok());
+    td.wait_status(&worker, "idle").await;
+    td.sup.open_turn(worker.parse().unwrap());
+    td.wait_status(&worker, "working").await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(usage(&td, &card).await["working_seconds"].as_u64().unwrap() >= 1);
+    eta(&td, &card, true).await;
+    assert_signals(&td, &card, json!(["eta_overdue"])).await;
+    assert_eq!(notices(&td, &lead).await, 1);
+}

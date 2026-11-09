@@ -5717,11 +5717,15 @@ assignment, status and wait events: only an agent working on this card in a
 working/research column counts. Idle time, open waits and time in other
 columns do not count. Usage query date filters apply to token/turn totals,
 not the working clock or current marks. To avoid a deploy-time burst, only
-cards entering the working-role column after the trouble baseline migration
+cards entering the working-role or research column after the trouble baseline migration
 are monitored, including cards assigned by a lead. The
 baseline survives daemon restarts. Clock/history replay starts at the first
 such entry and reads only explicit assignees' status, wait and reset events,
-not the lifetime history of agents who commented on the card. Budget usage
+not the lifetime history of agents who commented on the card. Card and agent
+histories use separate indexed sequence ranges after entry. Only one prior
+status per assignee is fetched, by an indexed descending seek with LIMIT 1.
+The query plans are tested after ANALYZE with 100,000 historical events.
+Budget usage
 starts at that entry. Interactive token usage totals retain their existing
 all-time/date-filtered meaning.
 
@@ -5739,9 +5743,10 @@ defaults. Unknown fields and negative limits are rejected. Example:
 Time, token and turn maps are keyed by the suffix of the card's `type:` label
 (untyped cards use `impl`). Token/turn budgets are off until set. Time budgets
 use four times the project's type-specific p70 from completed card history
-(TER-316), requiring at least five distinct cards. Calibration inspects only
-the newest 2000 project ETA events, using partial indexes for both the
-candidate window and the subsequent ETA/move closing edge. With too few samples,
+(TER-316), requiring at least five distinct cards. Calibration reuses
+TER-394's shared work_samples implementation and existing indexes: it selects
+cards from the newest 2000 project moves, then pairs their ETA/move events
+with a window function. With too few samples,
 they use the fixed fallbacks above (`hard` also uses four hours). Explicit
 project time overrides take precedence. A zero threshold disables that check.
 An ETA at or before now produces `eta_overdue`. The other signal names are
