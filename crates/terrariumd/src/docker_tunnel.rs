@@ -378,6 +378,9 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("reset@host"));
         assert!(args.contains(&"IdentitiesOnly=yes".to_owned()));
         assert!(args.contains(&"StrictHostKeyChecking=yes".to_owned()));
+        // Without this the pinned UserKnownHostsFile is not the only trust
+        // source: /etc/ssh/ssh_known_hosts could vouch for a host again.
+        assert!(args.contains(&"GlobalKnownHostsFile=/dev/null".to_owned()));
         assert!(reset_status(Some(0)).is_ok());
         for code in [Some(1), Some(75), None] {
             assert!(reset_status(code).is_err());
