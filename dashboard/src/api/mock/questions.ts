@@ -293,7 +293,8 @@ export function createQuestionMock(c: QuestionMockContext) {
     return q;
   };
 
-  const questions: Api["questions"] = {
+  // `toThread` needs the thread mock: ./index.ts adds it.
+  const questions: Omit<Api["questions"], "toThread"> = {
     list: (q = {}) =>
       reply(() => {
         const status = q.status ?? "open";
