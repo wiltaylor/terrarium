@@ -1178,7 +1178,7 @@ mod tests {
             .unwrap();
         st.query_map([], |r| r.get::<_, String>(0))
             .unwrap()
-            .filter_map(|p| serde_json::from_str(&p.ok()?).ok())
+            .filter_map(|p| serde_json::from_str::<serde_json::Value>(&p.ok()?).ok())
             .filter(|d| d["item"] == item && d["change"] == "closed")
             .collect()
     }
@@ -1252,7 +1252,7 @@ mod tests {
         // Mail to an agent is no Inbox item: reading it emits nothing.
         let to_agent = send(
             &mut t,
-            &Outgoing {
+            Outgoing {
                 from: &Address::Operator,
                 to: &worker,
                 subject: "Four",

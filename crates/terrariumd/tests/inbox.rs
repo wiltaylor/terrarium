@@ -736,13 +736,13 @@ async fn mail_handled_outside_the_inbox_closes_its_item() {
         .ok()
         .clone();
     let mid2 = id(&m2);
-    let replies = td
+    let r = td
         .post(
             &format!("/api/mail/{mid2}/reply"),
             json!({"body": "Thanks."}),
         )
-        .await
-        .ok();
+        .await;
+    let replies = r.ok().clone();
     assert_eq!(replies.as_array().unwrap().len(), 1);
     let (rows, counts) = inbox(&td, "?kind=mail").await;
     assert!(rows.is_empty(), "{rows:?}");
