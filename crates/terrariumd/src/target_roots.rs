@@ -1010,28 +1010,14 @@ mod tests {
     }
 
     /// [`run_code`] with another owned-root base (`work_root`) in the tree.
-    fn run_code_at(
-        base: &std::path::Path,
-        work_root: &str,
-        mode: &str,
-        dest: &str,
-    ) -> Option<i32> {
+    fn run_code_at(base: &std::path::Path, work_root: &str, mode: &str, dest: &str) -> Option<i32> {
         // Exercise the exact target program in an isolated tree, not /src.
         let script = SCRIPT.replace(
             "os.open('/',",
             &format!("os.open({:?},", base.to_str().unwrap()),
         );
         Command::new("python3")
-            .args([
-                "-c",
-                &script,
-                mode,
-                work_root,
-                "p",
-                "a",
-                "agent-id",
-                dest,
-            ])
+            .args(["-c", &script, mode, work_root, "p", "a", "agent-id", dest])
             .output()
             .unwrap()
             .status
