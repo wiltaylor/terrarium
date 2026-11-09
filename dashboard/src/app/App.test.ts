@@ -125,17 +125,15 @@ describe("App project routes", () => {
     }
   });
 
-  it("resolves every moved route to a real destination", async () => {
-    for (const project of ["terrarium", "my%20app"]) {
-      for (const route of MOVED_ROUTES) {
-        const from = route.path.replace(":project", project).replace(":id", "x1").replace(":name", "code-review").replace("*path", "a/b");
-        const to = movedTo(from)!;
-        const root = mount(from);
-        await vi.waitFor(() => expect(window.location.pathname).toBe(to));
-        expect(root.textContent, from).not.toContain("Page not found.");
-        dispose?.();
-        document.body.replaceChildren();
-      }
+  it.each(["terrarium", "my%20app"])("resolves every moved route to a real destination for %s", async (project) => {
+    for (const route of MOVED_ROUTES) {
+      const from = route.path.replace(":project", project).replace(":id", "x1").replace(":name", "code-review").replace("*path", "a/b");
+      const to = movedTo(from)!;
+      const root = mount(from);
+      await vi.waitFor(() => expect(window.location.pathname).toBe(to));
+      expect(root.textContent, from).not.toContain("Page not found.");
+      dispose?.();
+      document.body.replaceChildren();
     }
   });
 
