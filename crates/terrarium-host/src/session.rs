@@ -138,6 +138,27 @@ fn kill_all(pid: Option<u32>, scope: Option<&str>) {
     }
 }
 
+/// Kills the process group of a session when the session task drops
+/// before the process exits (TER-526): a runtime that shuts down, as in a
+/// host agent that stops or a test that ends early, leaves no child of
+/// the session. `kill_on_drop` alone kills only the group leader, and the
+/// children of a recipe kept running with its open fds. The guard sends no
+/// scope kill: that needs a runtime, and a drop can run without one.
+struct GroupGuard(Option<u32>);
+
+impl GroupGuard {
+    /// The process exited: its group id may be reused, so do not kill it.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        signal_group(self.0, Signal::SIGKILL);
+    }
+}
+
 /// Sleep until the deadline, or forever without one.
 async fn deadline(timeout: Option<Duration>) {
     match timeout {
@@ -204,6 +225,7 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
 
     let timeout = plan.timeout;
     let scope = plan.scope.clone();
+    let mut group = GroupGuard(pid);
     let done = tokio::spawn(async move {
         let scope = scope.as_deref();
         let mut stdin_tx = Some(stdin_tx);
@@ -245,6 +267,7 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
                 }
             }
         };
+        group.disarm();
         drop(stdin_tx);
         stdin_task.abort();
         drain(pumps).await;
@@ -405,6 +428,7 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
 
     let timeout = plan.timeout;
     let scope = plan.scope.clone();
+    let mut group = GroupGuard(pid);
     let done = tokio::spawn(async move {
         let scope = scope.as_deref();
         let mut forced: Option<ExitReason> = None;
@@ -446,6 +470,7 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
                 }
             }
         };
+        group.disarm();
         drop(stdin_tx);
         writer_task.abort();
         let mut reader_task = reader_task;
@@ -603,6 +628,53 @@ mod tests {
         assert_eq!(info.reason, ExitReason::Timeout);
         assert_eq!(info.signal, Some(9));
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// TER-526: a runtime that shuts down while a session runs (a test
+    /// that ends early) kills the whole process group, not only the
+    /// leader: no background child of the session stays.
+    #[test]
+    fn a_dropped_session_kills_its_process_group() {
+        let pidfile = std::env::temp_dir().join(format!(
+            "terrarium-host-ter526-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&pidfile);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let script = format!("sleep 300 & echo $! > '{}'; wait", pidfile.display());
+        let (run, child) = rt.block_on(async {
+            let run = spawn(plan("sh", &["-c", &script]), Arc::new(Outbox::new(1, 1 << 20))).unwrap();
+            let started = std::time::Instant::now();
+            loop {
+                let text = std::fs::read_to_string(&pidfile).unwrap_or_default();
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    break (run, pid);
+                }
+                assert!(started.elapsed() < Duration::from_secs(30), "no child pid");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        drop(rt);
+        let _ = std::fs::remove_file(&pidfile);
+        let gone = || {
+            nix::sys::signal::kill(Pid::from_raw(child), None).is_err()
+                || std::fs::read_to_string(format!("/proc/{child}/stat"))
+                    .is_ok_and(|s| s.rsplit(')').next().is_some_and(|r| r.trim_start().starts_with('Z')))
+        };
+        let started = std::time::Instant::now();
+        while !gone() && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left = !gone();
+        if left {
+            let _ = nix::sys::signal::kill(Pid::from_raw(child), Signal::SIGKILL);
+        }
+        drop(run);
+        assert!(!left, "the background child {child} outlived the session");
     }
 
     #[tokio::test]

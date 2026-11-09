@@ -167,6 +167,103 @@ pub fn write(dir: &Path, rel: &str, text: &str) {
     std::fs::write(p, text).unwrap();
 }
 
+/// TER-526: a shell loop for a fixture (a job recipe, a fake docker) that
+/// waits until the file `gate` exists. A test that ended early left the old
+/// open-ended loops running for good, with the open fds of the test run (a
+/// card check's lock fd). This loop also ends when the test process is gone
+/// (killed, so no drop ran) and after `limit`. Its status is 0 only when the
+/// gate exists.
+pub fn gate_wait(gate: &Path, limit: Duration) -> String {
+    let rounds = limit.as_millis() / 50;
+    format!(
+        "i=0; while [ ! -f '{g}' ] && kill -0 {pid} 2>/dev/null && [ \"$i\" -lt {rounds} ]; \
+         do sleep 0.05; i=$((i + 1)); done; [ -f '{g}' ]",
+        g = gate.display(),
+        pid = std::process::id(),
+    )
+}
+
+/// The live processes, other than this one, whose command line names
+/// `marker` (the temp dir of a test): the fixture processes of the test.
+/// Linux only: it reads `/proc`.
+pub fn processes_naming(marker: &Path) -> Vec<(i32, String)> {
+    let marker = marker.to_string_lossy();
+    let me = std::process::id().to_string();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for e in dir.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Ok(pid) = name.parse::<i32>() else {
+            continue;
+        };
+        if name == me {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(e.path().join("cmdline")) else {
+            continue;
+        };
+        let cmdline = String::from_utf8_lossy(&raw).replace('\0', " ");
+        if !cmdline.contains(marker.as_ref()) {
+            continue;
+        }
+        // A zombie has ended: only its parent has not reaped it yet.
+        let stat = std::fs::read_to_string(e.path().join("stat")).unwrap_or_default();
+        if stat
+            .rsplit(')')
+            .next()
+            .is_some_and(|r| r.trim_start().starts_with('Z'))
+        {
+            continue;
+        }
+        found.push((pid, cmdline.trim_end().to_owned()));
+    }
+    found
+}
+
+/// TER-526: the fixture processes of one test, found by its temp dir in
+/// their command line. On drop, also on a panic, it kills each one that is
+/// still alive, by pid. [`FixtureGuard::assert_none_left`] is the check at
+/// the end of a test that no fixture outlived it.
+pub struct FixtureGuard {
+    dir: PathBuf,
+}
+
+impl FixtureGuard {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    /// Wait up to [`WAIT`] for the fixture processes to end, then fail
+    /// with the ones that are still alive.
+    pub async fn assert_none_left(&self) {
+        let start = std::time::Instant::now();
+        loop {
+            let left = processes_naming(&self.dir);
+            if left.is_empty() {
+                return;
+            }
+            assert!(
+                start.elapsed() < WAIT,
+                "fixture processes outlived the test: {left:?}"
+            );
+            tokio::time::sleep(DELAY).await;
+        }
+    }
+}
+
+impl Drop for FixtureGuard {
+    fn drop(&mut self) {
+        for (pid, _) in processes_naming(&self.dir) {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
 impl TestDaemon {
     pub async fn start() -> Self {
         Self::with_config(|_| {}).await
