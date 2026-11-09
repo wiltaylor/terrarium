@@ -7895,12 +7895,14 @@ A schedule:
 | `created_by` | `operator` or `agent:<ulid>`. |
 | `owner` | `actor` (the default), `project`, or `system` (§19.6). |
 | `run_as` | The actor of the runs of an actor-owned schedule. It is `created_by`, until a caller changes the `action` or the `owner`, or takes the schedule over: then it is that caller. A project- or system-owned schedule does not use it. |
-| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, and always for a trigger and a project action. |
+| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, always for a trigger and a project action, and for a `day_start` schedule while no start planned its run. |
 | `last_run` | `{at, status, summary, run_id}` of the last run, or `null`. |
 | `runs_count` | The runs so far, the skipped runs too. |
 | `source` | `api`, `file` (`[[schedules]]` in `projects/<name>.toml`), or `fleet:<name>` (§18.1). |
 | `consecutive_skips` | The runs in a row that the rights check skipped. |
 | `disabled_reason` | Why the daemon disabled the schedule. Absent when it did not. |
+| `day_start_done` | A `day_start` schedule: the local day (`YYYY-MM-DD`, in its `tz`) of its last run. A start on that day, or on an earlier day, plans no run. Absent before the first run. |
+| `day_start_last` | A `day_start` schedule: `{cause, at}` of the last detected start that planned a run. `cause` is `daemon_start`, `resume`, `host_reconnect`, or `day_change`. Absent before the first plan. |
 
 The specs:
 
@@ -7911,6 +7913,7 @@ The specs:
 | `{"kind": "at", "at": "2026-11-01T02:00:00Z"}` | One run at an RFC 3339 time in the future. |
 | `{"kind": "on", "kinds": ["ci.run.failed"], "match"?, "dedupe"?, "escalate"?, "max_per_hour"?: 30}` | A trigger: each matching event starts a run. See §19.4. |
 | `{"kind": "manual"}` | A project action: no time and no event. Only `POST .../run` starts a run. See §19.10. |
+| `{"kind": "day_start", "tz"?: "UTC", "not_before"?, "not_after"?, "delay"?, "weekdays"?}` | Start of day: one run per calendar day in `tz`, at the first start of the day. See "Start of day" in §19.3. `not_before` and `not_after` are local times as `HH:MM`; `not_after` is not before `not_before`. `delay` is a duration as for `interval`, at most `12h`. `weekdays` is a list of `mon` to `sun`; empty or absent is every day. `catch_up` does not apply. |
 
 The actions:
 
@@ -7949,13 +7952,14 @@ A run:
 | Field | Meaning |
 |---|---|
 | `status` | `running`, then `ok`, `failed`, or `skipped`. |
-| `trigger` | `cron` (the timer, for each spec kind), `manual` (`POST .../run`), `catch_up`, or `event` (a trigger). |
+| `trigger` | `cron` (the timer, for each spec kind), `manual` (`POST .../run`), `catch_up`, `event` (a trigger), or `day_start` (the planned run of a `day_start` schedule). |
 | `summary` | One line. A skip starts with `skipped:`. |
 | `output` | `webhook`: `delivery` (the ID) and `url` (§19.5). `exec`: `target`, `cmd`, `exit_code`, `end`, and the last 4000 bytes of `stdout` and `stderr`. `mail`: `message_id`, `thread_id`, `to`, `held`, `held_reason`. `turn`: `agent`, `started`, `delivery`, `status_before`. `agent`: `agent`, `verb`, `status`. `probe`: the probe outcome with `windows`. `card`: `card` (the ID, or `null`), `op` (`open`, `comment`, or `close`), and `column` for a close. |
 | `error` | Why the run failed or was skipped. |
 | `actor` | Who triggered the run: `run_as` for a timed run, the caller for a run-now, the actor of the event for a trigger run (for example `source:terra/github`). |
 | `event_seq` | The `seq` of the event that started a trigger run. `null` for the other runs. |
 | `event` | `{seq, kind, summary}` of that event, while the log has it. Absent for the other runs. |
+| `day_start` | A `day_start` run: `{cause, at}` of the detected start that planned it (as `day_start_last`). Absent for the other runs. |
 
 ### 19.2 Endpoints
 
@@ -8065,6 +8069,33 @@ daemon left `running` becomes `failed` ("the daemon stopped during the
 run"). A schedule whose next run passed more than one tick before the
 start computes its next run from now; with `catch_up: once`, it also
 runs one time, with the trigger `catch_up`.
+
+**Start of day.** A `day_start` schedule has no time of its own. The
+daemon plans its run at each detected start:
+
+- `daemon_start`: the daemon starts.
+- `resume`: the timer runs again after a gap of more than 60 s (the
+  machine slept).
+- `host_reconnect`: the host agent of the target of an `exec` action
+  comes back online. An `exec` whose target is unknown, or whose host
+  agent is offline, plans no run until then.
+- `day_change`: the day changes in `tz` while the daemon is up.
+
+A start plans a run when the day in `tz` is after `day_start_done` and is
+in `weekdays`. The run is at the start plus `delay`, and not before
+`not_before`. A run that would be after `not_after` is not planned. A
+local time that a clock change skips moves on by one hour; a time that it
+shows twice is the first instant for `not_before` and the last for
+`not_after`. The planned run sets `next_run_at`, and the timer starts it
+with the trigger `day_start`. It records the day of its start in
+`day_start_done`, so the other starts of that day plan nothing: one run
+per day. A run planned before midnight for a time after midnight runs for
+the day of its start. The daemon drops a planned run when the target's
+host agent goes offline, when it is past `not_after`, or when the machine
+slept past it into a later day; the next start plans again. At a daemon
+start, a planned run that passed is dropped, with no catch-up run.
+`schedule show` gives `next run: at the first start after <day>` while no
+run is planned.
 
 **Retention.** The daily prune timer keeps the newest 500 runs of each
 schedule.

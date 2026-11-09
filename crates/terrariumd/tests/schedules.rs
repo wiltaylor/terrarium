@@ -1234,9 +1234,11 @@ use chrono::Datelike;
 use terrariumd::scheduler::{DayStartWatch, day_start_pass};
 use terrariumd::store::schedules::StartCause;
 
-/// Midnight UTC nine days ahead. It and the four days after it fall on
-/// weekdays that are neither today nor tomorrow; [`allowed_days`] lists
-/// only those, so the daemon's own timer never plans these runs.
+/// Midnight UTC nine days ahead. It and the three days after it fall on
+/// weekdays that are not yesterday, today, or tomorrow (UTC); in a zone
+/// up to a day from UTC, the daemon's own timer sees one of those three.
+/// [`allowed_days`] lists only the others, so that timer never plans
+/// these runs.
 fn day0() -> DateTime<Utc> {
     (Utc::now() + Duration::days(9))
         .date_naive()
@@ -1254,7 +1256,7 @@ fn day_text(day: i64) -> String {
 }
 
 fn allowed_days() -> Vec<String> {
-    (2..7)
+    (2..6)
         .map(|k| {
             (Utc::now() + Duration::days(k))
                 .weekday()
@@ -1577,4 +1579,185 @@ async fn day_start_spec_errors_name_the_field() {
         r.err(422, "invalid");
         assert_eq!(r.body["error"]["details"]["field"], field, "{extra}");
     }
+}
+
+#[tokio::test]
+async fn day_start_a_late_plan_runs_after_midnight_for_its_day() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    let sid = id(td
+        .post("/api/schedules", day_start_body("late", json!({"delay": "30m"})))
+        .await
+        .ok());
+    let mut w = DayStartWatch::default();
+    // A start at 23:50 with a delay of 30m plans a run at 00:20.
+    pass(&td, at(0, 23, 50), StartCause::DaemonStart, &mut w, true).await;
+    let next = |s: &Value| {
+        DateTime::parse_from_rfc3339(s["next_run_at"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(next(&schedule(&td, &sid).await), at(1, 0, 20));
+    // The first tick of the new day keeps the plan.
+    assert!(
+        pass(&td, at(1, 0, 0), StartCause::DayChange, &mut w, true)
+            .await
+            .is_empty()
+    );
+    assert_eq!(next(&schedule(&td, &sid).await), at(1, 0, 20));
+    assert!(tick(&td, at(1, 0, 10)).await.is_empty());
+    let runs = tick(&td, at(1, 0, 20)).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].day_start.as_ref().unwrap().cause, "daemon_start");
+    // It counts for the day of its start; the new day plans its own run.
+    assert_eq!(schedule(&td, &sid).await["day_start_done"], day_text(0));
+    let now = at(1, 0, 20) + Duration::seconds(10);
+    assert_eq!(
+        pass(&td, now, StartCause::DayChange, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    assert_eq!(
+        next(&schedule(&td, &sid).await),
+        now + Duration::minutes(30)
+    );
+}
+
+#[tokio::test]
+async fn day_start_days_follow_the_zone() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    let sid = id(td
+        .post(
+            "/api/schedules",
+            day_start_body("sydney", json!({"tz": "Australia/Sydney"})),
+        )
+        .await
+        .ok());
+    let mut w = DayStartWatch::default();
+    // 14:30 UTC is 00:30 or 01:30 of the next day in Sydney.
+    pass(&td, at(0, 14, 30), StartCause::DaemonStart, &mut w, true).await;
+    assert_eq!(tick(&td, at(0, 14, 30)).await.len(), 1);
+    assert_eq!(schedule(&td, &sid).await["day_start_done"], day_text(1));
+    // 12:00 UTC the next day is still that day in Sydney: no run.
+    assert!(
+        pass(&td, at(1, 12, 0), StartCause::Resume, &mut w, true)
+            .await
+            .is_empty()
+    );
+    // 14:30 UTC is the day after in Sydney: one run.
+    assert_eq!(
+        pass(&td, at(1, 14, 30), StartCause::Resume, &mut w, true).await,
+        vec![sid.clone()]
+    );
+    assert_eq!(tick(&td, at(1, 14, 30)).await.len(), 1);
+    assert_eq!(schedule(&td, &sid).await["day_start_done"], day_text(2));
+}
+
+/// Run the host agent `name` with `token`, and wait for it to be online.
+async fn connect_host(
+    td: &TestDaemon,
+    addr: std::net::SocketAddr,
+    name: &str,
+    token: &str,
+) -> tokio::task::JoinHandle<()> {
+    let mut o = terrarium_host::ClientOptions::new(
+        format!("ws://{addr}/hosts/connect"),
+        token,
+        name,
+    );
+    o.capabilities = terrarium_core::protocol::HostCapabilities {
+        shell: Some("/bin/sh".into()),
+        ..Default::default()
+    };
+    o.backoff_min = std::time::Duration::from_millis(50);
+    o.backoff_max = std::time::Duration::from_millis(200);
+    o.paths = terrarium_host::HostPaths {
+        work_dir: td.state.with_file_name("work"),
+        instances_dir: td.state.with_file_name("instances"),
+        repos_dir: td.state.with_file_name("repos"),
+    };
+    let task = tokio::spawn(terrarium_host::Client::new(o).run());
+    for _ in 0..300 {
+        if td.get(&format!("/api/hosts/{name}")).await.body["online"] == true {
+            return task;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("host {name} never came online");
+}
+
+#[tokio::test]
+async fn day_start_reachable_needs_a_known_target_with_its_host_online() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    let st = state(&td);
+    let (_serve, addr) = terrariumd::hosts::serve(st.clone(), "127.0.0.1:0")
+        .await
+        .unwrap();
+    let r = td.post("/api/hosts", json!({"name": "lab9"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let token = r.body["token"].as_str().unwrap().to_owned();
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "far", "kind": "host", "host": "lab9"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let mut body = day_start_body("far", json!({}));
+    body["action"] = json!({"type": "exec", "target": "far", "cmd": ["true"]});
+    let sid = id(td.post("/api/schedules", body).await.ok());
+    let mail = id(td
+        .post("/api/schedules", day_start_body("mail", json!({})))
+        .await
+        .ok());
+
+    // The real check: the host is offline, an unknown target is not
+    // reachable, and a mail action always is.
+    let check = |ids: (String, String)| {
+        let f = terrariumd::scheduler::reachable(&st);
+        st.db.read(move |c| {
+            let far = terrariumd::store::schedules::get(c, &ids.0)?;
+            let mut nowhere = far.clone();
+            nowhere.action = serde_json::from_value(
+                json!({"type": "exec", "target": "nowhere", "cmd": ["true"]}),
+            )
+            .unwrap();
+            let mail = terrariumd::store::schedules::get(c, &ids.1)?;
+            Ok((f(c, &far), f(c, &nowhere), f(c, &mail)))
+        })
+    };
+    assert_eq!(
+        check((sid.clone(), mail.clone())).await.unwrap(),
+        (false, false, true)
+    );
+    // A daemon start plans only the mail schedule; the exec one waits.
+    let mut w = DayStartWatch::default();
+    let armed = day_start_pass(
+        &st,
+        at(0, 8, 0),
+        StartCause::DaemonStart,
+        &mut w,
+        terrariumd::scheduler::reachable(&st),
+    )
+    .await;
+    assert_eq!(armed, vec![mail.clone()]);
+    // The host agent connects: the next pass plans the exec schedule,
+    // with the cause host_reconnect.
+    let _host = connect_host(&td, addr, "lab9", &token).await;
+    assert_eq!(
+        check((sid.clone(), mail.clone())).await.unwrap(),
+        (true, false, true)
+    );
+    let armed = day_start_pass(
+        &st,
+        at(0, 8, 1),
+        StartCause::DayChange,
+        &mut w,
+        terrariumd::scheduler::reachable(&st),
+    )
+    .await;
+    assert_eq!(armed, vec![sid.clone()]);
+    assert_eq!(
+        schedule(&td, &sid).await["day_start_last"]["cause"],
+        "host_reconnect"
+    );
 }

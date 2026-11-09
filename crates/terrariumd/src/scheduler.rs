@@ -159,8 +159,9 @@ impl DayStartWatch {
     }
 }
 
-/// Can the action of `s` run now? An `exec` on a target with a host agent
-/// needs that agent online. Other actions can always run.
+/// Can the action of `s` run now? An `exec` needs its target, and the
+/// host agent of a host target online. An unknown target, or a failed
+/// lookup, is not reachable. Other actions can always run.
 pub fn reachable(
     state: &Shared,
 ) -> impl Fn(&rusqlite::Connection, &Schedule) -> bool + Send + 'static {
@@ -175,17 +176,28 @@ pub fn reachable(
                 .host
                 .as_deref()
                 .is_none_or(|h| state.executor.hosts.is_online(h)),
-            _ => true,
+            _ => false,
         }
     }
 }
 
-/// Plan the runs of the `day_start` schedules for a start at `now`, in one
-/// write. A planned run that is no longer good (another day, past
-/// `not_after`, or its target is offline) is dropped. A schedule with no
-/// planned run gets one when the day did not run yet: the cause is
-/// `cause`, or `host_reconnect` when it waited for its host agent. A tick
-/// then starts the run when it is due. Returns the planned schedule IDs.
+/// One change of a [`day_start_pass`].
+enum DayStartChange {
+    /// Drop the planned run.
+    Disarm(String),
+    /// Plan the run of the day, for this start.
+    Arm(String, StartCause),
+}
+
+/// Plan the runs of the `day_start` schedules for a start at `now`. A
+/// planned run that is no longer good (see
+/// [`schedules::day_start_armed_valid`], or its target is offline) is
+/// dropped. A schedule with no planned run gets one when its day did not
+/// run yet: the cause is `cause`, or `host_reconnect` when it waited for
+/// its host agent. A tick then starts the run when it is due.
+///
+/// It reads first, and takes the write lock only when a plan changes, so
+/// a tick with nothing to do writes nothing. Returns the planned IDs.
 pub async fn day_start_pass<R>(
     state: &Shared,
     now: DateTime<Utc>,
@@ -198,19 +210,18 @@ where
 {
     watch.last = Some(now);
     let mut waiting = std::mem::take(&mut watch.waiting);
-    let r = state
+    let read = state
         .db
-        .write("system", move |t| {
-            let mut armed = Vec::new();
+        .read(move |c| {
+            let mut changes = Vec::new();
             let mut still = HashSet::new();
-            for s in schedules::day_starts(t)? {
-                let up = reachable(t, &s);
+            for s in schedules::day_starts(c)? {
+                let up = reachable(c, &s);
                 if s.next_run_at.is_some() {
-                    if !up || !schedules::day_start_armed_valid(&s, now)? {
-                        schedules::disarm_day_start(t, &s.id)?;
-                    } else {
+                    if up && schedules::day_start_armed_valid(&s, now)? {
                         continue;
                     }
+                    changes.push(DayStartChange::Disarm(s.id.clone()));
                 }
                 if !up {
                     still.insert(s.id.clone());
@@ -221,23 +232,56 @@ where
                 } else {
                     cause
                 };
-                if schedules::arm_day_start(t, &s, cause, now)?.is_some() {
-                    armed.push(s.id.clone());
+                if schedules::day_start_plan(&s.spec, s.day_start_done.as_deref(), now)?.is_some()
+                {
+                    changes.push(DayStartChange::Arm(s.id.clone(), cause));
                 }
             }
-            Ok((armed, still))
+            Ok((changes, still))
         })
         .await;
-    match r {
-        Ok((armed, still)) => {
+    let changes = match read {
+        Ok((changes, still)) => {
             watch.waiting = still;
-            armed
+            changes
         }
         Err(e) => {
-            warn!("the start-of-day pass failed: {e}");
-            Vec::new()
+            warn!("the start-of-day pass cannot read the schedules: {e}");
+            return Vec::new();
         }
+    };
+    if changes.is_empty() {
+        return Vec::new();
     }
+    let r = state
+        .db
+        .write("system", move |t| {
+            let mut armed = Vec::new();
+            for change in changes {
+                match change {
+                    DayStartChange::Disarm(id) => schedules::disarm_day_start(t, &id)?,
+                    DayStartChange::Arm(id, cause) => {
+                        // Read again under the lock: an API write may have
+                        // changed the schedule since the read.
+                        let Ok(s) = schedules::get(t, &id) else {
+                            continue;
+                        };
+                        if !s.enabled || !s.spec.is_day_start() || s.next_run_at.is_some() {
+                            continue;
+                        }
+                        if schedules::arm_day_start(t, &s, cause, now)?.is_some() {
+                            armed.push(id);
+                        }
+                    }
+                }
+            }
+            Ok(armed)
+        })
+        .await;
+    r.unwrap_or_else(|e| {
+        warn!("the start-of-day pass failed: {e}");
+        Vec::new()
+    })
 }
 
 // ------------------------------------------------------ the trigger engine

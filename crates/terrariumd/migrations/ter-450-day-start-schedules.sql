@@ -24,3 +24,5 @@ INSERT INTO schedule_runs (id, schedule, trigger, status, started_at, finished_a
     SELECT id, schedule, trigger, status, started_at, finished_at, summary, output, error, actor, event_seq FROM schedule_runs_v450;
 DROP TABLE schedule_runs_v450;
 CREATE INDEX schedule_runs_schedule ON schedule_runs(schedule, id);
+-- The start-of-day pass reads the `day_start` schedules each tick.
+CREATE INDEX schedules_spec_kind ON schedules(json_extract(spec, '$.kind'), enabled);
