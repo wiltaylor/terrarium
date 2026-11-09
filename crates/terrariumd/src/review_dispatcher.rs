@@ -23,7 +23,12 @@ fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
     Ok((!v.paused).then(|| actor(v.agent)))
 }
 
-/// Bounded review-column lookup. Keep the indexed query public for plan regression tests.
+/// Bounded review-column lookup. Keep the indexed query public for plan
+/// regression tests. Held GitHub cards (TER-85) are filtered here, before
+/// the LIMIT, so a column full of them cannot starve the rest; the label
+/// and title predicates mirror [`crate::store::github_gate::is_held`] for
+/// ASCII case and spaces (exotic Unicode whitespace stays with the Rust
+/// check in [`candidate`]).
 pub const CANDIDATES: &str = "
 SELECT c.id, c.title, c.labels FROM cards c INDEXED BY cards_column
 WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
@@ -33,6 +38,11 @@ WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = 
   AND NOT EXISTS (SELECT 1 FROM card_dispatch_retries d WHERE d.card = c.id AND d.retry_at > ?3)
   AND NOT EXISTS (SELECT 1 FROM card_reviews r WHERE r.card = c.id
       AND (r.applied = 2 OR r.cap_notified = 1))
+  AND NOT ((EXISTS (SELECT 1 FROM json_each(c.labels) g
+               WHERE trim(lower(g.value)) = 'github')
+        OR glob('github#[0-9][0-9]*:*', replace(lower(ltrim(c.title)), ' ', '')))
+       AND EXISTS (SELECT 1 FROM json_each(c.labels) h
+               WHERE trim(lower(h.value)) = 'hold'))
 ORDER BY c.position LIMIT 16";
 
 fn candidate(c: &Connection, project: &str) -> ApiResult<Option<String>> {
@@ -50,6 +60,8 @@ fn candidate(c: &Connection, project: &str) -> ApiResult<Option<String>> {
     )?;
     for row in rows {
         let (id, title, labels) = row?;
+        // The SQL already drops held cards; this stays the exact authority
+        // for the Unicode whitespace the SQL pattern cannot see.
         if !crate::store::github_gate::is_held(
             &title,
             &crate::store::json_col::<Vec<String>>(&labels),
@@ -215,14 +227,32 @@ pub fn verdict(t: &mut Tx<'_>, reviewer: &Actor, id: &str, body: &str) -> ApiRes
     if card.archived || card.column != review {
         return Ok(());
     }
-    let Some(who) = owner(t, &card.project)? else {
-        return Ok(());
-    };
     let first = body.lines().next().unwrap_or_default().trim();
     let destination = match first.strip_prefix("Review verdict: ").unwrap_or(first) {
         "accept" => "merge_queue",
         "changes" => "ready",
         _ => return Ok(()),
+    };
+    // An unusable owner (lost project admin, deleted) must not reject the
+    // comment and lose the findings: keep the verdict, record why nothing
+    // was applied, and leave the round open like a project without a
+    // review dispatcher.
+    let who = match owner(t, &card.project) {
+        Ok(Some(who)) => who,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            board::system_comment(
+                t,
+                id,
+                &format!(
+                    "Review verdict retained, but the review dispatcher owner is no longer \
+                     valid: {}. Card remains in review for the lead.",
+                    e.message
+                ),
+                None,
+            )?;
+            return Ok(());
+        }
     };
     // Mark this round consumed even when the decision is reserved for the lead.
     t.execute("UPDATE card_reviews SET applied = 2 WHERE card = ?1", [id])?;

@@ -100,7 +100,146 @@ async fn review_candidate_query_uses_only_indexed_searches() {
         .await
         .unwrap();
     assert!(plan.iter().any(|s| s.contains("cards_column")), "{plan:?}");
-    assert!(plan.iter().all(|s| !s.contains("SCAN")), "{plan:?}");
+    // Only the per-card label `json_each` may scan; every table access,
+    // the cards lookup included, must stay an index search.
+    assert!(
+        plan.iter()
+            .filter(|s| s.contains("SCAN"))
+            .all(|s| s.starts_with("SCAN json_each")),
+        "{plan:?}"
+    );
+}
+
+#[tokio::test]
+async fn review_held_cards_cannot_starve_the_candidate_list() {
+    let td = setup(2, 4, 20).await;
+    td.post(
+        "/api/templates",
+        json!({"name":"card-review","project":"p","spec":{"harness":"codex"}}),
+    )
+    .await
+    .ok();
+    td.patch("/api/projects/p", json!({"review_dispatcher":"lead"}))
+        .await
+        .ok();
+    // Sixteen held cards, held half by their `GitHub #n:` title and half by
+    // their labels, fill the whole LIMIT 16 window of the candidate query.
+    for i in 0..16 {
+        let (title, labels) = if i % 2 == 0 {
+            (format!("GitHub #{i}: imported"), json!(["hold"]))
+        } else {
+            ("Task".to_owned(), json!(["github", "hold"]))
+        };
+        let held: String = td
+            .post(
+                "/api/projects/p/cards",
+                json!({"title":title, "column":"ready", "labels":labels}),
+            )
+            .await
+            .ok()["id"]
+            .as_str()
+            .unwrap()
+            .into();
+        td.post(
+            &format!("/api/cards/{held}/move"),
+            json!({"column":"review"}),
+        )
+        .await
+        .ok();
+    }
+    assert!(!terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+        .await
+        .unwrap());
+    let free = card(&td, "small").await;
+    td.post(
+        &format!("/api/cards/{free}/move"),
+        json!({"column":"review"}),
+    )
+    .await
+    .ok();
+    assert!(terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+        .await
+        .unwrap());
+    let key = free.clone();
+    let picked: String = state(&td)
+        .db
+        .read(move |c| Ok(c.query_row("SELECT card FROM card_reviews", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(picked, free);
+}
+
+#[tokio::test]
+async fn review_owner_error_keeps_the_verdict_and_records_the_reason() {
+    // An owner that lost project admin, or was deleted, must not reject
+    // the reviewer's comment: the findings stay on the card.
+    for broken in ["demoted", "deleted"] {
+        let (td, id) = review_setup().await;
+        assert!(terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+            .await
+            .unwrap());
+        let agent = reviewer(&td, &id).await;
+        if broken == "demoted" {
+            let lead = lead_id(&td).await;
+            td.put(&format!("/api/agents/{lead}/roles"), json!({"roles":[]}))
+                .await
+                .ok();
+        } else {
+            state(&td)
+                .db
+                .write("operator", |t| {
+                    t.execute("UPDATE projects SET review_dispatcher = 'ghost'", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let body = "Review verdict: accept\nF1: Kept findings.".to_owned();
+        td.post_as(
+            &agent,
+            &format!("/api/cards/{id}/comments"),
+            json!({"body":body}),
+        )
+        .await
+        .ok();
+        let c = get(&td, &id).await;
+        assert_eq!(c["column"], "review");
+        assert!(
+            c["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["body"] == body),
+            "{broken}: {}",
+            c["comments"]
+        );
+        assert!(
+            c["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["body"]
+                    .as_str()
+                    .unwrap()
+                    .contains("review dispatcher owner is no longer valid")),
+            "{broken}: {}",
+            c["comments"]
+        );
+        // Like a project without a dispatcher, the round stays open.
+        let key = id.clone();
+        let applied: i64 = state(&td)
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT applied FROM card_reviews WHERE card = ?1",
+                    [&key],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(applied, 0, "{broken}");
+    }
 }
 
 #[tokio::test]
