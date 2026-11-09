@@ -2931,17 +2931,23 @@ async fn a_granted_lease_expires_by_its_own_timer() {
         )
         .await;
     assert_eq!(g.status, 201, "{}", g.body);
+    // The `state` of a lease reads `expired` once `expires_at` is past,
+    // before any expiry runs: wait for the audit row that only the expiry
+    // writes.
     wait_until(&lab.trace, "the granted lease never expired", async || {
-        let all = lab
-            .td
-            .get("/api/agents/terra%2Fworker/leases?all=true")
-            .await;
-        all.ok()[0]["state"] == "expired"
+        let a = lab.td.get("/api/audit?action=target.lease_expired").await;
+        !a.ok().as_array().unwrap().is_empty()
     })
     .await;
     let row = last_audit(&lab.td, "target.lease_expired").await;
     assert_eq!(row["actor"], "system");
     assert_eq!(row["target"], "box");
+    let all = lab
+        .td
+        .get("/api/agents/terra%2Fworker/leases?all=true")
+        .await;
+    assert_eq!(all.ok()[0]["state"], "expired");
+    assert_eq!(all.ok()[0]["revoked_by"], "system");
 }
 
 /// A lease with a short `until` expires: the timer ends the session with
