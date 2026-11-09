@@ -1714,7 +1714,11 @@ pub fn bind(socket: &Path, agent_uid: u32) -> std::io::Result<UnixListener> {
     std::os::unix::fs::chown(&tmp, Some(agent_uid), None)?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     std::fs::rename(&tmp, socket)?;
-    private.close()?;
+    // The socket is in place: a failed removal of the empty directory is
+    // not a failed bind.
+    if let Err(e) = private.close() {
+        tracing::warn!(error = %e, "cannot remove the private bind directory");
+    }
     Ok(listener)
 }
 

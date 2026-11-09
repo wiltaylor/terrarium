@@ -807,23 +807,65 @@ fn the_socket_belongs_to_the_agent_user() {
     });
 }
 
-/// `native::bind` gives the socket mode 0600 without a change of the
-/// process umask (TER-500), and leaves no temporary directory behind.
+/// The process umask, from the Umask line of /proc/self/status. Reading it
+/// there does not change it (umask(2) would, for a moment).
+fn process_umask() -> u32 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let line = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Umask:"))
+        .expect("a Umask line");
+    u32::from_str_radix(line.trim(), 8).unwrap()
+}
+
+/// `native::bind` gives the socket mode 0600 and the caller's owner without
+/// a change of the process umask (TER-500): a second thread samples the
+/// umask while bind runs many times and never sees another value. It also
+/// leaves no temporary directory behind.
 #[tokio::test]
 async fn bind_sets_the_mode_without_the_process_umask() {
-    use nix::sys::stat::{Mode, umask};
+    use std::sync::atomic::AtomicUsize;
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("h.sock");
-    // Read the umask without a lasting change: umask() returns the old one.
-    let before = umask(Mode::from_bits_truncate(0o022));
-    umask(before);
-    let listener = native::bind(&socket, nix::unistd::getuid().as_raw()).unwrap();
-    let after = umask(before);
-    umask(after);
-    assert_eq!(after, before);
+    let uid = nix::unistd::getuid().as_raw();
+    let before = process_umask();
+    let stop = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicUsize::new(0));
+    let sampler = {
+        let (stop, seen) = (stop.clone(), seen.clone());
+        std::thread::spawn(move || {
+            let mut other = Vec::new();
+            while !stop.load(Ordering::Relaxed) {
+                let m = process_umask();
+                seen.fetch_add(1, Ordering::Relaxed);
+                if m != before {
+                    other.push(m);
+                }
+            }
+            other
+        })
+    };
+    // Bind until the sampler has read the umask often enough to see a
+    // change (and at least 200 times).
+    let mut binds = 0;
+    while binds < 200 || (seen.load(Ordering::Relaxed) < 20_000 && binds < 20_000) {
+        drop(native::bind(&socket, uid).unwrap());
+        binds += 1;
+    }
+    let listener = native::bind(&socket, uid).unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let other = sampler.join().unwrap();
+    assert!(
+        other.is_empty(),
+        "the umask changed during bind: {:o} -> {:?} ({binds} binds)",
+        before,
+        other.iter().map(|m| format!("{m:o}")).collect::<Vec<_>>()
+    );
+    assert_eq!(process_umask(), before);
     let meta = std::fs::symlink_metadata(&socket).unwrap();
     assert!(meta.file_type().is_socket());
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(meta.uid(), uid);
     let names: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().file_name())
