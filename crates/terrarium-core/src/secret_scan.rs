@@ -22,12 +22,21 @@
 //! | `jwt` | `eyJ...` `.` `eyJ...` `.` (a JWT, as the CLI session tokens) |
 //! | `terrarium-host-token` | `thk_...` (a host agent token), `the_...` (an enrol token) |
 //! | `credential-key` | a key named like `token`, `secret`, `password`, `api_key`, or `authorization`, with a value of 16 characters or more |
-//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) |
+//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) or the line is one of the non-secret fields of the daemon-written export ([`is_exempt_export_field`], issue #27) |
 //! | `credential-file` | a file name that holds credentials: `.env`, `auth.json`, `.credentials.json`, `id_rsa`, `*.pem`, `*.key`, ... |
 //!
 //! A line with the marker `terrarium-scan: allow` skips the
 //! `credential-key` and `high-entropy` rules (a false hit). The token
 //! patterns and the file names have no such marker.
+//!
+//! The daemon writes the export of the config repo, so no marker can
+//! stay on its lines (issue #27). The fields of the export that hold no
+//! secret skip the `high-entropy` rule instead, by field and only in the
+//! export ([`EXPORT_EXEMPT_FIELDS`]): the `url` of a repo, its
+//! `default_branch`, and a `credential` name. A real secret in another
+//! field of the same export file still hits, the token patterns still
+//! run on the line, and a file that a user writes keeps the rule, with
+//! the marker as the way out.
 
 use std::sync::OnceLock;
 
@@ -197,6 +206,35 @@ fn is_word(part: &str) -> bool {
         || letters.chars().all(|c| c.is_ascii_uppercase())
 }
 
+/// The dir of the daemon-written export in the config repo
+/// (`terrariumd::config_repo::EXPORT_DIR`): the fleet files, the secrets
+/// by name, and the board rules. This crate cannot see that constant, so
+/// it holds the same string.
+const EXPORT_PREFIX: &str = "export/";
+
+/// The fields of the daemon-written export that hold no secret (issue
+/// #27): the `url` of a repo, its `default_branch`, and a `credential`
+/// name (a name in the secret store, never a value). Only the
+/// `high-entropy` rule skips them ([`is_exempt_export_field`]).
+const EXPORT_EXEMPT_FIELDS: &[&str] = &["url", "default_branch", "credential"];
+
+/// Is `line` one of the [`EXPORT_EXEMPT_FIELDS`] of the daemon-written
+/// export (issue #27)? The daemon writes the export, so the
+/// [`ALLOW_MARKER`] cannot stay on its lines; the fields that hold no
+/// secret skip the `high-entropy` rule instead, by field and only in the
+/// export: the key stands at the start of the line, bare or quoted, and
+/// the rest of the line is not looked at.
+fn is_exempt_export_field(path: &str, line: &str) -> bool {
+    if !path.starts_with(EXPORT_PREFIX) {
+        return false;
+    }
+    let Some((key, _)) = line.trim_start().split_once('=') else {
+        return false;
+    };
+    let key = key.trim().trim_matches(['"', '\'']);
+    EXPORT_EXEMPT_FIELDS.contains(&key)
+}
+
 /// Is `name` (the last part of a path) a file that holds credentials?
 pub fn is_credential_file(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -269,6 +307,10 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
         if line.contains(ALLOW_MARKER) {
             continue;
         }
+        // Issue #27: the non-secret fields of the daemon-written export
+        // skip the high-entropy rule only; the token patterns above and
+        // the credential-key rule below still run on the line.
+        let exempt_field = is_exempt_export_field(path, line);
         if let Some(re) = key_value() {
             for c in re.captures_iter(line) {
                 if let Some(v) = c.get(1)
@@ -279,7 +321,7 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
                 }
             }
         }
-        if let Some(re) = long_runs() {
+        if !exempt_field && let Some(re) = long_runs() {
             for m in re.find_iter(line) {
                 if m.as_str().len() >= ENTROPY_MIN_LEN
                     && shannon_entropy(m.as_str()) > ENTROPY_THRESHOLD
@@ -485,6 +527,54 @@ mod tests {
         assert!(is_word_path("manage-profile/security/api-tokens"));
         assert!(!is_word_path("Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe"));
         assert!(!is_word_path("abc/def+ghi=="));
+    }
+
+    /// The non-secret fields of the daemon-written export skip the
+    /// `high-entropy` rule (issue #27): a repo URL with a long mixed-case
+    /// path commits. The same value in a field that is not exempt, or in
+    /// a file outside the export, still hits, and so does a token pattern
+    /// on the exempt line.
+    #[test]
+    fn export_fields_known_not_secret_skip_high_entropy() {
+        let he = "high-entropy".to_owned();
+        let export = "export/projects/p1.fleet.toml";
+        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+        // The URL of the issue: the run under the host is 32 or more
+        // mixed-case characters, not a word path.
+        let url = "https://github.com/wiltaylor-daf/ExampleReportingService.git";
+        let run = "com/wiltaylor-daf/ExampleReportingService";
+        assert!(run.len() >= ENTROPY_MIN_LEN && shannon_entropy(run) > ENTROPY_THRESHOLD);
+        for line in [
+            format!("url = \"{url}\""),
+            format!("default_branch = \"{random}\""),
+            format!("credential = \"{random}\""),
+        ] {
+            assert!(!rules(export, &line).contains(&he), "{line}");
+        }
+        // By field, not by file: another field of the same export hits.
+        for line in [
+            format!("description = \"{random}\""),
+            format!("host = \"{random}\""),
+            format!("name = \"{random}\""),
+        ] {
+            assert!(rules(export, &line).contains(&he), "{line}");
+        }
+        // Only in the export: a file that a user writes keeps the rule,
+        // with the marker as the way out.
+        for path in ["fleets/prod.fleet.toml", "prompts/a.md"] {
+            let line = format!("url = \"{url}\"");
+            assert!(rules(path, &line).contains(&he), "{path}");
+            let line = format!("url = \"{url}\" # {ALLOW_MARKER}");
+            assert!(!rules(path, &line).contains(&he), "{path}");
+        }
+        // The token patterns and the `credential-key` rule still run on
+        // the exempt line.
+        let ghp = format!("ghp_{}", "FAKEfake0123456789".repeat(2));
+        assert!(rules(export, &format!("url = \"https://x.example/{ghp}\""))
+            .contains(&"github-token".to_owned()));
+        let feed = "https://example.com/feed?token=0123456789abcdef0123456789abcdef";
+        assert!(rules(export, &format!("url = \"{feed}\""))
+            .contains(&"credential-key".to_owned()));
     }
 
     #[test]
