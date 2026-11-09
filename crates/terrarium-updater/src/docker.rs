@@ -910,7 +910,8 @@ mod tests {
     #[test]
     fn service_command_crosses_the_legacy_image_boundary_both_ways() {
         let old = json!({"Config": {"Cmd": ["terrariumd"]}});
-        let new = json!({"Config": {"Cmd": ["terrariumd"], "Labels": {"io.terrarium.hot-swap-layout": "1"}}});
+        // The real CMD of a hot-swap image (Dockerfile), not the legacy one.
+        let new = json!({"Config": {"Cmd": ["--daemon-service", "terrariumd"], "Labels": {"io.terrarium.hot-swap-layout": "1"}}});
         let mut body = create_body(&spec(), "new");
         service_command(&mut body, &new);
         assert_eq!(body["Cmd"], json!(["--daemon-service", "terrariumd"]));

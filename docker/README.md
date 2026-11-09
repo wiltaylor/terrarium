@@ -43,9 +43,11 @@ live runner again. The harness does not restart.
 When `terrariumd` exits with status 0 and the container got no stop signal,
 the entrypoint stops the runners (see below) and the container exits.
 
-The Compose service explicitly runs `--daemon-service terrariumd`. Only this
-mode initializes releases and supervises the daemon. The image defaults to the
-same command, so direct `docker run` and older Compose files work too. Other commands (for example `bash`, backup
+The Compose service runs the image CMD, which is the service command
+`--daemon-service terrariumd`. Only this mode initializes releases and supervises
+the daemon, so a pre-hot-swap image (whose CMD is plain `terrariumd`) works from
+the same Compose file. Direct `docker run` and older Compose files (which set
+the command explicitly) work too. Other commands (for example `bash`, backup
 subcommands, or `terrariumd --version`) run once using bundled binaries and
 never change the live release or probation marker. A state-volume lock rejects
 a second service, including an accidental `compose run terrarium` without a
