@@ -20,6 +20,7 @@ pub mod conflict_hints;
 pub mod db;
 pub mod defaults;
 pub mod display;
+mod docker_tunnel;
 pub mod error;
 pub mod events;
 pub mod executor;
@@ -187,7 +188,15 @@ fn log_definitions(defs: &Definitions, errors: &[String], dir: &std::path::Path)
 /// subsystem takes its settings from the environment
 /// ([`usage_collector::UsageConfig::from_env`]).
 pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
-    start_with_usage(cfg, usage_collector::UsageConfig::from_env()).await
+    start_with_executor(cfg, executor::Executor::default()).await
+}
+
+/// Start with an explicit executor, avoiding process-global SSH overrides in tests.
+pub async fn start_with_executor(
+    cfg: DaemonConfig,
+    executor: executor::Executor,
+) -> anyhow::Result<Daemon> {
+    start_with_usage_and_executor(cfg, usage_collector::UsageConfig::from_env(), executor).await
 }
 
 /// [`start`] with the settings of usage accounting, quota probes, and login
@@ -195,6 +204,14 @@ pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
 pub async fn start_with_usage(
     cfg: DaemonConfig,
     usage: usage_collector::UsageConfig,
+) -> anyhow::Result<Daemon> {
+    start_with_usage_and_executor(cfg, usage, executor::Executor::default()).await
+}
+
+async fn start_with_usage_and_executor(
+    cfg: DaemonConfig,
+    usage: usage_collector::UsageConfig,
+    executor: executor::Executor,
 ) -> anyhow::Result<Daemon> {
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("cannot create state dir {}", cfg.state_dir.display()))?;
@@ -222,7 +239,7 @@ pub async fn start_with_usage(
         repos_dir: cfg.repos_dir.clone(),
         insecure_agent_header: cfg.insecure_agent_header,
         usage: Arc::new(usage_collector::UsageRuntime::new(usage)),
-        executor: Arc::default(),
+        executor: Arc::new(executor),
         harness_latest: Arc::default(),
         harness_tools: Arc::default(),
         agent_tools: Arc::default(),

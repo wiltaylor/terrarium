@@ -11690,6 +11690,82 @@ or the operator) read and set the config. The body is a JSON object:
 | `work_dir`     | the dir on the target for the work trees of the slots           | `/tmp/terrarium-jobs` |
 | `timeout_secs` | the most time the recipe may run                                | 3600                  |
 | `failure_patterns` | literal strings to extract from recipe output, with three following lines of context | `["FAILED", "panicked", "test result: FAILED", "failures:"]` |
+| `merge_secrets` | `DOCKER_CI_KEY` and `DOCKER_CI_RESET_KEY` mapped to `@secret:<name>[.<field>]`, consumed only by the daemon for merge jobs | `{}` |
+| `docker_ci` | public SSH settings: `destination`, `port`, `known_hosts`, `reset_destination`, `reset_port`, `reset_known_hosts` | none |
+
+`merge_secrets` uses the project's `delivery:<project>` principal, never
+agent or project grants. A delivery grant requires `level: run`, named
+targets, and no startup `env`. Worker runs, launches, secret reads, and
+brokers do not consider delivery grants. No database migration is needed:
+the existing grantee column stores principal strings without a type CHECK.
+Both `DOCKER_CI_KEY` and `DOCKER_CI_RESET_KEY` must be present when enabled.
+Literal values and arbitrary recipe
+env injection are refused.
+References resolve against current grants at each merge recipe, including
+reruns, and fail closed on a missing grant, wrong target, or proxy-only
+credential. Each use emits `secret.run` with the job, principal,
+target, field, and reference name, never the value. The SSH key remains in
+a private daemon run directory and is never sent to the target, recipe,
+or their environment. Output is stream-redacted with the full key and
+individual PEM lines before retention. The recipe retains its full raw target
+log because credentials never reach the target process tree.
+
+Configure `docker_ci` through the delivery API or fleet configuration before
+adding merge secret references. For example, `destination` is `root@vm`,
+`port` is its SSH port, and `known_hosts` is the administrator-verified
+OpenSSH host-key line (including `[host]:port` for a nonstandard port).
+`reset_destination` and `reset_port` identify the forced reset command;
+`reset_known_hosts` supplies its administrator-verified OpenSSH pin, written
+into a job-private reset directory. Neither SSH connection uses the daemon's
+shared TOFU known_hosts file. No endpoint
+or key pin is compiled into the daemon. Reset exit 75 retries twice with
+a two-second delay; any other failure prevents opening the tunnel.
+The daemon resolves configured merge secrets and opens the tunnel for every
+merge, independently of the recipe's `TERRARIUM_DOCKER_CI` gate switch.
+
+The Docker gate is off by default: merges continue to run the full
+`ci::validate` without requiring Docker or a key. To roll it out in order:
+deploy the job-runner support first, then
+the secret administrator grants `terrarium/docker-ci-vm` and
+`terrarium/docker-ci-reset` to
+`delivery:terrarium` with `--level run --target terrarium-helios-build`.
+Do not grant the key to `project:terrarium` or workers. The lead configures
+`--merge-secret DOCKER_CI_KEY=@secret:docker-ci-vm` and
+`--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery, with recipe
+`TERRARIUM_DOCKER_CI=1 just ci::validate-affected` to explicitly enable the
+live Docker gate. Leave the switch unset (or `0`) until the daemon and
+grant are ready. `--clear-merge-secrets` removes the references.
+The daemon pins the Docker VM's public host key and owns its SSH local
+forward. Trusted relay code embedded in the daemon release, never read
+from the merged branch, creates a 0600 Unix socket in a job-private
+directory on the target. Docker byte streams travel over its executor
+session to the daemon's SSH forward. The recipe gets only
+`DOCKER_HOST=unix://<job socket>`. Teardown closes the relay, socket, and
+SSH child on success or failure. Other processes sharing the target OS
+account can reach that socket during the job. This is an accepted risk:
+it grants Docker control of the throwaway VM, not access to its SSH key.
+Before opening the tunnel the daemon calls META-104's forced-command SSH
+reset as `dockerci@10.3.0.2` on port 22, with the second job-only key and
+strict checking against configured `reset_known_hosts` in its private RunDir.
+It sends no remote command. Exit 0 permits the tunnel, exit 1 fails, exit
+75 reports the reset lock busy, and a 150-second timeout fails closed.
+Both keys remain daemon-side. The VM's LAN and Tailscale egress is blocked
+outside the VM by vmlab switch rules, so branch code cannot undo it.
+The generic stream relay
+closes both directions when either peer closes. It does not preserve TCP
+half-close semantics. Docker version/pull/run/log streaming is tested, but
+clients requiring a write-half-close followed by a response are unsupported.
+Half-close forwarding is outside this change's scope. The relay
+does not filter privileged creates or host namespaces. A Docker API
+authorization layer, not a byte-pattern filter, would be needed to
+enforce that without breaking exec/attach upgrades and streaming APIs.
+Do not enable rollout until both grants and the pinned port-22 host key
+are installed and reset has been verified by the authorized operator.
+The gate runs the full suite, then explicitly runs the lifecycle/workspace and
+reservation/release Docker tests, rejecting ignored or unmatched results.
+The create-only device-IO test remains manual: its host-side `/dev/block`
+resolution requires a host agent colocated with Docker, not a remote
+`DOCKER_HOST`. The separate reservation/release case runs remotely.
 
 `failure_patterns: []` disables extraction. The patterns are literal, not
 regular expressions, must not be empty or whitespace-only, and can also be
@@ -11724,7 +11800,8 @@ validate or a merge is a `409 conflict` that says how to set it.
   (`[{card, branch, by_agent?, outcome?, note?}]`); `card`, `branch`, and
   `by_agent` are those of the first card. See 35.3 for the results.
 
-The recipe gets this env (TER-100), and no credential:
+The recipe gets this env (TER-100), plus any configured merge-only secrets
+for a merge job. It never receives the repository credential:
 
 | variable                  | value                                                                 |
 |---------------------------|-----------------------------------------------------------------------|
@@ -11742,7 +11819,8 @@ no `next`, or the commit has no merge-base with it, `TERRARIUM_BASE` and
 must run all of them. The terrarium repo's recipe for this is `just
 ci::validate-affected`: a validate job runs the checks that its changed
 files reach (the rules are in `scripts/affected.py`), and a merge job runs
-the full `just ci::validate`.
+the full `just ci::validate` through `just ci::merge`, plus the Docker
+gate only when `TERRARIUM_DOCKER_CI=1` is explicitly enabled.
 
 Jobs start first in, first out across all projects. A job starts when:
 
