@@ -373,7 +373,7 @@ fn every_settings_env_key_reaches_the_compose_service() {
         }
     }
     for (name, _) in NOT_PASSED {
-        if passed.contains(*name) {
+        if passed.iter().any(|p| p == *name) {
             problems.push(format!(
                 "{name}: passed by compose now, remove it from NOT_PASSED"
             ));
