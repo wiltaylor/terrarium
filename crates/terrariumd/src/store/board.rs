@@ -1802,8 +1802,7 @@ fn apply_move(
     }
     // With `board_flow = rules` the rules `card-blocked-mail` and
     // `card-done-mail` of the built-in pack send these mails (TER-162 D10).
-    if (to.is(BLOCKED) || to.name == DONE)
-        && !crate::store::projects::rules_flow(t, &card.project)?
+    if (to.is(BLOCKED) || to.name == DONE) && !crate::store::projects::rules_flow(t, &card.project)?
     {
         if to.is(BLOCKED) {
             notify_blocked(t, &author, &moved, comment.unwrap_or_default())?;

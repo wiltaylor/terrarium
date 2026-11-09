@@ -2199,7 +2199,12 @@ async fn mails_of(td: &TestDaemon, who: &str, prefix: &str, n: usize) -> Vec<Val
         };
         let got: Vec<Value> = all
             .into_iter()
-            .filter(|m| m["subject"].as_str().unwrap_or_default().starts_with(prefix))
+            .filter(|m| {
+                m["subject"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with(prefix)
+            })
             .collect();
         if got.len() >= n || start.elapsed() > std::time::Duration::from_secs(60) {
             return got;
