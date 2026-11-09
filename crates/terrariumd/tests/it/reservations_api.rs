@@ -137,7 +137,12 @@ async fn setup_opts(
         native_gpu,
         ..Default::default()
     };
-    if options.capabilities.native_gpu.as_ref().is_some_and(|n| n.enforced) {
+    if options
+        .capabilities
+        .native_gpu
+        .as_ref()
+        .is_some_and(|n| n.enforced)
+    {
         // An enforced helper: a fake that answers `hello` with the session
         // right, and a fake shim that records each helper request (apply,
         // stop) and says ok.
