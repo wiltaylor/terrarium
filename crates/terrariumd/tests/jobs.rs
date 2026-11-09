@@ -2195,8 +2195,14 @@ async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
     let a = lab(1).await;
     let wd = a._dirs.path().join("jobs");
     let marker = wd.join("p/recipe-of-a");
-    // Daemon A's recipe runs for a while and holds the slot's lock.
-    let recipe = format!("test -f OK && touch '{}' && sleep 10", marker.display());
+    // Daemon A's recipe holds the slot's lock until the gate appears (not a
+    // fixed sleep: under load daemon B's two attempts may start late).
+    let gate = a._dirs.path().join("gate");
+    let recipe = format!(
+        "test -f OK && touch '{}' && while ! test -f '{}'; do sleep 0.05; done",
+        marker.display(),
+        gate.display()
+    );
     a.td.put(
         "/api/projects/p/delivery",
         json!({"target": "p-box", "recipe": recipe, "slots": 1,
@@ -2271,6 +2277,8 @@ async fn two_daemons_on_one_work_dir_fail_clearly_on_a_clash() {
         std::fs::read_to_string(wd.join("p/slot-1/OK")).unwrap(),
         "a1\n"
     );
+    // Let A's recipe end: it held the slot for the whole clash above.
+    std::fs::write(&gate, "go\n").unwrap();
     // A's job is unaffected: it passes and its card moves to review.
     a.until_card(&ca, "review", |c| c["column"] == "review")
         .await;
