@@ -225,6 +225,10 @@ pub struct RunnerSupervisorConfig {
 /// The default of [`RunnerSupervisorConfig::upgrade_limit`].
 pub const DEFAULT_UPGRADE_LIMIT: usize = 3;
 
+/// How long an upgrade waits for the runner status to follow a rest that
+/// the events show.
+const UPGRADE_STATUS_LAG: Duration = Duration::from_secs(5);
+
 /// The default of [`RunnerSupervisorConfig::lead_nudge_interval`].
 pub const DEFAULT_LEAD_NUDGE_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -2387,29 +2391,62 @@ impl RunnerSupervisor {
                 None
             }
         };
-        // The check and the claim of the restart are under one lock: from
-        // here, no turn, recap or pointer goes out (`restart_requested`).
-        let runner = {
-            let mut slots = lock(&self.inner.slots);
-            let Some(slot) = slots.get_mut(&id).filter(|s| s.epoch == epoch) else {
-                return;
+        let Some(permit) = permit else {
+            if let Some(slot) = lock(&self.inner.slots)
+                .get_mut(&id)
+                .filter(|s| s.epoch == epoch)
+            {
+                slot.upgrade_waiting = false;
+            }
+            return;
+        };
+        // The runner reports its status on a stream of its own, which can
+        // lag behind the events: an agent that the events show at rest
+        // gets a short time for the runner status to follow.
+        let mut lagged = false;
+        let runner = loop {
+            // The check and the claim of the restart are under one lock:
+            // from here, no turn, recap or pointer goes out
+            // (`restart_requested`).
+            let behind = {
+                let mut slots = lock(&self.inner.slots);
+                let Some(slot) = slots.get_mut(&id).filter(|s| s.epoch == epoch) else {
+                    return;
+                };
+                let Some(runner) = slot.runner.clone() else {
+                    slot.upgrade_waiting = false;
+                    return;
+                };
+                // Out of a turn: the runner rests (`idle` or `waiting`),
+                // with no work on its way. A runner `blocked` is in a turn
+                // (a question on screen, a stalled tool call).
+                if slot.upgrade_pending && slot.can_idle_stop() && !slot.restart_requested {
+                    slot.upgrade_waiting = false;
+                    slot.upgrade_pending = false;
+                    slot.upgrade_permit = Some(permit);
+                    slot.restart_requested = true;
+                    slot.resume = slot.agent.session.clone().or(slot.session.clone());
+                    break runner;
+                }
+                let behind = slot.upgrade_pending
+                    && slot.seen.is_resting()
+                    && !runner.status().is_resting();
+                if lagged || !behind {
+                    slot.upgrade_waiting = false;
+                    return;
+                }
+                runner
             };
-            slot.upgrade_waiting = false;
-            // Out of a turn: the runner rests (`idle` or `waiting`), with
-            // no work on its way. A runner `blocked` is in a turn (a
-            // question on screen, a stalled tool call).
-            let settled = slot.can_idle_stop() && !slot.restart_requested;
-            let Some(permit) = permit.filter(|_| slot.upgrade_pending && settled) else {
-                return;
+            lagged = true;
+            let mut status = behind.watch_status();
+            let rests = async {
+                while !status.borrow_and_update().is_resting() {
+                    if status.changed().await.is_err() {
+                        break;
+                    }
+                }
             };
-            let Some(runner) = slot.runner.clone() else {
-                return;
-            };
-            slot.upgrade_pending = false;
-            slot.upgrade_permit = Some(permit);
-            slot.restart_requested = true;
-            slot.resume = slot.agent.session.clone().or(slot.session.clone());
-            runner
+            let _ = tokio::time::timeout(UPGRADE_STATUS_LAG, rests).await;
         };
         info!(
             agent = %id,
