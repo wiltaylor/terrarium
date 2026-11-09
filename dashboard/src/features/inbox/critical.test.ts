@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { InboxItem, Question } from "../../api/types";
+import type { InboxItem, Question, Thread } from "../../api/types";
 import { ALERT_FAVICON, ALERT_TITLE, announce, createTitleFlasher, criticalBanner, inboxItemDomId, inboxItemHref, shortText, type FlashEnv } from "./critical";
 
 const question = (id: string, over: Partial<Question> = {}): Question => ({
@@ -49,6 +49,21 @@ describe("criticalBanner", () => {
     expect(b.from).toBe("shop/lead");
     expect(b.text).toBe("Prod is down.");
     expect(b.href).toBe("/inbox?item=notice%3Anew");
+  });
+
+  it("shows a thread with a critical question: its topic, its agent, and the link to the thread (TER-488)", () => {
+    const th = (id: string, over: Partial<Thread> = {}): Thread =>
+      ({ id, topic: `Topic ${id}\nmore`, scope: "shop", template: null, opened_by: "operator", opened_by_name: "operator", agent: "A1", agent_name: "lead", report_to: null, report_to_name: null, status: "waiting_operator", response: null, handoff: null, open_questions: 1, created_at: "2026-10-28T09:00:00.000Z", updated_at: "2026-10-28T09:00:00.000Z", closed_at: null, closed_by: null, ...over }) as Thread;
+    const thread = (id: string, at: string, over: Partial<Thread> = {}): InboxItem => ({ id: `inbox-thread:${id}`, kind: "thread", open: true, urgent: true, critical: true, project: "shop", at, thread: th(id, over) });
+    const one = criticalBanner([item("old", "2026-10-28T08:00:00.000Z"), thread("T/1", "2026-10-28T12:00:00.000Z")])!;
+    expect(one).toMatchObject({ more: 1, from: "shop/lead", text: "Topic T/1", href: "/threads/T%2F1" });
+    // More than one critical thread: the Threads screen.
+    const two = criticalBanner([thread("T1", "2026-10-28T12:00:00.000Z"), thread("T2", "2026-10-28T11:00:00.000Z", { agent_name: null })])!;
+    expect(two).toMatchObject({ more: 1, href: "/threads" });
+    // A thread that only waits (no critical question) is no banner; the newest critical item wins.
+    expect(criticalBanner([{ ...thread("T3", "2026-10-28T13:00:00.000Z"), urgent: false, critical: false }, item("n", "2026-10-28T10:00:00.000Z")])!.item.id).toBe("notice:n");
+    // A global thread with no agent: who opened it.
+    expect(criticalBanner([{ ...thread("G", "2026-10-28T12:00:00.000Z", { scope: "global", agent_name: null, opened_by: "A9", opened_by_name: "meta/lead" }), project: null }])!.from).toBe("meta/lead");
   });
 
   it("hides after the acknowledgement: a closed item is not critical", () => {

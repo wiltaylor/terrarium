@@ -34,6 +34,17 @@ impl DeviceNodes for FakeNodes {
     }
 }
 
+/// `native::bind` sets the process umask to 0o177 while it binds. The umask
+/// is per process, so a directory that another test creates in that window
+/// gets mode 0600: no search bit, and a non-root user then gets EACCES in
+/// it (root ignores the mode). Each fixture setup and each bind holds this
+/// lock.
+static UMASK: Mutex<()> = Mutex::new(());
+
+fn umask_lock() -> std::sync::MutexGuard<'static, ()> {
+    UMASK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 struct Fake {
     dir: tempfile::TempDir,
     root: tempfile::TempDir,
@@ -89,6 +100,7 @@ impl Fake {
     }
 
     async fn with(rights: Vec<Right>, agent_uid: u32, gpu: Result<(), String>) -> Self {
+        let umask = umask_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let d = dir.path();
@@ -157,6 +169,7 @@ impl Fake {
         });
         let socket = d.join("helper.sock");
         let listener = native::bind(&socket, nix::unistd::getuid().as_raw()).unwrap();
+        drop(umask);
         tokio::spawn(native::serve(helper.clone(), listener));
         Self {
             dir,
@@ -622,21 +635,21 @@ fn uids(run: &str) -> Vec<String> {
 #[tokio::test]
 async fn each_holder_runs_under_its_own_workload_uid() {
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
-    let (_a, r) = send(
+    let (a, r) = send(
         &f.socket,
-        &Request::Start(f.start("p/a", None, &[], &[], &["sleep", "1"])),
+        &Request::Start(f.start("p/a", None, &[], &[], &["cat"])),
     )
     .await;
     assert!(matches!(r, Reply::Started { .. }), "{r:?}");
-    let (_a2, r) = send(
+    let (a2, r) = send(
         &f.socket,
-        &Request::Start(f.start("p/a", None, &[], &[], &["sleep", "1"])),
+        &Request::Start(f.start("p/a", None, &[], &[], &["cat"])),
     )
     .await;
     assert!(matches!(r, Reply::Started { .. }), "{r:?}");
-    let (_b, r) = send(
+    let (b, r) = send(
         &f.socket,
-        &Request::Start(f.start("p/b", None, &[], &[], &["sleep", "1"])),
+        &Request::Start(f.start("p/b", None, &[], &[], &["cat"])),
     )
     .await;
     assert!(matches!(r, Reply::Started { .. }), "{r:?}");
@@ -656,6 +669,14 @@ async fn each_holder_runs_under_its_own_workload_uid() {
         matches!(&r, Reply::Error { code: ErrorKind::Busy, message } if message.contains("no free workload user")),
         "{r:?}"
     );
+    // The sessions run `cat`, so they hold their workload users until
+    // their stdin ends, however slow the run (a `sleep` could end first).
+    for s in [a, a2, b] {
+        let (_, mut wr) = s.into_split();
+        native::write_frame(&mut wr, Kind::StdinEof, b"")
+            .await
+            .unwrap();
+    }
     f.wait_idle().await;
     // After both ended, p/c gets a UID.
     let (_c, r) = send(
@@ -885,6 +906,7 @@ fn the_socket_belongs_to_the_agent_user() {
         eprintln!("skipped: needs root to give the socket to another UID");
         return;
     }
+    let _umask = umask_lock();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("h.sock");
     let rt = tokio::runtime::Builder::new_current_thread()
