@@ -64,20 +64,18 @@ fn forward_socket(dir: &RunDir) -> ApiResult<(PathBuf, Option<tempfile::TempDir>
     Ok((socket, Some(short)))
 }
 
-/// The target end of the relay: `<work_dir>/.git/terrarium/d-<ulid>`. The
-/// relay binds `docker.sock` in it, so a path over the socket limit fails
-/// before the reset and the SSH tunnel, with a clear error (TER-626).
-fn relay_dir(work_dir: &str) -> ApiResult<String> {
-    let dir = format!("{work_dir}/.git/terrarium/d-{}", ulid::Ulid::new());
-    let socket = format!("{dir}/docker.sock");
-    if socket.len() > MAX_SOCKET_PATH {
-        return Err(ApiError::invalid(format!(
-            "Docker relay socket path {socket} is {} bytes, over the \
-             {MAX_SOCKET_PATH}-byte Unix socket limit: use a shorter job work_dir",
-            socket.len()
-        )));
+/// The target dir of the relay socket: `<work_dir>/.git/terrarium/d-<ulid>`.
+/// When `docker.sock` in it would pass the socket limit (a long work dir,
+/// TER-626), it is `/tmp/terrarium-d-<ulid>` on the target. The relay makes
+/// the dir 0700 with `mkdir`, which fails on a dir that exists, and removes
+/// it when it stops.
+fn relay_dir(work_dir: &str) -> String {
+    let id = ulid::Ulid::new();
+    let dir = format!("{work_dir}/.git/terrarium/d-{id}");
+    if dir.len() + "/docker.sock".len() <= MAX_SOCKET_PATH {
+        return dir;
     }
-    Ok(dir)
+    format!("/tmp/terrarium-d-{id}")
 }
 
 /// META-104 forced command. No recipe code or remote command is involved.
@@ -225,7 +223,7 @@ pub async fn open(
     timeout: u64,
     config: &DockerCiDef,
 ) -> ApiResult<Tunnel> {
-    let target_dir = relay_dir(work_dir)?;
+    let target_dir = relay_dir(work_dir);
     let dir = RunDirs::new(&state.state_dir).run_dir()?;
     let keyfile = dir.write_private("identity", key.as_bytes())?;
     let hosts = dir.write_private("known_hosts", config.known_hosts.as_bytes())?;
@@ -623,17 +621,13 @@ mod tests {
     }
 
     #[test]
-    fn relay_dir_refuses_a_socket_path_over_the_limit() {
-        let dir = relay_dir("/w/slot-1").unwrap();
+    fn relay_dir_stays_under_the_unix_socket_limit() {
+        let dir = relay_dir("/w/slot-1");
         assert!(dir.starts_with("/w/slot-1/.git/terrarium/d-"));
         let long = format!("/w/{}", "x".repeat(60));
-        let err = relay_dir(&long).unwrap_err();
-        assert!(
-            err.message.contains("107-byte Unix socket limit"),
-            "{}",
-            err.message
-        );
-        assert!(err.message.contains(&long), "{}", err.message);
+        let dir = relay_dir(&long);
+        assert!(dir.starts_with("/tmp/terrarium-d-"), "{dir}");
+        assert!(dir.len() + "/docker.sock".len() <= MAX_SOCKET_PATH);
     }
 
     #[test]
