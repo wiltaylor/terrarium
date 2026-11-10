@@ -12686,6 +12686,42 @@ A batch merge:
 - Any other failure (`error`) runs the batch once more with the merged
   cards, then fails each of them.
 
+The failed tests of a merge job run once more (TER-683). This is in the
+recipe, so the job stays one job:
+
+- In a merge job (`TERRARIUM_JOB_KIND=merge`), when `ci::test` (the root
+  pass) or `ci::test-unprivileged` (the uid 1001 pass) fails,
+  `scripts/rerun_tests.py` reads the names of the failed tests from the
+  libtest output (the console output, or the libtest JSON when
+  `RESULTS_DIR` is set) and runs exactly those tests once more: the same
+  cargo command with the test names and `--exact` (and `--tests`, so no
+  doctest), or for uid 1001 the same test binary as the same uid, from the
+  same directory, with the same env and a new private HOME. With
+  `RESULTS_DIR` the rerun writes `rust-rerun.json` and
+  `rust-unprivileged-rerun.json`; `rust.json` keeps the first run.
+- Every rerun test passes: the step passes, and the suite goes on. One
+  fails again, or does not run: the step fails, and the job is `red` as
+  before (split, fix card, failure block).
+- No rerun, the step fails at once: a build, fmt or clippy error, a test
+  binary that ended without a result (a crash or a signal), a failed
+  doctest, or more than 5 failed tests in the step.
+- For each rerun test the recipe prints one line
+  `[terrarium rerun] {"step", "test", "first", "rerun", "tail"}` (`step`
+  `test` or `test-unprivileged`, `first` `failed`, `rerun` `ok`, `failed`
+  or `missing`, `tail` the end of the first failure's output). The daemon
+  reads these lines from the job log (at most 20; names over 300 bytes and
+  other steps are dropped, the tail is cut to 1500 bytes), keeps them in
+  `reruns` of the job (`GET /api/jobs/{id}`), and takes them out of the
+  `tail`, which ends with one line `[rerun once: <step> <test>: failed,
+  then <result>; ...]`.
+- A merge job that passed files a flaky-test card for each test of
+  `reruns` with `rerun: ok`, in both board flows: a card `Flaky test:
+  <test>` in `backlog` with the labels `flaky`, `flaky-test:<hash of the
+  name>`, `version:vnext` and `type:small`, the job ID, the step and the
+  failure tail. When an open card (not in `done`, not archived) has that
+  `flaky-test:` label, it gets a comment with the new job instead.
+  A red job files no flaky card.
+
 The card writes of the queue are made as the operator. Their comments
 start with `Job queue:`.
 

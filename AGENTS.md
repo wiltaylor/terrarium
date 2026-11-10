@@ -52,6 +52,13 @@ It runs, in this order, the same parts as the GitHub CI `check` job
    The merge host needs a passwd entry for uid 1001 (OpenSSH tests need one):
    `useradd -u 1001 -M -s /usr/sbin/nologin terrarium-ci`. Without it the
    step fails before it runs a test.
+   In a merge job a failed test step (the root pass or the uid 1001 pass)
+   runs only its failed tests once more (TER-683, `scripts/rerun_tests.py`).
+   All pass: the step passes, and the daemon files a `flaky` card in
+   `backlog` for each of them (or comments on the open one). One fails
+   again: the step fails. No rerun for a build error, a crashed test
+   binary, a failed doctest, or more than 5 failed tests. A card check
+   never reruns: there each failure shows as it is (docs/api.md 35.3).
 4. `ci::scripts-test`: the Python tests under `scripts/`
 5. `ci::dashboard-check`: `npm run check`, then the dashboard unit tests (`npm run test -- --run`) in `dashboard/`
 
