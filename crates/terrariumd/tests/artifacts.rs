@@ -750,3 +750,145 @@ async fn artifact_origin_and_cors() {
     let r = oneshot(dash(), &path, &[("host", "t.lan:8081"), ("origin", "null")]).await;
     assert!(r.headers.get("access-control-allow-origin").is_none());
 }
+
+fn blob_names(td: &TestDaemon) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(td.state.join("artifacts"))
+        .map(|rd| {
+            rd.map(|e| e.unwrap().file_name().into_string().unwrap())
+                .filter(|n| n.len() >= 64 && n != "url.key")
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// TER-554: an upload refused for its name, the quota, or a bad attach
+/// leaves no blob on disk.
+#[tokio::test]
+async fn refused_uploads_leave_no_blob() {
+    let td = setup_with(|c| {
+        write(
+            c,
+            "daemon.toml",
+            "[artifacts]\nmax_file_bytes = 1000\nproject_quota_bytes = 2500\n",
+        )
+    })
+    .await;
+    let a = upload(&td, "proj/w1", "a", &[b'a'; 1000]).await;
+    upload(&td, "proj/w1", "b", &[b'b'; 1000]).await;
+    let before = blob_names(&td);
+    assert_eq!(before.len(), 2, "{before:?}");
+    // Over the quota.
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "c", "data_base64": b64(&[b'c'; 600])}),
+    )
+    .await
+    .err(413, "too_large");
+    // A bad name.
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "x/y", "data_base64": b64(b"small")}),
+    )
+    .await
+    .err(422, "invalid");
+    // The row fails after the blob is written: a card that does not exist.
+    let r = upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "d", "data_base64": b64(b"attach fails"),
+               "attach": {"kind": "card", "ref": "TER-999"}}),
+    )
+    .await;
+    assert!(r.status.is_client_error(), "{:?}", r.body);
+    assert_eq!(blob_names(&td), before);
+    // A refused upload of bytes another artifact uses keeps that blob.
+    let r = upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "a2", "data_base64": b64(&[b'a'; 1000]),
+               "attach": {"kind": "card", "ref": "TER-999"}}),
+    )
+    .await;
+    assert!(r.status.is_client_error(), "{:?}", r.body);
+    assert_eq!(blob_names(&td), before);
+    assert!(before.contains(&a["sha256"].as_str().unwrap().to_owned()));
+}
+
+/// TER-554: the orphan sweep removes the blobs, bundles and old temp
+/// entries that no row owns, and keeps the rest. The daemon runs it at
+/// start.
+#[tokio::test]
+async fn orphan_sweep_removes_unowned_blobs() {
+    let mut td = setup().await;
+    let a = upload(&td, "proj/w1", "a.txt", b"owned").await;
+    let owned = a["sha256"].as_str().unwrap().to_owned();
+    let dir = td.state.join("artifacts");
+    let orphan = "1".repeat(64);
+    let bundle = format!("{}.bundle", "2".repeat(64));
+    let old_tmp = format!("{}.tmp-01OLD", "3".repeat(64));
+    let new_tmp = format!("{}.tmp-01NEW", "4".repeat(64));
+    std::fs::write(dir.join(&orphan), b"orphan").unwrap();
+    std::fs::create_dir_all(dir.join(&bundle)).unwrap();
+    std::fs::write(dir.join(&bundle).join("index.html"), b"<p>").unwrap();
+    let f = std::fs::File::create(dir.join(&old_tmp)).unwrap();
+    f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200))
+        .unwrap();
+    drop(f);
+    std::fs::write(dir.join(&new_tmp), b"in flight").unwrap();
+    std::fs::write(dir.join("notes"), b"not ours").unwrap();
+
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let n = terrariumd::api::sweep_orphans(&state).await.unwrap();
+    assert_eq!(n, 3);
+    assert!(dir.join(&owned).is_file());
+    assert!(!dir.join(&orphan).exists());
+    assert!(!dir.join(&bundle).exists());
+    assert!(!dir.join(&old_tmp).exists());
+    assert!(dir.join(&new_tmp).exists());
+    assert!(dir.join("notes").exists());
+
+    // At start.
+    std::fs::write(dir.join(&orphan), b"orphan").unwrap();
+    td.boot(None, None).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while dir.join(&orphan).exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the start-up sweep did not remove the orphan"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(dir.join(&owned).is_file());
+}
+
+/// TER-554: a delete removes its blob under the digest lock, so it waits
+/// while an upload of the same bytes holds the lock.
+#[tokio::test]
+async fn delete_waits_for_the_digest_lock() {
+    let td = setup().await;
+    let a = upload(&td, "proj/w1", "a.txt", b"locked bytes").await;
+    let sha = a["sha256"].as_str().unwrap().to_owned();
+    let path = td.state.join("artifacts").join(&sha);
+    let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
+    let lock = ctx.digest_lock(&sha);
+    let guard = lock.clone().lock_owned().await;
+    let (r, ()) = tokio::join!(
+        td.req(
+            Method::DELETE,
+            "/api/artifacts/ART-1",
+            None,
+            Some("proj/w1")
+        ),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(path.is_file(), "the delete removed the blob under the lock");
+            drop(guard);
+        }
+    );
+    assert_eq!(r.status.as_u16(), 204);
+    assert!(!path.exists());
+}

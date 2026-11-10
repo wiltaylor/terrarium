@@ -79,6 +79,17 @@ pub struct ArtifactCtx {
     pub dir: PathBuf,
     pub limits: Limits,
     secret: Vec<u8>,
+    /// Blob locks, one stripe per first digest byte ([`ArtifactCtx::digest_lock`]).
+    locks: Vec<Arc<tokio::sync::Mutex<()>>>,
+}
+
+/// The number of blob lock stripes: one per value of the first digest byte.
+const LOCK_STRIPES: usize = 256;
+
+fn new_locks() -> Vec<Arc<tokio::sync::Mutex<()>>> {
+    (0..LOCK_STRIPES)
+        .map(|_| Arc::new(tokio::sync::Mutex::new(())))
+        .collect()
 }
 
 impl std::fmt::Debug for ArtifactCtx {
@@ -164,6 +175,7 @@ pub fn context(state_dir: &Path, config_dir: &Path) -> ApiResult<Arc<ArtifactCtx
         limits: load_limits(config_dir),
         secret: load_secret(state_dir)
             .map_err(|e| ApiError::internal(format!("cannot read the artifact URL key: {e}")))?,
+        locks: new_locks(),
     });
     map.insert(state_dir.to_owned(), ctx.clone());
     Ok(ctx)
@@ -202,6 +214,20 @@ impl ArtifactCtx {
 
     pub fn bundle_dir(&self, sha: &str) -> PathBuf {
         self.dir.join(format!("{sha}.bundle"))
+    }
+
+    /// The lock of the blobs of this digest. Hold it from the blob write
+    /// until the artifact row is committed, and from the "is it used" check
+    /// until the blob is removed, so an upload and a delete of the same
+    /// bytes cannot leave a row without a blob. Take it before a database
+    /// call, never inside one, and hold one at a time. Digests share a
+    /// stripe by their first byte; that only serialises them.
+    pub fn digest_lock(&self, sha: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let i = sha
+            .get(..2)
+            .and_then(|h| usize::from_str_radix(h, 16).ok())
+            .unwrap_or_else(|| sha.bytes().fold(0usize, |a, b| a.wrapping_mul(31) ^ b as usize));
+        self.locks[i % self.locks.len()].clone()
     }
 }
 
@@ -429,16 +455,24 @@ fn redactable(content_type: &str) -> bool {
     base.starts_with("text/") || base == "application/json" || base.ends_with("+json")
 }
 
-/// Check the size and the bundle, then write the blob (once per hash).
-/// A `file` of a text type (`text/*`, JSON) is redacted first (PLAN
-/// §16b.6); a binary file and a bundle are not. Blocking; run it off the
-/// async runtime.
-pub fn store_blob(
+/// A checked upload: its digest, size and type, and the redacted bytes
+/// when redaction applies. Nothing is on disk yet ([`write_blob`]).
+#[derive(Debug, Clone)]
+pub struct PreparedBlob {
+    pub blob: StoredBlob,
+    redacted: Option<Vec<u8>>,
+}
+
+/// Check the size and the bundle, sniff the type, and hash the bytes to
+/// store. A `file` of a text type (`text/*`, JSON) is redacted first (PLAN
+/// §16b.6); a binary file and a bundle are not. Writes nothing. Blocking;
+/// run it off the async runtime.
+pub fn prepare_blob(
     ctx: &ArtifactCtx,
     u: &Upload,
     redactor: &terrarium_core::redact::Redactor,
     view: &terrarium_core::redact::View,
-) -> ApiResult<StoredBlob> {
+) -> ApiResult<PreparedBlob> {
     let size = u.data.len() as u64;
     if size > ctx.limits.max_file_bytes {
         return Err(ApiError::new(
@@ -453,56 +487,185 @@ pub fn store_blob(
     if size == 0 {
         return Err(ApiError::invalid("the upload is empty"));
     }
-    std::fs::create_dir_all(&ctx.dir)
-        .map_err(|e| ApiError::internal(format!("cannot create the artifact dir: {e}")))?;
-    let (sha, size, content_type) = match u.kind.as_str() {
+    match u.kind.as_str() {
         "file" => {
             let content_type = sniff(&u.name, &u.data);
-            let data = if redactable(&content_type) {
-                redactor.redact_bytes_as(&u.data, view)
+            let redacted = if redactable(&content_type) {
+                match redactor.redact_bytes_as(&u.data, view) {
+                    std::borrow::Cow::Borrowed(_) => None,
+                    std::borrow::Cow::Owned(v) => Some(v),
+                }
             } else {
-                std::borrow::Cow::Borrowed(u.data.as_slice())
+                None
             };
-            let sha = sha256_hex(&data);
-            let path = ctx.blob_path(&sha);
-            if !path.is_file() {
-                write_atomic(&path, &data)
-                    .map_err(|e| ApiError::internal(format!("cannot store the blob: {e}")))?;
-            }
-            (sha, data.len() as u64, content_type)
+            let data = redacted.as_deref().unwrap_or(&u.data);
+            Ok(PreparedBlob {
+                blob: StoredBlob {
+                    sha256: sha256_hex(data),
+                    size: data.len() as u64,
+                    content_type,
+                },
+                redacted,
+            })
         }
         "bundle" => {
-            let sha = sha256_hex(&u.data);
             check_bundle(&u.data)?;
-            unpack_bundle(ctx, &sha, &u.data)?;
-            (sha, size, "text/html; charset=utf-8".into())
+            Ok(PreparedBlob {
+                blob: StoredBlob {
+                    sha256: sha256_hex(&u.data),
+                    size,
+                    content_type: "text/html; charset=utf-8".into(),
+                },
+                redacted: None,
+            })
         }
+        other => Err(ApiError::invalid(format!(
+            "bad artifact kind `{other}`: use file or bundle"
+        ))),
+    }
+}
+
+/// Write a prepared blob (once per hash). Hold its
+/// [`ArtifactCtx::digest_lock`]. Blocking; run it off the async runtime.
+pub fn write_blob(ctx: &ArtifactCtx, u: &Upload, p: &PreparedBlob) -> ApiResult<StoredBlob> {
+    std::fs::create_dir_all(&ctx.dir)
+        .map_err(|e| ApiError::internal(format!("cannot create the artifact dir: {e}")))?;
+    let sha = &p.blob.sha256;
+    match u.kind.as_str() {
+        "file" => {
+            let path = ctx.blob_path(sha);
+            if !path.is_file() {
+                let data = p.redacted.as_deref().unwrap_or(&u.data);
+                write_atomic(&path, data)
+                    .map_err(|e| ApiError::internal(format!("cannot store the blob: {e}")))?;
+            }
+        }
+        "bundle" => unpack_bundle(ctx, sha, &u.data)?,
         other => {
             return Err(ApiError::invalid(format!(
                 "bad artifact kind `{other}`: use file or bundle"
             )));
         }
-    };
-    Ok(StoredBlob {
-        sha256: sha,
-        size,
-        content_type,
-    })
+    }
+    Ok(p.blob.clone())
 }
 
-/// Remove the blobs no artifact uses any more.
+/// Is a blob of this digest and kind used by an artifact row?
+pub fn blob_used(conn: &Connection, sha: &str, kind: &str) -> ApiResult<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM artifacts WHERE sha256 = ?1 AND kind = ?2",
+            params![sha, kind],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// One entry of the blob dir that no row may own.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SweepEntry {
+    /// A blob (`file`) or an unpacked bundle (`bundle`): removed when no
+    /// row uses it.
+    Blob { sha: String, kind: String },
+    /// A temp file or dir of a write that did not finish. `sha` is the
+    /// digest it was for.
+    Temp { sha: String, path: PathBuf },
+}
+
+fn is_digest(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The entries of the blob dir the orphan sweep checks: blobs, bundles,
+/// and temp entries older than `min_temp_age`. Other names stay.
+pub fn sweep_candidates(
+    ctx: &ArtifactCtx,
+    now: std::time::SystemTime,
+    min_temp_age: std::time::Duration,
+) -> std::io::Result<Vec<SweepEntry>> {
+    let rd = match std::fs::read_dir(&ctx.dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for entry in rd {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let ft = entry.file_type()?;
+        if is_digest(&name) && ft.is_file() {
+            out.push(SweepEntry::Blob {
+                sha: name,
+                kind: "file".into(),
+            });
+        } else if let Some(sha) = name.strip_suffix(".bundle")
+            && is_digest(sha)
+            && ft.is_dir()
+        {
+            out.push(SweepEntry::Blob {
+                sha: sha.to_owned(),
+                kind: "bundle".into(),
+            });
+        } else if let Some((sha, _)) = name.split_once(".tmp-")
+            && is_digest(sha)
+        {
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .is_some_and(|age| age >= min_temp_age);
+            if old {
+                out.push(SweepEntry::Temp {
+                    sha: sha.to_owned(),
+                    path: entry.path(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Remove one sweep entry when no row owns it. Returns whether it was
+/// removed. Hold the entry's [`ArtifactCtx::digest_lock`].
+pub fn sweep_entry(ctx: &ArtifactCtx, conn: &Connection, e: &SweepEntry) -> ApiResult<bool> {
+    let result = match e {
+        SweepEntry::Blob { sha, kind } => {
+            if blob_used(conn, sha, kind)? {
+                return Ok(false);
+            }
+            if kind == "bundle" {
+                std::fs::remove_dir_all(ctx.bundle_dir(sha))
+            } else {
+                std::fs::remove_file(ctx.blob_path(sha))
+            }
+        }
+        SweepEntry::Temp { path, .. } => {
+            if path.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            }
+        }
+    };
+    match result {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(ApiError::internal(format!(
+            "cannot remove an orphan artifact blob: {err}"
+        ))),
+    }
+}
+
+/// Remove the blobs no artifact uses any more. Hold the
+/// [`ArtifactCtx::digest_lock`] of each blob.
 pub fn remove_blobs(ctx: &ArtifactCtx, conn: &Connection, blobs: &[(String, String)]) {
     for (sha, kind) in blobs {
-        let used: bool = conn
-            .query_row(
-                "SELECT 1 FROM artifacts WHERE sha256 = ?1 AND kind = ?2",
-                params![sha, kind],
-                |_| Ok(()),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .is_some();
+        // On a read error keep the blob: the orphan sweep finds it later.
+        let used = blob_used(conn, sha, kind).unwrap_or(true);
         if used {
             continue;
         }
@@ -809,6 +972,35 @@ fn emit(t: &mut Tx<'_>, row: &ArtRow, change: &str, extra: serde_json::Value) ->
     Ok(())
 }
 
+/// Check the name and the project quota of an upload of `size` bytes.
+/// Returns the trimmed name. The upload route calls it before it writes
+/// the blob, and [`create`] again in the transaction.
+pub fn check_upload(
+    conn: &Connection,
+    project: &str,
+    name: &str,
+    size: u64,
+    limits: &Limits,
+) -> ApiResult<String> {
+    let name = check_name(name)?;
+    let (_, used) = used_bytes(conn, project)?;
+    if used + size > limits.project_quota_bytes {
+        return Err(ApiError::new(
+            Code::TooLarge,
+            format!(
+                "project `{project}` uses {used} of {} bytes; this upload of {size} bytes does not fit",
+                limits.project_quota_bytes
+            ),
+        )
+        .with_details(json!({
+            "used_bytes": used,
+            "quota_bytes": limits.project_quota_bytes,
+            "size": size,
+        })));
+    }
+    Ok(name)
+}
+
 fn check_name(name: &str) -> ApiResult<String> {
     let n = name.trim();
     if n.is_empty() || n.len() > 255 || n.contains(['/', '\\', '\0']) || n == "." || n == ".." {
@@ -830,22 +1022,7 @@ pub fn create(
 ) -> ApiResult<Artifact> {
     projects::get(t, project)?;
     policy::write_project(actor, project)?;
-    let name = check_name(&u.name)?;
-    let (_, used) = used_bytes(t, project)?;
-    if used + blob.size > limits.project_quota_bytes {
-        return Err(ApiError::new(
-            Code::TooLarge,
-            format!(
-                "project `{project}` uses {used} of {} bytes; this upload of {} bytes does not fit",
-                limits.project_quota_bytes, blob.size
-            ),
-        )
-        .with_details(json!({
-            "used_bytes": used,
-            "quota_bytes": limits.project_quota_bytes,
-            "size": blob.size,
-        })));
-    }
+    let name = check_upload(t, project, &u.name, blob.size, limits)?;
     let num = next_number(t, project, "artifact")?;
     let uid = ulid::Ulid::new().to_string();
     t.execute(
@@ -1161,6 +1338,7 @@ mod tests {
             dir: PathBuf::from("/nonexistent"),
             limits: Limits::default(),
             secret: vec![7; 32],
+            locks: new_locks(),
         };
         let sig = ctx.sign("A", 100);
         assert!(ctx.verify("A", 100, &sig, 50));

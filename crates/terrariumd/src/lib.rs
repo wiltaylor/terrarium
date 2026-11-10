@@ -440,6 +440,7 @@ async fn activate(
 
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
+    tasks.push(spawn_artifact_sweep(state.clone()));
     tasks.push(target_roots::spawn(state.clone()));
     tasks.push(leases::spawn_timer(&state));
     tasks.push(reservations::spawn_timer(&state));
@@ -626,6 +627,18 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
 /// delivery IDs older than 7 days, the turn attachments older than 7
 /// days ([`api::attachments::prune`]), and the removed card files past
 /// the trash days with their blobs ([`api::card_files::prune`]).
+/// Remove the artifact blobs no row owns, once at start
+/// ([`api::sweep_orphans`]).
+fn spawn_artifact_sweep(state: Shared) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        match api::sweep_orphans(&state).await {
+            Ok(n) if n > 0 => info!(entries = n, "artifact orphan sweep done"),
+            Ok(_) => {}
+            Err(e) => warn!("artifact orphan sweep failed: {e}"),
+        }
+    })
+}
+
 fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = std::time::Duration::from_secs(3600);
