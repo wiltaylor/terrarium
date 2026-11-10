@@ -1015,7 +1015,8 @@ pub fn resume(t: &mut Tx<'_>, thread: &str, note: Option<&str>) -> ApiResult<Res
 }
 
 /// Reply on the thread of `original`: one message to every other
-/// participant. The original becomes `replied`.
+/// participant. The operator is a recipient only when `original` came from
+/// or went to the operator. The original becomes `replied`.
 pub fn reply(
     t: &mut Tx<'_>,
     original: &Message,
@@ -1048,9 +1049,16 @@ pub fn reply(
     };
     let all = participants(t, &original.thread_id)?;
     let system_thread = all.contains(&Address::System);
+    // The operator gets a reply only to a message from or to the operator
+    // (TER-592). Agent-to-agent replies on a thread that the operator
+    // started stay out of the Inbox. To reach the operator on such a
+    // thread, send to `operator` with the thread.
+    let operator = Address::Operator.key();
+    let to_operator = original.from == operator || original.to == operator;
     let recipients: Vec<Address> = all
         .into_iter()
         .filter(|p| p.key() != from.key() && *p != Address::System)
+        .filter(|p| to_operator || *p != Address::Operator)
         .collect();
     if recipients.is_empty() {
         // A daemon notice (a wait result, a watch) has nobody to answer.
