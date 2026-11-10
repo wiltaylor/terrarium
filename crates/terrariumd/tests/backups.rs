@@ -360,6 +360,146 @@ async fn scheduled_runs_seal_verify_rotate_prune_and_alert() {
     }
 }
 
+/// A scheduled backup that does not verify goes to `.unverified-<name>`:
+/// it is no base and no kept backup, nothing is pruned, and the streak
+/// mails once. A schedule turned on over an old manual backup mails no
+/// missed run at once, and a missed run mails once, also over a restart
+/// (the marks in the backup dir).
+#[tokio::test]
+async fn a_scheduled_backup_that_does_not_verify_is_set_aside_and_missed_mails_once() {
+    use std::time::Duration;
+    use terrariumd::backup::schedule::{Config, MARKS_FILE, Runner, UNVERIFIED_PREFIX};
+    use terrariumd::backup::{self, Kind};
+
+    const KEY: &str = "verify check pass phrase 1";
+    let td = TestDaemon::start().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let dir = backup::default_dir(&td.state);
+    td.put(
+        "/api/secrets/global/backup-key",
+        json!({"kind": "api_key", "fields": {"value": KEY}}),
+    )
+    .await
+    .ok();
+    let manual = td.post_empty("/api/backups").await;
+    assert_eq!(manual.status, 201, "{}", manual.body);
+    let manual = manual.body["name"].as_str().unwrap().to_owned();
+
+    // Turned on over the manual backup: the first check marks the
+    // schedule on and finds nothing, even days later.
+    let cfg = Config {
+        interval: Some(Duration::from_secs(86_400)),
+        keep: 1,
+        full_every: Duration::ZERO,
+        ..Config::default()
+    };
+    let now = chrono::Utc::now();
+    let mut runner = Runner::new(cfg.clone());
+    assert!(
+        !runner
+            .check_missed(&state, now + chrono::Duration::days(3), None)
+            .await
+    );
+    assert!(dir.join(MARKS_FILE).is_file());
+    let late = now + chrono::Duration::days(5);
+    assert!(runner.check_missed(&state, late, None).await);
+    // A restart: a new runner reads the marks and does not mail again.
+    let mut restarted = Runner::new(cfg);
+    assert!(!restarted.check_missed(&state, late, None).await);
+
+    let f1 = runner.run(&state).await;
+    assert!(f1.error.is_none() && f1.kind == Kind::Full, "{f1:?}");
+    assert_eq!(f1.removed, vec![manual]);
+    let f1 = f1.name.unwrap();
+
+    // The verify fails: the file goes aside, f1 stays, and one mail.
+    runner.verify = |_, _, _| Err(anyhow::anyhow!("a bad file in the test"));
+    for first in [true, false] {
+        let r = runner.run(&state).await;
+        let e = r.error.as_deref().unwrap();
+        assert!(e.contains("does not verify (moved to .unverified-"), "{e}");
+        assert_eq!(r.mailed, first, "{r:?}");
+        assert!(r.removed.is_empty() && !r.verified, "{r:?}");
+        let names: Vec<String> = backup::list(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(names, vec![f1.clone()]);
+    }
+    let aside = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(UNVERIFIED_PREFIX)
+        })
+        .count();
+    assert_eq!(aside, 2);
+
+    // A good run again: the newest full is f1's successor, f1 goes.
+    runner.verify = backup::verify;
+    let f2 = runner.run(&state).await;
+    assert!(f2.error.is_none(), "{f2:?}");
+    assert_eq!(f2.removed, vec![f1]);
+
+    let mails = state
+        .db
+        .read(|c| {
+            let mut s = c
+                .prepare(
+                    "SELECT subject FROM messages WHERE to_kind = 'operator' \
+                     AND subject LIKE 'Scheduled backup%' ORDER BY subject",
+                )
+                .unwrap();
+            Ok(s.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        mails,
+        vec!["Scheduled backup failed", "Scheduled backup missed"],
+        "{mails:?}"
+    );
+}
+
+/// A marks file that cannot be written (here a dir with content has its
+/// name): the runner keeps the marks in memory, so a failed run is not
+/// tried again at once, and the missed check still mails once.
+#[tokio::test]
+async fn a_marks_file_that_cannot_be_written_runs_no_loop_and_keeps_the_missed_check() {
+    use std::time::Duration;
+    use terrariumd::backup;
+    use terrariumd::backup::schedule::{Config, MARKS_FILE, Runner};
+
+    let td = TestDaemon::start().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let dir = backup::default_dir(&td.state);
+    std::fs::create_dir_all(dir.join(MARKS_FILE).join("x")).unwrap();
+    let mut runner = Runner::new(Config {
+        interval: Some(Duration::from_secs(86_400)),
+        ..Config::default()
+    });
+    assert!(!runner.check_missed(&state, chrono::Utc::now(), None).await);
+    // No key: the run fails and makes no backup.
+    let r = runner.run(&state).await;
+    assert!(r.error.is_some() && r.name.is_none(), "{r:?}");
+    let next = runner.next_at(&state).await.unwrap();
+    assert!(
+        next > chrono::Utc::now() + chrono::Duration::hours(23),
+        "the next run is at once: {next}"
+    );
+    let late = chrono::Utc::now() + chrono::Duration::days(3);
+    assert!(runner.check_missed(&state, late, None).await);
+    assert!(!runner.check_missed(&state, late, None).await);
+    assert!(dir.join(MARKS_FILE).is_dir());
+}
+
 /// `terrariumd backup drill`: a sealed backup restores into a scratch dir
 /// that goes at the end; a dir with content is refused and kept.
 #[test]

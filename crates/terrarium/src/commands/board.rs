@@ -540,8 +540,12 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
             repo,
             branch,
             eta,
+            onto,
         } => match ids.as_slice() {
-            [id] => super::jobs::merge(ctx, &card_path(id), repo, branch, eta).await,
+            [id] => super::jobs::merge(ctx, &card_path(id), repo, branch, eta, onto).await,
+            _ if onto.is_some() => anyhow::bail!(
+                "--onto takes one card: a release-blocker fix merges onto its release branch alone"
+            ),
             _ => super::jobs::merge_batch(ctx, ids, repo, branch, eta).await,
         },
         CardCmd::Assign { id, agent } => {

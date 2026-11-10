@@ -10,7 +10,8 @@
 //!
 //! A scheduled backup is always sealed: it holds every secret. The
 //! passphrase is the first line of `TERRARIUM_BACKUP_PASSPHRASE_FILE`
-//! when that is set, else the global secret `TERRARIUM_BACKUP_KEY_SECRET`
+//! when that is set (owned by the daemon user, no access for the group
+//! or others), else the global secret `TERRARIUM_BACKUP_KEY_SECRET`
 //! (default `backup-key`: its `passphrase` field, else `value`). With no
 //! key the run fails.
 //!
@@ -31,14 +32,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
 use super::Kind;
 use crate::api::Shared;
-use crate::api::backups::{CreateBody, create_queued};
+use crate::api::backups::{CreateBody, create_held, lock_queued};
 use crate::events::EventDraft;
 use crate::store::mail::{self, Address, Outgoing};
 
@@ -59,6 +60,9 @@ pub const MISSED_GRACE: Duration = Duration::from_secs(3600);
 /// The prefix of a scheduled backup that did not verify, in the backup
 /// dir. The list skips it.
 pub const UNVERIFIED_PREFIX: &str = ".unverified-";
+/// The marks of the schedule ([`Marks`]) in the backup dir. The list
+/// skips it.
+pub const MARKS_FILE: &str = ".schedule.json";
 /// The audit actor of a scheduled backup.
 pub const ACTOR: &str = "system:backup";
 /// The event kind of a scheduled backup.
@@ -206,31 +210,82 @@ fn newest(dir: &Path, full_only: bool) -> Option<DateTime<Utc>> {
         .max()
 }
 
-/// The kind of the next scheduled backup in `dir` with `passphrase`: as
-/// [`next_kind`], and full when the newest full backup is not sealed or
-/// the passphrase does not open it (the key was rotated): a diff and its
-/// base always have the same key.
-pub fn kind_for(dir: &Path, now: DateTime<Utc>, full_every: Duration, passphrase: &str) -> Kind {
+/// The kind of the next scheduled backup in `dir` with `passphrase`, and
+/// the base file name of a diff: as [`next_kind`], and full when the
+/// newest full backup is not sealed or the passphrase does not open it
+/// (the key was rotated): a diff and its base always have the same key.
+/// The caller holds the backup lock until the backup is made, so the
+/// base is still the newest full backup then.
+pub fn plan(
+    dir: &Path,
+    now: DateTime<Utc>,
+    full_every: Duration,
+    passphrase: &str,
+) -> (Kind, Option<String>) {
     let Ok(Some(path)) = super::newest_full(dir) else {
-        return Kind::Full;
+        return (Kind::Full, None);
     };
     let Ok(h) = super::read_header(&path) else {
-        return Kind::Full;
+        return (Kind::Full, None);
     };
     if next_kind(now, Some(h.created_at), full_every) == Kind::Full {
-        return Kind::Full;
+        return (Kind::Full, None);
     }
+    let base = path.file_name().map(|n| n.to_string_lossy().into_owned());
     match &h.encryption {
-        Some(e) if super::SealKey::open(passphrase, &h.id, e).is_ok() => Kind::Diff,
-        _ => Kind::Full,
+        Some(e) if base.is_some() && super::SealKey::open(passphrase, &h.id, e).is_ok() => {
+            (Kind::Diff, base)
+        }
+        _ => (Kind::Full, None),
     }
 }
 
+/// Refuse a passphrase file that another user owns, or that the group or
+/// others can read or change: it holds the key of every backup.
+fn check_key_file(path: &Path, mode: u32, owner: u32, me: u32) -> Result<(), String> {
+    if owner != me {
+        return Err(format!(
+            "{} is owned by uid {owner}, not by the daemon user (uid {me}): \
+             chown it to the daemon user and chmod 600 it",
+            path.display()
+        ));
+    }
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "{} has mode {:04o}: the group or others can read or change the backup key; \
+             chmod 600 it",
+            path.display(),
+            mode & 0o7777
+        ));
+    }
+    Ok(())
+}
+
 fn read_passphrase(path: &Path) -> Result<Zeroizing<String>, String> {
-    let s = Zeroizing::new(
-        std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?,
-    );
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    let cannot = |e: std::io::Error| format!("cannot read {}: {e}", path.display());
+    use std::os::unix::fs::OpenOptionsExt;
+    // Non-blocking: a FIFO at the path must not hold a runtime worker.
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(path)
+        .map_err(cannot)?;
+    // The mode of the opened file, not of the path: no swap in between.
+    let meta = f.metadata().map_err(cannot)?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    check_key_file(
+        path,
+        meta.mode(),
+        meta.uid(),
+        nix::unistd::geteuid().as_raw(),
+    )?;
+    let cap = usize::try_from(meta.len()).unwrap_or(0).saturating_add(1);
+    let mut s = Zeroizing::new(String::with_capacity(cap));
+    f.read_to_string(&mut s).map_err(cannot)?;
     let line = Zeroizing::new(s.lines().next().unwrap_or_default().to_owned());
     if line.is_empty() {
         return Err(format!("{} is empty", path.display()));
@@ -296,30 +351,138 @@ pub struct Report {
     pub mailed: bool,
 }
 
-/// The scheduled backup between runs: the settings and the alert marks.
+/// The marks of the schedule that outlive a restart, in [`MARKS_FILE`]
+/// in the backup dir. The file goes when the schedule is off.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Marks {
+    /// The schedule is on since then: no run before it is missed.
+    #[serde(default)]
+    pub on_since: Option<DateTime<Utc>>,
+    /// The last try of a run, also a failed one.
+    #[serde(default)]
+    pub last_run: Option<DateTime<Utc>>,
+    /// The due time of the last missed run that the operator has a mail of.
+    #[serde(default)]
+    pub missed_due: Option<DateTime<Utc>>,
+}
+
+impl Marks {
+    /// The marks in `dir`; none when the file is absent or bad. A time
+    /// after now (the clock went back, or the file is from another host)
+    /// is now: it must not hold back the runs and the missed check.
+    pub fn load(dir: &Path) -> Self {
+        Self::load_at(dir, Utc::now())
+    }
+
+    /// [`Marks::load`] with the times clamped to `now`.
+    pub fn load_at(dir: &Path, now: DateTime<Utc>) -> Self {
+        let m: Self = std::fs::read(dir.join(MARKS_FILE))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        m.clamped(now)
+    }
+
+    fn clamped(self, now: DateTime<Utc>) -> Self {
+        let c = |t: Option<DateTime<Utc>>| t.map(|t| t.min(now));
+        Self {
+            on_since: c(self.on_since),
+            last_run: c(self.last_run),
+            missed_due: c(self.missed_due),
+        }
+    }
+
+    /// Write the marks to `dir` (a temp file, then a rename).
+    pub fn save(&self, dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let tmp = dir.join(format!("{MARKS_FILE}.tmp"));
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec(self).map_err(std::io::Error::other)?,
+        )?;
+        std::fs::rename(tmp, dir.join(MARKS_FILE))
+    }
+}
+
+/// Change the marks in `dir` in a blocking task. A failed write is
+/// logged: the [`Runner`] keeps the same marks in memory, so the cost is
+/// a mail too many after a restart.
+async fn update_marks(dir: PathBuf, f: impl FnOnce(&mut Marks) + Send + 'static) -> Marks {
+    tokio::task::spawn_blocking(move || {
+        let mut m = Marks::load(&dir);
+        f(&mut m);
+        if let Err(e) = m.save(&dir) {
+            tracing::warn!("cannot write {}: {e}", dir.join(MARKS_FILE).display());
+        }
+        m
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// The check of a new backup: [`super::verify`].
+pub type VerifyFn = fn(&Path, Option<&Path>, Option<&str>) -> anyhow::Result<super::Verified>;
+
+/// The scheduled backup between runs: the settings and the alert mark.
 #[derive(Debug)]
 pub struct Runner {
     pub cfg: Config,
+    /// The check of each new backup. Tests put a failing one here.
+    pub verify: VerifyFn,
     /// A run failed and the operator has the mail: the next failures of
     /// the streak write events only.
     failing: bool,
-    /// The due time of the last missed run that the operator has a mail of.
-    missed_due: Option<DateTime<Utc>>,
+    /// The [`Marks`] of this process as well: a marks file that cannot
+    /// be written must not run the backups in a loop or stop the missed
+    /// check. Each use takes the later of the memory and the file.
+    marks: Marks,
 }
 
 impl Runner {
     pub fn new(cfg: Config) -> Self {
         Self {
             cfg,
+            verify: super::verify,
             failing: false,
-            missed_due: None,
+            marks: Marks::default(),
         }
+    }
+
+    /// The marks of the file in `dir` and of the memory, the later of each.
+    fn merged(&self, file: &Marks) -> Marks {
+        Marks {
+            on_since: self.marks.on_since.max(file.on_since),
+            last_run: self.marks.last_run.max(file.last_run),
+            missed_due: self.marks.missed_due.max(file.missed_due),
+        }
+    }
+
+    /// The time of the next run: one interval after the newest backup or
+    /// the last try, and not before [`FIRST_DELAY`] after the start.
+    /// `None` when the schedule is off.
+    pub async fn next_at(&self, state: &Shared) -> Option<DateTime<Utc>> {
+        let interval = self.cfg.interval?;
+        let dir = crate::api::backups::dir(state);
+        let (newest, file) =
+            tokio::task::spawn_blocking(move || (newest(&dir, false), Marks::load(&dir)))
+                .await
+                .unwrap_or_default();
+        let last = self.merged(&file).last_run;
+        Some(next_run(interval, state.started_at, newest.max(last)))
     }
 
     /// Make one scheduled backup, verify it, and prune after a verified
     /// full backup.
     pub async fn run(&mut self, state: &Shared) -> Report {
-        let r = run_once(state, &self.cfg).await;
+        let now = Utc::now();
+        self.marks.on_since.get_or_insert(now);
+        self.marks.last_run = Some(now);
+        update_marks(crate::api::backups::dir(state), move |m| {
+            m.on_since.get_or_insert(now);
+            m.last_run = Some(now);
+        })
+        .await;
+        let r = run_once(state, &self.cfg, self.verify).await;
         let mut r = match r {
             Ok(r) => r,
             Err((kind, error)) => Report {
@@ -358,9 +521,11 @@ impl Runner {
         r
     }
 
-    /// Check for a missed run at `now`: no backup and no try (`last_run`)
-    /// since one interval and [`MISSED_GRACE`]. One mail per due time.
-    /// True when it mailed.
+    /// Check for a missed run at `now`: no backup and no try (`last_run`,
+    /// or the last try in the [`Marks`]) since one interval and
+    /// [`MISSED_GRACE`]. The first check of a schedule that was off marks
+    /// it on and finds nothing: an old manual backup is not a missed run.
+    /// One mail per due time, also over a restart. True when it mailed.
     pub async fn check_missed(
         &mut self,
         state: &Shared,
@@ -371,17 +536,30 @@ impl Runner {
             return false;
         };
         let dir = crate::api::backups::dir(state);
-        let newest = tokio::task::spawn_blocking(move || newest(&dir, false))
-            .await
-            .ok()
-            .flatten();
-        let Some(due) = missed(interval, now, newest.max(last_run)) else {
+        let (newest, file) = {
+            let dir = dir.clone();
+            tokio::task::spawn_blocking(move || (newest(&dir, false), Marks::load_at(&dir, now)))
+                .await
+                .unwrap_or_default()
+        };
+        let marks = self.merged(&file);
+        let Some(on_since) = marks.on_since else {
+            self.marks.on_since = Some(now);
+            update_marks(dir, move |m| {
+                m.on_since.get_or_insert(now);
+            })
+            .await;
             return false;
         };
-        if self.missed_due == Some(due) {
+        let since = newest.max(last_run).max(marks.last_run).max(Some(on_since));
+        let Some(due) = missed(interval, now, since) else {
+            return false;
+        };
+        if marks.missed_due.is_some_and(|m| m >= due) {
             return false;
         }
-        self.missed_due = Some(due);
+        self.marks.missed_due = Some(due);
+        update_marks(dir, move |m| m.missed_due = Some(due)).await;
         let at = due.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         tracing::warn!(due = %at, "a scheduled backup was missed");
         let subject = "Scheduled backup missed";
@@ -448,50 +626,87 @@ async fn record(
     }
 }
 
+/// Take a backup that did not verify out of the list, so it is no base
+/// and no kept backup: rename it to `.unverified-<name>` (with `-<n>` at
+/// the end when that is taken: a later backup can have the same name),
+/// else delete it. Answers what was done; an error when the file stays
+/// in the list. The caller holds the backup lock.
+pub fn set_aside(path: &Path) -> Result<String, String> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let free = (1..=SET_ASIDE_NAMES)
+        .map(|n| match n {
+            1 => format!("{UNVERIFIED_PREFIX}{name}"),
+            n => format!("{UNVERIFIED_PREFIX}{name}-{n}"),
+        })
+        .find(|a| std::fs::symlink_metadata(path.with_file_name(a)).is_err());
+    match free {
+        Some(aside) => set_aside_to(path, &aside),
+        // Never over an older set-aside file.
+        None => delete_bad(path, &format!("no free {UNVERIFIED_PREFIX}{name} name")),
+    }
+}
+
+/// The most `.unverified-` names of one backup name.
+const SET_ASIDE_NAMES: usize = 1000;
+
+fn set_aside_to(path: &Path, aside: &str) -> Result<String, String> {
+    match std::fs::rename(path, path.with_file_name(aside)) {
+        Ok(()) => Ok(format!("moved to {aside}")),
+        Err(re) => delete_bad(path, &format!("cannot move it to {aside}: {re}")),
+    }
+}
+
+fn delete_bad(path: &Path, why: &str) -> Result<String, String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(format!("deleted: {why}")),
+        Err(de) => Err(format!(
+            "{why}, and cannot delete it ({de}): \
+             it is still in the backup dir; delete it by hand"
+        )),
+    }
+}
+
 /// One run. `Err((kind, error))` on a failure.
-async fn run_once(state: &Shared, cfg: &Config) -> Result<Report, (Kind, String)> {
+async fn run_once(
+    state: &Shared,
+    cfg: &Config,
+    verify: VerifyFn,
+) -> Result<Report, (Kind, String)> {
     let dir = crate::api::backups::dir(state);
     let pass = passphrase(state, cfg).await.map_err(|e| (Kind::Full, e))?;
-    let kind = {
+    // Held from the choice of the kind and the base to the prune: a
+    // manual backup in between would change the newest full backup, and
+    // the prune would refuse (a false alert).
+    let held = lock_queued(state).await;
+    let (kind, base) = {
         let (dir, every, pass) = (dir.clone(), cfg.full_every, pass.clone());
-        tokio::task::spawn_blocking(move || kind_for(&dir, Utc::now(), every, &pass))
+        tokio::task::spawn_blocking(move || plan(&dir, Utc::now(), every, &pass))
             .await
-            .unwrap_or(Kind::Full)
+            .unwrap_or((Kind::Full, None))
     };
     let body = CreateBody {
         kind: Some(kind),
         work: cfg.work,
         passphrase: Some(pass.as_str().to_owned()),
-        base: None,
+        base,
     };
-    let created = create_queued(state, body, ACTOR)
+    let created = create_held(state, &held, body, ACTOR)
         .await
         .map_err(|e| (kind, e.message))?;
     let verified = {
-        let (path, pass) = (created.path.clone(), pass.clone());
+        let (path, pass, name) = (created.path.clone(), pass.clone(), created.name.clone());
         tokio::task::spawn_blocking(move || {
-            let r = super::verify(&path, None, Some(pass.as_str()));
-            if r.is_err() {
-                // Out of the list: not a base, not a kept backup.
-                if let Some(name) = path.file_name() {
-                    let aside = path
-                        .with_file_name(format!("{UNVERIFIED_PREFIX}{}", name.to_string_lossy()));
-                    let _ = std::fs::rename(&path, aside);
-                }
-            }
-            r
+            verify(&path, None, Some(pass.as_str())).map_err(|e| {
+                let aside = set_aside(&path).unwrap_or_else(|e| e);
+                format!("{name} does not verify ({aside}): {e:#}")
+            })
         })
         .await
         .map_err(|e| (kind, format!("the verify task failed: {e}")))?
-        .map_err(|e| {
-            (
-                kind,
-                format!(
-                    "{} does not verify (moved to {UNVERIFIED_PREFIX}{}): {e:#}",
-                    created.name, created.name
-                ),
-            )
-        })?
+        .map_err(|e| (kind, e))?
     };
     record(
         state,
@@ -540,6 +755,7 @@ async fn run_once(state: &Shared, cfg: &Config) -> Result<Report, (Kind, String)
         .await;
     }
     report.removed = removed;
+    drop(held);
     Ok(report)
 }
 
@@ -570,24 +786,28 @@ async fn alert_failed(state: &Shared, kind: Kind, error: &str, first: bool) -> b
 pub fn spawn(state: Shared, cfg: Config) -> Option<JoinHandle<()>> {
     let Some(interval) = cfg.interval else {
         tracing::info!("scheduled backup is off ({ENV_SCHEDULE})");
+        // A later turn-on starts fresh: an old backup is not missed then.
+        let marks = crate::api::backups::dir(&state).join(MARKS_FILE);
+        if let Err(e) = std::fs::remove_file(&marks)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("cannot delete {}: {e}", marks.display());
+        }
         return None;
     };
     Some(tokio::spawn(async move {
         let mut runner = Runner::new(cfg);
-        // A failed run counts as a run: the next try is one interval later.
-        let mut last_run: Option<DateTime<Utc>> = None;
         loop {
-            runner.check_missed(&state, Utc::now(), last_run).await;
-            let dir = crate::api::backups::dir(&state);
-            let newest = tokio::task::spawn_blocking(move || newest(&dir, false))
+            // The last try is in the runner and the marks: a failed run
+            // counts as a run, and the next try is one interval later.
+            runner.check_missed(&state, Utc::now(), None).await;
+            let at = runner
+                .next_at(&state)
                 .await
-                .ok()
-                .flatten();
-            let at = next_run(interval, state.started_at, newest.max(last_run));
+                .unwrap_or_else(|| next_run(interval, state.started_at, None));
             tracing::info!(next = %at, "scheduled backup");
             let wait = (at - Utc::now()).to_std().unwrap_or(Duration::ZERO);
             tokio::time::sleep(wait).await;
-            last_run = Some(Utc::now());
             runner.run(&state).await;
         }
     }))
@@ -636,6 +856,140 @@ mod tests {
             "ops-backup"
         );
         assert!(parse(&[(ENV_KEY_SECRET, "a b")]).is_err());
+    }
+
+    #[test]
+    fn refuses_a_key_file_of_another_user_or_open_to_others() {
+        let p = Path::new("/k");
+        check_key_file(p, 0o100_600, 7, 7).unwrap();
+        check_key_file(p, 0o100_400, 7, 7).unwrap();
+        let e = check_key_file(p, 0o100_640, 7, 7).unwrap_err();
+        assert!(e.contains("0640") && e.contains("chmod 600"), "{e}");
+        assert!(check_key_file(p, 0o100_604, 7, 7).is_err());
+        assert!(check_key_file(p, 0o100_620, 7, 7).is_err());
+        let e = check_key_file(p, 0o100_600, 0, 7).unwrap_err();
+        assert!(e.contains("uid 0"), "{e}");
+    }
+
+    #[test]
+    fn reads_the_first_line_of_a_private_key_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("pass");
+        std::fs::write(&f, "pass phrase one\nrest\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_passphrase(&f).unwrap().as_str(), "pass phrase one");
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let e = read_passphrase(&f).unwrap_err();
+        assert!(e.contains("0644") && !e.contains("pass phrase"), "{e}");
+    }
+
+    #[test]
+    fn sets_aside_a_bad_backup_or_deletes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("a.zip");
+        std::fs::write(&f, "bad").unwrap();
+        let r = set_aside(&f).unwrap();
+        assert!(r.starts_with("moved"), "{r}");
+        assert!(!f.exists());
+        assert!(
+            tmp.path()
+                .join(format!("{UNVERIFIED_PREFIX}a.zip"))
+                .exists()
+        );
+        // A later bad backup with the same name keeps the first one.
+        std::fs::write(&f, "bad 2").unwrap();
+        let r = set_aside(&f).unwrap();
+        assert_eq!(r, format!("moved to {UNVERIFIED_PREFIX}a.zip-2"));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(format!("{UNVERIFIED_PREFIX}a.zip"))).unwrap(),
+            "bad"
+        );
+        // The rename fails (a dir with content has the name): delete it.
+        let g = tmp.path().join("b.zip");
+        std::fs::write(&g, "bad").unwrap();
+        let aside = tmp.path().join(format!("{UNVERIFIED_PREFIX}b.zip"));
+        std::fs::create_dir(&aside).unwrap();
+        std::fs::write(aside.join("x"), "x").unwrap();
+        let r = set_aside_to(&g, &format!("{UNVERIFIED_PREFIX}b.zip")).unwrap();
+        assert!(r.starts_with("deleted"), "{r}");
+        assert!(!g.exists());
+    }
+
+    #[test]
+    fn refuses_a_key_file_that_is_not_a_regular_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().join("dir");
+        std::fs::create_dir(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let e = read_passphrase(&d).unwrap_err();
+        assert!(e.contains("not a regular file"), "{e}");
+        // A FIFO with no writer: refused at once, no block.
+        let fifo = tmp.path().join("fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let e = read_passphrase(&fifo).unwrap_err();
+        assert!(e.contains("not a regular file"), "{e}");
+    }
+
+    #[test]
+    fn sets_aside_over_no_older_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("c.zip");
+        std::fs::write(tmp.path().join(format!("{UNVERIFIED_PREFIX}c.zip")), "old").unwrap();
+        for n in 2..=SET_ASIDE_NAMES {
+            std::fs::write(
+                tmp.path().join(format!("{UNVERIFIED_PREFIX}c.zip-{n}")),
+                "old",
+            )
+            .unwrap();
+        }
+        std::fs::write(&f, "bad").unwrap();
+        let r = set_aside(&f).unwrap();
+        assert!(r.starts_with("deleted: no free"), "{r}");
+        assert!(!f.exists());
+        let last = tmp
+            .path()
+            .join(format!("{UNVERIFIED_PREFIX}c.zip-{SET_ASIDE_NAMES}"));
+        assert_eq!(std::fs::read_to_string(last).unwrap(), "old");
+    }
+
+    #[test]
+    fn clamps_marks_from_the_future_to_now() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("backups");
+        let future = Utc::now() + chrono::Duration::days(30);
+        Marks {
+            on_since: Some(future),
+            last_run: Some(future),
+            missed_due: Some(future),
+        }
+        .save(&dir)
+        .unwrap();
+        let now = Utc::now();
+        let m = Marks::load(&dir);
+        for t in [m.on_since, m.last_run, m.missed_due] {
+            let t = t.unwrap();
+            assert!(t <= now + chrono::Duration::seconds(1), "{t}");
+            assert!(t >= now - chrono::Duration::minutes(1), "{t}");
+        }
+    }
+
+    #[test]
+    fn keeps_the_marks_in_the_backup_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("backups");
+        assert_eq!(Marks::load(&dir), Marks::default());
+        let t: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
+        let m = Marks {
+            on_since: Some(t),
+            last_run: Some(t),
+            missed_due: Some(t),
+        };
+        m.save(&dir).unwrap();
+        assert_eq!(Marks::load(&dir), m);
+        // Not a backup in the list.
+        assert!(super::super::list(&dir).unwrap().is_empty());
     }
 
     #[test]

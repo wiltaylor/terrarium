@@ -134,7 +134,10 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
       except the API trees (`/dev`, `/proc`, `/sys`), so no world-writable
       directory such as `/run/lock` or `/var/crash` keeps a file of the UID.
     - `PrivateTmp=yes` gives the unit its own `/tmp` and `/var/tmp`, removed
-      with the unit. `RemoveIPC=yes` makes systemd remove the System V and
+      with the unit. `PrivateIPC=yes` gives each unit its own IPC
+      namespace: a session sees only the System V objects and POSIX
+      message queues that it made, not those of the host users or of other
+      sessions. `RemoveIPC=yes` makes systemd remove the System V and
       POSIX IPC objects of the UID, also its files in `/dev/shm`, when the
       last unit of that UID stops.
     - The pool users have no home directory (see the install steps).
@@ -149,8 +152,8 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   `KillMode=control-group` ends every descendant with the main process.
   Properties: `--uid`/`--gid` of the holder's workload user,
   `NoNewPrivileges=yes`, `CapabilityBoundingSet=`, `AmbientCapabilities=`,
-  `RestrictSUIDSGID=yes`, `PrivateTmp=yes`, `RemoveIPC=yes`,
-  `ProtectSystem=strict`, `TemporaryFileSystem=<workspace_root>:ro`,
+  `RestrictSUIDSGID=yes`, `PrivateTmp=yes`, `PrivateIPC=yes`,
+  `RemoveIPC=yes`, `ProtectSystem=strict`, `TemporaryFileSystem=<workspace_root>:ro`,
   `BindPaths=` and `ReadWritePaths=` of the holder's workspace scope,
   `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
   each granted GPU and support node, `--expand-environment=no`. The
@@ -304,7 +307,12 @@ Known limits:
   also daemon-internal ones (target root probes, workspace sync, monitors,
   pipelines). Its working directory must be under `workspace_root`: a
   `cwd` that `allowed_cwd_roots` permits outside it, or no `cwd` while
-  `work_dir` is outside it, fails with exit code 125 and the reason.
+  `work_dir` is outside it, fails with exit code 125 and the reason, which
+  names the workspace root. A card agent's `exec` or `run` with no
+  `--cwd` runs in its owned root `<work_root>/<project>/<agent>`, which
+  the daemon prepares first (TER-634): set `work_root` under
+  `workspace_root`. An explicit `--cwd` is kept as given. The daemon's
+  root scripts run in the `work_root` itself (TER-615).
 - A helper that goes away between two `hello`s makes each native command
   fail with exit code 125 until the next reconnect reports the loss; the
   daemon then refuses host commands while a native exclusive GPU

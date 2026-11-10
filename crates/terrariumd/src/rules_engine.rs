@@ -1844,9 +1844,10 @@ async fn fire_timer(
         return Ok(false);
     };
     let Some(due) = pick.first_since.and_then(|f| {
+        // A release-blocker card goes at once, with no wait (TER-607).
         // At `min_cards` the batch goes now: the cards came while the
         // lane was busy, or the run of the last move failed (TER-644).
-        if t.min_cards.is_some_and(|min| pick.waiting >= min) {
+        if pick.release_blocker || t.min_cards.is_some_and(|min| pick.waiting >= min) {
             Some(f)
         } else {
             chrono::Duration::try_minutes(t.wait).and_then(|wait| f.checked_add_signed(wait))

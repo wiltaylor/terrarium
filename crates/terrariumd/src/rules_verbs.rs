@@ -766,7 +766,16 @@ pub struct BatchPick {
     /// The repo of the batch: the repo of the first card that waits. A
     /// card of another repo is left out and waits for a later batch.
     pub repo: Option<String>,
+    /// The batch is one card with the [`RELEASE_BLOCKER`] label (TER-607):
+    /// it goes at once, alone, before the other cards.
+    pub release_blocker: bool,
 }
+
+/// The label of a release-blocker fix (TER-607): the merge queue takes the
+/// first card with it alone and first, as a batch of one that goes at
+/// once. After it is on `next`, `card merge --onto release/X.Y.Z` merges
+/// the same commit into the frozen version.
+pub const RELEASE_BLOCKER: &str = "release-blocker";
 
 /// The cards of column `from` of `project` that a batch takes, in board
 /// order, at most `limit` (`None`: all). A card that is held, has an
@@ -775,6 +784,10 @@ pub struct BatchPick {
 /// waiting, so it does not block the queue; it goes in a later batch
 /// (TER-227). There is no limit of the daemon's own: the rule sets it
 /// (TER-162 D9).
+///
+/// A card that could go and has the [`RELEASE_BLOCKER`] label is the
+/// whole batch (TER-607): the first such card in board order, of any
+/// repo, alone, and the others wait for the next batch.
 pub fn pick_batch(
     conn: &Connection,
     project: &str,
@@ -783,6 +796,8 @@ pub fn pick_batch(
 ) -> ApiResult<BatchPick> {
     let board = board::get_board(conn, project)?;
     let mut out = BatchPick::default();
+    // The cards that could go, with their repo, in board order.
+    let mut ready: Vec<(&Card, String)> = Vec::new();
     for c in board
         .cards
         .iter()
@@ -826,6 +841,27 @@ pub fn pick_batch(
             }
             Err(e) => return Err(e),
         };
+        ready.push((c, r));
+    }
+    if let Some(i) = ready
+        .iter()
+        .position(|(c, _)| c.labels.iter().any(|l| l == RELEASE_BLOCKER))
+    {
+        let (c, r) = ready.remove(i);
+        for (o, _) in ready {
+            out.left_out.push(json!({
+                "card": o.id,
+                "reason": format!("the release-blocker card {} goes first, alone", c.id),
+            }));
+        }
+        out.waiting = 1;
+        out.first_since = since_of(conn, c)?;
+        out.repo = Some(r);
+        out.cards.push(c.clone());
+        out.release_blocker = true;
+        return Ok(out);
+    }
+    for (c, r) in ready {
         match &out.repo {
             Some(have) if *have != r => {
                 out.left_out.push(json!({
@@ -838,9 +874,7 @@ pub fn pick_batch(
             None => out.repo = Some(r),
         }
         out.waiting += 1;
-        let since = board::last_moved_at(conn, &c.id)?.unwrap_or_else(|| c.created_at.clone());
-        if let Ok(t) = DateTime::parse_from_rfc3339(&since) {
-            let t = t.with_timezone(&Utc);
+        if let Some(t) = since_of(conn, c)? {
             out.first_since = Some(out.first_since.map_or(t, |f| f.min(t)));
         }
         if limit.is_none_or(|l| out.cards.len() < l) {
@@ -850,15 +884,27 @@ pub fn pick_batch(
     Ok(out)
 }
 
+/// When `c` came into its column: its newest move, else its creation.
+fn since_of(conn: &Connection, c: &Card) -> ApiResult<Option<DateTime<Utc>>> {
+    let since = board::last_moved_at(conn, &c.id)?.unwrap_or_else(|| c.created_at.clone());
+    Ok(DateTime::parse_from_rfc3339(&since)
+        .ok()
+        .map(|t| t.with_timezone(&Utc)))
+}
+
 /// When a batch with `min_cards` and `max_wait_minutes` goes: `Ok` now,
 /// `Err((reason, due))` when it waits, with the time it goes by the
-/// wait (`None`: only a card more makes it go).
+/// wait (`None`: only a card more makes it go). A release-blocker batch
+/// goes now (TER-607).
 pub fn batch_goes(
     pick: &BatchPick,
     min_cards: Option<i64>,
     max_wait_minutes: Option<i64>,
     now: DateTime<Utc>,
 ) -> Result<(), (String, Option<DateTime<Utc>>)> {
+    if pick.release_blocker {
+        return Ok(());
+    }
     let Some(min) = min_cards.and_then(|n| usize::try_from(n).ok()) else {
         return Ok(());
     };

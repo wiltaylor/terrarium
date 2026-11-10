@@ -186,7 +186,13 @@ pub(crate) fn down(state: &Shared, row: &TargetRow) -> Option<String> {
                 row.state
             ));
         }
-        TargetKind::Ssh => return None,
+        TargetKind::Exedev if row.state != "running" => {
+            return Some(format!(
+                "target `{name}` is {}; a monitor or a pipeline does not bring a target up",
+                row.state
+            ));
+        }
+        TargetKind::Ssh | TargetKind::Exedev => return None,
         _ => {}
     }
     match &row.def.host {

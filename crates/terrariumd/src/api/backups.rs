@@ -80,11 +80,20 @@ pub async fn create_online(state: &Shared, body: CreateBody, actor: &str) -> Api
     create_locked(state, body, actor).await
 }
 
-/// [`create_online`], but a backup that runs now is waited for, not an
-/// error: for the schedule.
-pub async fn create_queued(state: &Shared, body: CreateBody, actor: &str) -> ApiResult<Created> {
-    let lock = busy_lock(&dir(state));
-    let _busy = lock.lock().await;
+/// The one-backup lock of the backup dir, waited for when a backup runs
+/// now: for the schedule. It holds the guard from the choice of the kind
+/// and the base to the prune, so no manual backup comes in between.
+pub async fn lock_queued(state: &Shared) -> tokio::sync::OwnedMutexGuard<()> {
+    busy_lock(&dir(state)).lock_owned().await
+}
+
+/// [`create_online`] under the guard of [`lock_queued`].
+pub async fn create_held(
+    state: &Shared,
+    _held: &tokio::sync::OwnedMutexGuard<()>,
+    body: CreateBody,
+    actor: &str,
+) -> ApiResult<Created> {
     create_locked(state, body, actor).await
 }
 
@@ -133,7 +142,11 @@ async fn create_locked(state: &Shared, body: CreateBody, actor: &str) -> ApiResu
         db: DbSource::Snapshot(snapshot),
     };
     let created = tokio::task::spawn_blocking(move || {
+        let mut opts = opts;
         let r = backup::create(&roots, &opts);
+        if let Some(p) = opts.passphrase.as_mut() {
+            zeroize::Zeroize::zeroize(p);
+        }
         drop(tmp);
         r
     })

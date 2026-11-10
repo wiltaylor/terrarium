@@ -851,7 +851,7 @@ fn host_down(conn: &rusqlite::Connection, state: &Shared, def: &DeliveryDef) -> 
 
 /// [`host_down`] of a target that is read.
 fn agent_down(state: &Shared, name: &str, def: &TargetDef) -> Option<String> {
-    if def.kind == TargetKind::Ssh {
+    if matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
         return None;
     }
     let host = def.host.as_deref()?;
@@ -2138,7 +2138,8 @@ fn none_merged(job: &Job, left: HashMap<usize, Left>, batch: Option<Vec<BatchCar
             "none of the branches of the batch does".to_owned()
         };
         let mut t = format!(
-            "{what} not merge onto `next` without conflicts; the queue does not resolve them. Files:\n{}",
+            "{what} not merge onto `{}` without conflicts; the queue does not resolve them. Files:\n{}",
+            job.onto(),
             notes(OUTCOME_CONFLICT).join("\n")
         );
         let moved = notes(OUTCOME_MOVED);
@@ -2171,6 +2172,98 @@ fn none_merged(job: &Job, left: HashMap<usize, Left>, batch: Option<Vec<BatchCar
     }
 }
 
+/// The checks of a merge onto the release branch `release` (TER-607),
+/// fetched as `refs/remotes/job/next`, with `next` as
+/// `refs/remotes/job/upstream`: the job has one card with a tested commit,
+/// that commit is on `next` (its passed merge onto `next` took it), and
+/// it brings nothing into the release that `next` had before the fix.
+///
+/// The last rule (review round 3): let M be the oldest commit of the
+/// first-parent line of `next` that holds the tested commit (the merge of
+/// the fix). No commit of `release..tested` may be in `release..M^1`, the
+/// history of `next` before the fix landed. So a fix branch made from
+/// `next` after the cut, or stacked on (or merging) a card that merged
+/// onto `next` before the fix, is refused: it would take unreleased
+/// cards into the frozen version. A fix that merges a card branch that
+/// is not on `next` yet cannot be told apart from the fix's own commits.
+fn release_fix(repo: &git::JobRepo, job: &Job, release: &str) -> Result<(), String> {
+    let onto = job.onto();
+    let cards = job.cards();
+    let [card] = cards.as_slice() else {
+        return Err(format!("a merge onto `{onto}` takes one card"));
+    };
+    let Some(want) = &card.commit else {
+        return Err(format!(
+            "card {} has no tested commit: merge it onto next first",
+            card.card
+        ));
+    };
+    let upstream = "refs/remotes/job/upstream";
+    let tested = match repo.commit_of(want) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Err(format!("the tested commit {want} is not on next")),
+        Err(e) => return Err(e.to_string()),
+    };
+    match repo.is_ancestor(&tested, upstream) {
+        Ok(true) => {}
+        Ok(false) => return Err(format!("the tested commit {want} is not on next")),
+        Err(e) => return Err(e.to_string()),
+    }
+    let foreign = brought_from_next(repo, release, &tested, upstream).map_err(|e| e.to_string())?;
+    if !foreign.is_empty() {
+        let shown: Vec<&str> = foreign.iter().take(5).map(String::as_str).collect();
+        return Err(format!(
+            "branch `{}` is not based on `{onto}`: its commit {want} brings {} commit(s) that \
+             were on next before the fix and are not in the release ({}). Make the fix \
+             branch from `{onto}`, with no other card in it",
+            card.branch,
+            foreign.len(),
+            shown.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The commits of `release..tested` that `next` (`upstream`) held before
+/// the merge of `tested` (see [`release_fix`]), newest first. M, the
+/// oldest first-parent commit of `upstream` that holds `tested`, is found
+/// by a binary search: along the first-parent line, once a commit holds
+/// `tested`, each newer one does too.
+fn brought_from_next(
+    repo: &git::JobRepo,
+    release: &str,
+    tested: &str,
+    upstream: &str,
+) -> Result<Vec<String>, git::GitError> {
+    // Newest first, so the commits that hold `tested` are a prefix.
+    let line = repo.rev_list(upstream, release, true)?;
+    let (mut lo, mut hi) = (0, line.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if repo.is_ancestor(tested, &line[mid])? {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    // `line[lo - 1]` is M. Without one, `tested` is in the release already.
+    let Some(m) = lo.checked_sub(1).map(|i| &line[i]) else {
+        return Ok(Vec::new());
+    };
+    let Some(before) = repo.commit_of(&format!("{m}^1"))? else {
+        return Ok(Vec::new());
+    };
+    let had: HashSet<String> = repo
+        .rev_list(&before, release, false)?
+        .into_iter()
+        .collect();
+    Ok(repo
+        .rev_list(tested, release, false)?
+        .into_iter()
+        .filter(|c| had.contains(c))
+        .collect())
+}
+
 /// Step 1, in the daemon, with the repo credential (TER-103): fetch, check
 /// out or merge, record the commit as [`job_ref`], and write the bundle.
 /// Blocking.
@@ -2193,19 +2286,35 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
         // batch, each with its reviewed commit (TER-553).
         let cards = job.cards();
         let branches: Vec<String> = cards.iter().map(|c| c.branch.clone()).collect();
-        let mut specs = vec!["+refs/heads/next:refs/remotes/job/next".to_owned()];
-        specs.extend(
-            branches
-                .iter()
-                .enumerate()
-                .map(|(i, b)| format!("+refs/heads/{b}:refs/remotes/job/card{i}")),
-        );
+        // `next`, or the release branch of `card merge --onto` (TER-607).
+        let onto = job.onto();
+        let release = onto != jobs::NEXT;
+        let mut specs = vec![format!("+refs/heads/{onto}:refs/remotes/job/next")];
+        if release {
+            // The tested commit is on `next`, so the card branch is not
+            // fetched; `next` also shows the cards that the release must
+            // not take.
+            specs.push("+refs/heads/next:refs/remotes/job/upstream".to_owned());
+        } else {
+            specs.extend(
+                branches
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| format!("+refs/heads/{b}:refs/remotes/job/card{i}")),
+            );
+        }
         // A card branch that is gone (deleted after the accept) fails
         // the whole fetch (TER-614 review, major 1): then `next` alone,
         // and each branch on its own. A branch that does not come leaves
-        // the merge with the reason; the others go on.
+        // the merge with the reason; the others go on. A release job
+        // fetches no card branch, so a failed fetch fails it.
         let mut gone: HashMap<usize, String> = HashMap::new();
         if let Err(e) = repo.fetch(&specs) {
+            if release {
+                return failed(format!(
+                    "cannot fetch {onto} and next (does the repo have a {onto} branch?): {e}"
+                ));
+            }
             if let Err(e) = repo.fetch(&specs[..1]) {
                 return failed(format!(
                     "cannot fetch next and {} (does the repo have a next branch?): {e}",
@@ -2223,10 +2332,13 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
         }
         let mut cur = match repo.commit_of("refs/remotes/job/next") {
             Ok(Some(c)) => c,
-            Ok(None) => return failed("the repo has no next branch".into()),
+            Ok(None) => return failed(format!("the repo has no {onto} branch")),
             Err(e) => return failed(e.to_string()),
         };
         base = Some(cur.clone());
+        if release && let Err(why) = release_fix(repo, job, &cur) {
+            return failed(why);
+        }
         // A branch that conflicts, or whose merge fails otherwise, leaves
         // the merge; the next branch merges onto the ones before it. So
         // does a branch whose head is no longer its reviewed commit
@@ -2240,7 +2352,13 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                 left.insert(i, Left::unfetched(b, e));
                 continue;
             }
-            let fetched = format!("refs/remotes/job/card{i}");
+            // Onto a release branch, the tested commit that
+            // [`release_fix`] checked, never the branch head: a push after
+            // the merge onto `next` does not count (TER-607).
+            let fetched = match &cards[i].commit {
+                Some(c) if release => c.clone(),
+                _ => format!("refs/remotes/job/card{i}"),
+            };
             let tip = match repo.commit_of(&fetched) {
                 Ok(Some(c)) => c,
                 Ok(None) => {
@@ -2249,7 +2367,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                 }
                 Err(e) => return failed(e.to_string()),
             };
-            if let Some(want) = &cards[i].commit {
+            if let Some(want) = cards[i].commit.as_ref().filter(|_| !release) {
                 // A reviewed commit that the fetch did not bring (the
                 // branch was rewritten) is no head either.
                 let reviewed = repo.commit_of(want).ok().flatten();
@@ -2259,7 +2377,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                 }
             }
             // The commit, not the ref: the merge takes what was checked.
-            match repo.merge(&cur, &tip, &format!("Merge {b} onto next")) {
+            match repo.merge(&cur, &tip, &format!("Merge {b} onto {onto}")) {
                 Ok(git::MergeStep::Merged(c)) => {
                     cur = c;
                     merged += 1;
@@ -2568,9 +2686,11 @@ async fn steps(
     // commit from the daemon's repo. The recipe never had that repo, so
     // nothing it did to its clone reaches the push.
     let h = head.clone();
+    let onto = job.onto().to_owned();
+    let to = onto.clone();
     let pushed = x
         .daemon(move |r| match r.commit_of("refs/job/merge") {
-            Ok(Some(c)) if c == h => r.push(&h, "next"),
+            Ok(Some(c)) if c == h => r.push(&h, &to),
             Ok(_) => Err(git::GitError::Refused(format!(
                 "the job repo does not hold the merge commit {h}"
             ))),
@@ -2583,7 +2703,7 @@ async fn steps(
             passed: false,
             outcome: Some("error".into()),
             tail: Some(format!(
-                "the recipe passed, but the push to `next` failed; did `next` move?\n{e}"
+                "the recipe passed, but the push to `{onto}` failed; did `{onto}` move?\n{e}"
             )),
             head: Some(head),
             batch,
@@ -3010,8 +3130,11 @@ pub fn queue_comment(j: &Job, card: &str) -> String {
                 .unwrap_or("the branch head at the start")
         ),
         JobKind::Merge if j.batch.is_empty() => format!(
-            "Job queue: merge job {} queued: {} onto next of {}.",
-            j.id, j.branch, j.repo
+            "Job queue: merge job {} queued: {} onto {} of {}.",
+            j.id,
+            j.branch,
+            j.onto(),
+            j.repo
         ),
         JobKind::Merge => {
             let names: Vec<&str> = j.batch.iter().map(|c| c.card.as_str()).collect();
@@ -5126,6 +5249,7 @@ mod tests {
             split_path: String::new(),
             planned_secs: None,
             slot: None,
+            onto: None,
         }
     }
 
