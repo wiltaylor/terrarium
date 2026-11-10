@@ -2526,6 +2526,11 @@ fn daemon_trace_capture() -> TraceCapture {
 #[tokio::test]
 async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
     use std::os::unix::fs::PermissionsExt;
+    // The failed resets are infra failures that run once more after
+    // `INFRA_RETRY`: 5 min by default, which only another test of this
+    // binary made short (a global). When this test ran first, a held
+    // retry outlasted the drain wait (TER-674).
+    terrariumd::jobs::set_infra_retry(Duration::from_millis(200));
     let trace = daemon_trace_capture();
     let fixtures = tempfile::tempdir().unwrap();
     let ssh = fixtures.path().join("ssh");
