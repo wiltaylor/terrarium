@@ -76,6 +76,9 @@ class UnprivilegedTests(unittest.TestCase):
                 self.assertEqual(os.stat(d).st_mode & 0o777, 0o700)
                 self.assertTrue(d.startswith(root + os.sep))
         self.assertEqual(len(set(first + second)), 4)
+        # Unix socket paths under TMPDIR stay short (TER-611).
+        self.assertEqual([os.path.relpath(d, root) for d in first + second],
+                         ["0h", "0t", "1h", "1t"])
         self.assertEqual([c.args[1:] for c in chown.call_args_list], [(1001, 1001)] * 4)
 
     def test_setpriv_drops_uid_gid_and_groups(self):

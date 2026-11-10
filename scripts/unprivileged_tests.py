@@ -74,8 +74,8 @@ def child_env(home: str, tmp: str) -> dict[str, str]:
 def private_dirs(root: str, n: int, uid: int) -> tuple[str, str]:
     """A fresh HOME and TMPDIR under ROOT for binary N, owned by UID, mode 0700."""
     dirs = []
-    for kind in ("home", "tmp"):
-        d = os.path.join(root, f"{n}-{kind}")
+    for kind in ("h", "t"):
+        d = os.path.join(root, f"{n}{kind}")
         os.mkdir(d, 0o700)
         os.chown(d, uid, uid)
         dirs.append(d)
@@ -122,7 +122,9 @@ def run() -> int:
         Path(results).mkdir(parents=True, exist_ok=True)
         report = Path(results, "rust-unprivileged.json").open("w", encoding="utf-8")
     # Root-owned, 0711: uid UID can enter it but not list it or add to it.
-    root = tempfile.mkdtemp(prefix="terrarium-ci-unpriv-")
+    # Keep the paths short: tests bind Unix sockets under TMPDIR, and a socket
+    # path has at most 108 bytes (a longer prefix broke a jobs test, TER-611).
+    root = tempfile.mkdtemp(prefix="u", dir="/tmp")
     os.chmod(root, 0o711)
     failed = []
     running = []
