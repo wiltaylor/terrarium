@@ -550,13 +550,21 @@ async fn sql(td: &TestDaemon, statement: &'static str, card: &str) {
 
 #[tokio::test]
 async fn remote_head_change_resolves_no_progress_after_a_lead_only_notice() {
-    use std::time::Duration;
     let (td, lead, worker, card) = setup().await;
-    let (_remote, git) = branch_watch(&td, &lead, &worker, &card, Some("card"), 1).await;
+    // The card has worked 100 s. A threshold of 60 s keeps the last read
+    // fresh under load, which a 1 s threshold and a sleep did not.
+    let (_remote, git) = branch_watch(&td, &lead, &worker, &card, Some("card"), 60).await;
     terrariumd::trouble::observe_remote_heads(&state(&td)).await;
     assert_signals(&td, &card, json!([])).await;
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    // The same head only refreshes the last successful read.
+    // The head was first seen at the start of the card, not after 100 s.
+    sql(
+        &td,
+        "UPDATE card_branch_heads SET working_seconds = 0 WHERE card = ?1",
+        &card,
+    )
+    .await;
+    // The same head only refreshes the last successful read: it keeps the
+    // interval from the first sighting.
     terrariumd::trouble::observe_remote_heads(&state(&td)).await;
     assert_signals(&td, &card, json!(["no_progress"])).await;
     assert_eq!(notices(&td, &lead).await, 1);

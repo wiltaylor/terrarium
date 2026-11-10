@@ -1925,6 +1925,10 @@ async fn default_triage_notifies_leads_on_backlog_and_hourly() {
         .as_str()
         .unwrap()
         .to_owned();
+    // Hold the engine timers before the rule pack loads: a real tick would
+    // send the hourly triage of the current hour at any point of this test,
+    // one mail more than the hours fired below.
+    state(&td).rule_timers.hold(true);
     td.patch_as(&lead, "/api/projects/p", json!({"board_flow": "rules"}))
         .await
         .ok();

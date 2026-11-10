@@ -3394,9 +3394,15 @@ both_flows!(a_green_batch_of_three_merges_in_one_job);
 /// `accepted`.
 async fn a_green_batch_of_three_merges_in_one_job(flow: &'static str) {
     let lab = lab_flow(2, flow).await;
+    // The job waits for the gate, not a fixed sleep: under load a batch
+    // that ends before the 409 check below lets a new job take card 2.
+    let gate = lab._dirs.path().join("gate");
     set_recipe(
         &lab,
-        "test -f OK && test -f g1 && test -f g2 && test -f g3 && sleep 1",
+        &format!(
+            "{} && test -f OK && test -f g1 && test -f g2 && test -f g3",
+            common::gate_wait(&gate, DEADLINE)
+        ),
     )
     .await;
     let mut heads = Vec::new();
@@ -3474,6 +3480,7 @@ async fn a_green_batch_of_three_merges_in_one_job(flow: &'static str) {
         })
         .await;
     }
+    std::fs::write(&gate, "").unwrap();
     for c in &cards {
         let card = lab
             .until_card(c, "accepted", |c| c["column"] == "accepted")
