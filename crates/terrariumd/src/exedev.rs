@@ -203,22 +203,31 @@ pub fn record_of(conn: &Connection, target: &str) -> ApiResult<Option<Vm>> {
         .optional()?)
 }
 
-/// The exe.dev instance id of this daemon: one row of `exedev_instance`,
-/// made once by its migration (8 hex characters). Read each time, so a
-/// test can set it.
+/// The exe.dev instance id of this daemon: the one row of
+/// `exedev_instance`, 8 random hex characters, written at the first call
+/// and kept after. Read each time, so a test can set it.
 pub fn instance(conn: &Connection) -> ApiResult<String> {
-    let id: Option<String> = conn
-        .query_row("SELECT id FROM exedev_instance LIMIT 1", [], |r| r.get(0))
-        .optional()?;
-    match id {
-        Some(i) if plain_word(&i) => Ok(i),
-        Some(i) => Err(ApiError::internal(format!(
-            "bad exe.dev instance id `{i}` in `exedev_instance`"
-        ))),
-        None => Err(ApiError::internal(
-            "no exe.dev instance id in `exedev_instance`",
-        )),
+    // The last 8 hex digits of the 80 random bits of a ULID.
+    let random = format!("{:032x}", ulid::Ulid::new().random());
+    conn.execute(
+        "INSERT INTO exedev_instance (id) SELECT ?1
+         WHERE NOT EXISTS (SELECT 1 FROM exedev_instance)",
+        [&random[random.len() - 8..]],
+    )?;
+    let id: String =
+        conn.query_row("SELECT id FROM exedev_instance LIMIT 1", [], |r| r.get(0))?;
+    if plain_word(&id) {
+        Ok(id)
+    } else {
+        Err(ApiError::internal(format!(
+            "bad exe.dev instance id `{id}` in `exedev_instance`"
+        )))
     }
+}
+
+/// [`instance`] in a write: the first call writes the row.
+async fn instance_of(state: &Shared) -> ApiResult<String> {
+    state.db.write("system", |t| instance(t)).await
 }
 
 /// The name prefix of the VMs of one daemon: `terrarium-x-<instance>-`.
@@ -685,7 +694,7 @@ async fn up_locked(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     let d = def.clone();
     let account = state.db.read(move |c| Account::of_target(c, &d)).await?;
     let api = api_for(state, &account)?;
-    let inst = state.db.read(instance).await?;
+    let inst = instance_of(state).await?;
     let one = state.executor.exedev.create.lock().await;
     let mut running: BTreeSet<String> = state
         .db
@@ -948,7 +957,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<Value> {
         let a = state.db.read(move |c| Account::of_target(c, &d)).await?;
         accounts.entry(a).or_default().insert(settings(&r.def).tag);
     }
-    let prefix = prefix_of(&state.db.read(instance).await?);
+    let prefix = prefix_of(&instance_of(state).await?);
     let mut removed = Vec::new();
     let mut errors = Vec::new();
     for (account, tags) in &accounts {
@@ -1240,15 +1249,19 @@ mod tests {
         assert!(long.len() <= 63, "{long}");
     }
 
-    /// The migration makes one instance id, a plain word of 8 hex
-    /// characters, and a second open keeps it.
+    /// The first call makes one instance id, a plain word of 8 hex
+    /// characters, and later calls (also after a reopen) keep it.
     #[test]
     fn the_instance_id_is_made_once_and_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.db");
         let id = instance(&crate::db::open(&path).unwrap()).unwrap();
         assert_eq!(id.len(), 8, "{id}");
-        assert!(id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "{id}");
+        assert!(
+            id.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            "{id}"
+        );
         assert_eq!(instance(&crate::db::open(&path).unwrap()).unwrap(), id);
         let other = tempfile::tempdir().unwrap();
         let id2 = instance(&crate::db::open(&other.path().join("t.db")).unwrap()).unwrap();

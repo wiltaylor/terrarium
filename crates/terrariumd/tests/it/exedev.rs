@@ -331,7 +331,8 @@ fn record(td: &TestDaemon, target: &str) -> Option<(String, Option<String>)> {
     use rusqlite::OptionalExtension;
     db(td)
         .query_row(
-            "SELECT name, ssh_dest FROM exedev_vms WHERE target = ?1",
+            "SELECT name, ssh_dest FROM exedev_vms WHERE target = ?1
+             ORDER BY created_at DESC",
             [target],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -829,9 +830,10 @@ async fn a_vm_of_a_target_whose_file_goes_is_removed_by_the_sweep() {
     assert!(vm_of(&td, "fx").is_none());
 }
 
-/// TER-653 finding 3: the target's `[exedev] api_token` changes while it
-/// has a VM. `down` removes the VM with the token it was made with; the
-/// next `up` uses the new token.
+/// TER-653 finding 3: the `[exedev] api_token` of a target file changes
+/// while the target has a VM (an API `PATCH` refuses it on a running
+/// target; a file reload does not). `down` removes the VM with the token
+/// it was made with; the next `up` uses the new token.
 #[tokio::test]
 async fn a_changed_api_token_removes_the_vm_on_the_account_it_was_made_on() {
     let (td, fake, _, _, _) = daemon().await;
@@ -842,16 +844,19 @@ async fn a_changed_api_token_removes_the_vm_on_the_account_it_was_made_on() {
         )
         .await;
     assert_eq!(r.status.as_u16(), 201, "{}", r.body);
-    td.post("/api/targets", target("ex", 8 * 3600)).await.ok();
+    let file = "kind = \"exedev\"\nephemeral = true\ncredential = \"vmkey\"\n";
+    crate::common::write(&td.config, "targets/ex.toml", file);
+    td.post_empty("/api/reload").await.ok();
     td.post_empty("/api/targets/ex/up").await.ok();
     let vm = vm_of(&td, "ex").unwrap();
-    let r = td
-        .patch(
-            "/api/targets/ex",
-            json!({"exedev": {"api_token": "exedev-other"}}),
-        )
-        .await;
-    assert!(r.status.is_success(), "{}", r.body);
+    crate::common::write(
+        &td.config,
+        "targets/ex.toml",
+        &format!("{file}[exedev]\napi_token = \"exedev-other\"\n"),
+    );
+    td.post_empty("/api/reload").await.ok();
+    let def = td.get("/api/targets/ex").await.ok().clone();
+    assert_eq!(def["exedev"]["api_token"], "exedev-other", "{def}");
     // Two accounts now (the record's and the target's): the young VM stays.
     assert!(sweep(&td).await.is_empty());
     assert_eq!(fake.lock().unwrap().names(), vec![vm.clone()]);
@@ -866,7 +871,12 @@ async fn a_changed_api_token_removes_the_vm_on_the_account_it_was_made_on() {
         .filter_map(|(c, t)| Some((c.split_whitespace().next()?, t.as_str())))
         .filter(|(c, _)| *c == "rm" || *c == "new")
         .collect();
-    assert_eq!(used, vec![("rm", TOKEN), ("new", TOKEN2)], "{:?}", f.commands);
+    assert_eq!(
+        used,
+        vec![("rm", TOKEN), ("new", TOKEN2)],
+        "{:?}",
+        f.commands
+    );
     assert!(!f.vms.contains_key(&vm));
     assert_eq!(f.vms.len(), 1);
 }
@@ -899,7 +909,10 @@ async fn a_record_with_no_ssh_host_stays_through_an_ls_miss_until_its_grace_time
             rusqlite::params![late, back],
         )
         .unwrap();
-    assert_eq!(sweep(&td).await, vec![(late.to_owned(), "unready".to_owned())]);
+    assert_eq!(
+        sweep(&td).await,
+        vec![(late.to_owned(), "unready".to_owned())]
+    );
     assert_eq!(fake.lock().unwrap().names(), vec![new.clone()]);
     assert!(!recorded(&td, late));
     // Past the grace time, a miss in `ls` forgets a record with no ssh host.
@@ -953,8 +966,9 @@ async fn live_round_trip_on_exe_dev() {
         )
         .unwrap();
         let td = TestDaemon::start().await;
-        db(&td)
-            .execute("UPDATE exedev_instance SET id = ?1", [&inst])
+        let conn = db(&td);
+        conn.execute("DELETE FROM exedev_instance", []).unwrap();
+        conn.execute("INSERT INTO exedev_instance (id) VALUES (?1)", [&inst])
             .unwrap();
         secrets(&td, &token, Some(&key)).await;
         td.post("/api/targets", target("live", life)).await.ok();
@@ -962,7 +976,10 @@ async fn live_round_trip_on_exe_dev() {
         assert_eq!(r.ok()["state"], "running", "{}", r.body);
         let up_at = std::time::Instant::now();
         let vm = vm_of(&td, "live").unwrap();
-        assert!(vm.starts_with(&terrariumd::exedev::prefix_of(&inst)), "{vm}");
+        assert!(
+            vm.starts_with(&terrariumd::exedev::prefix_of(&inst)),
+            "{vm}"
+        );
         let listed = names(&api.ls().await.unwrap());
         println!("made VM {vm}; ls after up: {listed:?}");
         assert!(listed.contains(&vm), "ls does not list {vm} after up");
