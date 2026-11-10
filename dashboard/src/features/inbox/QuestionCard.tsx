@@ -4,7 +4,7 @@
 // only. The context is Markdown, and goes through the DOMPurify sink
 // (SafeHtml) only.
 
-import { A } from "@solidjs/router";
+import { A, useNavigate } from "@solidjs/router";
 import { createEffect, createSignal, For, type JSX, on, Show } from "solid-js";
 import type { Question } from "../../api/types";
 import { LinkText, openCardLink, readerCardKeys } from "../../components/LinkText";
@@ -13,15 +13,21 @@ import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
 import { api } from "../../stores";
-import { ackText, answerBody, cardHref, chosenLabel, statusChip, THREAD_MOVE_MESSAGE_MAX } from "./questions";
+import { ackText, answerBody, canOpenInThread, cardHref, chosenLabel, mailThreadHref, statusChip, THREAD_MOVE_MESSAGE_MAX } from "./questions";
 import { threadHref } from "./threads";
 
 /**
  * `prefill`: text for the answer box (the reply of an agent that the
  * operator forwarded the question to, "Use as answer"). A new object fills
- * it again.
+ * it again. `inThread`: the card is on the page of its own thread, so it
+ * has no "Open in thread".
+ *
+ * "Open in thread" (GitHub #32) opens the linked Inbox thread, or, for an
+ * open question or notice with none, creates it with to-thread (TER-469)
+ * and opens it. "Show mail" opens the mail thread of the question.
  */
-export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; actions?: JSX.Element; prefill?: { text: string }; onChange: (q: Question) => void }) {
+export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; inThread?: boolean; actions?: JSX.Element; prefill?: { text: string }; onChange: (q: Question) => void }) {
+  const navigate = useNavigate();
   const q = () => props.question;
   const notice = () => q().kind === "notice";
   const [option, setOption] = createSignal<number | null>(null);
@@ -92,6 +98,13 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
           </span>
         </Show>
         <span class="mono muted">{q().id}</span>
+        <Show when={q().thread_id}>
+          {(m) => (
+            <A href={mailThreadHref(m())} class="muted" title="The mail thread of this question">
+              Show mail
+            </A>
+          )}
+        </Show>
         {props.actions}
       </div>
 
@@ -101,10 +114,13 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
 
       <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={openCardLink} />}</Show>
 
-      <Show when={q().status === "in_thread" && q().thread}>
+      <Show when={!props.inThread && q().thread}>
         {(t) => (
           <div class="small">
-            In a thread with the agent: <A href={threadHref(t())}>open the thread</A>
+            In a thread with the agent:{" "}
+            <A class="btn small" href={threadHref(t())}>
+              Open in thread
+            </A>
           </div>
         )}
       </Show>
@@ -148,14 +164,22 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
             </Show>
             <input placeholder="Reason to retract (optional)" value={reason()} onInput={(e) => setReason(e.currentTarget.value)} aria-label="Retract reason" />
             <ConfirmButton class="small" label="Retract" confirmLabel="Yes, retract" disabled={busy()} onConfirm={() => run(() => api.questions.retract(q().id, reason().trim() || undefined))} />
-            <Show when={q().status === "open" && !q().thread}>
+            <Show when={!props.inThread && !q().thread && canOpenInThread(q())}>
               <input placeholder="Message for the thread (optional)" value={threadMessage()} maxLength={THREAD_MOVE_MESSAGE_MAX} onInput={(e) => setThreadMessage(e.currentTarget.value)} aria-label="Thread message" />
               <ConfirmButton
                 class="small"
-                label="To thread"
+                label="Open in thread"
                 confirmLabel="Yes, open a thread"
                 disabled={busy()}
-                onConfirm={() => run(async () => (await api.questions.toThread(q().id, threadMessage().trim() || undefined)).question)}
+                onConfirm={async () => {
+                  let opened: string | undefined;
+                  await run(async () => {
+                    const { question, thread } = await api.questions.toThread(q().id, threadMessage().trim() || undefined);
+                    opened = thread.id;
+                    return question;
+                  });
+                  if (opened) navigate(threadHref(opened));
+                }}
               />
             </Show>
           </div>

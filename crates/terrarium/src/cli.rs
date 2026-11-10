@@ -3811,8 +3811,12 @@ pub enum GroupCmd {
         #[arg(long)]
         eta: Option<String>,
     },
-    /// Acknowledge publication after release CI succeeds
-    Built { key: String, version: String },
+    /// Acknowledge publication after release CI succeeds: one or more
+    /// group keys, then the version (`group built KEY... VERSION`)
+    Built {
+        #[arg(value_name = "KEY... VERSION", num_args = 2.., required = true)]
+        keys_and_version: Vec<String>,
+    },
     /// Remove a snapshot member, for example a card returned for a fix
     Remove { key: String, card: String },
 }
@@ -4708,8 +4712,15 @@ pub enum UpdateCmd {
         #[arg(long, default_value_t = 600)]
         wait: u64,
     },
-    /// For the updater: end a drain
-    #[command(hide = true)]
+    /// Before an update: drain the job slots only. No job of the job queue
+    /// starts, the running jobs finish, and the agents go on. Waits for the
+    /// running jobs; `resume` ends it, and so does a restart
+    DrainJobs {
+        /// The most seconds to wait for the running jobs
+        #[arg(long, default_value_t = 0)]
+        wait: u64,
+    },
+    /// End a drain, or a drain of the job slots
     Resume,
 }
 

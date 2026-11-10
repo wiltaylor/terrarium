@@ -64,7 +64,7 @@ pub struct SpawnArgs {
     /// Bind the ephemeral agent to a card of the owner's project (TER-74):
     /// it lives until the card is merged onto `next`, done, or archived,
     /// not for its lifetime. It is stopped while the card waits in
-    /// validating, review, or accepted, and starts again in its own
+    /// validating, review, merge_queue, or accepted, and starts again in its own
     /// session when the card comes back
     #[arg(long, value_name = "CARD")]
     pub card: Option<String>,

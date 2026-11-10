@@ -2350,3 +2350,34 @@ async fn move_mails_match_code() {
 async fn move_mails_match_rules() {
     move_mails_match("rules").await;
 }
+
+/// TER-614 R9: without a review dispatcher, `review_round` counts the
+/// moves of the card into review (a review by the lead too), in the card
+/// and in the board list.
+#[tokio::test]
+async fn review_round_counts_the_moves_into_review() {
+    let td = setup().await;
+    let id = card(&td, "proj/lead", json!({"title":"Reviewed twice"})).await;
+    let path = format!("/api/cards/{id}");
+    assert_eq!(td.get(&path).await.ok()["review_round"], 0);
+    for column in ["review", "ready", "review"] {
+        td.post(&format!("{path}/move"), json!({"column": column}))
+            .await
+            .ok();
+    }
+    assert_eq!(td.get(&path).await.ok()["review_round"], 2);
+    let board = td.get("/api/projects/proj/board").await.ok().clone();
+    let listed = board["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap()
+        .clone();
+    assert_eq!(listed["review_round"], 2, "{listed}");
+    // A move inside review, or out of it, adds no round.
+    td.post(&format!("{path}/move"), json!({"column": "ready"}))
+        .await
+        .ok();
+    assert_eq!(td.get(&path).await.ok()["review_round"], 2);
+}

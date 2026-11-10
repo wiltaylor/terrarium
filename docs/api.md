@@ -886,7 +886,13 @@ uses the project's `card-review` template, falling back to `global:card-review`,
 and that admin's spawn rights, caps, and template grants.
 
 Each card in review gets at most one review agent at a time. `review_round`
-on the card counts successful review spawns. Only the current review agent's
+on the card counts successful review spawns. A card of a project without a
+review dispatcher counts each move into its review column instead (TER-614),
+so a review by the lead counts too; `0` means it was never in review.
+`review_round` is in `GET /api/cards/{id}` and in each card of the board list.
+`trouble` on a card holds its active trouble signals (TER-79): the trouble
+pass sets them while the card is in a working or review column, and clears
+them when it leaves, so a done card shows `[]`. Only the current review agent's
 comment can supply a verdict: its first line must be `Review verdict: accept` or
 `Review verdict: changes` (bare `accept` and `changes` also work), with findings below it.
 At three rounds, automatic reviews stop and the owner is notified.
@@ -3387,7 +3393,7 @@ Bundles:
 To thread (GitHub #30, TER-469):
 
 - The operator moves an open question or notice into a new Inbox thread
-  with the asking agent: the Inbox action "To thread", `POST
+  with the asking agent: the Inbox action "Open in thread" (GitHub #32), `POST
   /api/questions/{id}/to-thread`, or `terrarium question to-thread <id>
   [-m <message>]` (also `terrarium admin question to-thread`).
 - The thread (§6.13) is in the project of the question, with the asking
@@ -3418,6 +3424,11 @@ To thread (GitHub #30, TER-469):
   retracts it, as an open question of the thread.
 - The recap turn lists the `in_thread` questions with their threads.
 - A bundle does not move (`409 conflict`): that is a follow-up.
+- In the dashboard (GitHub #32), "Open in thread" on a question or notice
+  with a linked thread opens that thread, also after the answer. On an
+  open one with none it moves it, as above, and opens the new thread.
+  "Show mail" opens the mail thread of the question (`thread_id`). The
+  thread shows the question in its conversation.
 
 ### 6.9 The Inbox
 
@@ -3749,8 +3760,8 @@ agent:
 
 | Card event | Bound agent |
 |---|---|
-| Moved to `validating`, `review`, or `accepted` | parked |
-| Moved out of `validating`, `review`, or `accepted` while parked (for example to `ready` after a failed job, or to `in_progress`) | unparked |
+| Moved to `validating`, `review`, `merge_queue`, or `accepted` | parked |
+| Moved out of `validating`, `review`, `merge_queue`, or `accepted` while parked (for example to `ready` after a failed job, or to `in_progress`) | unparked |
 | Moved between two other columns (for example `in_progress` to `blocked` or `ready`) | nothing |
 | A merge job passed (merged onto `next`), or moved to `done` | closed, `done` |
 | Archived | closed, `cancelled` |
@@ -3762,8 +3773,9 @@ reason}`), `agent.unpark_queued` (`{spawn_id, name, bound, cause,
 owner}`), `agent.unpark_dropped` (`{spawn_id, name, bound, reason}`: the
 card moved into a wait column again while its unpark waited, so the
 unpark and its return turn are dropped), and `agent.unparked`
-(`{spawn_id, name, bound, cause}`) are on the bound agent. The wait columns are names: a board without them never
-parks its bound agents.
+(`{spawn_id, name, bound, cause}`) are on the bound agent. A wait column is a column whose role is one of these,
+or a column with no role whose name is one: a board without them never parks
+its bound agents.
 
 **Finish.** Only these end an ephemeral agent:
 
@@ -8803,7 +8815,7 @@ one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
 of a `job` event, `data.id`, or of a `job.verdict` event, `data.job`; a
 rule with one runs only for those events): `state` (`queued`, `running`,
 `passed`, `failed`, `cancelled`), `outcome` (`red`, `conflict`, `error`,
-`none`), and the booleans `split` (the job is a half of a split batch),
+`infra`, `none`), and the booleans `split` (the job is a half of a split batch),
 `batch` (two or more cards of the job merged, did not conflict), `rerun`
 (a rerun of the job is queued or ran), and `halves` (the job was split).
 Every field that is set must hold; every block must hold.
@@ -8867,7 +8879,7 @@ tests, and publishes. Later accepted cards are not added to that snapshot.
 
 | endpoint | body | result |
 |---|---|---|
-| `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A closed group rejects updates. |
+| `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A step after `cut` that starts (running, done or failed) also finishes `cut`. A closed group rejects updates. |
 | `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, group}`. Explicit acknowledgement after release CI publishes. Moves only the snapshot's accepted members to done, clears assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
 | `POST /api/projects/{project}/version-groups/{key}/remove` | `{card}` | `{changed, group}`. Explicitly drops a member from an open snapshot without moving or editing that card. Use for a card returned for a fix, archived, or held. Removal is audited. Duplicate removal is a no-op. Closed groups reject removal. |
 
@@ -8878,7 +8890,12 @@ contains `key`, `version`, and `members` and names the group card.
 Lead CLI (uses `--project`, else the agent's project):
 `terrarium group status <key> --step "version branch e2e" --state running --eta 10m`,
 `terrarium group remove <key> <card>`, and
-`terrarium group built <key> vX.Y.Z`. Removed cards do not count in that build.
+`terrarium group built <key>... vX.Y.Z` (one call for each key; repeat the
+command after a failure, as built is idempotent). Removed cards do not count in that build.
+
+The `version_cut` rule opens no new group while another version group of the
+project is open past its cut step (the cut step is done, or a later step has
+started). The accepted cards wait for the next version (TER-609).
 
 - `group_open`: required `key`, `title`, `column`, and `done_when`. The key
   is project-scoped. Repeating an open is a no-op, even after closure.
@@ -9161,7 +9178,7 @@ Its rules, in order:
 | `job-fail-conflict`, `job-fail-red`, `job-fail-error` | a final failure | labels off, the failure block on the body, the top of `@ready` with the comment, unassign, a mail to the worker |
 | `job-cancelled` | a cancelled verdict | labels off |
 | `card-blocked-mail`, `card-done-mail` | a card move to the blocked column; to `done` | the blocked notice to the operator and the creator; the done notice on each linked thread |
-| `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `accepted` (names, as §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
+| `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `merge_queue`, `accepted` (roles, with the names as fallback, §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
 
 The move mails of the rules differ from the mails of the coded move
 (TER-536):
@@ -9269,7 +9286,7 @@ board screen.
 
 **The migration.** The pack names columns by role (`@review`,
 `@accepted`, `@ready`), and its bound agent rules name the wait columns
-(`validating`, `review`, `accepted`). A board can lack some of them. On
+(`validating`, `review`, `merge_queue`, `accepted`). A board can lack some of them. On
 such a board a run of the pack fails (§19.9). The migration maps the pack
 to the board's columns:
 
@@ -9295,6 +9312,18 @@ Each changed pack rule becomes an override (a rule with the pack rule's
 name, §19.11) at the end of the project's `rules.wcl`, with the reasons
 in its `description`. A pack rule that `rules.wcl` replaces already stays
 as it is (`kept`). A second migration of the same board changes nothing.
+
+A migration before TER-222 left `merge_queue` out of the `agent-park` and
+`agent-unpark` overrides, so a move from review to the merge queue woke
+the bound agent. Each load of the config (the start and `POST
+/api/reload`) adds it one time to the API rules of a project (TER-243). It
+changes only a block that is still exactly the text of that old migration
+for the board, and the board needs a merge queue column (the role
+`merge_queue`, else the name on a column with no role). The changed block
+gets `merge_queue added (TER-243).` at the end of its `description`, and
+a block with that note is never changed again. An edited block and a
+file's rules stay as they are. The write is a `rules.put` audit row. A
+problem is one line in the load report and does not fail the load.
 
 **The lint.** It reads the rules that the engine runs: the pack with the
 project's own rules for `board_flow = rules`, else only its own rules.
@@ -11400,6 +11429,36 @@ has no restore, because a restore replaces the database under the daemon.
    root that the backup does not have (`work`, without `--work`) does not
    change; `--skip-work` leaves the work root too.
 
+**The restore drill.** Test a backup before you need it:
+
+```sh
+terrariumd backup drill <file> [--base <full>] [--passphrase-file <file>] [--into <dir>] [--keep] [--json]
+```
+
+The drill restores the backup into an empty scratch dir (default: a new
+`.drill-<id>` dir in the backup dir), with the roots `state`, `config`,
+and `work` in it. It then checks that each manifest entry is in place
+with its size, that the restored database passes `PRAGMA
+integrity_check` and has the schema version of the header, and that
+`secrets.key` is back. The live data does not change, so the daemon can
+run. The scratch dir holds the secrets in plain form: the drill deletes it
+at the end unless `--keep`. A dir with content is refused. Run a drill
+after the first scheduled backup, after a key rotation, and after an
+upgrade of terrariumd.
+
+**The restore, step by step.**
+
+1. Pick the backup: `terrariumd backup ls`. For a diff, its base must be in
+   the same dir (or give `--base`).
+2. Get the passphrase: the `backup-key` secret is in the backup itself, so
+   use your off-server copy. A backup older than the last rotation needs
+   the old passphrase.
+3. Drill it: `terrariumd backup drill <file> --passphrase-file <file>`.
+4. Stop the daemon.
+5. Restore: `terrariumd backup restore <file> --passphrase-file <file>`.
+6. Start the daemon. Check the board, the agents, and `terrarium secret
+   ls`.
+
 Delete the `.terrarium-pre-restore-*` dirs when the daemon runs well. The
 restore writes the files as the user that runs it: run it as the user of
 the daemon. A database from an older terrariumd migrates at the next
@@ -11408,18 +11467,65 @@ migrations of this build) does not start.
 
 ### 32.4 Scheduled backups
 
-`TERRARIUM_BACKUP_SCHEDULE` (default `off`; `daily`, `weekly`, or a
-duration of `1h` or more): a daemon task makes a backup one interval after
-the newest backup in the dir, and not before 10 minutes after the start. A
-failed run waits one interval too. The backup is `full` when the dir has no
-full backup or when the newest is older than `TERRARIUM_BACKUP_FULL_EVERY`
-(default `7d`); else it is a `diff` of the newest full backup. Then the
-task keeps the newest `TERRARIUM_BACKUP_KEEP` (default `4`) full backups and
-their diffs, and deletes the rest (audit `backup.prune`).
-`TERRARIUM_BACKUP_WORK=on` adds the workspaces.
-`TERRARIUM_BACKUP_PASSPHRASE_FILE` seals each backup with the first line
-of that file. The audit actor is `system:backup`. A failure writes the
-audit row `backup.failed` with the error.
+The settings are daemon env vars:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TERRARIUM_BACKUP_SCHEDULE` | `off` | `daily`, `weekly`, or a duration of `1h` or more. |
+| `TERRARIUM_BACKUP_FULL_EVERY` | `7d` | The longest time between two full backups. |
+| `TERRARIUM_BACKUP_KEEP` | `4` | The full backups to keep, each with its diffs. |
+| `TERRARIUM_BACKUP_WORK` | `off` | `on`: add the workspaces. |
+| `TERRARIUM_BACKUP_KEY_SECRET` | `backup-key` | The global secret with the passphrase. |
+| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. |
+
+A bad value stops the daemon start. With a schedule, a daemon task makes a
+backup one interval after the newest backup in the dir, and not before 10
+minutes after the start. A failed run waits one interval too.
+
+**Kind.** The backup is `full` when the dir has no full backup, when the
+newest is older than `TERRARIUM_BACKUP_FULL_EVERY`, or when the key does
+not open the newest full backup (it is not sealed, or the key was
+rotated). Else it is a `diff` of the newest full backup. A diff and its
+base so always have the same key.
+
+**The key.** A scheduled backup holds every secret, so it is always
+sealed (§32.2). The passphrase is the `passphrase` field of the global
+secret `backup-key`, else its `value` field (`terrarium secret set
+backup-key`; an `api_key` or a `generic` secret). With no key the run
+fails and the operator gets a mail. The key never goes into a log, an
+event, an audit row, or an error. Keep a copy of the passphrase off the
+server: the secret store is in the backup, so a lost server takes the
+secret with it.
+
+**Rotation.** Set a new value on the secret. The next run is a full backup
+with the new key. The older backups keep the old key: keep the old
+passphrase until the retention deletes the last of them (after
+`TERRARIUM_BACKUP_KEEP` newer full backups). Restore or verify an old
+backup with the old passphrase (`--passphrase-file`).
+
+**Verify and record.** Each run reads the new backup back and checks each
+file against the manifest (§32.3 `verify`). The audit actor is
+`system:backup`. The rows are `backup.create`, `backup.verify` (`name`,
+`id`, `kind`, `checked_files`), `backup.prune`, `backup.failed` (`kind`,
+`error`), `backup.recovered`, and `backup.missed` (`due`). Each run also
+writes a global event of the kind `backup` with `change`: `verified`,
+`pruned`, `failed` (`level: error`), `recovered`, or `missed`
+(`level: error`). A backup that does not verify moves to
+`.unverified-<name>` in the backup dir: it is not a base and not a kept
+backup.
+
+**Retention.** Only a full backup that verified prunes the dir: it keeps
+the newest `TERRARIUM_BACKUP_KEEP` full backups and their diffs, and
+deletes the rest. Nothing is deleted before a newer full backup is
+verified, and nothing is deleted while the runs fail.
+
+**Alerts.** The first failed run of a streak mails the operator from
+`system` (subject `Scheduled backup failed`, with the error). The next
+failures write events only, and the first good run writes `recovered`. A
+missed run (no backup and no try for one interval and one hour, for
+example after the daemon was down) mails the operator once per due time
+(subject `Scheduled backup missed`). A new backup then runs 10 minutes
+after the start.
 
 This task is not a project schedule (§19): a project schedule starts agent
 turns in one project, and a backup is of the whole daemon.
@@ -11427,7 +11533,8 @@ turns in one project, and a backup is of the whole daemon.
 ### 32.5 The API
 
 The operator only (`403` for an agent, also a sysadmin). One backup runs at
-a time: a create while one runs is `409 conflict`.
+a time per backup dir: a create while one runs is `409 conflict`. A scheduled run waits
+for a running backup instead.
 
 #### `POST /api/backups`
 
@@ -11811,8 +11918,9 @@ The updater:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TERRARIUM_UPDATE_VERIFY` | `gh` | The image check (§34.4): `gh`, `cosign`, `off`, or `command:<shell command>`. |
-| `TERRARIUM_UPDATE_WORKFLOW` | `.github/workflows/ci.yml` | The workflow in `TERRARIUM_UPDATE_REPO` that signs the releases (`--signer-workflow`). |
+| `TERRARIUM_UPDATE_VERIFY` | `cosign` | The image check (§34.4): `cosign`, `gh`, `cosign-keyless`, `off`, or `command:<shell command>`. |
+| `TERRARIUM_UPDATE_COSIGN_KEY` | `/opt/terrarium/release/cosign.pub` | The public key of the `cosign` check: the release key of the image (`docker/release/cosign.pub`). |
+| `TERRARIUM_UPDATE_WORKFLOW` | `.github/workflows/ci.yml` | The workflow in `TERRARIUM_UPDATE_REPO` that signed the releases (`gh`, `--signer-workflow`). |
 | `TERRARIUM_UPDATE_IMAGE` | `ghcr.io/wiltaylor/terrarium` | The image repository of the releases. |
 | `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium` | The GitHub repo: the identity of the signing workflow. |
 | `TERRARIUM_UPDATE_DRAIN_WAIT` | `600` | Seconds that the drain waits for the running turns. |
@@ -11869,12 +11977,22 @@ One run at a time: a request while a run runs is `409 conflict`.
 `TERRARIUM_UPDATE_VERIFY` names a program, so that the check follows the
 way the release signs its images ([release.md](release.md)):
 
-- `gh` (the default): `gh attestation verify oci://<repo image>@<digest>
+- `cosign` (the default): `cosign verify --key <TERRARIUM_UPDATE_COSIGN_KEY>
+  <repo image>@<digest>`. The local release build (`just release::publish`,
+  [release.md](release.md), "The local release build") signs the image
+  digest with the release key pair. cosign checks the signature and its
+  transparency log entry with the public key, which the image has at
+  `/opt/terrarium/release/cosign.pub` (`docker/release/cosign.pub`). The
+  image has cosign 3.1.4 (pinned with its SHA-256 in the Dockerfile). A
+  missing key file fails the check before cosign runs. A release that the
+  GitHub workflow made has no cosign signature: this check refuses it (see
+  release.md, "The switch from the workflow to the local build").
+- `gh`: `gh attestation verify oci://<repo image>@<digest>
   --repo <repo> --signer-workflow <repo>/.github/workflows/ci.yml
-  --bundle-from-oci`. The release signs only with
-  `actions/attest-build-provenance` and pushes the Sigstore bundle to the
-  registry; this is the check of [release.md](release.md), "How to verify
-  a release". gh reads the bundle from GHCR, and checks the signature, the
+  --bundle-from-oci`. The check of the releases that the GitHub workflow
+  made: they sign only with `actions/attest-build-provenance` and push the
+  Sigstore bundle to the registry ([release.md](release.md), "A release of
+  the workflow"). gh reads the bundle from GHCR, and checks the signature, the
   transparency log entry, the digest, and that the certificate is of the
   release workflow of the repo. The image has gh 2.100.0 (pinned with its
   SHA-256 in the Dockerfile). gh asks for a token before it starts, also
@@ -11882,18 +12000,12 @@ way the release signs its images ([release.md](release.md)):
   `GITHUB_TOKEN`, the updater gives gh a placeholder. gh sends it to no
   GitHub API in this mode; a call that needs a real token fails, and so
   does the update. Set `GH_TOKEN` in the updater env to use a real one.
-- `cosign`: `cosign verify --certificate-identity-regexp
+- `cosign-keyless`: `cosign verify --certificate-identity-regexp
   '^https://github\.com/<repo>/\.github/workflows/'
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
-  <ref>`. The release makes no cosign signature and the image has no
-  cosign: this mode is for an image of your own (`TERRARIUM_UPDATE_IMAGE`,
-  `TERRARIUM_UPDATER_IMAGE`).
-
-Why gh and not cosign: the release has only the GitHub attestation, and
-`gh attestation verify` is the documented check for it. cosign v2.4 reads
-signatures and attestations in its own format; its reading of the GitHub
-bundle in the OCI referrers was not proved to work, so it is not the
-default.
+  <ref>`. For an image of your own that a GitHub workflow signs with
+  keyless cosign (`TERRARIUM_UPDATE_IMAGE`, `TERRARIUM_UPDATER_IMAGE`).
+  Before TER-613 this mode was named `cosign`.
 - `command:<shell command>`: `sh -c <command>` with the image in
   `TERRARIUM_UPDATE_REF`. Exit 0 accepts the image.
 - `off`: no check. The `verify` step is `skipped`, and the updater logs a
@@ -12002,8 +12114,16 @@ Answers `202` with `{run}`. No previous switch: the run fails at once
 
 #### `POST /api/system/update/drain`, `POST /api/system/update/resume`
 
-The operator only. Answer `{on, since, by, busy, jobs}`. The drain writes the
-audit row `system.drain`.
+The operator only. Answer `{on, since, by, busy, jobs, jobs_drain}`. The drain
+writes the audit row `system.drain`.
+
+With the body `{"jobs_only": true}` (TER-614, `terrarium admin update
+drain-jobs`) only the job slots drain, for example once an update is
+announced: no job of the job queue starts, the running jobs finish, and
+the agents go on. `jobs` lists the running jobs; `jobs_drain` is `{since,
+by}` while it is on, else `null`. The queued jobs wait. `resume` ends it,
+and so does a restart (it lives in memory). A running job that must not
+wait for its end is cancelled with the job cancel.
 
 ### 34.8 Mail
 
@@ -12405,7 +12525,33 @@ one key, the strictest applies until a cap write replaces them.
   way at most 3 times in a row in one daemon run: the next lost run gets
   the same kill (and the slot mark), then it is `red`, and its `tail`
   starts with `the infrastructure lost the run 4
-  times in a row, so this run counts as red: <why>`.
+  times in a row, so this run counts as red: <why>`. A merge job ends
+  `infra` instead (below).
+- A merge job that failed on its host before its tests (TER-614) is not a
+  test failure. It does not split, does not rerun at once, and uses no
+  attempt. Two paths. An end with outcome `error`, no tested commit
+  (`head`), and a failed step `receive`, `secrets`, or `recipe` (the
+  recipe did not start) goes back to the queue (event change `requeued`)
+  and runs once more after 5 minutes, and not while its host agent is
+  offline (a host agent that comes back online ends the wait early); each
+  card gets a comment that says so. A second such end ends the job with
+  outcome `infra` (verdict `infra`). A run lost past the cap above ends
+  `infra` at once, with no delayed retry. An `infra` end has no rerun, no
+  split, and no failure block: its cards lose the job labels and stay in
+  the merge queue with no job, with a comment. They go in the next batch
+  when a card enters the merge queue or the lead queues them. The retry
+  mark lives in memory: a daemon restart gives at most one extra run.
+- A failure in the daemon before the tests (`setup`, `prepare`) stays
+  `error`. A card branch that the daemon cannot fetch (deleted or
+  rewritten after the accept) or merge leaves the merge as a conflict does:
+  the failure block, the top of `ready`, a mail to its worker; the other
+  cards of the batch go on.
+- Each failed end has the step that failed as the last line of its `tail`:
+  `[failed step: <step>]`, one of `setup`, `prepare`, `receive`, `secrets`,
+  `recipe`, `push`. Each card gets a comment with the failed step and the
+  last 20 lines of the tail, indented. The daemon writes it in both board flows, after each `error`
+  or `infra` end and at the first infra end. A `red` end has the output in
+  its failure block.
 
 A batch merge:
 

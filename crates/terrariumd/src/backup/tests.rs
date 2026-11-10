@@ -506,10 +506,58 @@ fn list_and_prune_keep_the_newest_fulls_and_their_diffs() {
     assert_eq!(d2.header.base.as_ref().unwrap().id, f2.header.id);
     let l = list(&fx.dir).unwrap();
     assert_eq!(l.len(), 4);
-    let removed = prune(&fx.dir, 1).unwrap();
+    // Nothing goes before the newest full backup is verified.
+    assert!(prune(&fx.dir, 1, &f1.header.id).is_err());
+    assert_eq!(list(&fx.dir).unwrap().len(), 4);
+    let removed = prune(&fx.dir, 1, &f2.header.id).unwrap();
     assert_eq!(removed.len(), 2);
     assert!(removed.contains(&f1.name) && removed.contains(&d1.name));
     assert!(f2.path.exists() && d2.path.exists());
     assert!(is_backup_name(&f2.name));
     assert!(!is_backup_name("../x.zip") && !is_backup_name(".x.zip.partial"));
+}
+
+#[test]
+fn the_drill_restores_a_sealed_diff_into_a_scratch_dir_and_checks_it() {
+    let fx = fixture();
+    fx.make(Kind::Full, true, Some("pw"));
+    fs::write(fx.config.join("prompts/lead.md"), "lead v2").unwrap();
+    let d = fx.make(Kind::Diff, true, Some("pw"));
+    let scratch = fx.dir.join(format!("{DRILL_PREFIX}t"));
+    let r = drill(&d.path, None, Some("pw"), &scratch).unwrap();
+    assert_eq!(r.id, d.header.id);
+    assert_eq!(r.kind, Kind::Diff);
+    assert_eq!(r.integrity, "ok");
+    assert_eq!(r.db_user_version, 57);
+    assert!(r.secrets_key);
+    assert!(r.files > 0);
+    assert_eq!(
+        fs::read_to_string(scratch.join("config/prompts/lead.md")).unwrap(),
+        "lead v2"
+    );
+    let c = rusqlite::Connection::open(scratch.join("state").join(DB_FILE)).unwrap();
+    let v: String = c.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, "one");
+    // The live data did not change.
+    assert_eq!(
+        fs::read_to_string(fx.config.join("prompts/lead.md")).unwrap(),
+        "lead v2"
+    );
+    assert!(fs::read_dir(&fx.state).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(PRE_RESTORE_PREFIX)
+    }));
+    // A dir with content is refused; a wrong passphrase fails.
+    assert!(drill(&d.path, None, Some("pw"), &scratch).is_err());
+    let other = fx.dir.join(format!("{DRILL_PREFIX}u"));
+    assert!(drill(&d.path, None, Some("bad"), &other).is_err());
+    // A drill dir is not a backup in the list.
+    assert!(
+        list(&fx.dir)
+            .unwrap()
+            .iter()
+            .all(|l| !l.name.starts_with('.'))
+    );
 }

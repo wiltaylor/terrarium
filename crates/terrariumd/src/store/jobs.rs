@@ -126,7 +126,8 @@ pub struct Job {
     pub state: JobState,
     pub attempt: i64,
     /// Why a job failed: `red` (the recipe failed), `conflict` (the merge
-    /// did not apply), or `error` (the job could not run).
+    /// did not apply), `error` (the job could not run), or `infra` (a
+    /// merge that failed before its tests twice, TER-614 R3).
     pub outcome: Option<String>,
     pub exit_code: Option<i64>,
     pub tail: Option<String>,
@@ -558,7 +559,7 @@ pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStat
             s.splits += 1;
             continue;
         }
-        if outcome.as_deref() == Some("error") {
+        if matches!(outcome.as_deref(), Some("error" | "infra")) {
             s.errors += 1;
             continue;
         }
@@ -1751,6 +1752,21 @@ pub fn requeue_infra(t: &mut Tx<'_>, id: &str, why: &str) -> ApiResult<Option<Jo
         id,
         &format!(
             "the infrastructure lost the run after the recipe started ({why}); no attempt is used, and the job waits in the queue again"
+        ),
+    )
+}
+
+/// Put merge job `id` back in the queue for its one retry: it failed
+/// before its tests (TER-614 R3, `crate::jobs::OUTCOME_INFRA`). As
+/// [`requeue`]: it keeps its attempt and its place. `tail` is the output
+/// of the failed run, with its failed step: the job keeps it. `None` when
+/// it is not running (any more).
+pub fn requeue_before_tests(t: &mut Tx<'_>, id: &str, tail: &str) -> ApiResult<Option<Job>> {
+    requeue_with(
+        t,
+        id,
+        &format!(
+            "the job failed before its tests (an infra failure); no attempt is used, and it runs once more after a wait:\n{tail}"
         ),
     )
 }

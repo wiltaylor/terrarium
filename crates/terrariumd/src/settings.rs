@@ -412,6 +412,29 @@ pub enum BackupCommand {
         #[arg(long)]
         json: bool,
     },
+    /// The restore drill: restore a backup into an empty scratch dir and
+    /// check it (every file, the database integrity and schema version,
+    /// `secrets.key`). The live data does not change; a daemon can run.
+    /// The scratch dir holds the secrets in plain form: it is deleted at
+    /// the end unless `--keep`.
+    Drill {
+        file: PathBuf,
+        /// The base of a diff. Default: the backup with the base ID in the
+        /// dir of the diff.
+        #[arg(long)]
+        base: Option<PathBuf>,
+        /// The scratch dir (empty or missing). Default: a new
+        /// `.drill-<id>` dir in the backup dir.
+        #[arg(long)]
+        into: Option<PathBuf>,
+        /// Leave the scratch dir.
+        #[arg(long)]
+        keep: bool,
+        #[command(flatten)]
+        passphrase: PassphraseArgs,
+        #[arg(long)]
+        json: bool,
+    },
     /// Restore a backup (a full, or a diff and its base) into the state
     /// dir, the config repo, and the work dir. Stop the daemon first. The
     /// old content of each dir moves to `.terrarium-pre-restore-<time>/`.
