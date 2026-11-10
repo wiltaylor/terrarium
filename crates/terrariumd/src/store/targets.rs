@@ -59,6 +59,10 @@ pub struct Runtime {
     /// agent ULID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub instances: BTreeMap<String, Instance>,
+    /// An `exedev` target: its VM. The name is stored before `new` runs,
+    /// so a daemon restart adopts or removes the VM instead of leaking it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exedev: Option<crate::exedev::Vm>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +141,7 @@ pub fn kind_str(k: TargetKind) -> &'static str {
         TargetKind::Vnc => "vnc",
         TargetKind::Rdp => "rdp",
         TargetKind::Desktop => "desktop",
+        TargetKind::Exedev => "exedev",
     }
 }
 
@@ -191,8 +196,10 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
     if let Some(base) = &def.work_root {
         crate::target_roots::check_base(base)?;
     }
-    if def.sync_workspace && def.kind != TargetKind::Ssh {
-        return Err(ApiError::invalid("sync_workspace requires an ssh target"));
+    if def.sync_workspace && !matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
+        return Err(ApiError::invalid(
+            "sync_workspace requires an ssh or exedev target",
+        ));
     }
     if let Some(p) = &def.project {
         check_name("project", p)?;
@@ -296,6 +303,12 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
             display_address(def)?;
         }
         TargetKind::Desktop => need(k, "host", def.host.is_some())?,
+        TargetKind::Exedev => crate::exedev::validate(def)?,
+    }
+    if def.exedev.is_some() && def.kind != TargetKind::Exedev {
+        return Err(ApiError::invalid(format!(
+            "`[exedev]` is for an exedev target, not `{k}`"
+        )));
     }
     if (def.display.is_some() || def.display_name.is_some())
         && !matches!(def.kind, TargetKind::Docker | TargetKind::Desktop)
@@ -398,6 +411,12 @@ fn validate_limits(def: &TargetDef) -> ApiResult<()> {
             return Err(ApiError::invalid(format!(
                 "`limits` are not for a `{k}` target: it has only a display"
             )));
+        }
+        TargetKind::Exedev => {
+            return Err(ApiError::invalid(
+                "`limits` are not for an exedev target: `[exedev] cpu` and `memory_gb` set \
+                 the size of the VM",
+            ));
         }
     }
     l.resolve().map_err(ApiError::invalid)?;
@@ -913,7 +932,7 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[TargetDef]) -> ApiResult<(Changes, Vec
 /// `None`: the daemon has no rule for the credential of this kind.
 pub fn credential_kind(k: TargetKind) -> Option<Kind> {
     match k {
-        TargetKind::Ssh => Some(Kind::SshKey),
+        TargetKind::Ssh | TargetKind::Exedev => Some(Kind::SshKey),
         TargetKind::Vnc | TargetKind::Rdp => Some(Kind::Login),
         _ => None,
     }

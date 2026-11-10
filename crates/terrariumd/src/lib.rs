@@ -24,6 +24,7 @@ mod docker_tunnel;
 pub mod error;
 pub mod events;
 pub mod executor;
+pub mod exedev;
 pub mod fleet;
 pub mod git;
 pub mod git_identity;
@@ -508,6 +509,8 @@ async fn activate(
     tasks.push(card_delivery::spawn(&state));
     // The agents bound to cards: park, unpark, and end (TER-74).
     tasks.push(bound::spawn(&state));
+    // The exe.dev sweep (TER-294): VMs past their life, unheld, or left.
+    tasks.push(exedev::spawn(&state));
     tasks.extend(start_usage(&state).await);
     Ok(std::mem::take(&mut owned.0))
 }
