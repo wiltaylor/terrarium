@@ -2564,7 +2564,8 @@ pub async fn start_cp(
             };
             tokio::spawn(attach(pump_host(hs), sess.clone(), ctl, push, !push));
         }
-        TargetKind::Docker | TargetKind::Ssh => {
+        // `resolved_def` made an exedev target the ssh target of its VM.
+        TargetKind::Docker | TargetKind::Ssh | TargetKind::Exedev => {
             let st = state.clone();
             let d = def.clone();
             let start = move |c: RemoteCmd| start_cmd(&st, &d, &c);

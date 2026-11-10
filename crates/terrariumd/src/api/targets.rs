@@ -83,7 +83,9 @@ pub fn routes() -> Router<Shared> {
 /// operator only. The answer lists the removed VMs and the errors.
 async fn exedev_sweep(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Value>> {
     if !actor.is_operator() {
-        return Err(ApiError::forbidden("only the operator runs the exe.dev sweep"));
+        return Err(ApiError::forbidden(
+            "only the operator runs the exe.dev sweep",
+        ));
     }
     let out = crate::exedev::sweep(&state).await?;
     let detail = out.clone();

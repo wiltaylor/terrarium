@@ -350,14 +350,28 @@ impl TestDaemon {
         token: Option<&str>,
         ssh: Option<&str>,
     ) {
+        self.boot_with_executor(listen, token, |executor| {
+            if let Some(ssh) = ssh {
+                executor.ssh_bin = ssh.to_owned();
+            }
+        })
+        .await;
+    }
+
+    /// Start (or start again) the daemon with an executor that `f` sets up
+    /// (a fake `ssh`, a fake exe.dev API).
+    pub async fn boot_with_executor(
+        &mut self,
+        listen: Option<&str>,
+        token: Option<&str>,
+        f: impl FnOnce(&mut terrariumd::executor::Executor),
+    ) {
         if let Some(d) = self.daemon.take() {
             d.shutdown();
         }
         seed_database(&self.state);
         let mut executor = terrariumd::executor::Executor::default();
-        if let Some(ssh) = ssh {
-            executor.ssh_bin = ssh.to_owned();
-        }
+        f(&mut executor);
         let daemon = terrariumd::start_with_executor(
             DaemonConfig {
                 socket: self.socket.clone(),

@@ -387,13 +387,12 @@ pub fn api_of(state: &Shared, def: &TargetDef) -> ApiResult<Api> {
     let opened = state.db.read_now(|c| {
         crate::secrets::open_named(c, &state.state_dir, targets::owner(def), &name)
     })?;
-    let field =
-        crate::secrets::grants::main_field(opened.info.kind, &opened.info.secret_fields)
-            .ok_or_else(|| {
-                ApiError::invalid(format!(
-                    "secret `{name}` has more than one field; the exe.dev API token needs one"
-                ))
-            })?;
+    let field = crate::secrets::grants::main_field(opened.info.kind, &opened.info.secret_fields)
+        .ok_or_else(|| {
+            ApiError::invalid(format!(
+                "secret `{name}` has more than one field; the exe.dev API token needs one"
+            ))
+        })?;
     let token = opened
         .values
         .get(&field)
@@ -529,7 +528,10 @@ async fn wait_ssh(state: &Shared, def: &TargetDef, vm: &Vm) -> ApiResult<()> {
                 if c.end.as_ref().is_some_and(crate::executor::End::success) {
                     return Ok(());
                 }
-                last = String::from_utf8_lossy(&c.stderr).chars().take(200).collect();
+                last = String::from_utf8_lossy(&c.stderr)
+                    .chars()
+                    .take(200)
+                    .collect();
             }
             Err(e) => last = e.message,
         }
@@ -824,9 +826,7 @@ mod tests {
         ];
         for (extra, want) in cases {
             let text = if extra.starts_with("ephemeral") {
-                format!(
-                    "name = \"ex\"\nkind = \"exedev\"\ncredential = \"k\"\n{extra}"
-                )
+                format!("name = \"ex\"\nkind = \"exedev\"\ncredential = \"k\"\n{extra}")
             } else {
                 format!(
                     "name = \"ex\"\nkind = \"exedev\"\nephemeral = true\ncredential = \"k\"\n{extra}"
@@ -861,7 +861,10 @@ mod tests {
         };
         let d = ssh_def(&def("sync_workspace = true"), &vm).unwrap();
         assert_eq!(d.kind, TargetKind::Ssh);
-        assert_eq!(d.address.as_deref(), Some("exedev@terrarium-x-ex-1.exe.xyz"));
+        assert_eq!(
+            d.address.as_deref(),
+            Some("exedev@terrarium-x-ex-1.exe.xyz")
+        );
         assert!(d.sync_workspace);
         assert_eq!(d.credential.as_deref(), Some("k"));
         let none = Vm {
@@ -954,7 +957,10 @@ mod tests {
     /// command; it keeps the bodies it got.
     async fn fake_api(
         answers: Vec<(u16, &'static str)>,
-    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>) {
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    ) {
         use axum::{Router, http::HeaderMap, routing::post};
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let answers = std::sync::Arc::new(std::sync::Mutex::new(answers));
@@ -1039,7 +1045,11 @@ mod tests {
         let api = Api::new(&url, Zeroizing::new("exe1.s3cret-token".into())).unwrap();
         let s = ExedevSettings::default();
         let e = api.new_vm("terrarium-x-a", &s).await.unwrap_err();
-        assert!(e.message.contains("HTTP 422") && e.message.contains("2 CPUs"), "{}", e.message);
+        assert!(
+            e.message.contains("HTTP 422") && e.message.contains("2 CPUs"),
+            "{}",
+            e.message
+        );
         let e = api.rm(&["terrarium-x-a".into()]).await.unwrap_err();
         assert!(e.message.contains("HTTP 403"), "{}", e.message);
         assert!(!e.message.contains("s3cret"), "{}", e.message);
