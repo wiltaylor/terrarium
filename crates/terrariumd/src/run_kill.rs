@@ -881,7 +881,13 @@ mod tests {
             assert!(out.status.success(), "{out:?}");
             assert!(!name.exists());
             let line = std::fs::read_to_string(own.join("terrarium-run-X.pid")).unwrap();
-            assert!(line.split_whitespace().next().unwrap().parse::<u32>().is_ok());
+            assert!(
+                line.split_whitespace()
+                    .next()
+                    .unwrap()
+                    .parse::<u32>()
+                    .is_ok()
+            );
             let mode = std::fs::metadata(&own).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "{loose}");
         }
@@ -940,7 +946,10 @@ mod tests {
         std::fs::write(&name, "1 0\n").unwrap();
         assert_eq!(stale_of(sh(&kill, &[&name])), json!(std::process::id()));
         assert!(!new.exists());
-        assert!(name.exists(), "the old file is not read while the new one is there");
+        assert!(
+            name.exists(),
+            "the old file is not read while the new one is there"
+        );
         std::fs::write(&name, &stale).unwrap();
         assert_eq!(stale_of(sh(&kill, &[&name])), json!(std::process::id()));
         assert!(!name.exists());
