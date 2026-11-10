@@ -1074,8 +1074,7 @@ async fn uploads_past_the_limit_are_refused_and_permits_come_back() {
     assert_eq!(v["error"]["code"], "rate_limited", "{v}");
     assert_eq!(v["error"]["details"]["retry_after"], 2, "{v}");
     assert_eq!(
-        v["error"]["details"]["max_concurrent_uploads"],
-        MAX_CONCURRENT_UPLOADS,
+        v["error"]["details"]["max_concurrent_uploads"], MAX_CONCURRENT_UPLOADS,
         "{v}"
     );
     // The detached tasks finish their rows and give their permits back.
@@ -1119,9 +1118,13 @@ async fn failed_uploads_release_their_permit() {
     )
     .await
     .err(413, "too_large");
-    upload_json(&td, "proj/w1", json!({"name": "bad.bin", "data_base64": "!!"}))
-        .await
-        .err(400, "bad_request");
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "bad.bin", "data_base64": "!!"}),
+    )
+    .await
+    .err(400, "bad_request");
     // The row fails in the store task: a card that does not exist.
     let r = upload_json(
         &td,

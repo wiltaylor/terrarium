@@ -306,8 +306,10 @@ fn uploads_busy() -> Response {
         "max_concurrent_uploads": artifacts::MAX_CONCURRENT_UPLOADS,
     }))
     .into_response();
-    resp.headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from(UPLOAD_RETRY_AFTER_SECS));
+    resp.headers_mut().insert(
+        header::RETRY_AFTER,
+        HeaderValue::from(UPLOAD_RETRY_AFTER_SECS),
+    );
     resp
 }
 
