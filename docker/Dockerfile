@@ -22,14 +22,15 @@
 #                `just host::build` and for the runtime's /opt/terrarium/dist
 #                (GET /install/terrarium-host; the helper is a release asset)
 #   host-export  scratch stage that holds only the host binary, for `--output`
-#   gh           the GitHub CLI, pinned with its SHA-256, for the updater's image check
+#   gh           the GitHub CLI, pinned with its SHA-256, for the updater's gh image check
+#   cosign       cosign, pinned with its SHA-256, for the updater's default image check
 #   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3, ripgrep, uv (no harness),
 #                the static terrarium-host with its SHA-256 for the host installer and
-#                the host agent self-update, and the updater with the gh CLI (the
-#                entrypoint of the terrarium-updater service, docs/api.md §34). The
-#                release image of CI (ghcr.io/wiltaylor/terrarium, docs/release.md): CI
-#                takes the release's terrarium-host and terrarium-host-helper assets
-#                out of this stage.
+#                the host agent self-update, and the updater with cosign, the release
+#                public key (docker/release/) and the gh CLI (the entrypoint of the
+#                terrarium-updater service, docs/api.md §34). The release image
+#                (ghcr.io/wiltaylor/terrarium, docs/release.md): the release takes its
+#                terrarium-host and terrarium-host-helper assets out of this stage.
 
 ARG RUST_IMAGE=rust:1.97-trixie
 # The git ref of the build (crates/terrarium-version): `<commit>` or
@@ -117,6 +118,29 @@ RUN set -eu; \
     mkdir -p /out; \
     tar -xzf "/tmp/$file" -C /tmp; \
     cp "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /out/gh
+
+# ---------------------------------------------------------------------------
+# cosign for the updater's default image check (`cosign verify --key`,
+# TERRARIUM_UPDATE_VERIFY=cosign, docs/release.md). Pinned with the SHA-256
+# of the release binary of each arch (sigstore/cosign cosign_checksums.txt);
+# another arch stops the build. The release recipe signs with the same
+# major version (scripts/release.py).
+FROM ${RUST_IMAGE} AS cosign
+ARG TARGETARCH
+ARG COSIGN_VERSION=3.1.4
+ARG COSIGN_SHA256_AMD64=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+ARG COSIGN_SHA256_ARM64=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+        amd64) sum="$COSIGN_SHA256_AMD64" ;; \
+        arm64) sum="$COSIGN_SHA256_ARM64" ;; \
+        *) echo "no cosign checksum for $arch" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /out; \
+    curl -fsSL -o /out/cosign "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-${arch}"; \
+    echo "$sum  /out/cosign" | sha256sum -c -; \
+    chmod 0755 /out/cosign
 
 # ---------------------------------------------------------------------------
 FROM docker:29.0.3-cli AS docker-cli
@@ -216,10 +240,15 @@ RUN ln -s /state/releases/current/bin/terrariumd /usr/local/bin/terrariumd \
     && ln -s /state/releases/current/defaults /opt/terrarium/defaults \
     && ln -s /state/releases/current/harnesses.toml /etc/terrarium/harnesses.toml
 # The updater (docs/api.md §34): the same image with the entrypoint
-# terrarium-updater (compose.yaml, profile `updater`). `gh attestation
-# verify` checks the build provenance of a release image before the
-# updater pulls it (TERRARIUM_UPDATE_VERIFY=gh, the default; the gh stage).
+# terrarium-updater (compose.yaml, profile `updater`). `cosign verify --key`
+# checks the release signature of an image before the updater pulls it
+# (TERRARIUM_UPDATE_VERIFY=cosign, the default; the cosign stage), with the
+# release public key in /opt/terrarium/release/cosign.pub
+# (TERRARIUM_UPDATE_COSIGN_KEY). `gh attestation verify` stays for the
+# releases that GitHub Actions made (TERRARIUM_UPDATE_VERIFY=gh; the gh stage).
 COPY --from=gh /out/gh /usr/local/bin/gh
+COPY --from=cosign /out/cosign /usr/local/bin/cosign
+COPY docker/release/ /opt/terrarium/release/
 # The host installer serves these (GET /install/terrarium-host?arch=<arch>,
 # TERRARIUM_HOST_DIST_DIR). One arch for now: the arch of the build.
 COPY docker/entrypoint.sh /usr/local/bin/terrarium-entrypoint

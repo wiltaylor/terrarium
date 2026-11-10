@@ -3,25 +3,29 @@
 //! The check runs a program, so that it follows the way the release signs
 //! its images (docs/release.md) and can change without a new updater:
 //!
-//! - `gh` (the default): `gh attestation verify oci://<ref> --repo
-//!   <owner>/<repo> --signer-workflow <owner>/<repo>/<workflow>
-//!   --bundle-from-oci`. The release signs only with
-//!   `actions/attest-build-provenance` and pushes the Sigstore bundle to
-//!   the registry (docs/release.md), so gh reads the bundle from GHCR and
-//!   checks the certificate identity of the release workflow. gh wants a
-//!   token before it starts, also when it reads the bundle from the
-//!   registry: with no `GH_TOKEN` (or `GITHUB_TOKEN`), the updater gives it
-//!   a placeholder. A real token works too (higher rate limits).
-//! - `cosign`: `cosign verify` with the identity of the workflows of the
-//!   repo (keyless). The image has no cosign, and the release makes no
-//!   cosign signature: for an image of your own.
+//! - `cosign` (the default): `cosign verify --key <TERRARIUM_UPDATE_COSIGN_KEY>
+//!   <ref>`. The local release build (`just release::publish`, TER-613)
+//!   signs the image digest with the release key pair; the image holds the
+//!   public key at [`DEFAULT_COSIGN_KEY`] and the pinned cosign. cosign
+//!   checks the signature and its transparency log entry.
+//! - `gh`: `gh attestation verify oci://<ref> --repo <owner>/<repo>
+//!   --signer-workflow <owner>/<repo>/<workflow> --bundle-from-oci`. The
+//!   check of the releases that GitHub Actions made
+//!   (`actions/attest-build-provenance`, up to the last ci.yml release).
+//!   gh wants a token before it starts, also when it reads the bundle from
+//!   the registry: with no `GH_TOKEN` (or `GITHUB_TOKEN`), the updater gives
+//!   it a placeholder. A real token works too (higher rate limits).
+//! - `cosign-keyless`: `cosign verify` with the identity of the workflows of
+//!   the repo (keyless, the GitHub Actions OIDC issuer): for an image of
+//!   your own that a workflow signs.
 //! - `command:<shell command>`: any command; it gets the image in
 //!   `TERRARIUM_UPDATE_REF` and must exit 0 for a good image.
 //! - `off`: no check. The run records a skipped `verify` step.
 //!
-//! None of them works offline: gh and cosign read the Sigstore trust root
-//! and the bundle over the network. A check that cannot run (no program,
-//! no network) fails, and the update stops (fail closed).
+//! None of them works offline: gh and cosign read the Sigstore trust root,
+//! the transparency log and the signature over the network. A check that
+//! cannot run (no program, no key, no network) fails, and the update stops
+//! (fail closed).
 
 use std::time::Duration;
 
@@ -35,6 +39,10 @@ pub const DEFAULT_REPO: &str = "wiltaylor/terrarium";
 /// The workflow that signs the releases, in the repo.
 pub const ENV_WORKFLOW: &str = "TERRARIUM_UPDATE_WORKFLOW";
 pub const DEFAULT_WORKFLOW: &str = ".github/workflows/ci.yml";
+/// The public key of the `cosign` mode (a PEM file).
+pub const ENV_COSIGN_KEY: &str = "TERRARIUM_UPDATE_COSIGN_KEY";
+/// The release public key in the image (docker/cosign.pub).
+pub const DEFAULT_COSIGN_KEY: &str = "/opt/terrarium/release/cosign.pub";
 /// The placeholder token for gh when the env has none (see the module
 /// doc). gh sends it to no GitHub API with `--bundle-from-oci`; a call
 /// that needs a real token fails, and the update stops.
@@ -48,13 +56,16 @@ pub const TIMEOUT: Duration = Duration::from_secs(180);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Off,
+    /// `cosign verify --key`: the release key pair.
     Cosign,
+    /// `cosign verify` keyless, with the identity of the repo's workflows.
+    CosignKeyless,
     Gh,
     Command(String),
 }
 
 impl Mode {
-    /// Parse `TERRARIUM_UPDATE_VERIFY`. Empty is `gh`.
+    /// Parse `TERRARIUM_UPDATE_VERIFY`. Empty is `cosign`.
     pub fn parse(s: &str) -> Result<Self, String> {
         let t = s.trim();
         if let Some(cmd) = t.strip_prefix("command:") {
@@ -64,11 +75,12 @@ impl Mode {
             return Ok(Self::Command(cmd.trim().to_owned()));
         }
         match t.to_ascii_lowercase().as_str() {
-            "" | "gh" | "on" => Ok(Self::Gh),
-            "cosign" => Ok(Self::Cosign),
+            "" | "cosign" | "on" => Ok(Self::Cosign),
+            "cosign-keyless" => Ok(Self::CosignKeyless),
+            "gh" => Ok(Self::Gh),
             "off" | "0" | "false" | "no" => Ok(Self::Off),
             other => Err(format!(
-                "`{other}`: use gh, cosign, off, or command:<shell command>"
+                "`{other}`: use cosign, gh, cosign-keyless, off, or command:<shell command>"
             )),
         }
     }
@@ -77,6 +89,7 @@ impl Mode {
         match self {
             Self::Off => "off",
             Self::Cosign => "cosign",
+            Self::CosignKeyless => "cosign-keyless",
             Self::Gh => "gh",
             Self::Command(_) => "command",
         }
@@ -91,12 +104,40 @@ pub fn workflow_identity(repo: &str) -> String {
     )
 }
 
-/// The program and the arguments of the check of `reference`. `workflow`
-/// is the signing workflow in `repo` (`.github/workflows/ci.yml`).
-pub fn argv(mode: &Mode, repo: &str, workflow: &str, reference: &str) -> Option<Vec<String>> {
+/// Where the signature of a release comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signer {
+    /// `owner/repo` on GitHub (`gh`, `cosign-keyless`).
+    pub repo: String,
+    /// The signing workflow in the repo (`gh`).
+    pub workflow: String,
+    /// The public key file (`cosign`).
+    pub key: String,
+}
+
+impl Default for Signer {
+    fn default() -> Self {
+        Self {
+            repo: DEFAULT_REPO.into(),
+            workflow: DEFAULT_WORKFLOW.into(),
+            key: DEFAULT_COSIGN_KEY.into(),
+        }
+    }
+}
+
+/// The program and the arguments of the check of `reference`.
+pub fn argv(mode: &Mode, signer: &Signer, reference: &str) -> Option<Vec<String>> {
+    let repo = signer.repo.as_str();
     match mode {
         Mode::Off => None,
         Mode::Cosign => Some(vec![
+            "cosign".into(),
+            "verify".into(),
+            "--key".into(),
+            signer.key.clone(),
+            reference.into(),
+        ]),
+        Mode::CosignKeyless => Some(vec![
             "cosign".into(),
             "verify".into(),
             "--certificate-identity-regexp".into(),
@@ -113,7 +154,7 @@ pub fn argv(mode: &Mode, repo: &str, workflow: &str, reference: &str) -> Option<
             "--repo".into(),
             repo.into(),
             "--signer-workflow".into(),
-            format!("{repo}/{}", workflow.trim_start_matches('/')),
+            format!("{repo}/{}", signer.workflow.trim_start_matches('/')),
             "--bundle-from-oci".into(),
         ]),
         Mode::Command(cmd) => Some(vec!["sh".into(), "-c".into(), cmd.clone()]),
@@ -145,10 +186,7 @@ fn env_has_token() -> bool {
 #[derive(Debug, Clone)]
 pub struct CommandVerifier {
     pub mode: Mode,
-    /// `owner/repo` on GitHub.
-    pub repo: String,
-    /// The signing workflow in the repo (`.github/workflows/ci.yml`).
-    pub workflow: String,
+    pub signer: Signer,
 }
 
 impl Verifier for CommandVerifier {
@@ -158,9 +196,16 @@ impl Verifier for CommandVerifier {
 
     fn verify<'a>(&'a self, reference: &'a str) -> BoxFut<'a, Res<String>> {
         Box::pin(async move {
-            let Some(argv) = argv(&self.mode, &self.repo, &self.workflow, reference) else {
+            let Some(argv) = argv(&self.mode, &self.signer, reference) else {
                 return Ok("not checked".into());
             };
+            if self.mode == Mode::Cosign && !std::path::Path::new(&self.signer.key).is_file() {
+                return Err(format!(
+                    "the cosign public key {} is not a file; set {ENV_COSIGN_KEY}, or choose \
+                     another {ENV_VERIFY}",
+                    self.signer.key
+                ));
+            }
             let env = check_env(&self.mode, env_has_token());
             run_check(&argv, &env, self.mode.name(), reference).await
         })
@@ -212,10 +257,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_mode_parses_and_gh_is_the_default() {
-        assert_eq!(Mode::parse("").unwrap(), Mode::Gh);
+    fn the_mode_parses_and_cosign_is_the_default() {
+        assert_eq!(Mode::parse("").unwrap(), Mode::Cosign);
+        assert_eq!(Mode::parse("on").unwrap(), Mode::Cosign);
         assert_eq!(Mode::parse("GH").unwrap(), Mode::Gh);
         assert_eq!(Mode::parse("cosign").unwrap(), Mode::Cosign);
+        assert_eq!(
+            Mode::parse("Cosign-Keyless").unwrap(),
+            Mode::CosignKeyless
+        );
+        assert_eq!(Mode::CosignKeyless.name(), "cosign-keyless");
         assert_eq!(Mode::parse("off").unwrap(), Mode::Off);
         assert_eq!(
             Mode::parse("command: my-check $TERRARIUM_UPDATE_REF").unwrap(),
@@ -229,20 +280,88 @@ mod tests {
 
     #[test]
     fn gh_checks_the_provenance_of_the_release_workflow_from_the_registry() {
-        let a = argv(&Mode::Gh, DEFAULT_REPO, DEFAULT_WORKFLOW, REF).unwrap();
+        let a = argv(&Mode::Gh, &Signer::default(), REF).unwrap();
         assert_eq!(
             a.join(" "),
             "gh attestation verify oci://ghcr.io/wiltaylor/terrarium@sha256:ab \
              --repo wiltaylor/terrarium \
              --signer-workflow wiltaylor/terrarium/.github/workflows/ci.yml --bundle-from-oci"
         );
-        let c = argv(&Mode::Cosign, "wiltaylor/terrarium", DEFAULT_WORKFLOW, REF).unwrap();
+        let c = argv(&Mode::CosignKeyless, &Signer::default(), REF).unwrap();
         assert_eq!(c[0], "cosign");
+        assert!(!c.contains(&"--key".to_owned()));
         assert!(c.contains(
             &"^https://github\\.com/wiltaylor/terrarium/\\.github/workflows/".to_owned()
         ));
         assert!(c.contains(&ACTIONS_ISSUER.to_owned()));
-        assert_eq!(argv(&Mode::Off, "o/r", DEFAULT_WORKFLOW, "x"), None);
+        assert_eq!(argv(&Mode::Off, &Signer::default(), "x"), None);
+    }
+
+    #[test]
+    fn cosign_checks_the_release_key() {
+        let a = argv(&Mode::Cosign, &Signer::default(), REF).unwrap();
+        assert_eq!(
+            a.join(" "),
+            "cosign verify --key /opt/terrarium/release/cosign.pub \
+             ghcr.io/wiltaylor/terrarium@sha256:ab"
+        );
+        let s = Signer {
+            key: "/keys/mine.pub".into(),
+            ..Signer::default()
+        };
+        assert_eq!(argv(&Mode::Cosign, &s, REF).unwrap()[3], "/keys/mine.pub");
+    }
+
+    /// The cosign check with a fake `cosign`: it gets the key and the
+    /// digest, its exit decides, and a missing key fails before it runs.
+    #[tokio::test]
+    async fn the_cosign_check_uses_the_key_and_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("cosign.pub");
+        std::fs::write(&key, "test key\n").unwrap();
+        let log = dir.path().join("log");
+        let fake = dir.path().join("cosign");
+        let staging = dir.path().join("cosign.tmp");
+        std::fs::write(
+            &staging,
+            format!(
+                "#!/bin/sh\necho \"$*\" > {}\n[ \"$5\" = {REF} ]\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&staging, &fake).unwrap();
+        let signer = Signer {
+            key: key.display().to_string(),
+            ..Signer::default()
+        };
+        let mut a = argv(&Mode::Cosign, &signer, REF).unwrap();
+        a[0] = fake.display().to_string();
+        let ok = run_check(&a, &[], "cosign", REF).await.unwrap();
+        assert_eq!(ok, format!("cosign accepted {REF}"));
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().trim(),
+            format!("verify --key {} {REF}", key.display())
+        );
+        let mut b = argv(&Mode::Cosign, &signer, "ghcr.io/x@sha256:00").unwrap();
+        b[0] = fake.display().to_string();
+        let e = run_check(&b, &[], "cosign", "ghcr.io/x@sha256:00")
+            .await
+            .unwrap_err();
+        assert!(e.contains("cosign refused the image"), "{e}");
+        // No key file: the check fails before cosign runs.
+        let v = CommandVerifier {
+            mode: Mode::Cosign,
+            signer: Signer {
+                key: dir.path().join("none.pub").display().to_string(),
+                ..Signer::default()
+            },
+        };
+        let e = v.verify(REF).await.unwrap_err();
+        assert!(e.contains("is not a file"), "{e}");
+        assert!(e.contains(ENV_COSIGN_KEY), "{e}");
     }
 
     #[test]
@@ -283,7 +402,7 @@ mod tests {
         drop(script);
         std::fs::rename(&staging, &fake).unwrap();
         let env = check_env(&Mode::Gh, false);
-        let mut a = argv(&Mode::Gh, DEFAULT_REPO, DEFAULT_WORKFLOW, REF).unwrap();
+        let mut a = argv(&Mode::Gh, &Signer::default(), REF).unwrap();
         a[0] = fake.display().to_string();
         let ok = run_check(&a, &env, "gh", REF).await.unwrap();
         assert_eq!(ok, format!("gh accepted {REF}"));
@@ -297,13 +416,7 @@ mod tests {
             )
         );
         // Another image: the fake refuses, and so does the check.
-        let mut b = argv(
-            &Mode::Gh,
-            DEFAULT_REPO,
-            DEFAULT_WORKFLOW,
-            "ghcr.io/x@sha256:00",
-        )
-        .unwrap();
+        let mut b = argv(&Mode::Gh, &Signer::default(), "ghcr.io/x@sha256:00").unwrap();
         b[0] = fake.display().to_string();
         let e = run_check(&b, &env, "gh", "ghcr.io/x@sha256:00")
             .await
@@ -320,8 +433,7 @@ mod tests {
     async fn a_command_decides() {
         let ok = CommandVerifier {
             mode: Mode::Command("test \"$TERRARIUM_UPDATE_REF\" = good".into()),
-            repo: "o/r".into(),
-            workflow: DEFAULT_WORKFLOW.into(),
+            signer: Signer::default(),
         };
         assert!(ok.verify("good").await.is_ok());
         let e = ok.verify("bad").await.unwrap_err();
