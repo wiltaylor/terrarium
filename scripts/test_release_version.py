@@ -77,6 +77,7 @@ class ReleaseVersion(unittest.TestCase):
                 env=env,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             script = workflow_calc_script()
             wf = None
@@ -88,6 +89,7 @@ class ReleaseVersion(unittest.TestCase):
                     env=dict(env, GITHUB_OUTPUT=str(out), GITHUB_STEP_SUMMARY=str(Path(tmp, "s"))),
                     capture_output=True,
                     text=True,
+                    check=False,
                 )
             if not expect_ok:
                 self.assertNotEqual(proc.returncode, 0, proc.stdout)
