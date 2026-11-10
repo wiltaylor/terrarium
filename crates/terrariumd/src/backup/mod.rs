@@ -1258,8 +1258,13 @@ pub const DRILL_PREFIX: &str = ".drill-";
 /// Refuse a drill dir that is not empty: the drill writes into it, and
 /// the caller deletes it. Only an absent dir or an empty dir passes. A
 /// dir that cannot be read (permission denied, not a dir) is refused: it
-/// may hold files of its own.
+/// may hold files of its own. A symlink is refused: the restore would
+/// write the secrets into its target, and the cleanup removes only the
+/// link.
 pub fn check_drill_dir(dir: &Path) -> anyhow::Result<()> {
+    if fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!("the drill dir {} is a symlink", dir.display());
+    }
     match fs::read_dir(dir) {
         Ok(mut d) => {
             if d.next().is_some() {

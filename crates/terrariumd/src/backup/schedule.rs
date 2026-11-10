@@ -265,9 +265,18 @@ fn read_passphrase(path: &Path) -> Result<Zeroizing<String>, String> {
     use std::io::Read;
     use std::os::unix::fs::MetadataExt;
     let cannot = |e: std::io::Error| format!("cannot read {}: {e}", path.display());
-    let mut f = std::fs::File::open(path).map_err(cannot)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Non-blocking: a FIFO at the path must not hold a runtime worker.
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(path)
+        .map_err(cannot)?;
     // The mode of the opened file, not of the path: no swap in between.
     let meta = f.metadata().map_err(cannot)?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
     check_key_file(
         path,
         meta.mode(),
@@ -358,12 +367,24 @@ pub struct Marks {
 }
 
 impl Marks {
-    /// The marks in `dir`; none when the file is absent or bad.
+    /// The marks in `dir`; none when the file is absent or bad. A time
+    /// after now (the clock went back, or the file is from another host)
+    /// is now: it must not hold back the runs and the missed check.
     pub fn load(dir: &Path) -> Self {
-        std::fs::read(dir.join(MARKS_FILE))
+        let m: Self = std::fs::read(dir.join(MARKS_FILE))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        m.clamped(Utc::now())
+    }
+
+    fn clamped(self, now: DateTime<Utc>) -> Self {
+        let c = |t: Option<DateTime<Utc>>| t.map(|t| t.min(now));
+        Self {
+            on_since: c(self.on_since),
+            last_run: c(self.last_run),
+            missed_due: c(self.missed_due),
+        }
     }
 
     /// Write the marks to `dir` (a temp file, then a rename).
@@ -379,7 +400,8 @@ impl Marks {
 }
 
 /// Change the marks in `dir` in a blocking task. A failed write is
-/// logged: the cost is a mail too many after a restart.
+/// logged: the [`Runner`] keeps the same marks in memory, so the cost is
+/// a mail too many after a restart.
 async fn update_marks(dir: PathBuf, f: impl FnOnce(&mut Marks) + Send + 'static) -> Marks {
     tokio::task::spawn_blocking(move || {
         let mut m = Marks::load(&dir);
@@ -405,6 +427,10 @@ pub struct Runner {
     /// A run failed and the operator has the mail: the next failures of
     /// the streak write events only.
     failing: bool,
+    /// The [`Marks`] of this process as well: a marks file that cannot
+    /// be written must not run the backups in a loop or stop the missed
+    /// check. Each use takes the later of the memory and the file.
+    marks: Marks,
 }
 
 impl Runner {
@@ -413,13 +439,39 @@ impl Runner {
             cfg,
             verify: super::verify,
             failing: false,
+            marks: Marks::default(),
         }
+    }
+
+    /// The marks of the file in `dir` and of the memory, the later of each.
+    fn merged(&self, file: &Marks) -> Marks {
+        Marks {
+            on_since: self.marks.on_since.max(file.on_since),
+            last_run: self.marks.last_run.max(file.last_run),
+            missed_due: self.marks.missed_due.max(file.missed_due),
+        }
+    }
+
+    /// The time of the next run: one interval after the newest backup or
+    /// the last try, and not before [`FIRST_DELAY`] after the start.
+    /// `None` when the schedule is off.
+    pub async fn next_at(&self, state: &Shared) -> Option<DateTime<Utc>> {
+        let interval = self.cfg.interval?;
+        let dir = crate::api::backups::dir(state);
+        let (newest, file) =
+            tokio::task::spawn_blocking(move || (newest(&dir, false), Marks::load(&dir)))
+                .await
+                .unwrap_or_default();
+        let last = self.merged(&file).last_run;
+        Some(next_run(interval, state.started_at, newest.max(last)))
     }
 
     /// Make one scheduled backup, verify it, and prune after a verified
     /// full backup.
     pub async fn run(&mut self, state: &Shared) -> Report {
         let now = Utc::now();
+        self.marks.on_since.get_or_insert(now);
+        self.marks.last_run = Some(now);
         update_marks(crate::api::backups::dir(state), move |m| {
             m.on_since.get_or_insert(now);
             m.last_run = Some(now);
@@ -479,13 +531,15 @@ impl Runner {
             return false;
         };
         let dir = crate::api::backups::dir(state);
-        let (newest, marks) = {
+        let (newest, file) = {
             let dir = dir.clone();
             tokio::task::spawn_blocking(move || (newest(&dir, false), Marks::load(&dir)))
                 .await
                 .unwrap_or_default()
         };
+        let marks = self.merged(&file);
         let Some(on_since) = marks.on_since else {
+            self.marks.on_since = Some(now);
             update_marks(dir, move |m| {
                 m.on_since.get_or_insert(now);
             })
@@ -499,6 +553,7 @@ impl Runner {
         if marks.missed_due.is_some_and(|m| m >= due) {
             return false;
         }
+        self.marks.missed_due = Some(due);
         update_marks(dir, move |m| m.missed_due = Some(due)).await;
         let at = due.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         tracing::warn!(due = %at, "a scheduled backup was missed");
@@ -576,25 +631,36 @@ pub fn set_aside(path: &Path) -> Result<String, String> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut aside = format!("{UNVERIFIED_PREFIX}{name}");
-    let mut n = 1;
-    while n < 1000 && std::fs::symlink_metadata(path.with_file_name(&aside)).is_ok() {
-        n += 1;
-        aside = format!("{UNVERIFIED_PREFIX}{name}-{n}");
+    let free = (1..=SET_ASIDE_NAMES)
+        .map(|n| match n {
+            1 => format!("{UNVERIFIED_PREFIX}{name}"),
+            n => format!("{UNVERIFIED_PREFIX}{name}-{n}"),
+        })
+        .find(|a| std::fs::symlink_metadata(path.with_file_name(a)).is_err());
+    match free {
+        Some(aside) => set_aside_to(path, &aside),
+        // Never over an older set-aside file.
+        None => delete_bad(path, &format!("no free {UNVERIFIED_PREFIX}{name} name")),
     }
-    set_aside_to(path, &aside)
 }
+
+/// The most `.unverified-` names of one backup name.
+const SET_ASIDE_NAMES: usize = 1000;
 
 fn set_aside_to(path: &Path, aside: &str) -> Result<String, String> {
     match std::fs::rename(path, path.with_file_name(aside)) {
         Ok(()) => Ok(format!("moved to {aside}")),
-        Err(re) => match std::fs::remove_file(path) {
-            Ok(()) => Ok(format!("deleted: cannot move it to {aside}: {re}")),
-            Err(de) => Err(format!(
-                "cannot move it to {aside} ({re}) or delete it ({de}): \
-                 it is still in the backup dir; delete it by hand"
-            )),
-        },
+        Err(re) => delete_bad(path, &format!("cannot move it to {aside}: {re}")),
+    }
+}
+
+fn delete_bad(path: &Path, why: &str) -> Result<String, String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(format!("deleted: {why}")),
+        Err(de) => Err(format!(
+            "{why}, and cannot delete it ({de}): \
+             it is still in the backup dir; delete it by hand"
+        )),
     }
 }
 
@@ -727,15 +793,13 @@ pub fn spawn(state: Shared, cfg: Config) -> Option<JoinHandle<()>> {
     Some(tokio::spawn(async move {
         let mut runner = Runner::new(cfg);
         loop {
-            // The last try is in the marks: a failed run counts as a
-            // run, and the next try is one interval later.
+            // The last try is in the runner and the marks: a failed run
+            // counts as a run, and the next try is one interval later.
             runner.check_missed(&state, Utc::now(), None).await;
-            let dir = crate::api::backups::dir(&state);
-            let (newest, marks) =
-                tokio::task::spawn_blocking(move || (newest(&dir, false), Marks::load(&dir)))
-                    .await
-                    .unwrap_or_default();
-            let at = next_run(interval, state.started_at, newest.max(marks.last_run));
+            let at = runner
+                .next_at(&state)
+                .await
+                .unwrap_or_else(|| next_run(interval, state.started_at, None));
             tracing::info!(next = %at, "scheduled backup");
             let wait = (at - Utc::now()).to_std().unwrap_or(Duration::ZERO);
             tokio::time::sleep(wait).await;
@@ -845,6 +909,62 @@ mod tests {
         let r = set_aside_to(&g, &format!("{UNVERIFIED_PREFIX}b.zip")).unwrap();
         assert!(r.starts_with("deleted"), "{r}");
         assert!(!g.exists());
+    }
+
+    #[test]
+    fn refuses_a_key_file_that_is_not_a_regular_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().join("dir");
+        std::fs::create_dir(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let e = read_passphrase(&d).unwrap_err();
+        assert!(e.contains("not a regular file"), "{e}");
+        // A FIFO with no writer: refused at once, no block.
+        let fifo = tmp.path().join("fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let e = read_passphrase(&fifo).unwrap_err();
+        assert!(e.contains("not a regular file"), "{e}");
+    }
+
+    #[test]
+    fn sets_aside_over_no_older_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("c.zip");
+        std::fs::write(tmp.path().join(format!("{UNVERIFIED_PREFIX}c.zip")), "old").unwrap();
+        for n in 2..=SET_ASIDE_NAMES {
+            std::fs::write(tmp.path().join(format!("{UNVERIFIED_PREFIX}c.zip-{n}")), "old")
+                .unwrap();
+        }
+        std::fs::write(&f, "bad").unwrap();
+        let r = set_aside(&f).unwrap();
+        assert!(r.starts_with("deleted: no free"), "{r}");
+        assert!(!f.exists());
+        let last = tmp
+            .path()
+            .join(format!("{UNVERIFIED_PREFIX}c.zip-{SET_ASIDE_NAMES}"));
+        assert_eq!(std::fs::read_to_string(last).unwrap(), "old");
+    }
+
+    #[test]
+    fn clamps_marks_from_the_future_to_now() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("backups");
+        let future = Utc::now() + chrono::Duration::days(30);
+        Marks {
+            on_since: Some(future),
+            last_run: Some(future),
+            missed_due: Some(future),
+        }
+        .save(&dir)
+        .unwrap();
+        let now = Utc::now();
+        let m = Marks::load(&dir);
+        for t in [m.on_since, m.last_run, m.missed_due] {
+            let t = t.unwrap();
+            assert!(t <= now + chrono::Duration::seconds(1), "{t}");
+            assert!(t >= now - chrono::Duration::minutes(1), "{t}");
+        }
     }
 
     #[test]

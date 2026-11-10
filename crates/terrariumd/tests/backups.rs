@@ -468,6 +468,38 @@ async fn a_scheduled_backup_that_does_not_verify_is_set_aside_and_missed_mails_o
     );
 }
 
+/// A marks file that cannot be written (here a dir with content has its
+/// name): the runner keeps the marks in memory, so a failed run is not
+/// tried again at once, and the missed check still mails once.
+#[tokio::test]
+async fn a_marks_file_that_cannot_be_written_runs_no_loop_and_keeps_the_missed_check() {
+    use std::time::Duration;
+    use terrariumd::backup;
+    use terrariumd::backup::schedule::{Config, MARKS_FILE, Runner};
+
+    let td = TestDaemon::start().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let dir = backup::default_dir(&td.state);
+    std::fs::create_dir_all(dir.join(MARKS_FILE).join("x")).unwrap();
+    let mut runner = Runner::new(Config {
+        interval: Some(Duration::from_secs(86_400)),
+        ..Config::default()
+    });
+    assert!(!runner.check_missed(&state, chrono::Utc::now(), None).await);
+    // No key: the run fails and makes no backup.
+    let r = runner.run(&state).await;
+    assert!(r.error.is_some() && r.name.is_none(), "{r:?}");
+    let next = runner.next_at(&state).await.unwrap();
+    assert!(
+        next > chrono::Utc::now() + chrono::Duration::hours(23),
+        "the next run is at once: {next}"
+    );
+    let late = chrono::Utc::now() + chrono::Duration::days(3);
+    assert!(runner.check_missed(&state, late, None).await);
+    assert!(!runner.check_missed(&state, late, None).await);
+    assert!(dir.join(MARKS_FILE).is_dir());
+}
+
 /// `terrariumd backup drill`: a sealed backup restores into a scratch dir
 /// that goes at the end; a dir with content is refused and kept.
 #[test]

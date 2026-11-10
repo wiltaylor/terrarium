@@ -570,6 +570,11 @@ fn the_drill_refuses_a_dir_it_cannot_read() {
     let empty = tmp.path().join("empty");
     fs::create_dir(&empty).unwrap();
     check_drill_dir(&empty).unwrap();
+    // A symlink to an empty dir is refused.
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&empty, &link).unwrap();
+    let e = check_drill_dir(&link).unwrap_err().to_string();
+    assert!(e.contains("symlink"), "{e}");
     // A file is not a drill dir.
     let file = tmp.path().join("file");
     fs::write(&file, "mine").unwrap();

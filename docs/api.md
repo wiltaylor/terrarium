@@ -11432,8 +11432,8 @@ integrity_check` and has the schema version of the header, and that
 `secrets.key` is back. The live data does not change, so the daemon can
 run. The scratch dir holds the secrets in plain form: the drill deletes it
 at the end unless `--keep`. Only an absent or empty dir is taken: a dir
-with content, or one that cannot be read (for example permission
-denied), is refused and not deleted. Run a drill
+with content, one that cannot be read (for example permission denied),
+or a symlink is refused and not deleted. Run a drill
 after the first scheduled backup, after a key rotation, and after an
 upgrade of terrariumd.
 
@@ -11479,7 +11479,7 @@ not open the newest full backup (it is not sealed, or the key was
 rotated). Else it is a `diff` of the newest full backup. A diff and its
 base so always have the same key. A run holds the one-backup lock of the
 dir from the choice of the kind and the base to the prune: a manual
-backup (§32.5) waits, or gets `409 conflict`, until the run ends.
+backup (§32.5) during the run gets `409 conflict`; it does not wait.
 
 **The key.** A scheduled backup holds every secret, so it is always
 sealed (§32.2). The passphrase is the `passphrase` field of the global
