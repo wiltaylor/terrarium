@@ -4667,7 +4667,10 @@ async fn a_jobs_only_drain_holds_the_slots_and_not_the_agents() {
         if j.first().is_some_and(|j| j["state"] == "running") {
             break j[0]["id"].as_str().unwrap().to_owned();
         }
-        assert!(start.elapsed() < DEADLINE, "the slow job never started: {j:?}");
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the slow job never started: {j:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
 
@@ -4686,7 +4689,10 @@ async fn a_jobs_only_drain_holds_the_slots_and_not_the_agents() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     terrariumd::jobs::tick(&state).await.unwrap();
     let j = job_of(&lab, &fast).await;
-    assert_eq!(j[0]["state"], "queued", "a job started during the drain: {j:?}");
+    assert_eq!(
+        j[0]["state"], "queued",
+        "a job started during the drain: {j:?}"
+    );
 
     lab.until_card(&slow, "review", |c| c["column"] == "review")
         .await;

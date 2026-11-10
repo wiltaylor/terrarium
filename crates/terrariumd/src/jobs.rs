@@ -1481,7 +1481,9 @@ async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> Ran {
         Ok(end) => end,
         Err(e) => error_end(format!("the job could not run: {}", e.message)),
     };
-    let at = *step.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let at = *step
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let end = with_failed_step(end, at);
     if !end.passed
         && let Some(why) = lost.into_inner()
@@ -4712,7 +4714,8 @@ mod tests {
         }
         // Past the cap: still a lost run, so it gets the kill of a lost
         // run, but it ends red (review 2, major 1).
-        let Ran::Lost { red: Some(e), .. } = lost_or_red(&job, false, "error lost: gone".into(), end())
+        let Ran::Lost { red: Some(e), .. } =
+            lost_or_red(&job, false, "error lost: gone".into(), end())
         else {
             panic!("the run after the cap has no red end");
         };
@@ -4753,7 +4756,8 @@ mod tests {
                 Ran::Lost { red: None, .. }
             ));
         }
-        let Ran::Lost { red: Some(e), .. } = lost_or_red(&job, true, "error lost: gone".into(), end())
+        let Ran::Lost { red: Some(e), .. } =
+            lost_or_red(&job, true, "error lost: gone".into(), end())
         else {
             panic!("the run after the cap has no end");
         };
