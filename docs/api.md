@@ -446,7 +446,7 @@ refused it. Do not parse the message; use `code`.
 | 409 | `lease_held` | Another agent holds a lease on the target that the new lease clashes with (§17.7). `details: {"target", "holder", "holder_id", "lease_id", "exclusive", "expires_at"}`. |
 | 413 | `too_large` | An upload is over the per-file limit or the project quota. |
 | 415 | `unsupported_media_type` | An attachment is not a PNG, JPEG, GIF, or WebP image (§6.2). |
-| 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. An agent has too many live exec sessions (§17). A host agent runs its maximum of sessions. |
+| 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. An agent has too many live exec sessions (§17). A host agent runs its maximum of sessions. All upload slots of the daemon are busy (§12.2). |
 | 501 | `not_available` | The route exists, but this phase does not do the request. |
 | 503 | `unavailable` | The daemon cannot do the request on this machine: the repo browser has no `bwrap` to read an agent tree (§5.3). |
 | 422 | `invalid` | Well-formed values that break a rule: a bad name, an empty title, a missing column. |
@@ -5390,6 +5390,12 @@ Multipart (`multipart/form-data`): a `file` part with the bytes (its
   of its root, and with `index.html` at the root. Else `422 invalid`.
 - Over the per-file limit or the project quota: `413 too_large`, with
   `details` (`size`, `max_file_bytes`, or `used_bytes`, `quota_bytes`).
+- The daemon runs at most 8 uploads at one time. An upload that finds no
+  free slot within 3 s gets `429 rate_limited` with `Retry-After: 2` and
+  `details` (`retry_after`, `max_concurrent_uploads`). It stores nothing
+  (TER-605). `terrarium artifact push` and `terrarium test push` try a `429`
+  again after `Retry-After` (else `details.retry_after`, else 2 s, at most
+  60 s), at most 5 tries in all, then fail with the error (TER-661).
 
 Limits come from `$TERRARIUM_CONFIG_DIR/daemon.toml`. The daemon reads the
 file at the first artifact call; a change needs a restart.
@@ -5412,7 +5418,7 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
 | Endpoint | Body | Answer |
 |---|---|---|
 | `GET /api/projects/{name}/artifacts?label=&limit=&cursor=` | | `200` artifacts newest first, cursor: number; `label` keeps the artifacts with that exact label |
-| `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact |
+| `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact; `429 rate_limited` with `Retry-After` when all 8 upload slots stay busy for 3 s (§12.2) |
 | `GET /api/projects/{name}/artifacts/usage` | | `200 {"project", "count", "used_bytes", "quota_bytes", "max_file_bytes"}` |
 | `GET /api/artifacts/{id}` | | `200` artifact |
 | `DELETE /api/artifacts/{id}` | | `204`; the author or an admin |
