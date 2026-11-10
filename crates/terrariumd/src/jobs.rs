@@ -2485,7 +2485,9 @@ fn bundle_ready(
         return Prepared::End(JobEnd {
             passed: false,
             outcome: Some("error".into()),
-            tail: Some(format!("the prepare step failed: cannot write the bundle: {e}")),
+            tail: Some(format!(
+                "the prepare step failed: cannot write the bundle: {e}"
+            )),
             ..JobEnd::default()
         });
     }
@@ -2904,8 +2906,12 @@ fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
 
 /// The env names that `release_secrets` may set (TER-623): the secrets of
 /// `scripts/release.py`, and no other name.
-pub const RELEASE_SECRET_ENV: &[&str] =
-    &["GHCR_TOKEN", "GH_TOKEN", "COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD"];
+pub const RELEASE_SECRET_ENV: &[&str] = &[
+    "GHCR_TOKEN",
+    "GH_TOKEN",
+    "COSIGN_PRIVATE_KEY",
+    "COSIGN_PASSWORD",
+];
 
 /// The env name under which the release VM key is resolved. The daemon
 /// uses it for the tunnel; it is never recipe env.

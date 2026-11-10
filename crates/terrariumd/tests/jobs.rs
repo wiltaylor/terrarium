@@ -2943,7 +2943,10 @@ while True:
     assert!(env["TERRARIUM_DOCKER_HOST"].starts_with("unix://"));
     assert!(!env.contains_key("DOCKER_RELEASE_KEY"));
     assert!(!env.contains_key("TERRARIUM_BASE"));
-    assert!(env.values().all(|v| !v.contains(VM_KEY)), "the VM key reached the recipe");
+    assert!(
+        env.values().all(|v| !v.contains(VM_KEY)),
+        "the VM key reached the recipe"
+    );
     let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
     assert_eq!(order, "tunnel\n");
     // The card stays where it is, with a comment of the end.
@@ -2971,7 +2974,12 @@ while True:
     assert_eq!(mjob["state"], "passed", "{mjob:#}");
     let env: std::collections::BTreeMap<String, String> =
         serde_json::from_slice(&std::fs::read(&merge_env).unwrap()).unwrap();
-    for name in ["GH_TOKEN", "COSIGN_PASSWORD", "DOCKER_RELEASE_KEY", "TERRARIUM_DOCKER_HOST"] {
+    for name in [
+        "GH_TOKEN",
+        "COSIGN_PASSWORD",
+        "DOCKER_RELEASE_KEY",
+        "TERRARIUM_DOCKER_HOST",
+    ] {
         assert!(!env.contains_key(name), "{name} in a merge job");
     }
     for secret in [GH, COSIGN, VM_KEY] {
@@ -3033,7 +3041,12 @@ while True:
         .await
         .unwrap();
     for secret in [GH, COSIGN, VM_KEY] {
-        for (what, text) in [("job", &detail), ("jobs", &all), ("audit", &audit), ("events", &events)] {
+        for (what, text) in [
+            ("job", &detail),
+            ("jobs", &all),
+            ("audit", &audit),
+            ("events", &events),
+        ] {
             assert!(!text.contains(secret), "a secret in the {what}");
         }
     }
@@ -3066,13 +3079,25 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
         ("release_target", json!("q-box")),
         ("release_secrets", json!({"PATH": "@secret:release-github"})),
         ("release_secrets", json!({"GH_TOKEN": "plain-token"})),
-        ("release_secrets", json!({"DOCKER_RELEASE_KEY": "@secret:release-vm"})),
-        ("docker_release", json!({"destination": "-oProxyCommand=x", "port": 22,
-                                   "known_hosts": "vm ssh-ed25519 pin", "key": "@secret:vm"})),
-        ("docker_release", json!({"destination": "root@vm", "port": 22,
-                                   "known_hosts": "vm ssh-ed25519 pin", "key": "plain-key"})),
-        ("docker_release", json!({"destination": "root@vm", "port": 22,
-                                   "known_hosts": "", "key": "@secret:vm"})),
+        (
+            "release_secrets",
+            json!({"DOCKER_RELEASE_KEY": "@secret:release-vm"}),
+        ),
+        (
+            "docker_release",
+            json!({"destination": "-oProxyCommand=x", "port": 22,
+                                   "known_hosts": "vm ssh-ed25519 pin", "key": "@secret:vm"}),
+        ),
+        (
+            "docker_release",
+            json!({"destination": "root@vm", "port": 22,
+                                   "known_hosts": "vm ssh-ed25519 pin", "key": "plain-key"}),
+        ),
+        (
+            "docker_release",
+            json!({"destination": "root@vm", "port": 22,
+                                   "known_hosts": "", "key": "@secret:vm"}),
+        ),
     ] {
         let mut config = base.clone();
         config[key] = value;

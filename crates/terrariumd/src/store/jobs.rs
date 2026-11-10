@@ -2216,7 +2216,10 @@ mod tests {
         );
         // A running release holds the lane, and the cap of the release
         // host counts it.
-        let run = [running(job("0", "a", JobKind::Release, "app", "t0"), "client")];
+        let run = [running(
+            job("0", "a", JobKind::Release, "app", "t0"),
+            "client",
+        )];
         let caps = HashMap::from([("client".to_owned(), 1)]);
         assert_eq!(ids(&pick(queued, &run, &q, &caps)), ["3", "4"]);
     }

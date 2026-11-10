@@ -318,9 +318,9 @@ fn merged(cur: &Value, a: &DeliverySetArgs) -> anyhow::Result<Value> {
     if a.clear_release_secrets || !a.release_secrets.is_empty() {
         let mut refs = serde_json::Map::new();
         for entry in &a.release_secrets {
-            let (name, reference) = entry
-                .split_once('=')
-                .ok_or_else(|| anyhow::anyhow!("--release-secret needs NAME=@secret:name[.field]"))?;
+            let (name, reference) = entry.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("--release-secret needs NAME=@secret:name[.field]")
+            })?;
             if name.is_empty() || !reference.starts_with("@secret:") {
                 anyhow::bail!("--release-secret needs NAME=@secret:name[.field]");
             }
