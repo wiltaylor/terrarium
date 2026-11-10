@@ -6,7 +6,7 @@ import { SelfReport } from "../../components/SelfReport";
 import { EventHistory } from "../../components/EventHistory";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Terminal } from "../../components/Terminal";
-import { ConfirmButton, ErrorBanner, PageHead, Tabs } from "../../components/ui";
+import { ConfirmButton, ErrorBanner, PageHead, ProviderLogo, Tabs } from "../../components/ui";
 import { GRANTABLE_ROLES, roleLabel, type Agent, type AgentStatus, type ResetKind, type ResetResult, type Role } from "../../api/types";
 import { ago } from "../../lib/format";
 import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
@@ -412,6 +412,7 @@ export function SubscriptionCell(props: { agent: Agent; running: boolean; onErro
           >
             {(name) => (
               <>
+                <Show when={detail()}>{(d) => <ProviderLogo provider={d().provider} small />}</Show>
                 <A href="/settings/subscriptions">{detail()?.display_name ?? name()}</A>
                 <Show when={detail()} fallback={<Show when={!detail.loading}><span class="chip warn">not found</span></Show>}>
                   {(d) => (
