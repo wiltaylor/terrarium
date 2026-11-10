@@ -432,7 +432,9 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 .collect::<Vec<_>>();
             let mut out = Vec::new();
             for (job, running) in lost {
-                let delivery = jobs::delivery(t, &job.project)?;
+                // A release ran on the release target (TER-623).
+                let delivery = jobs::job_delivery(&jobs::delivery(t, &job.project)?, job.kind)
+                    .unwrap_or_default();
                 let target = delivery.target.clone();
                 let def = match target.as_deref().map(|n| targets::get(t, n)) {
                     Some(Ok(row)) if row.def.project.as_ref().is_none_or(|p| *p == job.project) => {
@@ -555,6 +557,12 @@ async fn end_lost(state: &Shared, l: Lost) {
         // TER-196 review 2, major 1: a lost run past the cap ends red, but
         // only after the kill and the slot mark above.
         finish_job(state, &job.id, end).await;
+    } else if running && job.kind == JobKind::Release {
+        // TER-623: a release never runs again by itself. Its push, its
+        // signatures or its GitHub release may be done: the lead looks
+        // first, and queues a new release.
+        let why = why.unwrap_or_else(|| "the daemon stopped during the run".into());
+        finish_job(state, &job.id, release_lost_end(&why)).await;
     } else if running {
         // P5: the run is lost, not failed. The job goes back to the queue
         // with its attempt and its place, as TER-160 does for a host that
@@ -591,6 +599,15 @@ async fn end_lost(state: &Shared, l: Lost) {
     kick(state);
 }
 
+/// The end of a release whose run was lost (TER-623): an error, never a
+/// rerun.
+fn release_lost_end(why: &str) -> JobEnd {
+    error_end(format!(
+        "the release run was lost ({why}); a release does not run again by itself: check \
+         the tag, the image and the GitHub release of the version, then queue a new release"
+    ))
+}
+
 /// True when the kill of a lost job run shows that none of its processes
 /// is left (TER-190 review, finding 2). `kill_hits`: the target has job
 /// PID files ([`crate::run_kill::kind_wraps`]) and the job ran on the host
@@ -617,6 +634,8 @@ pub fn check_delivery(
     def: &DeliveryDef,
 ) -> ApiResult<()> {
     check_merge_refs(def)?;
+    check_release_refs(def)?;
+    check_release_target(conn, actor, project, def)?;
     if def
         .failure_patterns
         .as_ref()
@@ -936,7 +955,7 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
                 }
                 if jobs::start(t, &j.id, &host, j.slot)? {
                     let run = LiveRun::new(&j.id);
-                    if code_flow(t, &j.project)? {
+                    if j.kind != JobKind::Release && code_flow(t, &j.project)? {
                         for c in j.cards() {
                             set_labels(t, &c.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
                         }
@@ -1381,11 +1400,12 @@ async fn rerun_lost(state: &Shared, job: Job, why: String, red: Option<JobEnd>, 
     hold(&job.id, why.clone(), None);
     // As in [`recover_lost`]: the kill goes to the current delivery
     // target, and a job that ran on another host gets no confirmed kill.
-    let (project, ran_on) = (job.project.clone(), job.host.clone());
+    let (project, ran_on, kind) = (job.project.clone(), job.host.clone(), job.kind);
     let found = state
         .db
         .read(move |c| {
-            let delivery = jobs::delivery(c, &project)?;
+            let delivery =
+                jobs::job_delivery(&jobs::delivery(c, &project)?, kind).unwrap_or_default();
             let def = match delivery.target.as_deref().map(|n| targets::get(c, n)) {
                 Some(Ok(row)) if row.def.project.as_ref().is_none_or(|p| *p == project) => {
                     Some(row.def)
@@ -1523,6 +1543,11 @@ async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> Ran {
     if !end.passed
         && let Some(why) = lost.into_inner()
     {
+        if job.kind == JobKind::Release {
+            // TER-623: the kill of [`rerun_lost`] runs, and then the
+            // release ends as an error, never a rerun ([`end_lost`]).
+            return Ran::Lost { why, red: None };
+        }
         return lost_or_red(&job.id, job.kind == JobKind::Merge, why, end);
     }
     if end.passed || end.outcome.as_deref() != Some("error") || recipe.load(Ordering::SeqCst) {
@@ -2421,6 +2446,15 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                 Err(e) => return failed(e.to_string()),
             },
         };
+        // A release (TER-623) tests and builds its commit on `main`: no
+        // list of changed files.
+        if job.kind == JobKind::Release {
+            if job.commit.is_none() {
+                return failed("a release job needs its commit on main".into());
+            }
+            base = None;
+            return bundle_ready(repo, refname, bundle, head, batch, base);
+        }
         // A repo without `next` is no error: the recipe then gets no list
         // of changed files.
         let next = "+refs/heads/next:refs/remotes/job/next".to_owned();
@@ -2432,11 +2466,28 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
         };
         head
     };
+    bundle_ready(repo, refname, bundle, head, batch, base)
+}
+
+/// Write the job ref and its bundle: the end of [`prepare`].
+fn bundle_ready(
+    repo: &git::JobRepo,
+    refname: &str,
+    bundle: &std::path::Path,
+    head: String,
+    batch: Option<Vec<BatchCard>>,
+    base: Option<String>,
+) -> Prepared {
     if let Err(e) = repo
         .set_ref(refname, &head)
         .and_then(|()| repo.bundle(refname, bundle))
     {
-        return failed(format!("cannot write the bundle: {e}"));
+        return Prepared::End(JobEnd {
+            passed: false,
+            outcome: Some("error".into()),
+            tail: Some(format!("the prepare step failed: cannot write the bundle: {e}")),
+            ..JobEnd::default()
+        });
     }
     Prepared::Ready { head, batch, base }
 }
@@ -2497,7 +2548,13 @@ async fn steps(
         .map_err(|e| ApiError::internal(format!("cannot read the job bundle: {e}")))?;
     let _ = tokio::fs::remove_file(&b).await;
     let base = base.filter(|b| check_commit(b).is_ok()).unwrap_or_default();
-    let wipe = if x.wipe { "wipe" } else { "" };
+    // A release starts on a new tree (TER-623): nothing of an older
+    // release is in it.
+    let wipe = if x.wipe || job.kind == JobKind::Release {
+        "wipe"
+    } else {
+        ""
+    };
     let receive = x.plain_cmd(
         RECEIVE_SCRIPT,
         &[x.dir, &head, job.kind.as_str(), &base, &tree, wipe],
@@ -2558,8 +2615,11 @@ async fn steps(
     }
     x.at(STEP_SECRETS);
     let injected = merge_secrets(x.state, job, delivery).await?;
+    let release = release_secrets(x.state, job, delivery).await?;
     let own: Vec<_> = injected
         .iter()
+        .chain(release.env.iter())
+        .chain(release.key.iter())
         .map(|i| (i.label(), i.value.clone()))
         .collect();
     let mut env = recipe_env(job, x.dir, &head, base);
@@ -2578,7 +2638,7 @@ async fn steps(
             &key.value,
             x.dir,
             delivery.timeout_secs(),
-            config,
+            config.into(),
         )
         .await?;
         // Never `DOCKER_HOST` here: see [`crate::docker_tunnel::ENDPOINT_ENV`].
@@ -2587,9 +2647,34 @@ async fn steps(
             tunnel.endpoint.clone(),
         );
         Some(tunnel)
+    } else if let Some(key) = &release.key {
+        // TER-623: the release VM, with no reset. The key stays here.
+        let config = delivery.docker_release.as_ref().ok_or_else(|| {
+            ApiError::invalid("a release key requires the docker_release endpoint")
+        })?;
+        let tunnel = crate::docker_tunnel::open(
+            x.state,
+            x.def,
+            &key.value,
+            x.dir,
+            delivery.timeout_secs(),
+            config.into(),
+        )
+        .await?;
+        env.insert(
+            crate::docker_tunnel::ENDPOINT_ENV.into(),
+            tunnel.endpoint.clone(),
+        );
+        Some(tunnel)
     } else {
         None
     };
+    // TER-623: the release secrets, in the env of the release recipe only.
+    // The executor sends the env on stdin, never on a command line.
+    for i in &release.env {
+        env.insert(i.env.clone(), i.value.to_string());
+    }
+    drop(release);
     // Credentials stay in the daemon, so retain the normal target recipe log.
     let script = recipe_script(recipe, base);
     let recipe_cmd = RemoteCmd {
@@ -2639,7 +2724,17 @@ async fn steps(
             ..RemoteCmd::default()
         };
         match crate::executor::start_cmd(x.state, x.def, &cmd) {
-            Ok(run) => output_of(&run.collect(RECIPE_MAX).await),
+            Ok(run) => {
+                // The log may hold what the recipe printed: the same
+                // redaction as the recipe output (TER-623).
+                let run = crate::executor::redact_run(
+                    run,
+                    crate::executor::own_redactor(&own),
+                    x.state.db.redactor().get(),
+                    terrarium_core::redact::View::All,
+                );
+                output_of(&run.collect(RECIPE_MAX).await)
+            }
             Err(e) => format!("[cannot read retained log: {e}]"),
         }
     } else {
@@ -2804,6 +2899,207 @@ fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
             "merge_secrets accepts only @secret references",
         ));
     }
+    Ok(())
+}
+
+/// The env names that `release_secrets` may set (TER-623): the secrets of
+/// `scripts/release.py`, and no other name.
+pub const RELEASE_SECRET_ENV: &[&str] =
+    &["GHCR_TOKEN", "GH_TOKEN", "COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD"];
+
+/// The env name under which the release VM key is resolved. The daemon
+/// uses it for the tunnel; it is never recipe env.
+const RELEASE_KEY_ENV: &str = "DOCKER_RELEASE_KEY";
+
+/// What a release job resolved (TER-623): the recipe env, and the key of
+/// the release VM that only the daemon uses. `Debug` of each shows no value.
+#[derive(Default)]
+struct ReleaseSecrets {
+    env: Vec<secrets::run_env::Injected>,
+    key: Option<secrets::run_env::Injected>,
+}
+
+/// Resolve the release secrets and the release VM key (TER-623): only for
+/// a release job, only on the release target. `delivery` is the job's
+/// [`DeliveryDef::release_view`], so its `target` is the release target;
+/// the delivery grant of each secret must name it ([`secrets::run_env::resolve_delivery`]),
+/// else the job fails here, before the recipe. Each value read is audited
+/// by env name and secret, never by value.
+async fn release_secrets(
+    state: &Shared,
+    job: &Job,
+    delivery: &DeliveryDef,
+) -> ApiResult<ReleaseSecrets> {
+    if job.kind != JobKind::Release {
+        return Ok(ReleaseSecrets::default());
+    }
+    let target = delivery
+        .release_target()
+        .filter(|t| delivery.target.as_deref() == Some(*t))
+        .ok_or_else(|| ApiError::invalid("a release job runs only on the release target"))?
+        .to_owned();
+    check_release_refs(delivery)?;
+    let mut refs_env = delivery.release_secrets.clone();
+    if let Some(d) = &delivery.docker_release {
+        refs_env.insert(RELEASE_KEY_ENV.into(), d.key.clone());
+    }
+    if refs_env.is_empty() {
+        return Ok(ReleaseSecrets::default());
+    }
+    let refs = secrets::run_env::parse_refs(&refs_env)?;
+    let key = secrets::key(&state.state_dir)?;
+    let project = job.project.clone();
+    let proxy_on = state.git_proxy.is_on();
+    let t = target.clone();
+    let injected = state
+        .db
+        .read(move |c| {
+            let use_only = crate::git_proxy::use_only_secrets(c, proxy_on)?;
+            secrets::run_env::resolve_delivery(c, &key, &project, &t, &refs, &use_only)
+        })
+        .await?;
+    let audits: Vec<_> = injected
+        .iter()
+        .map(|i| {
+            (
+                format!("{}/{}", i.scope, i.name),
+                serde_json::json!({"job": job.id, "project": job.project, "kind": "release",
+                    "target": target, "field": i.field, "env": i.env,
+                    "principal": format!("delivery:{}", job.project), "level": "run"}),
+            )
+        })
+        .collect();
+    let project = job.project.clone();
+    state
+        .db
+        .write("system", move |t| {
+            for (object, detail) in audits {
+                t.audit("secret.run", &object, Some(&project), detail)?;
+            }
+            Ok(())
+        })
+        .await?;
+    let mut out = ReleaseSecrets::default();
+    for i in injected {
+        if i.env == RELEASE_KEY_ENV {
+            out.key = Some(i);
+        } else {
+            out.env.push(i);
+        }
+    }
+    Ok(out)
+}
+
+/// The checks of the release settings that need no database (TER-623):
+/// the secret names and references, and the release VM endpoint.
+fn check_release_refs(delivery: &DeliveryDef) -> ApiResult<()> {
+    let has_release = !delivery.release_secrets.is_empty()
+        || delivery.docker_release.is_some()
+        || delivery.release_recipe.is_some();
+    if has_release && delivery.release_target().is_none() {
+        return Err(ApiError::invalid(
+            "release_secrets, release_recipe and docker_release require release_target",
+        ));
+    }
+    for (name, value) in &delivery.release_secrets {
+        secrets::grants::check_env_name(name)?;
+        if !RELEASE_SECRET_ENV.contains(&name.as_str()) {
+            return Err(ApiError::invalid(format!(
+                "release_secrets sets only {}, not `{name}`",
+                RELEASE_SECRET_ENV.join(", ")
+            )));
+        }
+        if !value.starts_with(secrets::run_env::REF_PREFIX) {
+            return Err(ApiError::invalid(format!(
+                "release_secrets `{name}` must be an @secret reference"
+            )));
+        }
+    }
+    secrets::run_env::parse_refs(&delivery.release_secrets)?;
+    if let Some(d) = &delivery.docker_release {
+        if d.destination.is_empty()
+            || d.destination.starts_with('-')
+            || d.destination.chars().any(char::is_whitespace)
+        {
+            return Err(ApiError::invalid(
+                "the docker_release SSH destination must be a nonempty user@host value, not options",
+            ));
+        }
+        if d.port == 0 || d.known_hosts.trim().is_empty() {
+            return Err(ApiError::invalid(
+                "docker_release requires a nonzero SSH port and a pinned known_hosts line",
+            ));
+        }
+        let key = BTreeMap::from([(RELEASE_KEY_ENV.to_owned(), d.key.clone())]);
+        if !d.key.starts_with(secrets::run_env::REF_PREFIX)
+            || secrets::run_env::parse_refs(&key)?.len() != 1
+        {
+            return Err(ApiError::invalid(
+                "the docker_release key must be an @secret reference",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The checks of the release target (TER-623, D2): the target of this
+/// project (or a global one set by a sysadmin) that runs release jobs
+/// only. It is not the job target of any project, and not the release
+/// target of another project; and the job target of this project is not
+/// the release target of another project.
+fn check_release_target(
+    conn: &rusqlite::Connection,
+    actor: &Actor,
+    project: &str,
+    def: &DeliveryDef,
+) -> ApiResult<()> {
+    let mut others: Vec<(String, DeliveryDef)> = Vec::new();
+    let mut st = conn.prepare("SELECT project FROM project_delivery WHERE project != ?1")?;
+    let names = st
+        .query_map([project], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for p in names {
+        let d = jobs::delivery(conn, &p)?;
+        others.push((p, d));
+    }
+    if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty())
+        && let Some((p, _)) = others
+            .iter()
+            .find(|(_, d)| d.release_target() == Some(target))
+    {
+        return Err(ApiError::conflict(format!(
+            "target `{target}` is the release target of project `{p}`: it runs release jobs only"
+        )));
+    }
+    let Some(release) = def.release_target() else {
+        return Ok(());
+    };
+    if def.target.as_deref() == Some(release) {
+        return Err(ApiError::invalid(format!(
+            "release_target `{release}` is the job target too: the release target runs release jobs only"
+        )));
+    }
+    for (p, d) in &others {
+        if d.target.as_deref() == Some(release) || d.release_target() == Some(release) {
+            return Err(ApiError::conflict(format!(
+                "release_target `{release}` is a job target of project `{p}`: the release target runs release jobs only"
+            )));
+        }
+    }
+    let row = targets::get(conn, release)?;
+    match &row.def.project {
+        Some(p) if p == project => {}
+        Some(p) => {
+            return Err(ApiError::forbidden(format!(
+                "target `{release}` belongs to project `{p}`; the releases of `{project}` use its own targets"
+            )));
+        }
+        None => policy::sysadmin(
+            actor,
+            &format!("running the releases of `{project}` on the global target `{release}`"),
+        )?,
+    }
+    executor::no_exec(&row.def)?;
     Ok(())
 }
 
@@ -3129,6 +3425,13 @@ pub fn queue_comment(j: &Job, card: &str) -> String {
                 .as_deref()
                 .unwrap_or("the branch head at the start")
         ),
+        JobKind::Release => format!(
+            "Job queue: release job {} queued: {} of {} at commit {}.",
+            j.id,
+            j.branch,
+            j.repo,
+            j.commit.as_deref().unwrap_or("-")
+        ),
         JobKind::Merge if j.batch.is_empty() => format!(
             "Job queue: merge job {} queued: {} onto {} of {}.",
             j.id,
@@ -3266,6 +3569,9 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
 /// then the coded card flow (the move, the rerun, or the split).
 fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     emit_verdicts(t, j)?;
+    if j.kind == JobKind::Release {
+        return release_end(t, j);
+    }
     // The failed step and the output on each card (TER-614 R3), from the
     // daemon in both flows: the rules quote a template value onto one
     // line, which would lose the lines of the output. Not for red: a red
@@ -3287,6 +3593,17 @@ fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     } else {
         batch_end(t, j)
     }
+}
+
+/// The end of a release job (TER-623): a comment on its card with the
+/// result, and the output for a failure. No move, no label, no rerun, in
+/// both board flows: the lead's release step reads it.
+fn release_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    comment(t, &j.card, &verdict_comment(j))?;
+    if j.state != jobs::JobState::Passed {
+        output_note(t, j)?;
+    }
+    Ok(())
 }
 
 /// The end of a merge job that failed before its tests twice
@@ -3393,6 +3710,11 @@ pub fn emit_verdicts(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     // of lost runs goes (TER-196 review 2, minor 2).
     lost_runs().remove(&j.id);
     infra_retried().remove(&j.id);
+    // A release (TER-623) is no verdict on a card: the board rules, which
+    // move cards on verdicts, never see one. The `job` event says its end.
+    if j.kind == JobKind::Release {
+        return Ok(());
+    }
     for data in verdicts(j) {
         let card = data["card"].as_str().unwrap_or_default().to_owned();
         let summary = format!(
@@ -3520,6 +3842,8 @@ fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     let to = match j.kind {
         JobKind::Validate => board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?,
         JobKind::Merge => board::role_name(t, &j.project, board::ACCEPTED, COL_ACCEPTED)?,
+        // [`on_end`] ends a release in [`release_end`].
+        JobKind::Release => return release_end(t, j),
     };
     let note = end_comment(j, "passed");
     move_or_comment(t, &j.card, &to, None, &note)?;

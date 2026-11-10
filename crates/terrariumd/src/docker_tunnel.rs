@@ -15,7 +15,7 @@ use crate::api::Shared;
 use crate::error::{ApiError, ApiResult};
 use crate::executor::{Control, Ev, RemoteCmd, Stream};
 use crate::secrets::{RunDir, RunDirs};
-use terrarium_core::config::{DockerCiDef, TargetDef};
+use terrarium_core::config::{DockerCiDef, DockerReleaseDef, TargetDef};
 
 const RELAY: &str = include_str!("docker_relay.py");
 
@@ -215,13 +215,42 @@ impl Tunnel {
     }
 }
 
+/// The SSH end of a tunnel: the Docker CI VM (`docker_ci`) or the release
+/// VM (`docker_release`, TER-623), each pinned by its known_hosts line.
+#[derive(Debug, Clone, Copy)]
+pub struct Endpoint<'a> {
+    pub destination: &'a str,
+    pub port: u16,
+    pub known_hosts: &'a str,
+}
+
+impl<'a> From<&'a DockerCiDef> for Endpoint<'a> {
+    fn from(c: &'a DockerCiDef) -> Self {
+        Endpoint {
+            destination: &c.destination,
+            port: c.port,
+            known_hosts: &c.known_hosts,
+        }
+    }
+}
+
+impl<'a> From<&'a DockerReleaseDef> for Endpoint<'a> {
+    fn from(c: &'a DockerReleaseDef) -> Self {
+        Endpoint {
+            destination: &c.destination,
+            port: c.port,
+            known_hosts: &c.known_hosts,
+        }
+    }
+}
+
 pub async fn open(
     state: &Shared,
     target: &TargetDef,
     key: &str,
     work_dir: &str,
     timeout: u64,
-    config: &DockerCiDef,
+    config: Endpoint<'_>,
 ) -> ApiResult<Tunnel> {
     let target_dir = relay_dir(work_dir);
     let dir = RunDirs::new(&state.state_dir).run_dir()?;
@@ -260,7 +289,7 @@ pub async fn open(
         .arg(keyfile)
         .arg("-L")
         .arg(forward)
-        .arg(&config.destination)
+        .arg(config.destination)
         .env_remove("SSH_AUTH_SOCK")
         .stdin(Stdio::null())
         .stdout(Stdio::null())

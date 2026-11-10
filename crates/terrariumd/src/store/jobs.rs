@@ -51,6 +51,9 @@ pub const LIST_MAX: usize = 200;
 pub enum JobKind {
     Validate,
     Merge,
+    /// A release (TER-623): the release recipe on the release client
+    /// target, on a commit of `main`, with the release secrets in its env.
+    Release,
 }
 
 impl JobKind {
@@ -58,6 +61,7 @@ impl JobKind {
         match self {
             Self::Validate => "validate",
             Self::Merge => "merge",
+            Self::Release => "release",
         }
     }
 
@@ -65,6 +69,7 @@ impl JobKind {
         match s {
             "validate" => Some(Self::Validate),
             "merge" => Some(Self::Merge),
+            "release" => Some(Self::Release),
             _ => None,
         }
     }
@@ -213,6 +218,13 @@ pub fn check_onto(onto: &str) -> ApiResult<()> {
 /// The slot of the merge lane (TER-159, TER-190): one merge at a time per
 /// project, in a work tree of its own, apart from the validate slots.
 pub const MERGE_SLOT: i64 = 0;
+
+/// The slot of the release lane (TER-623): one release at a time per
+/// project, on the release target, apart from the other lanes.
+pub const RELEASE_SLOT: i64 = -1;
+
+/// The branch of a release job: the release merge commit is on `main`.
+pub const RELEASE_BRANCH: &str = "main";
 
 /// A card of a batch merge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,6 +589,8 @@ pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStat
         s.first_attempt.add(passed);
         match JobKind::parse(&kind) {
             Some(JobKind::Merge) => s.merge.add(passed),
+            // A release is no test of a card (TER-623).
+            Some(JobKind::Release) => {}
             _ => s.validate.add(passed),
         }
     }
@@ -979,6 +993,9 @@ pub struct QueueOf {
     pub slots: usize,
     /// The host key of the project's delivery target.
     pub host: String,
+    /// The host key of the project's release target (TER-623), when it
+    /// has one.
+    pub release_host: Option<String>,
 }
 
 /// The queued jobs that may start now, with the host each one takes a
@@ -1010,6 +1027,8 @@ pub fn pick(
     let mut validating: HashMap<String, usize> = HashMap::new();
     // The projects where no more merge may start in this pick.
     let mut merging: HashSet<String> = HashSet::new();
+    // The projects where no more release may start in this pick.
+    let mut releasing: HashSet<String> = HashSet::new();
     // The validate slots that are held, per project.
     let mut held: HashMap<String, HashSet<i64>> = HashMap::new();
     for j in running {
@@ -1023,6 +1042,9 @@ pub fn pick(
         match j.kind {
             JobKind::Merge => {
                 merging.insert(j.project.clone());
+            }
+            JobKind::Release => {
+                releasing.insert(j.project.clone());
             }
             JobKind::Validate => {
                 *validating.entry(j.project.clone()).or_default() += 1;
@@ -1038,16 +1060,31 @@ pub fn pick(
             continue;
         };
         let merge = j.kind == JobKind::Merge;
+        let release = j.kind == JobKind::Release;
         if merge && !merging.insert(j.project.clone()) {
             // A merge of the project runs, or an older one comes first,
             // whether it starts now or not.
             continue;
         }
-        let used = on_host.get(&q.host).copied().unwrap_or(0);
-        if caps.get(&q.host).is_some_and(|cap| used >= *cap) {
+        // A release runs on the release target: with none, it waits.
+        let host = if release {
+            match &q.release_host {
+                Some(h) => h.clone(),
+                None => continue,
+            }
+        } else {
+            q.host.clone()
+        };
+        if release && !releasing.insert(j.project.clone()) {
             continue;
         }
-        if merge {
+        let used = on_host.get(&host).copied().unwrap_or(0);
+        if caps.get(&host).is_some_and(|cap| used >= *cap) {
+            continue;
+        }
+        if release {
+            j.slot = Some(RELEASE_SLOT);
+        } else if merge {
             j.slot = Some(MERGE_SLOT);
         } else {
             let busy = validating.get(&j.project).copied().unwrap_or(0);
@@ -1062,8 +1099,8 @@ pub fn pick(
             j.slot = Some(free);
             *validating.entry(j.project.clone()).or_default() += 1;
         }
-        *on_host.entry(q.host.clone()).or_default() += 1;
-        out.push((j, q.host.clone()));
+        *on_host.entry(host.clone()).or_default() += 1;
+        out.push((j, host));
     }
     out
 }
@@ -1117,11 +1154,13 @@ pub fn startable(
             continue;
         }
         let host = host_of(conn, &def);
+        let release_host = def.release_view().map(|v| host_of(conn, &v));
         queues.insert(
             p.to_owned(),
             QueueOf {
                 slots: def.slots(),
                 host,
+                release_host,
             },
         );
         defs.insert(p.to_owned(), def);
@@ -1133,10 +1172,20 @@ pub fn startable(
     Ok(pick(queued, &running, &queues, &caps)
         .into_iter()
         .filter_map(|(j, h)| {
-            let def = defs.get(&j.project)?.clone();
+            let def = job_delivery(defs.get(&j.project)?, j.kind)?;
             Some((j, h, def))
         })
         .collect())
+}
+
+/// The config that a job of `kind` runs with: the project's, or for a
+/// release its [`DeliveryDef::release_view`] (TER-623). `None`: a release
+/// with no release target.
+pub fn job_delivery(def: &DeliveryDef, kind: JobKind) -> Option<DeliveryDef> {
+    match kind {
+        JobKind::Release => def.release_view(),
+        JobKind::Validate | JobKind::Merge => Some(def.clone()),
+    }
 }
 
 /// The host key of the delivery target of `def`. A target that is gone
@@ -1866,6 +1915,11 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
     {
         return Err(ApiError::invalid("`recipe` holds a NUL byte"));
     }
+    if let Some(r) = &def.release_recipe
+        && r.contains('\0')
+    {
+        return Err(ApiError::invalid("`release_recipe` holds a NUL byte"));
+    }
     if let Some(w) = &def.work_dir
         && (!w.starts_with('/')
             || w.split('/').any(|c| c == "..")
@@ -2125,10 +2179,46 @@ mod tests {
                     QueueOf {
                         slots: *slots,
                         host: (*host).to_owned(),
+                        release_host: None,
                     },
                 )
             })
             .collect()
+    }
+
+    /// TER-623: a release runs on the host of the release target, in its
+    /// own lane of one per project, beside the merge and validate jobs. A
+    /// project with no release target keeps its releases queued.
+    #[test]
+    fn a_release_has_its_own_lane_on_the_release_host() {
+        let mut q = queues(&[("a", 1, "build"), ("b", 1, "build")]);
+        q.get_mut("a").unwrap().release_host = Some("client".into());
+        let queued = vec![
+            job("1", "a", JobKind::Release, "app", "t1"),
+            job("2", "a", JobKind::Release, "app", "t2"),
+            job("3", "a", JobKind::Merge, "app", "t3"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+            job("5", "b", JobKind::Release, "app", "t5"),
+        ];
+        let p = pick(queued.clone(), &[], &q, &HashMap::new());
+        assert_eq!(ids(&p), ["1", "3", "4"]);
+        let got: Vec<(&str, &str, Option<i64>)> = p
+            .iter()
+            .map(|(j, h)| (j.id.as_str(), h.as_str(), j.slot))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("1", "client", Some(RELEASE_SLOT)),
+                ("3", "build", Some(MERGE_SLOT)),
+                ("4", "build", Some(1)),
+            ]
+        );
+        // A running release holds the lane, and the cap of the release
+        // host counts it.
+        let run = [running(job("0", "a", JobKind::Release, "app", "t0"), "client")];
+        let caps = HashMap::from([("client".to_owned(), 1)]);
+        assert_eq!(ids(&pick(queued, &run, &q, &caps)), ["3", "4"]);
     }
 
     fn ids(picked: &[(Job, String)]) -> Vec<&str> {

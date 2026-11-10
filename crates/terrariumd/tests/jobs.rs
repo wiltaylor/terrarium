@@ -2801,6 +2801,321 @@ async fn delivery_secret_config_refuses_plaintext_and_arbitrary_env_injection() 
     }
 }
 
+/// TER-623: a release job runs the release recipe on the release target,
+/// with the release secrets in its env and the release VM relay as
+/// TERRARIUM_DOCKER_HOST. The VM key never reaches the recipe, a merge job
+/// of the same daemon never sees a release secret, a grant that does not
+/// name the release target refuses the release before its recipe, and no
+/// secret value is in the job output, the events, or the audit.
+#[tokio::test]
+async fn a_release_job_gets_its_secrets_only_on_the_release_target() {
+    use std::os::unix::fs::PermissionsExt;
+    const GH: &str = "dummy-gh-token-623-0123456789";
+    const COSIGN: &str = "dummy-cosign-password-623-0123456789";
+    const VM_KEY: &str = "dummy-release-vm-key-623-0123456789";
+    let fixtures = tempfile::tempdir().unwrap();
+    let ssh = fixtures.path().join("ssh");
+    std::fs::write(
+        &ssh,
+        format!(
+            r#"#!/usr/bin/env python3
+import os, pathlib, socket, sys
+root = pathlib.Path({root:?})
+args = sys.argv[1:]
+key = pathlib.Path(args[args.index('-i') + 1]).read_text()
+assert 'SSH_AUTH_SOCK' not in os.environ
+assert '-L' in args
+assert key == {key:?}
+assert 'StrictHostKeyChecking=yes' in args
+pin_arg = next(a for a in args if a.startswith('UserKnownHostsFile='))
+assert pathlib.Path(pin_arg.split('=', 1)[1]).read_text().startswith('test-release-vm ')
+assert args[-1] == 'root@test-release-vm'
+assert args[args.index('-p') + 1] == '2251'
+with (root / 'order').open('a') as f: f.write('tunnel\n')
+s = socket.socket(socket.AF_UNIX)
+s.bind(args[args.index('-L') + 1].split(':')[0])
+s.listen()
+while True:
+    c, _ = s.accept()
+    c.recv(4096)
+    c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK')
+    c.close()
+"#,
+            root = fixtures.path().to_str().unwrap(),
+            key = VM_KEY,
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let lab = lab_impl_ssh(1, None, "code", Some(ssh.to_str().unwrap())).await;
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "p-client", "kind": "host", "host": "lab1", "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    for (name, value) in [
+        ("release-github", GH),
+        ("release-cosign", COSIGN),
+        ("release-vm", VM_KEY),
+    ] {
+        lab.td
+            .put(
+                &format!("/api/secrets/p/{name}"),
+                json!({"kind":"api_key", "fields":{"value":value}}),
+            )
+            .await
+            .ok();
+        lab.td
+            .post(
+                &format!("/api/secrets/p/{name}/grants"),
+                json!({"grantee":"delivery:p", "level":"run", "targets":["p-client"]}),
+            )
+            .await
+            .ok();
+    }
+    let dump = |file: &Path| {
+        format!(
+            r#"python3 -I -c 'import json,os,pathlib; pathlib.Path("{}").write_text(json.dumps(dict(os.environ)))'"#,
+            file.display()
+        )
+    };
+    let merge_env = fixtures.path().join("merge-env.json");
+    let release_env = fixtures.path().join("release-env.json");
+    let marker = fixtures.path().join("release-started");
+    let release_recipe = format!(
+        r#"touch '{marker}' && {dump} && test -S "${{TERRARIUM_DOCKER_HOST#unix://}}" && test -z "${{DOCKER_RELEASE_KEY:-}}${{DOCKER_HOST:-}}" && test "$(git rev-parse HEAD)" = "$TERRARIUM_HEAD" && echo "token $GH_TOKEN" && echo release-ok"#,
+        marker = marker.display(),
+        dump = dump(&release_env),
+    );
+    let config = json!({
+        "target": "p-box", "recipe": format!("{} && test -f OK", dump(&merge_env)),
+        "next_repos": ["app"], "work_dir": lab._dirs.path().join("jobs"),
+        "release_target": "p-client", "release_recipe": release_recipe,
+        "release_secrets": {"GH_TOKEN": "@secret:release-github",
+                            "COSIGN_PASSWORD": "@secret:release-cosign.value"},
+        "docker_release": {"destination": "root@test-release-vm", "port": 2251,
+                           "known_hosts": "test-release-vm ssh-ed25519 public-test-pin\n",
+                           "key": "@secret:release-vm"}});
+    let r = lab.td.put("/api/projects/p/delivery", config.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    // The release, on the head of main.
+    let main = git(&lab.origin, &["rev-parse", "main"]);
+    let card = lab.card("v1.0.0", "v1").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{card}/release"),
+            json!({"commit": "0000000000000000000000000000000000000000"}),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(&lab.w1, &format!("/api/cards/{card}/release"), json!({}))
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{card}/release"),
+            json!({"commit": &main[..12]}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["kind"], "release", "{}", r.body);
+    assert_eq!(r.body["job"]["branch"], "main", "{}", r.body);
+    assert_eq!(r.body["job"]["commit"], main.as_str(), "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["card"] == card.as_str()).unwrap();
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let env: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(&release_env).unwrap()).unwrap();
+    assert_eq!(env["GH_TOKEN"], GH);
+    assert_eq!(env["COSIGN_PASSWORD"], COSIGN);
+    assert_eq!(env["TERRARIUM_JOB_KIND"], "release");
+    assert_eq!(env["TERRARIUM_HEAD"], main);
+    assert!(env["TERRARIUM_DOCKER_HOST"].starts_with("unix://"));
+    assert!(!env.contains_key("DOCKER_RELEASE_KEY"));
+    assert!(!env.contains_key("TERRARIUM_BASE"));
+    assert!(env.values().all(|v| !v.contains(VM_KEY)), "the VM key reached the recipe");
+    let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
+    assert_eq!(order, "tunnel\n");
+    // The card stays where it is, with a comment of the end.
+    let c = lab.td.get(&format!("/api/cards/{card}")).await.ok().clone();
+    assert_eq!(c["column"], "backlog", "{c:#}");
+    let detail = lab
+        .td
+        .get(&format!("/api/jobs/{}", job["id"].as_str().unwrap()))
+        .await
+        .ok()
+        .to_string();
+    assert!(detail.contains("release-ok"), "{detail}");
+    assert!(detail.contains("token "), "{detail}");
+
+    // A merge job on the same daemon: no release secret, no relay.
+    lab.branch("ter-m623", "next", &[("OK", "yes\n")]);
+    let mcard = lab.card("merge", "ter-m623").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{mcard}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let mjob = jobs.iter().find(|j| j["card"] == mcard.as_str()).unwrap();
+    assert_eq!(mjob["state"], "passed", "{mjob:#}");
+    let env: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(&merge_env).unwrap()).unwrap();
+    for name in ["GH_TOKEN", "COSIGN_PASSWORD", "DOCKER_RELEASE_KEY", "TERRARIUM_DOCKER_HOST"] {
+        assert!(!env.contains_key(name), "{name} in a merge job");
+    }
+    for secret in [GH, COSIGN, VM_KEY] {
+        assert!(env.values().all(|v| !v.contains(secret)));
+    }
+
+    // A grant that does not name the release target: refused before the
+    // recipe and before the tunnel.
+    let _ = std::fs::remove_file(&marker);
+    lab.td
+        .delete("/api/secrets/p/release-github/grants?grantee=delivery:p")
+        .await
+        .ok();
+    lab.td
+        .post(
+            "/api/secrets/p/release-github/grants",
+            json!({"grantee":"delivery:p", "level":"run", "targets":["p-box"]}),
+        )
+        .await
+        .ok();
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let job = jobs
+        .iter()
+        .find(|j| j["card"] == card.as_str() && j["state"] != "passed")
+        .unwrap();
+    assert_eq!(job["state"], "failed", "{job:#}");
+    assert!(!marker.exists(), "the recipe ran without its grant");
+    let detail = lab
+        .td
+        .get(&format!("/api/jobs/{}", job["id"].as_str().unwrap()))
+        .await
+        .ok()
+        .to_string();
+    assert!(detail.contains("not target `p-client`"), "{detail}");
+    let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
+    assert_eq!(order, "tunnel\n", "a refused release opened the tunnel");
+
+    // No secret value in the jobs, the events, or the audit.
+    let all = lab.td.get("/api/projects/p/jobs").await.ok().to_string();
+    let audit = lab.td.get("/api/audit").await.ok().to_string();
+    let events = lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| {
+            let mut statement =
+                c.prepare("SELECT summary || payload FROM events WHERE project = 'p'")?;
+            let rows = statement.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?.join("\n"))
+        })
+        .await
+        .unwrap();
+    for secret in [GH, COSIGN, VM_KEY] {
+        for (what, text) in [("job", &detail), ("jobs", &all), ("audit", &audit), ("events", &events)] {
+            assert!(!text.contains(secret), "a secret in the {what}");
+        }
+    }
+    assert!(audit.contains("release-github"), "{audit}");
+    // A release is no verdict on a card.
+    assert!(!events.contains(&format!(
+        "release job {} for {card}:",
+        job["id"].as_str().unwrap()
+    )));
+}
+
+/// TER-623: the release config fails closed. The release target runs
+/// release jobs only, the secret names are those of the release, and
+/// every value is a reference.
+#[tokio::test]
+async fn the_release_config_refuses_a_shared_target_and_plain_values() {
+    let lab = lab(1).await;
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "p-client", "kind": "host", "host": "lab1", "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let base = json!({"target": "p-box", "recipe": "true", "release_target": "p-client"});
+    let mut bad = Vec::new();
+    for (key, value) in [
+        ("release_target", json!("p-box")),
+        ("release_target", json!("q-box")),
+        ("release_secrets", json!({"PATH": "@secret:release-github"})),
+        ("release_secrets", json!({"GH_TOKEN": "plain-token"})),
+        ("release_secrets", json!({"DOCKER_RELEASE_KEY": "@secret:release-vm"})),
+        ("docker_release", json!({"destination": "-oProxyCommand=x", "port": 22,
+                                   "known_hosts": "vm ssh-ed25519 pin", "key": "@secret:vm"})),
+        ("docker_release", json!({"destination": "root@vm", "port": 22,
+                                   "known_hosts": "vm ssh-ed25519 pin", "key": "plain-key"})),
+        ("docker_release", json!({"destination": "root@vm", "port": 22,
+                                   "known_hosts": "", "key": "@secret:vm"})),
+    ] {
+        let mut config = base.clone();
+        config[key] = value;
+        bad.push(config);
+    }
+    let mut config = base.clone();
+    config.as_object_mut().unwrap().remove("release_target");
+    config["release_secrets"] = json!({"GH_TOKEN": "@secret:release-github"});
+    bad.push(config);
+    for config in bad {
+        let r = lab.td.put("/api/projects/p/delivery", config.clone()).await;
+        assert!(
+            matches!(r.status, 403 | 409 | 422),
+            "{config}: {} {}",
+            r.status,
+            r.body
+        );
+    }
+    // The release target of `p` cannot be the job target of `q`.
+    let r = lab.td.put("/api/projects/p/delivery", base.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "gshared", "kind": "host", "host": "lab1"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let mut p = base.clone();
+    p["release_target"] = json!("gshared");
+    let r = lab.td.put("/api/projects/p/delivery", p).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = lab
+        .td
+        .put(
+            "/api/projects/q/delivery",
+            json!({"target": "gshared", "recipe": "true"}),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+}
+
 /// Review B1: the recipe commits in its clone and moves HEAD. The push
 /// sends the merge commit that the prepare step recorded, never the
 /// recipe's commit.
