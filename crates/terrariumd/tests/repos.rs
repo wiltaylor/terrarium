@@ -944,7 +944,12 @@ on_agent_create = ["app"]
 async fn repo_rm_refuses_while_in_use_then_removes() {
     let (td, _origin, _remotes) = daemon_with_repo().await;
     // A repo of the project file belongs to the file.
-    let proj = td.get("/api/projects/terra/repos").await.ok().as_array().unwrap()
+    let proj = td
+        .get("/api/projects/terra/repos")
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
         .iter()
         .find(|r| r["name"] == "proj")
         .unwrap()["id"]
@@ -992,7 +997,10 @@ async fn repo_rm_refuses_while_in_use_then_removes() {
         [],
     )
     .unwrap();
-    in_use(td.delete_as("terra/lead", &path).await, "queued merge job of TER-1");
+    in_use(
+        td.delete_as("terra/lead", &path).await,
+        "queued merge job of TER-1",
+    );
     // A finished job does not count.
     conn.execute("UPDATE jobs SET state = 'passed' WHERE id = 'j1'", [])
         .unwrap();
@@ -1046,7 +1054,10 @@ async fn repo_rm_refuses_while_in_use_then_removes() {
     let r = td.delete_as("terra/lead", &path).await;
     assert_eq!(r.ok()["name"], "app");
     td.get(&path).await.err(404, "not_found");
-    let names: Vec<String> = td.get("/api/projects/terra/repos").await.ok()
+    let names: Vec<String> = td
+        .get("/api/projects/terra/repos")
+        .await
+        .ok()
         .as_array()
         .unwrap()
         .iter()
@@ -1058,5 +1069,7 @@ async fn repo_rm_refuses_while_in_use_then_removes() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0]["target"], "terra/app");
     assert!(ws.join("app/keep.txt").is_file());
-    td.delete_as("terra/lead", &path).await.err(404, "not_found");
+    td.delete_as("terra/lead", &path)
+        .await
+        .err(404, "not_found");
 }
