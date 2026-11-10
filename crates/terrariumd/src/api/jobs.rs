@@ -779,7 +779,14 @@ async fn merge_commits(
             let mut out = Vec::new();
             for id in &ids {
                 let card = board::get_card(c, &board::normalise_id(id))?;
+                // The checks of the write, in its order: a held or archived
+                // card gets that error, not one of its repo.
                 policy::admin_project(&a, &card.project, "queueing a merge onto next")?;
+                not_held(&card)?;
+                if card.archived {
+                    return Err(ApiError::conflict(format!("card {} is archived", card.id)));
+                }
+                enabled(&jobs::delivery(c, &card.project)?, &card.project)?;
                 let r = repo_of(c, &card, repo.clone())?;
                 let b = branch_of(&card, branch.clone())?;
                 let recorded = accepted_heads::commit_for(c, &card.id, &b)?;

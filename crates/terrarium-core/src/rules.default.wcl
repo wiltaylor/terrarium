@@ -277,6 +277,7 @@ rule "job-moved" {
   on = ["job.verdict"]
   max_per_hour = 600
   when "data.verdict" { eq = "moved" }
+  if_card { not_column = ["@ready", "backlog"] }
   card_label { remove = ["validation:running", "validation:queued"] }
   card_move {
     to = "@review"
