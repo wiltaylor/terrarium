@@ -1277,6 +1277,8 @@ pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     crate::secrets::grants::on_agent_deleted(t, id)?;
     // Its tool grants (`crate::store::tools`).
     crate::store::tools::on_agent_deleted(t, id)?;
+    // Its journaled write answers (`crate::agent_rpc`).
+    crate::agent_rpc::on_agent_deleted(t, id)?;
     // The sessions stay for the card links (migration 37); the session
     // files go to the archive after the commit (`crate::session_archive`).
     crate::store::session_refs::on_agent_deleted(t, id, a.agent.harness.as_str())?;

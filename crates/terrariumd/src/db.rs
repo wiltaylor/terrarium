@@ -3410,7 +3410,8 @@ mod tests {
         assert!(!conn.table_exists(None, "agent_rpc_answers").unwrap());
         migrate(&mut conn).unwrap();
         conn.execute(
-            "INSERT INTO agent_rpc_answers VALUES ('agent', 'request', 'fingerprint', 'answer')",
+            "INSERT INTO agent_rpc_answers(agent, request_id, fingerprint, answer)
+             VALUES ('agent', 'request', 'fingerprint', 'answer')",
             [],
         )
         .unwrap();
@@ -3431,6 +3432,40 @@ mod tests {
             )
             .unwrap();
         assert!(recorded);
+    }
+
+    #[test]
+    fn agent_rpc_answer_age_counts_old_rows_from_the_upgrade() {
+        const AGE: &str = "ter-555-agent-rpc-answers-age.sql";
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        let before: Vec<_> = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != AGE)
+            .collect();
+        migrate_named(&mut conn, &before).unwrap();
+        conn.execute(
+            "INSERT INTO agent_rpc_answers VALUES ('agent', 'request', 'fingerprint', 'answer')",
+            [],
+        )
+        .unwrap();
+        let start = chrono::Utc::now().timestamp();
+        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        let created: i64 = conn
+            .query_row("SELECT created_at FROM agent_rpc_answers", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(created >= start, "{created} < {start}");
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT rowid FROM agent_rpc_answers WHERE created_at < 1",
+                [],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("agent_rpc_answers_created"), "{plan}");
     }
 
     #[test]
