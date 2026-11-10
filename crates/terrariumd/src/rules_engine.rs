@@ -1834,8 +1834,7 @@ async fn fire_timer(
     };
     let Some(due) = pick.first_since.and_then(|f| {
         // A release-blocker card goes at once, with no wait (TER-607).
-        if pick.release_blocker
-            || (t.version && t.min_cards.is_some_and(|min| pick.waiting >= min))
+        if pick.release_blocker || (t.version && t.min_cards.is_some_and(|min| pick.waiting >= min))
         {
             Some(f)
         } else {

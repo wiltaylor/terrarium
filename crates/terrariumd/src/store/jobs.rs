@@ -201,9 +201,8 @@ pub fn check_onto(onto: &str) -> ApiResult<()> {
     }
     if let Some(p) = pre
         && (p.is_empty()
-            || p.split('.').any(|x| {
-                x.is_empty() || !x.bytes().all(|b| b.is_ascii_alphanumeric())
-            }))
+            || p.split('.')
+                .any(|x| x.is_empty() || !x.bytes().all(|b| b.is_ascii_alphanumeric())))
     {
         return Err(bad());
     }
@@ -1934,7 +1933,12 @@ mod tests {
     /// TER-607: `--onto` takes `next` or `release/X.Y.Z`, nothing else.
     #[test]
     fn onto_takes_next_or_a_release_branch() {
-        for ok in ["next", "release/1.4.0", "release/10.0.12", "release/1.4.0-rc.1"] {
+        for ok in [
+            "next",
+            "release/1.4.0",
+            "release/10.0.12",
+            "release/1.4.0-rc.1",
+        ] {
             assert!(check_onto(ok).is_ok(), "{ok}");
         }
         for bad in [
