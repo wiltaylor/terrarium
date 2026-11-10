@@ -463,12 +463,7 @@ pub async fn add_merge_queue(db: &crate::db::Db) -> Vec<String> {
                 }
                 let found = row(c, &project).and_then(|r| Ok((r, context(c, &project)?)));
                 out.push(match found {
-                    Ok((r, ctx)) => Ok((
-                        project,
-                        text,
-                        r.map(|r| r.hash).unwrap_or_default(),
-                        ctx,
-                    )),
+                    Ok((r, ctx)) => Ok((project, text, r.map(|r| r.hash).unwrap_or_default(), ctx)),
                     Err(e) => Err((project, e)),
                 });
             }

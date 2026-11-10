@@ -673,7 +673,9 @@ async fn a_reload_adds_the_merge_queue_to_old_wait_overrides() {
         .replace(", \"merge_queue\"] }", "] }")
         .replace("  when \"data.to\" { ne = \"merge_queue\" }\n", "");
     assert!(!removed.contains("\"merge_queue\""), "{removed}");
-    let r = td.put("/api/projects/p/rules", json!({"text": removed})).await;
+    let r = td
+        .put("/api/projects/p/rules", json!({"text": removed}))
+        .await;
     assert_eq!(r.status, 200, "{}", r.body);
     td.post_empty("/api/reload").await.ok();
     assert_eq!(td.get("/api/projects/p/rules").await.ok()["text"], removed);

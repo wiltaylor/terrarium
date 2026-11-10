@@ -700,8 +700,7 @@ pub fn add_merge_queue_to_wait_overrides(
     let mut changed = false;
     for r in &own.rules {
         if !matches!(r.name.as_str(), "agent-park" | "agent-unpark")
-            || r
-                .description
+            || r.description
                 .as_deref()
                 .is_some_and(|d| d.contains(MERGE_QUEUE_MARK))
         {
@@ -1513,7 +1512,10 @@ rule "to-blocked" {
     fn old_wait_overrides_get_the_merge_queue_once() {
         let board = queue_board();
         let text = old_migration(&board);
-        assert!(text.contains("one_of = [\"review\", \"accepted\"] }"), "{text}");
+        assert!(
+            text.contains("one_of = [\"review\", \"accepted\"] }"),
+            "{text}"
+        );
         let new = upgrade(&text, &board).expect("a change");
         let park = rule_of(&new, "agent-park");
         assert_eq!(
@@ -1521,11 +1523,19 @@ rule "to-blocked" {
             serde_json::json!(["review", "accepted", "queue"])
         );
         assert!(
-            park.description.as_deref().unwrap().ends_with(MERGE_QUEUE_MARK),
+            park.description
+                .as_deref()
+                .unwrap()
+                .ends_with(MERGE_QUEUE_MARK),
             "{new}"
         );
         let unpark = rule_of(&new, "agent-unpark");
-        let nes: Vec<Value> = unpark.when.iter().skip(1).map(|w| w.value.clone()).collect();
+        let nes: Vec<Value> = unpark
+            .when
+            .iter()
+            .skip(1)
+            .map(|w| w.value.clone())
+            .collect();
         assert_eq!(
             nes,
             vec![
@@ -1535,7 +1545,13 @@ rule "to-blocked" {
                 Value::from("done")
             ]
         );
-        assert!(unpark.description.as_deref().unwrap().ends_with(MERGE_QUEUE_MARK));
+        assert!(
+            unpark
+                .description
+                .as_deref()
+                .unwrap()
+                .ends_with(MERGE_QUEUE_MARK)
+        );
         assert!(new.starts_with(MINE.trim_end()));
         assert_eq!(upgrade(&new, &board), None);
     }
@@ -1575,10 +1591,7 @@ rule "to-blocked" {
 
     #[test]
     fn the_merge_queue_column_is_found_by_role_first() {
-        let board = cols(&[
-            ("merge_queue", Some("review")),
-            ("mq", Some("merge_queue")),
-        ]);
+        let board = cols(&[("merge_queue", Some("review")), ("mq", Some("merge_queue"))]);
         assert_eq!(merge_queue_column(&board).unwrap().name, "mq");
         let named = cols(&[("merge_queue", None)]);
         assert_eq!(merge_queue_column(&named).unwrap().name, "merge_queue");
