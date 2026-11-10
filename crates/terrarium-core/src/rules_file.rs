@@ -2149,10 +2149,10 @@ rule "mine" {
         assert_eq!(batch.verb, "job.queue");
         assert_eq!(batch.args["kind"], "batch");
         assert_eq!(batch.args["from"], "@merge_queue");
-        // terrarium starts with 8 cards, or 30 minutes after the first
-        // one (TER-162 D9).
+        // terrarium starts with 4 cards, or 30 minutes after the first
+        // one, at most 8 (TER-162 D9, TER-644).
         assert_eq!(batch.args["limit"], 8);
-        assert_eq!(batch.args["min_cards"], 8);
+        assert_eq!(batch.args["min_cards"], 4);
         assert_eq!(batch.args["max_wait_minutes"], 30);
         // A board without the column refuses the file.
         let e = parse(MERGE_QUEUE_RULES, "rules.wcl", &board()).unwrap_err();

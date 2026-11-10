@@ -1659,7 +1659,9 @@ fn end_run(t: &Tx<'_>, row: &RunRow) -> ApiResult<()> {
 // ------------------------------------------------------------ the timers
 
 /// One batch rule that waits for a time: `job_queue` of kind `batch` with
-/// `min_cards` and `max_wait_minutes`.
+/// `min_cards` and `max_wait_minutes`. Its timer fires when the merge lane
+/// of the project is free and `min_cards` wait, or the first card waited
+/// `max_wait_minutes` (TER-644).
 struct TimerRule {
     project: String,
     rule: String,
@@ -1709,7 +1711,7 @@ fn timer_rules(projects: &[ProjectRules]) -> Vec<TimerRule> {
                     limit: arg("limit").and_then(|n| usize::try_from(n).ok()),
                     wait,
                     version: false,
-                    min_cards: None,
+                    min_cards: arg("min_cards").and_then(|n| usize::try_from(n).ok()),
                 });
             }
         }
@@ -1719,9 +1721,11 @@ fn timer_rules(projects: &[ProjectRules]) -> Vec<TimerRule> {
 
 /// Write a `rule.timer` event ([`TIMER_KIND`]) for each batch rule of
 /// `projects` whose wait ended: cards wait in its `from` column, and the
-/// first one came `max_wait_minutes` before `now` or earlier. That holds
-/// also when `min_cards` or more wait: no card move ran the batch then
-/// (a hold released in place), or its run failed (TER-227). The event
+/// first one came `max_wait_minutes` before `now` or earlier, or (a batch
+/// rule) `min_cards` or more wait: no card move ran the batch then (the
+/// merge lane was busy, a hold released in place, or its run failed,
+/// TER-227, TER-644). While a merge job of the project is queued or
+/// running, a batch timer is not written and not marked. The event
 /// plans a run of that rule only (no card), and the verb checks the time
 /// again. `fired` holds the due time of
 /// each timer written, so one wait writes one event (a restart may write
@@ -1818,6 +1822,12 @@ async fn fire_timer(
             if version {
                 return Ok(Some(crate::store::version_groups::pick(c, &project)?));
             }
+            // A batch waits while a merge job holds the lane; this check
+            // runs again on each tick, so the batch goes soon after the
+            // lane is free (TER-644).
+            if crate::store::jobs::open_merge(c, &project)?.is_some() {
+                return Ok(None);
+            }
             let columns: Vec<BoardColumn> = board::column_roles(c, &project)?
                 .into_iter()
                 .map(|(name, role)| BoardColumn { name, role })
@@ -1835,8 +1845,9 @@ async fn fire_timer(
     };
     let Some(due) = pick.first_since.and_then(|f| {
         // A release-blocker card goes at once, with no wait (TER-607).
-        if pick.release_blocker || (t.version && t.min_cards.is_some_and(|min| pick.waiting >= min))
-        {
+        // At `min_cards` the batch goes now: the cards came while the
+        // lane was busy, or the run of the last move failed (TER-644).
+        if pick.release_blocker || t.min_cards.is_some_and(|min| pick.waiting >= min) {
             Some(f)
         } else {
             chrono::Duration::try_minutes(t.wait).and_then(|wait| f.checked_add_signed(wait))

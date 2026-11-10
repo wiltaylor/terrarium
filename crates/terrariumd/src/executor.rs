@@ -5037,7 +5037,8 @@ G() {
     -c protocol.git.allow=never -c protocol.ext.allow=never -c protocol.fd.allow=never \
     -c protocol.ftp.allow=never -c protocol.ftps.allow=never -c fetch.recurseSubmodules=false \
     -c submodule.recurse=false -c gc.auto=0 -c maintenance.auto=false \
-    -c merge.verifySignatures=false -c advice.detachedHead=false -c core.pager=cat "$@"
+    -c merge.verifySignatures=false -c advice.detachedHead=false -c core.pager=cat \
+    ${safe:+-c "safe.directory=$safe"} "$@"
 }
 g() {
   if [ -n "$helper" ]; then G -c "credential.helper=$helper" "$@"; else G "$@"; fi
@@ -5069,7 +5070,12 @@ check_config() {
   done
 }
 note=
+safe=
 if [ -d "$dest/.git" ]; then
+  # Another UID can own the repo: on a native host the sessions of one
+  # agent run as different pool UIDs (TER-635). Its config is checked
+  # below and runs with the overrides of G, so trust this one path.
+  safe=$(cd "$dest" && pwd -P)
   bad=$(check_config)
   if [ -n "$bad" ]; then
     forget

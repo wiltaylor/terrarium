@@ -30,7 +30,7 @@ use terrarium_core::config::PushVia;
 pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/repos/credential", post(credential_helper))
-        .route("/repos/{id}", get(show))
+        .route("/repos/{id}", get(show).delete(remove))
         .route("/repos/{id}/checkout", post(checkout))
 }
 
@@ -60,6 +60,41 @@ async fn show(
         })
         .await?;
     policy::read_project(&actor, &r.project)?;
+    Ok(Json(r))
+}
+
+/// `DELETE /api/repos/{id}` (TER-658): drop the registration of a repo,
+/// for a project_admin. The clones in workspaces and on targets stay.
+/// `409` while a job, the delivery config, a pipeline, or a bound agent's
+/// checkout uses it (`repos::remove`). The bound agents' workspaces are
+/// read before the write; a checkout made between the two is not seen.
+async fn remove(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Repo>> {
+    let context = actor.project().map(str::to_owned);
+    let (repo, bound) = state
+        .db
+        .read(move |c| {
+            let r = repos::resolve(c, &id, context.as_deref())?;
+            let bound = repos::bound_workspaces(c, &r.project)?;
+            Ok((r, bound))
+        })
+        .await?;
+    policy::read_project(&actor, &repo.project)?;
+    policy::admin_project(&actor, &repo.project, "removing a repo")?;
+    let checked_out = {
+        let repo = repo.clone();
+        tokio::task::spawn_blocking(move || repos::bound_checkouts(&repo, &bound))
+            .await
+            .map_err(|e| ApiError::internal(format!("checkout check: {e}")))??
+    };
+    let id = repo.id.clone();
+    let r = state
+        .db
+        .write(actor.label(), move |t| repos::remove(t, &id, &checked_out))
+        .await?;
     Ok(Json(r))
 }
 

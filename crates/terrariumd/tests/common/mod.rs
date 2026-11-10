@@ -24,6 +24,60 @@ pub const DELAY: Duration = Duration::from_millis(20);
 /// load 90 on 32 cores, agent starts stayed `starting` and stops stayed
 /// `idle` for over 15 s, and each test passed alone (TER-471).
 pub const WAIT: Duration = Duration::from_secs(60);
+/// The longest time a [`Stall`] wait goes on while it still makes progress.
+pub const HARD_WAIT: Duration = Duration::from_secs(180);
+
+/// The deadline of a wait that counts only time without progress. Under
+/// merge-job load (load 40 to 60 on 32 cores) real runner starts and
+/// restarts went past a fixed deadline from the start of the wait while
+/// the agent still moved (TER-647). The wait fails after [`WAIT`] with
+/// the same mark, or after [`HARD_WAIT`] in all.
+pub struct Stall<M> {
+    mark: M,
+    since: std::time::Instant,
+    start: std::time::Instant,
+}
+
+impl<M: PartialEq + std::fmt::Debug> Stall<M> {
+    pub fn new(mark: M) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            mark,
+            since: now,
+            start: now,
+        }
+    }
+
+    /// True when [`WAIT`] went by since the last progress: read a new mark
+    /// and give it to [`Stall::moved`].
+    pub fn due(&self) -> bool {
+        self.since.elapsed() >= WAIT
+    }
+
+    /// Takes a new mark. A changed mark is progress and starts a new
+    /// window. False: the wait has failed.
+    pub fn moved(&mut self, mark: M) -> bool {
+        if mark == self.mark || self.start.elapsed() >= HARD_WAIT {
+            return false;
+        }
+        self.mark = mark;
+        self.since = std::time::Instant::now();
+        true
+    }
+}
+
+impl<M: std::fmt::Debug> std::fmt::Display for Stall<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no progress for {:.0}s after {:.0}s, last mark {:?}",
+            self.since.elapsed().as_secs_f64(),
+            self.start.elapsed().as_secs_f64(),
+            self.mark
+        )
+    }
+}
+
 /// The longest time daemon boot waits for job queue recovery.
 pub const RECOVERY_WAIT: Duration = Duration::from_secs(90);
 
@@ -367,7 +421,7 @@ impl TestDaemon {
         f: impl FnOnce(&mut terrariumd::executor::Executor),
     ) {
         if let Some(d) = self.daemon.take() {
-            d.shutdown();
+            d.shutdown_and_wait().await;
         }
         seed_database(&self.state);
         let mut executor = terrariumd::executor::Executor::default();
@@ -481,6 +535,9 @@ impl TestDaemon {
     }
     pub async fn put_as(&self, agent: &str, path: &str, body: Value) -> Resp {
         self.req(Method::PUT, path, Some(body), Some(agent)).await
+    }
+    pub async fn delete_as(&self, agent: &str, path: &str) -> Resp {
+        self.req(Method::DELETE, path, None, Some(agent)).await
     }
 
     /// Open a WebSocket on the Unix socket.

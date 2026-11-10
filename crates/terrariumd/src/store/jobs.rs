@@ -615,6 +615,20 @@ pub fn open_of_card(conn: &Connection, card: &str) -> ApiResult<Option<Job>> {
         .optional()?)
 }
 
+/// The open (queued or running) merge job of `project` that holds its
+/// merge lane, the oldest first (TER-644). `None`: the lane is free.
+pub fn open_merge(conn: &Connection, project: &str) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM jobs WHERE project = ?1 AND kind = 'merge'
+               AND state IN ('queued', 'running')
+             ORDER BY created_at LIMIT 1",
+            [project],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// The commit of `card` on `branch` that its newest passed merge onto
 /// `next` took (TER-607): the tested commit that `card merge --onto
 /// release/X.Y.Z` may merge. `None` when no passed merge onto `next`
