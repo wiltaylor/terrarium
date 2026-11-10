@@ -4935,6 +4935,83 @@ mod tests {
         // refuses an unknown role (tests/board.rs).
     }
 
+    /// TER-580: the rounds that the TER-553 upgrade backfilled, filled or
+    /// not, need a fresh accept after `ter-580-backfilled-heads.sql`: no
+    /// commit, a note, and the background read does not pick them. A round
+    /// of a review accept keeps its commit.
+    #[test]
+    fn backfilled_rounds_need_a_fresh_accept() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let (before, after): (Vec<_>, Vec<_>) = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .partition(|(n, _)| *n < "ter-553-accepted-heads.sql");
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        migrate_named(&mut conn, &before).unwrap();
+        let rest: Vec<_> = after
+            .iter()
+            .copied()
+            .filter(|(n, _)| !n.starts_with("ter-553-") && !n.starts_with("ter-580-"))
+            .collect();
+        migrate_named(&mut conn, &rest).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 't', 't');
+             INSERT INTO boards (project, created_at) VALUES ('p', 't');
+             INSERT INTO board_columns (project, name, position, role) VALUES
+               ('p', 'review', 0, NULL), ('p', 'merge_queue', 1, 'merge_queue');
+             INSERT INTO cards (id, project, number, column_id, position, title, body,
+                                labels, created_by, created_at, updated_at)
+             SELECT 'P-' || n, 'p', n, (SELECT id FROM board_columns WHERE name = 'merge_queue'),
+                    n, 't', '', '[]', 'operator', 't', 't'
+             FROM (SELECT 1 AS n UNION ALL SELECT 2);",
+        )
+        .unwrap();
+        let ter553: Vec<_> = after
+            .iter()
+            .copied()
+            .filter(|(n, _)| n.starts_with("ter-553-"))
+            .collect();
+        migrate_named(&mut conn, &ter553).unwrap();
+        // The first read after the upgrade filled P-1 with the tip then;
+        // P-2 was still open. P-3 came in by a review accept since.
+        conn.execute_batch(
+            "UPDATE card_accepted_heads SET branch = 'p-1', commit_sha = 'aaaa',
+                    recorded_at = 't' WHERE card = 'P-1';
+             INSERT INTO cards (id, project, number, column_id, position, title, body,
+                                labels, created_by, created_at, updated_at)
+             VALUES ('P-3', 'p', 3, (SELECT id FROM board_columns WHERE name = 'merge_queue'),
+                     3, 't', '', '[]', 'operator', 't', 't');
+             INSERT INTO card_accepted_heads (card, round, accepted_at, branch, commit_sha)
+             VALUES ('P-3', '01ROUND', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'p-3', 'cccc');",
+        )
+        .unwrap();
+        assert!(migrate(&mut conn).unwrap() >= 1);
+        let mut q = conn
+            .prepare(
+                "SELECT card, commit_sha, needs_accept, note FROM card_accepted_heads
+                 ORDER BY card",
+            )
+            .unwrap();
+        let rows: Vec<(String, Option<String>, i64, Option<String>)> = q
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        for (card, commit, needs, note) in &rows[..2] {
+            assert_eq!((commit.as_deref(), *needs), (None, 1), "{card}: {rows:?}");
+            assert!(note.as_deref().unwrap_or_default().contains("accept the card again"));
+        }
+        assert_eq!((rows[2].1.as_deref(), rows[2].2), (Some("cccc"), 0));
+        let pending = crate::store::accepted_heads::pending(
+            &conn,
+            "9999",
+            "2000-01-01T00:00:00.000Z",
+        )
+        .unwrap();
+        assert!(pending.is_empty(), "{pending:?}");
+    }
+
     /// Migration 82 (TER-165): the role column takes the job roles. The
     /// roles of migration 48 stay, and the one-column-per-role index stays.
     #[test]

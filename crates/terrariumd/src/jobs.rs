@@ -182,17 +182,31 @@ pub struct Runtime {
     /// ([`recover_lost`]). A job that starts before that counts as lost and
     /// goes back to the queue (TER-211).
     recovered: tokio::sync::watch::Sender<bool>,
+    /// True while [`record_accepted_heads`] does nothing (TER-580): a test
+    /// holds the background read to see what the API pre-read recorded.
+    accepted_hold: std::sync::atomic::AtomicBool,
 }
 
 impl Default for Runtime {
     fn default() -> Self {
         Self {
             recovered: tokio::sync::watch::Sender::new(false),
+            accepted_hold: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
 
 impl Runtime {
+    /// Hold (or release) the background read of the reviewed commits.
+    pub fn hold_accepted_reads(&self, hold: bool) {
+        self.accepted_hold
+            .store(hold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn accepted_held(&self) -> bool {
+        self.accepted_hold.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Wait until [`spawn`] has taken up the jobs of the last daemon. From
     /// then on, the start does not take a running job as lost.
     pub async fn recovered(&self) {
@@ -643,16 +657,34 @@ pub fn record_accepted_soon(state: &Shared) {
 /// queue has no commit yet (TER-553). A card without a usable repo or
 /// branch, or a branch that is not on the remote, keeps its round open
 /// with a note: a batch leaves the card out until its head is recorded.
+/// The read takes the tip at read time, so it fills only a round accepted
+/// within [`accepted_heads::FILL_MAX_AGE_SECS`] (TER-580): an older open
+/// round gets [`accepted_heads::EXPIRED_NOTE`] and needs a fresh accept.
 /// Returns the count of recorded heads.
 pub async fn record_accepted_heads(state: &Shared) -> usize {
     use crate::store::accepted_heads;
+    if state.job_queue.accepted_held() {
+        return 0;
+    }
+    let now = chrono::Utc::now();
     // A failed read waits a minute: a card without its branch on the
     // remote does not cost a `git ls-remote` on each queue kick.
-    let retry_before = (chrono::Utc::now() - chrono::Duration::seconds(60))
+    let retry_before =
+        (now - chrono::Duration::seconds(60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let accepted_after = (now - chrono::Duration::seconds(accepted_heads::FILL_MAX_AGE_SECS))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let cutoff = accepted_after.clone();
+    if let Err(e) = state
+        .db
+        .write("system", move |t| accepted_heads::expire(t, &cutoff))
+        .await
+    {
+        warn!("cannot note the expired reviewed-commit reads: {e}");
+    }
+    let cutoff = accepted_after.clone();
     let pending = match state
         .db
-        .read(move |c| accepted_heads::pending(c, &retry_before))
+        .read(move |c| accepted_heads::pending(c, &retry_before, &cutoff))
         .await
     {
         Ok(p) => p,
@@ -687,10 +719,13 @@ pub async fn record_accepted_heads(state: &Shared) -> usize {
             Err(e) => Err(e.message),
         };
         let (card, round) = (p.card.clone(), p.round.clone());
+        let cutoff = accepted_after.clone();
         let done = state
             .db
             .write("system", move |t| match &read {
-                Ok((branch, head)) => accepted_heads::record(t, &card, &round, branch, head),
+                Ok((branch, head)) => {
+                    accepted_heads::record(t, &card, &round, branch, head, &cutoff)
+                }
                 Err(why) => accepted_heads::note(t, &card, &round, why).map(|()| false),
             })
             .await;

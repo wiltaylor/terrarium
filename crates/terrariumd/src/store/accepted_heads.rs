@@ -16,6 +16,16 @@ use crate::error::ApiResult;
 /// The name of the merge queue column when no column has the role.
 const QUEUE_NAME: &str = "merge_queue";
 
+/// How long after the accept the background read may fill a round
+/// (TER-580). The read takes the tip of the branch at read time, so a late
+/// read could take a push made after the review. A round still open after
+/// this needs a fresh accept.
+pub const FILL_MAX_AGE_SECS: i64 = 10 * 60;
+
+/// The note of a round that the background read may no longer fill.
+pub const EXPIRED_NOTE: &str =
+    "the head was not read within 10 minutes of the accept: accept the card again";
+
 /// Is a column with `name` and `role` the merge queue? The role, else the
 /// name of a column without a role (as `conflict_hints`).
 pub fn is_queue(name: &str, role: Option<&str>) -> bool {
@@ -41,7 +51,7 @@ pub fn on_move(
              ON CONFLICT(card) DO UPDATE SET
                round = excluded.round, accepted_at = excluded.accepted_at,
                branch = NULL, commit_sha = NULL, recorded_at = NULL, note = NULL,
-               tried_at = NULL",
+               tried_at = NULL, needs_accept = 0",
             params![card, ulid::Ulid::new().to_string(), now()],
         )?;
     } else if was && !is {
@@ -57,16 +67,23 @@ pub struct Pending {
     pub round: String,
 }
 
-/// The rounds without a recorded commit, oldest first. A round whose last
-/// read failed at or after `retry_before` waits.
-pub fn pending(conn: &Connection, retry_before: &str) -> ApiResult<Vec<Pending>> {
+/// The rounds without a recorded commit that the background read may
+/// fill, oldest first: accepted at or after `accepted_after`, and not
+/// backfilled by the upgrade. A round whose last read failed at or after
+/// `retry_before` waits.
+pub fn pending(
+    conn: &Connection,
+    retry_before: &str,
+    accepted_after: &str,
+) -> ApiResult<Vec<Pending>> {
     let mut q = conn.prepare(
         "SELECT card, round FROM card_accepted_heads
-         WHERE commit_sha IS NULL AND (tried_at IS NULL OR tried_at < ?1)
+         WHERE commit_sha IS NULL AND needs_accept = 0 AND accepted_at >= ?2
+           AND (tried_at IS NULL OR tried_at < ?1)
          ORDER BY accepted_at, card",
     )?;
     let rows = q
-        .query_map([retry_before], |r| {
+        .query_map([retry_before, accepted_after], |r| {
             Ok(Pending {
                 card: r.get(0)?,
                 round: r.get(1)?,
@@ -78,15 +95,37 @@ pub fn pending(conn: &Connection, retry_before: &str) -> ApiResult<Vec<Pending>>
 
 /// Record the head `commit` of `branch` for round `round` of `card`. Only
 /// the open round, and only once: a late read of an earlier round, or a
-/// second read of this one, changes nothing. True when it recorded.
-pub fn record(t: &Tx<'_>, card: &str, round: &str, branch: &str, commit: &str) -> ApiResult<bool> {
+/// second read of this one, changes nothing. A round accepted before
+/// `accepted_after`, or backfilled by the upgrade, is not filled either.
+/// True when it recorded.
+pub fn record(
+    t: &Tx<'_>,
+    card: &str,
+    round: &str,
+    branch: &str,
+    commit: &str,
+    accepted_after: &str,
+) -> ApiResult<bool> {
     let n = t.execute(
         "UPDATE card_accepted_heads SET branch = ?3, commit_sha = ?4, recorded_at = ?5,
                 note = NULL
-         WHERE card = ?1 AND round = ?2 AND commit_sha IS NULL",
-        params![card, round, branch, commit, now()],
+         WHERE card = ?1 AND round = ?2 AND commit_sha IS NULL
+           AND needs_accept = 0 AND accepted_at >= ?6",
+        params![card, round, branch, commit, now(), accepted_after],
     )?;
     Ok(n == 1)
+}
+
+/// Note [`EXPIRED_NOTE`] on each open round accepted before
+/// `accepted_after` that the background read did not fill. Returns the
+/// count of rounds noted now.
+pub fn expire(t: &Tx<'_>, accepted_after: &str) -> ApiResult<usize> {
+    Ok(t.execute(
+        "UPDATE card_accepted_heads SET note = ?2, tried_at = ?3
+         WHERE commit_sha IS NULL AND needs_accept = 0 AND accepted_at < ?1
+           AND (note IS NULL OR note <> ?2)",
+        params![accepted_after, EXPIRED_NOTE, now()],
+    )?)
 }
 
 /// Record `commit` of `branch` in the open round of `card`, in the write
