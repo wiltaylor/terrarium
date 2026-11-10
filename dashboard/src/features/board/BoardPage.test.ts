@@ -13,6 +13,9 @@ vi.mock("../../stores", () => ({
   events: { on: (fn: typeof onEvent) => { listeners.add(fn); return () => listeners.delete(fn); } },
   inbox: { refresh: async () => {} },
   agents: { inProject: () => [], byId: () => undefined },
+  // The card body and comments link card keys (TER-571).
+  projects: { projects: () => [] },
+  cardPeek: { open: () => {}, close: () => {} },
 }));
 const { BoardPage } = await import("./BoardPage");
 const { loadBoards } = await import("../inbox/TrackedCards");
