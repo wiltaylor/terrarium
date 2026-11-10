@@ -607,12 +607,9 @@ fn with_merge_queue(rule: &Rule, mq: &str) -> Option<Rule> {
     }
     if rule.name == "agent-unpark" {
         let to = |m: &MatchRule| matches!(m.path.as_str(), "data.to" | "data.to_role");
-        let has = rule
-            .when
-            .iter()
-            .any(|m| {
-                m.op == MatchOp::Ne && to(m) && m.value.as_str() == Some(value(&m.path).as_str())
-            });
+        let has = rule.when.iter().any(|m| {
+            m.op == MatchOp::Ne && to(m) && m.value.as_str() == Some(value(&m.path).as_str())
+        });
         let last = rule
             .when
             .iter()
