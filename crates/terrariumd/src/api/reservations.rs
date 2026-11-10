@@ -24,7 +24,13 @@ pub fn routes() -> Router<Shared> {
         .route("/reservations/{id}/cancel", post(cancel))
 }
 
-async fn capacity(State(state): State<Shared>, Path(host): Path<String>) -> ApiResult<Json<Value>> {
+/// Whoever has an actor. The totals count every project; the reservation
+/// and holder of a GPU claim show only to an actor that reads its project.
+async fn capacity(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(host): Path<String>,
+) -> ApiResult<Json<Value>> {
     Ok(Json(state.db.read(move |c| {
         hosts::get(c, &host)?;
         let (physical, budget, percentage) = store::capacity(c, &host)?;
@@ -34,7 +40,14 @@ async fn capacity(State(state): State<Shared>, Path(host): Path<String>) -> ApiR
         let mut cores = std::collections::BTreeSet::new();
         let mut gpus = Vec::new();
         for r in charged {
-            for gpu in &r.gpus { gpus.push(json!({"reservation":r.id,"holder":r.holder,"claim":gpu})); }
+            let visible = policy::read_project(&actor, &r.project).is_ok();
+            for gpu in &r.gpus {
+                gpus.push(if visible {
+                    json!({"reservation":r.id,"holder":r.holder,"claim":gpu})
+                } else {
+                    json!({"claim":gpu})
+                });
+            }
             used.cpu_millis = used.cpu_millis.saturating_add(r.amounts.cpu_millis);
             used.memory_bytes = used.memory_bytes.saturating_add(r.amounts.memory_bytes);
             cores.extend(r.cores.iter().copied());

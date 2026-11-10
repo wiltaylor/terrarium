@@ -3582,7 +3582,7 @@ for any agent.
 |---|---|---|
 | `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?, "targets"?, "grants"?, "bind"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
 | `GET /api/agents/{owner}/spawned` | `?limit=&cursor=`; for `operator`: `?project=` | `200` the spawns of the owner, running and finished, newest first, paged (§2.4). |
-| `GET /api/spawns/{id}` | | `200` one spawn, also after the finish. |
+| `GET /api/spawns/{id}` | | `200` one spawn, also after the finish. A reader of its project reads it; a spawn of `operator`: the operator only. |
 | `POST /api/agents/{id}/done` | `{"result"?}` | `202` the spawn. The close follows after 3 s. |
 | `POST /api/agents/{id}/cancel` | | `200` the spawn, closed with the outcome `cancelled`. |
 
@@ -6578,7 +6578,10 @@ and `write_iops` (nonnegative integers).
 
 The `used` object includes charged `cpu_millis`, `memory_bytes`, the summed
 per-device `io` map, and sorted `exclusive_cores` CPU IDs. Queued and terminal
-reservations are excluded. Admission locks are per host agent. Docker lifecycle
+reservations are excluded. Every actor reads the capacity, and the totals
+count every project. A `used.gpus` entry shows `reservation` and `holder`
+only to an actor that reads the project of the reservation; other actors
+see the `claim` only. Admission locks are per host agent. Docker lifecycle
 verbs publish an in-progress intent, then release admission while pulling or
 creating a container. Verbs may overlap on the same host. Resource changes on
 that host return `409 resource_busy` until all verbs finish, except a grant
