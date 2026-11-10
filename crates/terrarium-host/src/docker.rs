@@ -637,9 +637,13 @@ mod tests {
     use crate::protocol::VolumeMount;
     use std::path::PathBuf;
 
-    /// The env dir of the tests.
+    /// The env dir of the tests: `env` in a private temp dir of this test
+    /// process, so that its parent is a dir of this user.
     fn env_dir() -> PathBuf {
-        std::env::temp_dir().join("terrarium-host-test-env")
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| tempfile::tempdir().unwrap())
+            .path()
+            .join("env")
     }
 
     fn plan_run(
