@@ -444,7 +444,8 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
         10_000_000,
         "fn main() -> string {\n  let s = \"x\".repeat(8000000)\n  let i = 0\n  while i < 100000 {\n    let t = s.replace(\"x\", \"y\")\n    i = i + 1\n  }\n  \"\"\n}",
     );
-    let started = std::time::Instant::now();
+    // Set when the slow dry run returns, that is after it gave its slot back.
+    let slow_returned = std::sync::atomic::AtomicBool::new(false);
     let slow_run = async {
         let body = td
             .post(
@@ -454,11 +455,11 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
             .await
             .ok()
             .clone();
-        (body, started.elapsed())
+        slow_returned.store(true, std::sync::atomic::Ordering::SeqCst);
+        body
     };
-    let others = async {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        // A second dry run finds no slot and is refused within its wait.
+    // A second dry run finds no slot and is refused within its wait.
+    let refused = async {
         let t = std::time::Instant::now();
         let body = td
             .post(
@@ -468,15 +469,29 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
             .await
             .ok()
             .clone();
-        let refused_in = t.elapsed();
-        // The engine's lane of another project runs its script meanwhile.
-        ping(&td, "se", &card, 1).await;
-        settle(&td).await;
-        let c = comments(&td, &card).await;
-        (body, refused_in, c, started.elapsed())
+        (body, t.elapsed())
     };
-    let ((slow_body, slow_done), (busy, refused_in, c, engine_done)) =
+    // The engine's lane of another project runs its script meanwhile: its
+    // comment is there before the slow dry run returns (TER-680: the order
+    // of the two events, not two measured durations).
+    let engine = async {
+        ping(&td, "se", &card, 1).await;
+        for _ in 0..1000 {
+            let c = comments(&td, &card).await;
+            if !c.is_empty() {
+                return (c, slow_returned.load(std::sync::atomic::Ordering::SeqCst));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the engine's rule did not comment");
+    };
+    let others = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::join!(refused, engine)
+    };
+    let (slow_body, ((busy, refused_in), (c, slow_had_returned))) =
         tokio::join!(slow_run, others);
+    settle(&td).await;
 
     let plan = &busy["plans"][0];
     assert_eq!(plan["outcome"], "failed", "{plan}");
@@ -485,12 +500,13 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
         "{plan}"
     );
     assert!(refused_in < Duration::from_secs(4), "{refused_in:?}");
+    assert!(
+        !slow_had_returned,
+        "the engine's rule ran only after the dry run gave its slot back"
+    );
     assert_eq!(c.len(), 1, "{c:?}");
     assert_eq!(c[0].1, "quick");
-    assert!(
-        engine_done < slow_done,
-        "the engine ran while the dry run held its slot: {engine_done:?} {slow_done:?}"
-    );
+    assert_eq!(comments(&td, &card).await.len(), 1);
     let why = slow_body["plans"][0]["reason"].as_str().unwrap();
     assert!(why.contains("longer than 5000 ms"), "{why}");
 }
