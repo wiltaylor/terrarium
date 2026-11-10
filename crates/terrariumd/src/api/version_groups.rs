@@ -110,14 +110,11 @@ async fn status(
             if g.closed_at.is_some() {
                 return Err(ApiError::conflict("version group is closed"));
             }
-            if !version_groups::STEPS.contains(&req.step.as_str()) {
-                return Err(ApiError::invalid("unknown version step"));
-            }
-            let changed = groups::step(
+            let changed = version_groups::step(
                 t,
                 &g,
                 &req.step,
-                Some(&req.state),
+                &req.state,
                 req.text.as_deref(),
                 req.eta.as_deref(),
             )?;
