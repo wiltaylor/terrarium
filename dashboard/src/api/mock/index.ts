@@ -488,7 +488,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     } else if (b.lab_repo || b.lab_ref || b.lab_path || b.lab_from_workspace) {
       fail(422, "invalid", `\`lab_repo\`, \`lab_ref\`, \`lab_path\`, and \`lab_from_workspace\` are for a vmlab target, not \`${b.kind}\``);
     }
-    if (b.ephemeral && !(b.kind === "vmlab" || (b.kind === "docker" && b.image))) fail(422, "invalid", "an ephemeral target must be docker with `image`, or vmlab");
+    if (b.ephemeral && !(b.kind === "vmlab" || b.kind === "exedev" || (b.kind === "docker" && b.image))) fail(422, "invalid", "an ephemeral target must be docker with `image`, vmlab, or exedev");
     // docs/api.md §17.2, "Resource limits": `{}` is no limits.
     if (b.limits && !Object.keys(b.limits).length) delete b.limits;
     if (b.limits) {
