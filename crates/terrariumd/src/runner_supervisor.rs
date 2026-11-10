@@ -1100,8 +1100,7 @@ impl Slot {
     /// task passed on a rest event after it, and the runner still rests.
     /// With no seq it cannot tell, and the next rest event decides.
     fn turn_ended(&self, started: Option<u64>) -> bool {
-        self.seen.is_resting()
-            && started.is_some_and(|s| self.rest_seq.is_some_and(|r| r > s))
+        self.seen.is_resting() && started.is_some_and(|s| self.rest_seq.is_some_and(|r| r > s))
     }
 
     fn new(agent: Agent) -> Self {
