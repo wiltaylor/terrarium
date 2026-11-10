@@ -7196,9 +7196,10 @@ of `sh -c <script>` on the target. The URL, the path, the branch, and the
 depth are arguments of the script. The credential of the repo goes in the
 env of that run only: `TERRARIUM_GIT_USERNAME` and
 `TERRARIUM_GIT_PASSWORD` for a token, which a `credential.helper` of `-c`
-reads, or `TERRARIUM_GIT_SSH_KEY` for an SSH key, which the script writes
-to a 0600 temp file for `GIT_SSH_COMMAND` and removes at exit. The secret
-is never on a command line. The target needs `git` and `sh`. A vmlab
+reads, or `TERRARIUM_GIT_SSH_KEY` for an SSH key, base64-encoded on one
+line, which the script decodes with `base64 -d` into a 0600 temp file for
+`GIT_SSH_COMMAND` and removes at exit. The secret is never on a command
+line. The target needs `git` and `sh`, and `base64` for an SSH key. A vmlab
 target is `422 invalid`.
 
 `path` is an absolute path on the target, or a path under

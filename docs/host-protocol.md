@@ -446,11 +446,12 @@ which its children (credential helpers, the ssh connection helper) inherit
 too. That fallback refuses (`bad_request`) each name that a secret grant
 cannot set (`terrarium_core::env_deny`: the loader, the C library, the
 shells, `SSH_*`, `GIT_*`, the language runtimes, the proxies and CA files,
-`OPENSSL_*`, `KRB5*`, `DBUS_*`, the harnesses; except the four exact
+`OPENSSL_*`, `KRB5*`, `DBUS_*`, the harnesses; except the three exact
 names under which the daemon sends multi-line values,
-`TERRARIUM_GIT_TRAILERS` on each agent exec and `TERRARIUM_COMMIT_HOOK`,
-`TERRARIUM_GIT_KNOWN_HOSTS` and `TERRARIUM_GIT_SSH_KEY` on a checkout,
-which neither the CLI nor its children read; any other `TERRARIUM_*` name
+`TERRARIUM_GIT_TRAILERS` on each agent exec and `TERRARIUM_COMMIT_HOOK`
+and `TERRARIUM_GIT_KNOWN_HOSTS` on a checkout, which neither the CLI nor
+its children read; the SSH key of a checkout, `TERRARIUM_GIT_SSH_KEY`,
+comes base64-encoded on one line, so it goes into the env file; any other `TERRARIUM_*` name
 is refused, because the daemon does not check the names of an agent's own
 exec env), and also `DOCKER_*`, `SSL_*`, `OTEL_*`, `GODEBUG`,
 `GETCONF_DIR`, `NIS_PATH`, `RESOLV_HOST_CONF` and each name that ends in
