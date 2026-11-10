@@ -254,6 +254,10 @@ pub struct PendingTurn {
     pub id: String,
     pub text: String,
     pub source: &'static str,
+    /// The `queued_turns` row of a store turn that the supervisor keeps
+    /// ([`Supervisor::send_queued_turn`]). The row stays until the turn is
+    /// typed, so the store lists it, not this queue.
+    pub queued: Option<i64>,
 }
 
 impl From<String> for PendingTurn {
@@ -262,6 +266,7 @@ impl From<String> for PendingTurn {
             id: AgentId::new().to_string(),
             text,
             source: "supervisor",
+            queued: None,
         }
     }
 }
@@ -326,6 +331,23 @@ pub trait Supervisor: Send + Sync + 'static {
     /// Type `text` into the harness as one turn.
     fn send_turn(&self, agent: AgentId, text: String)
     -> BoxFuture<'_, Result<(), SupervisorError>>;
+    /// [`Supervisor::send_turn`] for the store turn `row` of `agent`
+    /// (`queued_turns`, TER-542). `Ok(true)`: the supervisor keeps the turn
+    /// for later (before the first idle of a launch, for example) and
+    /// deletes the row itself when it types the turn. The row stays until
+    /// then, so a daemon restart delivers the turn again. A second call for
+    /// a row that the supervisor keeps does nothing. `Ok(false)`: the turn
+    /// went out, and the caller deletes the row. The default sends the
+    /// turn and returns `false`.
+    fn send_queued_turn(
+        &self,
+        agent: AgentId,
+        row: i64,
+        text: String,
+    ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+        let _ = row;
+        Box::pin(async move { self.send_turn(agent, text).await.map(|()| false) })
+    }
     /// `agent` got a stream of its self-hosted subscription
     /// (`crate::stream_limit`): type the work that waited for it. The
     /// default does nothing.

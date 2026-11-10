@@ -1376,6 +1376,16 @@ impl RunnerSupervisor {
         lock(&self.inner.holds).get(&agent).map(|h| h.hold.clone())
     }
 
+    /// The `queued_turns` rows of the store turns that the slot of
+    /// `agent` keeps for later ([`Supervisor::send_queued_turn`]). For
+    /// tests.
+    pub fn kept_queued_turns(&self, agent: AgentId) -> Vec<i64> {
+        lock(&self.inner.slots)
+            .get(&agent)
+            .map(|s| s.turns.iter().filter_map(|t| t.queued).collect())
+            .unwrap_or_default()
+    }
+
     /// The operator turns that wait for the end of a quota hold. For tests.
     pub fn waiting_turns(&self, agent: AgentId) -> Vec<String> {
         lock(&self.inner.holds)
@@ -2997,10 +3007,15 @@ impl RunnerSupervisor {
                 }
                 None => None,
             };
-            let deliveries: Vec<_> = turns
-                .into_iter()
-                .map(|turn| runner.type_turn(turn.text))
-                .collect();
+            let mut deliveries = Vec::with_capacity(turns.len());
+            for turn in turns {
+                if let Some(row) = turn.queued
+                    && !me.take_queued_row(id, row).await
+                {
+                    continue;
+                }
+                deliveries.push(runner.type_turn(turn.text));
+            }
             if let Some(delivery) = recap
                 && let Err(e) = delivery.wait().await
             {
@@ -3013,6 +3028,103 @@ impl RunnerSupervisor {
             }
             me.finish_turn_delivery(id, epoch);
         });
+    }
+
+    /// Type `turn` into the harness of `agent`, or keep it in the slot
+    /// for later (before the first idle of the launch, during a restart, a
+    /// compaction, or the reset gate, with no free stream). `Ok(true)`:
+    /// the slot keeps a store turn (`turn.queued`), and its row stays until
+    /// [`Self::deliver_pending`] types it (TER-542). A store turn that the
+    /// slot keeps already is not kept twice. A quota hold keeps only the
+    /// text: `Ok(false)`, as for a turn that went out.
+    async fn send_pending(
+        &self,
+        agent: AgentId,
+        turn: crate::supervisor::PendingTurn,
+    ) -> Result<bool, SupervisorError> {
+        let runner = self
+            .runner(agent)
+            .ok_or(SupervisorError::NotRunning(agent))?;
+        let kept = turn.queued.is_some();
+        if let Some(row) = turn.queued
+            && lock(&self.inner.slots)
+                .get(&agent)
+                .is_some_and(|s| s.turns.iter().any(|t| t.queued == Some(row)))
+        {
+            return Ok(true);
+        }
+        if let Some(h) = lock(&self.inner.holds).get_mut(&agent) {
+            info!(agent = %agent, "a quota hold lasts; the turn waits");
+            h.waiting.push(turn.text);
+            return Ok(false);
+        }
+        // Before the first idle of the launch: the turn goes after the
+        // recap turn. During a compaction: after its end.
+        let epoch = {
+            let mut slots = lock(&self.inner.slots);
+            let slot = slots
+                .get_mut(&agent)
+                .ok_or(SupervisorError::NotRunning(agent))?;
+            if slot.stop_requested {
+                // The API persists NotRunning turns for the next wake.
+                return Err(SupervisorError::NotRunning(agent));
+            }
+            if !slot.reached_idle
+                || slot.restart_requested
+                || slot.compacting.is_some()
+                || slot.reset_gate
+            {
+                slot.turns.push(turn);
+                return Ok(kept);
+            }
+            // The stream limit (`crate::stream_limit`): with no free
+            // stream the turn waits in the slot, and goes out when the
+            // agent gets one.
+            let sub = slot.agent.subscription.clone();
+            if !self.stream_take(agent, sub.as_deref()) {
+                slot.turns.push(turn);
+                return Ok(kept);
+            }
+            slot.turns_in_flight += 1;
+            slot.epoch
+        };
+        let delivery = runner.type_turn(turn.text);
+        let me = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = delivery.wait().await {
+                debug!(agent = %agent, "a turn was not delivered: {e}");
+            }
+            me.finish_turn_delivery(agent, epoch);
+        });
+        Ok(false)
+    }
+
+    /// Delete the store row `row` of a kept turn of `id` right before the
+    /// turn is typed (TER-542), under the turn lock of the agent
+    /// ([`crate::lifecycle::Lifecycle::turn_lock`]). `false`: the row is
+    /// gone (an operator removed it, or a wake typed it), and the turn does
+    /// not go out. With no daemon state, or when the store fails, the turn
+    /// goes out.
+    async fn take_queued_row(&self, id: AgentId, row: i64) -> bool {
+        let Some(state) = self.state() else {
+            return true;
+        };
+        let lock = state.lifecycle.turn_lock(id);
+        let _held = lock.lock().await;
+        let key = id.to_string();
+        match state
+            .db
+            .write("system", move |t| {
+                crate::store::agents::remove_queued_turn(t, &key, row)
+            })
+            .await
+        {
+            Ok(removed) => removed.is_some(),
+            Err(e) => {
+                warn!(agent = %id, "cannot delete a delivered queued turn: {e}");
+                true
+            }
+        }
     }
 
     fn finish_turn_delivery(&self, id: AgentId, epoch: u64) {
@@ -4425,6 +4537,7 @@ impl Supervisor for RunnerSupervisor {
                                 id: t.id,
                                 text: t.text,
                                 source: "runner",
+                                queued: None,
                             })
                             .collect()
                     }
@@ -4438,8 +4551,9 @@ impl Supervisor for RunnerSupervisor {
             }
             // Read the upstream queue last so a handoff cannot appear twice.
             // As with dispatch itself, an item may leave between snapshots.
+            // A kept store turn shows as its store row (TER-542).
             if let Some(slot) = lock(&self.inner.slots).get(&agent) {
-                turns.extend(slot.turns.clone());
+                turns.extend(slot.turns.iter().filter(|t| t.queued.is_none()).cloned());
             }
             Ok(crate::supervisor::PendingTurns {
                 items: turns,
@@ -4662,56 +4776,19 @@ impl Supervisor for RunnerSupervisor {
         agent: AgentId,
         text: String,
     ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        Box::pin(async move { self.send_pending(agent, text.into()).await.map(|_| ()) })
+    }
+
+    fn send_queued_turn(
+        &self,
+        agent: AgentId,
+        row: i64,
+        text: String,
+    ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
         Box::pin(async move {
-            let runner = self
-                .runner(agent)
-                .ok_or(SupervisorError::NotRunning(agent))?;
-            if let Some(h) = lock(&self.inner.holds).get_mut(&agent) {
-                info!(agent = %agent, "a quota hold lasts; the turn waits");
-                h.waiting.push(text);
-                return Ok(());
-            }
-            // Before the first idle of the launch: the turn goes after the
-            // recap turn. During a compaction: after its end.
-            let epoch = {
-                let mut slots = lock(&self.inner.slots);
-                let slot = slots
-                    .get_mut(&agent)
-                    .ok_or(SupervisorError::NotRunning(agent))?;
-                if slot.stop_requested {
-                    // The API persists NotRunning turns for the next wake.
-                    return Err(SupervisorError::NotRunning(agent));
-                }
-                if let Some(slot) = slots.get_mut(&agent).filter(|s| {
-                    !s.reached_idle || s.restart_requested || s.compacting.is_some() || s.reset_gate
-                }) {
-                    slot.turns.push(text.into());
-                    return Ok(());
-                }
-                // The stream limit (`crate::stream_limit`): with no free
-                // stream the turn waits in the slot, and goes out when the
-                // agent gets one.
-                if let Some(slot) = slots.get_mut(&agent) {
-                    let sub = slot.agent.subscription.clone();
-                    if !self.stream_take(agent, sub.as_deref()) {
-                        slot.turns.push(text.into());
-                        return Ok(());
-                    }
-                    slot.turns_in_flight += 1;
-                    slot.epoch
-                } else {
-                    return Err(SupervisorError::NotRunning(agent));
-                }
-            };
-            let delivery = runner.type_turn(text);
-            let me = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = delivery.wait().await {
-                    debug!(agent = %agent, "a turn was not delivered: {e}");
-                }
-                me.finish_turn_delivery(agent, epoch);
-            });
-            Ok(())
+            let mut turn = crate::supervisor::PendingTurn::from(text);
+            turn.queued = Some(row);
+            self.send_pending(agent, turn).await
         })
     }
 

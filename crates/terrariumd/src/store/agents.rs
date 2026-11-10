@@ -480,16 +480,6 @@ pub fn remove_queued_turn(t: &mut Tx<'_>, id: &str, turn: i64) -> ApiResult<Opti
     .optional()?)
 }
 
-/// Delete the queued turns of agent `id` up to `upto` (the ID of the
-/// last turn that went to the supervisor).
-pub fn forget_queued_turns(t: &mut Tx<'_>, id: &str, upto: i64) -> ApiResult<()> {
-    t.execute(
-        "DELETE FROM queued_turns WHERE agent = ?1 AND id <= ?2",
-        params![id, upto],
-    )?;
-    Ok(())
-}
-
 /// Set or clear the `paused` flag. Returns the flag before.
 pub fn set_paused(t: &mut Tx<'_>, id: &str, paused: bool) -> ApiResult<bool> {
     let before: bool = t
