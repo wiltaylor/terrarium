@@ -178,8 +178,11 @@ impl Daemon {
 pub const STATE_LOCK: &str = "daemon.lock";
 
 /// Take the exclusive lock of `state_dir`, or fail when another daemon
-/// holds it.
-fn lock_state_dir(state_dir: &std::path::Path) -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
+/// holds it. The CLI restore holds it too, so that no daemon starts on the
+/// state dir while it is replaced.
+pub fn lock_state_dir(
+    state_dir: &std::path::Path,
+) -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
     use nix::fcntl::{Flock, FlockArg};
     use std::os::unix::fs::OpenOptionsExt as _;
     let path = state_dir.join(STATE_LOCK);

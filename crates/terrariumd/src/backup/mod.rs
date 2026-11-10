@@ -31,7 +31,7 @@
 //! old content of each root to `<root>/.terrarium-pre-restore-<time>/`
 //! and the new content into place. The daemon must be stopped
 //! (`terrariumd backup restore` refuses while a daemon answers on the
-//! socket).
+//! socket or holds the state lock, and holds that lock while it runs).
 
 pub mod schedule;
 pub mod seal;
