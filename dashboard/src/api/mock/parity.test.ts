@@ -1198,6 +1198,14 @@ describe("mode 1 targets (docs/api.md §17.2, §17.3, §17.7, §17.8)", () => {
     for (const b of bad) await expect(api.targets.create(b)).rejects.toMatchObject({ status: 422, code: "invalid" });
   });
 
+  it("takes an exedev target with a credential and ephemeral, as the daemon does (TER-651)", async () => {
+    const api = mock();
+    await expect(api.targets.create({ name: "x", kind: "exedev", ephemeral: true })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.create({ name: "x", kind: "exedev", credential: "vmkey" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.create({ name: "x", kind: "exedev", credential: "vmkey", ephemeral: true, keep: true })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.create({ name: "ex", kind: "exedev", credential: "vmkey", ephemeral: true })).resolves.toMatchObject({ kind: "exedev", host_online: null });
+  });
+
   it("prefixes a project target made through the API, keeps a prefixed name, and keeps a global name", async () => {
     const api = mock();
     expect((await api.targets.create({ name: "box", kind: "host", host: "lab1", project: "terrarium" })).name).toBe("terrarium-box");

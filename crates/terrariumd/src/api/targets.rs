@@ -552,8 +552,8 @@ async fn verb_target(state: &Shared, actor: &Actor, name: String) -> ApiResult<T
     Ok(r)
 }
 
-/// `POST /api/targets/{name}/test`: one login to an `ssh` target with its
-/// key (PLAN §16b.6a, `crate::target_test`). The rights of a lifecycle
+/// `POST /api/targets/{name}/test`: one login to an `ssh` target (or the
+/// VM of an `exedev` target) with its key (PLAN §16b.6a, `crate::target_test`). The rights of a lifecycle
 /// verb: an actor that may use the target, or one that may define it.
 async fn test(
     State(state): State<Shared>,

@@ -3128,8 +3128,8 @@ pub enum TargetsCmd {
     /// Show one target: its definition, state, and the key of its
     /// credential with the fingerprint
     Show { name: String },
-    /// Log in to an ssh target once with its key, and report the result:
-    /// ok, auth_refused, host_key_unknown, host_key_mismatch,
+    /// Log in to an ssh target, or the VM of an exedev target, once with
+    /// its key, and report the result: ok, auth_refused, host_key_unknown, host_key_mismatch,
     /// unreachable, or error. Exit 1 when it is not ok
     Test { name: String },
     #[command(flatten)]

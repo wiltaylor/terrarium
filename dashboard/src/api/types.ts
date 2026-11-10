@@ -2652,7 +2652,8 @@ export interface UsageMe {
 // Coded to the daemon's `api/hosts.rs` and `api/targets.rs`, which are new
 // and not yet in docs/api.md. The mock serves the same shapes.
 
-export type TargetKind = "host" | "ssh" | "docker" | "vmlab" | "vnc" | "rdp" | "desktop";
+/** `exedev`: a VM on exe.dev per holder, reached over ssh (TER-294). The create dialog does not offer it. */
+export type TargetKind = "host" | "ssh" | "docker" | "vmlab" | "vnc" | "rdp" | "desktop" | "exedev";
 /** docs/api.md §17.10: the display server of a `docker` or `desktop` target. */
 export type DisplayProtocol = "x11" | "wayland" | "auto";
 /** docs/api.md §17.2: what the last lifecycle verb saw. */

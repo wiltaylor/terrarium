@@ -6963,8 +6963,13 @@ POST /api/targets/box/test
 
 `host_key` is `known`, `added`, `unknown`, `mismatch`, or `not_checked`.
 `stderr` is the tail of the ssh stderr (at most 2000 bytes). The key
-never shows. A target of another kind is `422 invalid` ("not
-supported"); for a target with a host agent, use the `status` verb
+never shows. An `exedev` target is tested through the ssh target of its
+recorded VM (`exedev@<ssh_dest>`, its `credential`); the report keeps
+`"kind": "exedev"` and shows that address. With no VM, or a VM with no
+ssh host yet, the test is `409 conflict`: bring the VM up with the `up`
+verb or a holder's start, then test again (TER-651). A target of another
+kind is `422 invalid` ("not supported"); for a target with a host agent,
+use the `status` verb
 (§17.3). A target whose credential does not work is `422 invalid`. Each
 test writes a `target.test` audit row with `{result, host_key,
 exit_code}`.
