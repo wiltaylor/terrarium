@@ -913,10 +913,7 @@ mod tests {
         if !sticky_root {
             return;
         }
-        let dir = tmp.join(format!(
-            "terrarium-host-test-private-{}",
-            std::process::id()
-        ));
+        let dir = tmp.join(format!("terrarium-host-test-private-{}", std::process::id()));
         let res = super::private_dir(&dir);
         let _ = std::fs::remove_dir(&dir);
         res.unwrap();
