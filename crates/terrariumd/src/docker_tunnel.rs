@@ -54,6 +54,13 @@ fn forward_socket(dir: &RunDir) -> ApiResult<(PathBuf, Option<tempfile::TempDir>
                 socket.display()
             ))
         })?;
+    // `tempdir_in` uses the umask (often 0755): make it private before the
+    // SSH client binds the socket in it.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(short.path(), std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| {
+            ApiError::internal(format!("cannot make the Docker forward dir private: {e}"))
+        })?;
     let socket = short.path().join("docker.sock");
     Ok((socket, Some(short)))
 }
