@@ -1875,6 +1875,15 @@ describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
     ev.close();
   });
 
+  it("a turn to a stopped agent without start_if_stopped wakes it and queues the turn (TER-210)", async () => {
+    const tick = fakeClock();
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleRunMs: 15 });
+    const s = await api.schedules.create({ name: "nudge-docs", project: "terrarium", spec: { kind: "interval", every: "1h" }, action: { type: "turn", agent: "terrarium/docs-writer", text: "go", start_if_stopped: false } });
+    const pending = api.schedules.run(s.id);
+    await tick(15);
+    expect(await pending).toMatchObject({ status: "ok", summary: "woke terrarium/docs-writer and sent the turn", output: { agent: "terrarium/docs-writer", started: true, delivery: "queued" }, error: null });
+  });
+
   it("pages runs newest first with a cursor", async () => {
     const api = mock();
     const s = (await api.schedules.list()).find((x) => x.name === "tests")!;
