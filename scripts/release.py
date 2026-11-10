@@ -3,8 +3,8 @@
 It replaces the version, image and release jobs of the GitHub CI
 (docs/release.md). The release job runs it on the release client (a small
 VM, as the non-root user `release`) on a clean checkout of the commit to
-release. Everything that runs the code of the release (the gate and the
-image build) runs on the release VM's Docker daemon (TERRARIUM_DOCKER_HOST,
+release. Everything that runs the code of the release (the gate, the
+image build and the --version checks) runs on the release VM's Docker daemon (TERRARIUM_DOCKER_HOST,
 the daemon's relay), which gets no secret. The client only pushes, signs,
 and creates the release:
 
@@ -33,8 +33,10 @@ Steps (each one writes its part of <out>/summary.json):
             layout on this side, <out>/image: the VM gets no secret.
 6. extract  the host agent and the host helper out of that layout, with
             the two checks of the old CI: the SHA-256 is the .sha256 of the
-            image, and `--version` is the release version. Writes
-            SHA256SUMS.
+            image, and `--version` is the release version. The --version
+            check runs on the release VM (no network, uid 65534, no
+            capabilities): the client never runs a binary of the release.
+            Writes SHA256SUMS.
 7. push     publish: crane pushes the layout as <image>:<version> (the
             same bytes, so the same digest) and tags :pre or :latest.
 8. sign     publish: cosign signs the image digest, both binaries and
@@ -62,6 +64,7 @@ import argparse
 import base64
 import gzip
 import hashlib
+import io
 import json
 import os
 import shlex
@@ -84,6 +87,11 @@ GATE_UID = 1001
 REGISTRY = "ghcr.io"
 KEY_PATH = "docker/release/cosign.pub"
 GATE_DOCKERFILE = "docker/release-gate.Dockerfile"
+# The image of the --version check of the host binaries on the release VM (the
+# client base of docker/release.Dockerfile; the binaries are static musl).
+VERSION_IMAGE = "debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2"
+# The uid of the --version check: nobody.
+VERSION_UID = 65534
 PLATFORM = "linux/amd64"
 BINARIES = ("terrarium-host", "terrarium-host-helper")
 DIST = "/opt/terrarium/dist"
@@ -532,6 +540,34 @@ def image_files(layout: Path, wanted: list[str], platform: str = PLATFORM) -> di
     return {w: out[r] for w, r in real.items()}
 
 
+def version_on_vm(ctx: Ctx, binary: str, data: bytes) -> str:
+    """`<binary> --version` in a container on the release VM: the client runs no code of the release."""
+    name = f"terrarium-release-version-{binary}-{os.getpid()}"
+    denv = docker_env(ctx)
+    archive = ctx.out / f"{binary}.version.tar"
+    with tarfile.open(archive, "w") as tar:
+        d = tarfile.TarInfo("opt/check")
+        d.type, d.mode = tarfile.DIRTYPE, 0o755
+        tar.addfile(d)
+        f = tarfile.TarInfo(f"opt/check/{binary}")
+        f.size, f.mode = len(data), 0o755
+        tar.addfile(f, io.BytesIO(data))
+    created = False
+    try:
+        run(["docker", "create", "--name", name, "--network", "none", "--user", f"{VERSION_UID}:{VERSION_UID}",
+             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", VERSION_IMAGE,
+             f"/opt/check/{binary}", "--version"], denv, ctx.out, stdout=subprocess.DEVNULL)
+        created = True
+        with archive.open("rb") as fh:
+            run(["docker", "cp", "-", f"{name}:/"], denv, ctx.out, stdin=fh, text=False)
+        return run(["docker", "start", "--attach", name], denv, ctx.out, stdout=subprocess.PIPE).stdout
+    finally:
+        if created:
+            subprocess.run(["docker", "rm", "--force", name], env=denv, cwd=ctx.out,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        archive.unlink(missing_ok=True)
+
+
 def step_extract(ctx: Ctx, version: str) -> list[Path]:
     layout = ctx.out / "image"
     wanted = []
@@ -552,10 +588,10 @@ def step_extract(ctx: Ctx, version: str) -> list[Path]:
         asset = dist / f"{b}-{version}-linux-x86_64"
         asset.write_bytes(data)
         asset.chmod(0o755)
-        proc = run([str(asset), "--version"], ctx.base_env(), dist, stdout=subprocess.PIPE)
-        print(proc.stdout, end="")
-        if not proc.stdout.startswith(f"{b} {version}+"):
-            raise ReleaseError(f"{asset.name} --version says {proc.stdout.strip()!r}, not {b} {version}+")
+        said = version_on_vm(ctx, b, data)
+        print(said, end="")
+        if not said.startswith(f"{b} {version}+"):
+            raise ReleaseError(f"{asset.name} --version says {said.strip()!r}, not {b} {version}+")
         sums.append(f"{got}  {asset.name}\n")
         assets.append(asset)
     (dist / "SHA256SUMS").write_text("".join(sums))
@@ -565,15 +601,22 @@ def step_extract(ctx: Ctx, version: str) -> list[Path]:
 
 
 # 7 ---------------------------------------------------------------------------
-def crane_env(ctx: Ctx) -> dict[str, str]:
-    """The env of crane, cosign and gh: their login and state in the RAM directory."""
+def tool_env(ctx: Ctx, *, registry: bool) -> dict[str, str]:
+    """The env of crane, cosign and gh: their state in the RAM directory, and the
+    registry login (DOCKER_CONFIG) only for the tools that talk to the registry."""
     env = ctx.base_env()
     if ctx.secret_dir:
         d = ctx.secret_dir
-        env.update(DOCKER_CONFIG=str(d), GH_CONFIG_DIR=str(d / "gh"), TUF_ROOT=str(d / "sigstore"),
+        env.update(GH_CONFIG_DIR=str(d / "gh"), TUF_ROOT=str(d / "sigstore"),
                    XDG_CONFIG_HOME=str(d / "config"), XDG_CACHE_HOME=str(d / "cache"),
                    XDG_DATA_HOME=str(d / "data"))
+        if registry:
+            env["DOCKER_CONFIG"] = str(d)
     return env
+
+
+def crane_env(ctx: Ctx) -> dict[str, str]:
+    return tool_env(ctx, registry=True)
 
 
 def step_push(ctx: Ctx, version: str, prerelease: bool, digest: str) -> None:
@@ -591,8 +634,9 @@ def step_push(ctx: Ctx, version: str, prerelease: bool, digest: str) -> None:
 
 
 # 8 ---------------------------------------------------------------------------
-def cosign_env(ctx: Ctx, *, key: bool) -> dict[str, str]:
-    env = crane_env(ctx)
+def cosign_env(ctx: Ctx, *, key: bool, registry: bool) -> dict[str, str]:
+    """registry: the image commands (sign, verify); the blob commands get no login."""
+    env = tool_env(ctx, registry=registry)
     if key:
         env["COSIGN_PRIVATE_KEY"] = cosign_key(ctx)
         env["COSIGN_PASSWORD"] = ctx.environ["COSIGN_PASSWORD"]
@@ -614,11 +658,11 @@ def sign_blobs(ctx: Ctx, files: list[Path]) -> list[Path]:
     for f in files:
         bundle = f.with_name(f.name + ".sigstore.json")
         run(["cosign", "sign-blob", "--yes", "--key", "env://COSIGN_PRIVATE_KEY", *extra,
-             "--bundle", str(bundle), str(f)], cosign_env(ctx, key=True), ctx.repo_dir)
+             "--bundle", str(bundle), str(f)], cosign_env(ctx, key=True, registry=False), ctx.repo_dir)
         bundles.append(bundle)
     for f, bundle in zip(files, bundles):
         run(["cosign", "verify-blob", "--key", pub, *no_tlog, "--bundle", str(bundle), str(f)],
-            cosign_env(ctx, key=False), ctx.repo_dir)
+            cosign_env(ctx, key=False, registry=False), ctx.repo_dir)
     return bundles
 
 
@@ -627,9 +671,9 @@ def step_sign(ctx: Ctx, digest: str, files: list[Path]) -> list[Path]:
     extra, no_tlog = _sign_args(ctx)
     pub = str(ctx.repo_dir / KEY_PATH)
     run(["cosign", "sign", "--yes", "--key", "env://COSIGN_PRIVATE_KEY", *extra, ref],
-        cosign_env(ctx, key=True), ctx.repo_dir)
+        cosign_env(ctx, key=True, registry=True), ctx.repo_dir)
     # The key of the checkout (the one that the image ships) must accept the signature.
-    run(["cosign", "verify", "--key", pub, *no_tlog, ref], cosign_env(ctx, key=False), ctx.repo_dir,
+    run(["cosign", "verify", "--key", pub, *no_tlog, ref], cosign_env(ctx, key=False, registry=True), ctx.repo_dir,
         stdout=subprocess.DEVNULL)
     bundles = sign_blobs(ctx, files)
     ctx.summary["signed"] = {"image": ref, "blobs": [b.name for b in bundles]}
@@ -639,7 +683,7 @@ def step_sign(ctx: Ctx, digest: str, files: list[Path]) -> list[Path]:
 
 # 9 ---------------------------------------------------------------------------
 def gh_env(ctx: Ctx) -> dict[str, str]:
-    env = crane_env(ctx)
+    env = tool_env(ctx, registry=False)
     env.update(GH_TOKEN=ctx.environ.get("GH_TOKEN", ""), GH_PROMPT_DISABLED="1", GH_NO_UPDATE_NOTIFIER="1")
     return env
 
@@ -765,6 +809,8 @@ def main(argv: list[str] | None = None) -> int:
     if publish and a.no_gate:
         ap.error("--no-gate is for the dry run only: a release passes the gate")
     testing = os.environ.get("TERRARIUM_RELEASE_TEST") == "1"
+    if publish and a.gate != DEFAULT_GATE and not testing:
+        ap.error(f"--gate is for the tests only (TERRARIUM_RELEASE_TEST=1): a release passes {DEFAULT_GATE}")
     if publish and a.signing_config and not testing:
         ap.error("--signing-config is for the tests only (TERRARIUM_RELEASE_TEST=1)")
     if a.github_api != GITHUB_API and not testing:

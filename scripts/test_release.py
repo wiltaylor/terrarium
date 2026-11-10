@@ -50,6 +50,8 @@ SECRETS = {
 # The gate on the release VM: its image, its container, the source in, the run, the results out.
 GATE = [("docker", "buildx"), ("docker", "create"), ("docker", "cp"), ("docker", "start"),
         ("docker", "cp"), ("docker", "rm")]
+# The --version check of one host binary on the VM.
+VERSION = [("docker", "create"), ("docker", "cp"), ("docker", "start"), ("docker", "rm")]
 LEAKS = (TOKEN, SECRETS["COSIGN_PRIVATE_KEY"], "cosign-secret-key-body-3", "cosign-secret-pass-4")
 
 
@@ -108,6 +110,13 @@ elif tool == "docker" and args[:2] == ["buildx", "build"]:
     with tarfile.open(dest, "w") as tar:
         for f in sorted(Path(cfg["FAKE_LAYOUT"]).rglob("*")):
             tar.add(f, arcname=f.relative_to(cfg["FAKE_LAYOUT"]).as_posix(), recursive=False)
+elif tool == "docker" and args[0] == "cp" and args[-2] == "-" and "release-version" in args[-1]:
+    # A host binary for its --version check on the VM: kept, not run.
+    with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read())) as tar:
+        m = [m for m in tar.getmembers() if m.isfile()][0]
+        data = tar.extractfile(m).read()
+    Path(log).with_name(args[-1].split(":")[0] + ".bin").write_bytes(data)
+    note(version_file=m.name, version_mode=oct(m.mode))
 elif tool == "docker" and args[0] == "cp" and args[-2] == "-":
     # The gate source: a tar on stdin.
     with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read())) as tar:
@@ -125,6 +134,10 @@ elif tool == "docker" and args[0] == "cp":
                 info.size = len(data)
                 tar.addfile(info, io.BytesIO(data))
     sys.stdout.buffer.write(buf.getvalue())
+elif tool == "docker" and args[0] == "start" and "release-version" in args[-1]:
+    import re
+    data = Path(log).with_name(args[-1] + ".bin").read_text()
+    print(re.findall(r'echo "([^"]+)"', data)[-1])
 elif tool == "docker" and args[0] == "start":
     sys.exit(int(cfg.get("FAKE_GATE_RC", "0")))
 elif tool == "crane" and args[0] == "push":
@@ -174,7 +187,9 @@ def put_blob(layout: Path, data: bytes) -> dict:
 
 
 def host_binary(name: str, version: str) -> bytes:
-    return f'#!/bin/sh\necho "{name} {version}+0123abc"\n'.encode()
+    # A run of it leaves EXECUTED next to it: the client must never run one.
+    return (f'#!/bin/sh\necho ran >> "$(dirname "$0")/EXECUTED"\n'
+            f'echo "{name} {version}+0123abc"\n').encode()
 
 
 def make_layout(layout: Path, version: str, *, bad_sha=None, helper=True, report=None) -> None:
@@ -317,14 +332,15 @@ class Release(unittest.TestCase):
         image = release.DEFAULT_IMAGE
         self.assertEqual(
             self.tools(),
-            [("gh", "release"), *GATE, ("docker", "buildx"),
+            [("gh", "release"), *GATE, ("docker", "buildx"), *VERSION, *VERSION,
              ("crane", "push"), ("crane", "tag"), ("cosign", "sign"), ("cosign", "verify"),
              ("cosign", "sign-blob"), ("cosign", "sign-blob"), ("cosign", "sign-blob"),
              ("cosign", "verify-blob"), ("cosign", "verify-blob"), ("cosign", "verify-blob"),
              ("gh", "release")],
         )
-        # The same indexes as before the gate moved to the VM: 3 is the image build.
-        calls = self.calls()[4:]
+        # The same indexes as before the gate and the --version checks moved to the VM.
+        everything = self.calls()
+        calls = everything[4:8] + everything[16:]
         build = calls[3]["argv"]
         self.assertEqual(build[:2], ["buildx", "build"])
         self.assertEqual(build[-1], ".")
@@ -349,8 +365,7 @@ class Release(unittest.TestCase):
             self.assertNotIn("--signing-config", c["argv"])
             self.assertNotIn("--insecure-ignore-tlog", c["argv"])
             if c["tool"] in ("cosign", "gh", "crane"):
-                ram = Path(c["docker_config"])
-                self.assertEqual(c["state"]["GH_CONFIG_DIR"], str(ram / "gh"))
+                ram = Path(c["state"]["GH_CONFIG_DIR"]).parent
                 self.assertEqual(c["state"]["TUF_ROOT"], str(ram / "sigstore"))
                 self.assertTrue(release._is_tmpfs(str(ram.parent)), ram)
         self.assertEqual(calls[4]["argv"], ["push", str(self.out / "image"), f"{image}:{self.VERSION}"])
@@ -405,8 +420,12 @@ class Release(unittest.TestCase):
         self.assertEqual(base64.b64decode(push["config_auth"]).decode(), f"wiltaylor:{TOKEN}")
         self.assertFalse(Path(push["docker_config"]).exists())
         for c in self.calls():
-            if c["tool"] == "docker":
-                self.assertIsNone(c["docker_config"], c["argv"])
+            login = c["docker_config"] is not None
+            if c["tool"] == "crane" or (c["tool"] == "cosign" and c["argv"][0] in ("sign", "verify")):
+                self.assertTrue(login, c["argv"])
+            else:
+                # docker, gh, sign-blob and verify-blob get no registry login.
+                self.assertFalse(login, (c["tool"], c["argv"][:2]))
         # The token goes to the GitHub API, and nowhere else.
         self.assertEqual(FakeGitHub.seen, [f"token {TOKEN}"])
         self.assert_no_secret_leaks()
@@ -472,6 +491,37 @@ class Release(unittest.TestCase):
         self.assertIn(f'name = "terrarium"\nversion = "{self.VERSION}"', lock)
         self.assertIn('name = "serde"\nversion = "0.1.0"', lock)
 
+    def test_the_client_never_runs_a_release_binary(self):
+        proc = self.run_release("publish")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # The fake binaries leave EXECUTED when they run: nothing ran them here.
+        self.assertEqual(list(self.tmp.rglob("EXECUTED")), [])
+        checks = [c["argv"] for c in self.calls() if c["argv"][:1] == ["create"] and "--network" in c["argv"]]
+        self.assertEqual(len(checks), 2)
+        for argv, b in zip(checks, release.BINARIES):
+            self.assertEqual(argv[argv.index("--network") + 1], "none")
+            self.assertEqual(argv[argv.index("--user") + 1], "65534:65534")
+            self.assertEqual(argv[argv.index("--cap-drop") + 1], "ALL")
+            self.assertIn("no-new-privileges", argv)
+            self.assertNotIn("--privileged", argv)
+            self.assertEqual(argv[-3:], [release.VERSION_IMAGE, f"/opt/check/{b}", "--version"])
+        files = [n for n in self.notes() if "version_file" in n]
+        self.assertEqual([n["version_file"] for n in files], [f"opt/check/{b}" for b in release.BINARIES])
+        # No exec of a file of <out> on the client.
+        for c in self.calls():
+            self.assertFalse(c["tool"].startswith(release.BINARIES[0]), c)
+        for argv in [c["argv"] for c in self.calls()]:
+            self.assertNotIn("--version", argv[:1])
+
+    def test_publish_refuses_another_gate_outside_the_tests(self):
+        proc = self.run_release("publish", "--gate", "true", env={"TERRARIUM_RELEASE_TEST": "0"})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("--gate is for the tests only", proc.stderr)
+        self.assertEqual(self.calls(), [])
+        # The dry run may use another gate.
+        proc = self.run_release("dry-run", "--gate", "true", secrets=False)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
     def test_the_client_needs_no_root(self):
         # publish runs as the user release on the client (META-119): no root rule.
         proc = self.run_release("publish", env={"TERRARIUM_RELEASE_TEST": "1"})
@@ -527,7 +577,7 @@ class Release(unittest.TestCase):
     def test_dry_run_builds_and_extracts_but_publishes_nothing(self):
         proc = self.run_release("dry-run", secrets=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(self.tools(), [*GATE, ("docker", "buildx")])
+        self.assertEqual(self.tools(), [*GATE, ("docker", "buildx"), *VERSION, *VERSION])
         self.assertEqual(len((self.out / "dist/SHA256SUMS").read_text().splitlines()), 2)
         self.assertTrue((self.out / "image/index.json").is_file())
         self.assertFalse((self.out / "image.tar").exists())
@@ -539,7 +589,7 @@ class Release(unittest.TestCase):
     def test_dry_run_can_skip_the_gate_but_publish_cannot(self):
         proc = self.run_release("dry-run", "--no-gate", secrets=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(self.tools(), [("docker", "buildx")])
+        self.assertEqual(self.tools(), [("docker", "buildx"), *VERSION, *VERSION])
         proc = self.run_release("publish", "--no-gate")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("--no-gate is for the dry run only", proc.stderr)
@@ -692,6 +742,8 @@ class Pins(unittest.TestCase):
             self.assertIn("@sha256:", self.arg(client, name), name)
         for name in ("RUST_IMAGE", "NODE_IMAGE", "UV_IMAGE"):
             self.assertIn("@sha256:", self.arg(gate, name), name)
+        # The --version check on the VM uses the client base, pinned the same way.
+        self.assertEqual(self.arg(client, "DEBIAN_IMAGE"), release.VERSION_IMAGE)
         # The client runs as the user release; it has no toolchain to run the code of the release.
         self.assertRegex(client, r"(?m)^USER release$")
         for tool in ("rustup", "node_modules", "uv", "just", "bubblewrap"):

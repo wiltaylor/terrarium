@@ -234,7 +234,10 @@ as the workflow (`scripts/release_version.py`). The steps:
    and provenance (`mode=max`). The export is an OCI layout that comes back
    to the client (`release-out/image`); the VM pushes nothing.
 6. `extract`: the host agent and the host helper out of that layout, with
-   the two checks of "What a release publishes", and `SHA256SUMS`.
+   the two checks of "What a release publishes", and `SHA256SUMS`. The
+   `--version` check runs on the release VM, in a container of the pinned
+   `debian:trixie-slim` with no network, uid 65534, and no capabilities:
+   the client never runs a binary of the release.
 7. `push`: crane pushes the same layout as `:<version>` (the same bytes, so
    the digest of the build) and tags `:pre` or `:latest`.
 8. `sign`: cosign signs the image digest, both binaries, and `SHA256SUMS`
@@ -264,12 +267,12 @@ never into a sandbox or to the VM.
 
 | Env | Secret | What it is | Who gets it |
 |---|---|---|---|
-| `GHCR_TOKEN` (`GHCR_USER`, default `wiltaylor`) and `GH_TOKEN` | `release-github` (field `value`) | one classic token with `repo` and `write:packages` (the operator's choice; it reaches all of the operator's repos) | crane, cosign and gh through a mode-0600 `config.json` in a private mode-0700 directory in RAM (`XDG_RUNTIME_DIR` or `/dev/shm` on tmpfs; no tmpfs stops the release), which also holds the state of cosign (`TUF_ROOT`) and gh (`GH_CONFIG_DIR`) and which the script removes at the end, also when the run is stopped by SIGTERM, SIGHUP or SIGINT; `gh` and the scope check as `GH_TOKEN` |
+| `GHCR_TOKEN` (`GHCR_USER`, default `wiltaylor`) and `GH_TOKEN` | `release-github` (field `value`) | one classic token with `repo` and `write:packages` (the operator's choice; it reaches all of the operator's repos) | crane and the image commands of cosign (`cosign sign` and `cosign verify`; not `sign-blob`, `verify-blob`, or gh) through a mode-0600 `config.json` in a private mode-0700 directory in RAM (`XDG_RUNTIME_DIR` or `/dev/shm` on tmpfs; no tmpfs stops the release), which also holds the state of cosign (`TUF_ROOT`) and gh (`GH_CONFIG_DIR`) and which the script removes at the end, also when the run is stopped by SIGTERM, SIGHUP or SIGINT; `gh` and the scope check as `GH_TOKEN` |
 | `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` | `release-cosign` (fields `private_key`, `password`) | the encrypted private key of the release key pair (cosign 3.1.4), base64-encoded in one line, and its password | `cosign sign` and `cosign sign-blob` only. The script decodes the key in memory and passes the PEM in the env (`--key env://COSIGN_PRIVATE_KEY`): no key file |
 
 No secret is on a command line, in the output, in `release-out/`, in the
 build context, in an image layer, or on the release VM: docker (the gate and
-the image build) gets an env without them, and the client runs no code of the
+the image build, and the `--version` checks) gets an env without them, and the client runs no code of the
 release (`scripts/test_release.py` checks each of these).
 
 ### The switch from the workflow to the local build
@@ -290,7 +293,10 @@ that the workflow made. The order:
    with cosign.
 
 A daemon that still checks with `gh` at step 5 refuses N+1 (fail closed)
-until step 3. If the local build fails after step 4, the fallback is a
+until step 3. Do step 3 just before step 5, and put no `release:` or
+`pre-release:` trailer on `main` between steps 3 and 5: the workflow would
+publish a release with no cosign signature, and the daemons that check with
+cosign refuse it (fail closed). If the local build fails after step 4, the fallback is a
 revert of the TER-622 commit and a release with the workflow; that release
 has no cosign signature, so the daemons set `TERRARIUM_UPDATE_VERIFY=gh`
 for it.
