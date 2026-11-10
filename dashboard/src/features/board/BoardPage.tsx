@@ -27,7 +27,7 @@ import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_Q
 import { boardVersions, matchesVersion, NO_VERSION } from "./versionLabels";
 import { cardAgentName } from "./cardAgent";
 import { agents, api, events } from "../../stores";
-import { boardView } from "./done";
+import { boardView, doneToggleHref } from "./done";
 
 export function DoneCardsPage() {
   return <BoardPage done />;
@@ -266,7 +266,7 @@ export function BoardPage(props: { done?: boolean }) {
   return (
     <div class="board-page">
       <PageHead title={props.done ? "Done cards" : "Cards"} level={2}>
-        <button type="button" onClick={() => navigate(`${projectBase(params.project)}/board${props.done ? "" : "/done"}`)}>
+        <button type="button" onClick={() => navigate(doneToggleHref(projectBase(params.project), !!props.done, search))}>
           {props.done ? "Back to cards" : "Show done cards"}
         </button>
         {/* A phone folds the two filters into this button; a wider screen shows them in the row and hides the button. */}
@@ -346,7 +346,7 @@ export function BoardPage(props: { done?: boolean }) {
               collapsed={laneState().collapsed}
               onToggle={(key) => saveLaneState(toggleCollapsed(laneState(), key))}
               visible={visible}
-              addColumn={newCardColumn(columnNames())}
+              addColumn={props.done ? undefined : newCardColumn(columnNames())}
               addButton={addCardButton}
               onDrop={(...a) => void onLaneDrop(...a)}
               boardRef={(el) => (boardEl = el)}
