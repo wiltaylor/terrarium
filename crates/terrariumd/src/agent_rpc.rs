@@ -474,7 +474,7 @@ async fn journaled(
                 t.audit("agent_rpc.indeterminate", &request_id, Some(&project), json!({"agent": key, "reason": "unresolved_journal"}))?;
                 return Ok(Some(Err(RpcError::new("indeterminate", format!("request {request_id} ({method}): the call may or may not have happened; check before you retry")))));
             }
-            t.execute("INSERT INTO agent_rpc_answers(agent, request_id, fingerprint) VALUES (?1, ?2, ?3)", rusqlite::params![key, request_id, fingerprint])?;
+            t.execute("INSERT INTO agent_rpc_answers(agent, request_id, fingerprint, created_at) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![key, request_id, fingerprint, chrono::Utc::now().timestamp()])?;
             Ok(None)
         }).await.map_err(internal)?;
     if let Some(answer) = cached {
@@ -509,6 +509,56 @@ async fn journaled(
     .await
     .map_err(internal)?;
     answer
+}
+
+/// How long a write answer stays for a replay. A runner retries within
+/// seconds, so a day is a wide margin. After it, a retry with the same
+/// request ID runs the write again.
+pub const ANSWER_MAX_AGE: chrono::Duration = chrono::Duration::hours(24);
+
+/// The rows that one prune write deletes. Each batch is its own write, so
+/// the prune never holds the database lock for long (TER-394).
+pub const PRUNE_BATCH: i64 = 500;
+
+/// Delete at most `limit` answers admitted before `cutoff` (unix seconds),
+/// on the `created_at` index. Returns the number of deleted rows.
+pub fn prune_answers_batch(
+    t: &crate::db::Tx<'_>,
+    cutoff: i64,
+    limit: i64,
+) -> crate::error::ApiResult<usize> {
+    Ok(t.execute(
+        "DELETE FROM agent_rpc_answers WHERE rowid IN (
+             SELECT rowid FROM agent_rpc_answers WHERE created_at < ?1 LIMIT ?2)",
+        rusqlite::params![cutoff, limit],
+    )?)
+}
+
+/// Delete the answers older than [`ANSWER_MAX_AGE`] in batches of
+/// [`PRUNE_BATCH`], one write per batch. Returns the number of deleted rows.
+pub async fn prune_answers(
+    db: &crate::db::Db,
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::error::ApiResult<usize> {
+    let cutoff = (now - ANSWER_MAX_AGE).timestamp();
+    let mut total = 0;
+    loop {
+        let n = db
+            .write("system", move |t| prune_answers_batch(t, cutoff, PRUNE_BATCH))
+            .await?;
+        total += n;
+        if n < PRUNE_BATCH as usize {
+            return Ok(total);
+        }
+    }
+}
+
+/// The agent `id` is deleted: its answers go with it. The primary key
+/// starts with the agent, so this is an indexed delete of one agent's rows,
+/// and the age prune keeps that at most a day of writes.
+pub fn on_agent_deleted(t: &crate::db::Tx<'_>, id: &str) -> crate::error::ApiResult<()> {
+    t.execute("DELETE FROM agent_rpc_answers WHERE agent = ?1", [id])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -563,6 +613,72 @@ mod tests {
         let mut conn = rusqlite::Connection::open(path).unwrap();
         crate::db::migrate(&mut conn).unwrap();
         crate::db::Db::new(conn, crate::events::EventHub::default())
+    }
+
+    async fn answer_rows(db: &crate::db::Db, agent: &'static str) -> i64 {
+        db.read(move |c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM agent_rpc_answers WHERE agent = ?1",
+                [agent],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn answers_past_the_age_limit_are_pruned_in_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crash_db(&dir.path().join("prune.sqlite"));
+        let now = chrono::Utc::now();
+        let old = (now - ANSWER_MAX_AGE).timestamp() - 1;
+        let fresh = (now - ANSWER_MAX_AGE).timestamp() + 60;
+        let n_old = PRUNE_BATCH * 2 + 3;
+        db.write("test", move |t| {
+            for i in 0..n_old {
+                t.execute(
+                    "INSERT INTO agent_rpc_answers(agent, request_id, fingerprint, answer, created_at)
+                     VALUES ('old', ?1, 'f', 'a', ?2)",
+                    rusqlite::params![format!("r{i}"), old],
+                )?;
+            }
+            t.execute(
+                "INSERT INTO agent_rpc_answers(agent, request_id, fingerprint, answer, created_at)
+                 VALUES ('fresh', 'r', 'f', 'a', ?1)",
+                [fresh],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let one = db
+            .write("test", move |t| prune_answers_batch(t, old + 1, PRUNE_BATCH))
+            .await
+            .unwrap();
+        assert_eq!(one, PRUNE_BATCH as usize, "one batch is bounded");
+        assert_eq!(prune_answers(&db, now).await.unwrap() as i64, n_old - PRUNE_BATCH);
+        assert_eq!(answer_rows(&db, "old").await, 0);
+        assert_eq!(answer_rows(&db, "fresh").await, 1);
+        assert_eq!(prune_answers(&db, now).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_new_answer_is_kept_by_the_prune_and_deleted_with_its_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crash_db(&dir.path().join("agent-delete.sqlite"));
+        journaled(&db, &crash_context(), "kept".into(), &crash_params(), async {
+            Ok(json!("done"))
+        })
+        .await
+        .unwrap();
+        let agent = "00000000000000000000000001";
+        assert_eq!(prune_answers(&db, chrono::Utc::now()).await.unwrap(), 0);
+        assert_eq!(answer_rows(&db, agent).await, 1);
+        db.write("test", move |t| on_agent_deleted(t, agent))
+            .await
+            .unwrap();
+        assert_eq!(answer_rows(&db, agent).await, 0);
     }
 
     #[tokio::test]
