@@ -629,9 +629,7 @@ async fn a_reload_adds_the_merge_queue_to_old_wait_overrides() {
 rule \"agent-unpark\" {{\n  description = \"Wakes. Mapped to this board: the board has no column `validating`: `data.to ne validating` always holds, dropped.\"\n  on = [\"card\"]\n  max_per_hour = 600\n  when \"data.change\" {{ eq = \"moved\" }}\n  when \"data.to\" {{ ne = \"review\" }}\n  when \"data.to\" {{ ne = \"done\" }}\n  agent_unpark {{}}\n}}\n",
         terrarium_core::rules_tools::MIGRATION_HEADER
     );
-    let r = td
-        .put("/api/projects/p/rules", json!({"text": old}))
-        .await;
+    let r = td.put("/api/projects/p/rules", json!({"text": old})).await;
     assert_eq!(r.status, 200, "{}", r.body);
 
     td.post_empty("/api/reload").await.ok();

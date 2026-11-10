@@ -1486,11 +1486,22 @@ rule \"agent-unpark\" {{\n  description = \"The card came back out of a wait col
         let board = queue_board();
         let text = old_wait_overrides()
             .replace("\"data.to\" { one_of", "\"data.to_role\" { one_of")
-            .replace("\"data.to\" { ne = \"review\"", "\"data.to_role\" { ne = \"review\"")
-            .replace("\"data.to\" { ne = \"accepted\"", "\"data.to_role\" { ne = \"accepted\"");
+            .replace(
+                "\"data.to\" { ne = \"review\"",
+                "\"data.to_role\" { ne = \"review\"",
+            )
+            .replace(
+                "\"data.to\" { ne = \"accepted\"",
+                "\"data.to_role\" { ne = \"accepted\"",
+            );
         let own = parse(&text, "rules.wcl", &ctx(&board)).unwrap();
         let new = add_merge_queue_to_wait_overrides(&text, &own, &board).expect("a change");
-        assert!(new.contains("when \"data.to_role\" { one_of = [\"review\", \"accepted\", \"merge_queue\"] }"), "{new}");
+        assert!(
+            new.contains(
+                "when \"data.to_role\" { one_of = [\"review\", \"accepted\", \"merge_queue\"] }"
+            ),
+            "{new}"
+        );
         assert!(new.contains("when \"data.to_role\" { ne = \"accepted\" }\n  when \"data.to_role\" { ne = \"merge_queue\" }\n  when \"data.to\" { ne = \"done\" }"), "{new}");
     }
 
@@ -1506,11 +1517,17 @@ rule \"agent-unpark\" {{\n  description = \"The card came back out of a wait col
         let edited = text.replace("max_per_hour = 600\n  when \"data.change\" { eq = \"moved\" }\n  when \"data.to\" { one_of", "max_per_hour = 60\n  when \"data.change\" { eq = \"moved\" }\n  when \"data.to\" { one_of");
         let own = parse(&edited, "rules.wcl", &ctx(&board)).unwrap();
         let new = add_merge_queue_to_wait_overrides(&edited, &own, &board).expect("unpark changes");
-        assert!(new.contains("one_of = [\"review\", \"accepted\"] }"), "{new}");
+        assert!(
+            new.contains("one_of = [\"review\", \"accepted\"] }"),
+            "{new}"
+        );
         assert!(new.contains("ne = \"queue\""), "{new}");
         // The same rules without the migration header are the project's own.
         let own_only = text.replace(MIGRATION_HEADER, "");
         let own = parse(&own_only, "rules.wcl", &ctx(&board)).unwrap();
-        assert_eq!(add_merge_queue_to_wait_overrides(&own_only, &own, &board), None);
+        assert_eq!(
+            add_merge_queue_to_wait_overrides(&own_only, &own, &board),
+            None
+        );
     }
 }
