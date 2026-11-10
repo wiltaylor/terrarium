@@ -403,3 +403,40 @@ async fn old_credential_files_move_in_at_the_start() {
     let audit = td.get("/api/audit?action=secret.migrated").await;
     assert_eq!(audit.ok().as_array().unwrap().len(), 2);
 }
+
+/// One daemon per state dir: a second start on a locked state dir fails
+/// before it touches the run dirs. A start clears the run dirs that a
+/// stopped daemon left.
+#[tokio::test]
+async fn a_second_daemon_on_the_state_dir_fails_and_a_start_clears_the_run_dirs() {
+    let mut td = TestDaemon::start().await;
+    let live = terrariumd::secrets::RunDirs::base(&td.state).join("01LIVE");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("askpass"), "echo tok").unwrap();
+    // Another socket, so the socket probe does not stop it: only the lock.
+    let second = terrariumd::start(terrariumd::DaemonConfig {
+        socket: td.dir.path().join("second.sock"),
+        listen: None,
+        token: None,
+        state_dir: td.state.clone(),
+        config_dir: td.config.clone(),
+        work_dir: td.state.with_file_name("work"),
+        max_targets_per_project: terrariumd::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
+        repos_dir: std::path::PathBuf::from("/repos"),
+        supervisor: td.sup.clone(),
+        insecure_agent_header: true,
+        artifact_listen: None,
+        web: Default::default(),
+    })
+    .await;
+    let Err(err) = second else {
+        panic!("a second daemon started on a locked state dir");
+    };
+    assert!(format!("{err:#}").contains("another daemon"), "{err:#}");
+    assert!(live.join("askpass").exists());
+    assert!(!td.dir.path().join("second.sock").exists());
+    // The first daemon stops (its run dirs stay, as after a crash), and the
+    // next start clears them before it serves.
+    td.boot(None, None).await;
+    assert!(!live.exists());
+}
