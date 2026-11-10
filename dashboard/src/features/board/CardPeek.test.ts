@@ -121,6 +121,7 @@ describe("CardPeek", () => {
     const closeBoard = vi.fn(() => setBoardOpen(false));
     mount(() => [
       createComponent(Show, {
+        keyed: false,
         get when() {
           return boardOpen();
         },
