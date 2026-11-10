@@ -327,6 +327,83 @@ fn a_manifest_path_out_of_the_root_is_refused() {
     assert!(check_paths(&m).is_err());
 }
 
+fn entry(path: &str, kind: EntryKind, link: Option<&str>) -> Entry {
+    Entry {
+        path: path.into(),
+        kind,
+        mode: 0o600,
+        size: 0,
+        mtime_ns: 0,
+        sha256: None,
+        link: link.map(str::to_owned),
+        stored_in: None,
+    }
+}
+
+#[test]
+fn a_manifest_path_below_a_symlink_entry_is_refused() {
+    // The link comes after the file in the manifest: the order does not
+    // matter.
+    for entries in [
+        vec![
+            entry("state/a", EntryKind::Symlink, Some("/etc")),
+            entry("state/a/passwd", EntryKind::File, None),
+        ],
+        vec![
+            entry("state/a/b/c", EntryKind::File, None),
+            entry("state/a", EntryKind::Symlink, Some("/etc")),
+        ],
+        vec![
+            entry("work/p", EntryKind::Symlink, Some("../../x")),
+            entry("work/p/d", EntryKind::Dir, None),
+        ],
+    ] {
+        let m = Manifest {
+            id: "X".into(),
+            entries,
+        };
+        let err = check_paths(&m).unwrap_err();
+        assert!(format!("{err:#}").contains("below the symlink"), "{err:#}");
+    }
+    // Plain form only: `a/./x` or `a//x` would hide the link prefix.
+    for path in ["state/a/./x", "state/a//x", "state/a/x/"] {
+        let m = Manifest {
+            id: "X".into(),
+            entries: vec![
+                entry("state/a", EntryKind::Symlink, Some("/etc")),
+                entry(path, EntryKind::File, None),
+            ],
+        };
+        assert!(check_paths(&m).is_err(), "{path}");
+    }
+    // A symlink next to a file of the same prefix is fine.
+    let m = Manifest {
+        id: "X".into(),
+        entries: vec![
+            entry("state/a", EntryKind::Symlink, Some("b")),
+            entry("state/ab/x", EntryKind::File, None),
+            entry("state/b/x", EntryKind::File, None),
+        ],
+    };
+    check_paths(&m).unwrap();
+}
+
+#[test]
+fn a_backup_skips_the_secret_run_dirs() {
+    let fx = fixture();
+    let run = crate::secrets::RunDirs::base(&fx.state).join("01RUN");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("askpass"), "echo tok").unwrap();
+    // A `.run` dir elsewhere is data.
+    fs::create_dir_all(fx.work.join("p/a/.run")).unwrap();
+    fs::write(fx.work.join("p/a/.run/pid"), "1").unwrap();
+    let full = fx.make(Kind::Full, true, None);
+    let n = names(&full);
+    assert!(!n.iter().any(|x| x.contains("credentials/.run")), "{n:?}");
+    assert!(n.contains(&"files/work/p/a/.run/pid".to_owned()));
+    assert!(n.contains(&"files/state/credentials/accounts/claude/a/.credentials.json".to_owned()));
+}
+
 #[test]
 fn list_and_prune_keep_the_newest_fulls_and_their_diffs() {
     let fx = fixture();

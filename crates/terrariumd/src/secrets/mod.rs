@@ -45,7 +45,7 @@ pub mod run_env;
 pub mod ssh;
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -326,6 +326,37 @@ impl RunDirs {
     /// The state dir that the run dirs are in.
     pub fn state_dir(&self) -> &Path {
         &self.state_dir
+    }
+
+    /// `<state>/credentials/.run`: the parent of the run dirs.
+    pub fn base(state_dir: &Path) -> PathBuf {
+        credentials_dir(state_dir).join(RUN_DIR)
+    }
+
+    /// Remove the run dirs that a stopped daemon left (a crash or a kill
+    /// skips [`RunDir`]'s drop, and the dirs can hold askpass scripts and
+    /// keys). Call it at the start, before any run: one daemon owns a
+    /// state dir at a time.
+    pub fn clear_stale(state_dir: &Path) -> io::Result<usize> {
+        let base = Self::base(state_dir);
+        let entries = match fs::read_dir(&base) {
+            Ok(e) => e,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let mut n = 0;
+        for e in entries {
+            let e = e?;
+            let path = e.path();
+            // A symlink is removed, not followed.
+            if e.file_type()?.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+            n += 1;
+        }
+        Ok(n)
     }
 
     /// A fresh 0700 dir for the one-shot files of one run.
@@ -1233,6 +1264,28 @@ pub(crate) mod tests {
         fs::remove_file(crypto::key_path(dir.path())).unwrap();
         assert!(ensure_key(&c, dir.path()).is_err());
         assert!(key(dir.path()).is_err());
+    }
+
+    #[test]
+    fn clear_stale_removes_left_run_dirs_and_not_their_link_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(RunDirs::clear_stale(dir.path()).unwrap(), 0);
+        let runs = RunDirs::new(dir.path());
+        let left = runs.run_dir().unwrap();
+        left.write_script("askpass", "echo tok").unwrap();
+        let left_path = left.path().to_owned();
+        // A crash: no drop.
+        std::mem::forget(left);
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, RunDirs::base(dir.path()).join("link")).unwrap();
+        assert_eq!(RunDirs::clear_stale(dir.path()).unwrap(), 2);
+        assert!(!left_path.exists());
+        assert!(outside.join("keep").exists());
+        assert_eq!(fs::read_dir(RunDirs::base(dir.path())).unwrap().count(), 0);
+        // The store still makes run dirs.
+        runs.run_dir().unwrap();
     }
 
     #[test]

@@ -489,6 +489,9 @@ pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
     // Reconstructible image payloads, not application data. In particular do
     // not copy every retained daemon binary into every pre-upgrade backup.
     skip.insert(state_c.join("releases"));
+    // The one-shot helper files of live git and ssh runs (askpass
+    // scripts, keys): never data, and secrets in the clear.
+    skip.insert(crate::secrets::RunDirs::base(&state_c));
     for f in ["", "-wal", "-shm", "-journal"] {
         skip.insert(state_c.join(format!("{DB_FILE}{f}")));
     }
@@ -964,7 +967,9 @@ fn source_of<'a>(
     }
 }
 
-/// Each path is `<known root>/<relative path>` with no `..`.
+/// Each path is `<known root>/<relative path>` in plain form (no empty,
+/// `.`, or `..` part), and no path is below a symlink entry: the restore
+/// would write through the link, out of the root.
 fn check_paths(m: &Manifest) -> anyhow::Result<()> {
     for e in &m.entries {
         let (root, rel) = split(&e.path)?;
@@ -972,11 +977,31 @@ fn check_paths(m: &Manifest) -> anyhow::Result<()> {
             bail!("unknown root in {}", e.path);
         }
         let ok = !rel.is_empty()
+            && rel.split('/').all(|s| !matches!(s, "" | "." | ".."))
             && Path::new(rel)
                 .components()
                 .all(|c| matches!(c, Component::Normal(_)));
         if !ok {
             bail!("bad path in the manifest: {}", e.path);
+        }
+    }
+    // The paths are in plain form, so a string prefix is a path prefix.
+    let links: HashSet<&str> = m
+        .entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::Symlink)
+        .map(|e| e.path.as_str())
+        .collect();
+    for e in &m.entries {
+        let mut at = e.path.as_str();
+        while let Some((parent, _)) = at.rsplit_once('/') {
+            if links.contains(parent) {
+                bail!(
+                    "bad path in the manifest: {} is below the symlink {parent}",
+                    e.path
+                );
+            }
+            at = parent;
         }
     }
     Ok(())

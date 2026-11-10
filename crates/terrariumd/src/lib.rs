@@ -220,6 +220,13 @@ async fn start_with_usage_and_executor(
     let db_path = cfg.state_dir.join("terrarium.db");
     let conn = db::open(&db_path)?;
     info!(path = %db_path.display(), "database ready");
+    // The run dirs of a daemon that stopped without its drops: before any
+    // request or job can make a new one.
+    match secrets::RunDirs::clear_stale(&cfg.state_dir) {
+        Ok(0) => {}
+        Ok(n) => info!(count = n, "removed stale secret run dirs"),
+        Err(e) => warn!(error = %e, "cannot clear the secret run dirs"),
+    }
 
     let (defs, errors) = Definitions::load(&cfg.config_dir);
     let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
