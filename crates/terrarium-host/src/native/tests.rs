@@ -218,6 +218,13 @@ fn a_gpu_session_allows_only_its_gpu_and_the_support_nodes() {
     assert!(p.contains(&"PrivateIPC=yes"));
     assert!(p.contains(&"RemoveIPC=yes"));
     assert!(p.contains(&"ProtectSystem=strict"));
+    // /home, /root and /run/user are an empty tmpfs: git trusts every
+    // repo (safe.directory=*), so none of them may be visible (TER-659).
+    assert!(p.contains(&"ProtectHome=tmpfs"));
+    assert!(
+        !p.iter()
+            .any(|x| x.starts_with("ProtectHome=") && *x != "ProtectHome=tmpfs")
+    );
     // /proc shows only the processes of the session's UID (TER-638), with
     // the full /proc of those (CUDA reads /proc/driver/nvidia).
     assert!(p.contains(&"ProtectProc=invisible"), "{p:?}");
@@ -1252,6 +1259,12 @@ fn a_workspace_root_under_a_private_tmp_is_refused_at_start() {
     assert!(e.contains("PrivateTmp"), "{e}");
     check_workspace_root(Path::new("/srv/terrarium/work")).unwrap();
     check_workspace_root(Path::new("/tmpfoo/work")).unwrap();
+    // ProtectHome=tmpfs hides these in each session (TER-659).
+    for bad in ["/home/op/work", "/root/w", "/run/user/1000/w"] {
+        let e = check_workspace_root(Path::new(bad)).unwrap_err();
+        assert!(e.contains("ProtectHome"), "{bad}: {e}");
+    }
+    check_workspace_root(Path::new("/homes/work")).unwrap();
 }
 
 #[test]

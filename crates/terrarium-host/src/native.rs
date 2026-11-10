@@ -995,6 +995,11 @@ pub fn plan_start(
         // the unit. PrivateIPC gives each unit its own IPC namespace
         // (System V and POSIX message queues): a session does not see the
         // IPC objects of the host users or of other sessions (TER-641).
+        // ProtectHome=tmpfs puts an empty read-only tmpfs over /home,
+        // /root and /run/user: git trusts every repo (safe.directory=*),
+        // so a repo there that the UID can read would run its config
+        // (core.fsmonitor, hooks) as the UID (TER-659). The pool users
+        // have no home directory, so nothing of theirs is hidden.
         "PrivateTmp=yes",
         "PrivateIPC=yes",
         // The sessions of one holder can run as different pool UIDs (one
@@ -1007,6 +1012,7 @@ pub fn plan_start(
         "UMask=0007",
         "RemoveIPC=yes",
         "ProtectSystem=strict",
+        "ProtectHome=tmpfs",
         "KillMode=control-group",
         "DevicePolicy=closed",
         "DeviceAllow=char-pts rw",
@@ -1212,13 +1218,23 @@ pub fn holder_workspace(root: &Path, holder: &str) -> Result<Option<PathBuf>, Re
 }
 
 /// `workspace_root` at helper start: not under /tmp or /var/tmp, which
-/// `PrivateTmp=yes` replaces in each unit (every session would fail).
+/// `PrivateTmp=yes` replaces in each unit, and not under /home, /root or
+/// /run/user, which `ProtectHome=tmpfs` hides (every session would fail).
 pub fn check_workspace_root(root: &Path) -> Result<(), String> {
     for tmp in ["/tmp", "/var/tmp"] {
         if root.starts_with(tmp) {
             return Err(format!(
                 "workspace_root {} is under {tmp}, which each session gets a private copy of \
                  (PrivateTmp=yes): put the workspace elsewhere, for example /srv/terrarium/work",
+                root.display()
+            ));
+        }
+    }
+    for home in ["/home", "/root", "/run/user"] {
+        if root.starts_with(home) {
+            return Err(format!(
+                "workspace_root {} is under {home}, which each session hides \
+                 (ProtectHome=tmpfs): put the workspace elsewhere, for example /srv/terrarium/work",
                 root.display()
             ));
         }
