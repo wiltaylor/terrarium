@@ -3749,8 +3749,8 @@ agent:
 
 | Card event | Bound agent |
 |---|---|
-| Moved to `validating`, `review`, or `accepted` | parked |
-| Moved out of `validating`, `review`, or `accepted` while parked (for example to `ready` after a failed job, or to `in_progress`) | unparked |
+| Moved to `validating`, `review`, `merge_queue`, or `accepted` | parked |
+| Moved out of `validating`, `review`, `merge_queue`, or `accepted` while parked (for example to `ready` after a failed job, or to `in_progress`) | unparked |
 | Moved between two other columns (for example `in_progress` to `blocked` or `ready`) | nothing |
 | A merge job passed (merged onto `next`), or moved to `done` | closed, `done` |
 | Archived | closed, `cancelled` |
@@ -3762,8 +3762,8 @@ reason}`), `agent.unpark_queued` (`{spawn_id, name, bound, cause,
 owner}`), `agent.unpark_dropped` (`{spawn_id, name, bound, reason}`: the
 card moved into a wait column again while its unpark waited, so the
 unpark and its return turn are dropped), and `agent.unparked`
-(`{spawn_id, name, bound, cause}`) are on the bound agent. The wait columns are names: a board without them never
-parks its bound agents.
+(`{spawn_id, name, bound, cause}`) are on the bound agent. A wait column is the column with that role, else the
+column with that name: a board without them never parks its bound agents.
 
 **Finish.** Only these end an ephemeral agent:
 
@@ -9156,7 +9156,7 @@ Its rules, in order:
 | `job-fail-conflict`, `job-fail-red`, `job-fail-error` | a final failure | labels off, the failure block on the body, the top of `@ready` with the comment, unassign, a mail to the worker |
 | `job-cancelled` | a cancelled verdict | labels off |
 | `card-blocked-mail`, `card-done-mail` | a card move to the blocked column; to `done` | the blocked notice to the operator and the creator; the done notice on each linked thread |
-| `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `accepted` (names, as §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
+| `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `merge_queue`, `accepted` (roles, with the names as fallback, §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
 
 The move mails of the rules differ from the mails of the coded move
 (TER-536):
@@ -9264,7 +9264,7 @@ board screen.
 
 **The migration.** The pack names columns by role (`@review`,
 `@accepted`, `@ready`), and its bound agent rules name the wait columns
-(`validating`, `review`, `accepted`). A board can lack some of them. On
+(`validating`, `review`, `merge_queue`, `accepted`). A board can lack some of them. On
 such a board a run of the pack fails (§19.9). The migration maps the pack
 to the board's columns:
 

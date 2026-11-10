@@ -602,3 +602,58 @@ async fn rights_plan_as_a_reader_apply_as_an_admin() {
     .await
     .err(409, "conflict");
 }
+
+/// TER-243: the wait overrides that a migration wrote before TER-222 get
+/// the merge queue at the next load of the config, once.
+#[tokio::test]
+async fn a_reload_adds_the_merge_queue_to_old_wait_overrides() {
+    let td = lab().await;
+    let cols: Vec<Value> = [
+        "backlog",
+        "ready",
+        "in_progress",
+        "review",
+        "merge_queue",
+        "blocked",
+        "done",
+    ]
+    .iter()
+    .map(|n| json!({"name": n}))
+    .collect();
+    let r = td
+        .patch("/api/projects/p/board", json!({"columns": cols}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let old = format!(
+        "{}\nrule \"agent-park\" {{\n  description = \"Parks. Mapped to this board: the board has no column `validating`: dropped from `data.to`.\"\n  on = [\"card\"]\n  max_per_hour = 600\n  when \"data.change\" {{ eq = \"moved\" }}\n  when \"data.to\" {{ one_of = [\"review\"] }}\n  agent_park {{ reason = \"card in {{{{card.column}}}}\" }}\n}}\n\n\
+rule \"agent-unpark\" {{\n  description = \"Wakes. Mapped to this board: the board has no column `validating`: `data.to ne validating` always holds, dropped.\"\n  on = [\"card\"]\n  max_per_hour = 600\n  when \"data.change\" {{ eq = \"moved\" }}\n  when \"data.to\" {{ ne = \"review\" }}\n  when \"data.to\" {{ ne = \"done\" }}\n  agent_unpark {{}}\n}}\n",
+        terrarium_core::rules_tools::MIGRATION_HEADER
+    );
+    let r = td
+        .put("/api/projects/p/rules", json!({"text": old}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    td.post_empty("/api/reload").await.ok();
+    let text = td.get("/api/projects/p/rules").await.ok()["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        text.contains("when \"data.to\" { one_of = [\"review\", \"merge_queue\"] }"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "when \"data.to\" { ne = \"review\" }\n  when \"data.to\" { ne = \"merge_queue\" }\n  when \"data.to\" { ne = \"done\" }"
+        ),
+        "{text}"
+    );
+    let puts = audit_rows(&td, "rules.put").await;
+    assert_eq!(puts.len(), 2, "{puts:?}");
+
+    // A second load changes nothing.
+    td.post_empty("/api/reload").await.ok();
+    assert_eq!(td.get("/api/projects/p/rules").await.ok()["text"], text);
+    assert_eq!(audit_rows(&td, "rules.put").await.len(), 2);
+}
