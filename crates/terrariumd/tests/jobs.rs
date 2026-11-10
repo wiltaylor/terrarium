@@ -2830,6 +2830,63 @@ async fn a_merge_pushes_the_recorded_commit_not_the_head_after_the_recipe() {
     assert!(!all.lines().any(|l| l == "evil"), "{all}");
 }
 
+/// TER-607: `card merge --onto release/X.Y.Z` merges the card's commit
+/// onto that release branch and pushes it there; `next` stays. A branch
+/// that is not `next` or `release/X.Y.Z` is refused.
+#[tokio::test]
+async fn a_merge_onto_a_release_branch_pushes_that_branch_only() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK && test -f FROZEN",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    let fix = lab.branch("ter-rb1", "next", &[("OK", "yes\n")]);
+    let id = lab.card("ter-rb1", "ter-rb1").await;
+    for bad in ["main", "release/1.4", "release/../next"] {
+        let r = lab
+            .td
+            .post_as(
+                &lab.lead,
+                &format!("/api/cards/{id}/merge"),
+                json!({"onto": bad}),
+            )
+            .await;
+        assert_eq!(r.status, 422, "{bad}: {}", r.body);
+    }
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{id}/merge"),
+            json!({"onto": "release/1.4.0"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["onto"], "release/1.4.0", "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let job = jobs.into_iter().find(|j| j["card"] == id.as_str()).unwrap();
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let rel = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    assert_eq!(job["head"].as_str().unwrap(), rel, "{job:#}");
+    assert_eq!(
+        git(&lab.origin, &["log", "-1", "--format=%s", "release/1.4.0"]),
+        "Merge ter-rb1 onto release/1.4.0"
+    );
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0^2"]),
+        fix,
+        "the tested fix commit"
+    );
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), next, "next stays");
+}
+
 /// Review B2: the recipe plants `url.<x>.insteadOf` and `pushInsteadOf`
 /// in its clone's `.git/config` to send the push (and the credential) to
 /// another repo. The push does not read that config: `next` goes to the

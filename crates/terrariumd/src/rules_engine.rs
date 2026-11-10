@@ -1833,7 +1833,10 @@ async fn fire_timer(
         return Ok(false);
     };
     let Some(due) = pick.first_since.and_then(|f| {
-        if t.version && t.min_cards.is_some_and(|min| pick.waiting >= min) {
+        // A release-blocker card goes at once, with no wait (TER-607).
+        if pick.release_blocker
+            || (t.version && t.min_cards.is_some_and(|min| pick.waiting >= min))
+        {
             Some(f)
         } else {
             chrono::Duration::try_minutes(t.wait).and_then(|wait| f.checked_add_signed(wait))

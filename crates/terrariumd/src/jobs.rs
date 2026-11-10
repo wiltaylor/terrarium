@@ -1878,7 +1878,8 @@ fn none_merged(job: &Job, left: HashMap<usize, Left>, batch: Option<Vec<BatchCar
             "none of the branches of the batch does".to_owned()
         };
         let mut t = format!(
-            "{what} not merge onto `next` without conflicts; the queue does not resolve them. Files:\n{}",
+            "{what} not merge onto `{}` without conflicts; the queue does not resolve them. Files:\n{}",
+            job.onto(),
             notes(OUTCOME_CONFLICT).join("\n")
         );
         let moved = notes(OUTCOME_MOVED);
@@ -1933,7 +1934,9 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
         // batch, each with its reviewed commit (TER-553).
         let cards = job.cards();
         let branches: Vec<String> = cards.iter().map(|c| c.branch.clone()).collect();
-        let mut specs = vec!["+refs/heads/next:refs/remotes/job/next".to_owned()];
+        // `next`, or the release branch of `card merge --onto` (TER-607).
+        let onto = job.onto();
+        let mut specs = vec![format!("+refs/heads/{onto}:refs/remotes/job/next")];
         specs.extend(
             branches
                 .iter()
@@ -1942,13 +1945,13 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
         );
         if let Err(e) = repo.fetch(&specs) {
             return failed(format!(
-                "cannot fetch next and {} (does the repo have a next branch?): {e}",
+                "cannot fetch {onto} and {} (does the repo have a {onto} branch?): {e}",
                 branches.join(" ")
             ));
         }
         let mut cur = match repo.commit_of("refs/remotes/job/next") {
             Ok(Some(c)) => c,
-            Ok(None) => return failed("the repo has no next branch".into()),
+            Ok(None) => return failed(format!("the repo has no {onto} branch")),
             Err(e) => return failed(e.to_string()),
         };
         base = Some(cur.clone());
@@ -1975,7 +1978,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                 }
             }
             // The commit, not the ref: the merge takes what was checked.
-            match repo.merge(&cur, &tip, &format!("Merge {b} onto next")) {
+            match repo.merge(&cur, &tip, &format!("Merge {b} onto {onto}")) {
                 Ok(git::MergeStep::Merged(c)) => {
                     cur = c;
                     merged += 1;
@@ -2277,9 +2280,11 @@ async fn steps(
     // commit from the daemon's repo. The recipe never had that repo, so
     // nothing it did to its clone reaches the push.
     let h = head.clone();
+    let onto = job.onto().to_owned();
+    let to = onto.clone();
     let pushed = x
         .daemon(move |r| match r.commit_of("refs/job/merge") {
-            Ok(Some(c)) if c == h => r.push(&h, "next"),
+            Ok(Some(c)) if c == h => r.push(&h, &to),
             Ok(_) => Err(git::GitError::Refused(format!(
                 "the job repo does not hold the merge commit {h}"
             ))),
@@ -2292,7 +2297,7 @@ async fn steps(
             passed: false,
             outcome: Some("error".into()),
             tail: Some(format!(
-                "the recipe passed, but the push to `next` failed; did `next` move?\n{e}"
+                "the recipe passed, but the push to `{onto}` failed; did `{onto}` move?\n{e}"
             )),
             head: Some(head),
             batch,
@@ -2719,8 +2724,11 @@ pub fn queue_comment(j: &Job, card: &str) -> String {
                 .unwrap_or("the branch head at the start")
         ),
         JobKind::Merge if j.batch.is_empty() => format!(
-            "Job queue: merge job {} queued: {} onto next of {}.",
-            j.id, j.branch, j.repo
+            "Job queue: merge job {} queued: {} onto {} of {}.",
+            j.id,
+            j.branch,
+            j.onto(),
+            j.repo
         ),
         JobKind::Merge => {
             let names: Vec<&str> = j.batch.iter().map(|c| c.card.as_str()).collect();
@@ -4698,6 +4706,7 @@ mod tests {
             split_path: String::new(),
             planned_secs: None,
             slot: None,
+            onto: None,
         }
     }
 

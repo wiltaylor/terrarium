@@ -164,6 +164,50 @@ pub struct Job {
     /// work tree on the target, which no two jobs use at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot: Option<i64>,
+    /// The branch that a merge job merges onto and pushes (TER-607):
+    /// `None` is `next`, else a release branch `release/X.Y.Z` from
+    /// `card merge --onto`. See [`Job::onto`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onto: Option<String>,
+}
+
+/// The branch that a merge job goes onto by default.
+pub const NEXT: &str = "next";
+
+/// Check the branch of `card merge --onto` (TER-607): `next`, or a
+/// release branch `release/X.Y.Z` with three numbers and an optional
+/// pre-release part (`release/1.4.0-rc.1`).
+pub fn check_onto(onto: &str) -> ApiResult<()> {
+    if onto == NEXT {
+        return Ok(());
+    }
+    let bad = || {
+        ApiError::invalid(format!(
+            "bad --onto `{onto}`: give `next` or a release branch `release/X.Y.Z`"
+        ))
+    };
+    let v = onto.strip_prefix("release/").ok_or_else(bad)?;
+    let (core, pre) = match v.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (v, None),
+    };
+    let nums: Vec<&str> = core.split('.').collect();
+    if nums.len() != 3
+        || nums
+            .iter()
+            .any(|n| n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(bad());
+    }
+    if let Some(p) = pre
+        && (p.is_empty()
+            || p.split('.').any(|x| {
+                x.is_empty() || !x.bytes().all(|b| b.is_ascii_alphanumeric())
+            }))
+    {
+        return Err(bad());
+    }
+    Ok(())
 }
 
 /// The slot of the merge lane (TER-159, TER-190): one merge at a time per
@@ -194,6 +238,12 @@ pub struct BatchCard {
 }
 
 impl Job {
+    /// The branch that the merge goes onto: `next`, or the release
+    /// branch of `card merge --onto` (TER-607).
+    pub fn onto(&self) -> &str {
+        self.onto.as_deref().unwrap_or(NEXT)
+    }
+
     /// The cards of the job: the batch, or the one card.
     pub fn cards(&self) -> Vec<BatchCard> {
         if !self.batch.is_empty() {
@@ -242,7 +292,7 @@ pub struct JobEnd {
 
 const COLS: &str = "id, project, card, kind, repo, branch, commit_sha, state, attempt, outcome,
                     exit_code, tail, head, by_agent, created_by, created_at, started_at, ended_at,
-                    host, batch, parent, split_path, planned_secs, slot";
+                    host, batch, parent, split_path, planned_secs, slot, onto";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
     let kind: String = r.get(3)?;
@@ -276,6 +326,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
         split_path: r.get(21)?,
         planned_secs: r.get(22)?,
         slot: r.get(23)?,
+        onto: r.get(24)?,
     })
 }
 
@@ -1273,14 +1324,16 @@ struct Insert<'a> {
     created_by: &'a str,
     created_at: &'a str,
     planned_secs: Option<i64>,
+    onto: Option<&'a str>,
 }
 
 fn insert(t: &mut Tx<'_>, i: Insert<'_>) -> ApiResult<Job> {
     t.execute(
         "INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state, attempt,
                            by_agent, created_by, created_at, batch, parent, split_path,
-                           planned_secs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                           planned_secs, onto)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                 ?16)",
         params![
             i.id,
             i.project,
@@ -1298,7 +1351,8 @@ fn insert(t: &mut Tx<'_>, i: Insert<'_>) -> ApiResult<Job> {
             batch_text(i.batch)?,
             i.parent,
             i.split_path,
-            i.planned_secs
+            i.planned_secs,
+            i.onto
         ],
     )?;
     let job = get(t, &i.id)?;
@@ -1379,6 +1433,21 @@ pub fn started_eta(job: &Job, started: &str) -> Option<String> {
 /// Queue a job. A card has at most one open job. A batch (two or more
 /// cards, a merge only) starts with the job's own card.
 pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
+    create_onto(t, n, None)
+}
+
+/// [`create`] for a merge job of one card onto `onto` (TER-607): a
+/// release branch, checked with [`check_onto`]. `None` is `next`.
+pub fn create_onto(t: &mut Tx<'_>, n: NewJob, onto: Option<&str>) -> ApiResult<Job> {
+    if let Some(o) = onto {
+        check_onto(o)?;
+        if n.kind != JobKind::Merge || !n.batch.is_empty() {
+            return Err(ApiError::invalid(
+                "only a merge job of one card goes onto a release branch",
+            ));
+        }
+    }
+    let onto = onto.filter(|o| *o != NEXT);
     if !n.batch.is_empty() {
         if n.kind != JobKind::Merge {
             return Err(ApiError::invalid("only a merge job takes a batch"));
@@ -1450,10 +1519,14 @@ pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
             created_by: &actor,
             created_at: &at,
             planned_secs: n.planned_secs,
+            onto,
         },
     )?;
     let mut detail = json!({"card": job.card, "kind": job.kind, "repo": job.repo,
                             "branch": job.branch, "commit": job.commit});
+    if let Some(o) = &job.onto {
+        detail["onto"] = json!(o);
+    }
     if !job.batch.is_empty() {
         detail["batch"] = json!(job.batch.iter().map(|c| &c.card).collect::<Vec<_>>());
     }
@@ -1486,6 +1559,7 @@ pub fn rerun(t: &mut Tx<'_>, failed: &Job, cards: Option<&[BatchCard]>) -> ApiRe
             created_by: &failed.created_by,
             created_at: &failed.created_at,
             planned_secs: failed.planned_secs,
+            onto: failed.onto.as_deref(),
         },
     )?;
     emit(t, &job, "queued")?;
@@ -1536,6 +1610,7 @@ pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, 
                 created_by: &red.created_by,
                 created_at: &red.created_at,
                 planned_secs: red.planned_secs,
+                onto: red.onto.as_deref(),
             },
         )?;
         emit(t, &job, "queued")?;
@@ -1856,6 +1931,28 @@ pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
 mod tests {
     use super::*;
 
+    /// TER-607: `--onto` takes `next` or `release/X.Y.Z`, nothing else.
+    #[test]
+    fn onto_takes_next_or_a_release_branch() {
+        for ok in ["next", "release/1.4.0", "release/10.0.12", "release/1.4.0-rc.1"] {
+            assert!(check_onto(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "main",
+            "release/1.4",
+            "release/1.4.0.1",
+            "release/v1.4.0",
+            "release/1.4.x",
+            "release/1.4.0-",
+            "release/1.4.0-rc..1",
+            "release/1.4.0;rm",
+            "release/",
+            "",
+        ] {
+            assert!(check_onto(bad).is_err(), "{bad}");
+        }
+    }
+
     /// TER-123: only jobs that started and got their cancel at `since` or
     /// later count as maybe draining.
     #[test]
@@ -1961,6 +2058,7 @@ mod tests {
             split_path: String::new(),
             planned_secs: None,
             slot: None,
+            onto: None,
         }
     }
 

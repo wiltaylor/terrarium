@@ -3353,6 +3353,113 @@ async fn the_merge_queue_batch_goes_when_8_cards_wait() {
     assert_eq!(last["steps"][0]["detail"]["waiting"], 1, "{last}");
 }
 
+/// TER-607: a card with the release-blocker label is taken first, as a
+/// batch of one, at once; the cards that waited before it stay.
+#[tokio::test]
+async fn a_release_blocker_card_goes_first_as_a_batch_of_one() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    let blocker = new_card(
+        &td,
+        "p",
+        json!({"title": "fix", "column": "review", "labels": ["release-blocker"]}),
+    )
+    .await;
+    settle(&td).await;
+    for id in &ids {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    assert!(open_jobs(&td).await.is_empty(), "3 of 8 cards wait");
+
+    // The blocker comes last in board order and goes now, alone.
+    move_to(&td, &blocker, "merge_queue").await;
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].card, blocker);
+    assert!(open[0].batch.is_empty(), "a batch of one: {:?}", open[0]);
+    assert_eq!(open[0].onto(), "next");
+    let r = runs_of(&td, "p", "merge-queue-batch").await;
+    let last = r.last().unwrap();
+    assert_eq!(last["state"], "done", "{last}");
+    let left = last["steps"][0]["detail"]["left_out"].as_array().unwrap();
+    assert_eq!(left.len(), 3, "{last}");
+    assert!(
+        left.iter().all(|x| x["reason"]
+            .as_str()
+            .unwrap()
+            .contains("release-blocker card")),
+        "{last}"
+    );
+    for id in &ids {
+        assert_eq!(column_of(&td, id).await, "merge_queue");
+        assert_eq!(card(&td, id).await["labels"], json!([]));
+    }
+}
+
+/// TER-607: a card that waits in the merge queue and then gets the
+/// release-blocker label goes on the next timer check, with no wait.
+#[tokio::test]
+async fn a_release_blocker_label_on_a_waiting_card_fires_the_timer_now() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    for id in &ids {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    let st = state(&td);
+    let projects = rules_engine::load(&st.db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
+    let mut fired = std::collections::HashMap::new();
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "2 of 8 cards wait, for 30 minutes");
+
+    let r = td
+        .patch(
+            &format!("/api/cards/{}", ids[1]),
+            json!({"add_labels": ["release-blocker"]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    settle(&td).await;
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "a release blocker does not wait");
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].card, ids[1]);
+    assert!(open[0].batch.is_empty(), "{:?}", open[0]);
+}
+
 #[tokio::test]
 async fn the_merge_queue_batch_goes_30_minutes_after_the_first_card() {
     let td = queue_lab().await;

@@ -420,6 +420,11 @@ struct MergeBody {
     /// The planned duration, as for a validate.
     #[serde(default)]
     eta: Option<String>,
+    /// The branch that the merge goes onto (TER-607): `next` (the
+    /// default), or a release branch `release/X.Y.Z` of a frozen
+    /// version, for a release-blocker fix.
+    #[serde(default)]
+    onto: Option<String>,
 }
 
 /// The planned duration of a body's `eta`: `None` without one.
@@ -695,6 +700,9 @@ async fn merge(
     ApiJson(b): ApiJson<MergeBody>,
 ) -> ApiResult<Response> {
     let planned_secs = planned(b.eta.as_deref())?;
+    if let Some(o) = &b.onto {
+        jobs::check_onto(o)?;
+    }
     rt::prepare_hosts(&state.db, None).await?;
     let commits = merge_commits(
         &state,
@@ -723,7 +731,7 @@ async fn merge(
             }
             let branch = branch_of(&card, b.branch)?;
             let commit = merge_commit(&commits, &card.id, &branch)?;
-            let job = jobs::create(
+            let job = jobs::create_onto(
                 t,
                 NewJob {
                     project: card.project.clone(),
@@ -736,6 +744,7 @@ async fn merge(
                     batch: Vec::new(),
                     planned_secs,
                 },
+                b.onto.as_deref(),
             )?;
             if rt::code_flow(t, &card.project)? {
                 let patch = CardPatch {
