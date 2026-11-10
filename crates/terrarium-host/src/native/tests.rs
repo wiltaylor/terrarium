@@ -221,7 +221,10 @@ fn a_gpu_session_allows_only_its_gpu_and_the_support_nodes() {
     // /home, /root and /run/user are an empty tmpfs: git trusts every
     // repo (safe.directory=*), so none of them may be visible (TER-659).
     assert!(p.contains(&"ProtectHome=tmpfs"));
-    assert!(!p.iter().any(|x| x.starts_with("ProtectHome=") && *x != "ProtectHome=tmpfs"));
+    assert!(
+        !p.iter()
+            .any(|x| x.starts_with("ProtectHome=") && *x != "ProtectHome=tmpfs")
+    );
     // No holder workspace yet: the workspace root is an empty read-only
     // tmpfs, nothing is bound in, nothing is writable.
     let real = std::fs::canonicalize(root.path()).unwrap();
