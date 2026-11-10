@@ -5,14 +5,17 @@ user passed in the merge suite and failed in the release CI (TER-494,
 TER-575). This step reuses the test binaries that the root run of `ci::test`
 built (`cargo test --workspace --no-run`, the same command and env, so no
 rebuild), keeps those that SELECT names, and runs each of them as UID with
-`setpriv`, with its own private HOME and TMPDIR. Doctests are not run.
-Without root it skips: the main run is then already unprivileged.
+`setpriv`, with its own private HOME and TMPDIR, all binaries at once.
+Doctests are not run. Without root it skips: the main run is then already
+unprivileged. As root it fails early when UID has no passwd entry (OpenSSH
+needs one); the host needs the user (useradd, see the message).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import pwd
 from pathlib import Path
 import shutil
 import subprocess
@@ -71,12 +74,20 @@ def child_env(home: str, tmp: str) -> dict[str, str]:
 def private_dirs(root: str, n: int, uid: int) -> tuple[str, str]:
     """A fresh HOME and TMPDIR under ROOT for binary N, owned by UID, mode 0700."""
     dirs = []
-    for kind in ("home", "tmp"):
-        d = os.path.join(root, f"{n}-{kind}")
+    for kind in ("h", "t"):
+        d = os.path.join(root, f"{n}{kind}")
         os.mkdir(d, 0o700)
         os.chown(d, uid, uid)
         dirs.append(d)
     return dirs[0], dirs[1]
+
+
+def has_user(uid: int) -> bool:
+    try:
+        pwd.getpwuid(uid)
+    except KeyError:
+        return False
+    return True
 
 
 def setpriv(uid: int) -> list[str]:
@@ -87,6 +98,11 @@ def run() -> int:
     if os.geteuid() != 0:
         print("unprivileged tests: skipped, not root (the main run is already unprivileged)")
         return 0
+    if not has_user(UID):
+        print(f"unprivileged tests: uid {UID} has no passwd entry; OpenSSH and other tests need"
+              f" one. Add it on this host: useradd -u {UID} -M -s /usr/sbin/nologin"
+              " terrarium-ci", file=sys.stderr)
+        return 1
     meta = subprocess.run(["cargo", "metadata", "--no-deps", "--format-version", "1"],
                           stdout=subprocess.PIPE, text=True, check=False)
     if meta.returncode:
@@ -106,30 +122,42 @@ def run() -> int:
         Path(results).mkdir(parents=True, exist_ok=True)
         report = Path(results, "rust-unprivileged.json").open("w", encoding="utf-8")
     # Root-owned, 0711: uid UID can enter it but not list it or add to it.
-    root = tempfile.mkdtemp(prefix="terrarium-ci-unpriv-")
+    # Keep the paths short: tests bind Unix sockets under TMPDIR, and a socket
+    # path has at most 108 bytes (a longer prefix broke a jobs test, TER-611).
+    root = tempfile.mkdtemp(prefix="u", dir="/tmp")
     os.chmod(root, 0o711)
     failed = []
+    running = []
     try:
         args = []
         if report:
             args = ["-Z", "unstable-options", "--format", "json", "--report-time"]
+        # The binaries run at the same time, each into its own log; the logs
+        # are then printed (and reported) one after another, in cargo's order.
         for n, (exe, cwd) in enumerate(bins):
             env = child_env(*private_dirs(root, n, UID))
             if report:
                 env["RUSTC_BOOTSTRAP"] = "1"
+            log = open(os.path.join(root, f"{n}.log"), "w+", encoding="utf-8",
+                       errors="replace")
+            running.append((exe, log, subprocess.Popen(
+                setpriv(UID) + [exe, *args], cwd=cwd, env=env, stdout=log)))
+        for exe, log, child in running:
+            code = child.wait()
+            log.seek(0)
             print(f"unprivileged tests: uid {UID}: {exe}", flush=True)
-            with subprocess.Popen(setpriv(UID) + [exe, *args], cwd=cwd, env=env,
-                                  stdout=subprocess.PIPE, text=True, encoding="utf-8",
-                                  errors="replace") as child:
-                assert child.stdout is not None
-                for line in child.stdout:
-                    print(line, end="", flush=True)
-                    if report:
-                        report.write(line)
-                        report.flush()
-                if child.wait():
-                    failed.append(exe)
+            for line in log:
+                print(line, end="", flush=True)
+                if report:
+                    report.write(line)
+            if code:
+                failed.append(exe)
     finally:
+        for _, log, child in running:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            log.close()
         if report:
             report.close()
         shutil.rmtree(root, ignore_errors=True)
