@@ -262,10 +262,7 @@ mod tests {
         assert_eq!(Mode::parse("on").unwrap(), Mode::Cosign);
         assert_eq!(Mode::parse("GH").unwrap(), Mode::Gh);
         assert_eq!(Mode::parse("cosign").unwrap(), Mode::Cosign);
-        assert_eq!(
-            Mode::parse("Cosign-Keyless").unwrap(),
-            Mode::CosignKeyless
-        );
+        assert_eq!(Mode::parse("Cosign-Keyless").unwrap(), Mode::CosignKeyless);
         assert_eq!(Mode::CosignKeyless.name(), "cosign-keyless");
         assert_eq!(Mode::parse("off").unwrap(), Mode::Off);
         assert_eq!(
