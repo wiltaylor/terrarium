@@ -3649,6 +3649,107 @@ async fn a_kept_queued_turn_goes_out_once_without_a_restart() {
     assert!(td.sup.kept_queued_turns(id.parse().unwrap()).is_empty());
 }
 
+/// TER-562: a wake with a queued turn while a quota hold lasts. The hold
+/// keeps the turn, and its row stays in the store until the turn is typed
+/// after the hold. Returns the agent ID and the store row of the turn.
+async fn held_queued_turn(td: &Td) -> (String, i64) {
+    use terrariumd::supervisor::{Supervisor, TurnHold};
+    let id = td.agent("demo", "bob", json!({})).await;
+    let agent: AgentId = id.parse().unwrap();
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    td.sup
+        .hold_turns(
+            agent,
+            Some(TurnHold {
+                until: None,
+                reason: "the daily budget is used up".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/send"),
+            Some(json!({"text": "wake up"})),
+        )
+        .await;
+    assert_eq!(r["queued"], true, "{r}");
+    let start = Instant::now();
+    while td.sup.waiting_turns(agent) != ["[User] wake up"] {
+        assert!(
+            start.elapsed() < WAIT,
+            "the hold never kept the turn: {:?}",
+            td.sup.waiting_turns(agent)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let a = td.get(&format!("/api/agents/{id}")).await;
+    assert_eq!(a["queued"], 1, "the row stays while the hold keeps the turn: {a}");
+    let q = td.get(&format!("/api/agents/{id}/queued")).await;
+    let items = q["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "the turn shows once: {q}");
+    assert_eq!(items[0]["source"], "store", "{q}");
+    let row = items[0]["id"].as_i64().unwrap();
+    (id, row)
+}
+
+/// TER-562: a daemon restart during a quota hold does not lose the held
+/// store turn: the wake at the start of the new daemon delivers it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_queued_turn_survives_a_daemon_restart() {
+    let mut td = Td::start().await;
+    let (id, _) = held_queued_turn(&td).await;
+    td.restart_daemon().await;
+    assert_eq!(wake_up_turns(&td, &id).await, 1);
+    let q = td.get(&format!("/api/agents/{id}/queued")).await;
+    assert!(q["items"].as_array().unwrap().is_empty(), "{q}");
+}
+
+/// TER-562: the same row sent again during the hold is kept once, and the
+/// end of the hold types it once and deletes its row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_queued_turn_goes_out_once_at_the_end_of_the_hold() {
+    use terrariumd::supervisor::Supervisor;
+    let td = Td::start().await;
+    let (id, row) = held_queued_turn(&td).await;
+    let agent: AgentId = id.parse().unwrap();
+    let again = td
+        .sup
+        .send_queued_turn(agent, row, "[User] wake up".into())
+        .await
+        .unwrap();
+    assert!(again, "the hold keeps the row");
+    assert_eq!(td.sup.waiting_turns(agent), ["[User] wake up"]);
+    td.sup.hold_turns(agent, None).await.unwrap();
+    assert_eq!(wake_up_turns(&td, &id).await, 1);
+    let q = td.get(&format!("/api/agents/{id}/queued")).await;
+    assert!(q["items"].as_array().unwrap().is_empty(), "{q}");
+}
+
+/// TER-562: a held store turn that the operator removes during the hold
+/// does not go out at its end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removed_held_queued_turn_does_not_go_out() {
+    use terrariumd::supervisor::Supervisor;
+    let td = Td::start().await;
+    let (id, row) = held_queued_turn(&td).await;
+    let agent: AgentId = id.parse().unwrap();
+    let path = format!("/api/agents/{id}/queued/{row}?source=store");
+    assert_eq!(td.req(Method::DELETE, &path, None, None).await.0, 204);
+    td.sup.hold_turns(agent, None).await.unwrap();
+    td.wait_status(&id, "idle").await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let starts = td.events(&id, "turn_start").await;
+    assert!(
+        !starts.iter().any(|x| x["data"]["prompt"] == "[User] wake up"),
+        "{starts:#?}"
+    );
+    assert!(td.sup.waiting_turns(agent).is_empty());
+}
+
 /// PLAN §18 "Auto compact" with the real supervisor and runner: a manual
 /// compaction types `/compact` as a raw command, shows `working` with the
 /// reason `compacting`, and holds a new turn until the PostCompact hook.
