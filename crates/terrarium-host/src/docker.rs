@@ -52,10 +52,11 @@ pub const CLI_DENIED_ENV: &[&str] = &["GODEBUG", "GETCONF_DIR", "NIS_PATH", "RES
 pub const CLI_DENIED_ENV_PREFIXES: &[&str] = &["DOCKER_", "SSL_", "OTEL_"];
 
 /// The one prefix of the grant deny list that the fallback lets through:
-/// the daemon's own names. The daemon sends multi-line values under them on
-/// each agent exec (`TERRARIUM_GIT_TRAILERS`, `TERRARIUM_GIT_KNOWN_HOSTS`,
-/// `TERRARIUM_COMMIT_HOOK`), and neither the `docker` CLI nor its children
-/// read them. A grant cannot set them.
+/// the daemon's own names. The daemon sends multi-line values under them:
+/// `TERRARIUM_GIT_TRAILERS` on each agent exec, and
+/// `TERRARIUM_GIT_KNOWN_HOSTS` and `TERRARIUM_COMMIT_HOOK` only on a
+/// `repo checkout` run. Neither the `docker` CLI nor its children read
+/// them. A grant cannot set them.
 pub const CLI_ALLOWED_PREFIX: &str = "TERRARIUM_";
 
 /// Does `k` steer the `docker` CLI, its children, or the loader under it?
