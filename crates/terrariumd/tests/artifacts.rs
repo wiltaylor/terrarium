@@ -973,8 +973,8 @@ async fn upload_finishes_after_the_client_goes_away() {
     let sha = terrariumd::store::artifacts::sha256_hex(&data);
     let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
     let guard = ctx.digest_lock(&sha).lock_owned().await;
-    let body = serde_json::to_vec(&json!({"name": "dropped.bin", "data_base64": b64(&data)}))
-        .unwrap();
+    let body =
+        serde_json::to_vec(&json!({"name": "dropped.bin", "data_base64": b64(&data)})).unwrap();
     let r = tokio::time::timeout(
         std::time::Duration::from_millis(300),
         raw(
@@ -992,7 +992,12 @@ async fn upload_finishes_after_the_client_goes_away() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let list = td
-            .req(Method::GET, "/api/projects/proj/artifacts", None, Some("proj/w1"))
+            .req(
+                Method::GET,
+                "/api/projects/proj/artifacts",
+                None,
+                Some("proj/w1"),
+            )
             .await;
         let list = list.ok().to_string();
         if list.contains("dropped.bin") {
