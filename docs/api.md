@@ -4363,6 +4363,11 @@ For an agent sender:
 | `POST /api/mail/{id}/read` | none | `200` message |
 | `POST /api/mail/{id}/reply` | `{"body", "subject"?}` | `201` **array** of messages, one for each recipient |
 
+- A reply goes to every other participant of the thread. The operator is a
+  recipient only when the replied-to message came from or went to
+  `operator`. To reach the operator on another message of the thread, send
+  to `operator` with `thread_id`.
+
 - `state` is a state or `unread` (`queued` and `delivered`).
 - `project` keeps the messages from or to the inbox of the project, or
   from or to one of its agents (also a removed one). `since` and `until`

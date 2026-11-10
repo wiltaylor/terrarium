@@ -7,6 +7,7 @@
 import { A } from "@solidjs/router";
 import { createEffect, createSignal, For, type JSX, on, Show } from "solid-js";
 import type { Question } from "../../api/types";
+import { LinkText, openCardLink, readerCardKeys } from "../../components/LinkText";
 import { SafeHtml } from "../../components/SafeHtml";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
@@ -95,10 +96,10 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
       </div>
 
       <p class="question-text" style={{ margin: 0, "white-space": "pre-wrap", "font-weight": 600 }}>
-        {q().text}
+        <LinkText text={q().text} project={q().project} />
       </p>
 
-      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project)} />}</Show>
+      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={openCardLink} />}</Show>
 
       <Show when={q().status === "in_thread" && q().thread}>
         {(t) => (

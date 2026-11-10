@@ -32,6 +32,16 @@ pub async fn sample() -> Option<Vec<GpuDevice>> {
 }
 
 pub async fn sample_with(bin: &str) -> Option<Vec<GpuDevice>> {
+    match probe(bin).await {
+        Ok(devices) => Some(devices),
+        Err(error) => {
+            tracing::debug!(bin, %error, "gpu inventory probe failed");
+            None
+        }
+    }
+}
+
+async fn probe(bin: &str) -> Result<Vec<GpuDevice>, String> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args([
         "--query-gpu=uuid,name,memory.total,memory.used",
@@ -40,12 +50,13 @@ pub async fn sample_with(bin: &str) -> Option<Vec<GpuDevice>> {
     .kill_on_drop(true);
     let output = tokio::time::timeout(std::time::Duration::from_secs(2), cmd.output())
         .await
-        .ok()?
-        .ok()?;
+        .map_err(|_| "timed out after 2s".to_string())?
+        .map_err(|e| format!("run: {e}"))?;
     if !output.status.success() {
-        return None;
+        return Err(format!("exit status {}", output.status));
     }
-    parse(std::str::from_utf8(&output.stdout).ok()?)
+    let text = std::str::from_utf8(&output.stdout).map_err(|e| format!("stdout: {e}"))?;
+    parse(text).ok_or_else(|| "unparseable inventory".to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -176,19 +187,29 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn cache_limits_probes_and_refreshes_successes_and_failures() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("smi");
         let inventory = dir.path().join("inventory");
         let calls = dir.path().join("calls");
-        std::fs::write(&bin, format!("#!/bin/sh\nprintf 'call\\n' >> '{}'\ncase \"$1\" in --query-gpu=*) cat '{}' ;; esac\n", calls.display(), inventory.display())).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // A child shell writes the script, so no fork of this test process
+        // holds a write fd on it when it is exec'd (ETXTBSY, TER-585).
+        let bin = crate::client::tests::write_execd_script(
+            dir.path(),
+            "smi",
+            &format!(
+                "#!/bin/sh\nprintf 'call\\n' >> '{}'\ncase \"$1\" in --query-gpu=*) cat '{}' ;; esac\n",
+                calls.display(),
+                inventory.display()
+            ),
+        );
         std::fs::write(&inventory, "GPU-abcd, test, 8192, 0\n").unwrap();
         let mut cache = Cache::default();
         cache
             .refresh(bin.to_str().unwrap(), "/nonexistent/docker")
             .await;
-        assert_eq!(cache.devices[0].uuid, "GPU-abcd");
+        assert_eq!(
+            cache.devices.first().map(|d| d.uuid.as_str()),
+            Some("GPU-abcd")
+        );
         std::fs::write(&inventory, "GPU-1234, changed, 8192, 0\n").unwrap();
         for _ in 0..5 {
             cache
@@ -196,12 +217,18 @@ mod tests {
                 .await;
         }
         assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2);
-        assert_eq!(cache.devices[0].uuid, "GPU-abcd");
+        assert_eq!(
+            cache.devices.first().map(|d| d.uuid.as_str()),
+            Some("GPU-abcd")
+        );
         cache.refreshed = Some(std::time::Instant::now() - CACHE_TTL);
         cache
             .refresh(bin.to_str().unwrap(), "/nonexistent/docker")
             .await;
-        assert_eq!(cache.devices[0].uuid, "GPU-1234");
+        assert_eq!(
+            cache.devices.first().map(|d| d.uuid.as_str()),
+            Some("GPU-1234")
+        );
         std::fs::write(&inventory, "unavailable\n").unwrap();
         cache.refreshed = Some(std::time::Instant::now() - CACHE_TTL);
         cache
