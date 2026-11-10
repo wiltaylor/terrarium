@@ -11152,8 +11152,11 @@ async fn uploads_retry_a_429_after_retry_after() {
 
     // Another error is not tried again.
     let m = MockTransport::new();
-    m.reply(413, json!({"error": {"code": "too_large", "message": "over quota"}}))
-        .reply(201, pushed.clone());
+    m.reply(
+        413,
+        json!({"error": {"code": "too_large", "message": "over quota"}}),
+    )
+    .reply(201, pushed.clone());
     let (r, _) = exec_on(&["artifact", "push", &path], &m).await;
     assert!(r.is_err());
     assert_eq!(m.requests().len(), 1);
