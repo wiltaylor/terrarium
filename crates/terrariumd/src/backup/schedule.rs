@@ -833,8 +833,7 @@ mod tests {
         let r = set_aside(&f).unwrap();
         assert_eq!(r, format!("moved to {UNVERIFIED_PREFIX}a.zip-2"));
         assert_eq!(
-            std::fs::read_to_string(tmp.path().join(format!("{UNVERIFIED_PREFIX}a.zip")))
-                .unwrap(),
+            std::fs::read_to_string(tmp.path().join(format!("{UNVERIFIED_PREFIX}a.zip"))).unwrap(),
             "bad"
         );
         // The rename fails (a dir with content has the name): delete it.
