@@ -285,13 +285,54 @@ fn parse_upload(headers: &HeaderMap, body: &[u8], max: u64) -> ApiResult<Upload>
     ))
 }
 
+/// How long an upload waits for a permit ([`artifacts::MAX_CONCURRENT_UPLOADS`])
+/// before it is refused.
+const UPLOAD_PERMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The `Retry-After` of an upload refused for want of a permit, in seconds.
+const UPLOAD_RETRY_AFTER_SECS: u64 = 2;
+
+/// A `429 rate_limited` with `Retry-After`: all upload permits are taken.
+fn uploads_busy() -> Response {
+    let mut resp = ApiError::new(
+        Code::RateLimited,
+        format!(
+            "too many uploads in progress (at most {}); try again in {UPLOAD_RETRY_AFTER_SECS} s",
+            artifacts::MAX_CONCURRENT_UPLOADS
+        ),
+    )
+    .with_details(serde_json::json!({
+        "retry_after": UPLOAD_RETRY_AFTER_SECS,
+        "max_concurrent_uploads": artifacts::MAX_CONCURRENT_UPLOADS,
+    }))
+    .into_response();
+    resp.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(UPLOAD_RETRY_AFTER_SECS));
+    resp
+}
+
 async fn upload(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> ApiResult<(StatusCode, Json<Artifact>)> {
+) -> Response {
+    match upload_checked(state, actor, name, headers, body).await {
+        Ok(Some(a)) => (StatusCode::CREATED, Json(a)).into_response(),
+        Ok(None) => uploads_busy(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The upload, or `None` when no upload permit was free in time.
+async fn upload_checked(
+    state: Shared,
+    actor: Actor,
+    name: String,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Option<Artifact>> {
     policy::write_project(&actor, &name)?;
     let p = name.clone();
     state
@@ -299,14 +340,23 @@ async fn upload(
         .read(move |c| crate::store::projects::get(c, &p).map(|_| ()))
         .await?;
     let ctx = ctx(&state)?;
+    // The permit before the bytes are decoded. It moves into each task
+    // that holds the bytes, so it is free again only when they are
+    // dropped: on every error, on a client disconnect (the handler future
+    // drops), and when the store task ends (TER-605).
+    let Some(permit) = ctx.upload_permit(UPLOAD_PERMIT_WAIT).await else {
+        return Ok(None);
+    };
     let up = parse_upload(&headers, &body, ctx.limits.max_file_bytes)?;
     drop(body);
     let (c2, u2, r2) = (ctx.clone(), up.clone(), state.db.redactor().get());
     let view = crate::secrets::redact::view_of(&actor);
-    let prepared: PreparedBlob =
-        tokio::task::spawn_blocking(move || artifacts::prepare_blob(&c2, &u2, &r2, &view))
-            .await
-            .map_err(|e| ApiError::internal(format!("upload task failed: {e}")))??;
+    let (prepared, permit) = tokio::task::spawn_blocking(move || {
+        (artifacts::prepare_blob(&c2, &u2, &r2, &view), permit)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("upload task failed: {e}")))?;
+    let prepared: PreparedBlob = prepared?;
     // The name and the quota before the blob is on disk: a refused upload
     // leaves no blob. `create` checks both again in its transaction.
     let (p, n, size, limits) = (
@@ -325,15 +375,16 @@ async fn upload(
     // in place: when the client disconnects, the handler future drops, but
     // the task still finishes the row or removes the blob before it
     // releases the lock (TER-583).
-    let task = tokio::spawn(store_upload(state, ctx, actor, name, up, prepared));
+    let task = tokio::spawn(store_upload(state, ctx, actor, name, up, prepared, permit));
     let a = task
         .await
         .map_err(|e| ApiError::internal(format!("upload task failed: {e}")))??;
-    Ok((StatusCode::CREATED, Json(a)))
+    Ok(Some(a))
 }
 
 /// Write the blob, create the row, and remove the blob again when the row
-/// fails, all under the digest lock of the blob.
+/// fails, all under the digest lock of the blob. The upload permit is free
+/// again when the task ends.
 async fn store_upload(
     state: Shared,
     ctx: std::sync::Arc<ArtifactCtx>,
@@ -341,6 +392,7 @@ async fn store_upload(
     name: String,
     up: Upload,
     prepared: PreparedBlob,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 ) -> ApiResult<Artifact> {
     let sha = prepared.blob.sha256.clone();
     let _guard = ctx.digest_lock(&sha).lock_owned().await;
