@@ -319,12 +319,31 @@ async fn upload(
         .db
         .read(move |c| artifacts::check_upload(c, &p, &n, size, &limits).map(|_| ()))
         .await?;
-    // Hold the digest lock until the row is committed (or the blob is
-    // removed again), so a delete of the same bytes cannot remove the blob
-    // under the new row.
+    // One task owns the digest lock from the blob write to the committed
+    // row (or the removal of the blob again), so a delete of the same bytes
+    // cannot remove the blob under the new row. It is spawned, not awaited
+    // in place: when the client disconnects, the handler future drops, but
+    // the task still finishes the row or removes the blob before it
+    // releases the lock (TER-583).
+    let task = tokio::spawn(store_upload(state, ctx, actor, name, up, prepared));
+    let a = task
+        .await
+        .map_err(|e| ApiError::internal(format!("upload task failed: {e}")))??;
+    Ok((StatusCode::CREATED, Json(a)))
+}
+
+/// Write the blob, create the row, and remove the blob again when the row
+/// fails, all under the digest lock of the blob.
+async fn store_upload(
+    state: Shared,
+    ctx: std::sync::Arc<ArtifactCtx>,
+    actor: Actor,
+    name: String,
+    up: Upload,
+    prepared: PreparedBlob,
+) -> ApiResult<Artifact> {
     let sha = prepared.blob.sha256.clone();
-    let lock = ctx.digest_lock(&sha);
-    let _guard = lock.lock().await;
+    let _guard = ctx.digest_lock(&sha).lock_owned().await;
     let (c2, u2) = (ctx.clone(), up.clone());
     let blob: StoredBlob =
         tokio::task::spawn_blocking(move || artifacts::write_blob(&c2, &u2, &prepared))
@@ -338,24 +357,21 @@ async fn upload(
             artifacts::create(t, &actor, &name, &up, &blob, &limits)
         })
         .await;
-    match created {
-        Ok(a) => Ok((StatusCode::CREATED, Json(a))),
-        Err(e) => {
-            // No row: remove the blob unless another artifact uses it.
-            let c2 = ctx.clone();
-            if let Err(re) = state
-                .db
-                .read(move |c| {
-                    artifacts::remove_blobs(&c2, c, &[(sha, kind)]);
-                    Ok(())
-                })
-                .await
-            {
-                tracing::warn!("cannot remove the blob of a refused upload: {re}");
-            }
-            Err(e)
+    if created.is_err() {
+        // No row: remove the blob unless another artifact uses it.
+        let c2 = ctx.clone();
+        if let Err(re) = state
+            .db
+            .read(move |c| {
+                artifacts::remove_blobs(&c2, c, &[(sha, kind)]);
+                Ok(())
+            })
+            .await
+        {
+            tracing::warn!("cannot remove the blob of a refused upload: {re}");
         }
     }
+    created
 }
 
 /// Remove the blobs no artifact uses any more, each under its digest lock.

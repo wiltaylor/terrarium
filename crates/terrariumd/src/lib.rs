@@ -662,16 +662,6 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
     })
 }
 
-/// Run the artifact retention prune (PLAN §15.2): first one hour after the
-/// start, then every `[artifacts] prune_interval_hours` (default 24). The
-/// same timer prunes the trash of deleted agents (`TERRARIUM_TRASH_DAYS`,
-/// [`trash::prune_trash`]), the plain backups of the moved credentials
-/// after the same days ([`secrets::migrate::prune_backups`]), the session archive of deleted agents
-/// ([`session_archive::prune_archive`]), the revoked sessions past their `exp`, and the
-/// schedule runs past the newest 500 of each schedule, and the webhook
-/// delivery IDs older than 7 days, the turn attachments older than 7
-/// days ([`api::attachments::prune`]), and the removed card files past
-/// the trash days with their blobs ([`api::card_files::prune`]).
 /// Remove the artifact blobs no row owns, once at start
 /// ([`api::sweep_orphans`]).
 fn spawn_artifact_sweep(state: Shared) -> JoinHandle<()> {
@@ -684,6 +674,16 @@ fn spawn_artifact_sweep(state: Shared) -> JoinHandle<()> {
     })
 }
 
+/// Run the artifact retention prune (PLAN §15.2): first one hour after the
+/// start, then every `[artifacts] prune_interval_hours` (default 24). The
+/// same timer prunes the trash of deleted agents (`TERRARIUM_TRASH_DAYS`,
+/// [`trash::prune_trash`]), the plain backups of the moved credentials
+/// after the same days ([`secrets::migrate::prune_backups`]), the session archive of deleted agents
+/// ([`session_archive::prune_archive`]), the revoked sessions past their `exp`, and the
+/// schedule runs past the newest 500 of each schedule, and the webhook
+/// delivery IDs older than 7 days, the turn attachments older than 7
+/// days ([`api::attachments::prune`]), and the removed card files past
+/// the trash days with their blobs ([`api::card_files::prune`]).
 fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = std::time::Duration::from_secs(3600);

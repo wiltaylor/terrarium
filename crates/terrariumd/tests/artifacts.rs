@@ -892,3 +892,116 @@ async fn delete_waits_for_the_digest_lock() {
     assert_eq!(r.status.as_u16(), 204);
     assert!(!path.exists());
 }
+
+/// TER-583: the name and quota pre-check uses the size of the redacted
+/// bytes. The raw upload does not fit the quota, the redacted one does.
+#[tokio::test]
+async fn upload_precheck_uses_the_redacted_size() {
+    const SECRET: &str = "ghp_REDACTme0123456789";
+    let td = setup_with(|c| {
+        write(
+            c,
+            "daemon.toml",
+            "[artifacts]\nmax_file_bytes = 4000\nproject_quota_bytes = 1000\n",
+        )
+    })
+    .await;
+    td.post(
+        "/api/secrets",
+        json!({"name": "gh", "kind": "token", "fields": {"value": SECRET}}),
+    )
+    .await
+    .ok();
+    let raw = format!("{SECRET}\n").repeat(50);
+    let redacted = "[secret:gh]\n".repeat(50);
+    assert!(raw.len() > 1000 && redacted.len() < 1000);
+    let a = upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "leak.txt", "content_type": "text/plain",
+               "data_base64": b64(raw.as_bytes())}),
+    )
+    .await
+    .ok()
+    .clone();
+    assert_eq!(a["size"].as_u64().unwrap(), redacted.len() as u64, "{a}");
+    let sha = a["sha256"].as_str().unwrap();
+    let stored = std::fs::read(td.state.join("artifacts").join(sha)).unwrap();
+    assert_eq!(stored, redacted.as_bytes());
+    // The redacted size counts against the quota: a second copy does not fit.
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "other.txt", "content_type": "text/plain",
+               "data_base64": b64(&[b'o'; 500])}),
+    )
+    .await
+    .err(413, "too_large");
+}
+
+/// TER-583: the orphan sweep takes the digest lock of each entry, so it
+/// waits while an upload of those bytes holds the stripe.
+#[tokio::test]
+async fn sweep_waits_while_an_upload_holds_the_stripe() {
+    let td = setup().await;
+    let dir = td.state.join("artifacts");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A blob an upload has written but not yet committed a row for.
+    let sha = "5".repeat(64);
+    let path = dir.join(&sha);
+    std::fs::write(&path, b"in flight").unwrap();
+    let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
+    let guard = ctx.digest_lock(&sha).lock_owned().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let (n, ()) = tokio::join!(terrariumd::api::sweep_orphans(&state), async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(path.is_file(), "the sweep removed the blob under the lock");
+        drop(guard);
+    });
+    // No row was committed: after the lock is free the sweep removes it.
+    assert_eq!(n.unwrap(), 1);
+    assert!(!path.exists());
+}
+
+/// TER-583: the upload task owns the digest lock, so an upload whose client
+/// goes away while it waits for the lock still commits its row.
+#[tokio::test]
+async fn upload_finishes_after_the_client_goes_away() {
+    let td = setup().await;
+    let data = b"bytes of a dropped client".to_vec();
+    let sha = terrariumd::store::artifacts::sha256_hex(&data);
+    let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
+    let guard = ctx.digest_lock(&sha).lock_owned().await;
+    let body = serde_json::to_vec(&json!({"name": "dropped.bin", "data_base64": b64(&data)}))
+        .unwrap();
+    let r = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        raw(
+            &td,
+            Method::POST,
+            "/api/projects/proj/artifacts",
+            Some("application/json"),
+            body,
+            Some("proj/w1"),
+        ),
+    )
+    .await;
+    assert!(r.is_err(), "the upload did not wait for the lock");
+    drop(guard);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let list = td
+            .req(Method::GET, "/api/projects/proj/artifacts", None, Some("proj/w1"))
+            .await;
+        let list = list.ok().to_string();
+        if list.contains("dropped.bin") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the upload of a dropped client left no row: {list}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(td.state.join("artifacts").join(&sha).is_file());
+}
