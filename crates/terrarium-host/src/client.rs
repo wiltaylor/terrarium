@@ -1660,7 +1660,11 @@ pub(crate) mod tests {
     /// copies the fd table, and the exec of the script in that window
     /// fails with ETXTBSY under load (TER-415, TER-423). A child shell
     /// does the write and drops the fd by exiting.
-    pub(crate) fn write_execd_script(dir: &std::path::Path, name: &str, text: &str) -> std::path::PathBuf {
+    pub(crate) fn write_execd_script(
+        dir: &std::path::Path,
+        name: &str,
+        text: &str,
+    ) -> std::path::PathBuf {
         let path = dir.join(name);
         let status = std::process::Command::new("sh")
             .arg("-c")

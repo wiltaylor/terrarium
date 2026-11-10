@@ -206,7 +206,10 @@ mod tests {
         cache
             .refresh(bin.to_str().unwrap(), "/nonexistent/docker")
             .await;
-        assert_eq!(cache.devices.first().map(|d| d.uuid.as_str()), Some("GPU-abcd"));
+        assert_eq!(
+            cache.devices.first().map(|d| d.uuid.as_str()),
+            Some("GPU-abcd")
+        );
         std::fs::write(&inventory, "GPU-1234, changed, 8192, 0\n").unwrap();
         for _ in 0..5 {
             cache
@@ -214,12 +217,18 @@ mod tests {
                 .await;
         }
         assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2);
-        assert_eq!(cache.devices.first().map(|d| d.uuid.as_str()), Some("GPU-abcd"));
+        assert_eq!(
+            cache.devices.first().map(|d| d.uuid.as_str()),
+            Some("GPU-abcd")
+        );
         cache.refreshed = Some(std::time::Instant::now() - CACHE_TTL);
         cache
             .refresh(bin.to_str().unwrap(), "/nonexistent/docker")
             .await;
-        assert_eq!(cache.devices.first().map(|d| d.uuid.as_str()), Some("GPU-1234"));
+        assert_eq!(
+            cache.devices.first().map(|d| d.uuid.as_str()),
+            Some("GPU-1234")
+        );
         std::fs::write(&inventory, "unavailable\n").unwrap();
         cache.refreshed = Some(std::time::Instant::now() - CACHE_TTL);
         cache
