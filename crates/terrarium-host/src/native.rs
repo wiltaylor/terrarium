@@ -974,8 +974,11 @@ pub fn plan_start(
         // with only this holder's workspace scope bound in (below,
         // [`holder_workspace`]): a file that an earlier holder of the UID
         // left in another trust domain, also a 0600 one, does not exist in
-        // the unit.
+        // the unit. PrivateIPC gives each unit its own IPC namespace
+        // (System V and POSIX message queues): a session does not see the
+        // IPC objects of the host users or of other sessions (TER-641).
         "PrivateTmp=yes",
+        "PrivateIPC=yes",
         "RemoveIPC=yes",
         "ProtectSystem=strict",
         "KillMode=control-group",

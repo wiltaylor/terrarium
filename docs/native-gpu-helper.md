@@ -134,7 +134,10 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
       except the API trees (`/dev`, `/proc`, `/sys`), so no world-writable
       directory such as `/run/lock` or `/var/crash` keeps a file of the UID.
     - `PrivateTmp=yes` gives the unit its own `/tmp` and `/var/tmp`, removed
-      with the unit. `RemoveIPC=yes` makes systemd remove the System V and
+      with the unit. `PrivateIPC=yes` gives each unit its own IPC
+      namespace: a session sees only the System V objects and POSIX
+      message queues that it made, not those of the host users or of other
+      sessions. `RemoveIPC=yes` makes systemd remove the System V and
       POSIX IPC objects of the UID, also its files in `/dev/shm`, when the
       last unit of that UID stops.
     - The pool users have no home directory (see the install steps).
@@ -149,8 +152,8 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   `KillMode=control-group` ends every descendant with the main process.
   Properties: `--uid`/`--gid` of the holder's workload user,
   `NoNewPrivileges=yes`, `CapabilityBoundingSet=`, `AmbientCapabilities=`,
-  `RestrictSUIDSGID=yes`, `PrivateTmp=yes`, `RemoveIPC=yes`,
-  `ProtectSystem=strict`, `TemporaryFileSystem=<workspace_root>:ro`,
+  `RestrictSUIDSGID=yes`, `PrivateTmp=yes`, `PrivateIPC=yes`,
+  `RemoveIPC=yes`, `ProtectSystem=strict`, `TemporaryFileSystem=<workspace_root>:ro`,
   `BindPaths=` and `ReadWritePaths=` of the holder's workspace scope,
   `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
   each granted GPU and support node, `--expand-environment=no`. The
