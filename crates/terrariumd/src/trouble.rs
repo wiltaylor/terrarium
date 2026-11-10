@@ -615,18 +615,18 @@ fn reconcile(t: &mut Tx<'_>, change: &Change, reminder_default: bool) -> ApiResu
                 )
             } else {
                 format!(
-                "Card {} ({}) in {}: {signal}.\nWorking time: {} seconds. Usage: {} turns, {} tokens. Review rounds: {}. ETA extensions: {}. Short timer polls in the last hour: {}. Compaction requests in the last hour: {}.\nPlease check its state. This notice is sent once per card and signal.",
-                card.id,
-                card.title,
-                card.column,
-                f.seconds,
-                totals.turns,
-                totals.tokens(),
-                f.reviews,
-                f.eta_delays,
-                f.polls,
-                f.compactions
-            )
+                    "Card {} ({}) in {}: {signal}.\nWorking time: {} seconds. Usage: {} turns, {} tokens. Review rounds: {}. ETA extensions: {}. Short timer polls in the last hour: {}. Compaction requests in the last hour: {}.\nPlease check its state. This notice is sent once per card and signal.",
+                    card.id,
+                    card.title,
+                    card.column,
+                    f.seconds,
+                    totals.turns,
+                    totals.tokens(),
+                    f.reviews,
+                    f.eta_delays,
+                    f.polls,
+                    f.compactions
+                )
             };
             let agent = card.agent.as_deref().unwrap_or("");
             for to in crate::question_guard::leads(t, &card.project, agent)? {
