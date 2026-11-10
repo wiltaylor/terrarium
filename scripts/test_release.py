@@ -102,6 +102,9 @@ if tool == "docker":
         for f in sorted(Path(cfg["FAKE_LAYOUT"]).rglob("*")):
             tar.add(f, arcname=f.relative_to(cfg["FAKE_LAYOUT"]).as_posix(), recursive=False)
 elif tool == "crane" and args[0] == "push":
+    if cfg.get("FAKE_PUSH_SLEEP"):
+        import time
+        time.sleep(float(cfg["FAKE_PUSH_SLEEP"]))
     repo = args[2].rsplit(":", 1)[0]
     print(f"{repo}@{cfg.get('FAKE_PUSH_DIGEST') or layout_digest()}")
 elif tool == "cosign":
@@ -363,6 +366,32 @@ class Release(unittest.TestCase):
         # The token goes to the GitHub API, and nowhere else.
         self.assertEqual(FakeGitHub.seen, [f"token {TOKEN}"])
         self.assert_no_secret_leaks()
+
+    def test_a_killed_run_removes_the_registry_login(self):
+        import signal
+        import time
+        cfg = {"FAKE_LOG": str(self.log), "FAKE_LAYOUT": str(self.layout), "FAKE_PUSH_SLEEP": "30"}
+        (self.bin / "fake.json").write_text(json.dumps(cfg))
+        e = {"PATH": f"{self.bin}:{os.environ['PATH']}", "HOME": str(self.tmp), "TERRARIUM_RELEASE_TEST": "1",
+             **SECRETS}
+        proc = subprocess.Popen(
+            [sys.executable, "-I", str(SCRIPT), "publish", "--out", str(self.out), "--gate", str(self.bin / "gate"),
+             "--github-api", f"http://127.0.0.1:{self.api.server_address[1]}"],
+            cwd=self.repo, env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        deadline = time.time() + 30
+        push = None
+        while time.time() < deadline and push is None:
+            push = next((c for c in self.calls() if c["tool"] == "crane"), None)
+            time.sleep(0.1)
+        self.assertIsNotNone(push, "crane push did not start")
+        self.assertTrue(Path(push["docker_config"]).exists())
+        proc.send_signal(signal.SIGTERM)
+        out, err = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 1, out + err)
+        self.assertIn("stopped by signal", err)
+        self.assertFalse(Path(push["docker_config"]).exists())
+        self.assertTrue(release._is_tmpfs(str(Path(push["docker_config"]).parent)))
 
     def test_a_token_without_the_scopes_stops_before_the_gate(self):
         FakeGitHub.scopes = "repo"

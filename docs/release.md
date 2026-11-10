@@ -255,7 +255,7 @@ never into a sandbox or to the VM.
 
 | Env | Secret | What it is | Who gets it |
 |---|---|---|---|
-| `GHCR_TOKEN` (`GHCR_USER`, default `wiltaylor`) and `GH_TOKEN` | `release-github` (field `value`) | one classic token with `repo` and `write:packages` (the operator's choice; it reaches all of the operator's repos) | crane and cosign through a mode-0600 `config.json` in a private temporary directory that the script removes at the end; `gh` and the scope check as `GH_TOKEN` |
+| `GHCR_TOKEN` (`GHCR_USER`, default `wiltaylor`) and `GH_TOKEN` | `release-github` (field `value`) | one classic token with `repo` and `write:packages` (the operator's choice; it reaches all of the operator's repos) | crane and cosign through a mode-0600 `config.json` in a private directory in RAM (`XDG_RUNTIME_DIR` or `/dev/shm` on tmpfs; no tmpfs stops the release) that the script removes at the end, also when the run is stopped by SIGTERM, SIGHUP or SIGINT; `gh` and the scope check as `GH_TOKEN` |
 | `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` | `release-cosign` (fields `private_key`, `password`) | the encrypted private key of the release key pair (cosign 3.1.4), base64-encoded in one line, and its password | `cosign sign` and `cosign sign-blob` only. The script decodes the key in memory and passes the PEM in the env (`--key env://COSIGN_PRIVATE_KEY`): no key file |
 
 No secret is on a command line, in the output, in `release-out/`, in the

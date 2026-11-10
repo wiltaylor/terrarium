@@ -58,6 +58,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -594,10 +595,33 @@ def step_release(ctx: Ctx, version: str, prerelease: bool, commit: str, digest: 
 
 
 # ---------------------------------------------------------------------------
+def ram_dir(environ: dict[str, str]) -> str:
+    """A writable tmpfs for the registry login: XDG_RUNTIME_DIR or /dev/shm, never a disk."""
+    for d in (environ.get("XDG_RUNTIME_DIR"), "/dev/shm"):
+        if d and os.path.isdir(d) and os.access(d, os.W_OK) and _is_tmpfs(d):
+            return d
+    raise ReleaseError("no RAM directory for the registry login (XDG_RUNTIME_DIR or /dev/shm on tmpfs)")
+
+
+def _is_tmpfs(path: str) -> bool:
+    try:
+        mounts = Path("/proc/self/mounts").read_text().splitlines()
+    except OSError:
+        return False
+    real = os.path.realpath(path)
+    best, fstype = "", ""
+    for line in mounts:
+        parts = line.split()
+        if len(parts) > 2:
+            mnt = parts[1].replace("\\040", " ")
+            if (real == mnt or real.startswith(mnt.rstrip("/") + "/")) and len(mnt) > len(best):
+                best, fstype = mnt, parts[2]
+    return fstype in ("tmpfs", "ramfs")
+
+
 def registry_login(ctx: Ctx) -> None:
-    """A private DOCKER_CONFIG for crane and cosign; the token is in no argv."""
-    base = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
-    ctx.secret_dir = Path(tempfile.mkdtemp(prefix="terrarium-release-", dir=base))
+    """A private DOCKER_CONFIG for crane and cosign in RAM; the token is in no argv."""
+    ctx.secret_dir = Path(tempfile.mkdtemp(prefix="terrarium-release-", dir=ram_dir(ctx.environ)))
     ctx.secret_dir.chmod(0o700)
     user = ctx.environ.get("GHCR_USER", "wiltaylor")
     auth = base64.b64encode(f"{user}:{ctx.environ['GHCR_TOKEN']}".encode()).decode()
@@ -667,6 +691,13 @@ def main(argv: list[str] | None = None) -> int:
         gate=a.gate, run_gate=not a.no_gate, signing_config=a.signing_config,
         environ=dict(os.environ), github_api=a.github_api,
     )
+    # A killed run (SIGTERM, SIGHUP, SIGINT) still removes the registry login:
+    # the signal becomes an exception, and the `finally` of release() runs.
+    def stop(signum, _frame):
+        raise ReleaseError(f"stopped by signal {signum}")
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, stop)
     try:
         return release(ctx)
     except (ReleaseError, release_version.VersionError) as e:
