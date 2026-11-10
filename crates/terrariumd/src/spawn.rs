@@ -1334,7 +1334,7 @@ fn bound_prompt_section(owner: &str, bound: &str) -> String {
          task. You live until {object} is finished: merged onto `next`, moved to `done`, or \
          archived. Then the daemon closes you, and `{owner}` gets your last message as the \
          result.\n\n\
-         - When you send the card on (validating, review, accepted), end your turn. Do not run \
+         - When you send the card on (validating, review, merge_queue, accepted), end your turn. Do not run \
          `terrarium agent done`. While the card waits, the daemon stops you.\n\
          - When the card comes back (a failed validation, review, or merge), the daemon starts \
          you again in this session and workspace. The turn is `[System:card <id>]` with the \

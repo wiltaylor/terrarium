@@ -410,46 +410,74 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
 fn a_restore_with_a_dir_entry_on_a_symlink_entry_changes_nothing() {
     let fx = fixture();
     let full = fx.make(Kind::Full, false, None);
-    let link = "state/agents/A1/harness/cred/account";
-    let target = fx.state.join("credentials/accounts/claude/a");
     let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o7777;
-    let before = mode(&target);
-    // Copy the zip with a second manifest entry on the symlink: a dir of
-    // mode 0777.
-    let bad = fx.dir.join("dup.zip");
-    {
-        let mut src = ZipArchive::new(File::open(&full.path).unwrap()).unwrap();
-        let mut out = ZipWriter::new(File::create(&bad).unwrap());
-        for i in 0..src.len() {
-            let mut f = src.by_index(i).unwrap();
-            let name = f.name().unwrap().into_owned();
-            let mut data = Vec::new();
-            f.read_to_end(&mut data).unwrap();
-            if name == MANIFEST {
-                let mut m: Manifest = serde_json::from_slice(&data).unwrap();
-                assert!(
-                    m.entries
-                        .iter()
-                        .any(|e| e.path == link && e.kind == EntryKind::Symlink)
-                );
-                let mut dir = entry(link, EntryKind::Dir, None);
-                dir.mode = 0o777;
-                m.entries.push(dir);
-                data = serde_json::to_vec(&m).unwrap();
+    // A dir outside every root, for a link with an absolute target.
+    let outside = fx._tmp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
+    let outside_link = outside.to_str().unwrap().to_owned();
+    // (the symlink path, its new target when the backup does not have it,
+    // the dir that the dir entry would change)
+    let cases = [
+        (
+            "state/agents/A1/harness/cred/account",
+            None,
+            fx.state.join("credentials/accounts/claude/a"),
+        ),
+        (
+            "state/agents/A1/escape",
+            Some(outside_link),
+            outside.clone(),
+        ),
+    ];
+    for (n, (link, new_target, target)) in cases.into_iter().enumerate() {
+        let before = mode(&target);
+        // Copy the zip with a second manifest entry on the symlink: a dir of
+        // mode 0777.
+        let bad = fx.dir.join(format!("dup{n}.zip"));
+        {
+            let mut src = ZipArchive::new(File::open(&full.path).unwrap()).unwrap();
+            let mut out = ZipWriter::new(File::create(&bad).unwrap());
+            for i in 0..src.len() {
+                let mut f = src.by_index(i).unwrap();
+                let name = f.name().unwrap().into_owned();
+                let mut data = Vec::new();
+                f.read_to_end(&mut data).unwrap();
+                if name == MANIFEST {
+                    let mut m: Manifest = serde_json::from_slice(&data).unwrap();
+                    match &new_target {
+                        None => assert!(
+                            m.entries
+                                .iter()
+                                .any(|e| e.path == link && e.kind == EntryKind::Symlink)
+                        ),
+                        Some(t) => {
+                            assert!(
+                                Path::new(t).is_absolute() && !Path::new(t).starts_with(&fx.state)
+                            );
+                            m.entries
+                                .push(entry(link, EntryKind::Symlink, Some(t.as_str())));
+                        }
+                    }
+                    let mut dir = entry(link, EntryKind::Dir, None);
+                    dir.mode = 0o777;
+                    m.entries.push(dir);
+                    data = serde_json::to_vec(&m).unwrap();
+                }
+                out.start_file(name, SimpleFileOptions::default()).unwrap();
+                out.write_all(&data).unwrap();
             }
-            out.start_file(name, SimpleFileOptions::default()).unwrap();
-            out.write_all(&data).unwrap();
+            out.finish().unwrap();
         }
-        out.finish().unwrap();
+        let err = restore(&bad, &fx.roots(false), &RestoreOptions::default()).unwrap_err();
+        assert!(format!("{err:#}").contains("twice"), "{link}: {err:#}");
+        assert_eq!(mode(&target), before, "{link}");
+        assert!(
+            !fx.state
+                .join(format!("{STAGING_PREFIX}{}", full.header.id))
+                .exists()
+        );
     }
-    let err = restore(&bad, &fx.roots(false), &RestoreOptions::default()).unwrap_err();
-    assert!(format!("{err:#}").contains("twice"), "{err:#}");
-    assert_eq!(mode(&target), before);
-    assert!(
-        !fx.state
-            .join(format!("{STAGING_PREFIX}{}", full.header.id))
-            .exists()
-    );
 }
 
 #[test]
@@ -478,10 +506,58 @@ fn list_and_prune_keep_the_newest_fulls_and_their_diffs() {
     assert_eq!(d2.header.base.as_ref().unwrap().id, f2.header.id);
     let l = list(&fx.dir).unwrap();
     assert_eq!(l.len(), 4);
-    let removed = prune(&fx.dir, 1).unwrap();
+    // Nothing goes before the newest full backup is verified.
+    assert!(prune(&fx.dir, 1, &f1.header.id).is_err());
+    assert_eq!(list(&fx.dir).unwrap().len(), 4);
+    let removed = prune(&fx.dir, 1, &f2.header.id).unwrap();
     assert_eq!(removed.len(), 2);
     assert!(removed.contains(&f1.name) && removed.contains(&d1.name));
     assert!(f2.path.exists() && d2.path.exists());
     assert!(is_backup_name(&f2.name));
     assert!(!is_backup_name("../x.zip") && !is_backup_name(".x.zip.partial"));
+}
+
+#[test]
+fn the_drill_restores_a_sealed_diff_into_a_scratch_dir_and_checks_it() {
+    let fx = fixture();
+    fx.make(Kind::Full, true, Some("pw"));
+    fs::write(fx.config.join("prompts/lead.md"), "lead v2").unwrap();
+    let d = fx.make(Kind::Diff, true, Some("pw"));
+    let scratch = fx.dir.join(format!("{DRILL_PREFIX}t"));
+    let r = drill(&d.path, None, Some("pw"), &scratch).unwrap();
+    assert_eq!(r.id, d.header.id);
+    assert_eq!(r.kind, Kind::Diff);
+    assert_eq!(r.integrity, "ok");
+    assert_eq!(r.db_user_version, 57);
+    assert!(r.secrets_key);
+    assert!(r.files > 0);
+    assert_eq!(
+        fs::read_to_string(scratch.join("config/prompts/lead.md")).unwrap(),
+        "lead v2"
+    );
+    let c = rusqlite::Connection::open(scratch.join("state").join(DB_FILE)).unwrap();
+    let v: String = c.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, "one");
+    // The live data did not change.
+    assert_eq!(
+        fs::read_to_string(fx.config.join("prompts/lead.md")).unwrap(),
+        "lead v2"
+    );
+    assert!(fs::read_dir(&fx.state).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(PRE_RESTORE_PREFIX)
+    }));
+    // A dir with content is refused; a wrong passphrase fails.
+    assert!(drill(&d.path, None, Some("pw"), &scratch).is_err());
+    let other = fx.dir.join(format!("{DRILL_PREFIX}u"));
+    assert!(drill(&d.path, None, Some("bad"), &other).is_err());
+    // A drill dir is not a backup in the list.
+    assert!(
+        list(&fx.dir)
+            .unwrap()
+            .iter()
+            .all(|l| !l.name.starts_with('.'))
+    );
 }

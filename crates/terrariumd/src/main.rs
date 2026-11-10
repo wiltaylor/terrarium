@@ -865,6 +865,61 @@ fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Resul
                 ),
             );
         }
+        BackupCommand::Drill {
+            file,
+            base,
+            into,
+            keep,
+            passphrase,
+            json,
+        } => {
+            let scratch = into.clone().unwrap_or_else(|| {
+                default_dir.join(format!("{}{}", backup::DRILL_PREFIX, ulid::Ulid::new()))
+            });
+            // Checked here too: the cleanup below deletes the dir, so it
+            // must not hold anything of its own.
+            if std::fs::read_dir(&scratch).is_ok_and(|mut d| d.next().is_some()) {
+                anyhow::bail!("the drill dir {} is not empty", scratch.display());
+            }
+            let r = with_passphrase(passphrase, |p| {
+                let r = backup::drill(file, base.as_deref(), p.as_deref(), &scratch);
+                if r.is_err() && !*keep {
+                    let _ = std::fs::remove_dir_all(&scratch);
+                }
+                r
+            });
+            if !*keep {
+                let _ = std::fs::remove_dir_all(&scratch);
+            }
+            let r = r?;
+            let left = if *keep {
+                format!(
+                    "; the restored tree is in {} (it holds the secrets: delete it)",
+                    r.dir.display()
+                )
+            } else {
+                String::new()
+            };
+            print(
+                *json,
+                &serde_json::to_value(&r)?,
+                format!(
+                    "drill passed: {} backup {} restored into a scratch dir: {} entries, {} files, \
+                     database integrity {}, schema version {}{}{left}",
+                    r.kind,
+                    r.id,
+                    r.entries,
+                    r.files,
+                    r.integrity,
+                    r.db_user_version,
+                    if r.secrets_key {
+                        ", secrets.key present"
+                    } else {
+                        ""
+                    }
+                ),
+            );
+        }
         BackupCommand::Restore {
             file,
             base,
@@ -878,6 +933,12 @@ fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Resul
                     settings.socket.display()
                 );
             }
+            // A daemon on another socket holds the state lock: refuse, and
+            // hold the lock so that no daemon starts during the restore.
+            std::fs::create_dir_all(&settings.state_dir)
+                .with_context(|| format!("cannot create {}", settings.state_dir.display()))?;
+            let _state_lock = terrariumd::lock_state_dir(&settings.state_dir)
+                .context("a daemon may use this state dir: stop it first, then restore")?;
             let roots = Roots {
                 state: settings.state_dir.clone(),
                 config: Some(settings.config_repo.clone()),
@@ -891,7 +952,12 @@ fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Resul
                         base: base.clone(),
                         passphrase: p,
                         skip_work: *skip_work,
-                        keep: vec![default_dir.clone(), file.clone()],
+                        // The held lock file stays in place.
+                        keep: vec![
+                            default_dir.clone(),
+                            file.clone(),
+                            settings.state_dir.join(terrariumd::STATE_LOCK),
+                        ],
                     },
                 )
             })?;

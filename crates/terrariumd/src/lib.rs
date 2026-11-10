@@ -178,8 +178,11 @@ impl Daemon {
 pub const STATE_LOCK: &str = "daemon.lock";
 
 /// Take the exclusive lock of `state_dir`, or fail when another daemon
-/// holds it.
-fn lock_state_dir(state_dir: &std::path::Path) -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
+/// holds it. The CLI restore holds it too, so that no daemon starts on the
+/// state dir while it is replaced.
+pub fn lock_state_dir(
+    state_dir: &std::path::Path,
+) -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
     use nix::fcntl::{Flock, FlockArg};
     use std::os::unix::fs::OpenOptionsExt as _;
     let path = state_dir.join(STATE_LOCK);
@@ -940,6 +943,8 @@ pub async fn apply_definitions(
         })
         .await?;
     rule_errors.extend(stored);
+    // TER-243: merge_queue into the wait overrides of older migrations.
+    rule_errors.extend(store::rules::add_merge_queue(&state.db).await);
     report.errors.extend(rule_errors);
     // The template files, before the fleets: a fleet agent may name one.
     match template_files::refresh(state).await {

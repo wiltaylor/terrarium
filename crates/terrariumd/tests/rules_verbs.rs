@@ -338,6 +338,95 @@ async fn version_cut_key_is_unique_when_same_members_are_cut_again() {
         .unwrap();
 }
 
+/// A version cut with one card and no wait, outside the rule engine.
+async fn cut_now(td: &TestDaemon, project: &'static str) -> Option<String> {
+    state(td)
+        .db
+        .write("test", move |t| {
+            terrariumd::store::version_groups::cut(t, &Actor::Operator, project, "test", 1, 240)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn version_cut_waits_while_a_group_is_past_cut_and_a_later_step_finishes_cut() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a","column":"accepted","labels":["version:vnext"]}),
+    )
+    .await;
+    let first = cut_now(&td, "p").await.expect("first cut");
+    let path = format!("/api/projects/p/version-groups/{first}");
+    // A group still in its cut step does not stop a second group.
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b","column":"accepted","labels":["version:vnext"]}),
+    )
+    .await;
+    let second = cut_now(&td, "p")
+        .await
+        .expect("second cut while first is in cut");
+    let step = td
+        .post(
+            &format!("{path}/status"),
+            json!({"step":"version branch e2e","state":"running"}),
+        )
+        .await;
+    assert_eq!(step.status, 200, "{}", step.body);
+    assert_eq!(step.body["changed"], true);
+    let steps = &step.body["group"]["steps"];
+    assert_eq!(steps[1]["name"], "cut");
+    assert_eq!(steps[1]["state"], "done");
+    assert!(steps[1]["finished_at"].is_string());
+    assert_eq!(steps[2]["state"], "running");
+    // A pending later step does not finish cut.
+    let other = td
+        .post(
+            &format!("/api/projects/p/version-groups/{second}/status"),
+            json!({"step":"pre-release","state":"pending"}),
+        )
+        .await;
+    assert_eq!(other.status, 200, "{}", other.body);
+    assert_eq!(other.body["group"]["steps"][1]["state"], "running");
+    // The first group is past cut: the next accepted card waits.
+    let c = new_card(
+        &td,
+        "p",
+        json!({"title":"c","column":"accepted","labels":["version:vnext"]}),
+    )
+    .await;
+    assert_eq!(cut_now(&td, "p").await, None);
+    assert!(card(&td, &c).await.get("group").is_none());
+    // Another project is not affected.
+    td.project("q").await;
+    new_card(
+        &td,
+        "q",
+        json!({"title":"q","column":"accepted","labels":["version:vnext"]}),
+    )
+    .await;
+    assert!(cut_now(&td, "q").await.is_some());
+    // Both groups built: the waiting card is cut into a new group.
+    for key in [&first, &second] {
+        let built = td
+            .post(
+                &format!("/api/projects/p/version-groups/{key}/built"),
+                json!({"version":"v0.36.0"}),
+            )
+            .await;
+        assert_eq!(built.status, 200, "{}", built.body);
+    }
+    assert_eq!(card(&td, &a).await["column"], "done");
+    assert_eq!(card(&td, &b).await["column"], "done");
+    let third = cut_now(&td, "p").await.expect("cut after the build");
+    assert_eq!(card(&td, &c).await["group"]["key"], third.as_str());
+}
+
 #[tokio::test]
 async fn version_cut_freezes_members_and_explicit_built_completes_only_snapshot() {
     let td = TestDaemon::start().await;

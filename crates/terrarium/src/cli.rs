@@ -3803,8 +3803,12 @@ pub enum GroupCmd {
         #[arg(long)]
         eta: Option<String>,
     },
-    /// Acknowledge publication after release CI succeeds
-    Built { key: String, version: String },
+    /// Acknowledge publication after release CI succeeds: one or more
+    /// group keys, then the version (`group built KEY... VERSION`)
+    Built {
+        #[arg(value_name = "KEY... VERSION", num_args = 2.., required = true)]
+        keys_and_version: Vec<String>,
+    },
     /// Remove a snapshot member, for example a card returned for a fix
     Remove { key: String, card: String },
     /// Add a late accepted card to an open version group

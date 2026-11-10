@@ -60,6 +60,12 @@ pub fn cut(
     if min_cards < 1 {
         return Err(ApiError::invalid("min_cards must be positive"));
     }
+    // One release at a time: while a version group of the project is open
+    // past its cut step, new accepted cards wait for the next version
+    // (TER-609, from the 0.36.0 cuts).
+    if open_past_cut(t, project)? {
+        return Ok(None);
+    }
     let due = pick.first_since.and_then(|at| at.checked_add_signed(wait));
     if pick.cards.is_empty()
         || (pick.waiting < min_cards as usize && due.is_none_or(|at| at > Utc::now()))
@@ -140,6 +146,46 @@ pub fn cut(
         None,
     )?;
     Ok(Some(key))
+}
+
+/// Whether an open version group of the project has left its cut step:
+/// the cut step is done, or a later step has started.
+pub fn open_past_cut(conn: &Connection, project: &str) -> ApiResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM card_groups g
+           JOIN group_steps c ON c.group_card = g.card AND c.name = 'cut'
+           JOIN group_steps s ON s.group_card = g.card
+         WHERE g.project = ?1 AND g.closed_at IS NULL AND g.key LIKE 'version:%'
+           AND (c.state = 'done' OR (s.position > c.position AND s.state <> 'pending')))",
+        [project],
+        |r| r.get(0),
+    )?)
+}
+
+/// Record a version step. A later step that starts (running, done or
+/// failed) finishes the cut step, so the group shows it is past the cut.
+pub fn step(
+    t: &mut Tx<'_>,
+    g: &groups::Group,
+    name: &str,
+    state: &str,
+    text: Option<&str>,
+    eta: Option<&str>,
+) -> ApiResult<bool> {
+    let at = STEPS
+        .iter()
+        .position(|s| *s == name)
+        .ok_or_else(|| ApiError::invalid("unknown version step"))?;
+    let cut = STEPS.iter().position(|s| *s == "cut").unwrap_or(1);
+    let mut changed = false;
+    if at > cut
+        && state != "pending"
+        && g.steps.iter().any(|s| s.name == "cut" && s.state != "done")
+    {
+        changed |= groups::step(t, g, "cut", Some("done"), None, None)?;
+    }
+    changed |= groups::step(t, g, name, Some(state), text, eta)?;
+    Ok(changed)
 }
 
 /// Add a late accepted card to an open version group (TER-608). The card

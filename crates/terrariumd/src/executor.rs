@@ -485,6 +485,15 @@ pub fn exec_limits(
     }))
 }
 
+/// A `host` target whose host agent reported enforced native GPU support
+/// (TER-345): its commands run through the root helper.
+pub fn native_enforced(def: &TargetDef, caps: Option<&HostCapabilities>) -> bool {
+    def.kind == TargetKind::Host
+        && caps
+            .and_then(|c| c.native_gpu.as_ref())
+            .is_some_and(|n| n.enforced)
+}
+
 /// On a host agent with enforced native GPU support (TER-345), every
 /// command on a `host` target runs through the root helper: with no
 /// reservation it gets no GPU. Elsewhere the grant is dropped, so a host
@@ -500,11 +509,7 @@ pub fn native_gpu_limits(
     operator: bool,
     limits: Option<ExecLimits>,
 ) -> ApiResult<Option<ExecLimits>> {
-    let native = def.kind == TargetKind::Host
-        && caps
-            .and_then(|c| c.native_gpu.as_ref())
-            .is_some_and(|n| n.enforced);
-    if !native {
+    if !native_enforced(def, caps) {
         return Ok(limits.map(|l| ExecLimits {
             native_gpu: None,
             ..l

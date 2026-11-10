@@ -326,13 +326,42 @@ finally:
 /// native GPU enforcement the operator scope (the whole workspace root,
 /// no tmpfs) keeps their mount check and their mkdir working; an agent's
 /// own execs keep the holder `<project>/<agent>` and its own directory.
-fn root_script(argv: Vec<String>, timeout_secs: u64) -> RemoteCmd {
+///
+/// `cwd` comes from [`script_cwd`].
+fn root_script(argv: Vec<String>, timeout_secs: u64, cwd: Option<&str>) -> RemoteCmd {
     RemoteCmd {
         argv,
+        cwd: cwd.map(str::to_owned),
         timeout_secs: Some(timeout_secs),
         operator: true,
         ..RemoteCmd::default()
     }
+}
+
+/// The working directory of the root scripts on `def` with the owned-root
+/// base `base` (TER-615). The native helper refuses a working directory
+/// outside its `workspace_root`, and a command with no cwd gets the host
+/// agent's own `work_dir`, which is outside it (`/work` on helios). So on
+/// a host with native GPU enforcement the scripts run in the base: the
+/// `work_root` is under the helper's `workspace_root` there (TER-485), and
+/// the helper accepts the workspace root itself. The scripts use only
+/// absolute paths, so the directory changes nothing else. Elsewhere they
+/// keep no cwd: the base can be missing before the first prepare creates
+/// it.
+fn script_cwd(state: &Shared, def: &TargetDef, base: &str) -> Option<String> {
+    let caps = def
+        .host
+        .as_deref()
+        .and_then(|h| state.executor.hosts.capabilities(h));
+    script_cwd_for(def, caps.as_ref(), base)
+}
+
+fn script_cwd_for(
+    def: &TargetDef,
+    caps: Option<&terrarium_core::protocol::HostCapabilities>,
+    base: &str,
+) -> Option<String> {
+    crate::executor::native_enforced(def, caps).then(|| base.to_owned())
 }
 
 fn command(
@@ -342,6 +371,7 @@ fn command(
     name: &str,
     agent: &str,
     dest: &str,
+    cwd: Option<&str>,
 ) -> ApiResult<RemoteCmd> {
     root(base, project, name)?;
     Ok(root_script(
@@ -352,6 +382,7 @@ fn command(
         .map(str::to_owned)
         .collect(),
         if mode == "prepare" { 120 } else { 900 },
+        cwd,
     ))
 }
 
@@ -397,12 +428,18 @@ pub async fn prepare(
     if !card || def.kind == terrarium_core::config::TargetKind::Vmlab {
         return Ok(None);
     }
+    let stored = stored_base(state, &a.id, &def.name).await?;
+    let mut current = stored.unwrap_or_else(|| base(def).to_owned());
     // Probe separately: a missing interpreter is a legacy target, whereas a
     // failed ownership check must still fail closed.
     let probe = start_cmd(
         state,
         def,
-        &root_script(vec!["sh".into(), "-c".into(), PYTHON_PROBE.into()], 30),
+        &root_script(
+            vec!["sh".into(), "-c".into(), PYTHON_PROBE.into()],
+            30,
+            script_cwd(state, def, &current).as_deref(),
+        ),
     )?
     .collect(4096)
     .await;
@@ -414,8 +451,6 @@ pub async fn prepare(
     if !probe.end().success() {
         return Err(ApiError::invalid(probe_failure(&probe)));
     }
-    let stored = stored_base(state, &a.id, &def.name).await?;
-    let mut current = stored.unwrap_or_else(|| base(def).to_owned());
     let mut path = root(&current, &a.project, &a.name)?;
     if dest.is_some_and(|d| !inside(&path, d)) {
         warn_outside(state, actor, def, &path).await?;
@@ -454,7 +489,15 @@ pub async fn prepare(
     let mut out = start_cmd(
         state,
         def,
-        &command("prepare", &current, &a.project, &a.name, &a.id, relative)?,
+        &command(
+            "prepare",
+            &current,
+            &a.project,
+            &a.name,
+            &a.id,
+            relative,
+            script_cwd(state, def, &current).as_deref(),
+        )?,
     )?
     .collect(4096)
     .await;
@@ -464,7 +507,7 @@ pub async fn prepare(
     {
         // Exit 3 means the agent user cannot reach the default base, so no
         // root of this agent exists there: switching the row orphans nothing.
-        current = home_fallback(state, def).await?;
+        current = home_fallback(state, def, &current).await?;
         path = root(&current, &a.project, &a.name)?;
         let (id, target, fallback) = (a.id.clone(), def.name.clone(), current.clone());
         state
@@ -487,7 +530,15 @@ pub async fn prepare(
         out = start_cmd(
             state,
             def,
-            &command("prepare", &current, &a.project, &a.name, &a.id, "")?,
+            &command(
+                "prepare",
+                &current,
+                &a.project,
+                &a.name,
+                &a.id,
+                "",
+                script_cwd(state, def, &current).as_deref(),
+            )?,
         )?
         .collect(4096)
         .await;
@@ -533,12 +584,17 @@ fn probe_failure(probe: &crate::executor::Collected) -> String {
     }
 }
 
-/// The home fallback base of the agent user on the target.
-async fn home_fallback(state: &Shared, def: &TargetDef) -> ApiResult<String> {
+/// The home fallback base of the agent user on the target. `base` is the
+/// base that failed, for [`script_cwd`].
+async fn home_fallback(state: &Shared, def: &TargetDef, base: &str) -> ApiResult<String> {
     let out = start_cmd(
         state,
         def,
-        &root_script(vec!["python3".into(), "-c".into(), HOME_PROBE.into()], 30),
+        &root_script(
+            vec!["python3".into(), "-c".into(), HOME_PROBE.into()],
+            30,
+            script_cwd(state, def, base).as_deref(),
+        ),
     )?
     .collect(4096)
     .await;
@@ -648,7 +704,15 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         let measured = match start_cmd(
             state,
             &row.def,
-            &command("measure", &owned, &project, &name, &id, "")?,
+            &command(
+                "measure",
+                &owned,
+                &project,
+                &name,
+                &id,
+                "",
+                script_cwd(state, &row.def, &owned).as_deref(),
+            )?,
         ) {
             Ok(run) => run.collect(4096).await,
             Err(e) => {
@@ -678,7 +742,15 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         let run = match start_cmd(
             state,
             &row.def,
-            &command("delete", &owned, &project, &name, &id, "")?,
+            &command(
+                "delete",
+                &owned,
+                &project,
+                &name,
+                &id,
+                "",
+                script_cwd(state, &row.def, &owned).as_deref(),
+            )?,
         ) {
             Ok(run) => run,
             Err(e) => {
@@ -836,7 +908,7 @@ mod tests {
         let ws = std::fs::canonicalize(ws.path()).unwrap();
         let mut scripts: Vec<RemoteCmd> = ["prepare", "measure", "delete"]
             .into_iter()
-            .map(|mode| command(mode, "/srv/roots", "terra", "x", "agent-x", "").unwrap())
+            .map(|mode| command(mode, "/srv/roots", "terra", "x", "agent-x", "", None).unwrap())
             .collect();
         for cmd in &scripts {
             assert!(cmd.argv.iter().any(|a| a == "x"));
@@ -845,10 +917,12 @@ mod tests {
         scripts.push(root_script(
             vec!["sh".into(), "-c".into(), PYTHON_PROBE.into()],
             30,
+            None,
         ));
         scripts.push(root_script(
             vec!["python3".into(), "-c".into(), HOME_PROBE.into()],
             30,
+            None,
         ));
         for cmd in &scripts {
             assert!(cmd.operator && cmd.holder.is_none(), "{cmd:?}");
@@ -881,6 +955,123 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.to_string().contains("has no holder"), "{e}");
+    }
+
+    /// TER-615: on a host with native GPU enforcement every root script
+    /// (the probes, prepare, measure, delete) runs in the owned-root base,
+    /// so the helper takes it even though the host agent's own `work_dir`
+    /// (`/work` on helios) is outside its `workspace_root`. The path is the
+    /// real one: the daemon frame, the host agent's exec plan, the
+    /// `start_request` that fills a missing cwd with `work_dir`, and the
+    /// helper's `plan_start`. Without the cwd the same command is refused
+    /// as on helios. Elsewhere the scripts keep no cwd.
+    #[test]
+    fn root_scripts_on_a_native_host_run_in_the_base_under_the_workspace_root() {
+        use terrarium_core::protocol::{HostCapabilities, NativeGpuCapability};
+        use terrarium_host::native::{Ctx, HostDevices, Identity, plan_start, start_request};
+        let ws = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(ws.path()).unwrap();
+        let base = ws.to_str().unwrap().to_owned();
+        let mut h: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
+        h.name = "box".into();
+        h.work_root = Some(base.clone());
+        let caps = HostCapabilities {
+            native_gpu: Some(NativeGpuCapability {
+                enforced: true,
+                version: 1,
+                reason: None,
+            }),
+            ..Default::default()
+        };
+        let cwd = script_cwd_for(&h, Some(&caps), &base);
+        assert_eq!(cwd.as_deref(), Some(base.as_str()));
+        // No native enforcement, or not a host target: no cwd, as before.
+        assert_eq!(script_cwd_for(&h, None, &base), None);
+        assert_eq!(
+            script_cwd_for(&h, Some(&HostCapabilities::default()), &base),
+            None
+        );
+        let mut d = h.clone();
+        d.kind = terrarium_core::config::TargetKind::Docker;
+        assert_eq!(script_cwd_for(&d, Some(&caps), &base), None);
+
+        let ctx = Ctx {
+            workspace_root: ws.clone(),
+            state_dir: "/run/terrarium-host-helper/sessions".into(),
+            dev_dir: "/dev".into(),
+            support_nodes: vec![],
+        };
+        let workload = Identity {
+            name: String::new(),
+            uid: 2001,
+            gid: 2001,
+        };
+        // The host agent's work_dir, outside the workspace root (`/work`
+        // on helios; a directory that exists on every test machine here).
+        let work = tempfile::tempdir().unwrap();
+        let host_work_dir = std::fs::canonicalize(work.path()).unwrap();
+        let host_work_dir = host_work_dir.as_path();
+        assert!(!host_work_dir.starts_with(&ws));
+        let helper = |cmd: &RemoteCmd| {
+            let l = crate::executor::native_gpu_limits(
+                &h,
+                Some(&caps),
+                cmd.holder.as_deref(),
+                cmd.operator,
+                None,
+            )
+            .unwrap();
+            let terrarium_host::protocol::DaemonFrame::Exec(req) =
+                crate::executor::host_frame(&h, None, cmd, l).unwrap()(1)
+            else {
+                panic!("not an exec frame");
+            };
+            let plan = terrarium_host::verb::plan_exec(&req, &Default::default()).unwrap();
+            let start = start_request(&plan.exec, 1, req.limits.as_ref(), host_work_dir);
+            assert_eq!(start.holder, "operator");
+            plan_start(&ctx, &start, &[], &HostDevices, 1, &workload).map(|_| start.cwd)
+        };
+        let mut scripts: Vec<RemoteCmd> = ["prepare", "measure", "delete"]
+            .into_iter()
+            .map(|mode| command(mode, &base, "terra", "x", "agent-x", "", cwd.as_deref()).unwrap())
+            .collect();
+        scripts.push(root_script(
+            vec!["sh".into(), "-c".into(), PYTHON_PROBE.into()],
+            30,
+            cwd.as_deref(),
+        ));
+        scripts.push(root_script(
+            vec!["python3".into(), "-c".into(), HOME_PROBE.into()],
+            30,
+            cwd.as_deref(),
+        ));
+        for cmd in &scripts {
+            assert_eq!(helper(cmd).unwrap(), base, "{cmd:?}");
+            // The same script with no cwd: the helper gets the host
+            // agent's work_dir and refuses it, as on helios.
+            let bare = RemoteCmd {
+                cwd: None,
+                ..cmd.clone()
+            };
+            let e = helper(&bare).unwrap_err();
+            assert!(
+                e.message.contains(&format!(
+                    "{} is not under the workspace root",
+                    host_work_dir.display()
+                )),
+                "{e:?}"
+            );
+        }
+        // The helper takes the workspace root itself, but nothing outside
+        // it: `/` and the host agent's work_dir stay refused.
+        for outside in ["/", host_work_dir.to_str().unwrap()] {
+            let cmd = RemoteCmd {
+                cwd: Some(outside.into()),
+                ..scripts[0].clone()
+            };
+            let e = helper(&cmd).unwrap_err();
+            assert!(e.message.contains("not under the workspace root"), "{e:?}");
+        }
     }
 
     /// The owned root as the agent's own directory under the workspace root
@@ -937,7 +1128,7 @@ mod tests {
             assert_eq!(measurement(bad), None);
         }
         for mode in ["prepare", "measure", "delete"] {
-            let cmd = command(mode, "/src/terrarium", "p", "a", "id", "").unwrap();
+            let cmd = command(mode, "/src/terrarium", "p", "a", "id", "", None).unwrap();
             assert_eq!(
                 cmd.timeout_secs,
                 Some(if mode == "prepare" { 120 } else { 900 })
