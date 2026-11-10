@@ -1513,8 +1513,12 @@ rule \"agent-unpark\" {{\n  description = \"The card came back out of a wait col
         let plain = cols(&[("review", Some("review")), ("accepted", Some("accepted"))]);
         let own = parse(&text, "rules.wcl", &ctx(&plain)).unwrap();
         assert_eq!(add_merge_queue_to_wait_overrides(&text, &own, &plain), None);
-        // An override that the admin edited after the migration.
-        let edited = text.replace("max_per_hour = 600\n  when \"data.change\" { eq = \"moved\" }\n  when \"data.to\" { one_of", "max_per_hour = 60\n  when \"data.change\" { eq = \"moved\" }\n  when \"data.to\" { one_of");
+        // An override that the admin edited after the migration: its
+        // block is no longer the text that the migration wrote.
+        let edited = text.replace(
+            "  when \"data.to\" { one_of",
+            "  // kept as it is\n  when \"data.to\" { one_of",
+        );
         let own = parse(&edited, "rules.wcl", &ctx(&board)).unwrap();
         let new = add_merge_queue_to_wait_overrides(&edited, &own, &board).expect("unpark changes");
         assert!(
