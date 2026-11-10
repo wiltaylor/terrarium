@@ -36,9 +36,11 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 /// The deadline of the waits for a state. Under load one start of the fake
-/// TUI took 18 s (TER-117), so 15 s was too short. Only a failing test
+/// TUI took 18 s (TER-117), so 15 s was too short, and 45 s was too short
+/// at load 40 to 60 on 32 cores (TER-647). The state waits of [`Td`] count
+/// only time without progress ([`common::Stall`]). Only a failing test
 /// waits it out.
-const WAIT: Duration = Duration::from_secs(45);
+const WAIT: Duration = common::WAIT;
 /// The lead nudge rate limit in these tests. Long enough that the requests
 /// a test makes inside one interval fit in it on a loaded machine. 4 s was
 /// too short at a load of 70 to 100: the hub listener handles each card
@@ -283,17 +285,29 @@ impl Td {
             .to_owned()
     }
 
+    /// The newest event `seq` of the agent and its status: what moves
+    /// while a start, a restart or a turn goes on.
+    async fn progress(&self, id: &str) -> (Value, String) {
+        let newest = self
+            .get(&format!("/api/agents/{id}/events?order=desc&limit=1"))
+            .await;
+        (newest[0]["seq"].clone(), self.status(id).await)
+    }
+
     async fn wait_status(&self, id: &str, want: &str) {
-        let start = Instant::now();
+        let mut stall = common::Stall::new(self.progress(id).await);
         loop {
             let s = self.status(id).await;
             if s == want {
                 return;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "agent never reached {want}; last {s}"
-            );
+            if stall.due() {
+                let mark = self.progress(id).await;
+                assert!(
+                    stall.moved(mark),
+                    "agent never reached {want}; last {s} ({stall})"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -308,16 +322,19 @@ impl Td {
 
     /// Wait until `f` holds for the events of one kind.
     async fn wait_events(&self, id: &str, kind: &str, f: impl Fn(&[Value]) -> bool) -> Vec<Value> {
-        let start = Instant::now();
+        let mut stall = common::Stall::new(self.progress(id).await);
         loop {
             let ev = self.events(id, kind).await;
             if f(&ev) {
                 return ev;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "{kind} events never matched: {ev:#?}"
-            );
+            if stall.due() {
+                let mark = self.progress(id).await;
+                assert!(
+                    stall.moved(mark),
+                    "{kind} events never matched ({stall}): {ev:#?}"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
     }
