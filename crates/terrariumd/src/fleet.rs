@@ -1032,6 +1032,17 @@ pub fn check_against(conn: &Connection, f: &Fleet, prompts: &Path) -> ApiResult<
                 ),
             )),
             Some(r) => {
+                if let Some(p) = crate::store::jobs::release_target_of(conn, name)? {
+                    issues.push(Issue::error(
+                        "targets",
+                        crate::store::jobs::release_only(
+                            name,
+                            &p,
+                            &format!("{} list target `{name}` in policy.targets", users.join(", ")),
+                        )
+                        .message,
+                    ));
+                }
                 if let Some(tp) = &r.def.project {
                     for u in users.iter().filter(|u| !u.starts_with(&format!("{tp}/"))) {
                         issues.push(Issue::error(

@@ -1962,7 +1962,12 @@ pub async fn usable(state: &Shared, actor: &Actor, name: &str) -> ApiResult<Targ
         .read(move |c| {
             let row = targets::get(c, &n)?;
             let lease = match &agent {
-                Some(a) => leases::standing(c, &n, a)?,
+                Some(a) => {
+                    // TER-623: a release target is for the release job
+                    // and the operator only, whatever the policy or lease.
+                    crate::store::jobs::check_not_release_target(c, &n, "using the target")?;
+                    leases::standing(c, &n, a)?
+                }
                 None => leases::Standing::None,
             };
             Ok((row, lease))

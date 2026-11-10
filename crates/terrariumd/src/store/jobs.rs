@@ -1908,6 +1908,40 @@ pub fn delivery(conn: &Connection, project: &str) -> ApiResult<DeliveryDef> {
     }
 }
 
+/// The project whose `release_target` is `target` (TER-623), if any. Such
+/// a target runs release jobs only: no agent may use it, list it in a
+/// policy, or hold a lease or a reservation on it ([`release_only`]).
+pub fn release_target_of(conn: &Connection, target: &str) -> ApiResult<Option<String>> {
+    let mut st = conn.prepare("SELECT project FROM project_delivery ORDER BY project")?;
+    let names = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for p in names {
+        if delivery(conn, &p)?.release_target() == Some(target) {
+            return Ok(Some(p));
+        }
+    }
+    Ok(None)
+}
+
+/// The refusal of `what` on the release target `target` of `project`
+/// (TER-623): only the release job and the operator use it.
+pub fn release_only(target: &str, project: &str, what: &str) -> ApiError {
+    ApiError::forbidden(format!(
+        "{what}: target `{target}` is the release target of project `{project}`, and a \
+         release target runs release jobs only (TER-623): no agent may exec, shell, copy, \
+         lease, reserve or list it in policy.targets; only the operator uses it"
+    ))
+}
+
+/// [`release_only`] when `target` is a release target.
+pub fn check_not_release_target(conn: &Connection, target: &str, what: &str) -> ApiResult<()> {
+    match release_target_of(conn, target)? {
+        Some(p) => Err(release_only(target, &p, what)),
+        None => Ok(()),
+    }
+}
+
 /// Set the queue config of a project.
 pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResult<DeliveryDef> {
     if let Some(r) = &def.recipe

@@ -2679,6 +2679,11 @@ async fn steps(
     drop(release);
     // Credentials stay in the daemon, so retain the normal target recipe log.
     let script = recipe_script(recipe, base);
+    let script = if job.kind == JobKind::Release {
+        release_home(&script)
+    } else {
+        script
+    };
     let recipe_cmd = RemoteCmd {
         argv: vec!["sh".into(), "-c".into(), logged_recipe(script, &log)],
         cwd: Some(x.dir.to_owned()),
@@ -3068,29 +3073,63 @@ fn check_release_target(
         let d = jobs::delivery(conn, &p)?;
         others.push((p, d));
     }
-    if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty())
-        && let Some((p, _)) = others
-            .iter()
-            .find(|(_, d)| d.release_target() == Some(target))
-    {
-        return Err(ApiError::conflict(format!(
-            "target `{target}` is the release target of project `{p}`: it runs release jobs only"
-        )));
+    let machine = |t: &str| machine_of(conn, t);
+    if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty()) {
+        let host = machine(target);
+        if let Some((p, r)) = others.iter().find_map(|(p, d)| {
+            d.release_target()
+                .filter(|r| *r == target || machine(r) == host)
+                .map(|r| (p, r))
+        }) {
+            return Err(ApiError::conflict(format!(
+                "target `{target}` is, or is on the machine of, `{r}`, the release target of project `{p}`: it runs release jobs only"
+            )));
+        }
     }
     let Some(release) = def.release_target() else {
         return Ok(());
     };
-    if def.target.as_deref() == Some(release) {
+    let host = machine(release);
+    if let Some(t) = def.target.as_deref().filter(|t| *t == release || machine(t) == host) {
         return Err(ApiError::invalid(format!(
-            "release_target `{release}` is the job target too: the release target runs release jobs only"
+            "release_target `{release}` is, or is on the machine of, the job target `{t}`: the release target runs release jobs only"
         )));
     }
     for (p, d) in &others {
-        if d.target.as_deref() == Some(release) || d.release_target() == Some(release) {
+        let shared = [d.target.as_deref(), d.release_target()]
+            .into_iter()
+            .flatten()
+            .find(|t| *t == release || machine(t) == host);
+        if let Some(t) = shared {
             return Err(ApiError::conflict(format!(
-                "release_target `{release}` is a job target of project `{p}`: the release target runs release jobs only"
+                "release_target `{release}` is, or is on the machine of, `{t}`, a job or release target of project `{p}`: the release target runs release jobs only"
             )));
         }
+    }
+    // F1 (review-ter-623): no agent may hold the release target already.
+    let mut st = conn.prepare("SELECT project, name, policy FROM agents ORDER BY project, name")?;
+    let agents = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (p, n, policy) in agents {
+        let policy = crate::store::json_col::<terrarium_core::config::Policy>(&policy);
+        if policy.targets.iter().any(|t| t == release) {
+            return Err(ApiError::conflict(format!(
+                "release_target `{release}` is in the policy.targets of agent {p}/{n}: remove it first; a release target runs release jobs only"
+            )));
+        }
+    }
+    if let Some(l) = crate::store::leases::active_on(conn, release)?.first() {
+        return Err(ApiError::conflict(format!(
+            "release_target `{release}` has an active lease of agent {}: revoke it first; a release target runs release jobs only",
+            l.agent
+        )));
     }
     let row = targets::get(conn, release)?;
     match &row.def.project {
@@ -3109,6 +3148,30 @@ fn check_release_target(
     Ok(())
 }
 
+/// The machine of target `name` (TER-623, review-ter-623 F2): its host
+/// agent (by ID), or its ssh host and port, so a second target name for the
+/// same machine compares equal. A target that is gone keeps its name.
+fn machine_of(conn: &rusqlite::Connection, name: &str) -> String {
+    let Ok(row) = targets::get(conn, name) else {
+        return format!("name:{name}");
+    };
+    if let Some(h) = row.def.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        let id = crate::store::hosts::find(conn, h)
+            .ok()
+            .flatten()
+            .map_or_else(|| h.to_owned(), |x| x.id);
+        return format!("host:{id}");
+    }
+    if let Some(a) = row.def.address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        return format!(
+            "ssh:{}:{}",
+            jobs::address_key(a),
+            row.def.port.unwrap_or(22)
+        );
+    }
+    format!("name:{name}")
+}
+
 /// The file of the changed paths in a job clone, relative to its root
 /// (written by [`RECEIVE_SCRIPT`]).
 pub const CHANGED_FILES: &str = ".git/terrarium/changed-files";
@@ -3122,6 +3185,25 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
         return recipe;
     }
     format!("unset TERRARIUM_BASE TERRARIUM_CHANGED_FILES\n{recipe}")
+}
+
+/// The release recipe in a new HOME (TER-623, review-ter-623 F1): a 0700
+/// dir from `mktemp -d`, removed when the recipe ends, with the XDG dirs in
+/// it, and no global or system git config. So no `~/.docker`,
+/// `~/.gitconfig`, `~/.config` or cache that was left in the release
+/// user's home is read by the release. `XDG_RUNTIME_DIR` stays (the RAM dir
+/// of `scripts/release.py`).
+fn release_home(recipe: &str) -> String {
+    format!(
+        r#"home=$(mktemp -d "${{TMPDIR:-/tmp}}/terrarium-release-home.XXXXXXXX") || {{ echo "cannot make the release HOME"; exit 125; }}
+trap 'rm -rf -- "$home"' EXIT
+trap 'exit 143' TERM INT HUP
+export HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" XDG_DATA_HOME="$home/.local/share" XDG_STATE_HOME="$home/.local/state" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+unset DOCKER_CONFIG CARGO_HOME RUSTUP_HOME UV_CACHE_DIR npm_config_cache
+sh -c {}
+"#,
+        crate::executor::sh_quote(recipe)
+    )
 }
 
 /// Keep merged stdout/stderr outside the reusable slot, so the next checkout
@@ -4204,6 +4286,33 @@ printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// TER-623 F1: the release recipe runs in a new private HOME, with no
+    /// global git config, and the HOME is gone after it; the exit code is
+    /// the recipe's.
+    #[test]
+    fn a_release_recipe_runs_in_a_new_home_that_goes_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        let recipe = format!(
+            "printf '%s\\n' \"$HOME\" > '{o}'; test \"$(stat -c %a \"$HOME\")\" = 700 \
+             && test \"$GIT_CONFIG_GLOBAL\" = /dev/null && test -z \"${{DOCKER_CONFIG:-}}\" \
+             && test \"$XDG_CONFIG_HOME\" = \"$HOME/.config\" && exit 7",
+            o = out.display()
+        );
+        let status = recipe_sh()
+            .env("HOME", dir.path())
+            .env("DOCKER_CONFIG", dir.path())
+            .env("TMPDIR", dir.path())
+            .args(["-c", &release_home(&recipe)])
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(7));
+        let home = std::fs::read_to_string(&out).unwrap();
+        let home = home.trim();
+        assert!(home.contains("terrarium-release-home."), "{home}");
+        assert!(!std::path::Path::new(home).exists(), "the release HOME stayed");
+    }
 
     #[test]
     fn merge_references_refuse_literals_and_reserved_env_names() {

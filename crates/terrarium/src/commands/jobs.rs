@@ -679,6 +679,79 @@ mod tests {
     }
 
     #[test]
+    fn release_flags_set_keep_and_clear() {
+        // TER-623 F5: the release flags, all four docker_release values at
+        // the first set, and @secret references only.
+        let args = parse_set(&[
+            "--release-target",
+            "p-client",
+            "--release-secret",
+            "GH_TOKEN=@secret:release-github",
+            "--release-secret",
+            "COSIGN_PASSWORD=@secret:release-cosign.password",
+            "--docker-release-destination",
+            "root@vm.example",
+            "--docker-release-port",
+            "2251",
+            "--docker-release-known-hosts",
+            "vm.example ssh-ed25519 AAAAplace-holder-pin\n",
+            "--docker-release-key",
+            "@secret:docker-release-vm",
+        ])
+        .unwrap();
+        let cur = serde_json::json!({"target": "p-box"});
+        let value = super::merged(&cur, &args.delivery).unwrap();
+        assert_eq!(value["release_target"], "p-client");
+        assert_eq!(
+            value["release_secrets"],
+            serde_json::json!({"GH_TOKEN": "@secret:release-github",
+                               "COSIGN_PASSWORD": "@secret:release-cosign.password"})
+        );
+        let want = serde_json::json!({"destination": "root@vm.example", "port": 2251,
+            "known_hosts": "vm.example ssh-ed25519 AAAAplace-holder-pin\n",
+            "key": "@secret:docker-release-vm"});
+        assert_eq!(value["docker_release"], want);
+        assert_eq!(value["target"], "p-box");
+
+        // One flag keeps the other three.
+        let args = parse_set(&["--docker-release-port", "2252"]).unwrap();
+        let cur = serde_json::json!({"docker_release": want});
+        let value = super::merged(&cur, &args.delivery).unwrap();
+        assert_eq!(value["docker_release"]["port"], 2252);
+        assert_eq!(value["docker_release"]["key"], "@secret:docker-release-vm");
+
+        // The first set needs all four.
+        let args = parse_set(&["--docker-release-destination", "root@vm"]).unwrap();
+        let e = super::merged(&serde_json::json!({}), &args.delivery).unwrap_err();
+        assert!(e.to_string().contains("--docker-release-port"), "{e}");
+
+        // A key or a secret that is not a reference is refused.
+        let args = parse_set(&["--docker-release-key", "plain-private-key"]).unwrap();
+        assert!(super::merged(&serde_json::json!({"docker_release": want}), &args.delivery).is_err());
+        for bad in ["GH_TOKEN=ghp_plain", "GH_TOKEN", "=@secret:x"] {
+            let args = parse_set(&["--release-secret", bad]).unwrap();
+            assert!(super::merged(&serde_json::json!({}), &args.delivery).is_err(), "{bad}");
+        }
+
+        // Clear and reset.
+        let args = parse_set(&[
+            "--clear-docker-release",
+            "--clear-release-secrets",
+            "--release-target",
+            "",
+        ])
+        .unwrap();
+        let cur = serde_json::json!({"target": "p-box", "release_target": "p-client",
+            "release_secrets": {"GH_TOKEN": "@secret:release-github"}, "docker_release": want});
+        let value = super::merged(&cur, &args.delivery).unwrap();
+        assert!(value.get("docker_release").is_none(), "{value}");
+        assert!(value.get("release_target").is_none(), "{value}");
+        assert_eq!(value["release_secrets"], serde_json::json!({}));
+        assert_eq!(value["target"], "p-box");
+        assert!(parse_set(&["--clear-docker-release", "--docker-release-port", "1"]).is_err());
+    }
+
+    #[test]
     fn docker_ci_flags_set_keep_and_clear() {
         let args = parse_set(&[
             "--docker-ci-destination",
