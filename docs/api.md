@@ -11431,7 +11431,9 @@ with its size, that the restored database passes `PRAGMA
 integrity_check` and has the schema version of the header, and that
 `secrets.key` is back. The live data does not change, so the daemon can
 run. The scratch dir holds the secrets in plain form: the drill deletes it
-at the end unless `--keep`. A dir with content is refused. Run a drill
+at the end unless `--keep`. Only an absent or empty dir is taken: a dir
+with content, or one that cannot be read (for example permission
+denied), is refused and not deleted. Run a drill
 after the first scheduled backup, after a key rotation, and after an
 upgrade of terrariumd.
 
@@ -11465,7 +11467,7 @@ The settings are daemon env vars:
 | `TERRARIUM_BACKUP_KEEP` | `4` | The full backups to keep, each with its diffs. |
 | `TERRARIUM_BACKUP_WORK` | `off` | `on`: add the workspaces. |
 | `TERRARIUM_BACKUP_KEY_SECRET` | `backup-key` | The global secret with the passphrase. |
-| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. |
+| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. The daemon user must own it, and only the owner may read it (mode `0600` or `0400`); else each run fails. |
 
 A bad value stops the daemon start. With a schedule, a daemon task makes a
 backup one interval after the newest backup in the dir, and not before 10
@@ -11475,7 +11477,9 @@ minutes after the start. A failed run waits one interval too.
 newest is older than `TERRARIUM_BACKUP_FULL_EVERY`, or when the key does
 not open the newest full backup (it is not sealed, or the key was
 rotated). Else it is a `diff` of the newest full backup. A diff and its
-base so always have the same key.
+base so always have the same key. A run holds the one-backup lock of the
+dir from the choice of the kind and the base to the prune: a manual
+backup (§32.5) waits, or gets `409 conflict`, until the run ends.
 
 **The key.** A scheduled backup holds every secret, so it is always
 sealed (§32.2). The passphrase is the `passphrase` field of the global
@@ -11501,7 +11505,8 @@ writes a global event of the kind `backup` with `change`: `verified`,
 `pruned`, `failed` (`level: error`), `recovered`, or `missed`
 (`level: error`). A backup that does not verify moves to
 `.unverified-<name>` in the backup dir: it is not a base and not a kept
-backup.
+backup. When the move fails the run deletes the file; when that fails
+too, the error mail says to delete it by hand.
 
 **Retention.** Only a full backup that verified prunes the dir: it keeps
 the newest `TERRARIUM_BACKUP_KEEP` full backups and their diffs, and
@@ -11514,7 +11519,11 @@ failures write events only, and the first good run writes `recovered`. A
 missed run (no backup and no try for one interval and one hour, for
 example after the daemon was down) mails the operator once per due time
 (subject `Scheduled backup missed`). A new backup then runs 10 minutes
-after the start.
+after the start. The schedule keeps its marks in `.schedule.json` in the
+backup dir: the time it was turned on, the last try, and the due time of
+the last missed mail. So a restart does not mail the same missed run
+again, and a schedule that is turned on over an old manual backup mails
+no missed run at once. The file goes when the schedule is off.
 
 This task is not a project schedule (§19): a project schedule starts agent
 turns in one project, and a backup is of the whole daemon.

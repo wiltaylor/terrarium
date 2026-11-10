@@ -1255,6 +1255,23 @@ pub fn prune(dir: &Path, keep_full: usize, verified_full: &str) -> anyhow::Resul
 /// skips the backup dir, and [`list`] skips names with a dot.
 pub const DRILL_PREFIX: &str = ".drill-";
 
+/// Refuse a drill dir that is not empty: the drill writes into it, and
+/// the caller deletes it. Only an absent dir or an empty dir passes. A
+/// dir that cannot be read (permission denied, not a dir) is refused: it
+/// may hold files of its own.
+pub fn check_drill_dir(dir: &Path) -> anyhow::Result<()> {
+    match fs::read_dir(dir) {
+        Ok(mut d) => {
+            if d.next().is_some() {
+                bail!("the drill dir {} is not empty", dir.display());
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => bail!("cannot read the drill dir {}: {e}", dir.display()),
+    }
+}
+
 /// The result of [`drill`].
 #[derive(Debug, Clone, Serialize)]
 pub struct Drilled {
@@ -1289,9 +1306,7 @@ pub fn drill(
     passphrase: Option<&str>,
     scratch: &Path,
 ) -> anyhow::Result<Drilled> {
-    if fs::read_dir(scratch).is_ok_and(|mut d| d.next().is_some()) {
-        bail!("the drill dir {} is not empty", scratch.display());
-    }
+    check_drill_dir(scratch)?;
     fs::create_dir_all(scratch).with_context(|| format!("cannot create {}", scratch.display()))?;
     fs::set_permissions(scratch, fs::Permissions::from_mode(0o700))?;
     let header = read_header(path)?;

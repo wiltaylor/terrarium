@@ -561,3 +561,30 @@ fn the_drill_restores_a_sealed_diff_into_a_scratch_dir_and_checks_it() {
             .all(|l| !l.name.starts_with('.'))
     );
 }
+
+#[test]
+fn the_drill_refuses_a_dir_it_cannot_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Absent and empty dirs pass.
+    check_drill_dir(&tmp.path().join("none")).unwrap();
+    let empty = tmp.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    check_drill_dir(&empty).unwrap();
+    // A file is not a drill dir.
+    let file = tmp.path().join("file");
+    fs::write(&file, "mine").unwrap();
+    assert!(check_drill_dir(&file).is_err());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "mine");
+    // A dir that cannot be read may hold files: refused, not deleted.
+    let locked = tmp.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::write(locked.join("mine"), "x").unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads it anyway; then the dir is not empty, also refused.
+    let e = check_drill_dir(&locked).unwrap_err().to_string();
+    if fs::read_dir(&locked).is_err() {
+        assert!(e.contains("cannot read"), "{e}");
+    }
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(locked.join("mine").exists());
+}
