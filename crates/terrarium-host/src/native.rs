@@ -974,8 +974,11 @@ pub fn plan_start(
         // with only this holder's workspace scope bound in (below,
         // [`holder_workspace`]): a file that an earlier holder of the UID
         // left in another trust domain, also a 0600 one, does not exist in
-        // the unit.
+        // the unit. PrivateIPC gives each unit its own IPC namespace
+        // (System V and POSIX message queues): a session does not see the
+        // IPC objects of the host users or of other sessions (TER-641).
         "PrivateTmp=yes",
+        "PrivateIPC=yes",
         "RemoveIPC=yes",
         "ProtectSystem=strict",
         "KillMode=control-group",
@@ -1061,7 +1064,8 @@ pub fn safe_cwd(root: &Path, cwd: &str) -> Result<PathBuf, Refusal> {
         .map_err(|e| Refusal::invalid(format!("working directory {cwd}: {e}")))?;
     if !real.starts_with(root) || !real.is_dir() {
         return Err(Refusal::invalid(format!(
-            "working directory {cwd} is not under the workspace root"
+            "working directory {cwd} is not under the workspace root {}",
+            root.display()
         )));
     }
     let s = real.to_string_lossy();
