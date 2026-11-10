@@ -544,7 +544,9 @@ pub async fn prune_answers(
     let mut total = 0;
     loop {
         let n = db
-            .write("system", move |t| prune_answers_batch(t, cutoff, PRUNE_BATCH))
+            .write("system", move |t| {
+                prune_answers_batch(t, cutoff, PRUNE_BATCH)
+            })
             .await?;
         total += n;
         if n < PRUNE_BATCH as usize {
@@ -653,11 +655,16 @@ mod tests {
         .await
         .unwrap();
         let one = db
-            .write("test", move |t| prune_answers_batch(t, old + 1, PRUNE_BATCH))
+            .write("test", move |t| {
+                prune_answers_batch(t, old + 1, PRUNE_BATCH)
+            })
             .await
             .unwrap();
         assert_eq!(one, PRUNE_BATCH as usize, "one batch is bounded");
-        assert_eq!(prune_answers(&db, now).await.unwrap() as i64, n_old - PRUNE_BATCH);
+        assert_eq!(
+            prune_answers(&db, now).await.unwrap() as i64,
+            n_old - PRUNE_BATCH
+        );
         assert_eq!(answer_rows(&db, "old").await, 0);
         assert_eq!(answer_rows(&db, "fresh").await, 1);
         assert_eq!(prune_answers(&db, now).await.unwrap(), 0);
@@ -667,9 +674,13 @@ mod tests {
     async fn a_new_answer_is_kept_by_the_prune_and_deleted_with_its_agent() {
         let dir = tempfile::tempdir().unwrap();
         let db = crash_db(&dir.path().join("agent-delete.sqlite"));
-        journaled(&db, &crash_context(), "kept".into(), &crash_params(), async {
-            Ok(json!("done"))
-        })
+        journaled(
+            &db,
+            &crash_context(),
+            "kept".into(),
+            &crash_params(),
+            async { Ok(json!("done")) },
+        )
         .await
         .unwrap();
         let agent = "00000000000000000000000001";
