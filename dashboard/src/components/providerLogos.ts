@@ -62,7 +62,6 @@ export const PROVIDER_COLORS: Record<string, string> = {
   openrouter: "#6467f2",
   xai: "#222",
   groq: "#f55036",
-  zai: "#2d2d2d",
   deepseek: "#4d6bfe",
 };
 
