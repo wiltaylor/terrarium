@@ -106,11 +106,27 @@ export function CopyButton(props: { text: string; label?: string }) {
   );
 }
 
+/**
+ * The open dialogs and drawers, the newest last (TER-598). Escape closes only
+ * the top one: the card side panel over the board drawer closes, and the
+ * drawer stays.
+ */
+const escapeStack: (() => void)[] = [];
+
+const onEscapeKey = (e: KeyboardEvent) => {
+  if (e.key === "Escape") escapeStack.at(-1)?.();
+};
+
 function useEscape(fn: () => void) {
   onMount(() => {
-    const h = (e: KeyboardEvent) => e.key === "Escape" && fn();
-    window.addEventListener("keydown", h);
-    onCleanup(() => window.removeEventListener("keydown", h));
+    const entry = () => fn();
+    if (escapeStack.length === 0) window.addEventListener("keydown", onEscapeKey);
+    escapeStack.push(entry);
+    onCleanup(() => {
+      const i = escapeStack.lastIndexOf(entry);
+      if (i >= 0) escapeStack.splice(i, 1);
+      if (escapeStack.length === 0) window.removeEventListener("keydown", onEscapeKey);
+    });
   });
 }
 

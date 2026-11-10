@@ -13,7 +13,7 @@
 //   Only a prefix of a project that the reader can see (`prefixProject`)
 //   makes a link. Any other key stays plain text.
 
-import { resolveWikilink, targetHref } from "./markdown";
+import { resolveWikilink, safePageTarget, targetHref } from "./markdown";
 
 export type LinkSegment =
   | { kind: "text"; text: string }
@@ -74,9 +74,6 @@ function cardTarget(key: string, ctx: LinkContext): { project: string; id: strin
   return { project, id: key, href: targetHref({ kind: "card", project, id: key }) };
 }
 
-/** A wiki page path with no empty, `.`, or `..` segment. */
-const safePagePath = (path: string): boolean => path.length > 0 && path.split("/").every((s) => s.trim() !== "" && s !== "." && s !== "..");
-
 /** The wiki target of `wiki:<page>` or `[[page]]`. A card key in `[[...]]` is a card, as in the wiki. */
 function wikiTarget(ref: string, ctx: LinkContext): LinkSegment | null {
   const page = ref.trim();
@@ -85,7 +82,7 @@ function wikiTarget(ref: string, ctx: LinkContext): LinkSegment | null {
   if (card) return { kind: "card", text: page, ...card };
   const t = resolveWikilink(page, { project: ctx.project, cardPrefixes: new Set() });
   if (t.kind === "memory") return { kind: "wiki", text: page, href: targetHref(t) };
-  if (t.kind !== "page" || !t.project || !safePagePath(t.path)) return null;
+  if (!safePageTarget(t)) return null;
   return { kind: "wiki", text: page, href: targetHref(t) };
 }
 

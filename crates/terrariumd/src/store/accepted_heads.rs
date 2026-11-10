@@ -16,6 +16,16 @@ use crate::error::ApiResult;
 /// The name of the merge queue column when no column has the role.
 const QUEUE_NAME: &str = "merge_queue";
 
+/// How long after the accept the background read may fill a round
+/// (TER-580). The read takes the tip of the branch at read time, so a late
+/// read could take a push made after the review. A round still open after
+/// this needs a fresh accept.
+pub const FILL_MAX_AGE_SECS: i64 = 10 * 60;
+
+/// The note of a round that the background read may no longer fill.
+pub const EXPIRED_NOTE: &str =
+    "the head was not read within 10 minutes of the accept: accept the card again";
+
 /// Is a column with `name` and `role` the merge queue? The role, else the
 /// name of a column without a role (as `conflict_hints`).
 pub fn is_queue(name: &str, role: Option<&str>) -> bool {
@@ -41,7 +51,7 @@ pub fn on_move(
              ON CONFLICT(card) DO UPDATE SET
                round = excluded.round, accepted_at = excluded.accepted_at,
                branch = NULL, commit_sha = NULL, recorded_at = NULL, note = NULL,
-               tried_at = NULL",
+               tried_at = NULL, needs_accept = 0, stall_noted = 0",
             params![card, ulid::Ulid::new().to_string(), now()],
         )?;
     } else if was && !is {
@@ -57,16 +67,23 @@ pub struct Pending {
     pub round: String,
 }
 
-/// The rounds without a recorded commit, oldest first. A round whose last
-/// read failed at or after `retry_before` waits.
-pub fn pending(conn: &Connection, retry_before: &str) -> ApiResult<Vec<Pending>> {
+/// The rounds without a recorded commit that the background read may
+/// fill, oldest first: accepted at or after `accepted_after`, and not
+/// backfilled by the upgrade. A round whose last read failed at or after
+/// `retry_before` waits.
+pub fn pending(
+    conn: &Connection,
+    retry_before: &str,
+    accepted_after: &str,
+) -> ApiResult<Vec<Pending>> {
     let mut q = conn.prepare(
         "SELECT card, round FROM card_accepted_heads
-         WHERE commit_sha IS NULL AND (tried_at IS NULL OR tried_at < ?1)
+         WHERE commit_sha IS NULL AND needs_accept = 0 AND accepted_at >= ?2
+           AND (tried_at IS NULL OR tried_at < ?1)
          ORDER BY accepted_at, card",
     )?;
     let rows = q
-        .query_map([retry_before], |r| {
+        .query_map([retry_before, accepted_after], |r| {
             Ok(Pending {
                 card: r.get(0)?,
                 round: r.get(1)?,
@@ -78,15 +95,86 @@ pub fn pending(conn: &Connection, retry_before: &str) -> ApiResult<Vec<Pending>>
 
 /// Record the head `commit` of `branch` for round `round` of `card`. Only
 /// the open round, and only once: a late read of an earlier round, or a
-/// second read of this one, changes nothing. True when it recorded.
-pub fn record(t: &Tx<'_>, card: &str, round: &str, branch: &str, commit: &str) -> ApiResult<bool> {
+/// second read of this one, changes nothing. A round accepted before
+/// `accepted_after`, or backfilled by the upgrade, is not filled either.
+/// True when it recorded.
+pub fn record(
+    t: &Tx<'_>,
+    card: &str,
+    round: &str,
+    branch: &str,
+    commit: &str,
+    accepted_after: &str,
+) -> ApiResult<bool> {
     let n = t.execute(
         "UPDATE card_accepted_heads SET branch = ?3, commit_sha = ?4, recorded_at = ?5,
                 note = NULL
-         WHERE card = ?1 AND round = ?2 AND commit_sha IS NULL",
-        params![card, round, branch, commit, now()],
+         WHERE card = ?1 AND round = ?2 AND commit_sha IS NULL
+           AND needs_accept = 0 AND accepted_at >= ?6",
+        params![card, round, branch, commit, now(), accepted_after],
     )?;
     Ok(n == 1)
+}
+
+/// The cutoff of the background read now: a round accepted before it is
+/// not filled ([`FILL_MAX_AGE_SECS`]).
+pub fn fill_cutoff() -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(FILL_MAX_AGE_SECS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Add [`EXPIRED_NOTE`] to the note of each open round accepted before
+/// `accepted_after` that the background read did not fill. An earlier
+/// note (why the read failed) stays in front. Returns the count of rounds
+/// noted now.
+pub fn expire(t: &Tx<'_>, accepted_after: &str) -> ApiResult<usize> {
+    Ok(t.execute(
+        "UPDATE card_accepted_heads
+         SET note = CASE WHEN note IS NULL OR note = '' THEN ?2 ELSE note || '; ' || ?2 END,
+             tried_at = ?3
+         WHERE commit_sha IS NULL AND needs_accept = 0 AND accepted_at < ?1
+           AND (note IS NULL OR instr(note, ?2) = 0)",
+        params![accepted_after, EXPIRED_NOTE, now()],
+    )?)
+}
+
+/// A round that waits for a fresh accept, not yet told on its card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stall {
+    pub card: String,
+    pub column: String,
+    pub note: String,
+}
+
+/// The open rounds that need a fresh accept (backfilled by the upgrade,
+/// or past the age cap) and have no card comment about it yet.
+pub fn stalls(conn: &Connection) -> ApiResult<Vec<Stall>> {
+    let mut q = conn.prepare(
+        "SELECT h.card, b.name, COALESCE(h.note, '') FROM card_accepted_heads h
+         JOIN cards c ON c.id = h.card JOIN board_columns b ON b.id = c.column_id
+         WHERE h.commit_sha IS NULL AND h.stall_noted = 0 AND c.archived = 0
+           AND (h.needs_accept = 1 OR instr(COALESCE(h.note, ''), ?1) > 0)
+         ORDER BY h.accepted_at, h.card",
+    )?;
+    let rows = q
+        .query_map([EXPIRED_NOTE], |r| {
+            Ok(Stall {
+                card: r.get(0)?,
+                column: r.get(1)?,
+                note: r.get(2)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// The round of `card` was told on its card.
+pub fn stall_noted(t: &Tx<'_>, card: &str) -> ApiResult<()> {
+    t.execute(
+        "UPDATE card_accepted_heads SET stall_noted = 1 WHERE card = ?1",
+        [card],
+    )?;
+    Ok(())
 }
 
 /// Record `commit` of `branch` in the open round of `card`, in the write

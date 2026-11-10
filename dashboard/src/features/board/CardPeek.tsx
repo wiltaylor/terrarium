@@ -15,12 +15,14 @@ export function CardPeek() {
     <Show when={cardPeek.current()} keyed>
       {(t) => {
         const [card] = createResource(() => t.id, (id) => api.cards.get(id));
+        // `card.latest` throws the load error again: read it only without an error (TER-598).
+        const loaded = () => (card.error ? undefined : card.latest);
         return (
           <Drawer
             title={
               <span>
                 <span class="mono muted">{t.id}</span>
-                <Show when={card.latest}>{(c) => <> <span class="chip">{c().column}</span></>}</Show>
+                <Show when={loaded()}>{(c) => <> <span class="chip">{c().column}</span></>}</Show>
               </span>
             }
             onClose={() => cardPeek.close()}
@@ -28,10 +30,10 @@ export function CardPeek() {
             <Show when={card.error}>
               <ErrorBanner error={card.error} />
             </Show>
-            <Show when={card.loading && !card.latest}>
+            <Show when={card.loading && !loaded()}>
               <p class="muted">Loading the card.</p>
             </Show>
-            <Show when={card.latest}>
+            <Show when={loaded()}>
               {(c) => (
                 <div class="stack card-peek" style={{ gap: "10px" }}>
                   <h2 style={{ margin: 0 }}>{c().title}</h2>

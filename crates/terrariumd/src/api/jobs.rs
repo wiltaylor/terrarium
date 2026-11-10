@@ -763,8 +763,14 @@ async fn merge(
 /// The commit that a merge takes for each of the cards `ids`, with its
 /// branch, by card ID (TER-553): the reviewed commit that the merge queue
 /// recorded at the accept, else the head of the branch on its remote now.
-/// The merge then takes that commit, never a later push. Read before the
-/// write of the job: the head is a `git ls-remote`.
+/// A card in the merge queue without a reviewed commit for the branch
+/// gets a 409 (TER-580): a round not recorded yet, a commit of another
+/// branch (a `branch` override, or a branch changed after the accept), or
+/// no round (a column given the role while it held cards). The head now
+/// could be a push after the review. The fallback is for cards outside
+/// the queue. The merge then takes that
+/// commit, never a later push. Read before the write of the job: the head
+/// is a `git ls-remote`.
 async fn merge_commits(
     state: &Shared,
     actor: &Actor,
@@ -790,6 +796,12 @@ async fn merge_commits(
                 let r = repo_of(c, &card, repo.clone())?;
                 let b = branch_of(&card, branch.clone())?;
                 let recorded = accepted_heads::commit_for(c, &card.id, &b)?;
+                if recorded.is_none()
+                    && accepted_heads::is_queue(&card.column, card.column_role.as_deref())
+                {
+                    let why = accepted_heads::missing_reason(c, &card.id, &b)?;
+                    return Err(ApiError::conflict(format!("card {}: {why}", card.id)));
+                }
                 out.push((card.id, card.project, r, b, recorded));
             }
             Ok(out)

@@ -57,6 +57,16 @@ describe("linkSegments", () => {
     plain("[x](wiki:%E0%A4%A)");
   });
 
+  it("refuses an empty, `.`, or `..` project part (TER-598)", () => {
+    plain("[[project:../x]]");
+    plain("[[project:./x]]");
+    plain("[[project:..]]");
+    plain("[[project:/x]]");
+    plain("[x](wiki:project:../x)");
+    plain("[x](wiki:project:%2E%2E/x)");
+    expect(links("[[project:webshop]]")).toEqual([{ kind: "wiki", text: "project:webshop", href: "/p/webshop/knowledge/wiki/index" }]);
+  });
+
   it("links card keys of the reader's projects: bare, [text](card:KEY), and [[KEY]]", () => {
     expect(seg("Blocked by TER-12 and WEB-4.")).toEqual([
       { kind: "text", text: "Blocked by " },

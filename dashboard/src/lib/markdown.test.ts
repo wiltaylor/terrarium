@@ -83,6 +83,15 @@ describe("helpers", () => {
     expect(safeUrl("JavaScript:alert(1)")).toBeNull();
     expect(safeUrl("data:text/html,<b>")).toBeNull();
   });
+  it("refuses a URL with a user name or password, as LinkText does (TER-598)", () => {
+    for (const h of ["https://user:pw@example.com/", "http://user@example.com/", "HTTPS://a:b@example.com", "https:user:pw@example.com", "//user:pw@example.com/x", "/\\user:pw@example.com/x"]) {
+      expect(safeUrl(h), h).toBeNull();
+    }
+    expect(safeUrl("https://example.com/a@b")).toBe("https://example.com/a@b");
+    expect(safeUrl("mailto:a@b.c")).toBe("mailto:a@b.c");
+    expect(safeUrl("/p/x@y")).toBe("/p/x@y");
+    expect(renderWiki("[x](https://user:pw@example.com/) <https://u:p@example.com/>", { project: "p" })).not.toContain("<a");
+  });
 });
 
 describe("renderWiki cardKeys (TER-571)", () => {
@@ -109,7 +118,7 @@ describe("renderWiki cardKeys (TER-571)", () => {
   it("renders card: and wiki: links, and refuses a bad one as its text", () => {
     expect(md("[the fix](card:TER-7)")).toContain('<a class="wikilink wikilink-card" href="/p/terrarium/board?card=TER-7">the fix</a>');
     expect(md("[the design](wiki:designs/x)")).toContain('<a class="wikilink wikilink-page" href="/p/terrarium/knowledge/wiki/designs/x">the design</a>');
-    const bad = md("[a](card:ABC-1) [b](wiki:../x) [c](javascript:alert(1))");
+    const bad = md("[a](card:ABC-1) [b](wiki:../x) [c](javascript:alert(1)) [d](wiki:project:../x) [e](wiki:project:./x) [f](wiki:project:%2e%2e/x)");
     expect(bad).not.toContain("<a");
   });
 

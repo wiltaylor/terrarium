@@ -224,11 +224,7 @@ async fn move_card(
     ApiJson(m): ApiJson<MoveBody>,
 ) -> ApiResult<Json<Card>> {
     let to = m.column.clone();
-    let head = head_before(&state, &actor, &id, move |_, cols| {
-        cols.iter()
-            .any(|(name, role)| *name == to && accepted_heads::is_queue(name, role.as_deref()))
-    })
-    .await;
+    let head = head_before(&state, &actor, &id, move |_, cols| goes_to_queue(cols, &to)).await;
     let card = state
         .db
         .write(actor.label(), move |t| {
@@ -367,6 +363,20 @@ where
         Ok(Some(h)) if crate::jobs::check_commit(&h).is_ok() => Some((branch, h)),
         _ => None,
     }
+}
+
+/// Is `to`, as a move gives it, the merge queue of the board `cols`? The
+/// column named `to`, else the column with the role `to`, as
+/// `board::move_card` resolves it (TER-580).
+fn goes_to_queue(cols: &[(String, Option<String>)], to: &str) -> bool {
+    let by_name = cols.iter().find(|(name, _)| name == to);
+    let col = by_name.or_else(|| {
+        board::ROLES
+            .contains(&to)
+            .then(|| cols.iter().find(|(_, role)| role.as_deref() == Some(to)))
+            .flatten()
+    });
+    col.is_some_and(|(name, role)| accepted_heads::is_queue(name, role.as_deref()))
 }
 
 /// Record the head read by [`head_before`], when the write moved the card

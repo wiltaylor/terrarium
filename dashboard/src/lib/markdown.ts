@@ -41,6 +41,17 @@ export function resolveWikilink(raw: string, ctx: ResolveContext): WikiTarget {
   return { kind: "page", project: ctx.project, path: ref };
 }
 
+/** A path part that is not empty, `.`, or `..`. */
+const safePart = (s: string): boolean => s.trim() !== "" && s !== "." && s !== "..";
+
+/**
+ * A page target that stays inside `/p/<project>/knowledge/wiki/` (TER-598):
+ * a project with no `/`, and a project and page path with no empty, `.`, or
+ * `..` part. A text or
+ * `wiki:` link refuses any other page.
+ */
+export const safePageTarget = (t: WikiTarget): boolean => t.kind === "page" && safePart(t.project) && !t.project.includes("/") && t.path.split("/").every(safePart);
+
 export function targetHref(t: WikiTarget): string {
   const p = `/p/${encodeURIComponent(t.project)}`;
   switch (t.kind) {
@@ -73,9 +84,23 @@ export function splitFrontMatter(src: string): { meta: FrontMatter; body: string
 
 const SAFE_URL = /^(https?:|mailto:|\/|#|\.|artifact:|data:image\/(png|gif|jpeg|webp);)/i;
 
+/** True when an http(s) or protocol-relative URL carries a user name or password (`https://user:pass@host`). */
+function hasUserInfo(h: string): boolean {
+  if (!/^(?:https?:|[\\/]{2})/i.test(h)) return false;
+  try {
+    // Without a base, `https:user@host` parses as on a page with another scheme: with the user.
+    const u = /^https?:/i.test(h) ? new URL(h) : new URL(h, "https://base.invalid/");
+    return u.username !== "" || u.password !== "";
+  } catch {
+    return true;
+  }
+}
+
+/** The URL when its scheme is safe, or null. An http(s) URL with a user name or password is refused, as in `LinkText` (TER-598). */
 export function safeUrl(href: string): string | null {
   const h = href.trim();
   if (!h) return null;
+  if (hasUserInfo(h)) return null;
   // Relative paths with no scheme are fine.
   if (!/^[a-z][a-z0-9+.-]*:/i.test(h)) return h;
   return SAFE_URL.test(h) ? h : null;
@@ -121,7 +146,7 @@ function appLinkHref(href: string, opts: RenderOptions): { href: string; card: b
     return null;
   }
   const t = resolveWikilink(page, { project: opts.project, cardPrefixes: new Set() });
-  if (t.kind !== "page" || !t.project || !t.path || t.path.split("/").some((seg) => !seg.trim() || seg === "." || seg === "..")) return null;
+  if (!safePageTarget(t)) return null;
   return { href: targetHref(t), card: false };
 }
 
