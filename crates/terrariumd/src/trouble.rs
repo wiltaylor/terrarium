@@ -694,7 +694,7 @@ fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
             AND s.bound_id = c.id AND s.finished_at IS NULL LIMIT 1)), c.labels, c.eta_at, c.archived
         FROM cards c JOIN board_columns k ON k.id = c.column_id
         WHERE (c.archived = 0 AND (k.role IN ('working', 'review') OR lower(k.name) = 'research'
-            OR (k.role = 'accepted' AND c.labels LIKE '%"version:%')))
+            OR (k.role = 'accepted' AND c.labels LIKE '%\"version:%')))
         OR EXISTS (SELECT 1 FROM card_trouble m WHERE m.card = c.id AND m.active = 1)")?;
     let rows = q
         .query_map([], |r| {

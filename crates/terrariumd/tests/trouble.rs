@@ -689,9 +689,8 @@ async fn passed_eta_still_mails_worker_when_reminders_are_disabled() {
 #[tokio::test]
 async fn shipped_accepted_marks_accepted_cards_of_a_built_version() {
     let (td, lead, _worker, _card) = setup().await;
-    let new = |title: &str, label: &str| {
-        json!({"title": title, "column": "accepted", "labels": [label]})
-    };
+    let new =
+        |title: &str, label: &str| json!({"title": title, "column": "accepted", "labels": [label]});
     let shipped = id(td
         .post("/api/projects/p/cards", new("shipped", "version:0.36.0"))
         .await

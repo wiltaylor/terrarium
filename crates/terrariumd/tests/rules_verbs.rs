@@ -473,7 +473,8 @@ async fn version_group_add_and_built_moves_same_version_accepted_cards() {
         .as_str()
         .unwrap()
         .to_owned();
-    let accepted = |title: &str, labels: Value| json!({"title":title,"column":"accepted","labels":labels});
+    let accepted =
+        |title: &str, labels: Value| json!({"title":title,"column":"accepted","labels":labels});
     let a = new_card(&td, "p", accepted("member", json!(["version:vnext"]))).await;
     let key = state(&td)
         .db
