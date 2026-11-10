@@ -1294,3 +1294,12 @@ async fn reconcile(state: &Shared) -> ApiResult<()> {
     }
     Ok(())
 }
+
+// TER-611 negative proof only, never merged: passes as root, fails as uid 1001.
+#[cfg(test)]
+mod ter611_negative {
+    #[test]
+    fn ter611_lib_needs_root() {
+        std::fs::read_dir("/root").expect("read /root");
+    }
+}

@@ -7,6 +7,7 @@ mod ter221_latency;
 #[path = "../trouble.rs"]
 mod trouble;
 mod workspace_sync;
+mod ter611_negative;
 
 mod reservations;
 mod reservations_api;
