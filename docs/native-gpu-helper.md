@@ -154,8 +154,10 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   `BindPaths=` and `ReadWritePaths=` of the holder's workspace scope,
   `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
   each granted GPU and support node, `--expand-environment=no`. The
-  environment goes in a root-only `EnvironmentFile` under `state_dir`, not
-  on a command line.
+  environment goes in a root-only (0600) `EnvironmentFile` under
+  `state_dir`, not on a command line. Each value is double-quoted with `"`,
+  `\`, `` ` ``, and `$` escaped, so systemd reads it back byte for byte,
+  also a multi-line value such as the git trailers (TER-566).
 - **The shim** (`terrarium-host native`, hidden subcommand) is what the
   host agent's session runner starts. The request travels in
   `TERRARIUM_NATIVE_REQUEST` (environment, readable only by the same UID).
@@ -276,7 +278,8 @@ a workload user that changed since the start, GPU sessions without a
 verified `nvidia-smi`, a trusted path with a writable parent, a working
 directory outside the root
 (directly or by a symlink), `%` in a path, control characters, NUL in argv,
-bad environment names and newlines in values, unknown GPUs, device nodes
+bad environment names, NUL or a character that systemd's UTF-8 check
+refuses (U+FDD0 to U+FDEF, U+xFFFE, U+xFFFF) in values, unknown GPUs, device nodes
 that do not match the inventory, missing support nodes, and `stop` of a
 shared parent slice.
 

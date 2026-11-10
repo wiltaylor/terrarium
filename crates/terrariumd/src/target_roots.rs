@@ -412,9 +412,7 @@ pub async fn prepare(
         return Ok(None);
     }
     if !probe.end().success() {
-        return Err(ApiError::invalid(
-            "cannot check target python3 availability",
-        ));
+        return Err(ApiError::invalid(probe_failure(&probe)));
     }
     let stored = stored_base(state, &a.id, &def.name).await?;
     let mut current = stored.unwrap_or_else(|| base(def).to_owned());
@@ -506,6 +504,29 @@ pub async fn prepare(
         ));
     }
     Ok(Some(path))
+}
+
+/// The error of a failed python3 probe, with what the target said: its
+/// error output, or else how the run ended (TER-566: a refused native
+/// exec showed only the first sentence).
+fn probe_failure(probe: &crate::executor::Collected) -> String {
+    let mut why = probe.stderr_tail();
+    if why.is_empty() {
+        why = match probe.end() {
+            crate::executor::End::Error { message, .. } => message,
+            crate::executor::End::Exit { code, signal, reason } => match (code, signal) {
+                (Some(c), _) => format!("exit code {c}"),
+                (None, Some(s)) => format!("signal {s}"),
+                _ => reason,
+            },
+            crate::executor::End::Cp { .. } => String::new(),
+        };
+    }
+    if why.is_empty() {
+        "cannot check target python3 availability".to_owned()
+    } else {
+        format!("cannot check target python3 availability: {why}")
+    }
 }
 
 /// The home fallback base of the agent user on the target.
@@ -752,6 +773,43 @@ pub fn spawn(state: Shared) -> tokio::task::JoinHandle<()> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// TER-566: the error of a failed python3 probe says why.
+    #[test]
+    fn a_failed_python_probe_carries_its_error_output() {
+        use crate::executor::{Collected, End};
+        let refused = Collected {
+            stderr: b"terrarium-host native: refused (Invalid): bad environment variable \"X\"\n"
+                .to_vec(),
+            end: Some(End::Exit {
+                code: Some(1),
+                signal: None,
+                reason: "exited".into(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            probe_failure(&refused),
+            "cannot check target python3 availability: terrarium-host native: refused (Invalid): bad environment variable \"X\""
+        );
+        let silent = Collected {
+            end: Some(End::Exit {
+                code: Some(2),
+                signal: None,
+                reason: "exited".into(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            probe_failure(&silent),
+            "cannot check target python3 availability: exit code 2"
+        );
+        let lost = Collected::default();
+        assert_eq!(
+            probe_failure(&lost),
+            "cannot check target python3 availability: the run ended without an end"
+        );
+    }
 
     /// The daemon's fixed root scripts run with the operator scope on a
     /// host with native GPU enforcement (they pass, and the helper gives

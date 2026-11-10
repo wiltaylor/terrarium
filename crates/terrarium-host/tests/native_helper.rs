@@ -96,7 +96,7 @@ impl Fake {
             &d.join("systemd-run"),
             &format!(
                 "printf '%s\\n' \"$@\" >> '{run}'\n\
-                 for a; do case \"$a\" in EnvironmentFile=*) cp \"${{a#EnvironmentFile=}}\" '{env}';; esac; done\n\
+                 for a; do case \"$a\" in EnvironmentFile=*) cp \"${{a#EnvironmentFile=}}\" '{env}'; stat -c %a \"${{a#EnvironmentFile=}}\" > '{env}.mode';; esac; done\n\
                  while [ $# -gt 0 ]; do a=$1; shift; [ \"$a\" = -- ] && break; done\n\
                  exec \"$@\"\n",
                 run = d.join("run.log").display(),
@@ -294,6 +294,46 @@ async fn without_the_session_right_nothing_starts() {
         Some(ErrorKind::Forbidden)
     );
     assert!(f.log("run.log").is_empty() && f.log("ctl.log").is_empty());
+}
+
+/// TER-566: the daemon sends multi-line values (git trailers, known hosts,
+/// a commit hook) on every exec. The helper accepts them and writes them
+/// to the 0600 environment file in systemd's double-quoted form, never to
+/// the `systemd-run` command line; NUL stays refused.
+#[tokio::test]
+async fn a_session_takes_multi_line_environment_values() {
+    let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
+    let trailers = "Card: TER-566\nAgent: p/a\n";
+    let hook = "#!/bin/sh\nexec \"$1\" `x`\r\n";
+    let mut req = f.start("p/a", None, &[], &[], &["true"]);
+    req.env = BTreeMap::from([
+        ("TERRARIUM_GIT_TRAILERS".into(), trailers.into()),
+        ("TERRARIUM_COMMIT_HOOK".into(), hook.into()),
+    ]);
+    let (s, r) = send(&f.socket, &Request::Start(req.clone())).await;
+    assert!(matches!(r, Reply::Started { .. }), "{r:?}");
+    let (mut rd, _wr) = s.into_split();
+    let exit = loop {
+        match native::read_frame(&mut rd).await.unwrap() {
+            Some((Kind::Exit, d)) => break serde_json::from_slice::<Exit>(&d).unwrap(),
+            Some(_) => {}
+            None => panic!("no exit"),
+        }
+    };
+    assert_eq!(exit.code, Some(0));
+    assert_eq!(
+        f.log("env.copy"),
+        "TERRARIUM_COMMIT_HOOK=\"#!/bin/sh\nexec \\\"\\$1\\\" \\`x\\`\r\n\"\n\
+         TERRARIUM_GIT_TRAILERS=\"Card: TER-566\nAgent: p/a\n\"\n"
+    );
+    assert_eq!(f.log("env.copy.mode").trim(), "600");
+    let run = f.log("run.log");
+    assert!(!run.contains("TER-566") && !run.contains("#!/bin/sh"), "{run}");
+    f.wait_idle().await;
+
+    req.env = BTreeMap::from([("TERRARIUM_GIT_TRAILERS".into(), "a\n\0b".into())]);
+    let (_, r) = send(&f.socket, &Request::Start(req)).await;
+    assert_eq!(code(&r), Some(ErrorKind::Invalid), "{r:?}");
 }
 
 #[tokio::test]

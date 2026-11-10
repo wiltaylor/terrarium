@@ -455,9 +455,41 @@ fn unsafe_requests_are_refused() {
             ErrorKind::Invalid,
         ),
         (
-            "newline in env value",
+            "NUL in env value",
             StartRequest {
-                env: BTreeMap::from([("A".into(), "x\nB=y".into())]),
+                env: BTreeMap::from([("A".into(), "x\0y".into())]),
+                ..base.clone()
+            },
+            ErrorKind::Invalid,
+        ),
+        (
+            "NUL after a newline in env value",
+            StartRequest {
+                env: BTreeMap::from([("A".into(), "x\n\0".into())]),
+                ..base.clone()
+            },
+            ErrorKind::Invalid,
+        ),
+        (
+            "noncharacter in env value (systemd refuses it)",
+            StartRequest {
+                env: BTreeMap::from([("A".into(), "x\u{FDD0}".into())]),
+                ..base.clone()
+            },
+            ErrorKind::Invalid,
+        ),
+        (
+            "U+FFFE in env value (systemd refuses it)",
+            StartRequest {
+                env: BTreeMap::from([("A".into(), "\u{FFFE}".into())]),
+                ..base.clone()
+            },
+            ErrorKind::Invalid,
+        ),
+        (
+            "U+10FFFF in env value (systemd refuses it)",
+            StartRequest {
+                env: BTreeMap::from([("A".into(), "\u{10FFFF}".into())]),
                 ..base.clone()
             },
             ErrorKind::Invalid,
@@ -657,6 +689,236 @@ fn small_parsers() {
         ["terrarium-native-7-000000ab.service"]
     );
     assert_eq!(env_line("A", "plain"), "A=\"plain\"\n");
+}
+
+/// A port of `parse_env_file_internal` of systemd v254
+/// (`src/basic/env-file.c`), the parser that PID 1 runs on an
+/// `EnvironmentFile=`, state for state and byte for byte. It returns the
+/// assignments in file order, as `load_env_file_push` pushes them.
+fn systemd_parse_env_file(contents: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum S {
+        PreKey,
+        Key,
+        PreValue,
+        Value,
+        ValueEscape,
+        SingleQuoteValue,
+        DoubleQuoteValue,
+        DoubleQuoteValueEscape,
+        Comment,
+        CommentEscape,
+    }
+    const WHITESPACE: &[u8] = b" \t\n\r";
+    const NEWLINE: &[u8] = b"\n\r";
+    const COMMENTS: &[u8] = b"#;";
+    const SHELL_NEED_ESCAPE: &[u8] = b"\"\\`$";
+    fn finish(key: &mut Vec<u8>, last_key_ws: Option<usize>) -> Vec<u8> {
+        let mut k = std::mem::take(key);
+        if let Some(n) = last_key_ws {
+            k.truncate(n);
+        }
+        k
+    }
+    let mut out = Vec::new();
+    let (mut key, mut value) = (Vec::new(), Vec::new());
+    let (mut last_value_ws, mut last_key_ws): (Option<usize>, Option<usize>) = (None, None);
+    let mut state = S::PreKey;
+    // `*p` stops at the first NUL, like the C loop.
+    for &c in contents.iter().take_while(|&&c| c != 0) {
+        match state {
+            S::PreKey => {
+                if COMMENTS.contains(&c) {
+                    state = S::Comment;
+                } else if !WHITESPACE.contains(&c) {
+                    state = S::Key;
+                    last_key_ws = None;
+                    key.push(c);
+                }
+            }
+            S::Key => {
+                if NEWLINE.contains(&c) {
+                    state = S::PreKey;
+                    key.clear();
+                } else if c == b'=' {
+                    state = S::PreValue;
+                    last_value_ws = None;
+                } else {
+                    if !WHITESPACE.contains(&c) {
+                        last_key_ws = None;
+                    } else if last_key_ws.is_none() {
+                        last_key_ws = Some(key.len());
+                    }
+                    key.push(c);
+                }
+            }
+            S::PreValue => {
+                if NEWLINE.contains(&c) {
+                    state = S::PreKey;
+                    out.push((finish(&mut key, last_key_ws), std::mem::take(&mut value)));
+                } else if c == b'\'' {
+                    state = S::SingleQuoteValue;
+                } else if c == b'"' {
+                    state = S::DoubleQuoteValue;
+                } else if c == b'\\' {
+                    state = S::ValueEscape;
+                } else if !WHITESPACE.contains(&c) {
+                    state = S::Value;
+                    value.push(c);
+                }
+            }
+            S::Value => {
+                if NEWLINE.contains(&c) {
+                    state = S::PreKey;
+                    if let Some(n) = last_value_ws {
+                        value.truncate(n);
+                    }
+                    out.push((finish(&mut key, last_key_ws), std::mem::take(&mut value)));
+                } else if c == b'\\' {
+                    state = S::ValueEscape;
+                    last_value_ws = None;
+                } else {
+                    if !WHITESPACE.contains(&c) {
+                        last_value_ws = None;
+                    } else if last_value_ws.is_none() {
+                        last_value_ws = Some(value.len());
+                    }
+                    value.push(c);
+                }
+            }
+            S::ValueEscape => {
+                state = S::Value;
+                if !NEWLINE.contains(&c) {
+                    value.push(c);
+                }
+            }
+            S::SingleQuoteValue => {
+                if c == b'\'' {
+                    state = S::PreValue;
+                } else {
+                    value.push(c);
+                }
+            }
+            S::DoubleQuoteValue => {
+                if c == b'"' {
+                    state = S::PreValue;
+                } else if c == b'\\' {
+                    state = S::DoubleQuoteValueEscape;
+                } else {
+                    value.push(c);
+                }
+            }
+            S::DoubleQuoteValueEscape => {
+                state = S::DoubleQuoteValue;
+                if SHELL_NEED_ESCAPE.contains(&c) {
+                    value.push(c);
+                } else if c != b'\n' {
+                    value.push(b'\\');
+                    value.push(c);
+                }
+            }
+            S::Comment => {
+                if c == b'\\' {
+                    state = S::CommentEscape;
+                } else if NEWLINE.contains(&c) {
+                    state = S::PreKey;
+                }
+            }
+            S::CommentEscape => {
+                state = if NEWLINE.contains(&c) {
+                    S::PreKey
+                } else {
+                    S::Comment
+                };
+            }
+        }
+    }
+    if matches!(
+        state,
+        S::PreValue
+            | S::Value
+            | S::ValueEscape
+            | S::SingleQuoteValue
+            | S::DoubleQuoteValue
+            | S::DoubleQuoteValueEscape
+    ) {
+        if state == S::Value
+            && let Some(n) = last_value_ws
+        {
+            value.truncate(n);
+        }
+        out.push((finish(&mut key, last_key_ws), value));
+    }
+    out
+}
+
+/// The port above reads systemd's own examples as systemd does, so that
+/// the round trip below proves something about systemd, not about itself.
+#[test]
+fn the_systemd_parser_port_matches_systemd() {
+    let got = systemd_parse_env_file(
+        b"# c\nA=plain  \nB = \"q \\\"x\\\" \\n\"\nC='s\\n'\nD=a\\\nb\n;x\nE=\"l1\nl2\"\n",
+    );
+    let want: Vec<(&[u8], &[u8])> = vec![
+        (b"A", b"plain"),
+        (b"B", b"q \"x\" \\n"),
+        (b"C", b"s\\n"),
+        (b"D", b"ab"),
+        (b"E", b"l1\nl2"),
+    ];
+    let got: Vec<(&[u8], &[u8])> = got
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+        .collect();
+    assert_eq!(got, want);
+}
+
+/// TER-566: a multi-line value (the daemon's git trailers, known hosts,
+/// commit hook) is accepted, and systemd reads the exact bytes back from
+/// the environment file, with no other assignment.
+#[test]
+fn multi_line_env_values_reach_the_unit_byte_for_byte() {
+    let values: &[&str] = &[
+        "Card: TER-566\nAgent: ter-566\n",
+        "host1 ssh-ed25519 AAAA\nhost2 ssh-rsa BBBB\n",
+        "#!/bin/sh\nset -e\nexec git interpret-trailers \"$1\" `x` \\\n",
+        "x\nB=y",
+        "a\r\nb\rc\n\n",
+        "\n#comment\n;semi\n",
+        "trailing\\",
+        "back\\\nslash",
+        "  lead and trail  \t",
+        "\"\"''\\\\$$``",
+        "ctl \x1b[0m \x07 \x7f \u{85} tab\t",
+        "unicode \u{e9} \u{1F600} \u{FFFD}",
+        "",
+    ];
+    let root = tempfile::tempdir().unwrap();
+    let ctx = ctx(root.path());
+    let mut req = request(root.path());
+    req.env = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (format!("V{i:02}"), (*v).to_owned()))
+        .collect();
+    req.env
+        .insert("TERRARIUM_GIT_TRAILERS".into(), "A: 1\nB: 2\n".into());
+    let plan = plan_start(&ctx, &req, &inventory(), &nodes(), 1, &W).unwrap();
+    let got: Vec<(String, Vec<u8>)> = systemd_parse_env_file(plan.env.as_bytes())
+        .into_iter()
+        .map(|(k, v)| (String::from_utf8(k).unwrap(), v))
+        .collect();
+    let want: Vec<(String, Vec<u8>)> = req
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_bytes().to_vec()))
+        .collect();
+    assert_eq!(got, want, "{:?}", plan.env);
+    // The values are in the root-only environment file, never on the
+    // systemd-run command line.
+    for v in values.iter().filter(|v| v.len() > 2) {
+        assert!(!plan.args.iter().any(|a| a.contains(v)), "{v:?}");
+    }
 }
 
 #[test]
