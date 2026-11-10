@@ -214,8 +214,7 @@ pub fn instance(conn: &Connection) -> ApiResult<String> {
          WHERE NOT EXISTS (SELECT 1 FROM exedev_instance)",
         [&random[random.len() - 8..]],
     )?;
-    let id: String =
-        conn.query_row("SELECT id FROM exedev_instance LIMIT 1", [], |r| r.get(0))?;
+    let id: String = conn.query_row("SELECT id FROM exedev_instance LIMIT 1", [], |r| r.get(0))?;
     if plain_word(&id) {
         Ok(id)
     } else {
