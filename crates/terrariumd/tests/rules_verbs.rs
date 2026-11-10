@@ -2179,7 +2179,12 @@ async fn job_queue_validates_merges_and_batches() {
     assert_eq!(r[0]["state"], "noop", "{r:?}");
     assert_eq!(r[0]["steps"][0]["detail"]["lane"], json!(j[1].id), "{r:?}");
     let r = td.delete(&format!("/api/jobs/{}", j[1].id)).await;
-    assert!(r.status == 200 || r.status == 204, "{} {}", r.status, r.body);
+    assert!(
+        r.status == 200 || r.status == 204,
+        "{} {}",
+        r.status,
+        r.body
+    );
     settle(&td).await;
 
     // The lane is free. The batch: board order, the held card left out,
@@ -3454,7 +3459,11 @@ async fn the_merge_queue_batch_goes_when_4_cards_wait() {
     let last = r.last().unwrap();
     assert_eq!(last["state"], "noop", "{last}");
     assert_eq!(last["steps"][0]["detail"]["waiting"], 1, "{last}");
-    assert_eq!(last["steps"][0]["detail"]["lane"], json!(open[0].id), "{last}");
+    assert_eq!(
+        last["steps"][0]["detail"]["lane"],
+        json!(open[0].id),
+        "{last}"
+    );
 }
 
 /// TER-644: one card goes alone 30 minutes after it came.
@@ -3542,7 +3551,12 @@ async fn no_batch_goes_while_the_merge_lane_is_busy() {
 
     // The lane is free: the next check queues one batch of the 4.
     let r = td.delete(&format!("/api/jobs/{lane}")).await;
-    assert!(r.status == 200 || r.status == 204, "{} {}", r.status, r.body);
+    assert!(
+        r.status == 200 || r.status == 204,
+        "{} {}",
+        r.status,
+        r.body
+    );
     settle(&td).await;
     let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
         .await
@@ -3842,7 +3856,12 @@ async fn a_card_of_another_repo_does_not_block_the_merge_queue() {
         .unwrap();
     assert_eq!(n, 0, "the lane is busy");
     let r = td.delete(&format!("/api/jobs/{}", open[0].id)).await;
-    assert!(r.status == 200 || r.status == 204, "{} {}", r.status, r.body);
+    assert!(
+        r.status == 200 || r.status == 204,
+        "{} {}",
+        r.status,
+        r.body
+    );
     settle(&td).await;
     let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
         .await
