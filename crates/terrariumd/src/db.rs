@@ -2559,6 +2559,11 @@ pub struct Db {
     /// it in before it lets the lock go ([`Tx::rebuild_redactor`]), so no
     /// other write sees the value with the old matcher.
     redactor: RedactorHandle,
+    /// Serializes the host pin resolution of this database
+    /// ([`crate::jobs::prepare_hosts`]). Per database, not per process: the
+    /// test binary runs hundreds of daemons in one process, and one shared
+    /// lock queued every boot behind the DNS lookups of the others (TER-648).
+    host_pins: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Db {
@@ -2567,7 +2572,13 @@ impl Db {
             conn: Arc::new(Mutex::new(conn)),
             hub,
             redactor: RedactorHandle::default(),
+            host_pins: Arc::default(),
         }
+    }
+
+    /// The lock of [`crate::jobs::prepare_hosts`] on this database.
+    pub(crate) fn host_pins(&self) -> &tokio::sync::Mutex<()> {
+        &self.host_pins
     }
 
     pub fn hub(&self) -> &EventHub {
