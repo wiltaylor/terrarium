@@ -2990,6 +2990,93 @@ async fn a_fix_stacked_on_a_card_merged_after_the_cut_is_refused() {
     );
 }
 
+/// TER-637 (TER-607 review round 3, minor 1): card X, branched from
+/// `next` before the cut, merges onto `next` after it. Fix F's branch
+/// points at a commit of X's branch with no commit of its own, so F's
+/// merge onto `next` passes with no merge commit, and the oldest
+/// first-parent commit of `next` that holds F is X's merge. The merge of
+/// F onto the release is refused and the release stays.
+#[tokio::test]
+async fn a_fix_whose_next_merge_made_no_commit_is_refused() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    let x1 = lab.branch("ter-x", "next", &[("OK", "yes\n"), ("X1", "x\n")]);
+    lab.branch("ter-x", "ter-x", &[("X2", "x\n")]);
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    let x = lab.card("x", "ter-x").await;
+    let j = merge_and_wait(&lab, &x, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    // F's branch is X's first commit: no commit of its own.
+    git(
+        &lab.work,
+        &["push", "-q", "origin", &format!("{x1}:refs/heads/ter-rb4")],
+    );
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    let rb4 = lab.card("ter-rb4", "ter-rb4").await;
+    let j = merge_and_wait(&lab, &rb4, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), next, "a no-op merge");
+    let j = merge_and_wait(&lab, &rb4, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("which is not its own merge"), "{tail}");
+    assert!(tail.contains(&next), "names X's merge: {tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        frozen,
+        "the release stays"
+    );
+}
+
+/// TER-637 (TER-607 review round 3, minor 2): when the first-parent
+/// commit of `next` that holds the tested commit has no first parent (a
+/// `next` rewritten to a root commit), the check cannot see what `next`
+/// held before the fix: the merge onto the release is refused.
+#[tokio::test]
+async fn a_fix_whose_next_merge_has_no_first_parent_is_refused() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    // A root commit, pushed as `next` and as the fix branch.
+    git(&lab.work, &["checkout", "-q", "--orphan", "ter-rb5"]);
+    std::fs::write(lab.work.join("OK"), "yes\n").unwrap();
+    git(&lab.work, &["add", "-A"]);
+    git(&lab.work, &["commit", "-q", "-m", "root"]);
+    let root = git(&lab.work, &["rev-parse", "HEAD"]);
+    git(&lab.work, &["push", "-q", "-f", "origin", "ter-rb5", "ter-rb5:next"]);
+    let rb5 = lab.card("ter-rb5", "ter-rb5").await;
+    let j = merge_and_wait(&lab, &rb5, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), root);
+    let j = merge_and_wait(&lab, &rb5, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("has no first parent"), "{tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        frozen,
+        "the release stays"
+    );
+}
+
 /// TER-607 review round 2, finding 3: a batch of two or more cards with a
 /// release-blocker card is refused; the fix merges alone.
 #[tokio::test]

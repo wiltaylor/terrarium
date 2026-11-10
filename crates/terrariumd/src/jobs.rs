@@ -2186,6 +2186,13 @@ fn none_merged(job: &Job, left: HashMap<usize, Left>, batch: Option<Vec<BatchCar
 /// onto `next` before the fix, is refused: it would take unreleased
 /// cards into the frozen version. A fix that merges a card branch that
 /// is not on `next` yet cannot be told apart from the fix's own commits.
+///
+/// M must be the fix's own merge (TER-637): its second parent is the
+/// tested commit, as [`git::JobRepo::merge`] writes it. A passed merge
+/// onto `next` of a commit that `next` held already makes no merge
+/// commit, so M is then the merge of another card, and `M^1` does not
+/// hold that card's commits: such a fix is refused, as is an M with no
+/// first parent.
 fn release_fix(repo: &git::JobRepo, job: &Job, release: &str) -> Result<(), String> {
     let onto = job.onto();
     let cards = job.cards();
@@ -2209,7 +2216,7 @@ fn release_fix(repo: &git::JobRepo, job: &Job, release: &str) -> Result<(), Stri
         Ok(false) => return Err(format!("the tested commit {want} is not on next")),
         Err(e) => return Err(e.to_string()),
     }
-    let foreign = brought_from_next(repo, release, &tested, upstream).map_err(|e| e.to_string())?;
+    let foreign = brought_from_next(repo, release, &tested, upstream)?;
     if !foreign.is_empty() {
         let shown: Vec<&str> = foreign.iter().take(5).map(String::as_str).collect();
         return Err(format!(
@@ -2228,19 +2235,22 @@ fn release_fix(repo: &git::JobRepo, job: &Job, release: &str) -> Result<(), Stri
 /// the merge of `tested` (see [`release_fix`]), newest first. M, the
 /// oldest first-parent commit of `upstream` that holds `tested`, is found
 /// by a binary search: along the first-parent line, once a commit holds
-/// `tested`, each newer one does too.
+/// `tested`, each newer one does too. An M that is not the merge of
+/// `tested` (no first parent, or a second parent that is not `tested`)
+/// is an error: the check cannot tell what `next` held before the fix.
 fn brought_from_next(
     repo: &git::JobRepo,
     release: &str,
     tested: &str,
     upstream: &str,
-) -> Result<Vec<String>, git::GitError> {
+) -> Result<Vec<String>, String> {
+    let git = |e: git::GitError| e.to_string();
     // Newest first, so the commits that hold `tested` are a prefix.
-    let line = repo.rev_list(upstream, release, true)?;
+    let line = repo.rev_list(upstream, release, true).map_err(git)?;
     let (mut lo, mut hi) = (0, line.len());
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        if repo.is_ancestor(tested, &line[mid])? {
+        if repo.is_ancestor(tested, &line[mid]).map_err(git)? {
             lo = mid + 1;
         } else {
             hi = mid;
@@ -2250,15 +2260,29 @@ fn brought_from_next(
     let Some(m) = lo.checked_sub(1).map(|i| &line[i]) else {
         return Ok(Vec::new());
     };
-    let Some(before) = repo.commit_of(&format!("{m}^1"))? else {
-        return Ok(Vec::new());
+    let Some(before) = repo.commit_of(&format!("{m}^1")).map_err(git)? else {
+        return Err(format!(
+            "the merge {m} that took the tested commit {tested} onto next has no first \
+             parent: cannot check what next held before the fix"
+        ));
     };
+    let own = repo.commit_of(&format!("{m}^2")).map_err(git)?;
+    if own.as_deref() != Some(tested) {
+        return Err(format!(
+            "the tested commit {tested} came onto next with commit {m}, which is not its own \
+             merge: next held it already when its merge onto next passed (that merge made no \
+             commit). Make the fix branch from the release branch, with a commit of its own, \
+             and merge it onto next again"
+        ));
+    }
     let had: HashSet<String> = repo
-        .rev_list(&before, release, false)?
+        .rev_list(&before, release, false)
+        .map_err(git)?
         .into_iter()
         .collect();
     Ok(repo
-        .rev_list(tested, release, false)?
+        .rev_list(tested, release, false)
+        .map_err(git)?
         .into_iter()
         .filter(|c| had.contains(c))
         .collect())
