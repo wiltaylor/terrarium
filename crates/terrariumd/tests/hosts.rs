@@ -1408,17 +1408,26 @@ async fn reconnect_resumes_a_running_session() {
     let _h = lab.host("lab1").await;
     lab.target(json!({"name": "box", "kind": "host", "host": "lab1"}))
         .await;
-    let sid = exec(
-        &lab.td,
-        "box",
-        json!({"cmd": ["sh", "-c", "echo one; sleep 1; echo two; exit 4"]}),
-    )
-    .await;
+    // The session runs until the test makes the flag, after the
+    // reconnect. A fixed `sleep 1` ended the session before the reconnect
+    // under load, and the reconnect then resumed 0 sessions (TER-610).
+    let dir = tempfile::tempdir().unwrap();
+    let flag = dir.path().join("go");
+    let script = format!(
+        "echo one; while [ ! -e '{}' ]; do sleep 0.02; done; echo two; exit 4",
+        flag.display()
+    );
+    let sid = exec(&lab.td, "box", json!({"cmd": ["sh", "-c", script]})).await;
     // Wait for the first line, then cut the link.
     let path = format!("/api/targets/box/sessions/{sid}/output?since=0&wait=5");
     let first = lab.td.get(&path).await;
     assert!(!first.ok()["chunks"].as_array().unwrap().is_empty());
     assert!(lab.state().executor.hosts.drop_link("lab1"));
+    wait_until(&lab.trace, "the host never connected again", async || {
+        events(&lab.td, "host.connected").await.len() == 2
+    })
+    .await;
+    std::fs::write(&flag, b"").unwrap();
     let d = drain(&lab.td, "box", &sid).await;
     assert_eq!(String::from_utf8_lossy(&d.stdout), "one\ntwo\n");
     assert_eq!(d.end["code"], 4);

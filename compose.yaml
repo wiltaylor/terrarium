@@ -189,10 +189,12 @@ services:
     group_add: ["${TERRARIUM_DOCKER_GID:-0}"]
     environment:
       RUST_LOG: ${RUST_LOG:-info}
-      # The image check of a release: gh (the default: the build provenance
-      # attestation of the release workflow), cosign, off, or
-      # command:<shell command> (docs/api.md §34.4).
-      TERRARIUM_UPDATE_VERIFY: ${TERRARIUM_UPDATE_VERIFY:-gh}
+      # The image check of a release: cosign (the default: the release key,
+      # docker/release/cosign.pub in the image), gh (the build provenance of
+      # the GitHub workflow, the releases up to TER-613), cosign-keyless, off,
+      # or command:<shell command> (docs/api.md §34.4, docs/release.md).
+      TERRARIUM_UPDATE_VERIFY: ${TERRARIUM_UPDATE_VERIFY:-cosign}
+      TERRARIUM_UPDATE_COSIGN_KEY: ${TERRARIUM_UPDATE_COSIGN_KEY:-/opt/terrarium/release/cosign.pub}
       TERRARIUM_UPDATE_WORKFLOW: ${TERRARIUM_UPDATE_WORKFLOW:-.github/workflows/ci.yml}
       TERRARIUM_UPDATE_IMAGE: ${TERRARIUM_UPDATE_IMAGE:-ghcr.io/wiltaylor/terrarium}
       TERRARIUM_UPDATE_REPO: ${TERRARIUM_UPDATE_REPO:-wiltaylor/terrarium}

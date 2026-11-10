@@ -116,13 +116,32 @@ async fn rollback(
     Ok((StatusCode::ACCEPTED, Json(json!({"run": run}))))
 }
 
+/// The body of `POST /api/system/update/drain`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DrainBody {
+    /// Drain the job slots only (TER-614 R4): no job starts, the running
+    /// jobs finish, and the agents go on.
+    #[serde(default)]
+    jobs_only: bool,
+}
+
 /// `POST /api/system/update/drain`: no new turns. The caller polls
 /// `GET /api/system/update` (`drain.busy`) for the end of the running
-/// turns.
-async fn drain(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<DrainInfo>> {
+/// turns. With `{"jobs_only": true}`: no new jobs only (`drain.jobs`).
+async fn drain(
+    State(state): State<Shared>,
+    actor: Actor,
+    raw: axum::body::Bytes,
+) -> ApiResult<Json<DrainInfo>> {
     policy::operator_only(&actor, WHAT)?;
-    self_update::start_drain(&state, &actor.label());
-    let detail = json!({});
+    let body: DrainBody = parse_optional(&raw)?;
+    if body.jobs_only {
+        self_update::start_jobs_drain(&state, &actor.label());
+    } else {
+        self_update::start_drain(&state, &actor.label());
+    }
+    let detail = json!({"jobs_only": body.jobs_only});
     let r = state
         .db
         .write(actor.label(), move |t| {

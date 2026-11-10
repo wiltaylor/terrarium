@@ -886,7 +886,13 @@ uses the project's `card-review` template, falling back to `global:card-review`,
 and that admin's spawn rights, caps, and template grants.
 
 Each card in review gets at most one review agent at a time. `review_round`
-on the card counts successful review spawns. Only the current review agent's
+on the card counts successful review spawns. A card of a project without a
+review dispatcher counts each move into its review column instead (TER-614),
+so a review by the lead counts too; `0` means it was never in review.
+`review_round` is in `GET /api/cards/{id}` and in each card of the board list.
+`trouble` on a card holds its active trouble signals (TER-79): the trouble
+pass sets them while the card is in a working or review column, and clears
+them when it leaves, so a done card shows `[]`. Only the current review agent's
 comment can supply a verdict: its first line must be `Review verdict: accept` or
 `Review verdict: changes` (bare `accept` and `changes` also work), with findings below it.
 At three rounds, automatic reviews stop and the owner is notified.
@@ -3387,7 +3393,7 @@ Bundles:
 To thread (GitHub #30, TER-469):
 
 - The operator moves an open question or notice into a new Inbox thread
-  with the asking agent: the Inbox action "To thread", `POST
+  with the asking agent: the Inbox action "Open in thread" (GitHub #32), `POST
   /api/questions/{id}/to-thread`, or `terrarium question to-thread <id>
   [-m <message>]` (also `terrarium admin question to-thread`).
 - The thread (§6.13) is in the project of the question, with the asking
@@ -3418,6 +3424,11 @@ To thread (GitHub #30, TER-469):
   retracts it, as an open question of the thread.
 - The recap turn lists the `in_thread` questions with their threads.
 - A bundle does not move (`409 conflict`): that is a follow-up.
+- In the dashboard (GitHub #32), "Open in thread" on a question or notice
+  with a linked thread opens that thread, also after the answer. On an
+  open one with none it moves it, as above, and opens the new thread.
+  "Show mail" opens the mail thread of the question (`thread_id`). The
+  thread shows the question in its conversation.
 
 ### 6.9 The Inbox
 
@@ -5887,7 +5898,14 @@ they use the fixed fallbacks above (`hard` also uses four hours). Explicit
 project time overrides take precedence. A zero threshold disables that check.
 An ETA at or before now produces `eta_overdue`. The other signal names are
 `time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
-`validation_red`, `timer_polls`, `compactions`, `review_wait` and `no_progress`.
+`validation_red`, `timer_polls`, `compactions`, `review_wait`, `no_progress`
+and `shipped_accepted`. `shipped_accepted` (TER-608) marks an accepted card
+with a `version:X.Y.Z` or `version:vX.Y.Z` label (not `version:vnext`) when
+a closed version group of the project has the status `Built X.Y.Z` or
+`Built vX.Y.Z` (from `group built`). The daemon sees no Git tags, so that
+acknowledgement is its record of a published tag. Each pass reads the built
+versions once per project from `card_groups`, not from the event log. Only the leads get
+its mail. It clears when the card leaves accepted or loses the label.
 Review wait starts at the most recent entry into review and clears on return to work.
 Assignment changes while the card stays in review do not reset its age.
 Job-set ETAs do not count as agent ETA extensions.
@@ -7211,6 +7229,70 @@ start or a restart fails. A restart of the harness and a daemon shutdown
 leave the targets as they are. Each of these verbs writes an audit row
 with the actor `system`: `target.up` with `"reason": "agent_start"`, and
 `target.destroy` with `"reason": "agent_stop"`.
+
+#### exe.dev VMs (`kind = "exedev"`)
+
+An `exedev` target is an exe.dev VM that the daemon makes on `up` and
+removes on `down` (`crate::exedev`, TER-294). It needs `ephemeral = true`,
+no `keep`, no `address`, `host` or `port`, and a `credential`: an
+`ssh_key` that exe.dev accepts for VMs with the target's tag.
+`sync_workspace = true` mirrors the holder's workspace as on an ssh target.
+
+```toml
+kind = "exedev"
+ephemeral = true
+credential = "github-deploy-cloud-test"
+sync_workspace = true
+
+[exedev]                     # every key is optional
+api_token = "exedev-api-token"   # the API token secret: new, ls, rm
+cpu = 2                      # new --cpu
+memory_gb = 4                # new --memory=<n>GB, at most 2 per vCPU
+tag = "terrarium-dev-ssh"    # new --tag
+user = "exedev"              # the ssh user on the VM
+max_life_secs = 28800        # 60 to 28800 (8 hours)
+```
+
+- The lifecycle goes through `POST https://exe.dev/exec` with the token
+  in the `Authorization` header only: `new --name=terrarium-x-<target>-<id>
+  --sandbox --tag=<tag> --cpu=<n> --memory=<n>GB`, `ls`, `rm`. Commands,
+  copies and the workspace sync go over ssh to `<user>@<ssh_dest>` (the
+  API stops a command at 30 s and a body at 64 KB). `up` waits up to 180 s
+  for ssh.
+- Each VM has a row in the table `exedev_vms`, written before `new` runs:
+  the VM name, the target, the account it was made on (the token secret
+  name, the target's project, and whether an admin set the target), the
+  tag, the ssh host, and `created_at` and `expires_at`. The row outlives
+  the target: `rm` always runs on the account the VM was made on, also
+  after the target's `api_token` changes or the target is deleted.
+- One lock per target serializes `up`, `down`, `status` and the sweep's
+  removal of that target's VM. An `up` that finds a recorded VM in `ls`,
+  in its life, adopts it (also a row that `new` never answered: the ssh
+  host then comes from `ls`). A recorded VM past its life is removed and
+  replaced, never adopted. A `new` that fails removes its VM; when that
+  `rm` fails too, the row stays for the sweep.
+- At most 3 VMs at once over all exedev targets (the recorded ones and the
+  `terrarium-x-` VMs in `ls`). The fourth `up` answers `409` with
+  `exe.dev cap: 3 of 3 VMs run (...)`.
+- The sweep runs one minute after the start, then at the next `expires_at`
+  of a recorded VM and at least every hour, and on
+  `POST /api/exedev/sweep` (the operator only; the answer is
+  `{removed: [{vm, target, reason}], errors}`, audit row `exedev.sweep`).
+  It runs `ls` once for each account of the rows and the targets, and
+  removes:
+  - `expired`: a recorded VM past its life, with a mail to the project
+    inbox (or to the operator for a global target);
+  - `orphaned`: a recorded VM whose target is gone;
+  - `unready`: a recorded VM with no ssh host after 10 minutes, held or not;
+  - `unheld`: a recorded VM that no running agent holds after 10 minutes;
+  - `leftover`: a VM in `ls` with the `terrarium-x-` prefix and a tag of
+    the account, that no row of any account records, 10 minutes after its
+    `created_at` in `ls` (or after the sweep first saw it).
+  Each removal of a recorded VM writes `target.destroy` with
+  `"reason": "exedev_<reason>"`. A VM without the prefix is never removed.
+- Deleting the target removes its VM. When that `rm` fails, the target is
+  deleted and the row stays, so the next sweep removes the VM as
+  `orphaned`.
 
 ### 17.7 Target leases
 
@@ -8804,7 +8886,7 @@ one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
 of a `job` event, `data.id`, or of a `job.verdict` event, `data.job`; a
 rule with one runs only for those events): `state` (`queued`, `running`,
 `passed`, `failed`, `cancelled`), `outcome` (`red`, `conflict`, `error`,
-`none`), and the booleans `split` (the job is a half of a split batch),
+`infra`, `none`), and the booleans `split` (the job is a half of a split batch),
 `batch` (two or more cards of the job merged, did not conflict), `rerun`
 (a rerun of the job is queued or ran), and `halves` (the job was split).
 Every field that is set must hold; every block must hold.
@@ -8864,21 +8946,23 @@ Each cut opens a project-scoped unique `version:<ULID>` group, records
 gathering, cut, version branch e2e, pre-release, and done steps, and mails
 the project lead (the operator if no lead exists). No Git work is done.
 The lead chooses the version, relabels only the snapshot members, branches,
-tests, and publishes. Later accepted cards are not added to that snapshot.
+tests, and publishes. Later accepted cards are not added to that snapshot
+by the rule. The lead adds a late card with `group add`.
 
 | endpoint | body | result |
 |---|---|---|
 | `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A step after `cut` that starts (running, done or failed) also finishes `cut`. A closed group rejects updates. |
-| `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, group}`. Explicit acknowledgement after release CI publishes. Moves only the snapshot's accepted members to done, clears assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
+| `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, also_done, group}`. Explicit acknowledgement after release CI publishes. Moves the snapshot's accepted members to done, then every other active, unheld accepted card labelled `version:vX.Y.Z` or `version:X.Y.Z` (either form of the given version) that is in no open group (TER-608), listed in `also_done`. Clears their assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
 | `POST /api/projects/{project}/version-groups/{key}/remove` | `{card}` | `{changed, group}`. Explicitly drops a member from an open snapshot without moving or editing that card. Use for a card returned for a fix, archived, or held. Removal is audited. Duplicate removal is a no-op. Closed groups reject removal. |
+| `POST /api/projects/{project}/version-groups/{key}/add` | `{card}` | `{changed, group}`. Adds a late card to an open snapshot (TER-608). The card must be active, unheld, in the accepted column, and in no other open group. Addition is audited (`version.member_added`). Duplicate addition is a no-op. Closed groups reject addition. |
 
-All three endpoints require project admin. Keys are project-scoped. A successful
+All four endpoints require project admin. Keys are project-scoped. A successful
 pipeline poll is never a built acknowledgement. The `version.built` event
-contains `key`, `version`, and `members` and names the group card.
+contains `key`, `version`, `members` and `also_done` and names the group card.
 
 Lead CLI (uses `--project`, else the agent's project):
 `terrarium group status <key> --step "version branch e2e" --state running --eta 10m`,
-`terrarium group remove <key> <card>`, and
+`terrarium group remove <key> <card>`, `terrarium group add <key> <card>`, and
 `terrarium group built <key>... vX.Y.Z` (one call for each key; repeat the
 command after a failure, as built is idempotent). Removed cards do not count in that build.
 
@@ -11431,7 +11515,9 @@ with its size, that the restored database passes `PRAGMA
 integrity_check` and has the schema version of the header, and that
 `secrets.key` is back. The live data does not change, so the daemon can
 run. The scratch dir holds the secrets in plain form: the drill deletes it
-at the end unless `--keep`. A dir with content is refused. Run a drill
+at the end unless `--keep`. Only an absent or empty dir is taken: a dir
+with content, one that cannot be read (for example permission denied),
+or a symlink is refused and not deleted. Run a drill
 after the first scheduled backup, after a key rotation, and after an
 upgrade of terrariumd.
 
@@ -11465,7 +11551,7 @@ The settings are daemon env vars:
 | `TERRARIUM_BACKUP_KEEP` | `4` | The full backups to keep, each with its diffs. |
 | `TERRARIUM_BACKUP_WORK` | `off` | `on`: add the workspaces. |
 | `TERRARIUM_BACKUP_KEY_SECRET` | `backup-key` | The global secret with the passphrase. |
-| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. |
+| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. The daemon user must own it, and only the owner may read it (mode `0600` or `0400`); else each run fails. |
 
 A bad value stops the daemon start. With a schedule, a daemon task makes a
 backup one interval after the newest backup in the dir, and not before 10
@@ -11475,7 +11561,9 @@ minutes after the start. A failed run waits one interval too.
 newest is older than `TERRARIUM_BACKUP_FULL_EVERY`, or when the key does
 not open the newest full backup (it is not sealed, or the key was
 rotated). Else it is a `diff` of the newest full backup. A diff and its
-base so always have the same key.
+base so always have the same key. A run holds the one-backup lock of the
+dir from the choice of the kind and the base to the prune: a manual
+backup (§32.5) during the run gets `409 conflict`; it does not wait.
 
 **The key.** A scheduled backup holds every secret, so it is always
 sealed (§32.2). The passphrase is the `passphrase` field of the global
@@ -11501,7 +11589,8 @@ writes a global event of the kind `backup` with `change`: `verified`,
 `pruned`, `failed` (`level: error`), `recovered`, or `missed`
 (`level: error`). A backup that does not verify moves to
 `.unverified-<name>` in the backup dir: it is not a base and not a kept
-backup.
+backup. When the move fails the run deletes the file; when that fails
+too, the error mail says to delete it by hand.
 
 **Retention.** Only a full backup that verified prunes the dir: it keeps
 the newest `TERRARIUM_BACKUP_KEEP` full backups and their diffs, and
@@ -11514,7 +11603,11 @@ failures write events only, and the first good run writes `recovered`. A
 missed run (no backup and no try for one interval and one hour, for
 example after the daemon was down) mails the operator once per due time
 (subject `Scheduled backup missed`). A new backup then runs 10 minutes
-after the start.
+after the start. The schedule keeps its marks in `.schedule.json` in the
+backup dir: the time it was turned on, the last try, and the due time of
+the last missed mail. So a restart does not mail the same missed run
+again, and a schedule that is turned on over an old manual backup mails
+no missed run at once. The file goes when the schedule is off.
 
 This task is not a project schedule (§19): a project schedule starts agent
 turns in one project, and a backup is of the whole daemon.
@@ -11907,8 +12000,9 @@ The updater:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TERRARIUM_UPDATE_VERIFY` | `gh` | The image check (§34.4): `gh`, `cosign`, `off`, or `command:<shell command>`. |
-| `TERRARIUM_UPDATE_WORKFLOW` | `.github/workflows/ci.yml` | The workflow in `TERRARIUM_UPDATE_REPO` that signs the releases (`--signer-workflow`). |
+| `TERRARIUM_UPDATE_VERIFY` | `cosign` | The image check (§34.4): `cosign`, `gh`, `cosign-keyless`, `off`, or `command:<shell command>`. |
+| `TERRARIUM_UPDATE_COSIGN_KEY` | `/opt/terrarium/release/cosign.pub` | The public key of the `cosign` check: the release key of the image (`docker/release/cosign.pub`). |
+| `TERRARIUM_UPDATE_WORKFLOW` | `.github/workflows/ci.yml` | The workflow in `TERRARIUM_UPDATE_REPO` that signed the releases (`gh`, `--signer-workflow`). |
 | `TERRARIUM_UPDATE_IMAGE` | `ghcr.io/wiltaylor/terrarium` | The image repository of the releases. |
 | `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium` | The GitHub repo: the identity of the signing workflow. |
 | `TERRARIUM_UPDATE_DRAIN_WAIT` | `600` | Seconds that the drain waits for the running turns. |
@@ -11965,12 +12059,22 @@ One run at a time: a request while a run runs is `409 conflict`.
 `TERRARIUM_UPDATE_VERIFY` names a program, so that the check follows the
 way the release signs its images ([release.md](release.md)):
 
-- `gh` (the default): `gh attestation verify oci://<repo image>@<digest>
+- `cosign` (the default): `cosign verify --key <TERRARIUM_UPDATE_COSIGN_KEY>
+  <repo image>@<digest>`. The local release build (`just release::publish`,
+  [release.md](release.md), "The local release build") signs the image
+  digest with the release key pair. cosign checks the signature and its
+  transparency log entry with the public key, which the image has at
+  `/opt/terrarium/release/cosign.pub` (`docker/release/cosign.pub`). The
+  image has cosign 3.1.4 (pinned with its SHA-256 in the Dockerfile). A
+  missing key file fails the check before cosign runs. A release that the
+  GitHub workflow made has no cosign signature: this check refuses it (see
+  release.md, "The switch from the workflow to the local build").
+- `gh`: `gh attestation verify oci://<repo image>@<digest>
   --repo <repo> --signer-workflow <repo>/.github/workflows/ci.yml
-  --bundle-from-oci`. The release signs only with
-  `actions/attest-build-provenance` and pushes the Sigstore bundle to the
-  registry; this is the check of [release.md](release.md), "How to verify
-  a release". gh reads the bundle from GHCR, and checks the signature, the
+  --bundle-from-oci`. The check of the releases that the GitHub workflow
+  made: they sign only with `actions/attest-build-provenance` and push the
+  Sigstore bundle to the registry ([release.md](release.md), "A release of
+  the workflow"). gh reads the bundle from GHCR, and checks the signature, the
   transparency log entry, the digest, and that the certificate is of the
   release workflow of the repo. The image has gh 2.100.0 (pinned with its
   SHA-256 in the Dockerfile). gh asks for a token before it starts, also
@@ -11978,18 +12082,12 @@ way the release signs its images ([release.md](release.md)):
   `GITHUB_TOKEN`, the updater gives gh a placeholder. gh sends it to no
   GitHub API in this mode; a call that needs a real token fails, and so
   does the update. Set `GH_TOKEN` in the updater env to use a real one.
-- `cosign`: `cosign verify --certificate-identity-regexp
+- `cosign-keyless`: `cosign verify --certificate-identity-regexp
   '^https://github\.com/<repo>/\.github/workflows/'
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
-  <ref>`. The release makes no cosign signature and the image has no
-  cosign: this mode is for an image of your own (`TERRARIUM_UPDATE_IMAGE`,
-  `TERRARIUM_UPDATER_IMAGE`).
-
-Why gh and not cosign: the release has only the GitHub attestation, and
-`gh attestation verify` is the documented check for it. cosign v2.4 reads
-signatures and attestations in its own format; its reading of the GitHub
-bundle in the OCI referrers was not proved to work, so it is not the
-default.
+  <ref>`. For an image of your own that a GitHub workflow signs with
+  keyless cosign (`TERRARIUM_UPDATE_IMAGE`, `TERRARIUM_UPDATER_IMAGE`).
+  Before TER-613 this mode was named `cosign`.
 - `command:<shell command>`: `sh -c <command>` with the image in
   `TERRARIUM_UPDATE_REF`. Exit 0 accepts the image.
 - `off`: no check. The `verify` step is `skipped`, and the updater logs a
@@ -12098,8 +12196,16 @@ Answers `202` with `{run}`. No previous switch: the run fails at once
 
 #### `POST /api/system/update/drain`, `POST /api/system/update/resume`
 
-The operator only. Answer `{on, since, by, busy, jobs}`. The drain writes the
-audit row `system.drain`.
+The operator only. Answer `{on, since, by, busy, jobs, jobs_drain}`. The drain
+writes the audit row `system.drain`.
+
+With the body `{"jobs_only": true}` (TER-614, `terrarium admin update
+drain-jobs`) only the job slots drain, for example once an update is
+announced: no job of the job queue starts, the running jobs finish, and
+the agents go on. `jobs` lists the running jobs; `jobs_drain` is `{since,
+by}` while it is on, else `null`. The queued jobs wait. `resume` ends it,
+and so does a restart (it lives in memory). A running job that must not
+wait for its end is cancelled with the job cancel.
 
 ### 34.8 Mail
 
@@ -12501,7 +12607,33 @@ one key, the strictest applies until a cap write replaces them.
   way at most 3 times in a row in one daemon run: the next lost run gets
   the same kill (and the slot mark), then it is `red`, and its `tail`
   starts with `the infrastructure lost the run 4
-  times in a row, so this run counts as red: <why>`.
+  times in a row, so this run counts as red: <why>`. A merge job ends
+  `infra` instead (below).
+- A merge job that failed on its host before its tests (TER-614) is not a
+  test failure. It does not split, does not rerun at once, and uses no
+  attempt. Two paths. An end with outcome `error`, no tested commit
+  (`head`), and a failed step `receive`, `secrets`, or `recipe` (the
+  recipe did not start) goes back to the queue (event change `requeued`)
+  and runs once more after 5 minutes, and not while its host agent is
+  offline (a host agent that comes back online ends the wait early); each
+  card gets a comment that says so. A second such end ends the job with
+  outcome `infra` (verdict `infra`). A run lost past the cap above ends
+  `infra` at once, with no delayed retry. An `infra` end has no rerun, no
+  split, and no failure block: its cards lose the job labels and stay in
+  the merge queue with no job, with a comment. They go in the next batch
+  when a card enters the merge queue or the lead queues them. The retry
+  mark lives in memory: a daemon restart gives at most one extra run.
+- A failure in the daemon before the tests (`setup`, `prepare`) stays
+  `error`. A card branch that the daemon cannot fetch (deleted or
+  rewritten after the accept) or merge leaves the merge as a conflict does:
+  the failure block, the top of `ready`, a mail to its worker; the other
+  cards of the batch go on.
+- Each failed end has the step that failed as the last line of its `tail`:
+  `[failed step: <step>]`, one of `setup`, `prepare`, `receive`, `secrets`,
+  `recipe`, `push`. Each card gets a comment with the failed step and the
+  last 20 lines of the tail, indented. The daemon writes it in both board flows, after each `error`
+  or `infra` end and at the first infra end. A `red` end has the output in
+  its failure block.
 
 A batch merge:
 
@@ -12537,8 +12669,8 @@ start with `Job queue:`.
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?, eta?}`. `eta` is the planned duration (§35.5). The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
-| `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?}`. `eta` is the planned duration (§35.5). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
-| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of one or more cards, in this order (no limit of the daemon; the batch rule of the merge queue sets its own, §19.11). All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
+| `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?, onto?}`. `eta` is the planned duration (§35.5). `onto` is `next` (the default) or a release branch `release/X.Y.Z` (see the release-blocker fix below). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of one or more cards, in this order (no limit of the daemon; the batch rule of the merge queue sets its own, §19.11). All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. A batch of two or more cards with a `release-blocker` card is refused with `409`: that card merges alone. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/projects/{name}/jobs/stats` | members                            | `?since=`: an RFC 3339 time, or a duration back from now such as `7d` (the default); anything else is `400`. The jobs created at or after `since` (a rerun keeps the `created_at` of its first try): `{project, since, jobs, first_attempt, validate, merge, reruns, conflicts, errors, cancelled, open, splits, failed_steps: [{step, failed}], failed_targets: [{target, failed, first_attempt}], untargeted_test_fails}`. Each of `first_attempt`, `validate`, `merge`, and `reruns` is `{ended, passed, failed, pass_rate}`; `pass_rate` is `passed / ended` from 0 to 1, `null` with none ended. A first attempt is attempt 1 and no split half; a `conflict` counts in `conflicts`, not in `ended`. A job with outcome `error` could not run (host agent offline, prepare step failed, push to `next` failed): first attempts and reruns with it count in `errors`, not in `ended`, so an outage does not lower the rate. Split halves count in `splits` only. `failed_targets` (most first) come from the `error: N targets failed:` lines of the failed jobs' output tails, all attempts; `failed_steps` from the first ``error: recipe `<step>` failed`` line, or `timeout`. `untargeted_test_fails` counts the failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
@@ -12568,6 +12700,39 @@ of the merge queue and back in.
 **Upgrade step (TER-580).** After the upgrade, each card that was in the
 merge queue at the TER-553 upgrade and has not left it since stays out of
 merges until it is moved out of the merge queue and back in.
+
+**A release-blocker fix (TER-607).** A frozen version keeps its members.
+A fix for it goes in a card with the label `release-blocker`, on a branch
+made from the release branch `release/X.Y.Z`, not from `next` and not on
+top of another card.
+
+1. The batch rule of the merge queue takes the first card of the column
+   with the label that could go, alone and at once, as a batch of one.
+   The other cards wait for the next batch. There is no preemption: a
+   merge job that is queued or running already, and the halves of a red
+   batch that splits, still run before the blocker. A `card merge` (`POST
+   /api/merges`) of two or more cards with a `release-blocker` card is
+   refused with `409`.
+2. After its merge onto `next` passed, `card merge <id> --onto
+   release/X.Y.Z` (`onto` in the body; one card, a project admin) merges
+   the commit that this merge took onto the release branch, and pushes
+   only that branch. `main` then gets the release merge as usual. The
+   job never takes the head of the card branch: a push after the merge
+   onto `next` does not reach the release. A card without a passed merge
+   of its branch onto `next` is refused with `409`.
+3. The job checks what the fix brings into the release. The tested
+   commit must be on `next`. Let M be the oldest commit of the
+   first-parent line of `next` that holds the tested commit (the merge
+   of the fix onto `next`). No commit of `release/X.Y.Z..tested` may be
+   in `release/X.Y.Z..M^1`, the history of `next` before the fix landed
+   that the release does not have. So a fix branch made from `next`
+   after the cut is refused, and so is a fix stacked on, or merging, a
+   card that merged onto `next` before the fix: both would take
+   unreleased cards into the frozen version. The job then fails with
+   outcome `error`, the release branch stays, and the tail names the
+   commits. Limit: a fix that merges a card branch that is not on `next`
+   yet passes, since its commits cannot be told apart from the fix's own
+   commits. Those commits then reach `next` in the same merge as the fix.
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.

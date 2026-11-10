@@ -244,7 +244,7 @@ pub fn wraps(def: &TargetDef, cmd: &RemoteCmd) -> bool {
 pub fn kind_wraps(def: &TargetDef) -> bool {
     matches!(
         def.kind,
-        TargetKind::Host | TargetKind::Docker | TargetKind::Ssh
+        TargetKind::Host | TargetKind::Docker | TargetKind::Ssh | TargetKind::Exedev
     )
 }
 

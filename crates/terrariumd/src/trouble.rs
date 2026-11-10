@@ -426,14 +426,34 @@ struct Change {
     totals: usage::Totals,
 }
 
+/// An accepted card labelled with a version that `group built` acknowledged.
+pub const SHIPPED_ACCEPTED: &str = "shipped_accepted";
+
 fn desired(
     c: &Connection,
     card: &Watched,
     now: DateTime<Utc>,
     estimates: &mut ReviewEstimates,
+    built: &mut HashMap<String, BTreeSet<String>>,
 ) -> ApiResult<(BTreeSet<String>, Facts, usage::Totals)> {
     let mut out = BTreeSet::new();
     if card.archived {
+        return Ok((out, Facts::default(), usage::Totals::default()));
+    }
+    // TER-608: an accepted card whose version was built (published) should
+    // have gone to done with `group built`. Only the lead can fix it.
+    if card.column_role.as_deref() == Some("accepted") {
+        let versions = crate::store::version_groups::shipped_label_versions(&card.labels);
+        if !versions.is_empty() {
+            // One read of card_groups per project and pass, not per card.
+            if !built.contains_key(&card.project) {
+                let b = crate::store::version_groups::built_versions(c, &card.project)?;
+                built.insert(card.project.clone(), b);
+            }
+            if versions.iter().any(|v| built[&card.project].contains(v)) {
+                out.insert(SHIPPED_ACCEPTED.into());
+            }
+        }
         return Ok((out, Facts::default(), usage::Totals::default()));
     }
     if !matches!(card.column_role.as_deref(), Some("working" | "review"))
@@ -586,19 +606,34 @@ fn reconcile(t: &mut Tx<'_>, change: &Change, reminder_default: bool) -> ApiResu
         )?;
         if !old.contains_key(signal) {
             let subject = format!("{}: trouble signal {signal}", card.id);
-            let body = format!(
-                "Card {} ({}) in {}: {signal}.\nWorking time: {} seconds. Usage: {} turns, {} tokens. Review rounds: {}. ETA extensions: {}. Short timer polls in the last hour: {}. Compaction requests in the last hour: {}.\nPlease check its state. This notice is sent once per card and signal.",
-                card.id,
-                card.title,
-                card.column,
-                f.seconds,
-                totals.turns,
-                totals.tokens(),
-                f.reviews,
-                f.eta_delays,
-                f.polls,
-                f.compactions
-            );
+            let body = if signal == SHIPPED_ACCEPTED {
+                format!(
+                    "Card {} ({}) is in {} and labelled {}, but that version was acknowledged as built with terrarium group built. Move it to done, or relabel it if it did not ship.\nThis notice is sent once per card and signal.",
+                    card.id,
+                    card.title,
+                    card.column,
+                    card.labels
+                        .iter()
+                        .filter(|l| l.starts_with("version:"))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                format!(
+                    "Card {} ({}) in {}: {signal}.\nWorking time: {} seconds. Usage: {} turns, {} tokens. Review rounds: {}. ETA extensions: {}. Short timer polls in the last hour: {}. Compaction requests in the last hour: {}.\nPlease check its state. This notice is sent once per card and signal.",
+                    card.id,
+                    card.title,
+                    card.column,
+                    f.seconds,
+                    totals.turns,
+                    totals.tokens(),
+                    f.reviews,
+                    f.eta_delays,
+                    f.polls,
+                    f.compactions
+                )
+            };
             let agent = card.agent.as_deref().unwrap_or("");
             for to in crate::question_guard::leads(t, &card.project, agent)? {
                 mail::send(
@@ -627,6 +662,7 @@ fn reconcile(t: &mut Tx<'_>, change: &Change, reminder_default: bool) -> ApiResu
                 .flatten()
                 .unwrap_or(reminder_default);
             if signal != "no_progress"
+                && signal != SHIPPED_ACCEPTED
                 && !eta_reminder
                 && let Ok(to @ Address::Agent { .. }) = mail::resolve(t, agent, Some(&card.project))
             {
@@ -663,7 +699,8 @@ fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
         coalesce(c.assignee, (SELECT s.id FROM spawns s WHERE s.bound_kind = 'card'
             AND s.bound_id = c.id AND s.finished_at IS NULL LIMIT 1)), c.labels, c.eta_at, c.archived
         FROM cards c JOIN board_columns k ON k.id = c.column_id
-        WHERE (c.archived = 0 AND (k.role IN ('working', 'review') OR lower(k.name) = 'research'))
+        WHERE (c.archived = 0 AND (k.role IN ('working', 'review') OR lower(k.name) = 'research'
+            OR (k.role = 'accepted' AND c.labels LIKE '%\"version:%')))
         OR EXISTS (SELECT 1 FROM card_trouble m WHERE m.card = c.id AND m.active = 1)")?;
     let rows = q
         .query_map([], |r| {
@@ -682,8 +719,9 @@ fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
         .collect::<Result<Vec<_>, _>>()?;
     let mut changes = Vec::new();
     let mut estimates = ReviewEstimates::default();
+    let mut built = HashMap::new();
     for card in rows {
-        let (signals, facts, totals) = desired(c, &card, now, &mut estimates)?;
+        let (signals, facts, totals) = desired(c, &card, now, &mut estimates, &mut built)?;
         let old: BTreeSet<String> = active_signals(c, &card.id)?.into_iter().collect();
         if old != signals {
             changes.push(Change {

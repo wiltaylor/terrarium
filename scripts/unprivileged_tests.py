@@ -1,31 +1,59 @@
-"""Run the terrarium-host tests again as an unprivileged user (TER-579).
+"""Run selected test binaries again as an unprivileged user (TER-579, TER-611).
 
 Merge jobs run as root, the release CI as uid 1001: tests that depend on the
 user passed in the merge suite and failed in the release CI (TER-494,
 TER-575). This step reuses the test binaries that the root run of `ci::test`
-built (`cargo test --no-run`, no rebuild with the same env) and runs each of
-them as UID with `setpriv`, with a private HOME. Doctests are not run.
-Without root it skips: the main run is then already unprivileged.
+built (`cargo test --workspace --no-run`, the same command and env, so no
+rebuild), keeps those that SELECT names, and runs each of them as UID with
+`setpriv`, each with its own private HOME, at most WIDTH at a time and the
+heavy terrariumd binaries (ALONE) on their own. TMPDIR is
+not set: the tests use the shared, sticky, root-owned /tmp like the release
+CI, which is what TER-575 failed on (a private TMPDIR hid that failure).
+Doctests are not run. Without root it skips: the main run is then already
+unprivileged. As root it fails early when UID has no passwd entry (OpenSSH
+needs one); the host needs the user (useradd, see the message).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import pwd
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 
-PACKAGES = ("terrarium-host",)
+# Package -> the test targets to run ("lib" for the unit tests), None for all.
+SELECT: dict[str, frozenset[str] | None] = {
+    "terrarium-host": None,
+    "terrariumd": frozenset({"lib", "it"}),
+}
 UID = 1001
-# Only these reach the tests: the merge job's env stays with root.
-PASS_ENV = ("PATH", "LANG", "LC_ALL", "TZ", "RUST_BACKTRACE", "RUST_LOG")
+# The merge job runs this on a loaded host: timing tests of these binaries
+# failed when another binary ran beside them (TER-611 review). They run alone.
+ALONE = frozenset({("terrariumd", "lib"), ("terrariumd", "it")})
+# The other binaries run at most this many at a time.
+WIDTH = 2
+# Only these reach the tests: the merge job's env stays with root. The rustup
+# and cargo homes let tests that run rustc or cargo find the pinned toolchain.
+PASS_ENV = ("PATH", "LANG", "LC_ALL", "TZ", "RUST_BACKTRACE", "RUST_LOG",
+            "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "CARGO_HOME")
 
 
-def test_binaries(cargo_output: str) -> list[tuple[str, str]]:
-    """(executable, package manifest dir) of each test artifact, in order."""
+def package_names(metadata: str) -> dict[str, str]:
+    """Manifest path -> package name, from `cargo metadata --no-deps`."""
+    return {p["manifest_path"]: p["name"] for p in json.loads(metadata)["packages"]}
+
+
+def target_label(target: dict) -> str:
+    return "lib" if "lib" in target.get("kind", ()) else target.get("name", "")
+
+
+def test_binaries(cargo_output: str, names: dict[str, str],
+                  select: dict[str, frozenset[str] | None]) -> list[tuple[str, str, bool]]:
+    """(executable, package manifest dir, runs alone) of each selected test artifact, in order."""
     found = []
     for line in cargo_output.splitlines():
         try:
@@ -35,15 +63,56 @@ def test_binaries(cargo_output: str) -> list[tuple[str, str]]:
         if msg.get("reason") != "compiler-artifact" or not msg.get("profile", {}).get("test"):
             continue
         exe = msg.get("executable")
-        if exe:
-            found.append((exe, str(Path(msg["manifest_path"]).parent)))
+        package = names.get(msg.get("manifest_path", ""))
+        if not exe or package not in select:
+            continue
+        label = target_label(msg.get("target", {}))
+        targets = select[package]
+        if targets is not None and label not in targets:
+            continue
+        found.append((exe, str(Path(msg["manifest_path"]).parent), (package, label) in ALONE))
     return found
+
+
+def groups(bins: list[tuple[str, str, bool]], width: int = WIDTH) -> list[list[int]]:
+    """The indexes of BINS that run at the same time, group by group, in order.
+
+    A binary that runs alone is a group of its own; the others fill groups of
+    at most WIDTH, in cargo's order.
+    """
+    out: list[list[int]] = []
+    shared: list[int] = []
+    for n, (_, _, alone) in enumerate(bins):
+        if alone:
+            out.append([n])
+            continue
+        if not shared or len(shared) == width:
+            shared = []
+            out.append(shared)
+        shared.append(n)
+    return out
 
 
 def child_env(home: str) -> dict[str, str]:
     env = {k: os.environ[k] for k in PASS_ENV if k in os.environ}
     env.update(HOME=home, USER="ci", LOGNAME="ci")
     return env
+
+
+def private_home(root: str, n: int, uid: int) -> str:
+    """A fresh HOME under ROOT for binary N, owned by UID, mode 0700."""
+    d = os.path.join(root, f"{n}h")
+    os.mkdir(d, 0o700)
+    os.chown(d, uid, uid)
+    return d
+
+
+def has_user(uid: int) -> bool:
+    try:
+        pwd.getpwuid(uid)
+    except KeyError:
+        return False
+    return True
 
 
 def setpriv(uid: int) -> list[str]:
@@ -54,47 +123,71 @@ def run() -> int:
     if os.geteuid() != 0:
         print("unprivileged tests: skipped, not root (the main run is already unprivileged)")
         return 0
-    cmd = ["cargo", "test", "--no-run", "--message-format=json-render-diagnostics"]
-    for p in PACKAGES:
-        cmd += ["-p", p]
+    if not has_user(UID):
+        print(f"unprivileged tests: uid {UID} has no passwd entry; OpenSSH and other tests need"
+              f" one. Add it on this host: useradd -u {UID} -M -s /usr/sbin/nologin"
+              " terrarium-ci", file=sys.stderr)
+        return 1
+    meta = subprocess.run(["cargo", "metadata", "--no-deps", "--format-version", "1"],
+                          stdout=subprocess.PIPE, text=True, check=False)
+    if meta.returncode:
+        return meta.returncode
+    cmd = ["cargo", "test", "--workspace", "--no-run",
+           "--message-format=json-render-diagnostics"]
     build = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, check=False)
     if build.returncode:
         return build.returncode
-    bins = test_binaries(build.stdout)
+    bins = test_binaries(build.stdout, package_names(meta.stdout), SELECT)
     if not bins:
-        print("unprivileged tests: cargo listed no test binaries", file=sys.stderr)
+        print("unprivileged tests: cargo listed no selected test binaries", file=sys.stderr)
         return 1
     results = os.environ.get("RESULTS_DIR")
     report = None
     if results:
         Path(results).mkdir(parents=True, exist_ok=True)
         report = Path(results, "rust-unprivileged.json").open("w", encoding="utf-8")
-    home = tempfile.mkdtemp(prefix="terrarium-ci-home-")
-    os.chown(home, UID, UID)
+    # Root-owned, 0711: uid UID can enter it but not list it or add to it.
+    root = tempfile.mkdtemp(prefix="terrarium-ci-home-")
+    os.chmod(root, 0o711)
     failed = []
+    running = []
     try:
-        env = child_env(home)
         args = []
         if report:
-            env["RUSTC_BOOTSTRAP"] = "1"
             args = ["-Z", "unstable-options", "--format", "json", "--report-time"]
-        for exe, cwd in bins:
-            print(f"unprivileged tests: uid {UID}: {exe}", flush=True)
-            with subprocess.Popen(setpriv(UID) + [exe, *args], cwd=cwd, env=env,
-                                  stdout=subprocess.PIPE, text=True, encoding="utf-8",
-                                  errors="replace") as child:
-                assert child.stdout is not None
-                for line in child.stdout:
+        # The binaries of a group run at the same time, each into its own log;
+        # the logs are then printed (and reported) one after another.
+        for group in groups(bins):
+            running = []
+            for n in group:
+                exe, cwd, _ = bins[n]
+                env = child_env(private_home(root, n, UID))
+                if report:
+                    env["RUSTC_BOOTSTRAP"] = "1"
+                log = open(os.path.join(root, f"{n}.log"), "w+", encoding="utf-8",
+                           errors="replace")
+                running.append((exe, log, subprocess.Popen(
+                    setpriv(UID) + [exe, *args], cwd=cwd, env=env, stdout=log)))
+            for exe, log, child in running:
+                code = child.wait()
+                log.seek(0)
+                print(f"unprivileged tests: uid {UID}: {exe}", flush=True)
+                for line in log:
                     print(line, end="", flush=True)
                     if report:
                         report.write(line)
-                        report.flush()
-                if child.wait():
+                log.close()
+                if code:
                     failed.append(exe)
     finally:
+        for _, log, child in running:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            log.close()
         if report:
             report.close()
-        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
     if failed:
         print(f"unprivileged tests: {len(failed)} binaries failed as uid {UID}:", file=sys.stderr)
         for exe in failed:

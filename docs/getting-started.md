@@ -1935,9 +1935,12 @@ image. After that, `<dir>/terrarium-compose up -d` keeps the release image
 (`<dir>/updater/state/image`). `just deploy::update` from source works as
 before and takes the install back to a source build.
 
-The updater checks the build provenance of each image with `gh attestation
-verify` before the pull (`TERRARIUM_UPDATE_VERIFY=gh`, docs/release.md). The check needs the network. When it
-fails, the update stops and nothing changes.
+The updater checks the release signature of each image with `cosign verify
+--key` and the release public key of the image before the pull
+(`TERRARIUM_UPDATE_VERIFY=cosign`, docs/release.md). A release that the
+GitHub workflow made needs `TERRARIUM_UPDATE_VERIFY=gh` (docs/release.md,
+"The switch from the workflow to the local build"). The check needs the
+network. When it fails, the update stops and nothing changes.
 
 ## 3. Configuration directories
 

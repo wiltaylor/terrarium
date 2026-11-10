@@ -215,6 +215,7 @@ fn a_gpu_session_allows_only_its_gpu_and_the_support_nodes() {
     assert!(p.contains(&"CapabilityBoundingSet="));
     assert!(p.contains(&"KillMode=control-group"));
     assert!(p.contains(&"PrivateTmp=yes"));
+    assert!(p.contains(&"PrivateIPC=yes"));
     assert!(p.contains(&"RemoveIPC=yes"));
     assert!(p.contains(&"ProtectSystem=strict"));
     // No holder workspace yet: the workspace root is an empty read-only

@@ -353,6 +353,19 @@ describe("the agent's close proposal (TER-114)", () => {
     await waitFor(() => expect(status(el)).toBe("closed"));
     expect((await api.questions.get(q.id)).status).toBe("retracted");
   });
+
+  it("shows the question that opened the thread, with no Open in thread (GitHub #32)", async () => {
+    // Any agent: the TER-495 test above moved the open question of terrarium/lead already.
+    const q = api.world.questions!.find((x) => x.kind !== "bundle" && x.status === "open" && !x.thread)!;
+    const { thread: t } = await api.questions.toThread(q.id);
+    expect(t.from_question).toBe(q.id);
+    const { el } = mount(`/threads/${t.id}`);
+    const sel = `article[aria-label$=' ${q.id}']`;
+    await waitFor(() => expect(el.querySelector(sel)).not.toBeNull());
+    const card = el.querySelector(sel)!;
+    expect([...card.querySelectorAll("a, button")].some((x) => x.textContent?.trim() === "Open in thread")).toBe(false);
+    expect([...card.querySelectorAll("a")].some((x) => x.textContent?.trim() === "Show mail")).toBe(true);
+  });
 });
 
 describe("the linked cards of a thread (TER-147)", () => {

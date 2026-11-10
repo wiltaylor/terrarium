@@ -2830,6 +2830,204 @@ async fn a_merge_pushes_the_recorded_commit_not_the_head_after_the_recipe() {
     assert!(!all.lines().any(|l| l == "evil"), "{all}");
 }
 
+/// Queue a merge of card `id` (`onto`: a release branch, else `next`) as
+/// the lead, and wait until the queue is idle: the newest job of the card.
+async fn merge_and_wait(lab: &Lab, id: &str, onto: Option<&str>) -> Value {
+    let body = onto.map_or_else(|| json!({}), |o| json!({"onto": o}));
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{id}/merge"), body)
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job_id = r.body["job"]["id"].as_str().unwrap().to_owned();
+    let jobs = lab.until_idle().await;
+    let mut of_card: Vec<Value> = jobs
+        .into_iter()
+        .filter(|j| j["card"] == id && j["onto"] == r.body["job"]["onto"])
+        .collect();
+    // A failed job may have a rerun: the newest is first.
+    assert!(
+        of_card.iter().any(|j| j["id"] == job_id.as_str()),
+        "{of_card:#?}"
+    );
+    let newest = of_card.remove(0);
+    let id = newest["id"].as_str().unwrap();
+    lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone()
+}
+
+/// TER-607: `card merge --onto release/X.Y.Z` merges the commit that the
+/// card's passed merge onto `next` took onto that release branch and
+/// pushes it there; `next` stays. A branch that is not `next` or
+/// `release/X.Y.Z` is refused. Review round 2: a card without a passed
+/// merge onto `next` gets a 409 (finding 1); a push to the branch after
+/// that merge does not reach the release (finding 1); a fix branch made
+/// from a `next` that moved on is refused, so the frozen version takes no
+/// unreleased card (finding 2).
+#[tokio::test]
+async fn a_merge_onto_a_release_branch_pushes_that_branch_only() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    // `next` moves on: a card that is not in the release merges.
+    lab.branch("ter-other", "next", &[("OK", "yes\n"), ("OTHER", "x\n")]);
+    let other = lab.card("other", "ter-other").await;
+    let j = merge_and_wait(&lab, &other, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+
+    // The fix branch is made from the release branch.
+    let fix = lab.branch("ter-rb1", "release/1.4.0", &[("OK", "yes\n")]);
+    let id = lab.card("ter-rb1", "ter-rb1").await;
+    for bad in ["main", "release/1.4", "release/../next"] {
+        let r = lab
+            .td
+            .post_as(
+                &lab.lead,
+                &format!("/api/cards/{id}/merge"),
+                json!({"onto": bad}),
+            )
+            .await;
+        assert_eq!(r.status, 422, "{bad}: {}", r.body);
+    }
+    // No passed merge onto `next` yet: no tested commit, no head.
+    lab.td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{id}/merge"),
+            json!({"onto": "release/1.4.0"}),
+        )
+        .await
+        .err(409, "conflict");
+    let j = merge_and_wait(&lab, &id, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    // A push after the merge onto `next` was never tested.
+    let late = lab.branch("ter-rb1", "ter-rb1", &[("EVIL", "x\n")]);
+    assert_ne!(late, fix);
+
+    let j = merge_and_wait(&lab, &id, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(j["onto"], "release/1.4.0", "{j:#}");
+    let rel = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    assert_eq!(j["head"].as_str().unwrap(), rel, "{j:#}");
+    assert_eq!(
+        git(&lab.origin, &["log", "-1", "--format=%s", "release/1.4.0"]),
+        "Merge ter-rb1 onto release/1.4.0"
+    );
+    assert_eq!(git(&lab.origin, &["rev-parse", "release/1.4.0^1"]), frozen);
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0^2"]),
+        fix,
+        "the tested fix commit, not the later push"
+    );
+    let files = git(&lab.origin, &["ls-tree", "--name-only", "release/1.4.0"]);
+    assert!(
+        !files.lines().any(|f| f == "EVIL" || f == "OTHER"),
+        "{files}"
+    );
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), next, "next stays");
+
+    // A fix branch made from `next` brings the other card along.
+    lab.branch("ter-rb2", "next", &[("OK", "rb2\n")]);
+    let rb2 = lab.card("ter-rb2", "ter-rb2").await;
+    let j = merge_and_wait(&lab, &rb2, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    let j = merge_and_wait(&lab, &rb2, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("is not based on `release/1.4.0`"), "{tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        rel,
+        "the release stays"
+    );
+}
+
+/// TER-607 review round 3: a card X branched from `next` before the cut
+/// merges onto `next` after it. A fix stacked on X's branch brings X's
+/// own commits (second-parent commits of `next`, not on its first-parent
+/// line), so the merge onto the release is refused and the release stays.
+#[tokio::test]
+async fn a_fix_stacked_on_a_card_merged_after_the_cut_is_refused() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    let xwork = lab.branch("ter-x", "next", &[("OK", "yes\n"), ("XWORK", "x\n")]);
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    let x = lab.card("x", "ter-x").await;
+    let j = merge_and_wait(&lab, &x, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    // The fix is stacked on X's branch.
+    lab.branch("ter-rb3", "ter-x", &[("OK", "rb3\n")]);
+    let rb3 = lab.card("ter-rb3", "ter-rb3").await;
+    let j = merge_and_wait(&lab, &rb3, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    let j = merge_and_wait(&lab, &rb3, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("is not based on `release/1.4.0`"), "{tail}");
+    assert!(tail.contains(&xwork), "names X's commit: {tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        frozen,
+        "the release stays"
+    );
+}
+
+/// TER-607 review round 2, finding 3: a batch of two or more cards with a
+/// release-blocker card is refused; the fix merges alone.
+#[tokio::test]
+async fn a_batch_with_a_release_blocker_card_is_refused() {
+    let lab = lab(2).await;
+    lab.branch("ter-b1", "next", &[("OK", "yes\n"), ("b1", "b1")]);
+    lab.branch("ter-b2", "next", &[("OK", "yes\n"), ("b2", "b2")]);
+    let b1 = lab.card("b1", "ter-b1").await;
+    let b2 = lab.card("b2", "ter-b2").await;
+    lab.td
+        .patch(
+            &format!("/api/cards/{b2}"),
+            json!({"add_labels": ["release-blocker"]}),
+        )
+        .await
+        .ok();
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [b1, b2]}))
+        .await;
+    r.err(409, "conflict");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("release-blocker"),
+        "{}",
+        r.body
+    );
+    assert!(lab.jobs().await.is_empty());
+    // Alone, it is queued.
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [b2]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+}
+
 /// Review B2: the recipe plants `url.<x>.insteadOf` and `pushInsteadOf`
 /// in its clone's `.git/config` to send the push (and the credential) to
 /// another repo. The push does not read that config: `next` goes to the
@@ -3078,7 +3276,7 @@ case "$1" in
     # the five-second TERM grace on a loaded host.
     gate="${0%/*}/kill-gate"
     if [ "$4" = terrarium-kill ] && [ -d "$gate" ]; then
-      touch "$gate/${5##*/}"
+      echo $$ > "$gate/${5##*/}"
       while [ -d "$gate" ]; do sleep 0.02; done
     fi
     # An async list gets /dev/null on stdin: keep the real one (`-i`, the
@@ -4125,12 +4323,30 @@ fn private_job_pidfile(job: &str) -> String {
     f
 }
 
+/// Is the held kill of `id` still waiting at the gate? The fake docker
+/// writes its PID into the gate file. Its process ends when the kill
+/// command hits its own timeout (`run_kill::kill_cmd`: grace + 30 s),
+/// and the kill then counts as ended.
+fn kill_still_held(gate: &Path, id: &str) -> bool {
+    let f = terrariumd::run_kill::job_pidfile(id);
+    std::fs::read_to_string(gate.join(Path::new(&f).file_name().unwrap()))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .is_some_and(alive)
+}
+
 /// Wait until the fake docker has held every kill before execution.
 async fn until_kills_held(gate: &Path, ids: &[&str]) {
     let start = Instant::now();
     for id in ids {
         let f = terrariumd::run_kill::job_pidfile(id);
-        while !gate.join(Path::new(&f).file_name().unwrap()).exists() {
+        // The file has the PID of the held kill once it is there whole.
+        let held = gate.join(Path::new(&f).file_name().unwrap());
+        while std::fs::read_to_string(&held)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_none()
+        {
             assert!(start.elapsed() < DEADLINE, "the kill of {id} never started");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -4398,10 +4614,16 @@ async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot(flow: &'static str)
         .await
         .ok()
         .clone();
-    assert_eq!(
-        q["state"], "queued",
-        "a job took the slot of a cancelled lost job while its kill ran: {q}"
-    );
+    // Read the job, then the kill: a kill still held after the read ran
+    // during it, so the slot must still be taken. Under load the held kill
+    // can reach its own timeout first, and its slot is then free by
+    // design (TER-610).
+    if kill_still_held(&kill_gate, &run_id) {
+        assert_eq!(
+            q["state"], "queued",
+            "a job took the slot of a cancelled lost job while its kill ran: {q}"
+        );
+    }
     assert!(alive(lr.id()), "the kill ended before the check");
 
     drop(gate);
@@ -4640,6 +4862,175 @@ async fn a_drain_starts_no_job_and_lists_the_running_ones() {
     assert_eq!(r.ok()["on"], false);
     lab.until_card(&fast, "review", |c| c["column"] == "review")
         .await;
+}
+
+/// TER-614 R4: a drain of the job slots only starts no job, lets the
+/// running one finish, and leaves the agents alone (no full drain). The
+/// resume starts the queued job.
+#[tokio::test]
+async fn a_jobs_only_drain_holds_the_slots_and_not_the_agents() {
+    let lab = lab(2).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let work_dir = lab._dirs.path().join("jobs-drain-only");
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "if test -f SLOW; then sleep 6; fi; test -f OK",
+                   "slots": 2, "next_repos": ["app"],
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let slow = queue_green(&lab, "ter-j1", "runs into the job drain", true).await;
+    let start = Instant::now();
+    let running = loop {
+        let j = job_of(&lab, &slow).await;
+        if j.first().is_some_and(|j| j["state"] == "running") {
+            break j[0]["id"].as_str().unwrap().to_owned();
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the slow job never started: {j:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let r = lab
+        .td
+        .post("/api/system/update/drain", json!({"jobs_only": true}))
+        .await;
+    let d = r.ok().clone();
+    assert_eq!(d["on"], false, "a jobs-only drain is no full drain: {d}");
+    assert!(d["jobs_drain"]["since"].is_string(), "{d}");
+    assert_eq!(d["jobs"], json!([running]), "{d}");
+    assert!(!state.self_update.draining());
+    assert!(state.self_update.jobs_draining());
+
+    let fast = queue_green(&lab, "ter-j2", "queued in the job drain", false).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    terrariumd::jobs::tick(&state).await.unwrap();
+    let j = job_of(&lab, &fast).await;
+    assert_eq!(
+        j[0]["state"], "queued",
+        "a job started during the drain: {j:?}"
+    );
+
+    lab.until_card(&slow, "review", |c| c["column"] == "review")
+        .await;
+    let v = lab.td.get("/api/system/update").await.ok().clone();
+    assert_eq!(v["drain"]["jobs"], json!([]), "{v}");
+    assert!(v["drain"]["jobs_drain"].is_object(), "{v}");
+
+    let r = lab.td.post_empty("/api/system/update/resume").await;
+    assert!(r.ok()["jobs_drain"].is_null());
+    assert!(!state.self_update.jobs_draining());
+    lab.until_card(&fast, "review", |c| c["column"] == "review")
+        .await;
+}
+
+both_flows!(a_merge_that_fails_before_its_tests_keeps_its_cards_in_the_queue);
+/// TER-614 R3: a merge job that fails before its tests (the clone on the
+/// target fails, so there is no tested commit) is an infra failure: no
+/// split, no rerun as a test failure, no attempt used. It runs once more
+/// after the wait; the second such end ends it `infra`, and its cards stay
+/// in the merge queue with the failed step and the output in comments.
+async fn a_merge_that_fails_before_its_tests_keeps_its_cards_in_the_queue(flow: &'static str) {
+    terrariumd::jobs::set_infra_retry(Duration::from_millis(200));
+    let lab = lab_flow(2, flow).await;
+    with_merge_queue(&lab).await;
+    // A work dir under a file: the receive step on the target cannot make
+    // the slot tree.
+    let file = lab._dirs.path().join("not-a-dir");
+    std::fs::write(&file, "x").unwrap();
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "slots": 2, "next_repos": ["app"],
+                   "work_dir": file.join("work").display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    lab.branch("ter-i1", "next", &[("i1", "1\n"), ("OK", "y\n")]);
+    lab.branch("ter-i2", "next", &[("i2", "2\n"), ("OK", "y\n")]);
+    let c1 = lab.card("i1", "ter-i1").await;
+    let c2 = lab.card("i2", "ter-i2").await;
+    for c in [&c1, &c2] {
+        accept(&lab, c).await;
+    }
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "no split and no rerun job: {jobs:#?}");
+    let j = &jobs[0];
+    assert_eq!(j["state"], "failed", "{j:#}");
+    assert_eq!(j["outcome"], "infra", "{j:#}");
+    assert_eq!(j["attempt"], 1, "no attempt used: {j:#}");
+    let tail = j["tail"].as_str().unwrap();
+    assert!(tail.ends_with("[failed step: receive]"), "{tail}");
+    for id in [&c1, &c2] {
+        let c = lab
+            .until_card(id, "infra comment", |c| {
+                comments(c).contains("failed before its tests again")
+            })
+            .await;
+        assert_eq!(c["column"], "merge_queue", "{c:#}");
+        let text = comments(&c);
+        assert!(text.contains("the job runs once more in"), "{text}");
+        assert!(text.contains("failed step: receive"), "{text}");
+        assert!(!text.contains("splits to find"), "{text}");
+        let l = labels(&c);
+        assert!(!l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
+        assert!(!c["body"].as_str().unwrap().contains("Validation failed"));
+    }
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
+}
+
+both_flows!(a_deleted_card_branch_leaves_the_batch_and_the_others_merge);
+/// TER-614 review, major 1: a card branch deleted after the accept is a
+/// failure of that card, not of the host. The card leaves the batch to the
+/// top of ready with the reason; the other cards merge in the same job.
+async fn a_deleted_card_branch_leaves_the_batch_and_the_others_merge(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
+    with_merge_queue(&lab).await;
+    let h1 = lab.branch("ter-g1", "next", &[("g1", "1\n"), ("OK", "y\n")]);
+    lab.branch("ter-g2", "next", &[("g2", "2\n"), ("OK", "y\n")]);
+    let h3 = lab.branch("ter-g3", "next", &[("g3", "3\n"), ("OK", "y\n")]);
+    let c1 = lab.card("g1", "ter-g1").await;
+    let c2 = lab.card("g2", "ter-g2").await;
+    let c3 = lab.card("g3", "ter-g3").await;
+    for c in [&c1, &c2, &c3] {
+        accept(&lab, c).await;
+    }
+    git(&lab.work, &["push", "-q", "origin", "--delete", "ter-g2"]);
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let g2 = lab
+        .until_card(&c2, "ready", |c| c["column"] == "ready")
+        .await;
+    let body = g2["body"].as_str().unwrap();
+    assert!(body.contains("cannot be fetched"), "{body}");
+    for c in [&c1, &c3] {
+        lab.until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "no rerun and no split: {jobs:#?}");
+    assert_eq!(jobs[0]["state"], "passed", "{jobs:#?}");
+    for h in [&h1, &h3] {
+        git(&lab.origin, &["merge-base", "--is-ancestor", h, "next"]);
+    }
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
 both_flows!(a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects);

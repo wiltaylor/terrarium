@@ -171,7 +171,7 @@ pub struct Status {
     pub updater_version: String,
     /// The image repository of the releases (`ghcr.io/wiltaylor/terrarium`).
     pub repository: String,
-    /// The image check: `gh`, `cosign`, `command`, or `off`.
+    /// The image check: `cosign`, `gh`, `cosign-keyless`, `command`, or `off`.
     pub verify: String,
     /// The image of the terrarium container now; `null` when the updater
     /// cannot find the container.

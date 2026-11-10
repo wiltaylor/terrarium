@@ -9,7 +9,7 @@
 //! - `protocol`, `client`: the wire format and the client of the daemon.
 //! - `machine`: the update and the rollback, over the seams in `engine`.
 //! - `store`: the history and the rollback target in the state dir.
-//! - `verify`: the signature check (a program: gh attestation verify by default, cosign, or a command).
+//! - `verify`: the signature check (a program: cosign verify with the release key by default, gh attestation verify, keyless cosign, or a command).
 //! - `docker`, `registry`, `server` (feature `bin`): Docker on
 //!   docker.sock, the registry API, and the socket listener.
 

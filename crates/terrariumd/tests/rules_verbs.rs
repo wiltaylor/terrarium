@@ -551,6 +551,141 @@ async fn version_cut_freezes_members_and_explicit_built_completes_only_snapshot(
     );
 }
 
+/// TER-608: `group add` takes a late accepted card into an open snapshot
+/// (audited), and `group built` also moves the other accepted cards that
+/// carry the version label in either form and clears their assignee. It
+/// skips held cards, cards of another open group, other versions and a
+/// label that is only a prefix of the version.
+#[tokio::test]
+async fn version_group_add_and_built_moves_same_version_accepted_cards() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let worker = td.agent("p", "worker", json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let accepted =
+        |title: &str, labels: Value| json!({"title":title,"column":"accepted","labels":labels});
+    let a = new_card(&td, "p", accepted("member", json!(["version:vnext"]))).await;
+    let key = state(&td)
+        .db
+        .write("test", |t| {
+            terrariumd::store::version_groups::cut(t, &Actor::Operator, "p", "test", 1, 240)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let path = format!("/api/projects/p/version-groups/{key}");
+    let late = new_card(&td, "p", accepted("late", json!(["version:vnext"]))).await;
+    let ready = new_card(&td, "p", json!({"title":"not accepted","column":"ready"})).await;
+    let tagged = new_card(&td, "p", accepted("tagged", json!(["version:1.2.3"]))).await;
+    let held = new_card(&td, "p", accepted("held", json!(["version:1.2.3"]))).await;
+    // The GitHub author gate holds a card with both labels (TER-85).
+    let id = held.clone();
+    state(&td)
+        .db
+        .write("test", move |t| {
+            t.execute(
+                "UPDATE cards SET labels = '[\"version:1.2.3\",\"github\",\"hold\"]' WHERE id = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let other = new_card(&td, "p", accepted("other", json!(["version:1.2.4"]))).await;
+    let vnext = new_card(&td, "p", accepted("open version", json!(["version:vnext"]))).await;
+    let prefix = new_card(&td, "p", accepted("prefix", json!(["version:1.2"]))).await;
+    let v_form = new_card(&td, "p", accepted("v form", json!(["version:v1.2.3"]))).await;
+    let grouped = new_card(&td, "p", accepted("grouped", json!(["version:1.2.3"]))).await;
+    let (ids, who) = ((tagged.clone(), grouped.clone()), worker.clone());
+    state(&td)
+        .db
+        .write("test", move |t| {
+            terrariumd::store::board::assign_card(t, &Actor::Operator, &ids.0, Some(&who))?;
+            terrariumd::store::groups::open(
+                t,
+                terrariumd::store::groups::Open {
+                    project: "p",
+                    rule: "test",
+                    key: "batch",
+                    title: "another open group",
+                    column: "accepted",
+                    done_when: "done",
+                    eta: None,
+                    close_after: None,
+                },
+            )?;
+            let g = terrariumd::store::groups::by_key(t, "p", "batch")?.unwrap();
+            terrariumd::store::groups::add(t, &g, &ids.1)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(card(&td, &tagged).await["assignee"], worker.as_str());
+
+    assert_eq!(
+        td.post_as(&worker, &format!("{path}/add"), json!({"card":late}))
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        td.post(&format!("{path}/add"), json!({"card":ready}))
+            .await
+            .status,
+        409
+    );
+    let added = td.post(&format!("{path}/add"), json!({"card":late})).await;
+    assert_eq!(added.status, 200, "{}", added.body);
+    assert_eq!(added.body["changed"], true);
+    assert_eq!(added.body["group"]["total"], 2);
+    assert_eq!(
+        td.post(&format!("{path}/add"), json!({"card":late}))
+            .await
+            .body["changed"],
+        false
+    );
+    let l = late.clone();
+    let audited = state(&td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM audit WHERE action = 'version.member_added'
+                    AND json_extract(detail, '$.card') = ?1",
+                [&l],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(audited, 1, "one audit row for one real add");
+
+    // The bare form matches both label forms.
+    let built = td
+        .post(&format!("{path}/built"), json!({"version":"1.2.3"}))
+        .await;
+    assert_eq!(built.status, 200, "{}", built.body);
+    let mut also: Vec<String> = serde_json::from_value(built.body["also_done"].clone()).unwrap();
+    also.sort();
+    let mut want = vec![tagged.clone(), v_form.clone()];
+    want.sort();
+    assert_eq!(also, want);
+    for id in [&a, &late, &tagged, &v_form] {
+        assert_eq!(card(&td, id).await["column"], "done", "{id}");
+    }
+    assert!(card(&td, &tagged).await["assignee"].is_null());
+    for id in [&held, &other, &vnext, &prefix, &grouped] {
+        assert_eq!(card(&td, id).await["column"], "accepted", "{id}");
+    }
+    assert_eq!(
+        td.post(&format!("{path}/add"), json!({"card":other}))
+            .await
+            .status,
+        409
+    );
+}
+
 #[tokio::test]
 async fn version_cut_age_timer_waits_for_merge_group_close() {
     let mut td = TestDaemon::start().await;
@@ -1496,9 +1631,23 @@ async fn merge_group_failure_tracks_the_phase_that_actually_started() {
     for (outcome, recipe) in [("conflict", false), ("error", false), ("red", true)] {
         let td = queue_lab().await;
         put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
-        let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
+        // In `review`, as in the delivery flow: the engine's 10 s
+        // `groups::expire` tick drops group members that sit in `backlog`,
+        // and the group then read null under load (TER-610, as TER-419).
+        let a = new_card(
+            &td,
+            "p",
+            json!({"title":"a", "column":"review", "repo":"app"}),
+        )
+        .await;
         let job = store_job(&td, JobKind::Merge, &[&a]).await;
         settle(&td).await;
+        // Read the group by its id at the end, as the TER-419 test does:
+        // after a red verdict the delivery flow takes card a out of it.
+        let gid = card(&td, &a).await["group"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let id = job.id.clone();
         state(&td)
             .db
@@ -1540,7 +1689,7 @@ async fn merge_group_failure_tracks_the_phase_that_actually_started() {
             .unwrap();
         verdict(&td, &failed, &a, outcome).await;
         settle(&td).await;
-        let g = card(&td, &a).await["group"].clone();
+        let g = card(&td, &gid).await["group"].clone();
         assert_eq!(
             g["steps"][1]["state"],
             if recipe { "done" } else { "failed" }
@@ -3440,6 +3589,113 @@ async fn the_merge_queue_batch_goes_when_8_cards_wait() {
     let last = r.last().unwrap();
     assert_eq!(last["state"], "noop", "{last}");
     assert_eq!(last["steps"][0]["detail"]["waiting"], 1, "{last}");
+}
+
+/// TER-607: a card with the release-blocker label is taken first, as a
+/// batch of one, at once; the cards that waited before it stay.
+#[tokio::test]
+async fn a_release_blocker_card_goes_first_as_a_batch_of_one() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    let blocker = new_card(
+        &td,
+        "p",
+        json!({"title": "fix", "column": "review", "labels": ["release-blocker"]}),
+    )
+    .await;
+    settle(&td).await;
+    for id in &ids {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    assert!(open_jobs(&td).await.is_empty(), "3 of 8 cards wait");
+
+    // The blocker comes last in board order and goes now, alone.
+    move_to(&td, &blocker, "merge_queue").await;
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].card, blocker);
+    assert!(open[0].batch.is_empty(), "a batch of one: {:?}", open[0]);
+    assert_eq!(open[0].onto(), "next");
+    let r = runs_of(&td, "p", "merge-queue-batch").await;
+    let last = r.last().unwrap();
+    assert_eq!(last["state"], "done", "{last}");
+    let left = last["steps"][0]["detail"]["left_out"].as_array().unwrap();
+    assert_eq!(left.len(), 3, "{last}");
+    assert!(
+        left.iter().all(|x| x["reason"]
+            .as_str()
+            .unwrap()
+            .contains("release-blocker card")),
+        "{last}"
+    );
+    for id in &ids {
+        assert_eq!(column_of(&td, id).await, "merge_queue");
+        assert_eq!(card(&td, id).await["labels"], json!([]));
+    }
+}
+
+/// TER-607: a card that waits in the merge queue and then gets the
+/// release-blocker label goes on the next timer check, with no wait.
+#[tokio::test]
+async fn a_release_blocker_label_on_a_waiting_card_fires_the_timer_now() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    for id in &ids {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    let st = state(&td);
+    let projects = rules_engine::load(&st.db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
+    let mut fired = std::collections::HashMap::new();
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "2 of 8 cards wait, for 30 minutes");
+
+    let r = td
+        .patch(
+            &format!("/api/cards/{}", ids[1]),
+            json!({"add_labels": ["release-blocker"]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    settle(&td).await;
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "a release blocker does not wait");
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].card, ids[1]);
+    assert!(open[0].batch.is_empty(), "{:?}", open[0]);
 }
 
 #[tokio::test]

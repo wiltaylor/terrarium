@@ -186,10 +186,44 @@ pub enum SpawnError {
     },
     #[error("cannot start {program} in a pty: {message}")]
     Pty { program: String, message: String },
+    /// The working directory is missing or unusable. A spawn reports a
+    /// failed `chdir` with the program name (ENOENT reads as a missing
+    /// binary), so it is checked first (TER-639).
+    #[error("working directory {}", cwd_problem(.path, .source))]
+    Cwd {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn cwd_problem(path: &Path, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => format!("{} does not exist", path.display()),
+        std::io::ErrorKind::NotADirectory => format!("{} is not a directory", path.display()),
+        _ => format!("{}: {e}", path.display()),
+    }
+}
+
+/// The working directory of `plan`, if it has one, is a directory.
+fn check_cwd(plan: &ExecPlan) -> Result<(), SpawnError> {
+    let Some(path) = &plan.cwd else {
+        return Ok(());
+    };
+    let err = |source| SpawnError::Cwd {
+        path: path.clone(),
+        source,
+    };
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => Ok(()),
+        Ok(_) => Err(err(std::io::Error::from(std::io::ErrorKind::NotADirectory))),
+        Err(e) => Err(err(e)),
+    }
 }
 
 /// Start the plan. Output goes to `outbox`.
 pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
+    check_cwd(&plan)?;
     if plan.pty.is_some() {
         spawn_pty(plan, outbox)
     } else {
@@ -709,6 +743,34 @@ mod tests {
             .collect();
         assert_eq!(out, b"out\n");
         assert_eq!(err, b"err\n");
+    }
+
+    /// TER-639: a missing working directory is named, not the program
+    /// (a failed chdir reads as "cannot start <program>: No such file").
+    #[tokio::test]
+    async fn a_missing_working_directory_is_named_not_the_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone");
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        for pty in [None, Some(PtySize::default())] {
+            let ob = Arc::new(Outbox::new(1, 1 << 20));
+            let mut p = plan("true", &[]);
+            p.pty = pty;
+            p.cwd = Some(missing.clone());
+            let e = spawn(p.clone(), ob.clone()).err().unwrap().to_string();
+            assert_eq!(
+                e,
+                format!("working directory {} does not exist", missing.display())
+            );
+            assert!(!e.contains("cannot start"), "{e}");
+            p.cwd = Some(file.clone());
+            let e = spawn(p, ob).err().unwrap().to_string();
+            assert_eq!(
+                e,
+                format!("working directory {} is not a directory", file.display())
+            );
+        }
     }
 
     #[tokio::test]

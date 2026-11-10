@@ -2574,6 +2574,28 @@ impl JobRepo {
         }
     }
 
+    /// The commits of `tip` that are not in `not`, newest first (`git
+    /// rev-list tip ^not`); with `first_parent`, only the first-parent
+    /// line of `tip`.
+    pub fn rev_list(
+        &self,
+        tip: &str,
+        not: &str,
+        first_parent: bool,
+    ) -> Result<Vec<String>, GitError> {
+        let not = format!("^{not}");
+        let mut args = vec!["rev-list"];
+        if first_parent {
+            args.push("--first-parent");
+        }
+        args.extend(["--end-of-options", tip, not.as_str()]);
+        Ok(self
+            .local(&args)?
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect())
+    }
+
     /// Point `refname` at `sha`.
     pub fn set_ref(&self, refname: &str, sha: &str) -> Result<(), GitError> {
         self.local(&["update-ref", refname, sha]).map(|_| ())
