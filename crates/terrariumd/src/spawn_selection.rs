@@ -88,9 +88,7 @@ fn cloud_refusal(
     named: Option<&str>,
     fallback: bool,
 ) -> Option<&'static str> {
-    if sub.cloud_kind().is_none() {
-        return None;
-    }
+    sub.cloud_kind()?;
     if fallback {
         return Some("cloud subscription, never taken by the automatic -alt fallback");
     }
