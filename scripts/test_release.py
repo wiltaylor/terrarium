@@ -80,7 +80,7 @@ log = cfg["FAKE_LOG"]
 SECRETS = ("GHCR_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 entry = {"tool": tool, "argv": args, "secrets": {k: os.environ[k] for k in SECRETS if k in os.environ},
          "uid": os.geteuid(), "docker_config": os.environ.get("DOCKER_CONFIG"),
-         "docker_host": os.environ.get("DOCKER_HOST")}
+         "docker_host": os.environ.get("DOCKER_HOST"), "cwd": os.getcwd()}
 dc = os.environ.get("DOCKER_CONFIG")
 if dc and Path(dc, "config.json").exists():
     entry["config_mode"] = oct(stat.S_IMODE(os.stat(Path(dc, "config.json")).st_mode))
@@ -393,6 +393,27 @@ class Release(unittest.TestCase):
         self.assertFalse(Path(push["docker_config"]).exists())
         self.assertTrue(release._is_tmpfs(str(Path(push["docker_config"]).parent)))
 
+    def test_the_gate_runs_on_its_own_clone(self):
+        proc = self.run_release("dry-run", secrets=False)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        gate = next(c for c in self.calls() if c["tool"] == "gate")
+        self.assertEqual(gate["cwd"], str(self.out / "gate-src"))
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.out / "gate-src",
+                              capture_output=True, text=True, check=True).stdout
+        self.assertEqual(head.strip(), self.summary()["commit"])
+        if os.geteuid() == 0:
+            self.assertEqual(gate["uid"], 1001)
+            self.assertEqual((self.out / "gate-src").stat().st_uid, 1001)
+            # The build context (the checkout) stays root's.
+            self.assertEqual((self.repo / "Cargo.toml").stat().st_uid, 0)
+
+    @unittest.skipIf(os.geteuid() == 0, "as root publish is allowed")
+    def test_publish_refuses_to_run_as_the_gate_user(self):
+        proc = self.run_release("publish", env={"TERRARIUM_RELEASE_TEST": "0"})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("publish runs as root in the release client container", proc.stderr)
+        self.assertEqual(self.calls(), [])
+
     def test_a_token_without_the_scopes_stops_before_the_gate(self):
         FakeGitHub.scopes = "repo"
         proc = self.run_release("publish")
@@ -529,12 +550,13 @@ class Release(unittest.TestCase):
         self.assertNotIn("create", [c["argv"][1] for c in self.calls() if c["tool"] == "gh"])
 
     def test_the_test_signing_config_is_refused_outside_the_tests(self):
-        proc = self.run_release("publish", "--signing-config", "/x.json", env={"TERRARIUM_RELEASE_TEST": "0"})
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("--signing-config is for the tests only", proc.stderr)
-        proc = self.run_release("publish", env={"TERRARIUM_RELEASE_TEST": "0"})
+        proc = self.run_release("dry-run", "--signing-config", "/x.json", env={"TERRARIUM_RELEASE_TEST": "0"})
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("--github-api is for the tests only", proc.stderr)
+        if os.geteuid() == 0:
+            proc = self.run_release("publish", "--signing-config", "/x.json", env={"TERRARIUM_RELEASE_TEST": "0"})
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("--signing-config is for the tests only", proc.stderr)
         self.assertEqual(self.calls(), [])
 
 
@@ -599,7 +621,9 @@ class Pins(unittest.TestCase):
         build = (REPO / "docker/release.Dockerfile").read_text()
         for name in ("RUST_IMAGE", "NODE_IMAGE", "DOCKER_CLI_IMAGE"):
             self.assertIn("@sha256:", self.arg(build, name), name)
-        self.assertIn("USER 1001", build)
+        # The recipe runs as root; the gate drops to the user release (uid 1001).
+        self.assertNotRegex(build, r"(?m)^USER ")
+        self.assertIn("useradd -m -u 1001", build)
 
     def test_the_release_public_key_is_in_the_repo(self):
         # The updater's default check and release.py need it (docker/release/README.md).

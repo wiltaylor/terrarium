@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1.7
 #
 # The release client container (TER-613, docs/release.md): the image of the
-# target where the release job runs `just release::publish`, as uid 1001
-# (the user of the old GitHub release CI), with:
+# target where the release job runs `just release::publish`. The recipe runs
+# as root in the container (no privileges, no capability beyond the
+# default): scripts/release.py runs the gate as uid 1001 (the user of the
+# old GitHub release CI, `release`), so the code of the gate cannot read the
+# secrets in the env of the root process tree. With:
 #
 #   the toolchain of the gate   rust 1.97.1 with rustfmt and clippy, just, uv, node 22, bubblewrap, git
 #   the image build             the docker CLI with buildx: the build runs on the release VM's
@@ -69,10 +72,8 @@ COPY --from=tools /out/ /usr/local/bin/
 RUN groupadd -g 1001 release \
     && useradd -m -u 1001 -g 1001 -s /bin/bash release \
     && mkdir -p /src && chown release:release /src
-USER 1001
-WORKDIR /home/release
-# The toolchain of rustup in the base image is read-only for 1001; the
-# crates registry goes to the user's own CARGO_HOME.
-ENV CARGO_HOME=/home/release/.cargo \
-    PATH=/home/release/.cargo/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
-    RUSTUP_TOOLCHAIN=1.97.1
+# No USER: the recipe runs as root, and the gate as `release` (uid 1001)
+# with its own CARGO_HOME (scripts/release.py). The toolchain of rustup
+# in the base image (/usr/local/rustup) is readable by 1001.
+WORKDIR /src
+ENV RUSTUP_TOOLCHAIN=1.97.1

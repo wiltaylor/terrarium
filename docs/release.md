@@ -201,7 +201,8 @@ holds the binary is the item to verify.
 
 `just release::publish` runs `scripts/release.py` on a clean checkout of
 the commit to release. The release job runs it on the release client target
-(the image of `docker/release.Dockerfile`: uid 1001, the docker CLI with
+(the image of `docker/release.Dockerfile`: root in the container for the
+recipe, the user `release` (uid 1001) for the gate, the docker CLI with
 buildx, crane, cosign, gh, and the toolchain of the gate). The image build
 runs on the release VM's Docker daemon, which the Terrarium daemon reaches
 through its Docker relay: the recipe gets only
@@ -217,9 +218,13 @@ secret. It uses the same trailers and version rules as the workflow
    logs the `X-OAuth-Scopes` and `github-authentication-token-expiration`
    headers of `GET https://api.github.com/user` (never the token), and stops
    when the token lacks `repo` or `write:packages`.
-3. `gate`: `just ci::validate` as a non-root user (uid 1001; with
-   `setpriv` when the script runs as root). Its env has no secret, and
-   `RESULTS_DIR` is `release-out/results`. A red gate publishes nothing.
+3. `gate`: `just ci::validate` on its own clone of the commit
+   (`release-out/gate-src`) as uid 1001 (`setpriv`). Publish runs as root
+   in the client container and refuses to run as another user: a process of
+   the same uid could read the secrets in `/proc/<pid>/environ` of the
+   recipe's process tree, and the gate runs the code and the build scripts
+   of the release. The gate's env has no secret, and `RESULTS_DIR` is
+   `release-out/results`. A red gate publishes nothing.
 4. `stamp`: the version into `Cargo.toml` and `Cargo.lock`.
 5. `image`: `docker buildx build` of the runtime stage of
    `docker/Dockerfile` for `linux/amd64`, with the OCI labels, an SBOM,

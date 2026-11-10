@@ -15,10 +15,11 @@ Steps (each one writes its part of <out>/summary.json):
             PATH, docker/release/cosign.pub, the scopes and the expiry of
             the GitHub token (the headers only), and no tag or release
             v<version> yet.
-3. gate     `just ci::validate` (or --gate) as a non-root user: as uid
-            1001 with setpriv when the script runs as root. The env of the
-            gate has no secret. RESULTS_DIR is <out>/results. Red: stop,
-            nothing is published.
+3. gate     `just ci::validate` (or --gate) on its own clone
+            (<out>/gate-src) as uid 1001 (setpriv). Publish runs as root,
+            so the gate cannot read the secrets in /proc/<pid>/environ of
+            this process tree. The env of the gate has no secret.
+            RESULTS_DIR is <out>/results. Red: stop, nothing is published.
 4. stamp    the version into Cargo.toml and Cargo.lock.
 5. image    `docker buildx build` of the runtime stage of docker/Dockerfile
             for linux/amd64, with the OCI labels, an SBOM and provenance
@@ -230,23 +231,38 @@ def token_info(ctx: Ctx) -> None:
 
 # 3 ---------------------------------------------------------------------------
 def step_gate(ctx: Ctx) -> None:
+    """The gate on its own clone of the commit, as uid 1001 when this runs as root.
+
+    The secrets are in the env of this process and of its parents (the
+    recipe's sh and just). A process of the same uid can read
+    /proc/<pid>/environ, so the gate, which runs the code and the build
+    scripts of the release, must run as another uid: publish runs as root
+    and drops the gate to 1001. Its own clone keeps the build context out of
+    its reach.
+    """
     results = ctx.out / "results"
     home = ctx.out / "gate-home"
+    src = ctx.out / "gate-src"
+    shutil.rmtree(src, ignore_errors=True)
     results.mkdir(parents=True, exist_ok=True)
     home.mkdir(parents=True, exist_ok=True)
+    run(["git", "clone", "--quiet", "--local", "--no-hardlinks", str(ctx.repo_dir), str(src)],
+        ctx.base_env(), ctx.out)
     argv = shlex.split(ctx.gate)
     uid = os.geteuid()
+    env = ctx.base_env(HOME=str(home), RESULTS_DIR=str(results))
     if uid == 0:
         # The release CI ran as uid 1001; root hides permission bugs (TER-579).
-        for p in (ctx.repo_dir, ctx.out):
-            run(["chown", "-R", f"{GATE_UID}:{GATE_UID}", str(p)], ctx.base_env(), ctx.repo_dir)
+        for path in (src, results, home):
+            run(["chown", "-R", f"{GATE_UID}:{GATE_UID}", str(path)], ctx.base_env(), ctx.out)
         argv = ["setpriv", f"--reuid={GATE_UID}", f"--regid={GATE_UID}", "--clear-groups", "--", *argv]
         uid = GATE_UID
-    env = ctx.base_env(HOME=str(home), RESULTS_DIR=str(results))
-    ctx.summary["gate"] = {"command": ctx.gate, "uid": uid, "results": str(results)}
+        # Root's CARGO_HOME is not the gate's to write: its own registry cache.
+        env["CARGO_HOME"] = str(home / ".cargo")
+    ctx.summary["gate"] = {"command": ctx.gate, "uid": uid, "results": str(results), "source": str(src)}
     ctx.save()
     try:
-        run(argv, env, ctx.repo_dir)
+        run(argv, env, src)
     except ReleaseError as e:
         ctx.summary["gate"]["passed"] = False
         ctx.save()
@@ -679,6 +695,9 @@ def main(argv: list[str] | None = None) -> int:
     if publish and a.no_gate:
         ap.error("--no-gate is for the dry run only: a release passes the gate")
     testing = os.environ.get("TERRARIUM_RELEASE_TEST") == "1"
+    if publish and os.geteuid() != 0 and not testing:
+        ap.error("publish runs as root in the release client container: the gate drops to uid 1001, "
+                 "so it cannot read the secrets in the env of this process tree")
     if publish and a.signing_config and not testing:
         ap.error("--signing-config is for the tests only (TERRARIUM_RELEASE_TEST=1)")
     if a.github_api != GITHUB_API and not testing:
