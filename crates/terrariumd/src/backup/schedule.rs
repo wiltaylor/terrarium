@@ -371,11 +371,16 @@ impl Marks {
     /// after now (the clock went back, or the file is from another host)
     /// is now: it must not hold back the runs and the missed check.
     pub fn load(dir: &Path) -> Self {
+        Self::load_at(dir, Utc::now())
+    }
+
+    /// [`Marks::load`] with the times clamped to `now`.
+    pub fn load_at(dir: &Path, now: DateTime<Utc>) -> Self {
         let m: Self = std::fs::read(dir.join(MARKS_FILE))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        m.clamped(Utc::now())
+        m.clamped(now)
     }
 
     fn clamped(self, now: DateTime<Utc>) -> Self {
@@ -533,7 +538,7 @@ impl Runner {
         let dir = crate::api::backups::dir(state);
         let (newest, file) = {
             let dir = dir.clone();
-            tokio::task::spawn_blocking(move || (newest(&dir, false), Marks::load(&dir)))
+            tokio::task::spawn_blocking(move || (newest(&dir, false), Marks::load_at(&dir, now)))
                 .await
                 .unwrap_or_default()
         };
