@@ -1064,7 +1064,8 @@ pub fn safe_cwd(root: &Path, cwd: &str) -> Result<PathBuf, Refusal> {
         .map_err(|e| Refusal::invalid(format!("working directory {cwd}: {e}")))?;
     if !real.starts_with(root) || !real.is_dir() {
         return Err(Refusal::invalid(format!(
-            "working directory {cwd} is not under the workspace root"
+            "working directory {cwd} is not under the workspace root {}",
+            root.display()
         )));
     }
     let s = real.to_string_lossy();

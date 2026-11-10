@@ -307,7 +307,12 @@ Known limits:
   also daemon-internal ones (target root probes, workspace sync, monitors,
   pipelines). Its working directory must be under `workspace_root`: a
   `cwd` that `allowed_cwd_roots` permits outside it, or no `cwd` while
-  `work_dir` is outside it, fails with exit code 125 and the reason.
+  `work_dir` is outside it, fails with exit code 125 and the reason, which
+  names the workspace root. A card agent's `exec` or `run` with no
+  `--cwd` runs in its owned root `<work_root>/<project>/<agent>`, which
+  the daemon prepares first (TER-634): set `work_root` under
+  `workspace_root`. An explicit `--cwd` is kept as given. The daemon's
+  root scripts run in the `work_root` itself (TER-615).
 - A helper that goes away between two `hello`s makes each native command
   fail with exit code 125 until the next reconnect reports the loss; the
   daemon then refuses host commands while a native exclusive GPU

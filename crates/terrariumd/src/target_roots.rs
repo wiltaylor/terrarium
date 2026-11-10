@@ -349,11 +349,34 @@ fn root_script(argv: Vec<String>, timeout_secs: u64, cwd: Option<&str>) -> Remot
 /// keep no cwd: the base can be missing before the first prepare creates
 /// it.
 fn script_cwd(state: &Shared, def: &TargetDef, base: &str) -> Option<String> {
-    let caps = def
-        .host
+    script_cwd_for(def, host_caps(state, def).as_ref(), base)
+}
+
+fn host_caps(
+    state: &Shared,
+    def: &TargetDef,
+) -> Option<terrarium_core::protocol::HostCapabilities> {
+    def.host
         .as_deref()
-        .and_then(|h| state.executor.hosts.capabilities(h));
-    script_cwd_for(def, caps.as_ref(), base)
+        .and_then(|h| state.executor.hosts.capabilities(h))
+}
+
+/// The default working directory of a card agent's command on `def`
+/// (TER-634). On a host with native GPU enforcement a command with no cwd
+/// would get the host agent's `work_dir` (`/work` on helios), which the
+/// helper refuses: it runs in the agent's owned root `root` instead, which
+/// prepare has made. An explicit cwd is kept, so one outside the
+/// workspace root is still refused by the helper. Elsewhere nothing
+/// changes.
+fn default_exec_cwd(
+    def: &TargetDef,
+    caps: Option<&terrarium_core::protocol::HostCapabilities>,
+    root: &str,
+    cmd: &mut RemoteCmd,
+) {
+    if cmd.cwd.is_none() && crate::executor::native_enforced(def, caps) {
+        cmd.cwd = Some(root.to_owned());
+    }
 }
 
 fn script_cwd_for(
@@ -640,6 +663,7 @@ pub async fn prepare_exec(
     let outside = paths.into_iter().flatten().find(|p| !inside(&r, p));
     if let Some(r) = prepare(state, actor, def, outside).await? {
         build_env(&r, cmd)?;
+        default_exec_cwd(def, host_caps(state, def).as_ref(), &r, cmd);
     }
     Ok(())
 }
@@ -1072,6 +1096,110 @@ mod tests {
             let e = helper(&cmd).unwrap_err();
             assert!(e.message.contains("not under the workspace root"), "{e:?}");
         }
+    }
+
+    /// TER-634: a card agent's exec with no cwd on a native host target
+    /// runs in its owned root `<work_root>/<project>/<agent>` (here
+    /// `work_root` = `workspace_root`, as on helios). Through the real path
+    /// (daemon frame, host exec plan, `start_request` with the host
+    /// agent's `work_dir`, the helper's `plan_start`): no cwd gives the
+    /// root, a cwd inside it is kept and passes, a cwd outside the
+    /// workspace root is kept and refused with a message that names the
+    /// workspace root. Elsewhere a missing cwd stays missing.
+    #[test]
+    fn a_card_agent_exec_on_a_native_host_defaults_to_its_owned_root() {
+        use terrarium_core::protocol::{HostCapabilities, NativeGpuCapability};
+        use terrarium_host::native::{Ctx, HostDevices, Identity, plan_start, start_request};
+        let ws = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(ws.path()).unwrap();
+        let base = ws.to_str().unwrap().to_owned();
+        let mut h: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
+        h.name = "box".into();
+        h.work_root = Some(base.clone());
+        let caps = HostCapabilities {
+            native_gpu: Some(NativeGpuCapability {
+                enforced: true,
+                version: 1,
+                reason: None,
+            }),
+            ..Default::default()
+        };
+        // The root that prepare makes, with a directory in it.
+        let owned = root(&base, "terra", "x").unwrap();
+        let sub = format!("{owned}/repo");
+        std::fs::create_dir_all(&sub).unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let host_work_dir = std::fs::canonicalize(work.path()).unwrap();
+        assert!(!host_work_dir.starts_with(&ws));
+        let ctx = Ctx {
+            workspace_root: ws.clone(),
+            state_dir: "/run/terrarium-host-helper/sessions".into(),
+            dev_dir: "/dev".into(),
+            support_nodes: vec![],
+        };
+        let workload = Identity {
+            name: String::new(),
+            uid: 2001,
+            gid: 2001,
+        };
+        let card_cmd = |cwd: Option<&str>| {
+            let mut cmd = RemoteCmd {
+                argv: vec!["sh".into(), "-c".into(), "id; pwd".into()],
+                cwd: cwd.map(str::to_owned),
+                holder: Some("terra/x".into()),
+                ..RemoteCmd::default()
+            };
+            default_exec_cwd(&h, Some(&caps), &owned, &mut cmd);
+            cmd
+        };
+        let helper = |cmd: &RemoteCmd| {
+            let l = crate::executor::native_gpu_limits(
+                &h,
+                Some(&caps),
+                cmd.holder.as_deref(),
+                cmd.operator,
+                None,
+            )
+            .unwrap();
+            let terrarium_host::protocol::DaemonFrame::Exec(req) =
+                crate::executor::host_frame(&h, None, cmd, l).unwrap()(1)
+            else {
+                panic!("not an exec frame");
+            };
+            let plan = terrarium_host::verb::plan_exec(&req, &Default::default()).unwrap();
+            let start = start_request(&plan.exec, 1, req.limits.as_ref(), &host_work_dir);
+            assert_eq!(start.holder, "terra/x");
+            plan_start(&ctx, &start, &[], &HostDevices, 1, &workload).map(|_| start.cwd)
+        };
+        // No cwd: the owned root.
+        let none = card_cmd(None);
+        assert_eq!(none.cwd.as_deref(), Some(owned.as_str()));
+        assert_eq!(helper(&none).unwrap(), owned);
+        // A cwd inside the root: kept, and the helper takes it.
+        let inside = card_cmd(Some(&sub));
+        assert_eq!(inside.cwd.as_deref(), Some(sub.as_str()));
+        assert_eq!(helper(&inside).unwrap(), sub);
+        // A cwd outside the workspace root: kept, and refused with the
+        // allowed base named.
+        let out = host_work_dir.to_str().unwrap();
+        let outside = card_cmd(Some(out));
+        assert_eq!(outside.cwd.as_deref(), Some(out));
+        let e = helper(&outside).unwrap_err();
+        assert!(
+            e.message
+                .contains(&format!("is not under the workspace root {base}")),
+            "{e:?}"
+        );
+        // Without native enforcement, or on another kind: no default.
+        let mut cmd = RemoteCmd::default();
+        default_exec_cwd(&h, None, &owned, &mut cmd);
+        assert_eq!(cmd.cwd, None);
+        default_exec_cwd(&h, Some(&HostCapabilities::default()), &owned, &mut cmd);
+        assert_eq!(cmd.cwd, None);
+        let mut d = h.clone();
+        d.kind = terrarium_core::config::TargetKind::Docker;
+        default_exec_cwd(&d, Some(&caps), &owned, &mut cmd);
+        assert_eq!(cmd.cwd, None);
     }
 
     /// The owned root as the agent's own directory under the workspace root
