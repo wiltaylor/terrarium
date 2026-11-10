@@ -347,7 +347,10 @@ fn check_cloud(def: &SubscriptionDef) -> ApiResult<()> {
         return Ok(());
     };
     if let Some(why) = cloud::harness_refusal(&def.harnesses) {
-        return Err(ApiError::invalid(format!("subscription `{}`: {why}", def.name)));
+        return Err(ApiError::invalid(format!(
+            "subscription `{}`: {why}",
+            def.name
+        )));
     }
     if def.plan.is_some() {
         return Err(ApiError::invalid(format!(

@@ -697,6 +697,7 @@ mod tests {
             last_success_at: None,
             selfhosted: None,
             enabled: true,
+            cloud: None,
             created_at: String::new(),
             updated_at: String::new(),
         };

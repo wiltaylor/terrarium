@@ -218,9 +218,7 @@ pub fn check(kind: Kind, s: &CloudSettings) -> Result<(), String> {
         (Kind::Foundry, Some(_), true) => {
             return Err("give `cloud.resource` or `cloud.base_url`, not both".into());
         }
-        (Kind::Foundry, Some(r), false)
-            if !word_ok(r) || r.contains(['.', '/', ':']) =>
-        {
+        (Kind::Foundry, Some(r), false) if !word_ok(r) || r.contains(['.', '/', ':']) => {
             return Err(format!(
                 "`cloud.resource` `{r}` must be the Foundry resource name alone, not a URL or host"
             ));
@@ -237,7 +235,9 @@ pub fn check(kind: Kind, s: &CloudSettings) -> Result<(), String> {
             ));
         }
         if !word_ok(v) {
-            return Err(format!("`cloud.models.{k}` must be a model id with no space"));
+            return Err(format!(
+                "`cloud.models.{k}` must be a model id with no space"
+            ));
         }
     }
     if s.budget_usd == Some(0) {
@@ -253,11 +253,16 @@ pub fn check_key(kind: Kind, key: &str, key_id: Option<&str>) -> Result<(), Stri
             let v: serde_json::Value = serde_json::from_str(key)
                 .map_err(|_| "the gcp key must be the service-account JSON".to_owned())?;
             if !v.get("type").is_some_and(serde_json::Value::is_string) {
-                return Err("the gcp key must be a JSON object with `type` (service_account)".into());
+                return Err(
+                    "the gcp key must be a JSON object with `type` (service_account)".into(),
+                );
             }
         }
         Kind::Bedrock | Kind::Foundry if !word_ok(key) => {
-            return Err(format!("the {} key has a space or a line break", kind.as_str()));
+            return Err(format!(
+                "the {} key has a space or a line break",
+                kind.as_str()
+            ));
         }
         _ => {}
     }
@@ -387,7 +392,11 @@ impl BudgetWindow {
 /// The window of `used_usd` spent against `budget_usd`.
 pub fn budget_window(budget_usd: u32, used_usd: f64) -> BudgetWindow {
     let budget = f64::from(budget_usd);
-    let used = if used_usd.is_finite() { used_usd.max(0.0) } else { 0.0 };
+    let used = if used_usd.is_finite() {
+        used_usd.max(0.0)
+    } else {
+        0.0
+    };
     let used_pct = if budget > 0.0 {
         (used / budget * 100.0).clamp(0.0, 100.0)
     } else {
@@ -438,7 +447,10 @@ mod tests {
         [
             ("opus", "us.anthropic.claude-opus-5-5"),
             ("sonnet", "us.anthropic.claude-sonnet-4-6"),
-            ("claude-opus-5-5", "arn:aws:bedrock:us-east-2:1:application-inference-profile/x"),
+            (
+                "claude-opus-5-5",
+                "arn:aws:bedrock:us-east-2:1:application-inference-profile/x",
+            ),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -509,7 +521,10 @@ mod tests {
         let env = claude_env(Kind::Gcp, &s, json, None);
         assert_eq!(get(&env.vars, "CLAUDE_CODE_USE_VERTEX"), Some("1"));
         assert_eq!(get(&env.vars, "CLOUD_ML_REGION"), Some("global"));
-        assert_eq!(get(&env.vars, "ANTHROPIC_VERTEX_PROJECT_ID"), Some("proj-1"));
+        assert_eq!(
+            get(&env.vars, "ANTHROPIC_VERTEX_PROJECT_ID"),
+            Some("proj-1")
+        );
         assert_eq!(
             env.files,
             [("GOOGLE_APPLICATION_CREDENTIALS".to_owned(), json.to_owned())]

@@ -2085,6 +2085,46 @@ The token is not in an error note: the daemon replaces each token and the
 account id with `<redacted>`. An expired Claude token (`expiresAt`) fails
 before the request, as for the probe. The daemon never refreshes a token.
 
+### Cloud providers for Claude Code: from docs, not verified live
+
+Read on 2026-11-10 (TER-630). No cloud account was available, so every
+fact below is **from docs, not verified live**. The code is
+`crates/terrarium-core/src/cloud.rs`; the API is docs/api.md §16.5.
+
+| Kind | Var | Meaning | Source |
+|---|---|---|---|
+| `bedrock` | `CLAUDE_CODE_USE_BEDROCK=1` | turns Bedrock on | https://code.claude.com/docs/en/amazon-bedrock |
+| `bedrock` | `AWS_REGION` | the region; else `AWS_DEFAULT_REGION`, the profile, `us-east-1` | same |
+| `bedrock` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | an IAM access key (the default credential chain) | same |
+| `bedrock` | `AWS_BEARER_TOKEN_BEDROCK` | an Amazon Bedrock API key; when set, the credential chain is not used | same |
+| `bedrock` | `ANTHROPIC_BEDROCK_BASE_URL` | another endpoint or a gateway | same |
+| `gcp` | `CLAUDE_CODE_USE_VERTEX=1` | turns Vertex AI (Google Cloud's Agent Platform) on | https://code.claude.com/docs/en/google-vertex-ai |
+| `gcp` | `CLOUD_ML_REGION` | `global`, `us`, `eu`, or a region; default `us-east5` | same |
+| `gcp` | `ANTHROPIC_VERTEX_PROJECT_ID` | the project of the requests, over the project of the credential file | same |
+| `gcp` | `GOOGLE_APPLICATION_CREDENTIALS` | the path of a service-account key file | same |
+| `gcp` | `ANTHROPIC_VERTEX_BASE_URL` | another endpoint or a gateway | same |
+| `foundry` | `CLAUDE_CODE_USE_FOUNDRY=1` | turns Microsoft Foundry on | https://code.claude.com/docs/en/microsoft-foundry |
+| `foundry` | `ANTHROPIC_FOUNDRY_RESOURCE` | the resource name alone (a URL or host is refused) | same |
+| `foundry` | `ANTHROPIC_FOUNDRY_BASE_URL` | the full base URL, instead of the resource | same |
+| `foundry` | `ANTHROPIC_FOUNDRY_API_KEY` | the API key of the resource | same |
+| all | `ANTHROPIC_DEFAULT_OPUS_MODEL`, `..._SONNET_MODEL`, `..._HAIKU_MODEL` | the model id of each alias (a Bedrock inference profile id or ARN, a Vertex id, a Foundry deployment name) | the three pages, "Pin model versions" |
+
+Not used: `AWS_SESSION_TOKEN` (temporary keys; the key file is static),
+`AWS_PROFILE` and the `awsAuthRefresh` and `gcpAuthRefresh` settings,
+`ANTHROPIC_FOUNDRY_AUTH_TOKEN` (an Entra ID token), the `VERTEX_REGION_CLAUDE_*`
+overrides, and Mantle (`CLAUDE_CODE_USE_MANTLE`). The IAM permissions are
+on the same pages: `bedrock:InvokeModel`,
+`bedrock:InvokeModelWithResponseStream`, `bedrock:ListInferenceProfiles`,
+and `bedrock:GetInferenceProfile` (Bedrock); `roles/aiplatform.user`
+(Vertex AI); `Azure AI User` or `Cognitive Services User` (Foundry).
+
+Tested: the env of each kind (unit tests in `cloud.rs`), and the env that
+a fake Claude Code gets through the real `terrarium exec-env` for a
+Bedrock key pair, a Bedrock API key, and a Foundry key
+(`crates/terrariumd/tests/runner_process.rs`,
+`the_harness_credentials_come_through_exec_env_only`). Not tested: a turn
+on any cloud, and the cost that Claude Code writes on a cloud.
+
 ### Self-hosted model servers
 
 Read on 2026-11-01 from the installed harness versions in `tools/` (no

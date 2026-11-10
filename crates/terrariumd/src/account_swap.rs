@@ -330,7 +330,11 @@ mod tests {
         for s in ["a", "c"] {
             crate::accounts::write_credential(state, s, HarnessId::Claude, b"{}").unwrap();
         }
-        let mut members = vec![sub("a", "logged_in"), sub("b", "api_key"), sub("c", "logged_in")];
+        let mut members = vec![
+            sub("a", "logged_in"),
+            sub("b", "api_key"),
+            sub("c", "logged_in"),
+        ];
         members[1].provider = "bedrock".into();
         members[1].env_var = Some("AWS_BEARER_TOKEN_BEDROCK".into());
         let v = view("a", &["a", "b", "c"]);

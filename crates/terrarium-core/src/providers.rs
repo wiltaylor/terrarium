@@ -206,8 +206,9 @@ pub fn display_name(
         "moonshot" if is_api_key(plan) => "Kimi API Platform".into(),
         "moonshot" => with("Kimi Code", tier.and_then(kimi_code_tier)),
         "openrouter" => "OpenRouter".into(),
-        "bedrock" | "gcp" | "foundry" => crate::cloud::kind(&p)
-            .map_or_else(|| p.clone(), |k| k.display_name().to_owned()),
+        "bedrock" | "gcp" | "foundry" => {
+            crate::cloud::kind(&p).map_or_else(|| p.clone(), |k| k.display_name().to_owned())
+        }
         _ => match plan {
             Some(pl) => format!("{} {pl}", provider.trim()),
             None if !provider.trim().is_empty() => provider.trim().to_owned(),

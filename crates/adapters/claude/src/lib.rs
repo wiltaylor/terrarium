@@ -250,7 +250,11 @@ impl Adapter for ClaudeAdapter {
             // `terrarium exec-env`; the launch has no cloud var.
             Some(s) if terrarium_core::cloud::is_cloud(&s.provider) => {
                 let mut a = agent.clone();
-                let models = s.cloud.as_ref().map(|c| c.models.clone()).unwrap_or_default();
+                let models = s
+                    .cloud
+                    .as_ref()
+                    .map(|c| c.models.clone())
+                    .unwrap_or_default();
                 a.model = terrarium_core::cloud::model_for(&models, agent.model.as_deref());
                 self.launch(&a, resume)
             }
@@ -475,7 +479,10 @@ mod tests {
         });
         let models: std::collections::BTreeMap<String, String> = [
             ("opus", "us.anthropic.claude-opus-5-5"),
-            ("claude-opus-5-5", "arn:aws:bedrock:us-east-2:1:application-inference-profile/p"),
+            (
+                "claude-opus-5-5",
+                "arn:aws:bedrock:us-east-2:1:application-inference-profile/p",
+            ),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))

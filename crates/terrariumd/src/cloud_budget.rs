@@ -231,7 +231,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let run = |db: &Db, now: DateTime<Utc>| {
+        async fn run(db: &Db, now: DateTime<Utc>) -> ApiResult<(Option<BudgetWindow>, i64)> {
             db.write("t", move |t| {
                 let sub = subs::get(t, "aws")?;
                 let w = write_window(t, &sub, now, "http://dash/subscriptions")?;
@@ -242,10 +242,14 @@ mod tests {
                 )?;
                 Ok((w, mails))
             })
-        };
+            .await
+        }
         let (w, mails) = run(&db, now).await.unwrap();
         let w = w.unwrap();
-        assert_eq!((w.used_usd, w.remaining_usd, w.used_pct), (50.0, 50.0, 50.0));
+        assert_eq!(
+            (w.used_usd, w.remaining_usd, w.used_pct),
+            (50.0, 50.0, 50.0)
+        );
         assert!(!w.alert());
         assert_eq!(mails, 0);
         let s = db

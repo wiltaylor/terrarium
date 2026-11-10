@@ -172,7 +172,11 @@ fn credential_dir() -> PathBuf {
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .collect();
-    let agent = if agent.is_empty() { "agent".to_owned() } else { agent };
+    let agent = if agent.is_empty() {
+        "agent".to_owned()
+    } else {
+        agent
+    };
     match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
         Some(d) => PathBuf::from(d).join("terrarium-credentials").join(agent),
         None => std::env::var_os("HOME")
@@ -200,7 +204,11 @@ fn write_files(
     let mut out = Vec::new();
     for (var, content) in files {
         let path = dir.join(format!("{}.json", var.to_ascii_lowercase()));
-        let tmp = dir.join(format!(".{}.{}.tmp", var.to_ascii_lowercase(), std::process::id()));
+        let tmp = dir.join(format!(
+            ".{}.{}.tmp",
+            var.to_ascii_lowercase(),
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&tmp);
         {
             let mut f = std::fs::OpenOptions::new()

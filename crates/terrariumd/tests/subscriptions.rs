@@ -3006,7 +3006,10 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
         .await;
     let sub = r.ok().clone();
     let text = sub.to_string();
-    assert!(!text.contains("E2E-SECRET") && !text.contains("AKIAE2E1"), "{text}");
+    assert!(
+        !text.contains("E2E-SECRET") && !text.contains("AKIAE2E1"),
+        "{text}"
+    );
     assert_eq!(sub["provider"], "bedrock");
     assert_eq!(sub["harnesses"], json!(["claude"]));
     assert_eq!(sub["cloud"]["budget_usd"], 10);
@@ -3030,7 +3033,9 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     .await
     .err(422, "invalid");
 
-    let a = td.agent("p", "worker", json!({"subscription": "aws"})).await;
+    let a = td
+        .agent("p", "worker", json!({"subscription": "aws"}))
+        .await;
     let id = a["id"].as_str().unwrap().to_owned();
     td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
     td.wait_status(&id, "idle").await;
@@ -3046,7 +3051,9 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
         })
         .await
         .unwrap();
-    terrariumd::cloud_budget::check(&state, "aws").await.unwrap();
+    terrariumd::cloud_budget::check(&state, "aws")
+        .await
+        .unwrap();
     td.wait_status(&id, "blocked").await;
     let blocked = events_of(td, "quota.blocked").await;
     assert_eq!(blocked.len(), 1, "{blocked:?}");
@@ -3067,7 +3074,9 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     assert_eq!(budget["balance"]["total"], 10.0);
     assert_eq!(budget["balance"]["currency"], "USD");
     // A second check holds nothing twice.
-    terrariumd::cloud_budget::check(&state, "aws").await.unwrap();
+    terrariumd::cloud_budget::check(&state, "aws")
+        .await
+        .unwrap();
     assert_eq!(events_of(td, "quota.blocked").await.len(), 1);
 
     // The operator raises the budget: the next check ends the hold.
@@ -3078,7 +3087,9 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     )
     .await
     .ok();
-    terrariumd::cloud_budget::check(&state, "aws").await.unwrap();
+    terrariumd::cloud_budget::check(&state, "aws")
+        .await
+        .unwrap();
     wait_for("the release", || async {
         events_of(td, "quota.resumed").await.len() == 1
     })

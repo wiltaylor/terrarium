@@ -1431,9 +1431,7 @@ async fn api_key(
                     key.provider, s.provider
                 )));
             }
-            if key.cloud.is_some()
-                && exists.as_ref().is_some_and(|s| s.source != SOURCE_API)
-            {
+            if key.cloud.is_some() && exists.as_ref().is_some_and(|s| s.source != SOURCE_API) {
                 return Err(ApiError::invalid(format!(
                     "subscription `{name}` comes from a file; set its `[cloud]` table there"
                 )));

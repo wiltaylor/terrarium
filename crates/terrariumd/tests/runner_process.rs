@@ -2071,7 +2071,10 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                 ("AWS_REGION", "us-east-1"),
                 ("AWS_ACCESS_KEY_ID", "AKIAE2EACCESSKEYID10"),
                 ("AWS_SECRET_ACCESS_KEY", "E2E-aws-secret-access-key-9"),
-                ("ANTHROPIC_DEFAULT_OPUS_MODEL", "us.anthropic.claude-opus-5-5"),
+                (
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                    "us.anthropic.claude-opus-5-5",
+                ),
             ],
         },
         Case {
@@ -2151,7 +2154,11 @@ async fn the_harness_credentials_come_through_exec_env_only() {
         assert!(spec.contains("exec-env"), "{}: {spec}", c.agent);
         assert!(spec.contains("--require-credentials"), "{}", c.agent);
         for v in &values {
-            assert!(!spec.contains(v.as_str()), "{}: runner.json holds a key", c.agent);
+            assert!(
+                !spec.contains(v.as_str()),
+                "{}: runner.json holds a key",
+                c.agent
+            );
         }
         td.post(&format!("/api/agents/{id}/stop"), None).await;
         td.wait_status(&id, "stopped").await;
@@ -2162,7 +2169,10 @@ async fn the_harness_credentials_come_through_exec_env_only() {
     let all = tree_text(&state, &[state.join("credentials")]);
     assert!(!all.is_empty());
     for v in &values {
-        assert!(!all.contains(v.as_str()), "a file of the state dir holds {v}");
+        assert!(
+            !all.contains(v.as_str()),
+            "a file of the state dir holds {v}"
+        );
     }
 }
 
