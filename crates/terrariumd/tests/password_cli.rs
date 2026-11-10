@@ -111,7 +111,10 @@ fn the_first_password_leaves_the_env() {
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
     let _ = child.kill();
     let _ = child.wait();
-    assert!(socket.exists(), "the daemon did not start (exit: {exited:?})");
+    assert!(
+        socket.exists(),
+        "the daemon did not start (exit: {exited:?})"
+    );
     let environ = String::from_utf8_lossy(&environ);
     assert!(environ.contains("TERRARIUM_HOST_LISTEN="), "read the env");
     assert!(!environ.contains("TERRARIUM_PASSWORD"), "{environ}");
