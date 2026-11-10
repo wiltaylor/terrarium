@@ -3687,7 +3687,10 @@ async fn held_queued_turn(td: &Td) -> (String, i64) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let a = td.get(&format!("/api/agents/{id}")).await;
-    assert_eq!(a["queued"], 1, "the row stays while the hold keeps the turn: {a}");
+    assert_eq!(
+        a["queued"], 1,
+        "the row stays while the hold keeps the turn: {a}"
+    );
     let q = td.get(&format!("/api/agents/{id}/queued")).await;
     let items = q["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "the turn shows once: {q}");
@@ -3744,7 +3747,9 @@ async fn a_removed_held_queued_turn_does_not_go_out() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     let starts = td.events(&id, "turn_start").await;
     assert!(
-        !starts.iter().any(|x| x["data"]["prompt"] == "[User] wake up"),
+        !starts
+            .iter()
+            .any(|x| x["data"]["prompt"] == "[User] wake up"),
         "{starts:#?}"
     );
     assert!(td.sup.waiting_turns(agent).is_empty());
