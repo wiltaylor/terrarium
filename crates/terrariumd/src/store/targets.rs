@@ -59,10 +59,6 @@ pub struct Runtime {
     /// agent ULID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub instances: BTreeMap<String, Instance>,
-    /// An `exedev` target: its VM. The name is stored before `new` runs,
-    /// so a daemon restart adopts or removes the VM instead of leaking it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exedev: Option<crate::exedev::Vm>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

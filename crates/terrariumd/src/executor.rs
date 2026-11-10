@@ -1319,6 +1319,8 @@ pub struct Executor {
     /// The exe.dev HTTPS API of `exedev` targets ([`crate::exedev`]).
     /// Tests point it at a fake.
     pub exedev_api: String,
+    /// The locks and the sweep timer of `exedev` targets.
+    pub exedev: crate::exedev::Locks,
     pub buffer_limit: usize,
     reaper: AtomicBool,
     /// The input rate limit of target displays (docs/api.md §17.10).
@@ -1336,6 +1338,7 @@ impl Default for Executor {
             max_per_agent: MAX_SESSIONS_PER_AGENT,
             ssh_bin: std::env::var("TERRARIUM_SSH").unwrap_or_else(|_| "ssh".into()),
             exedev_api: crate::exedev::DEFAULT_API.into(),
+            exedev: crate::exedev::Locks::default(),
             buffer_limit: SESSION_BUFFER,
             reaper: AtomicBool::new(false),
             display_limiter: crate::display::Limiter::default(),
@@ -4161,7 +4164,7 @@ pub async fn resolved_def(
     agent: Option<&str>,
 ) -> ApiResult<TargetDef> {
     if row.def.kind == TargetKind::Exedev {
-        return crate::exedev::exec_def_of(row);
+        return crate::exedev::exec_def(state, &row.def);
     }
     if !is_instance_kind(&row.def) {
         return Ok(row.def.clone());
@@ -4500,8 +4503,10 @@ async fn instance_lifecycle(
 /// vmlab instance target. Best effort: a failure is logged.
 pub async fn teardown(state: &Shared, row: &TargetRow) {
     if row.def.kind == TargetKind::Exedev {
+        // A failed `rm` keeps the VM's record, which outlives the target:
+        // the sweep removes the VM on the account it was made on.
         if let Err(e) = crate::exedev::destroy(state, &row.def).await {
-            warn!(target = %row.def.name, "cannot remove the exe.dev VM: {e}");
+            warn!(target = %row.def.name, "cannot remove the exe.dev VM; the sweep will: {e}");
         }
         return;
     }

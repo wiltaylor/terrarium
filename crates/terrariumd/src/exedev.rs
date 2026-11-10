@@ -10,21 +10,30 @@
 //! - Caps (operator, E4): at most [`MAX_VMS`] VMs at once over all
 //!   `exedev` targets, with a clear refusal; a life of at most 8 hours
 //!   (`[exedev] max_life_secs`).
-//! - The VM name goes into the target's runtime record before `new` runs.
-//!   A daemon restart then adopts the VM (or removes it) instead of
-//!   leaking it.
-//! - The sweep ([`spawn`], every hour, and `POST /api/exedev/sweep`)
-//!   removes a VM past its life (and mails the project), a VM that no
-//!   running agent holds, and a VM with the Terrarium name prefix
-//!   ([`NAME_PREFIX`]) and the target's tag that no target records.
+//! - Each VM has a row in the table `exedev_vms` ([`Vm`]), written before
+//!   `new` runs. The row names the account the VM was made on (the token
+//!   secret, its scope) and the tag, and it outlives its target: a daemon
+//!   restart adopts the VM, and the sweep removes a VM whose target is
+//!   gone, on the account it was made on.
+//! - One lock per target ([`Locks`]) serializes `up`, `destroy`, `status`
+//!   and the sweep's removal of the target's VM.
+//! - The sweep ([`spawn`]: one minute after the start, then at the next
+//!   `expires_at` and at least every hour; and `POST /api/exedev/sweep`)
+//!   removes a VM past its life (and mails the project), a VM whose target
+//!   is gone, a VM with no running holder or no ssh host after
+//!   [`GRACE_SECS`], and a VM with the Terrarium name prefix
+//!   ([`NAME_PREFIX`]) and a known tag that no row records, after
+//!   [`GRACE_SECS`].
 //! - The token is never on a command line or in a log: it goes only into
-//!   the `Authorization` header.
+//!   the `Authorization` header, and an answer that holds it is not shown.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use serde_json::{Value, json};
 use terrarium_core::config::{ExedevSettings, TargetDef, TargetKind};
 use tokio::task::JoinHandle;
@@ -39,38 +48,104 @@ use crate::store::targets;
 pub const DEFAULT_API: &str = "https://exe.dev/exec";
 /// At most this many exe.dev VMs at once (operator, E4).
 pub const MAX_VMS: usize = 3;
-/// The name prefix of each VM that Terrarium makes. The sweep removes only
-/// VMs with this prefix.
+/// The name prefix of each VM that Terrarium makes. The sweep removes an
+/// unrecorded VM only with this prefix.
 pub const NAME_PREFIX: &str = "terrarium-x-";
-/// The sweep runs this often.
+/// The sweep runs at least this often.
 pub const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 /// The first sweep runs this long after the daemon starts.
 pub const FIRST_SWEEP: Duration = Duration::from_secs(60);
-/// A VM younger than this is not removed for having no running holder:
-/// its agent may still be starting.
-const UNHELD_GRACE_SECS: i64 = 600;
+/// A VM younger than this is not removed for having no running holder, no
+/// ssh host, or no record: its `up` or its agent may still be starting.
+pub const GRACE_SECS: i64 = 600;
 /// How long `up` waits for ssh on a new VM.
 const SSH_WAIT: Duration = Duration::from_secs(180);
 /// The client timeout of one API call. The API itself stops at 30 s.
 const API_TIMEOUT: Duration = Duration::from_secs(45);
+/// The longest part of an API answer that goes into an error.
+const SHOWN_CHARS: usize = 300;
 
-/// The VM of an `exedev` target, in its runtime record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// ---------------------------------------------------------------- state
+
+/// The exedev state of one daemon (in [`crate::executor::Executor`]).
+#[derive(Default)]
+pub struct Locks {
+    /// One lock per target name.
+    targets: std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// One `new` at a time, so the cap holds.
+    create: tokio::sync::Mutex<()>,
+    /// Wakes the sweep timer when a VM with a new `expires_at` is recorded.
+    wake: tokio::sync::Notify,
+    /// When the sweep first saw each unrecorded VM that `ls` gives no
+    /// `created_at` for.
+    seen: std::sync::Mutex<BTreeMap<String, DateTime<Utc>>>,
+}
+
+impl Locks {
+    fn target(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut m = self
+            .targets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        m.entry(name.to_owned()).or_default().clone()
+    }
+}
+
+// --------------------------------------------------------------- records
+
+/// The account an exe.dev VM is made on: the token secret, as the target
+/// that made it opens it (its project, and whether an admin set it).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Account {
+    pub project: Option<String>,
+    pub api_token: String,
+    pub admin_set: bool,
+}
+
+impl Account {
+    /// The account of a target now.
+    pub fn of_target(conn: &Connection, def: &TargetDef) -> ApiResult<Self> {
+        Ok(Self {
+            project: def.project.clone(),
+            api_token: settings(def).api_token,
+            admin_set: targets::credential_admin(conn, &def.name)?,
+        })
+    }
+}
+
+/// An exe.dev VM that Terrarium made: a row of `exedev_vms`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Vm {
     /// The exe.dev VM name.
     pub name: String,
+    /// The target that made it. The row stays when the target goes.
+    pub target: String,
+    /// The account it was made on.
+    pub project: Option<String>,
+    pub api_token: String,
+    pub admin_set: bool,
+    /// The tag it was made with.
+    pub tag: String,
     /// The ssh host from `new` (`<name>.exe.xyz`). `None`: `new` has not
     /// answered yet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_dest: Option<String>,
     /// RFC 3339: when the daemon asked for the VM.
     pub created_at: String,
-    /// RFC 3339: the end of its life. The sweep removes it after.
+    /// RFC 3339: the end of its life.
     pub expires_at: String,
 }
 
 impl Vm {
-    fn expired(&self, now: DateTime<Utc>) -> bool {
+    pub fn account(&self) -> Account {
+        Account {
+            project: self.project.clone(),
+            api_token: self.api_token.clone(),
+            admin_set: self.admin_set,
+        }
+    }
+
+    /// Past `expires_at`, or a time that does not parse.
+    pub fn expired(&self, now: DateTime<Utc>) -> bool {
         parse_time(&self.expires_at).is_none_or(|t| now >= t)
     }
 
@@ -84,6 +159,91 @@ fn parse_time(s: &str) -> Option<DateTime<Utc>> {
         .ok()
         .map(|t| t.with_timezone(&Utc))
 }
+
+const VM_COLS: &str =
+    "name, target, project, api_token, admin_set, tag, ssh_dest, created_at, expires_at";
+
+fn vm_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Vm> {
+    Ok(Vm {
+        name: r.get(0)?,
+        target: r.get(1)?,
+        project: r.get(2)?,
+        api_token: r.get(3)?,
+        admin_set: r.get(4)?,
+        tag: r.get(5)?,
+        ssh_dest: r.get(6)?,
+        created_at: r.get(7)?,
+        expires_at: r.get(8)?,
+    })
+}
+
+/// Every recorded VM, by name.
+pub fn records(conn: &Connection) -> ApiResult<Vec<Vm>> {
+    let mut stmt = conn.prepare(&format!("SELECT {VM_COLS} FROM exedev_vms ORDER BY name"))?;
+    let rows = stmt.query_map([], vm_row)?.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The recorded VM of a target.
+pub fn record_of(conn: &Connection, target: &str) -> ApiResult<Option<Vm>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {VM_COLS} FROM exedev_vms WHERE target = ?1 ORDER BY created_at DESC"),
+            [target],
+            vm_row,
+        )
+        .optional()?)
+}
+
+fn record_named(conn: &Connection, name: &str) -> ApiResult<Option<Vm>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {VM_COLS} FROM exedev_vms WHERE name = ?1"),
+            [name],
+            vm_row,
+        )
+        .optional()?)
+}
+
+async fn put(state: &Shared, vm: &Vm) -> ApiResult<()> {
+    let v = vm.clone();
+    state
+        .db
+        .write("system", move |t| {
+            t.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO exedev_vms ({VM_COLS})
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                ),
+                params![
+                    v.name,
+                    v.target,
+                    v.project,
+                    v.api_token,
+                    v.admin_set,
+                    v.tag,
+                    v.ssh_dest,
+                    v.created_at,
+                    v.expires_at
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+}
+
+async fn forget(state: &Shared, name: &str) -> ApiResult<()> {
+    let n = name.to_owned();
+    state
+        .db
+        .write("system", move |t| {
+            t.execute("DELETE FROM exedev_vms WHERE name = ?1", [&n])?;
+            Ok(())
+        })
+        .await
+}
+
+// -------------------------------------------------------------- settings
 
 /// The settings of an `exedev` target: its `[exedev]` table, or the
 /// defaults (2 vCPU, 4 GiB, tag `terrarium-dev-ssh`, 8 h).
@@ -200,22 +360,16 @@ pub fn ssh_def(def: &TargetDef, vm: &Vm) -> ApiResult<TargetDef> {
     Ok(d)
 }
 
-/// [`ssh_def`] of the VM in the target's runtime record, read now. An
-/// error when the target has no VM.
+/// [`ssh_def`] of the target's recorded VM, read now. An error when the
+/// target has no VM.
 pub fn exec_def(state: &Shared, def: &TargetDef) -> ApiResult<TargetDef> {
     let n = def.name.clone();
-    let row = state.db.read_now(move |c| targets::get(c, &n))?;
-    exec_def_of(&row)
-}
-
-/// [`exec_def`] of a row that is read.
-pub fn exec_def_of(row: &targets::TargetRow) -> ApiResult<TargetDef> {
-    match &row.runtime.exedev {
-        Some(vm) => ssh_def(&row.def, vm),
+    match state.db.read_now(move |c| record_of(c, &n))? {
+        Some(vm) => ssh_def(def, &vm),
         None => Err(ApiError::conflict(format!(
             "target `{}` has no exe.dev VM; a holder's start brings it up \
              (POST /api/targets/{}/up)",
-            row.def.name, row.def.name
+            def.name, def.name
         ))),
     }
 }
@@ -227,6 +381,8 @@ pub fn exec_def_of(row: &targets::TargetRow) -> ApiResult<TargetDef> {
 pub struct Listed {
     pub name: String,
     pub tags: Vec<String>,
+    pub ssh_dest: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// The exe.dev HTTPS API with one token. `Debug` shows no token.
@@ -255,6 +411,13 @@ impl Api {
         })
     }
 
+    /// The part of an API answer that may go into an error: nothing when
+    /// any part of it holds the token, else its first [`SHOWN_CHARS`]
+    /// characters.
+    fn shown(&self, text: &str) -> String {
+        shown(text, &self.token)
+    }
+
     /// Run one command. The answer is its JSON. A status other than 2xx is
     /// an error with the status and the start of the body.
     pub async fn run(&self, cmd: &str) -> ApiResult<Value> {
@@ -273,11 +436,11 @@ impl Api {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            let mut body: String = text.chars().take(300).collect();
-            if body.contains(self.token.as_str()) {
-                body = "(the answer is not shown)".into();
-            }
-            let msg = format!("exe.dev API `{verb}`: HTTP {}: {body}", status.as_u16());
+            let msg = format!(
+                "exe.dev API `{verb}`: HTTP {}: {}",
+                status.as_u16(),
+                self.shown(&text)
+            );
             return Err(match status.as_u16() {
                 401 | 403 => ApiError::forbidden(msg),
                 429 => ApiError::resource_busy(msg),
@@ -298,6 +461,9 @@ impl Api {
         if !plain_word(name) {
             return Err(ApiError::invalid(format!("bad exe.dev VM name `{name}`")));
         }
+        if !plain_word(&s.tag) {
+            return Err(ApiError::invalid(format!("bad exe.dev tag `{}`", s.tag)));
+        }
         let cmd = format!(
             "new --name={name} --sandbox --tag={} --cpu={} --memory={}GB --no-email --json",
             s.tag, s.cpu, s.memory_gb
@@ -311,7 +477,7 @@ impl Api {
             .ok_or_else(|| {
                 ApiError::internal(format!(
                     "exe.dev API `new`: the answer has no `ssh_dest`: {}",
-                    v.to_string().chars().take(300).collect::<String>()
+                    self.shown(&v.to_string())
                 ))
             })
     }
@@ -349,13 +515,21 @@ impl Api {
         } else {
             Err(ApiError::internal(format!(
                 "exe.dev API `rm`: not removed: {left:?}; errors: {}",
-                v["errors"]
+                self.shown(&v["errors"].to_string())
             )))
         }
     }
 }
 
-/// The VMs of an `ls` answer: `{"vms": [{"vm_name", "tags"}, ...]}`.
+/// [`Api::shown`]: the whole text is checked for the token before the cut.
+fn shown(text: &str, token: &str) -> String {
+    if !token.is_empty() && text.contains(token) {
+        return "(the answer is not shown: it holds the API token)".into();
+    }
+    text.chars().take(SHOWN_CHARS).collect()
+}
+
+/// The VMs of an `ls` answer: `{"vms": [{"vm_name", "tags", ...}, ...]}`.
 pub fn parse_ls(v: &Value) -> Vec<Listed> {
     v["vms"]
         .as_array()
@@ -375,6 +549,8 @@ pub fn parse_ls(v: &Value) -> Vec<Listed> {
                     Some(Listed {
                         name: name.to_owned(),
                         tags,
+                        ssh_dest: vm["ssh_dest"].as_str().map(str::to_owned),
+                        created_at: vm["created_at"].as_str().and_then(parse_time),
                     })
                 })
                 .collect()
@@ -382,13 +558,23 @@ pub fn parse_ls(v: &Value) -> Vec<Listed> {
         .unwrap_or_default()
 }
 
-/// The API of a target: its token secret, opened now. The token stays in
+/// The API of an account: its token secret, opened now. The token stays in
 /// memory; it is never logged.
-pub fn api_of(state: &Shared, def: &TargetDef) -> ApiResult<Api> {
-    let name = settings(def).api_token;
-    let opened = state.db.read_now(|c| {
-        crate::secrets::open_named(c, &state.state_dir, targets::owner(def), &name)
-    })?;
+pub fn api_for(state: &Shared, account: &Account) -> ApiResult<Api> {
+    let name = account.api_token.clone();
+    // The VM can outlive its target, so the owner is the account's scope
+    // as the target had it, not the target row.
+    let owner = match account.project.as_deref() {
+        None => crate::secrets::Owner::Global,
+        Some(project) => crate::secrets::Owner::Repo {
+            project,
+            name: "exedev",
+            admin_set: account.admin_set,
+        },
+    };
+    let opened = state
+        .db
+        .read_now(|c| crate::secrets::open_named(c, &state.state_dir, owner, &name))?;
     let field = crate::secrets::grants::main_field(opened.info.kind, &opened.info.secret_fields)
         .ok_or_else(|| {
             ApiError::invalid(format!(
@@ -405,73 +591,66 @@ pub fn api_of(state: &Shared, def: &TargetDef) -> ApiResult<Api> {
 
 // ------------------------------------------------------------ lifecycle
 
-/// One `new` at a time, so the cap holds.
-static CREATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-async fn row_of(state: &Shared, target: &str) -> ApiResult<targets::TargetRow> {
-    let n = target.to_owned();
-    state.db.read(move |c| targets::get(c, &n)).await
-}
-
-async fn set_vm(state: &Shared, target: &str, vm: Option<Vm>) -> ApiResult<()> {
-    let n = target.to_owned();
-    state
-        .db
-        .write("system", move |t| {
-            let mut rt = targets::get(t, &n)?.runtime;
-            rt.exedev = vm;
-            targets::set_runtime(t, &n, &rt)
-        })
-        .await
-}
-
-/// The VMs that the `exedev` targets record now: `(target, vm)`.
-async fn recorded(state: &Shared) -> ApiResult<Vec<(TargetDef, Vm)>> {
-    let rows = state.db.read(targets::list).await?;
-    Ok(rows
-        .into_iter()
-        .filter(|r| r.def.kind == TargetKind::Exedev)
-        .filter_map(|r| r.runtime.exedev.map(|vm| (r.def, vm)))
-        .collect())
-}
-
 /// The refusal of a new VM when [`MAX_VMS`] run: `running` are the names
-/// that count (recorded by targets or listed with the prefix).
+/// that count (recorded, or listed with the prefix).
 pub fn cap_refusal(running: &BTreeSet<String>) -> Option<String> {
     (running.len() >= MAX_VMS).then(|| {
         format!(
             "exe.dev cap: {} of {MAX_VMS} VMs run ({}); a new one waits until one is \
-             removed (agent stop, lease end, or the hourly sweep)",
+             removed (agent stop, lease end, or the sweep)",
             running.len(),
             running.iter().cloned().collect::<Vec<_>>().join(", ")
         )
     })
 }
 
-/// `up`: adopt the recorded VM when it lives and is in its life, else make
-/// a new one. The answer is the new state (`running`).
+/// `up`: adopt the recorded VM when `ls` lists it and it is in its life,
+/// else make a new one. The answer is the new state (`running`).
 pub async fn up(state: &Shared, def: &TargetDef) -> ApiResult<String> {
-    let api = api_of(state, def)?;
+    let lock = state.executor.exedev.target(&def.name);
+    let _target = lock.lock().await;
+    up_locked(state, def).await
+}
+
+async fn up_locked(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     let s = settings(def);
     let now = Utc::now();
-    if let Some(vm) = row_of(state, &def.name).await?.runtime.exedev {
+    let n = def.name.clone();
+    if let Some(mut vm) = state.db.read(move |c| record_of(c, &n)).await? {
+        let api = api_for(state, &vm.account())?;
         let listed = api.ls().await?;
-        let live = listed.iter().any(|l| l.name == vm.name);
-        if live && !vm.expired(now) && vm.ssh_dest.is_some() {
-            wait_ssh(state, def, &vm).await?;
-            info!(target = %def.name, vm = %vm.name, "adopted the exe.dev VM");
-            return Ok("running".into());
+        match listed.iter().find(|l| l.name == vm.name) {
+            Some(l) if !vm.expired(now) => {
+                // A record written before `new` answered (a restart): the
+                // VM exists, so take its ssh host from `ls`.
+                if vm.ssh_dest.is_none() {
+                    vm.ssh_dest = Some(
+                        l.ssh_dest
+                            .clone()
+                            .unwrap_or_else(|| format!("{}.exe.xyz", vm.name)),
+                    );
+                    put(state, &vm).await?;
+                }
+                wait_ssh(state, def, &vm).await?;
+                info!(target = %def.name, vm = %vm.name, "adopted the exe.dev VM");
+                return Ok("running".into());
+            }
+            // Past its life: never adopted.
+            Some(_) => api.rm(std::slice::from_ref(&vm.name)).await?,
+            None => {}
         }
-        if live {
-            api.rm(std::slice::from_ref(&vm.name)).await?;
-        }
-        set_vm(state, &def.name, None).await?;
+        forget(state, &vm.name).await?;
     }
-    let _one = CREATE.lock().await;
-    let mut running: BTreeSet<String> = recorded(state)
+    let d = def.clone();
+    let account = state.db.read(move |c| Account::of_target(c, &d)).await?;
+    let api = api_for(state, &account)?;
+    let one = state.executor.exedev.create.lock().await;
+    let mut running: BTreeSet<String> = state
+        .db
+        .read(records)
         .await?
         .into_iter()
-        .map(|(_, vm)| vm.name)
+        .map(|v| v.name)
         .collect();
     running.extend(
         api.ls()
@@ -486,28 +665,38 @@ pub async fn up(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     let life = chrono::Duration::seconds(i64::try_from(s.max_life_secs).unwrap_or(i64::MAX));
     let mut vm = Vm {
         name: new_name(&def.name),
+        target: def.name.clone(),
+        project: account.project.clone(),
+        api_token: account.api_token.clone(),
+        admin_set: account.admin_set,
+        tag: s.tag.clone(),
         ssh_dest: None,
         created_at: now.to_rfc3339(),
         expires_at: (now + life).to_rfc3339(),
     };
     // The record first: a restart finds the VM even if `new` never answers.
-    set_vm(state, &def.name, Some(vm.clone())).await?;
+    put(state, &vm).await?;
+    state.executor.exedev.wake.notify_one();
     let dest = match api.new_vm(&vm.name, &s).await {
         Ok(d) => d,
         Err(e) => {
-            // `new` can make the VM and still fail (a 504): remove it.
-            if api.rm(std::slice::from_ref(&vm.name)).await.is_ok() {
-                set_vm(state, &def.name, None).await?;
+            // `new` can make the VM and still fail (a 504): remove it. When
+            // the `rm` fails too, the record stays for the sweep.
+            match api.rm(std::slice::from_ref(&vm.name)).await {
+                Ok(()) => forget(state, &vm.name).await?,
+                Err(r) => warn!(vm = %vm.name, "cannot remove the VM after a failed new: {r}"),
             }
             return Err(e);
         }
     };
     vm.ssh_dest = Some(dest);
-    set_vm(state, &def.name, Some(vm.clone())).await?;
-    drop(_one);
+    put(state, &vm).await?;
+    drop(one);
     info!(target = %def.name, vm = %vm.name, "made an exe.dev VM");
     if let Err(e) = wait_ssh(state, def, &vm).await {
-        let _ = destroy(state, def).await;
+        if let Err(r) = destroy_locked(state, def).await {
+            warn!(vm = %vm.name, "cannot remove the VM that ssh did not reach: {r}");
+        }
         return Err(e);
     }
     Ok("running".into())
@@ -516,7 +705,7 @@ pub async fn up(state: &Shared, def: &TargetDef) -> ApiResult<String> {
 /// Wait until `true` runs on the VM over ssh.
 async fn wait_ssh(state: &Shared, def: &TargetDef, vm: &Vm) -> ApiResult<()> {
     let d = ssh_def(def, vm)?;
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let mut last = String::new();
     while start.elapsed() < SSH_WAIT {
         let cmd = crate::executor::RemoteCmd {
@@ -546,13 +735,22 @@ async fn wait_ssh(state: &Shared, def: &TargetDef, vm: &Vm) -> ApiResult<()> {
     )))
 }
 
-/// `down` and `destroy`: remove the VM. The answer is `absent`.
+/// `down` and `destroy`: remove the VM, on the account it was made on.
+/// The answer is `absent`. When `rm` fails, the record stays (also when
+/// the target is deleted after), so the sweep removes the VM later.
 pub async fn destroy(state: &Shared, def: &TargetDef) -> ApiResult<String> {
-    if let Some(vm) = row_of(state, &def.name).await?.runtime.exedev {
-        api_of(state, def)?
+    let lock = state.executor.exedev.target(&def.name);
+    let _target = lock.lock().await;
+    destroy_locked(state, def).await
+}
+
+async fn destroy_locked(state: &Shared, def: &TargetDef) -> ApiResult<String> {
+    let n = def.name.clone();
+    if let Some(vm) = state.db.read(move |c| record_of(c, &n)).await? {
+        api_for(state, &vm.account())?
             .rm(std::slice::from_ref(&vm.name))
             .await?;
-        set_vm(state, &def.name, None).await?;
+        forget(state, &vm.name).await?;
         info!(target = %def.name, vm = %vm.name, "removed the exe.dev VM");
     }
     Ok("absent".into())
@@ -561,14 +759,17 @@ pub async fn destroy(state: &Shared, def: &TargetDef) -> ApiResult<String> {
 /// `status`: `running` when the recorded VM is in `ls`, else `absent` (and
 /// the record goes).
 pub async fn status(state: &Shared, def: &TargetDef) -> ApiResult<String> {
-    let Some(vm) = row_of(state, &def.name).await?.runtime.exedev else {
+    let lock = state.executor.exedev.target(&def.name);
+    let _target = lock.lock().await;
+    let n = def.name.clone();
+    let Some(vm) = state.db.read(move |c| record_of(c, &n)).await? else {
         return Ok("absent".into());
     };
-    let listed = api_of(state, def)?.ls().await?;
+    let listed = api_for(state, &vm.account())?.ls().await?;
     if listed.iter().any(|l| l.name == vm.name) {
         Ok("running".into())
     } else {
-        set_vm(state, &def.name, None).await?;
+        forget(state, &vm.name).await?;
         Ok("absent".into())
     }
 }
@@ -581,10 +782,27 @@ pub async fn status(state: &Shared, def: &TargetDef) -> ApiResult<String> {
 pub enum Reason {
     /// Past `expires_at`.
     Expired,
-    /// No running agent holds its target.
+    /// Its target is gone.
+    Orphaned,
+    /// No ssh host after the grace time: `new` never answered.
+    Unready,
+    /// No running agent holds its target, after the grace time.
     Unheld,
-    /// In `ls` with the prefix and the tag, but no target records it.
+    /// In `ls` with the prefix and a known tag, but no row records it,
+    /// after the grace time.
     Leftover,
+}
+
+impl Reason {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Expired => "expired",
+            Self::Orphaned => "orphaned",
+            Self::Unready => "unready",
+            Self::Unheld => "unheld",
+            Self::Leftover => "leftover",
+        }
+    }
 }
 
 /// One VM for the sweep to remove.
@@ -595,44 +813,44 @@ pub struct Removal {
     pub reason: Reason,
 }
 
-/// A recorded VM as the sweep sees it.
-#[derive(Debug, Clone)]
-pub struct Record {
-    pub target: String,
-    pub vm: Vm,
-    /// A running agent holds the target.
-    pub held: bool,
+/// What the sweep knows when it plans one account.
+pub struct Facts<'a> {
+    pub now: DateTime<Utc>,
+    /// The account of this `ls`.
+    pub account: &'a Account,
+    /// Every recorded VM, of every account.
+    pub records: &'a [Vm],
+    /// The names of the `exedev` targets that exist.
+    pub targets: &'a BTreeSet<String>,
+    /// The targets that a running agent holds.
+    pub held: &'a BTreeSet<String>,
+    /// The `ls` of the account.
+    pub listed: &'a [Listed],
+    /// The tags of the account's records and targets.
+    pub tags: &'a BTreeSet<String>,
 }
 
-/// What the sweep removes: the recorded VMs past their life or with no
-/// running holder (after [`UNHELD_GRACE_SECS`]), and the listed VMs with
-/// [`NAME_PREFIX`] and one of `tags` that no target records.
-pub fn plan(
-    now: DateTime<Utc>,
-    records: &[Record],
-    listed: &[Listed],
-    tags: &BTreeSet<String>,
-) -> Vec<Removal> {
+/// What the sweep removes on one account.
+pub fn plan(f: &Facts<'_>) -> Vec<Removal> {
     let mut out = Vec::new();
-    for r in records {
-        let reason = if r.vm.expired(now) {
-            Reason::Expired
-        } else if !r.held && r.vm.age_secs(now) >= UNHELD_GRACE_SECS {
-            Reason::Unheld
-        } else {
-            continue;
-        };
-        out.push(Removal {
-            vm: r.vm.name.clone(),
-            target: Some(r.target.clone()),
-            reason,
-        });
+    for v in f.records.iter().filter(|v| v.account() == *f.account) {
+        if let Some(reason) = record_reason(f, v) {
+            out.push(Removal {
+                vm: v.name.clone(),
+                target: Some(v.target.clone()),
+                reason,
+            });
+        }
     }
-    let known: BTreeSet<&str> = records.iter().map(|r| r.vm.name.as_str()).collect();
-    for l in listed {
+    let known: BTreeSet<&str> = f.records.iter().map(|v| v.name.as_str()).collect();
+    for l in f.listed {
+        let old = l
+            .created_at
+            .is_some_and(|t| (f.now - t).num_seconds() >= GRACE_SECS);
         if l.name.starts_with(NAME_PREFIX)
-            && l.tags.iter().any(|t| tags.contains(t))
+            && l.tags.iter().any(|t| f.tags.contains(t))
             && !known.contains(l.name.as_str())
+            && old
         {
             out.push(Removal {
                 vm: l.name.clone(),
@@ -642,6 +860,21 @@ pub fn plan(
         }
     }
     out
+}
+
+fn record_reason(f: &Facts<'_>, v: &Vm) -> Option<Reason> {
+    let old = v.age_secs(f.now) >= GRACE_SECS;
+    if v.expired(f.now) {
+        Some(Reason::Expired)
+    } else if !f.targets.contains(&v.target) {
+        Some(Reason::Orphaned)
+    } else if old && v.ssh_dest.is_none() {
+        Some(Reason::Unready)
+    } else if old && !f.held.contains(&v.target) {
+        Some(Reason::Unheld)
+    } else {
+        None
+    }
 }
 
 /// Run the sweep one time. The answer lists what it removed and the
@@ -654,64 +887,97 @@ pub async fn sweep(state: &Shared) -> ApiResult<Value> {
         .into_iter()
         .filter(|r| r.def.kind == TargetKind::Exedev)
         .collect();
-    // One `ls` for each token secret (by owner and name).
-    let mut accounts: BTreeMap<(Option<String>, String), TargetDef> = BTreeMap::new();
+    let names: BTreeSet<String> = rows.iter().map(|r| r.def.name.clone()).collect();
+    // The accounts and their tags: of the records (also of gone targets)
+    // and of the targets.
+    let mut accounts: BTreeMap<Account, BTreeSet<String>> = BTreeMap::new();
+    for v in state.db.read(records).await? {
+        accounts.entry(v.account()).or_default().insert(v.tag);
+    }
     for r in &rows {
-        accounts
-            .entry((r.def.project.clone(), settings(&r.def).api_token))
-            .or_insert_with(|| r.def.clone());
+        let d = r.def.clone();
+        let a = state.db.read(move |c| Account::of_target(c, &d)).await?;
+        accounts.entry(a).or_default().insert(settings(&r.def).tag);
     }
     let mut removed = Vec::new();
     let mut errors = Vec::new();
-    for def in accounts.values() {
-        let api = match api_of(state, def) {
+    for (account, tags) in &accounts {
+        let who = format!(
+            "token `{}` ({})",
+            account.api_token,
+            account.project.as_deref().unwrap_or("global")
+        );
+        let api = match api_for(state, account) {
             Ok(a) => a,
             Err(e) => {
-                errors.push(format!("target `{}`: {}", def.name, e.message));
+                errors.push(format!("{who}: {}", e.message));
                 continue;
             }
         };
-        let listed = match api.ls().await {
+        let mut listed = match api.ls().await {
             Ok(l) => l,
             Err(e) => {
-                errors.push(format!("target `{}`: {}", def.name, e.message));
+                errors.push(format!("{who}: {}", e.message));
                 continue;
             }
         };
-        // The records after `ls`: a VM that `up` makes now is recorded
-        // before its `new`, so it is no leftover.
-        let token = settings(def).api_token;
-        let same = |d: &TargetDef| d.project == def.project && settings(d).api_token == token;
-        let mut records = Vec::new();
-        let mut tags = BTreeSet::new();
-        for r in state.db.read(targets::list).await? {
-            if r.def.kind != TargetKind::Exedev || !same(&r.def) {
-                continue;
-            }
-            tags.insert(settings(&r.def).tag);
-            if let Some(vm) = r.runtime.exedev {
-                let held = !crate::executor::running_holders(state, &r.def.name, None)
-                    .await?
-                    .is_empty();
-                records.push(Record {
-                    target: r.def.name.clone(),
-                    vm,
-                    held,
-                });
+        let now = Utc::now();
+        {
+            let mut seen = state
+                .executor
+                .exedev
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for l in &mut listed {
+                if l.created_at.is_none() {
+                    l.created_at = Some(*seen.entry(l.name.clone()).or_insert(now));
+                }
             }
         }
-        for rm in plan(Utc::now(), &records, &listed, &tags) {
-            match api.rm(std::slice::from_ref(&rm.vm)).await {
-                Ok(()) => {
-                    if let Some(t) = &rm.target {
-                        after_removal(state, t, &rm).await;
-                    }
+        // The records after `ls`: a VM that `up` makes now is recorded
+        // before its `new`, so it is no leftover.
+        let all = state.db.read(records).await?;
+        let mut held = BTreeSet::new();
+        for v in all.iter().filter(|v| v.account() == *account) {
+            if names.contains(&v.target)
+                && !crate::executor::running_holders(state, &v.target, None)
+                    .await?
+                    .is_empty()
+            {
+                held.insert(v.target.clone());
+            }
+        }
+        let facts = Facts {
+            now,
+            account,
+            records: &all,
+            targets: &names,
+            held: &held,
+            listed: &listed,
+            tags,
+        };
+        for rm in plan(&facts) {
+            match remove(state, &api, &facts, &rm).await {
+                Ok(true) => {
                     info!(vm = %rm.vm, reason = ?rm.reason, "the exe.dev sweep removed a VM");
                     removed.push(rm);
                 }
+                Ok(false) => {}
                 Err(e) => errors.push(format!("rm `{}`: {}", rm.vm, e.message)),
             }
         }
+    }
+    // Forget the first sightings of VMs that are gone.
+    {
+        let all: BTreeSet<String> = removed.iter().map(|r: &Removal| r.vm.clone()).collect();
+        let mut seen = state
+            .executor
+            .exedev
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        seen.retain(|n, _| !all.contains(n));
     }
     for e in &errors {
         warn!("exe.dev sweep: {e}");
@@ -719,48 +985,68 @@ pub async fn sweep(state: &Shared) -> ApiResult<Value> {
     Ok(json!({"removed": removed, "errors": errors}))
 }
 
-/// After the sweep removed a target's VM: clear the record, set the state,
-/// write the audit row, and mail the project (or the operator) for a VM
-/// past its life.
-async fn after_removal(state: &Shared, target: &str, rm: &Removal) {
-    let (t, r) = (target.to_owned(), rm.clone());
+/// Remove one planned VM. A recorded VM is removed under its target's
+/// lock, after a fresh read shows the reason still holds. `false`: no
+/// longer to remove.
+async fn remove(state: &Shared, api: &Api, f: &Facts<'_>, rm: &Removal) -> ApiResult<bool> {
+    let Some(target) = &rm.target else {
+        // A leftover: still unrecorded right before the `rm`.
+        let n = rm.vm.clone();
+        if state.db.read(move |c| record_named(c, &n)).await?.is_some() {
+            return Ok(false);
+        }
+        api.rm(std::slice::from_ref(&rm.vm)).await?;
+        return Ok(true);
+    };
+    let lock = state.executor.exedev.target(target);
+    let _target = lock.lock().await;
+    let n = rm.vm.clone();
+    let Some(vm) = state.db.read(move |c| record_named(c, &n)).await? else {
+        return Ok(false);
+    };
+    if record_reason(f, &vm) != Some(rm.reason) {
+        return Ok(false);
+    }
+    api.rm(std::slice::from_ref(&vm.name)).await?;
+    after_removal(state, &vm, rm.reason, f.targets.contains(&vm.target)).await;
+    Ok(true)
+}
+
+/// After the sweep removed a recorded VM: forget the record, set the
+/// target `absent` when it still exists, write the audit row, and mail the
+/// project (or the operator) for a VM past its life.
+async fn after_removal(state: &Shared, vm: &Vm, reason: Reason, target_exists: bool) {
+    let v = vm.clone();
     let res = state
         .db
-        .write("system", move |tx| {
-            let row = targets::get(tx, &t)?;
-            if row.runtime.exedev.as_ref().map(|v| v.name.as_str()) != Some(r.vm.as_str()) {
-                return Ok(());
+        .write("system", move |t| {
+            t.execute("DELETE FROM exedev_vms WHERE name = ?1", [&v.name])?;
+            if target_exists && targets::find(t, &v.target)?.is_some() {
+                targets::set_state(t, &v.target, "absent", None)?;
             }
-            let mut rt = row.runtime.clone();
-            rt.exedev = None;
-            targets::set_runtime(tx, &t, &rt)?;
-            targets::set_state(tx, &t, "absent", None)?;
-            let project = row.def.project.clone();
-            tx.audit(
+            t.audit(
                 "target.destroy",
-                &t,
-                project.as_deref(),
-                json!({"reason": format!("exedev_{}", serde_json::to_value(r.reason)
-                    .ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()),
-                       "vm": r.vm}),
+                &v.target,
+                v.project.as_deref(),
+                json!({"reason": format!("exedev_{}", reason.word()), "vm": v.name}),
             )?;
-            if r.reason == Reason::Expired {
-                let to = match &project {
+            if reason == Reason::Expired {
+                let to = match &v.project {
                     Some(p) => crate::store::mail::Address::Project(p.clone()),
                     None => crate::store::mail::Address::Operator,
                 };
                 crate::store::mail::send(
-                    tx,
+                    t,
                     crate::store::mail::Outgoing {
                         from: &crate::store::mail::Address::System,
                         to: &to,
-                        subject: &format!("exe.dev VM {} removed: past its life", r.vm),
+                        subject: &format!("exe.dev VM {} removed: past its life", v.name),
                         body: &format!(
-                            "The exe.dev VM `{}` of target `{t}` was past its life \
+                            "The exe.dev VM `{}` of target `{}` was past its life \
                              (`[exedev] max_life_secs`, at most 8 hours), so the sweep \
                              removed it. A holder that still runs gets a new VM at its \
                              next start or lease grant.",
-                            r.vm
+                            v.name, v.target
                         ),
                         thread: None,
                         in_reply_to: None,
@@ -771,22 +1057,63 @@ async fn after_removal(state: &Shared, target: &str, rm: &Removal) {
         })
         .await;
     if let Err(e) = res {
-        warn!(target, "exe.dev sweep: cannot record the removal: {e}");
+        warn!(vm = %vm.name, "exe.dev sweep: cannot record the removal: {e}");
     }
 }
 
-/// The hourly sweep. The first run is one minute after the start, so a
-/// restart finds the VMs that the last daemon left.
+/// The time until the sweep must run: the hourly tick, or the earliest
+/// `expires_at` (one second after it), whichever comes first. A VM that is
+/// past its life already waits at least `retry` (its `rm` may fail).
+pub fn next_wait(
+    now: DateTime<Utc>,
+    until_tick: Duration,
+    expires: &[DateTime<Utc>],
+    retry: Duration,
+) -> Duration {
+    let mut wait = until_tick;
+    if let Some(first) = expires.iter().min() {
+        let to = (*first - now).to_std().unwrap_or(Duration::ZERO) + Duration::from_secs(1);
+        wait = wait.min(to.max(retry));
+    }
+    wait
+}
+
+/// The sweep timer: the first run [`FIRST_SWEEP`] after the start, then at
+/// the next `expires_at` of a recorded VM, and at least every
+/// [`SWEEP_EVERY`]. `up` wakes it when it records a VM.
 pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let state = state.clone();
     tokio::spawn(async move {
-        let mut wait = FIRST_SWEEP;
+        let mut tick = Instant::now() + FIRST_SWEEP;
+        let mut retry = Duration::ZERO;
         loop {
-            tokio::time::sleep(wait).await;
-            wait = SWEEP_EVERY;
+            let expires: Vec<DateTime<Utc>> = match state.db.read(records).await {
+                Ok(vms) => vms
+                    .iter()
+                    .filter_map(|v| parse_time(&v.expires_at))
+                    .collect(),
+                Err(e) => {
+                    warn!("exe.dev sweep: cannot read the VMs: {e}");
+                    Vec::new()
+                }
+            };
+            let wait = next_wait(
+                Utc::now(),
+                tick.saturating_duration_since(Instant::now()),
+                &expires,
+                retry,
+            );
+            tokio::select! {
+                () = tokio::time::sleep(wait) => {}
+                () = state.executor.exedev.wake.notified() => continue,
+            }
+            if Instant::now() >= tick {
+                tick = Instant::now() + SWEEP_EVERY;
+            }
             if let Err(e) = sweep(&state).await {
                 warn!("exe.dev sweep failed: {e}");
             }
+            retry = Duration::from_secs(60);
         }
     })
 }
@@ -853,15 +1180,34 @@ mod tests {
         assert!(new_name(&"x".repeat(60)).len() <= NAME_PREFIX.len() + 20 + 9);
     }
 
+    fn account() -> Account {
+        Account {
+            project: None,
+            api_token: "exedev-api-token".into(),
+            admin_set: true,
+        }
+    }
+
+    fn vm(name: &str, target: &str, age: i64, life: i64) -> Vm {
+        let now = Utc::now();
+        Vm {
+            name: name.into(),
+            target: target.into(),
+            project: None,
+            api_token: "exedev-api-token".into(),
+            admin_set: true,
+            tag: "terrarium-dev-ssh".into(),
+            ssh_dest: Some(format!("{name}.exe.xyz")),
+            created_at: (now - chrono::Duration::seconds(age)).to_rfc3339(),
+            expires_at: (now - chrono::Duration::seconds(age) + chrono::Duration::seconds(life))
+                .to_rfc3339(),
+        }
+    }
+
     #[test]
     fn ssh_def_points_ssh_at_the_vm() {
-        let vm = Vm {
-            name: "terrarium-x-ex-1".into(),
-            ssh_dest: Some("terrarium-x-ex-1.exe.xyz".into()),
-            created_at: Utc::now().to_rfc3339(),
-            expires_at: Utc::now().to_rfc3339(),
-        };
-        let d = ssh_def(&def("sync_workspace = true"), &vm).unwrap();
+        let v = vm("terrarium-x-ex-1", "ex", 0, 60);
+        let d = ssh_def(&def("sync_workspace = true"), &v).unwrap();
         assert_eq!(d.kind, TargetKind::Ssh);
         assert_eq!(
             d.address.as_deref(),
@@ -871,7 +1217,7 @@ mod tests {
         assert_eq!(d.credential.as_deref(), Some("k"));
         let none = Vm {
             ssh_dest: None,
-            ..vm
+            ..v
         };
         assert!(ssh_def(&def(""), &none).is_err());
     }
@@ -884,51 +1230,97 @@ mod tests {
         assert!(why.contains("3 of 3"), "{why}");
     }
 
-    fn vm(name: &str, age: i64, life: i64) -> Vm {
-        let now = Utc::now();
-        Vm {
+    fn listed(name: &str, tag: &str, age: i64) -> Listed {
+        Listed {
             name: name.into(),
-            ssh_dest: Some(format!("{name}.exe.xyz")),
-            created_at: (now - chrono::Duration::seconds(age)).to_rfc3339(),
-            expires_at: (now - chrono::Duration::seconds(age) + chrono::Duration::seconds(life))
-                .to_rfc3339(),
+            tags: vec![tag.into()],
+            ssh_dest: None,
+            created_at: Some(Utc::now() - chrono::Duration::seconds(age)),
         }
     }
 
-    #[test]
-    fn the_sweep_plan_removes_expired_unheld_and_leftover_vms_only() {
-        let rec = |t: &str, v: Vm, held: bool| Record {
-            target: t.into(),
-            vm: v,
-            held,
-        };
-        let records = vec![
-            rec("a", vm("terrarium-x-a-1", 9 * 3600, 8 * 3600), true),
-            rec("b", vm("terrarium-x-b-1", 3600, 8 * 3600), false),
-            rec("c", vm("terrarium-x-c-1", 60, 8 * 3600), false),
-            rec("d", vm("terrarium-x-d-1", 3600, 8 * 3600), true),
-        ];
-        let l = |n: &str, tag: &str| Listed {
-            name: n.into(),
-            tags: vec![tag.into()],
-        };
-        let listed = vec![
-            l("terrarium-x-a-1", "terrarium-dev-ssh"),
-            l("terrarium-x-lost-1", "terrarium-dev-ssh"),
-            l("terrarium-x-other-1", "someone-else"),
-            l("terrarium-ssh2", "terrarium-dev-ssh"),
-            l("personal-vm", "terrarium-dev-ssh"),
-        ];
+    fn run_plan(
+        records: &[Vm],
+        targets: &[&str],
+        held: &[&str],
+        listed: &[Listed],
+    ) -> Vec<(String, Reason)> {
+        let targets: BTreeSet<String> = targets.iter().map(|s| (*s).to_owned()).collect();
+        let held: BTreeSet<String> = held.iter().map(|s| (*s).to_owned()).collect();
         let tags: BTreeSet<String> = ["terrarium-dev-ssh".to_owned()].into();
-        let got = plan(Utc::now(), &records, &listed, &tags);
-        let got: Vec<(&str, Reason)> = got.iter().map(|r| (r.vm.as_str(), r.reason)).collect();
+        let a = account();
+        plan(&Facts {
+            now: Utc::now(),
+            account: &a,
+            records,
+            targets: &targets,
+            held: &held,
+            listed,
+            tags: &tags,
+        })
+        .into_iter()
+        .map(|r| (r.vm, r.reason))
+        .collect()
+    }
+
+    #[test]
+    fn the_sweep_plan_removes_only_what_it_must() {
+        let records = vec![
+            vm("terrarium-x-a-1", "a", 9 * 3600, 8 * 3600),
+            vm("terrarium-x-b-1", "b", 3600, 8 * 3600),
+            vm("terrarium-x-c-1", "c", 60, 8 * 3600),
+            vm("terrarium-x-d-1", "d", 3600, 8 * 3600),
+            vm("terrarium-x-gone-1", "gone", 60, 8 * 3600),
+            Vm {
+                ssh_dest: None,
+                ..vm("terrarium-x-e-1", "e", 3600, 8 * 3600)
+            },
+            Vm {
+                ssh_dest: None,
+                ..vm("terrarium-x-f-1", "f", 60, 8 * 3600)
+            },
+        ];
+        let ls = vec![
+            listed("terrarium-x-a-1", "terrarium-dev-ssh", 3600),
+            listed("terrarium-x-lost-1", "terrarium-dev-ssh", 3600),
+            listed("terrarium-x-new-1", "terrarium-dev-ssh", 60),
+            listed("terrarium-x-other-1", "someone-else", 3600),
+            listed("terrarium-ssh2", "terrarium-dev-ssh", 3600),
+            listed("personal-vm", "terrarium-dev-ssh", 3600),
+        ];
+        let got = run_plan(
+            &records,
+            &["a", "b", "c", "d", "e", "f"],
+            &["a", "d", "e", "f"],
+            &ls,
+        );
         assert_eq!(
             got,
             vec![
-                ("terrarium-x-a-1", Reason::Expired),
-                ("terrarium-x-b-1", Reason::Unheld),
-                ("terrarium-x-lost-1", Reason::Leftover),
+                ("terrarium-x-a-1".into(), Reason::Expired),
+                ("terrarium-x-b-1".into(), Reason::Unheld),
+                ("terrarium-x-gone-1".into(), Reason::Orphaned),
+                ("terrarium-x-e-1".into(), Reason::Unready),
+                ("terrarium-x-lost-1".into(), Reason::Leftover),
             ]
+        );
+    }
+
+    /// Finding 2: a VM recorded by a target of another project or token
+    /// (of the same exe.dev account) is no leftover of this account.
+    #[test]
+    fn a_vm_of_another_account_record_is_no_leftover() {
+        let other = Vm {
+            project: Some("p".into()),
+            admin_set: false,
+            ..vm("terrarium-x-p-1", "p-ex", 3600, 8 * 3600)
+        };
+        let ls = vec![listed("terrarium-x-p-1", "terrarium-dev-ssh", 3600)];
+        assert!(run_plan(&[other], &["p-ex"], &["p-ex"], &ls).is_empty());
+        // Unrecorded, it is a leftover.
+        assert_eq!(
+            run_plan(&[], &[], &[], &ls),
+            vec![("terrarium-x-p-1".into(), Reason::Leftover)]
         );
     }
 
@@ -938,25 +1330,25 @@ mod tests {
     /// before keeps it.
     #[test]
     fn a_vm_is_expired_from_its_expires_at_on() {
-        let made = Utc::now();
-        let v = Vm {
-            name: "terrarium-x-live-1".into(),
-            ssh_dest: None,
-            created_at: made.to_rfc3339(),
-            expires_at: (made + chrono::Duration::seconds(60)).to_rfc3339(),
-        };
-        let rec = [Record {
-            target: "live".into(),
-            vm: v.clone(),
-            held: true,
-        }];
+        let v = vm("terrarium-x-live-1", "live", 0, 60);
+        let made = parse_time(&v.created_at).unwrap();
+        let a = account();
+        let (t, h, tags) = (
+            BTreeSet::from(["live".to_owned()]),
+            BTreeSet::from(["live".to_owned()]),
+            BTreeSet::new(),
+        );
+        let recs = [v.clone()];
         let at = |s: i64| {
-            plan(
-                made + chrono::Duration::seconds(s),
-                &rec,
-                &[],
-                &BTreeSet::new(),
-            )
+            plan(&Facts {
+                now: made + chrono::Duration::seconds(s),
+                account: &a,
+                records: &recs,
+                targets: &t,
+                held: &h,
+                listed: &[],
+                tags: &tags,
+            })
         };
         assert!(at(59).is_empty());
         assert_eq!(at(61)[0].reason, Reason::Expired);
@@ -969,27 +1361,63 @@ mod tests {
         assert!(bad.expired(made));
     }
 
+    /// Finding 5: the timer runs at the next `expires_at`, not only hourly.
     #[test]
-    fn parse_ls_reads_names_and_tags() {
+    fn the_sweep_timer_runs_at_the_next_expiry() {
+        let now = Utc::now();
+        let hour = Duration::from_secs(3600);
+        let r = Duration::from_secs(60);
+        assert_eq!(next_wait(now, hour, &[], r), hour);
+        let soon = [now + chrono::Duration::seconds(120)];
+        assert_eq!(
+            next_wait(now, hour, &soon, Duration::ZERO),
+            Duration::from_secs(121)
+        );
+        let later = [now + chrono::Duration::seconds(7200)];
+        assert_eq!(next_wait(now, hour, &later, Duration::ZERO), hour);
+        // A VM past its life whose `rm` failed: retried, not in a hot loop.
+        let past = [now - chrono::Duration::seconds(5)];
+        assert_eq!(next_wait(now, hour, &past, r), r);
+        assert_eq!(
+            next_wait(now, hour, &past, Duration::ZERO),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn parse_ls_reads_names_tags_hosts_and_times() {
         let v = json!({"vms": [
-            {"vm_name": "a", "tags": ["terrarium-dev-ssh"], "status": "running"},
+            {"vm_name": "a", "tags": ["terrarium-dev-ssh"], "status": "running",
+             "ssh_dest": "a.exe.xyz", "created_at": "2026-11-08T12:17:53Z"},
             {"name": "b", "tags": ["#x"]},
             {"no_name": true},
         ]});
+        let got = parse_ls(&v);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "a");
+        assert_eq!(got[0].tags, vec!["terrarium-dev-ssh".to_owned()]);
+        assert_eq!(got[0].ssh_dest.as_deref(), Some("a.exe.xyz"));
+        assert_eq!(got[0].created_at, parse_time("2026-11-08T12:17:53Z"));
         assert_eq!(
-            parse_ls(&v),
-            vec![
-                Listed {
-                    name: "a".into(),
-                    tags: vec!["terrarium-dev-ssh".into()]
-                },
-                Listed {
-                    name: "b".into(),
-                    tags: vec!["x".into()]
-                },
-            ]
+            (got[1].name.as_str(), got[1].tags.clone()),
+            ("b", vec!["x".to_owned()])
         );
+        assert!(got[1].created_at.is_none());
         assert!(parse_ls(&json!({"vms": []})).is_empty());
+    }
+
+    /// Finding 7: the whole answer is checked for the token before the
+    /// cut, also when the token starts at character 299.
+    #[test]
+    fn an_answer_with_the_token_is_never_shown() {
+        let token = "exe1.s3cret-token";
+        let at_299 = format!("{}{token} tail", "x".repeat(299));
+        let s = shown(&at_299, token);
+        assert!(!s.contains('x') && !s.contains("exe1"), "{s}");
+        assert!(s.contains("not shown"), "{s}");
+        let long = "y".repeat(400);
+        assert_eq!(shown(&long, token).len(), SHOWN_CHARS);
+        assert_eq!(shown("short", token), "short");
     }
 
     /// A fake exe.dev API: it checks the bearer token and answers each
@@ -1079,6 +1507,11 @@ mod tests {
                 r#"{"deleted":[],"errors":{"x":"busy"},"failed":["terrarium-x-a"],"not_found":[]}"#,
             ),
             (200, r#"{"vm_name":"terrarium-x-a"}"#),
+            (200, r#"{"vm_name":"terrarium-x-a","note":"exe1.s3cret-token"}"#),
+            (
+                200,
+                r#"{"deleted":[],"errors":{"terrarium-x-a":"exe1.s3cret-token"},"failed":[],"not_found":[]}"#,
+            ),
         ])
         .await;
         let api = Api::new(&url, Zeroizing::new("exe1.s3cret-token".into())).unwrap();
@@ -1096,8 +1529,27 @@ mod tests {
         assert!(e.message.contains("not removed"), "{}", e.message);
         let e = api.new_vm("terrarium-x-a", &s).await.unwrap_err();
         assert!(e.message.contains("no `ssh_dest`"), "{}", e.message);
-        // A name that would need quoting never reaches the API.
+        // A 2xx `new` answer and the `rm` errors are checked too.
+        let e = api.new_vm("terrarium-x-a", &s).await.unwrap_err();
+        assert!(
+            !e.message.contains("s3cret") && e.message.contains("not shown"),
+            "{}",
+            e.message
+        );
+        let e = api.rm(&["terrarium-x-a".into()]).await.unwrap_err();
+        assert!(
+            !e.message.contains("s3cret") && e.message.contains("not shown"),
+            "{}",
+            e.message
+        );
+        // A name or a tag that would need quoting never reaches the API.
         assert!(api.new_vm("a; rm -rf", &s).await.is_err());
+        let bad_tag = ExedevSettings {
+            tag: "x --all".into(),
+            ..ExedevSettings::default()
+        };
+        let e = api.new_vm("terrarium-x-a", &bad_tag).await.unwrap_err();
+        assert!(e.message.contains("bad exe.dev tag"), "{}", e.message);
         assert!(api.rm(&["--all".into()]).await.is_err());
     }
 }
