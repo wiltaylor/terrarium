@@ -5506,7 +5506,7 @@ async fn a_late_read_of_an_earlier_round_records_nothing() {
                 None,
             )?;
             let far = "2000-01-01T00:00:00.000Z";
-            Ok(accepted_heads::pending(t, "9999", far)?)
+            accepted_heads::pending(t, "9999", far)
         })
         .await
         .unwrap();
