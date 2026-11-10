@@ -569,9 +569,13 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         }
         case "turn": {
           const ag = c.agent(a.agent);
-          // A stopped agent gets the turn as a send gives it: queued, and a wake starts it (TER-210, docs/api.md §19 turn).
-          if (ag.status === "stopped" && !a.start_if_stopped) return { status: "ok", summary: `woke ${a.agent} and sent the turn`, output: { agent: a.agent, started: true, delivery: "queued" }, error: null };
-          return { status: "ok", summary: `turn to ${a.agent}`, output: { agent: a.agent, started: ag.status === "stopped", delivery: "accepted" }, error: null };
+          // The daemon's `turn` (crates/terrariumd/src/api/schedules.rs): a live agent gets the turn at once, a stopped one is
+          // started first with start_if_stopped, else the send queues the turn and a wake starts it (TER-210, docs/api.md §19 turn).
+          const before = ag.status;
+          const live = ["starting", "idle", "waiting", "working", "blocked"].includes(before);
+          if (!live && !a.start_if_stopped) return { status: "ok", summary: `woke ${a.agent} and sent the turn`, output: { agent: a.agent, started: true, delivery: "queued", status_before: before }, error: null };
+          const started = !live;
+          return { status: "ok", summary: started ? `started ${a.agent} and sent the turn` : `turn sent to ${a.agent}`, output: { agent: a.agent, started, delivery: "accepted", status_before: before }, error: null };
         }
         case "exec": {
           const t = c.target(a.target);

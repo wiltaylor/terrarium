@@ -185,13 +185,15 @@ class ExtractDryRun(unittest.TestCase):
     VERSION = "0.36.0-alpha"
     BINS = ("terrarium-host", "terrarium-host-helper")
 
-    def extract(self, corrupt=None):
+    def extract(self, corrupt=None, missing=None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         dist = root / "image/opt/terrarium/dist"
         dist.mkdir(parents=True)
         for name in self.BINS:
+            if name == missing:
+                continue
             asset = f"{name}-x86_64-linux"
             (dist / asset).write_text(f"#!/bin/sh\necho '{name} {self.VERSION}+abc123'\n")
             digest = hashlib.sha256((dist / asset).read_bytes()).hexdigest()
@@ -240,6 +242,14 @@ class ExtractDryRun(unittest.TestCase):
         proc, _ = self.extract(corrupt="terrarium-host-helper")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("the image's terrarium-host-helper is", proc.stdout + proc.stderr)
+
+    def test_an_image_without_the_helper_fails(self):
+        # The loop names both binaries, so the copy of the missing helper
+        # fails under set -e before the SHA256SUMS line count check.
+        proc, work = self.extract(missing="terrarium-host-helper")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse((work / f"terrarium-host-helper-{self.VERSION}-linux-x86_64").exists())
+        self.assertEqual(len((work / "SHA256SUMS").read_text().splitlines()), 1)
 
 
 class VersionCalc(unittest.TestCase):

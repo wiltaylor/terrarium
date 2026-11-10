@@ -31,7 +31,11 @@ pub fn root_name(text: &str) -> Result<String, ParseError> {
                 .find("-->")
                 .ok_or_else(|| invalid("bad XML: an unclosed comment"))?;
             rest = r[end + 3..].trim_start();
-        } else if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case("<!DOCTYPE") {
+        } else if rest
+            .as_bytes()
+            .get(..9)
+            .is_some_and(|b| b.eq_ignore_ascii_case(b"<!DOCTYPE"))
+        {
             return Err(invalid(DOCTYPE));
         } else if let Some(r) = rest.strip_prefix('<') {
             let name: String = r

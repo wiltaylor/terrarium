@@ -2015,6 +2015,7 @@ rule "validate-pass" {
             "merge-red-split-note",
             "merge-red-fix-note",
             "job-fail-conflict",
+            "job-moved",
             "job-fail-red",
             "job-fail-error",
             "job-cancelled",
