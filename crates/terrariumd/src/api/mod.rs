@@ -3240,9 +3240,8 @@ mod tests {
         // A mail of the sysadmin agent to the operator: the link's reply is
         // refused, and nothing is written.
         let id = sys.clone();
-        let mid = s
-            .db
-            .write("system", move |t| {
+        let mid =
+            s.db.write("system", move |t| {
                 let from = mail::resolve(t, &id, None)?;
                 let m = mail::send(
                     t,
@@ -3262,9 +3261,11 @@ mod tests {
         let count = || {
             let s = s.clone();
             async move {
-                s.db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?))
-                    .await
-                    .unwrap()
+                s.db.read(|c| {
+                    Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?)
+                })
+                .await
+                .unwrap()
             }
         };
         let before = count().await;
