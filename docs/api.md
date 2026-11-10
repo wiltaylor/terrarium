@@ -9335,7 +9335,9 @@ about every 10 seconds: when the lane is free and `min_cards` cards wait,
 or the first one came `max_wait_minutes` ago, it writes a `rule.timer`
 event that runs the rule. While the lane is busy it writes no timer and
 keeps the wait, so 1 to 3 cards go soon after the lane is free once they
-waited 30 minutes. A project trigger on the end of a merge job (for
+waited 30 minutes. A `release-blocker` card (TER-607) also waits for a
+busy lane, then goes first and alone with no count or wait. A project
+trigger on the end of a merge job (for
 example a schedule that mails the lead) can stay as a notice; the batch
 does not need it.
 
