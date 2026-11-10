@@ -886,7 +886,9 @@ async fn spawned_lists_page_and_rights() {
     td.get_as(&lead, &format!("/api/spawns/{op}"))
         .await
         .err(403, "forbidden");
-    td.get_as(&other, &format!("/api/spawns/{first}")).await.ok();
+    td.get_as(&other, &format!("/api/spawns/{first}"))
+        .await
+        .ok();
     let ops = td.get("/api/agents/operator/spawned?project=p").await;
     assert_eq!(ops.ok().as_array().unwrap().len(), 1);
     assert_eq!(ops.body[0]["name"], "operator-worker-1");
