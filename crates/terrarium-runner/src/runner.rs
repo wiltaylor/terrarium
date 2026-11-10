@@ -141,11 +141,17 @@ impl ExitStatus {
 #[derive(Debug)]
 pub struct Delivery {
     id: u64,
-    rx: oneshot::Receiver<Result<(), DeliveryError>>,
+    rx: oneshot::Receiver<DeliveryOutcome>,
 }
 
+/// The outcome of a delivery. `Ok(Some(seq))`: the turn started, and `seq`
+/// is the seq of the last event in `events.jsonl` when it started. Every
+/// event of the turn, and its end, comes after `seq` (TER-547). `Ok(None)`:
+/// the turn started, with no seq (a runner from before the field).
+pub(crate) type DeliveryOutcome = Result<Option<u64>, DeliveryError>;
+
 impl Delivery {
-    pub(crate) fn from_parts(id: u64, rx: oneshot::Receiver<Result<(), DeliveryError>>) -> Self {
+    pub(crate) fn from_parts(id: u64, rx: oneshot::Receiver<DeliveryOutcome>) -> Self {
         Self { id, rx }
     }
 
@@ -155,6 +161,14 @@ impl Delivery {
 
     /// Wait for the outcome.
     pub async fn wait(self) -> Result<(), DeliveryError> {
+        self.wait_started().await.map(|_| ())
+    }
+
+    /// Wait for the outcome, with the event seq at the start of the turn
+    /// ([`DeliveryOutcome`]). A status event with a higher seq is of this
+    /// turn or later, on any channel order between the outcome and the
+    /// events.
+    pub async fn wait_started(self) -> Result<Option<u64>, DeliveryError> {
         self.rx.await.unwrap_or(Err(DeliveryError::Dropped))
     }
 }
@@ -174,7 +188,7 @@ struct PendingTurn {
     pending_id: String,
     text: String,
     attempts: u32,
-    tx: oneshot::Sender<Result<(), DeliveryError>>,
+    tx: oneshot::Sender<DeliveryOutcome>,
 }
 
 /// A turn that has not started typing. IDs belong to one runner lifetime.
@@ -891,6 +905,13 @@ impl Inner {
         let _ = self.events_tx.send(record);
     }
 
+    /// The seq of the last event in `events.jsonl`. Called under the state
+    /// lock, which every status event also holds, so a status event after
+    /// this call has a higher seq.
+    fn event_seq(&self) -> u64 {
+        lock(&self.events_log).seq()
+    }
+
     fn transition(&self, state: &mut State, to: AgentStatus, reason: &str) {
         let from = state.status;
         if from == to {
@@ -1023,7 +1044,7 @@ impl Inner {
                     state.block = None;
                     state.interrupt = None;
                     if let Some(f) = state.in_flight.take() {
-                        let _ = f.turn.tx.send(Ok(()));
+                        let _ = f.turn.tx.send(Ok(Some(self.event_seq())));
                     }
                     self.transition(&mut state, AgentStatus::Working, "prompt submitted");
                 }
@@ -1215,7 +1236,7 @@ impl Inner {
                 && let Some(f) = state.in_flight.take()
             {
                 tracing::debug!("turn {} submitted: the screen is busy", f.turn.id);
-                let _ = f.turn.tx.send(Ok(()));
+                let _ = f.turn.tx.send(Ok(Some(self.event_seq())));
                 state.turn_open = true;
                 state.block = None;
                 self.transition(
