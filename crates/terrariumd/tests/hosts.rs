@@ -26,6 +26,9 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 /// each daemon DB commit is an fsync: on a busy disk that took more than
 /// the old 6 s budget (300 polls of 20 ms) with no error (TER-497).
 const LINK_WAIT: Duration = Duration::from_secs(60);
+/// The longest wait for admission, also while the connect reconcile still
+/// makes progress ([`Lab::wait_admission_ready`]).
+const ADMISSION_CAP: Duration = Duration::from_secs(300);
 
 struct Lab {
     td: TestDaemon,
@@ -203,17 +206,30 @@ impl Lab {
     async fn wait_admission_ready(&self, name: &str) {
         // The link becomes online before reservation reconciliation opens
         // admission. Target verbs must wait for both, including on reconnect.
+        // Admission opens after the connect reconcile, one `status` of each
+        // target in turn, each a fake tool run. Under merge-job load (load
+        // average 40) six of them took over a minute while each call still
+        // ran (TER-648), so the deadline counts only time without a new
+        // tool call.
         let start = std::time::Instant::now();
-        while start.elapsed() < LINK_WAIT {
+        let mut seen = self.log().len();
+        let mut moved = std::time::Instant::now();
+        while moved.elapsed() < LINK_WAIT && start.elapsed() < ADMISSION_CAP {
             if !self.state().executor.resource_pending(name) {
                 return;
+            }
+            let now = self.log().len();
+            if now != seen {
+                seen = now;
+                moved = std::time::Instant::now();
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         // The reconcile error is only in the daemon log (TER-497).
         panic!(
-            "host {name} admission never became ready after {:?}; daemon trace:\n{}",
+            "host {name} admission never became ready after {:?} ({:?} without a tool call); daemon trace:\n{}",
             start.elapsed(),
+            moved.elapsed(),
             self.trace.text()
         );
     }

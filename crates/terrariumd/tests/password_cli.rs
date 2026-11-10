@@ -93,8 +93,17 @@ fn the_first_password_leaves_the_env() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    // The fresh daemon creates its schema and hashes the password before it
+    // binds the socket. Under merge-job load (load average 40) that took
+    // over 30 s (TER-648). Only a failing run waits out the cap, and a
+    // daemon that exits fails at once.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut exited = None;
     while !socket.exists() && std::time::Instant::now() < deadline {
+        exited = child.try_wait().unwrap();
+        if exited.is_some() {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let pid = child.id();
@@ -102,7 +111,7 @@ fn the_first_password_leaves_the_env() {
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
     let _ = child.kill();
     let _ = child.wait();
-    assert!(socket.exists(), "the daemon did not start");
+    assert!(socket.exists(), "the daemon did not start (exit: {exited:?})");
     let environ = String::from_utf8_lossy(&environ);
     assert!(environ.contains("TERRARIUM_HOST_LISTEN="), "read the env");
     assert!(!environ.contains("TERRARIUM_PASSWORD"), "{environ}");
