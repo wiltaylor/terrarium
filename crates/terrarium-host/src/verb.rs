@@ -127,6 +127,7 @@ pub fn plan_exec(req: &ExecRequest, policy: &PathPolicy) -> Result<VerbPlan, Bui
         timeout: secs(req.timeout_secs),
         capture_stdout: false,
         scope: None,
+        private_file: None,
     }))
 }
 
