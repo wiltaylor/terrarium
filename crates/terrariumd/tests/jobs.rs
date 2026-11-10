@@ -3078,7 +3078,7 @@ case "$1" in
     # the five-second TERM grace on a loaded host.
     gate="${0%/*}/kill-gate"
     if [ "$4" = terrarium-kill ] && [ -d "$gate" ]; then
-      touch "$gate/${5##*/}"
+      echo $$ > "$gate/${5##*/}"
       while [ -d "$gate" ]; do sleep 0.02; done
     fi
     # An async list gets /dev/null on stdin: keep the real one (`-i`, the
@@ -4125,12 +4125,30 @@ fn private_job_pidfile(job: &str) -> String {
     f
 }
 
+/// Is the held kill of `id` still waiting at the gate? The fake docker
+/// writes its PID into the gate file. Its process ends when the kill
+/// command hits its own timeout (`run_kill::kill_cmd`: grace + 30 s),
+/// and the kill then counts as ended.
+fn kill_still_held(gate: &Path, id: &str) -> bool {
+    let f = terrariumd::run_kill::job_pidfile(id);
+    std::fs::read_to_string(gate.join(Path::new(&f).file_name().unwrap()))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .is_some_and(alive)
+}
+
 /// Wait until the fake docker has held every kill before execution.
 async fn until_kills_held(gate: &Path, ids: &[&str]) {
     let start = Instant::now();
     for id in ids {
         let f = terrariumd::run_kill::job_pidfile(id);
-        while !gate.join(Path::new(&f).file_name().unwrap()).exists() {
+        // The file has the PID of the held kill once it is there whole.
+        let held = gate.join(Path::new(&f).file_name().unwrap());
+        while std::fs::read_to_string(&held)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_none()
+        {
             assert!(start.elapsed() < DEADLINE, "the kill of {id} never started");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -4398,10 +4416,16 @@ async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot(flow: &'static str)
         .await
         .ok()
         .clone();
-    assert_eq!(
-        q["state"], "queued",
-        "a job took the slot of a cancelled lost job while its kill ran: {q}"
-    );
+    // Read the job, then the kill: a kill still held after the read ran
+    // during it, so the slot must still be taken. Under load the held kill
+    // can reach its own timeout first, and its slot is then free by
+    // design (TER-610).
+    if kill_still_held(&kill_gate, &run_id) {
+        assert_eq!(
+            q["state"], "queued",
+            "a job took the slot of a cancelled lost job while its kill ran: {q}"
+        );
+    }
     assert!(alive(lr.id()), "the kill ended before the check");
 
     drop(gate);

@@ -1496,9 +1496,23 @@ async fn merge_group_failure_tracks_the_phase_that_actually_started() {
     for (outcome, recipe) in [("conflict", false), ("error", false), ("red", true)] {
         let td = queue_lab().await;
         put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
-        let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
+        // In `review`, as in the delivery flow: the engine's 10 s
+        // `groups::expire` tick drops group members that sit in `backlog`,
+        // and the group then read null under load (TER-610, as TER-419).
+        let a = new_card(
+            &td,
+            "p",
+            json!({"title":"a", "column":"review", "repo":"app"}),
+        )
+        .await;
         let job = store_job(&td, JobKind::Merge, &[&a]).await;
         settle(&td).await;
+        // Read the group by its id at the end, as the TER-419 test does:
+        // after a red verdict the delivery flow takes card a out of it.
+        let gid = card(&td, &a).await["group"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let id = job.id.clone();
         state(&td)
             .db
@@ -1540,7 +1554,7 @@ async fn merge_group_failure_tracks_the_phase_that_actually_started() {
             .unwrap();
         verdict(&td, &failed, &a, outcome).await;
         settle(&td).await;
-        let g = card(&td, &a).await["group"].clone();
+        let g = card(&td, &gid).await["group"].clone();
         assert_eq!(
             g["steps"][1]["state"],
             if recipe { "done" } else { "failed" }
