@@ -912,7 +912,11 @@ fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Resul
                     r.files,
                     r.integrity,
                     r.db_user_version,
-                    if r.secrets_key { ", secrets.key present" } else { "" }
+                    if r.secrets_key {
+                        ", secrets.key present"
+                    } else {
+                        ""
+                    }
                 ),
             );
         }

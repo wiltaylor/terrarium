@@ -1220,7 +1220,10 @@ pub fn prune(dir: &Path, keep_full: usize, verified_full: &str) -> anyhow::Resul
         .iter()
         .filter(|l| l.header.as_ref().is_some_and(|h| h.kind == Kind::Full))
         .collect();
-    let newest = fulls.last().and_then(|l| l.header.as_ref()).map(|h| h.id.as_str());
+    let newest = fulls
+        .last()
+        .and_then(|l| l.header.as_ref())
+        .map(|h| h.id.as_str());
     if newest != Some(verified_full) {
         bail!(
             "no prune: the verified full backup {verified_full} is not the newest full backup in {}",
@@ -1289,8 +1292,7 @@ pub fn drill(
     if fs::read_dir(scratch).is_ok_and(|mut d| d.next().is_some()) {
         bail!("the drill dir {} is not empty", scratch.display());
     }
-    fs::create_dir_all(scratch)
-        .with_context(|| format!("cannot create {}", scratch.display()))?;
+    fs::create_dir_all(scratch).with_context(|| format!("cannot create {}", scratch.display()))?;
     fs::set_permissions(scratch, fs::Permissions::from_mode(0o700))?;
     let header = read_header(path)?;
     let roots = Roots {

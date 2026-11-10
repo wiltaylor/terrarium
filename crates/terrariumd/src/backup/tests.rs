@@ -515,15 +515,21 @@ fn the_drill_restores_a_sealed_diff_into_a_scratch_dir_and_checks_it() {
         fs::read_to_string(fx.config.join("prompts/lead.md")).unwrap(),
         "lead v2"
     );
-    assert!(fs::read_dir(&fx.state).unwrap().all(|e| !e
-        .unwrap()
-        .file_name()
-        .to_string_lossy()
-        .starts_with(PRE_RESTORE_PREFIX)));
+    assert!(fs::read_dir(&fx.state).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(PRE_RESTORE_PREFIX)
+    }));
     // A dir with content is refused; a wrong passphrase fails.
     assert!(drill(&d.path, None, Some("pw"), &scratch).is_err());
     let other = fx.dir.join(format!("{DRILL_PREFIX}u"));
     assert!(drill(&d.path, None, Some("bad"), &other).is_err());
     // A drill dir is not a backup in the list.
-    assert!(list(&fx.dir).unwrap().iter().all(|l| !l.name.starts_with('.')));
+    assert!(
+        list(&fx.dir)
+            .unwrap()
+            .iter()
+            .all(|l| !l.name.starts_with('.'))
+    );
 }

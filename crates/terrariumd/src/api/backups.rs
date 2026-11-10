@@ -31,7 +31,9 @@ static BUSY: std::sync::LazyLock<
 > = std::sync::LazyLock::new(Default::default);
 
 fn busy_lock(dir: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
-    let mut m = BUSY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut m = BUSY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     m.entry(dir.to_path_buf()).or_default().clone()
 }
 

@@ -252,7 +252,12 @@ async fn passphrase(state: &Shared, cfg: &Config) -> Result<Zeroizing<String>, S
             crate::secrets::open(c, &key, crate::secrets::GLOBAL, &name)
         })
         .await
-        .map_err(|e| format!("cannot open the backup key `{}`: {}", cfg.key_secret, e.message))?;
+        .map_err(|e| {
+            format!(
+                "cannot open the backup key `{}`: {}",
+                cfg.key_secret, e.message
+            )
+        })?;
     let Some(o) = opened else {
         return Err(format!(
             "no backup key: a scheduled backup holds every secret and is always sealed; \
@@ -446,9 +451,7 @@ async fn record(
 /// One run. `Err((kind, error))` on a failure.
 async fn run_once(state: &Shared, cfg: &Config) -> Result<Report, (Kind, String)> {
     let dir = crate::api::backups::dir(state);
-    let pass = passphrase(state, cfg)
-        .await
-        .map_err(|e| (Kind::Full, e))?;
+    let pass = passphrase(state, cfg).await.map_err(|e| (Kind::Full, e))?;
     let kind = {
         let (dir, every, pass) = (dir.clone(), cfg.full_every, pass.clone());
         tokio::task::spawn_blocking(move || kind_for(&dir, Utc::now(), every, &pass))
@@ -471,10 +474,8 @@ async fn run_once(state: &Shared, cfg: &Config) -> Result<Report, (Kind, String)
             if r.is_err() {
                 // Out of the list: not a base, not a kept backup.
                 if let Some(name) = path.file_name() {
-                    let aside = path.with_file_name(format!(
-                        "{UNVERIFIED_PREFIX}{}",
-                        name.to_string_lossy()
-                    ));
+                    let aside = path
+                        .with_file_name(format!("{UNVERIFIED_PREFIX}{}", name.to_string_lossy()));
                     let _ = std::fs::rename(&path, aside);
                 }
             }
@@ -643,7 +644,10 @@ mod tests {
         let day = Duration::from_secs(86_400);
         assert_eq!(missed(day, t0, None), None);
         // Due at t0 + 1d; within the grace it is not missed.
-        assert_eq!(missed(day, t0 + chrono::Duration::minutes(1500), Some(t0)), None);
+        assert_eq!(
+            missed(day, t0 + chrono::Duration::minutes(1500), Some(t0)),
+            None
+        );
         assert_eq!(
             missed(day, t0 + chrono::Duration::hours(26), Some(t0)),
             Some(t0 + chrono::Duration::days(1))

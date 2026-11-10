@@ -321,11 +321,20 @@ async fn scheduled_runs_seal_verify_rotate_prune_and_alert() {
     assert_eq!(count("backup.verify "), 5, "{actions:?}");
     assert_eq!(count("backup.prune "), 1, "{actions:?}");
     assert_eq!(count("backup.missed "), 1, "{actions:?}");
-    assert!(events.iter().any(|e| e.contains("\"change\":\"verified\"")), "{events:?}");
-    assert!(events.iter().any(|e| e.contains("\"change\":\"failed\"")), "{events:?}");
+    assert!(
+        events.iter().any(|e| e.contains("\"change\":\"verified\"")),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e.contains("\"change\":\"failed\"")),
+        "{events:?}"
+    );
     assert_eq!(mails.len(), 2, "{mails:?}");
     for text in actions.iter().chain(&events).chain(&mails) {
-        assert!(!text.contains(KEY1) && !text.contains(KEY2), "a key leaked: {text}");
+        assert!(
+            !text.contains(KEY1) && !text.contains(KEY2),
+            "a key leaked: {text}"
+        );
     }
 }
 
@@ -352,7 +361,14 @@ fn the_drill_command_restores_into_a_scratch_dir_and_removes_it() {
     let r = json_out(&terrariumd(
         d,
         &state,
-        &["backup", "drill", &file, "--passphrase-file", pass, "--json"],
+        &[
+            "backup",
+            "drill",
+            &file,
+            "--passphrase-file",
+            pass,
+            "--json",
+        ],
     ));
     assert_eq!(r["integrity"], "ok");
     assert_eq!(r["id"], full["header"]["id"]);
@@ -388,7 +404,13 @@ fn the_drill_command_restores_into_a_scratch_dir_and_removes_it() {
     let out = terrariumd(
         d,
         &state,
-        &["backup", "drill", &file, "--passphrase-file", bad.to_str().unwrap()],
+        &[
+            "backup",
+            "drill",
+            &file,
+            "--passphrase-file",
+            bad.to_str().unwrap(),
+        ],
     );
     assert!(!out.status.success());
 }
