@@ -5000,15 +5000,16 @@ mod tests {
         assert_eq!(rows.len(), 3, "{rows:?}");
         for (card, commit, needs, note) in &rows[..2] {
             assert_eq!((commit.as_deref(), *needs), (None, 1), "{card}: {rows:?}");
-            assert!(note.as_deref().unwrap_or_default().contains("accept the card again"));
+            assert!(
+                note.as_deref()
+                    .unwrap_or_default()
+                    .contains("accept the card again")
+            );
         }
         assert_eq!((rows[2].1.as_deref(), rows[2].2), (Some("cccc"), 0));
-        let pending = crate::store::accepted_heads::pending(
-            &conn,
-            "9999",
-            "2000-01-01T00:00:00.000Z",
-        )
-        .unwrap();
+        let pending =
+            crate::store::accepted_heads::pending(&conn, "9999", "2000-01-01T00:00:00.000Z")
+                .unwrap();
         assert!(pending.is_empty(), "{pending:?}");
     }
 

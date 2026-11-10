@@ -5455,7 +5455,11 @@ async fn a_queued_card_without_its_reviewed_commit_is_not_merged() {
         .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
         .await;
     assert_eq!(r.status, 409, "{}", r.body);
-    assert!(r.body.to_string().contains("accept the card again"), "{}", r.body);
+    assert!(
+        r.body.to_string().contains("accept the card again"),
+        "{}",
+        r.body
+    );
 
     // A fresh round within the cap is filled by the background read.
     sql_on(
