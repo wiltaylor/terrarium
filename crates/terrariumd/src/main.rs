@@ -878,6 +878,13 @@ fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Resul
                     settings.socket.display()
                 );
             }
+            // A daemon on another socket holds the state lock: refuse, and
+            // hold the lock so that no daemon starts during the restore.
+            std::fs::create_dir_all(&settings.state_dir).with_context(|| {
+                format!("cannot create {}", settings.state_dir.display())
+            })?;
+            let _state_lock = terrariumd::lock_state_dir(&settings.state_dir)
+                .context("a daemon may use this state dir: stop it first, then restore")?;
             let roots = Roots {
                 state: settings.state_dir.clone(),
                 config: Some(settings.config_repo.clone()),
@@ -891,7 +898,12 @@ fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Resul
                         base: base.clone(),
                         passphrase: p,
                         skip_work: *skip_work,
-                        keep: vec![default_dir.clone(), file.clone()],
+                        // The held lock file stays in place.
+                        keep: vec![
+                            default_dir.clone(),
+                            file.clone(),
+                            settings.state_dir.join(terrariumd::STATE_LOCK),
+                        ],
                     },
                 )
             })?;
