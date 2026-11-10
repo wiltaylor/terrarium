@@ -453,6 +453,19 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
         capacity.ok()["used"]["gpus"][0]["claim"]["uuid"],
         "GPU-abcd"
     );
+    // A worker of the project sees the reservation; the lead of another
+    // project sees the claim only (TER-558).
+    let own = td.get_as("p/worker", "/api/hosts/h/capacity").await;
+    assert_eq!(own.ok()["used"]["gpus"][0]["reservation"], id);
+    assert!(own.body["used"]["gpus"][0].get("holder").is_some());
+    td.agent("other", "lead", json!({"roles":["project_admin"]}))
+        .await;
+    let foreign = td.get_as("other/lead", "/api/hosts/h/capacity").await;
+    let gpu = &foreign.ok()["used"]["gpus"][0];
+    assert_eq!(gpu["claim"]["uuid"], "GPU-abcd");
+    assert!(gpu.get("reservation").is_none(), "{gpu}");
+    assert!(gpu.get("holder").is_none(), "{gpu}");
+    assert!(!foreign.body.to_string().contains(id), "{}", foreign.body);
     let mut def = state
         .db
         .read(|c| Ok(terrariumd::store::targets::get(c, "p-box")?.def))
