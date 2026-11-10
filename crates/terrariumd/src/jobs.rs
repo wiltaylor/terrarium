@@ -678,7 +678,9 @@ pub async fn record_accepted_heads(state: &Shared) -> usize {
                 match remote_head(state, &project, &repo, &branch).await {
                     Ok(Some(h)) if check_commit(&h).is_ok() => Ok((branch, h)),
                     Ok(Some(h)) => Err(format!("bad head `{h}` of `{branch}`")),
-                    Ok(None) => Err(format!("branch `{branch}` is not on the remote of `{repo}`")),
+                    Ok(None) => Err(format!(
+                        "branch `{branch}` is not on the remote of `{repo}`"
+                    )),
                     Err(e) => Err(e.message),
                 }
             }
@@ -1835,7 +1837,14 @@ fn none_merged(job: &Job, left: HashMap<usize, Left>, batch: Option<Vec<BatchCar
     };
     JobEnd {
         passed: false,
-        outcome: Some(if conflict { OUTCOME_CONFLICT } else { OUTCOME_MOVED }.into()),
+        outcome: Some(
+            if conflict {
+                OUTCOME_CONFLICT
+            } else {
+                OUTCOME_MOVED
+            }
+            .into(),
+        ),
         tail: Some(tail),
         batch,
         ..JobEnd::default()
@@ -2957,7 +2966,9 @@ pub fn card_view(j: &Job, c: &BatchCard) -> Job {
         v.head = None;
         v.tail = Some(format!(
             "{}; the queue merges only the reviewed commit. Review the new commits, then accept the card again.",
-            c.note.as_deref().unwrap_or("the branch moved after its review")
+            c.note
+                .as_deref()
+                .unwrap_or("the branch moved after its review")
         ));
     }
     if c.outcome.as_deref() == Some("conflict") {
@@ -4419,12 +4430,24 @@ mod tests {
             outcome: None,
             note: None,
         };
-        let batch = vec![card("T-1"), card("T-2"), card("T-3"), card("T-4"), card("T-5")];
+        let batch = vec![
+            card("T-1"),
+            card("T-2"),
+            card("T-3"),
+            card("T-4"),
+            card("T-5"),
+        ];
         let marked = mark_left(&batch, &found);
         let outcomes: Vec<Option<&str>> = marked.iter().map(|c| c.outcome.as_deref()).collect();
         assert_eq!(
             outcomes,
-            [None, Some("conflict"), None, Some("conflict"), Some("moved")]
+            [
+                None,
+                Some("conflict"),
+                None,
+                Some("conflict"),
+                Some("moved")
+            ]
         );
         assert_eq!(marked[1].note.as_deref(), Some("README\nsrc/a.rs"));
         assert!(marked[4].note.as_deref().unwrap().contains("abc1234"));

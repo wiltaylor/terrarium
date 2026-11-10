@@ -79,13 +79,7 @@ pub fn pending(conn: &Connection, retry_before: &str) -> ApiResult<Vec<Pending>>
 /// Record the head `commit` of `branch` for round `round` of `card`. Only
 /// the open round, and only once: a late read of an earlier round, or a
 /// second read of this one, changes nothing. True when it recorded.
-pub fn record(
-    t: &Tx<'_>,
-    card: &str,
-    round: &str,
-    branch: &str,
-    commit: &str,
-) -> ApiResult<bool> {
+pub fn record(t: &Tx<'_>, card: &str, round: &str, branch: &str, commit: &str) -> ApiResult<bool> {
     let n = t.execute(
         "UPDATE card_accepted_heads SET branch = ?3, commit_sha = ?4, recorded_at = ?5,
                 note = NULL

@@ -5120,10 +5120,7 @@ async fn a_push_after_the_accept_is_not_merged(flow: &'static str) {
     assert!(text.contains("moved after its review"), "{text}");
     assert!(text.contains(&reviewed) && text.contains(&pushed), "{text}");
     let l = labels(&c);
-    assert!(
-        !l.iter().any(|l| l.starts_with("validation:")),
-        "{l:?}"
-    );
+    assert!(!l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
     assert!(c["assignee"].is_null(), "{c:#}");
 
     // The lead reviews the new commit and accepts again: it merges.
@@ -5230,5 +5227,8 @@ async fn the_batch_rule_takes_the_reviewed_commit() {
     let ids: Vec<&str> = pick.cards.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, [c1.as_str()], "{pick:?}");
     let out = format!("{:?}", pick.left_out);
-    assert!(out.contains(&c2) && out.contains("no reviewed commit"), "{out}");
+    assert!(
+        out.contains(&c2) && out.contains("no reviewed commit"),
+        "{out}"
+    );
 }

@@ -13,8 +13,8 @@ use crate::actor::Actor;
 use crate::error::ApiResult;
 use crate::events::{self, EventFilter};
 use crate::policy;
-use crate::store::accepted_heads;
 use crate::store::Page;
+use crate::store::accepted_heads;
 use crate::store::board::{self, Board, Card, CardFilter, CardPatch, ColumnSpec, NewCard, NewLink};
 
 pub fn routes() -> Router<Shared> {
@@ -306,9 +306,9 @@ async fn comment(
     let accept = first.strip_prefix("Review verdict: ").unwrap_or(first) == "accept";
     let head = if accept {
         head_before(&state, &actor, &id, |card, cols| {
-            cols.iter().any(|(name, role)| {
-                *name == card.column && role.as_deref() == Some(board::REVIEW)
-            }) || card.column == board::REVIEW
+            cols.iter()
+                .any(|(name, role)| *name == card.column && role.as_deref() == Some(board::REVIEW))
+                || card.column == board::REVIEW
         })
         .await
     } else {
@@ -334,7 +334,12 @@ async fn comment(
 /// head as the reviewed commit, so the batch rule of the move sees it.
 /// `None` when the card cannot go there, or the head cannot be read: the
 /// background read records it after the move.
-async fn head_before<F>(state: &Shared, actor: &Actor, id: &str, goes: F) -> Option<(String, String)>
+async fn head_before<F>(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    goes: F,
+) -> Option<(String, String)>
 where
     F: FnOnce(&Card, &[(String, Option<String>)]) -> bool + Send + 'static,
 {
