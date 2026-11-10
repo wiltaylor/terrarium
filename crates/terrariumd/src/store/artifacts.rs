@@ -226,7 +226,10 @@ impl ArtifactCtx {
         let i = sha
             .get(..2)
             .and_then(|h| usize::from_str_radix(h, 16).ok())
-            .unwrap_or_else(|| sha.bytes().fold(0usize, |a, b| a.wrapping_mul(31) ^ b as usize));
+            .unwrap_or_else(|| {
+                sha.bytes()
+                    .fold(0usize, |a, b| a.wrapping_mul(31) ^ b as usize)
+            });
         self.locks[i % self.locks.len()].clone()
     }
 }
@@ -574,7 +577,9 @@ pub enum SweepEntry {
 }
 
 fn is_digest(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// The entries of the blob dir the orphan sweep checks: blobs, bundles,
