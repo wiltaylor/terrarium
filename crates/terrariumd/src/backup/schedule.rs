@@ -567,22 +567,31 @@ async fn record(
 }
 
 /// Take a backup that did not verify out of the list, so it is no base
-/// and no kept backup: rename it to `.unverified-<name>`, else delete
-/// it. Answers what was done; an error when the file stays in the list.
+/// and no kept backup: rename it to `.unverified-<name>` (with `-<n>` at
+/// the end when that is taken: a later backup can have the same name),
+/// else delete it. Answers what was done; an error when the file stays
+/// in the list. The caller holds the backup lock.
 pub fn set_aside(path: &Path) -> Result<String, String> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let aside = path.with_file_name(format!("{UNVERIFIED_PREFIX}{name}"));
-    match std::fs::rename(path, &aside) {
-        Ok(()) => Ok(format!("moved to {UNVERIFIED_PREFIX}{name}")),
+    let mut aside = format!("{UNVERIFIED_PREFIX}{name}");
+    let mut n = 1;
+    while n < 1000 && std::fs::symlink_metadata(path.with_file_name(&aside)).is_ok() {
+        n += 1;
+        aside = format!("{UNVERIFIED_PREFIX}{name}-{n}");
+    }
+    set_aside_to(path, &aside)
+}
+
+fn set_aside_to(path: &Path, aside: &str) -> Result<String, String> {
+    match std::fs::rename(path, path.with_file_name(aside)) {
+        Ok(()) => Ok(format!("moved to {aside}")),
         Err(re) => match std::fs::remove_file(path) {
-            Ok(()) => Ok(format!(
-                "deleted: cannot move it to {UNVERIFIED_PREFIX}{name}: {re}"
-            )),
+            Ok(()) => Ok(format!("deleted: cannot move it to {aside}: {re}")),
             Err(de) => Err(format!(
-                "cannot move it to {UNVERIFIED_PREFIX}{name} ({re}) or delete it ({de}): \
+                "cannot move it to {aside} ({re}) or delete it ({de}): \
                  it is still in the backup dir; delete it by hand"
             )),
         },
@@ -819,13 +828,22 @@ mod tests {
                 .join(format!("{UNVERIFIED_PREFIX}a.zip"))
                 .exists()
         );
+        // A later bad backup with the same name keeps the first one.
+        std::fs::write(&f, "bad 2").unwrap();
+        let r = set_aside(&f).unwrap();
+        assert_eq!(r, format!("moved to {UNVERIFIED_PREFIX}a.zip-2"));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(format!("{UNVERIFIED_PREFIX}a.zip")))
+                .unwrap(),
+            "bad"
+        );
         // The rename fails (a dir with content has the name): delete it.
         let g = tmp.path().join("b.zip");
         std::fs::write(&g, "bad").unwrap();
         let aside = tmp.path().join(format!("{UNVERIFIED_PREFIX}b.zip"));
         std::fs::create_dir(&aside).unwrap();
         std::fs::write(aside.join("x"), "x").unwrap();
-        let r = set_aside(&g).unwrap();
+        let r = set_aside_to(&g, &format!("{UNVERIFIED_PREFIX}b.zip")).unwrap();
         assert!(r.starts_with("deleted"), "{r}");
         assert!(!g.exists());
     }
