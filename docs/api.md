@@ -12446,6 +12446,28 @@ start with `Job queue:`.
 A held card (the GitHub author gate, §8.3) gets no validate or merge
 job, from any caller (`403`).
 
+A merge takes the reviewed commit of each card (TER-553): the head of the
+card branch that the daemon recorded when the card moved into the merge
+queue. A card in the merge queue without a reviewed commit for the branch
+of the merge is refused with `409` (TER-580): the head is not recorded
+yet, the commit is of another branch (a `branch` in the body, or a branch
+changed after the accept), or the card has no round (a column got the
+`merge_queue` role while it held the card). A card outside the merge
+queue merges the head of its branch on the remote at queue time.
+
+The daemon reads the head right before the move, and in the background
+after it when that read failed. The background read fills a round only
+within 10 minutes of the accept; after that the round needs a fresh
+accept. The rounds that the TER-553 upgrade opened for the cards already
+in the merge queue need one too (TER-580): they hold no reviewed commit.
+For each such round the card gets one `Job queue:` comment with the
+reason. To go on, review the head of the branch, then move the card out
+of the merge queue and back in.
+
+**Upgrade step (TER-580).** After the upgrade, each card that was in the
+merge queue at the TER-553 upgrade and has not left it since stays out of
+merges until it is moved out of the merge queue and back in.
+
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
 Events `job` {change, project, id, card, kind, state, attempt, outcome,

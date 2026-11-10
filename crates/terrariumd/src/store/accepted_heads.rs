@@ -51,7 +51,7 @@ pub fn on_move(
              ON CONFLICT(card) DO UPDATE SET
                round = excluded.round, accepted_at = excluded.accepted_at,
                branch = NULL, commit_sha = NULL, recorded_at = NULL, note = NULL,
-               tried_at = NULL, needs_accept = 0",
+               tried_at = NULL, needs_accept = 0, stall_noted = 0",
             params![card, ulid::Ulid::new().to_string(), now()],
         )?;
     } else if was && !is {
@@ -116,16 +116,65 @@ pub fn record(
     Ok(n == 1)
 }
 
-/// Note [`EXPIRED_NOTE`] on each open round accepted before
-/// `accepted_after` that the background read did not fill. Returns the
-/// count of rounds noted now.
+/// The cutoff of the background read now: a round accepted before it is
+/// not filled ([`FILL_MAX_AGE_SECS`]).
+pub fn fill_cutoff() -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(FILL_MAX_AGE_SECS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Add [`EXPIRED_NOTE`] to the note of each open round accepted before
+/// `accepted_after` that the background read did not fill. An earlier
+/// note (why the read failed) stays in front. Returns the count of rounds
+/// noted now.
 pub fn expire(t: &Tx<'_>, accepted_after: &str) -> ApiResult<usize> {
     Ok(t.execute(
-        "UPDATE card_accepted_heads SET note = ?2, tried_at = ?3
+        "UPDATE card_accepted_heads
+         SET note = CASE WHEN note IS NULL OR note = '' THEN ?2 ELSE note || '; ' || ?2 END,
+             tried_at = ?3
          WHERE commit_sha IS NULL AND needs_accept = 0 AND accepted_at < ?1
-           AND (note IS NULL OR note <> ?2)",
+           AND (note IS NULL OR instr(note, ?2) = 0)",
         params![accepted_after, EXPIRED_NOTE, now()],
     )?)
+}
+
+/// A round that waits for a fresh accept, not yet told on its card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stall {
+    pub card: String,
+    pub column: String,
+    pub note: String,
+}
+
+/// The open rounds that need a fresh accept (backfilled by the upgrade,
+/// or past the age cap) and have no card comment about it yet.
+pub fn stalls(conn: &Connection) -> ApiResult<Vec<Stall>> {
+    let mut q = conn.prepare(
+        "SELECT h.card, b.name, COALESCE(h.note, '') FROM card_accepted_heads h
+         JOIN cards c ON c.id = h.card JOIN board_columns b ON b.id = c.column_id
+         WHERE h.commit_sha IS NULL AND h.stall_noted = 0 AND c.archived = 0
+           AND (h.needs_accept = 1 OR instr(COALESCE(h.note, ''), ?1) > 0)
+         ORDER BY h.accepted_at, h.card",
+    )?;
+    let rows = q
+        .query_map([EXPIRED_NOTE], |r| {
+            Ok(Stall {
+                card: r.get(0)?,
+                column: r.get(1)?,
+                note: r.get(2)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// The round of `card` was told on its card.
+pub fn stall_noted(t: &Tx<'_>, card: &str) -> ApiResult<()> {
+    t.execute(
+        "UPDATE card_accepted_heads SET stall_noted = 1 WHERE card = ?1",
+        [card],
+    )?;
+    Ok(())
 }
 
 /// Record `commit` of `branch` in the open round of `card`, in the write

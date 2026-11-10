@@ -5409,6 +5409,19 @@ async fn a_queued_card_without_its_reviewed_commit_is_not_merged() {
     let card = lab.card("nr", "ter-nr").await;
     hold_reads(&lab, true);
     accept(&lab, &card).await;
+    // The reviewed commit is of `ter-nr`: a merge of another branch of the
+    // queued card does not take that branch's head now.
+    lab.branch("ter-nr-other", "next", &[("other", "1\n"), ("OK", "y\n")]);
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{card}/merge"),
+            json!({"branch": "ter-nr-other"}),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(r.body.to_string().contains("is of branch"), "{}", r.body);
     // The pre-read failed, as when the remote did not answer.
     sql_on(
         &lab,
@@ -5434,11 +5447,12 @@ async fn a_queued_card_without_its_reviewed_commit_is_not_merged() {
     assert_eq!(r.status, 409, "{}", r.body);
 
     // A round past the cap is not filled: the read takes the tip now.
+    // The earlier cause of the failed read stays in the note.
     sql_on(
         &lab,
         &card,
-        "UPDATE card_accepted_heads SET accepted_at = '2026-01-01T00:00:00.000Z'
-         WHERE card = ?1",
+        "UPDATE card_accepted_heads SET accepted_at = '2026-01-01T00:00:00.000Z',
+                note = 'the remote did not answer' WHERE card = ?1",
     )
     .await;
     hold_reads(&lab, false);
@@ -5446,10 +5460,19 @@ async fn a_queued_card_without_its_reviewed_commit_is_not_merged() {
     assert_eq!(terrariumd::jobs::record_accepted_heads(&state).await, 0);
     let (commit, note, _) = round_of(&lab, &card).await.expect("a round");
     assert_eq!(commit, None);
-    assert_eq!(
-        note.as_deref(),
-        Some(terrariumd::store::accepted_heads::EXPIRED_NOTE)
+    let expired = format!(
+        "the remote did not answer; {}",
+        terrariumd::store::accepted_heads::EXPIRED_NOTE
     );
+    assert_eq!(note.as_deref(), Some(expired.as_str()));
+    // One card comment says why the card waits, and how to go on.
+    assert_eq!(terrariumd::jobs::record_accepted_heads(&state).await, 0);
+    let text = comments(&lab.card_of(&card).await);
+    assert_eq!(text.matches("is not recorded").count(), 1, "{text}");
+    assert!(text.contains(&expired), "{text}");
+    assert!(text.contains("move the card out of `merge_queue`"), "{text}");
+    let (_, note, _) = round_of(&lab, &card).await.expect("a round");
+    assert_eq!(note.as_deref(), Some(expired.as_str()));
     let r = lab
         .td
         .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
@@ -5478,6 +5501,29 @@ async fn a_queued_card_without_its_reviewed_commit_is_not_merged() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["job"]["commit"], reviewed.as_str(), "{}", r.body);
+}
+
+/// TER-580: a card in the merge queue with no round (a column given the
+/// role while it held the card: no move ran) is not merged at its head.
+#[tokio::test]
+async fn a_queued_card_without_a_round_is_not_merged() {
+    let lab = lab_flow(2, "code").await;
+    with_merge_queue(&lab).await;
+    lab.branch("ter-nw", "next", &[("nw", "1\n"), ("OK", "y\n")]);
+    let card = lab.card("nw", "ter-nw").await;
+    accept(&lab, &card).await;
+    sql_on(
+        &lab,
+        &card,
+        "DELETE FROM card_accepted_heads WHERE card = ?1",
+    )
+    .await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(r.body.to_string().contains("no reviewed commit"), "{}", r.body);
 }
 
 /// TER-580: a rule moves the card into the merge queue (a round with no
@@ -5551,4 +5597,60 @@ async fn a_late_read_of_an_earlier_round_records_nothing() {
         .unwrap();
     assert_eq!(now.len(), 1);
     assert_ne!(now[0].round, old);
+
+    // The guards of record() itself, for a read that passed pending():
+    // a cutoff after the accept, then a round that needs a fresh accept.
+    let round = now[0].round.clone();
+    let commit = "b".repeat(40);
+    let (id, r, c) = (card.clone(), round.clone(), commit.clone());
+    let aged = db
+        .write("system", move |t| {
+            accepted_heads::record(t, &id, &r, "ter-lr", &c, "9999")
+        })
+        .await
+        .unwrap();
+    assert!(!aged, "a round past the cutoff was filled");
+    sql_on(
+        &lab,
+        &card,
+        "UPDATE card_accepted_heads SET needs_accept = 1,
+                note = 'the round was opened by the upgrade' WHERE card = ?1",
+    )
+    .await;
+    let (id, r, c) = (card.clone(), round.clone(), commit.clone());
+    let backfilled = db
+        .write("system", move |t| {
+            accepted_heads::record(t, &id, &r, "ter-lr", &c, far)
+        })
+        .await
+        .unwrap();
+    assert!(!backfilled, "a backfilled round was filled");
+    assert_eq!(round_of(&lab, &card).await.expect("a round").0, None);
+    // The background pass tells the card once.
+    hold_reads(&lab, false);
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    for _ in 0..2 {
+        assert_eq!(terrariumd::jobs::record_accepted_heads(&state).await, 0);
+    }
+    let text = comments(&lab.card_of(&card).await);
+    assert_eq!(
+        text.matches("opened by the upgrade").count(),
+        1,
+        "{text}"
+    );
+    // Without the mark the same read records: the guards were the cause.
+    sql_on(
+        &lab,
+        &card,
+        "UPDATE card_accepted_heads SET needs_accept = 0 WHERE card = ?1",
+    )
+    .await;
+    let (id, r) = (card.clone(), round.clone());
+    let filled = db
+        .write("system", move |t| {
+            accepted_heads::record(t, &id, &r, "ter-lr", &commit, far)
+        })
+        .await
+        .unwrap();
+    assert!(filled);
 }

@@ -671,17 +671,19 @@ pub async fn record_accepted_heads(state: &Shared) -> usize {
     // remote does not cost a `git ls-remote` on each queue kick.
     let retry_before =
         (now - chrono::Duration::seconds(60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let accepted_after = (now - chrono::Duration::seconds(accepted_heads::FILL_MAX_AGE_SECS))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let accepted_after = accepted_heads::fill_cutoff();
     let cutoff = accepted_after.clone();
     if let Err(e) = state
         .db
-        .write("system", move |t| accepted_heads::expire(t, &cutoff))
+        .write("system", move |t| {
+            accepted_heads::expire(t, &cutoff)?;
+            note_stalls(t)
+        })
         .await
     {
         warn!("cannot note the expired reviewed-commit reads: {e}");
     }
-    let cutoff = accepted_after.clone();
+    let cutoff = accepted_after;
     let pending = match state
         .db
         .read(move |c| accepted_heads::pending(c, &retry_before, &cutoff))
@@ -719,13 +721,18 @@ pub async fn record_accepted_heads(state: &Shared) -> usize {
             Err(e) => Err(e.message),
         };
         let (card, round) = (p.card.clone(), p.round.clone());
-        let cutoff = accepted_after.clone();
         let done = state
             .db
             .write("system", move |t| match &read {
-                Ok((branch, head)) => {
-                    accepted_heads::record(t, &card, &round, branch, head, &cutoff)
-                }
+                // The cutoff at the write: the reads before took time.
+                Ok((branch, head)) => accepted_heads::record(
+                    t,
+                    &card,
+                    &round,
+                    branch,
+                    head,
+                    &accepted_heads::fill_cutoff(),
+                ),
                 Err(why) => accepted_heads::note(t, &card, &round, why).map(|()| false),
             })
             .await;
@@ -736,6 +743,24 @@ pub async fn record_accepted_heads(state: &Shared) -> usize {
         }
     }
     recorded
+}
+
+/// Post one card comment on each round that needs a fresh accept (the
+/// upgrade backfilled it, or the read did not fill it in time), so the
+/// card does not wait in the merge queue without a signal (TER-580).
+fn note_stalls(t: &mut crate::db::Tx<'_>) -> ApiResult<()> {
+    use crate::store::accepted_heads;
+    for s in accepted_heads::stalls(t)? {
+        let body = format!(
+            "Job queue: the reviewed commit of this card is not recorded: {}. A merge leaves \
+             the card out. Fix: review the head of the branch, then move the card out of \
+             `{}` and back in (a fresh accept records the head then).",
+            s.note, s.column
+        );
+        board::system_comment(t, &s.card, &body, None)?;
+        accepted_heads::stall_noted(t, &s.card)?;
+    }
+    Ok(())
 }
 
 /// A queued job that waits for its host (TER-160).
