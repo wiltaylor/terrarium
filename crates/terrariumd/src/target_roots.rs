@@ -1514,11 +1514,24 @@ mod tests {
         );
         let out = Command::new("sh")
             .args(["-c", "umask 0007 && exec python3 -c \"$0\" \"$@\""])
-            .args([&script, "prepare", "/src/terrarium", "p", "a", "agent-id", "repo/x"])
+            .args([
+                &script,
+                "prepare",
+                "/src/terrarium",
+                "p",
+                "a",
+                "agent-id",
+                "repo/x",
+            ])
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mode =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
         for dir in ["p", "p/a", "p/a/repo", "p/a/repo/x"] {
             assert_eq!(mode(&work.join(dir)), 0o2770, "{dir}");
         }
