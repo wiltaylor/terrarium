@@ -216,9 +216,7 @@ fn check_cwd(plan: &ExecPlan) -> Result<(), SpawnError> {
     };
     match std::fs::metadata(path) {
         Ok(m) if m.is_dir() => Ok(()),
-        Ok(_) => Err(err(std::io::Error::from(
-            std::io::ErrorKind::NotADirectory,
-        ))),
+        Ok(_) => Err(err(std::io::Error::from(std::io::ErrorKind::NotADirectory))),
         Err(e) => Err(err(e)),
     }
 }
