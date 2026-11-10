@@ -514,7 +514,11 @@ fn probe_failure(probe: &crate::executor::Collected) -> String {
     if why.is_empty() {
         why = match probe.end() {
             crate::executor::End::Error { message, .. } => message,
-            crate::executor::End::Exit { code, signal, reason } => match (code, signal) {
+            crate::executor::End::Exit {
+                code,
+                signal,
+                reason,
+            } => match (code, signal) {
                 (Some(c), _) => format!("exit code {c}"),
                 (None, Some(s)) => format!("signal {s}"),
                 _ => reason,

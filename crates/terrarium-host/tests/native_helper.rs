@@ -328,7 +328,10 @@ async fn a_session_takes_multi_line_environment_values() {
     );
     assert_eq!(f.log("env.copy.mode").trim(), "600");
     let run = f.log("run.log");
-    assert!(!run.contains("TER-566") && !run.contains("#!/bin/sh"), "{run}");
+    assert!(
+        !run.contains("TER-566") && !run.contains("#!/bin/sh"),
+        "{run}"
+    );
     f.wait_idle().await;
 
     req.env = BTreeMap::from([("TERRARIUM_GIT_TRAILERS".into(), "a\n\0b".into())]);
