@@ -28,7 +28,7 @@ const RUNNER: &str = "terrarium-runner";
 /// A completed delivery for a fake `RunnerHandle` in another crate.
 pub fn delivered_turn() -> crate::Delivery {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let _ = tx.send(Ok(()));
+    let _ = tx.send(Ok(None));
     crate::Delivery::from_parts(0, rx)
 }
 
