@@ -630,6 +630,79 @@ pub fn kick(state: &Shared) {
     });
 }
 
+/// Record the reviewed commit of the cards that came into the merge queue
+/// (TER-553), in the background: the read of each head is a `git
+/// ls-remote` in the daemon. The API move and comment, the rule effects,
+/// and a timer call it.
+pub fn record_accepted_soon(state: &Shared) {
+    let state = state.clone();
+    tokio::spawn(async move { record_accepted_heads(&state).await });
+}
+
+/// Read and record the head of each card branch whose round in the merge
+/// queue has no commit yet (TER-553). A card without a usable repo or
+/// branch, or a branch that is not on the remote, keeps its round open
+/// with a note: a batch leaves the card out until its head is recorded.
+/// Returns the count of recorded heads.
+pub async fn record_accepted_heads(state: &Shared) -> usize {
+    use crate::store::accepted_heads;
+    // A failed read waits a minute: a card without its branch on the
+    // remote does not cost a `git ls-remote` on each queue kick.
+    let retry_before = (chrono::Utc::now() - chrono::Duration::seconds(60))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let pending = match state
+        .db
+        .read(move |c| accepted_heads::pending(c, &retry_before))
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("cannot read the pending reviewed commits: {e}");
+            return 0;
+        }
+    };
+    let mut recorded = 0;
+    for p in pending {
+        let card = p.card.clone();
+        let place = state
+            .db
+            .read(move |c| {
+                let card = board::get_card(c, &card)?;
+                let repo = crate::api::jobs::repo_of(c, &card, None)?;
+                let branch = crate::api::jobs::branch_of(&card, None)?;
+                Ok((card.project, repo, branch))
+            })
+            .await;
+        let read = match place {
+            Ok((project, repo, branch)) => {
+                match remote_head(state, &project, &repo, &branch).await {
+                    Ok(Some(h)) if check_commit(&h).is_ok() => Ok((branch, h)),
+                    Ok(Some(h)) => Err(format!("bad head `{h}` of `{branch}`")),
+                    Ok(None) => Err(format!(
+                        "branch `{branch}` is not on the remote of `{repo}`"
+                    )),
+                    Err(e) => Err(e.message),
+                }
+            }
+            Err(e) => Err(e.message),
+        };
+        let (card, round) = (p.card.clone(), p.round.clone());
+        let done = state
+            .db
+            .write("system", move |t| match &read {
+                Ok((branch, head)) => accepted_heads::record(t, &card, &round, branch, head),
+                Err(why) => accepted_heads::note(t, &card, &round, why).map(|()| false),
+            })
+            .await;
+        match done {
+            Ok(true) => recorded += 1,
+            Ok(false) => {}
+            Err(e) => warn!(card = %p.card, "cannot record the reviewed commit: {e}"),
+        }
+    }
+    recorded
+}
+
 /// A queued job that waits for its host (TER-160).
 struct Wait {
     /// The first time that the host could not be reached.
@@ -1687,6 +1760,97 @@ fn job_ref(kind: JobKind) -> &'static str {
     }
 }
 
+/// Why a card left a merge: a `conflict` (the conflicting files, or why
+/// the merge failed), or `moved` (TER-553: the head of the branch is no
+/// longer the reviewed commit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Left {
+    outcome: &'static str,
+    note: String,
+}
+
+impl Left {
+    fn conflict(note: String) -> Self {
+        Left {
+            outcome: OUTCOME_CONFLICT,
+            note,
+        }
+    }
+
+    fn moved(branch: &str, reviewed: &str, tip: &str) -> Self {
+        Left {
+            outcome: OUTCOME_MOVED,
+            note: format!(
+                "the branch `{branch}` moved after its review: the reviewed commit is {reviewed}, the head is now {tip}"
+            ),
+        }
+    }
+}
+
+/// The outcome of a card whose branch did not merge onto `next`.
+pub const OUTCOME_CONFLICT: &str = "conflict";
+/// The outcome of a card whose branch head is no longer its reviewed
+/// commit (TER-553). It goes back to review, with no rerun.
+pub const OUTCOME_MOVED: &str = "moved";
+
+/// Is `outcome` one that takes a card out of its merge (a conflict, or a
+/// branch that moved after its review)? Such a card never runs again.
+pub fn left_merge(outcome: Option<&str>) -> bool {
+    matches!(outcome, Some(OUTCOME_CONFLICT | OUTCOME_MOVED))
+}
+
+/// The end of a merge in which no card merged: a `conflict` when a card
+/// conflicted, else `moved`.
+fn none_merged(job: &Job, left: HashMap<usize, Left>, batch: Option<Vec<BatchCard>>) -> JobEnd {
+    let mut all: Vec<(usize, Left)> = left.into_iter().collect();
+    all.sort_by_key(|(i, _)| *i);
+    let conflict = all.iter().any(|(_, l)| l.outcome == OUTCOME_CONFLICT);
+    let notes = |o: &str| -> Vec<String> {
+        all.iter()
+            .filter(|(_, l)| l.outcome == o)
+            .map(|(_, l)| l.note.clone())
+            .collect()
+    };
+    let tail = if conflict {
+        let what = if job.batch.is_empty() {
+            format!("the branch `{}` does", job.branch)
+        } else {
+            "none of the branches of the batch does".to_owned()
+        };
+        let mut t = format!(
+            "{what} not merge onto `next` without conflicts; the queue does not resolve them. Files:\n{}",
+            notes(OUTCOME_CONFLICT).join("\n")
+        );
+        let moved = notes(OUTCOME_MOVED);
+        if !moved.is_empty() {
+            t.push_str(&format!(
+                "\nLeft out, moved after review:\n{}",
+                moved.join("\n")
+            ));
+        }
+        t
+    } else {
+        format!(
+            "nothing merged: each branch moved after its review, and the queue merges only the reviewed commit.\n{}",
+            notes(OUTCOME_MOVED).join("\n")
+        )
+    };
+    JobEnd {
+        passed: false,
+        outcome: Some(
+            if conflict {
+                OUTCOME_CONFLICT
+            } else {
+                OUTCOME_MOVED
+            }
+            .into(),
+        ),
+        tail: Some(tail),
+        batch,
+        ..JobEnd::default()
+    }
+}
+
 /// Step 1, in the daemon, with the repo credential (TER-103): fetch, check
 /// out or merge, record the commit as [`job_ref`], and write the bundle.
 /// Blocking.
@@ -1705,10 +1869,10 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
     // a merge, the merge-base of the commit and `next` for a validate.
     let base;
     let head = if job.kind == JobKind::Merge {
-        // The branches of the merge, in order: the job's, then the rest of
-        // a batch.
-        let mut branches = vec![job.branch.clone()];
-        branches.extend(job.cards().iter().skip(1).map(|c| c.branch.clone()));
+        // The cards of the merge, in order: the job's, then the rest of a
+        // batch, each with its reviewed commit (TER-553).
+        let cards = job.cards();
+        let branches: Vec<String> = cards.iter().map(|c| c.branch.clone()).collect();
         let mut specs = vec!["+refs/heads/next:refs/remotes/job/next".to_owned()];
         specs.extend(
             branches
@@ -1729,47 +1893,50 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
         };
         base = Some(cur.clone());
         // A branch that conflicts, or whose merge fails otherwise, leaves
-        // the merge; the next branch merges onto the ones before it.
-        let mut left: HashMap<usize, String> = HashMap::new();
+        // the merge; the next branch merges onto the ones before it. So
+        // does a branch whose head is no longer its reviewed commit
+        // (TER-553): a push after the accept was not reviewed.
+        let mut left: HashMap<usize, Left> = HashMap::new();
         let mut merged = 0;
         for (i, b) in branches.iter().enumerate() {
-            let other = format!("refs/remotes/job/card{i}");
-            match repo.merge(&cur, &other, &format!("Merge {b} onto next")) {
+            let fetched = format!("refs/remotes/job/card{i}");
+            let tip = match repo.commit_of(&fetched) {
+                Ok(Some(c)) => c,
+                Ok(None) => return failed(format!("cannot fetch {b}")),
+                Err(e) => return failed(e.to_string()),
+            };
+            if let Some(want) = &cards[i].commit {
+                // A reviewed commit that the fetch did not bring (the
+                // branch was rewritten) is no head either.
+                let reviewed = repo.commit_of(want).ok().flatten();
+                if reviewed.as_deref() != Some(tip.as_str()) {
+                    left.insert(i, Left::moved(b, want, &tip));
+                    continue;
+                }
+            }
+            // The commit, not the ref: the merge takes what was checked.
+            match repo.merge(&cur, &tip, &format!("Merge {b} onto next")) {
                 Ok(git::MergeStep::Merged(c)) => {
                     cur = c;
                     merged += 1;
                 }
                 Ok(git::MergeStep::Conflict(files)) => {
-                    left.insert(i, files.join("\n"));
+                    left.insert(i, Left::conflict(files.join("\n")));
                 }
                 Ok(git::MergeStep::Failed(msg)) => {
-                    left.insert(i, format!("the merge failed without a conflict:\n{msg}"));
+                    left.insert(
+                        i,
+                        Left::conflict(format!("the merge failed without a conflict:\n{msg}")),
+                    );
                 }
                 Err(e) => return failed(format!("cannot merge {b}: {e}")),
             }
         }
         if !job.batch.is_empty() {
-            batch = Some(mark_conflicts(&job.batch, &left));
+            batch = Some(mark_left(&job.batch, &left));
         }
         if merged == 0 {
-            let what = if job.batch.is_empty() {
-                format!("the branch `{}` does", job.branch)
-            } else {
-                "none of the branches of the batch does".to_owned()
-            };
-            let mut files: Vec<(usize, String)> = left.into_iter().collect();
-            files.sort();
-            let files: Vec<String> = files.into_iter().map(|(_, f)| f).collect();
-            return Prepared::End(JobEnd {
-                passed: false,
-                outcome: Some("conflict".into()),
-                tail: Some(format!(
-                    "{what} not merge onto `next` without conflicts; the queue does not resolve them. Files:\n{}",
-                    files.join("\n")
-                )),
-                batch,
-                ..JobEnd::default()
-            });
+            return Prepared::End(none_merged(job, left, batch));
         }
         cur
     } else {
@@ -1822,6 +1989,11 @@ async fn steps(
     if job.kind == JobKind::Merge {
         for c in job.cards().iter().skip(1) {
             check_ref(&c.branch)?;
+        }
+        for c in job.cards() {
+            if let Some(commit) = &c.commit {
+                check_commit(commit)?;
+            }
         }
     }
     let (j, bundle) = (job.clone(), x.bundle.clone());
@@ -2295,14 +2467,14 @@ fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<
 
 /// The batch with each card that left the merge (by its index in the
 /// batch) marked `conflict`, with its files or the reason.
-fn mark_conflicts(batch: &[BatchCard], found: &HashMap<usize, String>) -> Vec<BatchCard> {
+fn mark_left(batch: &[BatchCard], found: &HashMap<usize, Left>) -> Vec<BatchCard> {
     batch
         .iter()
         .enumerate()
         .map(|(i, c)| match found.get(&i) {
-            Some(files) => BatchCard {
-                outcome: Some("conflict".into()),
-                note: Some(files.clone()),
+            Some(l) => BatchCard {
+                outcome: Some(l.outcome.into()),
+                note: Some(l.note.clone()),
                 ..c.clone()
             },
             None => BatchCard {
@@ -2317,18 +2489,25 @@ fn mark_conflicts(batch: &[BatchCard], found: &HashMap<usize, String>) -> Vec<Ba
 /// One line on the cards of a batch: those that merged, and those that
 /// conflicted.
 fn batch_summary(batch: &[BatchCard]) -> String {
-    let (bad, good): (Vec<&BatchCard>, Vec<&BatchCard>) = batch
-        .iter()
-        .partition(|c| c.outcome.as_deref() == Some("conflict"));
-    let names = |l: &[&BatchCard]| {
-        l.iter()
+    let with = |o: Option<&str>| -> String {
+        batch
+            .iter()
+            .filter(|c| match o {
+                Some(o) => c.outcome.as_deref() == Some(o),
+                None => !left_merge(c.outcome.as_deref()),
+            })
             .map(|c| c.card.as_str())
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let mut s = format!("batch: merged {}", names(&good));
+    let mut s = format!("batch: merged {}", with(None));
+    let bad = with(Some(OUTCOME_CONFLICT));
     if !bad.is_empty() {
-        s.push_str(&format!("; left out on a conflict {}", names(&bad)));
+        s.push_str(&format!("; left out on a conflict {bad}"));
+    }
+    let moved = with(Some(OUTCOME_MOVED));
+    if !moved.is_empty() {
+        s.push_str(&format!("; left out, moved after review {moved}"));
     }
     s
 }
@@ -2540,6 +2719,9 @@ pub fn split_comment(v: &Job, left: &Job, right: &Job) -> String {
 /// The verdict word of the final failure of a card: `j` is the job, `v`
 /// the card's view of it ([`card_view`]).
 pub fn fail_phrase(j: &Job, v: &Job) -> &'static str {
+    if v.outcome.as_deref() == Some(OUTCOME_MOVED) {
+        return MOVED_PHRASE;
+    }
     if j.batch.is_empty() {
         // A card split out of a red batch alone was red there already.
         if j.parent.is_some() && j.outcome.as_deref() == Some("red") {
@@ -2553,9 +2735,23 @@ pub fn fail_phrase(j: &Job, v: &Job) -> &'static str {
     "failed again"
 }
 
+/// The verdict words of a card whose branch moved after its review
+/// (TER-553).
+const MOVED_PHRASE: &str =
+    "left the merge: the branch moved after its review, so the card goes back to review";
+
 /// The comment of the final failure of a card ([`fail_phrase`]).
 pub fn fail_comment(j: &Job, v: &Job) -> String {
-    end_comment(v, fail_phrase(j, v))
+    let mut s = end_comment(v, fail_phrase(j, v));
+    // A branch that moved (TER-553): the reviewed commit and the head, in
+    // the comment of the move back to review. The daemon wrote the tail.
+    if v.outcome.as_deref() == Some(OUTCOME_MOVED)
+        && let Some(tail) = &v.tail
+    {
+        s.push(' ');
+        s.push_str(tail);
+    }
+    s
 }
 
 /// The body of the mail to the worker of a card that failed.
@@ -2598,6 +2794,7 @@ fn verdict_of(j: &Job) -> &'static str {
     }
     match j.outcome.as_deref() {
         Some("conflict") => "conflict",
+        Some(OUTCOME_MOVED) => "moved",
         _ if j.state == jobs::JobState::Passed => "passed",
         Some("red") => "red",
         _ => "error",
@@ -2620,7 +2817,7 @@ pub fn verdict_comment(v: &Job) -> String {
 /// The failure block of the verdict of `v`, for a failure only. It holds
 /// the tail of the job output: untrusted text.
 pub fn verdict_failure(v: &Job) -> Option<String> {
-    matches!(verdict_of(v), "red" | "conflict" | "error").then(|| failure_block(v))
+    matches!(verdict_of(v), "red" | "conflict" | "moved" | "error").then(|| failure_block(v))
 }
 
 /// The `job.verdict` event data of each card of an ended or cancelled
@@ -2689,6 +2886,9 @@ fn single_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
         return pass_card(t, j);
     }
     let outcome = j.outcome.as_deref();
+    if outcome == Some(OUTCOME_MOVED) {
+        return back_to_review(t, j);
+    }
     // A card split out of a red batch alone was red there already: a red
     // of its own is the second.
     let split_red = j.parent.is_some() && outcome == Some("red");
@@ -2707,10 +2907,14 @@ fn batch_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
         .batch
         .iter()
         .cloned()
-        .partition(|c| c.outcome.as_deref() == Some("conflict"));
+        .partition(|c| left_merge(c.outcome.as_deref()));
     for c in &conflicted {
         let v = card_view(j, c);
-        fail_card(t, &v, fail_phrase(j, &v))?;
+        if c.outcome.as_deref() == Some(OUTCOME_MOVED) {
+            back_to_review(t, &v)?;
+        } else {
+            fail_card(t, &v, fail_phrase(j, &v))?;
+        }
     }
     if j.state == jobs::JobState::Passed {
         for c in &merged {
@@ -2755,6 +2959,18 @@ pub fn card_view(j: &Job, c: &BatchCard) -> Job {
     v.card = c.card.clone();
     v.branch = c.branch.clone();
     v.by_agent = c.by_agent.clone();
+    v.commit = c.commit.clone();
+    if c.outcome.as_deref() == Some(OUTCOME_MOVED) {
+        v.outcome = Some(OUTCOME_MOVED.into());
+        v.exit_code = None;
+        v.head = None;
+        v.tail = Some(format!(
+            "{}; the queue merges only the reviewed commit. Review the new commits, then accept the card again.",
+            c.note
+                .as_deref()
+                .unwrap_or("the branch moved after its review")
+        ));
+    }
     if c.outcome.as_deref() == Some("conflict") {
         v.outcome = Some("conflict".into());
         v.exit_code = None;
@@ -2777,6 +2993,17 @@ fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     };
     let note = end_comment(j, "passed");
     move_or_comment(t, &j.card, &to, None, &note)?;
+    unassign(t, &j.card)
+}
+
+/// A card whose branch moved after its review (TER-553): its new commits
+/// were not reviewed, so it goes back to review with the reason, and is
+/// free. The move out of the merge queue ends its round, and the next
+/// accept records the head then. No rerun: the branch must be reviewed.
+fn back_to_review(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
+    let to = board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?;
+    move_or_comment(t, &j.card, &to, None, &fail_comment(j, j))?;
     unassign(t, &j.card)
 }
 
@@ -4188,25 +4415,45 @@ mod tests {
 
     #[test]
     fn batch_conflicts_are_marked_by_index() {
-        let found: HashMap<usize, String> =
-            [(1, "README\nsrc/a.rs".to_owned()), (3, "b.txt".to_owned())]
-                .into_iter()
-                .collect();
+        let found: HashMap<usize, Left> = [
+            (1, Left::conflict("README\nsrc/a.rs".to_owned())),
+            (3, Left::conflict("b.txt".to_owned())),
+            (4, Left::moved("t-5", "abc1234", "def5678")),
+        ]
+        .into_iter()
+        .collect();
         let card = |c: &str| BatchCard {
             card: c.into(),
             branch: c.to_lowercase(),
             by_agent: None,
+            commit: None,
             outcome: None,
             note: None,
         };
-        let batch = vec![card("T-1"), card("T-2"), card("T-3"), card("T-4")];
-        let marked = mark_conflicts(&batch, &found);
+        let batch = vec![
+            card("T-1"),
+            card("T-2"),
+            card("T-3"),
+            card("T-4"),
+            card("T-5"),
+        ];
+        let marked = mark_left(&batch, &found);
         let outcomes: Vec<Option<&str>> = marked.iter().map(|c| c.outcome.as_deref()).collect();
-        assert_eq!(outcomes, [None, Some("conflict"), None, Some("conflict")]);
+        assert_eq!(
+            outcomes,
+            [
+                None,
+                Some("conflict"),
+                None,
+                Some("conflict"),
+                Some("moved")
+            ]
+        );
         assert_eq!(marked[1].note.as_deref(), Some("README\nsrc/a.rs"));
+        assert!(marked[4].note.as_deref().unwrap().contains("abc1234"));
         assert_eq!(
             batch_summary(&marked),
-            "batch: merged T-1 T-3; left out on a conflict T-2 T-4"
+            "batch: merged T-1 T-3; left out on a conflict T-2 T-4; left out, moved after review T-5"
         );
     }
 
@@ -4399,6 +4646,7 @@ mod tests {
             card: card.into(),
             branch: card.to_lowercase(),
             by_agent: Some(by.into()),
+            commit: None,
             outcome: outcome.map(str::to_owned),
             note: outcome.map(|_| "src/a.rs".to_owned()),
         }

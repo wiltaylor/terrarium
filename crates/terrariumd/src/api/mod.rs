@@ -77,7 +77,7 @@ use terrarium_core::config::Definitions;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-pub use artifacts::{artifact_router, run_prune};
+pub use artifacts::{artifact_router, run_prune, sweep_orphans};
 pub use config::spawn_config_sync;
 pub use schedules::{run_schedule, run_triggered};
 pub use subscriptions::settle_defaults as settle_account_defaults;

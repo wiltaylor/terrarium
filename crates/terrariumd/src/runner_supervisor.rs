@@ -1070,6 +1070,26 @@ impl Slot {
             && self.compacting.is_none()
     }
 
+    /// A restart for an account swap may start now (TER-524): the runner
+    /// rests (`idle` or `waiting`, not `blocked`), no restart or stop is on
+    /// its way, and no turn, pointer or compaction is on its way into the
+    /// harness. Queued work (turns, a recap, pointer items) does not hold
+    /// the swap back: once the caller sets `restart_requested` under the
+    /// same lock, that work waits for the new launch on the new account.
+    /// Unlike [`Slot::can_idle_stop`] it does not read the runner's own
+    /// status stream: that can lag behind the events, and a swap that waits
+    /// needs the next rest event or the end of a failed delivery
+    /// ([`RunnerSupervisor::finish_turn_delivery`]) to fire.
+    fn can_swap_restart(&self) -> bool {
+        !self.stop_requested
+            && !self.restart_requested
+            && self.runner.is_some()
+            && self.seen.is_resting()
+            && self.turns_in_flight == 0
+            && !self.pointer_busy
+            && self.compacting.is_none()
+    }
+
     fn new(agent: Agent) -> Self {
         Self {
             agent,
@@ -2389,8 +2409,13 @@ impl RunnerSupervisor {
         let agent = {
             let mut slots = lock(&self.inner.slots);
             match slots.get_mut(&id).filter(|s| s.epoch == epoch) {
-                Some(slot) if slot.swap_pending => {
+                // Out of a turn only: a runner `blocked` is in a turn (a
+                // question on screen, a stalled tool call). The check and the
+                // claim of the restart are under one lock: from here, no
+                // turn, recap or pointer goes out (`restart_requested`).
+                Some(slot) if slot.swap_pending && slot.can_swap_restart() => {
                     slot.swap_pending = false;
+                    slot.restart_requested = true;
                     slot.agent.clone()
                 }
                 Some(slot) if slot.upgrade_pending && !slot.upgrade_waiting => {
@@ -2735,13 +2760,11 @@ impl RunnerSupervisor {
                 ..
             }
         );
-        // Not in a turn: a swap that waited can restart the harness now.
+        // Not in a turn: a swap that waited can restart the harness now. A
+        // runner `blocked` is still in its turn.
         let settled = matches!(
             rec.event,
-            Event::StatusChanged {
-                to: AgentStatus::Idle | AgentStatus::Waiting | AgentStatus::Blocked,
-                ..
-            }
+            Event::StatusChanged { to, .. } if to.is_resting()
         );
         match self.held(id) {
             // A held agent is `blocked`, not `idle`.
@@ -3016,17 +3039,20 @@ impl RunnerSupervisor {
                 }
                 deliveries.push(runner.type_turn(turn.text));
             }
-            if let Some(delivery) = recap
-                && let Err(e) = delivery.wait().await
-            {
-                warn!(agent = %id, "the recap turn was not delivered: {e}");
-            }
-            for delivery in deliveries {
-                if let Err(e) = delivery.wait().await {
-                    debug!(agent = %id, "a turn was not delivered: {e}");
+            let mut delivered = false;
+            if let Some(delivery) = recap {
+                match delivery.wait().await {
+                    Ok(()) => delivered = true,
+                    Err(e) => warn!(agent = %id, "the recap turn was not delivered: {e}"),
                 }
             }
-            me.finish_turn_delivery(id, epoch);
+            for delivery in deliveries {
+                match delivery.wait().await {
+                    Ok(()) => delivered = true,
+                    Err(e) => debug!(agent = %id, "a turn was not delivered: {e}"),
+                }
+            }
+            me.finish_turn_delivery(id, epoch, delivered);
         });
     }
 
@@ -3091,10 +3117,14 @@ impl RunnerSupervisor {
         let delivery = runner.type_turn(turn.text);
         let me = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = delivery.wait().await {
-                debug!(agent = %agent, "a turn was not delivered: {e}");
-            }
-            me.finish_turn_delivery(agent, epoch);
+            let delivered = match delivery.wait().await {
+                Ok(()) => true,
+                Err(e) => {
+                    debug!(agent = %agent, "a turn was not delivered: {e}");
+                    false
+                }
+            };
+            me.finish_turn_delivery(agent, epoch, delivered);
         });
         Ok(false)
     }
@@ -3127,12 +3157,22 @@ impl RunnerSupervisor {
         }
     }
 
-    fn finish_turn_delivery(&self, id: AgentId, epoch: u64) {
-        if let Some(slot) = lock(&self.inner.slots)
+    /// The end of a turn delivery (`delivered`: at least one turn went in).
+    fn finish_turn_delivery(&self, id: AgentId, epoch: u64, delivered: bool) {
+        let swap = lock(&self.inner.slots)
             .get_mut(&id)
             .filter(|s| s.epoch == epoch)
-        {
-            slot.turns_in_flight -= 1;
+            .is_some_and(|slot| {
+                slot.turns_in_flight -= 1;
+                !delivered && slot.swap_pending
+            });
+        // A swap that waited for this delivery (TER-524). A failed delivery
+        // runs no turn, so no rest event comes: check the swap now. A
+        // delivered turn is in the harness, though `seen` can still read
+        // `idle` (the runner resolves the delivery before it reports
+        // `working`): the swap fires at the rest event after that turn.
+        if swap {
+            self.take_pending_restart(id, epoch);
         }
     }
 
@@ -5351,11 +5391,8 @@ impl Supervisor for RunnerSupervisor {
                 // A runner of another build (after a hot swap): it
                 // restarts with resume when the turn ends (R4).
                 slot.upgrade_pending = upgrade;
-                (slot.swap_pending || slot.upgrade_pending)
-                    && matches!(
-                        slot.seen,
-                        AgentStatus::Idle | AgentStatus::Waiting | AgentStatus::Blocked
-                    )
+                // Out of a turn: a runner `blocked` is in one.
+                (slot.swap_pending || slot.upgrade_pending) && slot.seen.is_resting()
             } else {
                 false
             };
@@ -5420,14 +5457,17 @@ impl Supervisor for RunnerSupervisor {
                             Plan::Live
                         } else {
                             slot.agent = agent.clone();
-                            let busy =
-                                matches!(slot.seen, AgentStatus::Working | AgentStatus::Starting)
-                                    || slot.runner.is_none();
-                            if busy {
+                            // In a turn unless the runner rests with no work
+                            // on its way: a runner `blocked` has a question
+                            // on screen or a stalled tool call in its turn.
+                            // The claim of the restart is under the same
+                            // lock as the check (`restart_requested`).
+                            if slot.can_swap_restart() {
+                                slot.restart_requested = true;
+                                Plan::Now
+                            } else {
                                 slot.swap_pending = true;
                                 Plan::Later
-                            } else {
-                                Plan::Now
                             }
                         }
                     }
@@ -5642,6 +5682,9 @@ mod tests {
         claimed: AtomicBool,
         typed: Mutex<Vec<String>>,
         typed_ready: tokio::sync::Notify,
+        /// `type_turn` gives a failed delivery.
+        deliver_fails: bool,
+        kills: AtomicU64,
     }
 
     impl RunnerHandle for ClaimRunner {
@@ -5715,7 +5758,8 @@ mod tests {
             panic!("unused")
         }
         fn kill(&self) -> BoxFuture<'_, terrarium_runner::Result<()>> {
-            panic!("unused")
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
         }
         fn wait(&self) -> BoxFuture<'_, terrarium_runner::ExitStatus> {
             panic!("unused")
@@ -5724,7 +5768,11 @@ mod tests {
             assert!(!self.claimed.load(Ordering::SeqCst));
             lock(&self.typed).push(text);
             self.typed_ready.notify_one();
-            terrarium_runner::test_support::delivered_turn()
+            if self.deliver_fails {
+                terrarium_runner::test_support::failed_turn()
+            } else {
+                terrarium_runner::test_support::delivered_turn()
+            }
         }
         fn claim_idle_stop(&self) -> BoxFuture<'_, terrarium_runner::Result<bool>> {
             Box::pin(async move {
@@ -5743,6 +5791,83 @@ mod tests {
                 self.claimed.store(false, Ordering::SeqCst);
                 Ok(())
             })
+        }
+    }
+
+    /// TER-524: a swap that waits for a turn delivery. A failed delivery
+    /// runs no turn and sends no rest event, so its end restarts the
+    /// harness. A delivered turn is in the harness while `seen` still reads
+    /// `idle` (the runner resolves the delivery before it reports
+    /// `working`): its end does not restart; the rest event after the turn
+    /// does.
+    #[tokio::test]
+    async fn a_waiting_swap_restarts_after_a_failed_delivery() {
+        swap_after_delivery(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_waiting_swap_does_not_restart_after_a_delivered_turn() {
+        swap_after_delivery(false).await;
+    }
+
+    async fn swap_after_delivery(fails: bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        ));
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude",
+            "workspace": "/w", "subscription": "max-y"
+        }))
+        .unwrap();
+        let id = agent.id;
+        let runner = Arc::new(ClaimRunner {
+            id,
+            pending_error: None,
+            entered: tokio::sync::Notify::new(),
+            reply: tokio::sync::Notify::new(),
+            lost: false,
+            claimed: AtomicBool::new(false),
+            typed: Mutex::default(),
+            typed_ready: tokio::sync::Notify::new(),
+            deliver_fails: fails,
+            kills: AtomicU64::new(0),
+        });
+        let mut slot = Slot::new(agent);
+        slot.runner = Some(runner.clone());
+        slot.phase = Phase::Running;
+        slot.seen = AgentStatus::Idle;
+        slot.reached_idle = true;
+        // A swap that came while the turn was on its way (Plan::Later).
+        slot.swap_pending = true;
+        lock(&sup.inner.slots).insert(id, slot);
+        sup.send_turn(id, "the turn".into()).await.unwrap();
+        let start = Instant::now();
+        loop {
+            let in_flight = lock(&sup.inner.slots)[&id].turns_in_flight;
+            if in_flight == 0 && (!fails || runner.kills.load(Ordering::SeqCst) > 0) {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "fails {fails}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The restart (when it comes) runs in a task of its own.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(lock(&runner.typed).len(), 1);
+        let slots = lock(&sup.inner.slots);
+        let slot = &slots[&id];
+        if fails {
+            assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
+            assert!(slot.restart_requested);
+            assert!(!slot.swap_pending);
+        } else {
+            assert_eq!(runner.kills.load(Ordering::SeqCst), 0, "the turn runs");
+            assert!(!slot.restart_requested);
+            assert!(slot.swap_pending, "the swap waits for the rest event");
         }
     }
 
@@ -6029,6 +6154,8 @@ mod tests {
                 claimed: AtomicBool::new(false),
                 typed: Mutex::default(),
                 typed_ready: tokio::sync::Notify::new(),
+                deliver_fails: false,
+                kills: AtomicU64::new(0),
             });
             let mut slot = Slot::new(agent);
             slot.runner = Some(runner);
@@ -6117,6 +6244,8 @@ mod tests {
                 claimed: AtomicBool::new(false),
                 typed: Mutex::default(),
                 typed_ready: tokio::sync::Notify::new(),
+                deliver_fails: false,
+                kills: AtomicU64::new(0),
             });
             let mut slot = Slot::new(agent);
             slot.runner = Some(runner.clone());

@@ -446,9 +446,13 @@ which its children (credential helpers, the ssh connection helper) inherit
 too. That fallback refuses (`bad_request`) each name that a secret grant
 cannot set (`terrarium_core::env_deny`: the loader, the C library, the
 shells, `SSH_*`, `GIT_*`, the language runtimes, the proxies and CA files,
-the harnesses; except the daemon's own `TERRARIUM_*` names, which carry
-multi-line values such as `TERRARIUM_GIT_TRAILERS` on each agent exec, and
-which neither the CLI nor its children read), and also `DOCKER_*`, `SSL_*`, `OTEL_*`, `GODEBUG`,
+`OPENSSL_*`, `KRB5*`, `DBUS_*`, the harnesses; except the four exact
+names under which the daemon sends multi-line values,
+`TERRARIUM_GIT_TRAILERS` on each agent exec and `TERRARIUM_COMMIT_HOOK`,
+`TERRARIUM_GIT_KNOWN_HOSTS` and `TERRARIUM_GIT_SSH_KEY` on a checkout,
+which neither the CLI nor its children read; any other `TERRARIUM_*` name
+is refused, because the daemon does not check the names of an agent's own
+exec env), and also `DOCKER_*`, `SSL_*`, `OTEL_*`, `GODEBUG`,
 `GETCONF_DIR`, `NIS_PATH`, `RESOLV_HOST_CONF` and each name that ends in
 `_PROXY` in any case (`terrarium_host::docker::steers_the_cli`). A
 single-line value over 60 KiB, and a name with whitespace or a leading `#`

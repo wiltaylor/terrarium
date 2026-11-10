@@ -154,8 +154,10 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   `BindPaths=` and `ReadWritePaths=` of the holder's workspace scope,
   `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
   each granted GPU and support node, `--expand-environment=no`. The
-  environment goes in a root-only `EnvironmentFile` under `state_dir`, not
-  on a command line.
+  environment goes in a root-only (0600) `EnvironmentFile` under
+  `state_dir`, not on a command line. Each value is double-quoted with `"`,
+  `\`, `` ` ``, and `$` escaped, so systemd reads it back byte for byte,
+  also a multi-line value such as the git trailers (TER-566).
 - **The shim** (`terrarium-host native`, hidden subcommand) is what the
   host agent's session runner starts. The request travels in
   `TERRARIUM_NATIVE_REQUEST` (environment, readable only by the same UID).
@@ -276,7 +278,8 @@ a workload user that changed since the start, GPU sessions without a
 verified `nvidia-smi`, a trusted path with a writable parent, a working
 directory outside the root
 (directly or by a symlink), `%` in a path, control characters, NUL in argv,
-bad environment names and newlines in values, unknown GPUs, device nodes
+bad environment names, NUL or a character that systemd's UTF-8 check
+refuses (U+FDD0 to U+FDEF, U+xFFFE, U+xFFFF) in values, unknown GPUs, device nodes
 that do not match the inventory, missing support nodes, and `stop` of a
 shared parent slice.
 
@@ -353,16 +356,23 @@ not run it on a shared target or a DGX Spark without that decision.
    ```sh
    v=<version>   # the version of the daemon and the host agent, without the v
    gh release download "v$v" --repo wiltaylor/terrarium \
-     --pattern "terrarium-host-helper-$v-linux-x86_64" --pattern SHA256SUMS
-   sha256sum -c --ignore-missing SHA256SUMS
+     --pattern "terrarium-host-helper-$v-linux-x86_64" --pattern SHA256SUMS &&
+   sha256sum -c --ignore-missing SHA256SUMS &&
    gh attestation verify "terrarium-host-helper-$v-linux-x86_64" --repo wiltaylor/terrarium \
-     --signer-workflow wiltaylor/terrarium/.github/workflows/ci.yml
-   install -o root -g root -m 0755 "terrarium-host-helper-$v-linux-x86_64" /usr/local/libexec/terrarium-host-helper
+     --signer-workflow wiltaylor/terrarium/.github/workflows/ci.yml &&
+   install -o root -g root -m 0755 "terrarium-host-helper-$v-linux-x86_64" /usr/local/libexec/terrarium-host-helper &&
    /usr/local/libexec/terrarium-host-helper --version
    ```
 
+   The commands are joined with `&&`: when the download or a check fails,
+   the install does not run.
+
    Without `gh`, take both files from the release page with `curl -fLO`
-   and run the `sha256sum` check. A release up to v0.35.0-alpha has no
+   and run the `sha256sum` check. `SHA256SUMS` comes from the same release
+   as the binary, so a matching hash proves only that the download is
+   whole, not where the binary comes from. Run the `gh attestation verify`
+   check before the install, on another machine with `gh` if this host has
+   none. A release up to v0.35.0-alpha has no
    such file: build it from the tag with `cargo build
    --release --locked -p terrarium-host --bin terrarium-host-helper`.
 

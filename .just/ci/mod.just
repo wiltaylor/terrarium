@@ -22,6 +22,7 @@ validate: require-uv
 	just ci::fmt-check
 	just ci::lint
 	just ci::test
+	if [ "${TERRARIUM_JOB_KIND:-}" = merge ]; then just ci::test-unprivileged; fi
 	just ci::scripts-test
 	just ci::dashboard-check
 
@@ -92,6 +93,11 @@ test: require-cargo
 		: > "$RESULTS_DIR/rust.json"
 	fi
 	python3 scripts/rust_tests.py --workspace --no-fail-fast
+
+# Run the terrarium-host test binaries of `ci::test` again as uid 1001 (the release CI user), not as root (TER-579). `ci::validate` runs it in merge jobs only
+[group('ci')]
+test-unprivileged: require-cargo
+	python3 scripts/unprivileged_tests.py
 
 # Opt-in parallel runner. RESULTS_DIR retains rust.xml and doctests.json.
 [group('ci')]

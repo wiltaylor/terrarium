@@ -43,6 +43,9 @@ It runs, in this order, the same parts as the GitHub CI `check` job
 1. `ci::fmt-check`: `cargo fmt --all --check`
 2. `ci::lint`: clippy over the workspace, warnings fail
 3. `ci::test`: `cargo test --workspace --no-fail-fast`
+   In a merge job (`TERRARIUM_JOB_KIND=merge`) it is followed by
+   `ci::test-unprivileged`: the built terrarium-host test binaries run again
+   as uid 1001, the user of the release CI (TER-579).
 4. `ci::scripts-test`: the Python tests under `scripts/`
 5. `ci::dashboard-check`: `npm run check`, then the dashboard unit tests (`npm run test -- --run`) in `dashboard/`
 
