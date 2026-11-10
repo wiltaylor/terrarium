@@ -38,7 +38,7 @@ use zeroize::Zeroizing;
 
 use super::Kind;
 use crate::api::Shared;
-use crate::api::backups::{CreateBody, create_online};
+use crate::api::backups::{CreateBody, create_queued};
 use crate::events::EventDraft;
 use crate::store::mail::{self, Address, Outgoing};
 
@@ -461,7 +461,7 @@ async fn run_once(state: &Shared, cfg: &Config) -> Result<Report, (Kind, String)
         passphrase: Some(pass.as_str().to_owned()),
         base: None,
     };
-    let created = create_online(state, body, ACTOR)
+    let created = create_queued(state, body, ACTOR)
         .await
         .map_err(|e| (kind, e.message))?;
     let verified = {

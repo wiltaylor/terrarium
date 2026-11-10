@@ -11504,7 +11504,8 @@ turns in one project, and a backup is of the whole daemon.
 ### 32.5 The API
 
 The operator only (`403` for an agent, also a sysadmin). One backup runs at
-a time: a create while one runs is `409 conflict`.
+a time per backup dir: a create while one runs is `409 conflict`. A scheduled run waits
+for a running backup instead.
 
 #### `POST /api/backups`
 

@@ -6,6 +6,7 @@
 //! under the daemon.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
@@ -23,8 +24,16 @@ use crate::backup::{self, CreateOptions, Created, DbSource, Kind, Roots};
 use crate::error::{ApiError, ApiResult};
 use crate::policy;
 
-/// One backup at a time, from the API or the schedule.
-static BUSY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// One backup at a time per backup dir, from the API or the schedule.
+/// Per dir, not one for the process: the tests run many daemons in one.
+static BUSY: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn busy_lock(dir: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
+    let mut m = BUSY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    m.entry(dir.to_path_buf()).or_default().clone()
+}
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -60,11 +69,24 @@ pub fn dir(state: &Shared) -> PathBuf {
 /// `VACUUM INTO` on the daemon's own connection (one consistent
 /// snapshot); the files are read as they are. `actor` labels the audit row.
 pub async fn create_online(state: &Shared, body: CreateBody, actor: &str) -> ApiResult<Created> {
-    let Ok(_busy) = BUSY.try_lock() else {
+    let lock = busy_lock(&dir(state));
+    let Ok(_busy) = lock.try_lock() else {
         return Err(ApiError::conflict(
             "a backup runs now; try again when it ends",
         ));
     };
+    create_locked(state, body, actor).await
+}
+
+/// [`create_online`], but a backup that runs now is waited for, not an
+/// error: for the schedule.
+pub async fn create_queued(state: &Shared, body: CreateBody, actor: &str) -> ApiResult<Created> {
+    let lock = busy_lock(&dir(state));
+    let _busy = lock.lock().await;
+    create_locked(state, body, actor).await
+}
+
+async fn create_locked(state: &Shared, body: CreateBody, actor: &str) -> ApiResult<Created> {
     let dir = dir(state);
     let kind = body.kind.unwrap_or(Kind::Full);
     let base = match body.base.as_deref() {
