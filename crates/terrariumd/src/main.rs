@@ -865,6 +865,57 @@ fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Resul
                 ),
             );
         }
+        BackupCommand::Drill {
+            file,
+            base,
+            into,
+            keep,
+            passphrase,
+            json,
+        } => {
+            let scratch = into.clone().unwrap_or_else(|| {
+                default_dir.join(format!("{}{}", backup::DRILL_PREFIX, ulid::Ulid::new()))
+            });
+            // Checked here too: the cleanup below deletes the dir, so it
+            // must not hold anything of its own.
+            if std::fs::read_dir(&scratch).is_ok_and(|mut d| d.next().is_some()) {
+                anyhow::bail!("the drill dir {} is not empty", scratch.display());
+            }
+            let r = with_passphrase(passphrase, |p| {
+                let r = backup::drill(file, base.as_deref(), p.as_deref(), &scratch);
+                if r.is_err() && !*keep {
+                    let _ = std::fs::remove_dir_all(&scratch);
+                }
+                r
+            });
+            if !*keep {
+                let _ = std::fs::remove_dir_all(&scratch);
+            }
+            let r = r?;
+            let left = if *keep {
+                format!(
+                    "; the restored tree is in {} (it holds the secrets: delete it)",
+                    r.dir.display()
+                )
+            } else {
+                String::new()
+            };
+            print(
+                *json,
+                &serde_json::to_value(&r)?,
+                format!(
+                    "drill passed: {} backup {} restored into a scratch dir: {} entries, {} files, \
+                     database integrity {}, schema version {}{}{left}",
+                    r.kind,
+                    r.id,
+                    r.entries,
+                    r.files,
+                    r.integrity,
+                    r.db_user_version,
+                    if r.secrets_key { ", secrets.key present" } else { "" }
+                ),
+            );
+        }
         BackupCommand::Restore {
             file,
             base,

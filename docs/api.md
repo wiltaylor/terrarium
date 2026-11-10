@@ -11400,6 +11400,36 @@ has no restore, because a restore replaces the database under the daemon.
    root that the backup does not have (`work`, without `--work`) does not
    change; `--skip-work` leaves the work root too.
 
+**The restore drill.** Test a backup before you need it:
+
+```sh
+terrariumd backup drill <file> [--base <full>] [--passphrase-file <file>] [--into <dir>] [--keep] [--json]
+```
+
+The drill restores the backup into an empty scratch dir (default: a new
+`.drill-<id>` dir in the backup dir), with the roots `state`, `config`,
+and `work` in it. It then checks that each manifest entry is in place
+with its size, that the restored database passes `PRAGMA
+integrity_check` and has the schema version of the header, and that
+`secrets.key` is back. The live data does not change, so the daemon can
+run. The scratch dir holds the secrets in plain form: the drill deletes it
+at the end unless `--keep`. A dir with content is refused. Run a drill
+after the first scheduled backup, after a key rotation, and after an
+upgrade of terrariumd.
+
+**The restore, step by step.**
+
+1. Pick the backup: `terrariumd backup ls`. For a diff, its base must be in
+   the same dir (or give `--base`).
+2. Get the passphrase: the `backup-key` secret is in the backup itself, so
+   use your off-server copy. A backup older than the last rotation needs
+   the old passphrase.
+3. Drill it: `terrariumd backup drill <file> --passphrase-file <file>`.
+4. Stop the daemon.
+5. Restore: `terrariumd backup restore <file> --passphrase-file <file>`.
+6. Start the daemon. Check the board, the agents, and `terrarium secret
+   ls`.
+
 Delete the `.terrarium-pre-restore-*` dirs when the daemon runs well. The
 restore writes the files as the user that runs it: run it as the user of
 the daemon. A database from an older terrariumd migrates at the next
@@ -11408,18 +11438,65 @@ migrations of this build) does not start.
 
 ### 32.4 Scheduled backups
 
-`TERRARIUM_BACKUP_SCHEDULE` (default `off`; `daily`, `weekly`, or a
-duration of `1h` or more): a daemon task makes a backup one interval after
-the newest backup in the dir, and not before 10 minutes after the start. A
-failed run waits one interval too. The backup is `full` when the dir has no
-full backup or when the newest is older than `TERRARIUM_BACKUP_FULL_EVERY`
-(default `7d`); else it is a `diff` of the newest full backup. Then the
-task keeps the newest `TERRARIUM_BACKUP_KEEP` (default `4`) full backups and
-their diffs, and deletes the rest (audit `backup.prune`).
-`TERRARIUM_BACKUP_WORK=on` adds the workspaces.
-`TERRARIUM_BACKUP_PASSPHRASE_FILE` seals each backup with the first line
-of that file. The audit actor is `system:backup`. A failure writes the
-audit row `backup.failed` with the error.
+The settings are daemon env vars:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TERRARIUM_BACKUP_SCHEDULE` | `off` | `daily`, `weekly`, or a duration of `1h` or more. |
+| `TERRARIUM_BACKUP_FULL_EVERY` | `7d` | The longest time between two full backups. |
+| `TERRARIUM_BACKUP_KEEP` | `4` | The full backups to keep, each with its diffs. |
+| `TERRARIUM_BACKUP_WORK` | `off` | `on`: add the workspaces. |
+| `TERRARIUM_BACKUP_KEY_SECRET` | `backup-key` | The global secret with the passphrase. |
+| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. |
+
+A bad value stops the daemon start. With a schedule, a daemon task makes a
+backup one interval after the newest backup in the dir, and not before 10
+minutes after the start. A failed run waits one interval too.
+
+**Kind.** The backup is `full` when the dir has no full backup, when the
+newest is older than `TERRARIUM_BACKUP_FULL_EVERY`, or when the key does
+not open the newest full backup (it is not sealed, or the key was
+rotated). Else it is a `diff` of the newest full backup. A diff and its
+base so always have the same key.
+
+**The key.** A scheduled backup holds every secret, so it is always
+sealed (§32.2). The passphrase is the `passphrase` field of the global
+secret `backup-key`, else its `value` field (`terrarium secret set
+backup-key`; an `api_key` or a `generic` secret). With no key the run
+fails and the operator gets a mail. The key never goes into a log, an
+event, an audit row, or an error. Keep a copy of the passphrase off the
+server: the secret store is in the backup, so a lost server takes the
+secret with it.
+
+**Rotation.** Set a new value on the secret. The next run is a full backup
+with the new key. The older backups keep the old key: keep the old
+passphrase until the retention deletes the last of them (after
+`TERRARIUM_BACKUP_KEEP` newer full backups). Restore or verify an old
+backup with the old passphrase (`--passphrase-file`).
+
+**Verify and record.** Each run reads the new backup back and checks each
+file against the manifest (§32.3 `verify`). The audit actor is
+`system:backup`. The rows are `backup.create`, `backup.verify` (`name`,
+`id`, `kind`, `checked_files`), `backup.prune`, `backup.failed` (`kind`,
+`error`), `backup.recovered`, and `backup.missed` (`due`). Each run also
+writes a global event of the kind `backup` with `change`: `verified`,
+`pruned`, `failed` (`level: error`), `recovered`, or `missed`
+(`level: error`). A backup that does not verify moves to
+`.unverified-<name>` in the backup dir: it is not a base and not a kept
+backup.
+
+**Retention.** Only a full backup that verified prunes the dir: it keeps
+the newest `TERRARIUM_BACKUP_KEEP` full backups and their diffs, and
+deletes the rest. Nothing is deleted before a newer full backup is
+verified, and nothing is deleted while the runs fail.
+
+**Alerts.** The first failed run of a streak mails the operator from
+`system` (subject `Scheduled backup failed`, with the error). The next
+failures write events only, and the first good run writes `recovered`. A
+missed run (no backup and no try for one interval and one hour, for
+example after the daemon was down) mails the operator once per due time
+(subject `Scheduled backup missed`). A new backup then runs 10 minutes
+after the start.
 
 This task is not a project schedule (§19): a project schedule starts agent
 turns in one project, and a backup is of the whole daemon.

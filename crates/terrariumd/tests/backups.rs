@@ -192,3 +192,203 @@ fn the_offline_commands_round_trip_a_full_and_a_diff() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("stop it first"));
 }
+
+/// The scheduled runs (docs/api.md §32.4): the key from the secret, a
+/// failure alert once per streak, a verify of each backup, a rotated key
+/// that starts a new full backup, a prune only after a verified full
+/// backup, a missed run, and a restore drill of the newest backup. No key
+/// is in an event, an audit row, or a mail.
+#[tokio::test]
+async fn scheduled_runs_seal_verify_rotate_prune_and_alert() {
+    use std::time::Duration;
+    use terrariumd::backup::schedule::{Config, Runner};
+    use terrariumd::backup::{self, Kind};
+
+    const KEY1: &str = "first backup pass phrase 1";
+    const KEY2: &str = "second backup pass phrase 2";
+    let td = TestDaemon::start().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let dir = backup::default_dir(&td.state);
+    let mut runner = Runner::new(Config {
+        interval: Some(Duration::from_secs(86_400)),
+        keep: 2,
+        ..Config::default()
+    });
+
+    // No key: the run fails, makes no backup, and mails once per streak.
+    let r = runner.run(&state).await;
+    assert!(r.error.as_deref().unwrap().contains("backup-key"), "{r:?}");
+    assert!(r.mailed);
+    let r = runner.run(&state).await;
+    assert!(r.error.is_some() && !r.mailed, "{r:?}");
+    assert!(backup::list(&dir).unwrap().is_empty());
+
+    td.put(
+        "/api/secrets/global/backup-key",
+        json!({"kind": "api_key", "fields": {"value": KEY1}}),
+    )
+    .await
+    .ok();
+    let f1 = runner.run(&state).await;
+    assert!(f1.error.is_none() && f1.verified, "{f1:?}");
+    assert_eq!(f1.kind, Kind::Full);
+    let d1 = runner.run(&state).await;
+    assert_eq!(d1.kind, Kind::Diff, "{d1:?}");
+    let d1_path = dir.join(d1.name.as_ref().unwrap());
+    let h = backup::read_header(&d1_path).unwrap();
+    assert!(h.encryption.is_some());
+
+    // Rotate the key: the next run is a full backup with the new key.
+    td.put(
+        "/api/secrets/global/backup-key",
+        json!({"kind": "api_key", "fields": {"value": KEY2}}),
+    )
+    .await
+    .ok();
+    let f2 = runner.run(&state).await;
+    assert_eq!(f2.kind, Kind::Full, "{f2:?}");
+    assert!(f2.removed.is_empty());
+    let d2 = runner.run(&state).await;
+    assert_eq!(d2.kind, Kind::Diff, "{d2:?}");
+    // The old backups stay restorable with the previous key.
+    backup::verify(&d1_path, None, Some(KEY1)).unwrap();
+    assert!(backup::verify(&d1_path, None, Some(KEY2)).is_err());
+
+    // A third full backup verifies: the oldest full and its diff go.
+    runner.cfg.full_every = Duration::ZERO;
+    let f3 = runner.run(&state).await;
+    assert_eq!(f3.kind, Kind::Full, "{f3:?}");
+    let mut removed = f3.removed.clone();
+    removed.sort();
+    let mut want = vec![f1.name.clone().unwrap(), d1.name.clone().unwrap()];
+    want.sort();
+    assert_eq!(removed, want);
+    let names: Vec<String> = backup::list(&dir)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.name)
+        .collect();
+    assert_eq!(names.len(), 3, "{names:?}");
+
+    // A missed run mails once per due time.
+    let later = chrono::Utc::now() + chrono::Duration::days(3);
+    assert!(runner.check_missed(&state, later, None).await);
+    assert!(!runner.check_missed(&state, later, None).await);
+    // A run that was tried is not missed.
+    let mut fresh = Runner::new(runner.cfg.clone());
+    assert!(!fresh.check_missed(&state, later, Some(later)).await);
+
+    // The restore drill of the newest diff: the restored database has
+    // the key secret, and the live data does not change.
+    let d2_path = dir.join(d2.name.as_ref().unwrap());
+    let scratch = dir.join(format!("{}t", backup::DRILL_PREFIX));
+    let drilled = backup::drill(&d2_path, None, Some(KEY2), &scratch).unwrap();
+    assert_eq!(drilled.integrity, "ok");
+    assert!(drilled.secrets_key);
+    let c = rusqlite::Connection::open(scratch.join("state/terrarium.db")).unwrap();
+    let n: i64 = c
+        .query_row(
+            "SELECT count(*) FROM secrets WHERE scope = 'global' AND name = 'backup-key'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+    std::fs::remove_dir_all(&scratch).unwrap();
+
+    // Each run is in the audit and the event log; no key is anywhere.
+    let (actions, events, mails) = state
+        .db
+        .read(|c| {
+            let col = |sql: &str| -> Vec<String> {
+                let mut s = c.prepare(sql).unwrap();
+                s.query_map([], |r| r.get::<_, String>(0))
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect()
+            };
+            Ok((
+                col("SELECT action || ' ' || detail FROM audit WHERE actor = 'system:backup'"),
+                col("SELECT summary || ' ' || payload FROM events WHERE kind = 'backup'"),
+                col("SELECT coalesce(subject, '') || ' ' || body FROM messages WHERE to_kind = 'operator' AND subject LIKE 'Scheduled backup%'"),
+            ))
+        })
+        .await
+        .unwrap();
+    let count = |p: &str| actions.iter().filter(|a| a.starts_with(p)).count();
+    assert_eq!(count("backup.failed "), 2, "{actions:?}");
+    assert_eq!(count("backup.recovered "), 1, "{actions:?}");
+    assert_eq!(count("backup.verify "), 5, "{actions:?}");
+    assert_eq!(count("backup.prune "), 1, "{actions:?}");
+    assert_eq!(count("backup.missed "), 1, "{actions:?}");
+    assert!(events.iter().any(|e| e.contains("\"change\":\"verified\"")), "{events:?}");
+    assert!(events.iter().any(|e| e.contains("\"change\":\"failed\"")), "{events:?}");
+    assert_eq!(mails.len(), 2, "{mails:?}");
+    for text in actions.iter().chain(&events).chain(&mails) {
+        assert!(!text.contains(KEY1) && !text.contains(KEY2), "a key leaked: {text}");
+    }
+}
+
+/// `terrariumd backup drill`: a sealed backup restores into a scratch dir
+/// that goes at the end; a dir with content is refused and kept.
+#[test]
+fn the_drill_command_restores_into_a_scratch_dir_and_removes_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    let state = d.join("state");
+    std::fs::create_dir_all(state.join("credentials")).unwrap();
+    std::fs::create_dir_all(d.join("config")).unwrap();
+    std::fs::write(state.join("credentials/git"), "token-1").unwrap();
+    drop(terrariumd::db::open(&state.join("terrarium.db")).unwrap());
+    let pass = d.join("pass");
+    std::fs::write(&pass, "drill pass phrase\n").unwrap();
+    let pass = pass.to_str().unwrap();
+    let full = json_out(&terrariumd(
+        d,
+        &state,
+        &["backup", "create", "--passphrase-file", pass, "--json"],
+    ));
+    let file = full["path"].as_str().unwrap().to_owned();
+    let r = json_out(&terrariumd(
+        d,
+        &state,
+        &["backup", "drill", &file, "--passphrase-file", pass, "--json"],
+    ));
+    assert_eq!(r["integrity"], "ok");
+    assert_eq!(r["id"], full["header"]["id"]);
+    assert!(r["files"].as_u64().unwrap() > 0);
+    assert!(!Path::new(r["dir"].as_str().unwrap()).exists());
+    // The live data did not change.
+    assert_eq!(
+        std::fs::read_to_string(state.join("credentials/git")).unwrap(),
+        "token-1"
+    );
+
+    let busy = d.join("busy");
+    std::fs::create_dir_all(&busy).unwrap();
+    std::fs::write(busy.join("mine"), "x").unwrap();
+    let out = terrariumd(
+        d,
+        &state,
+        &[
+            "backup",
+            "drill",
+            &file,
+            "--passphrase-file",
+            pass,
+            "--into",
+            busy.to_str().unwrap(),
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(busy.join("mine").is_file());
+    // A wrong passphrase fails.
+    let bad = d.join("bad");
+    std::fs::write(&bad, "wrong\n").unwrap();
+    let out = terrariumd(
+        d,
+        &state,
+        &["backup", "drill", &file, "--passphrase-file", bad.to_str().unwrap()],
+    );
+    assert!(!out.status.success());
+}
