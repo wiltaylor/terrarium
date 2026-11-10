@@ -57,10 +57,9 @@ fn forward_socket(dir: &RunDir) -> ApiResult<(PathBuf, Option<tempfile::TempDir>
     // `tempdir_in` uses the umask (often 0755): make it private before the
     // SSH client binds the socket in it.
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(short.path(), std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| {
-            ApiError::internal(format!("cannot make the Docker forward dir private: {e}"))
-        })?;
+    std::fs::set_permissions(short.path(), std::fs::Permissions::from_mode(0o700)).map_err(
+        |e| ApiError::internal(format!("cannot make the Docker forward dir private: {e}")),
+    )?;
     let socket = short.path().join("docker.sock");
     Ok((socket, Some(short)))
 }
@@ -612,7 +611,10 @@ mod tests {
         assert!(socket.starts_with("/tmp"));
         assert!(socket.as_os_str().len() <= MAX_SOCKET_PATH);
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(short.path()).unwrap().permissions().mode();
+        let mode = std::fs::metadata(short.path())
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o700);
         std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let path = short.path().to_owned();
@@ -626,7 +628,11 @@ mod tests {
         assert!(dir.starts_with("/w/slot-1/.git/terrarium/d-"));
         let long = format!("/w/{}", "x".repeat(60));
         let err = relay_dir(&long).unwrap_err();
-        assert!(err.message.contains("107-byte Unix socket limit"), "{}", err.message);
+        assert!(
+            err.message.contains("107-byte Unix socket limit"),
+            "{}",
+            err.message
+        );
         assert!(err.message.contains(&long), "{}", err.message);
     }
 
