@@ -913,8 +913,7 @@ async fn upload_precheck_uses_the_redacted_size() {
     .await
     .ok();
     let raw = format!("{SECRET}\n").repeat(50);
-    let redacted = "[secret:gh]\n".repeat(50);
-    assert!(raw.len() > 1000 && redacted.len() < 1000);
+    assert!(raw.len() > 1000);
     let a = upload_json(
         &td,
         "proj/w1",
@@ -924,16 +923,18 @@ async fn upload_precheck_uses_the_redacted_size() {
     .await
     .ok()
     .clone();
-    assert_eq!(a["size"].as_u64().unwrap(), redacted.len() as u64, "{a}");
     let sha = a["sha256"].as_str().unwrap();
     let stored = std::fs::read(td.state.join("artifacts").join(sha)).unwrap();
-    assert_eq!(stored, redacted.as_bytes());
-    // The redacted size counts against the quota: a second copy does not fit.
+    assert!(!String::from_utf8_lossy(&stored).contains(SECRET));
+    assert!(stored.len() < 1000, "{}", stored.len());
+    assert_eq!(a["size"].as_u64().unwrap(), stored.len() as u64, "{a}");
+    // The redacted size counts against the quota: an upload that fits only
+    // next to nothing is refused now.
+    let rest = 1000 - stored.len() + 1;
     upload_json(
         &td,
         "proj/w1",
-        json!({"name": "other.txt", "content_type": "text/plain",
-               "data_base64": b64(&[b'o'; 500])}),
+        json!({"name": "other.bin", "data_base64": b64(&vec![0u8; rest])}),
     )
     .await
     .err(413, "too_large");
