@@ -57,11 +57,14 @@ class UnprivilegedTests(unittest.TestCase):
 
     def test_the_child_gets_its_dirs_and_not_the_job_env(self):
         env = {"PATH": "/usr/bin", "TERRARIUM_TOKEN": "x", "HOME": "/root", "RUST_BACKTRACE": "1",
-               "TMPDIR": "/tmp"}
+               "TMPDIR": "/tmp", "RUSTUP_HOME": "/r", "RUSTUP_TOOLCHAIN": "1.97.1",
+               "CARGO_HOME": "/c", "CARGO_TARGET_DIR": "/t"}
         with mock.patch.dict(os.environ, env, clear=True):
             child = ut.child_env("/tmp/h", "/tmp/t")
-        self.assertEqual(child, {"PATH": "/usr/bin", "RUST_BACKTRACE": "1", "HOME": "/tmp/h",
-                                 "TMPDIR": "/tmp/t", "USER": "ci", "LOGNAME": "ci"})
+        self.assertEqual(child, {"PATH": "/usr/bin", "RUST_BACKTRACE": "1", "RUSTUP_HOME": "/r",
+                                 "RUSTUP_TOOLCHAIN": "1.97.1", "CARGO_HOME": "/c",
+                                 "HOME": "/tmp/h", "TMPDIR": "/tmp/t", "USER": "ci",
+                                 "LOGNAME": "ci"})
 
     def test_each_binary_gets_fresh_private_dirs(self):
         with tempfile.TemporaryDirectory() as root, \
