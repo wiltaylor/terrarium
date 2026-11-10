@@ -90,6 +90,24 @@ const TICK: Duration = Duration::from_secs(10);
 /// The kind of the event that the engine writes when the wait of a batch
 /// rule ends (`job_queue` with `max_wait_minutes`, TER-172).
 pub const TIMER_KIND: &str = "rule.timer";
+
+/// The hold of the engine timers (`AppState::rule_timers`): while a test
+/// holds it, the engine writes no timer event ([`fire_timers`]), so only
+/// the planned events run the rules. The group expiry still runs.
+#[derive(Debug, Default)]
+pub struct TimerHold(std::sync::atomic::AtomicBool);
+
+impl TimerHold {
+    /// Whether the timers are held.
+    pub fn held(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Tests: hold the timers (`true`) or let them fire again (`false`).
+    pub fn hold(&self, on: bool) {
+        self.0.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 /// The actor of a timer event: the engine.
 const TIMER_ACTOR: &str = "system";
 
@@ -133,6 +151,14 @@ pub struct Cache {
     fired: HashMap<(String, String), String>,
     /// When [`fire_timers`] last ran.
     timers_at: Option<std::time::Instant>,
+    /// The merge groups whose repair waits for a pending rule run, with
+    /// the time of the first wait ([`groups::reconcile_merge_groups`]).
+    ///
+    /// [`groups::reconcile_merge_groups`]: crate::store::groups::reconcile_merge_groups
+    merge_waits: HashMap<String, DateTime<Utc>>,
+    /// A tick came and the merge group repair has not run since: it waits
+    /// for a planning write that reads the log to its end.
+    merge_due: bool,
 }
 
 /// One project for [`load`]: its rules file (hash, time) and its flow.
@@ -1737,16 +1763,21 @@ async fn drive_pass(state: &Shared, cache: &mut Cache, lanes: &mut Lanes) -> Api
         // Drain wakes before reading the durable log, never after it.
         while let Ok(_) | Err(TryRecvError::Lagged(_)) = rx.try_recv() {}
         let projects = load(&state.db, cache).await?;
-        if cache.timers_at.is_none_or(|at| at.elapsed() >= TICK) {
+        let tick = cache.timers_at.is_none_or(|at| at.elapsed() >= TICK);
+        if tick {
             cache.timers_at = Some(std::time::Instant::now());
+            cache.merge_due = true;
             if let Err(e) = state
                 .db
-                .write("rule:group-timeout", crate::store::groups::expire)
+                .write("rule:group-timeout", crate::store::groups::close_expired)
                 .await
             {
                 warn!("the rule engine cannot close expired groups: {e}");
             }
-            if let Err(e) = fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await {
+            if !state.rule_timers.held()
+                && let Err(e) =
+                    fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await
+            {
                 warn!("the rule engine cannot check the timers: {e}");
             }
         }
@@ -1754,13 +1785,36 @@ async fn drive_pass(state: &Shared, cache: &mut Cache, lanes: &mut Lanes) -> Api
         // Discover runnable lanes in the planning transaction. A separate
         // read would queue behind every worker again before we can plan
         // the next events under load.
-        let (more, pending) = state
+        // The merge group repair runs in this write, after a plan that read
+        // the log to its end (`more` false): then each event before this
+        // write has its runs, and a group with a pending run waits
+        // (TER-471). With `more`, the events after the batch have no runs
+        // yet, so the repair stays due for a later pass. Its error rolls
+        // back only the repair.
+        let waits = cache.merge_due.then(|| cache.merge_waits.clone());
+        let (more, pending, waits) = state
             .db
             .write("system", move |t| {
                 let (_, more) = plan_events(t, &projects, Utc::now())?;
-                Ok((more, pending_lanes(t)?))
+                let waits = match waits.filter(|_| !more) {
+                    Some(w) => match t.savepoint(|t| {
+                        crate::store::groups::reconcile_merge_groups(t, &w, Utc::now())
+                    }) {
+                        Ok(still) => Some(still),
+                        Err(e) => {
+                            warn!("the rule engine cannot repair the merge groups: {e}");
+                            Some(w)
+                        }
+                    },
+                    None => None,
+                };
+                Ok((more, pending_lanes(t)?, waits))
             })
             .await?;
+        if let Some(w) = waits {
+            cache.merge_waits = w;
+            cache.merge_due = false;
+        }
         lanes.reap();
         lanes.start(pending, |lane| {
             let state = state.clone();

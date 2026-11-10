@@ -4892,6 +4892,8 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         .await
         .unwrap()
         .def;
+    // A killed earlier run with the same PID can leave this name behind.
+    drop(ContainerGuard(name.clone()));
     let _guard = ContainerGuard(name.clone());
     terrariumd::executor::lifecycle(
         &state,
@@ -4916,42 +4918,146 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         );
         serde_json::from_slice::<Value>(&out.stdout).unwrap()[0].clone()
     };
+    // Facts from earlier steps (the inspect before recreate, the docker cp
+    // probe), printed at once and again in each failure.
+    let notes = std::cell::RefCell::new(Vec::<String>::new());
+    let note = |line: String| {
+        println!("{line}");
+        notes.borrow_mut().push(line);
+    };
+    // On failure: the container, the workspace dir as the container sees
+    // it, and the daemon trace, so that a gate failure names its step.
+    let diag = |step: &str| {
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("docker")
+                .args(args)
+                .output()
+                .unwrap();
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        format!(
+            "{step}\n{}\ndocker inspect: {}\nworkspace dir:\n{}\ndaemon trace:\n{}",
+            notes.borrow().join("\n"),
+            run(&[
+                "inspect",
+                "--format",
+                "{{json .Id}} {{json .Config.Image}} {{json .State}} {{json .Mounts}}",
+                &name,
+            ]),
+            run(&["exec", "-u", "0", &name, "ls", "-lan", "/work/terra/worker"]),
+            lab.trace.text()
+        )
+    };
+    // The managed container is up when Docker reports it running, not when
+    // the API call returns. Poll before each exec.
+    let wait_running = async |step: &str| {
+        let start = std::time::Instant::now();
+        while start.elapsed() < LINK_WAIT {
+            let out = std::process::Command::new("docker")
+                .args(["inspect", "--format", "{{.State.Running}}", &name])
+                .output()
+                .unwrap();
+            if out.status.success() && out.stdout.trim_ascii() == b"true" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!(
+            "{}",
+            diag(&format!("{step}: not running after {LINK_WAIT:?}"))
+        );
+    };
+    let read_seed = |step: &str| {
+        let out = std::process::Command::new("docker")
+            .args(["exec", &name, "cat", "/work/terra/worker/seed"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && out.stdout == b"workspace-survives-recreate\n",
+            "{}",
+            diag(&format!(
+                "{step}: cat exited {:?}, stdout {:?}, stderr {:?}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        );
+    };
+    wait_running("up").await;
     let before = inspect();
-    // With DOCKER_HOST=ssh://..., this bind source is on the daemon,
-    // not on the test host. Transfer the seed through Docker's archive
-    // API instead of assuming the daemon can read a local temp file.
-    let seed = state.work_dir.join("terra/worker/seed");
-    std::fs::write(&seed, "workspace-survives-recreate\n").unwrap();
-    let copied = std::process::Command::new("docker")
+    note(format!(
+        "docker inspect before: {}",
+        json!({"Id":before["Id"],"Image":before["Image"],"Mounts":before["Mounts"]})
+    ));
+    // With DOCKER_HOST set, this bind source is on the Docker daemon's
+    // machine, not on the test host. Write the seed in the container, as
+    // root because Docker creates a missing bind source as root, and read
+    // it back before `down`: an empty seed after recreate then names the
+    // recreate, not the write.
+    let wrote = std::process::Command::new("docker")
         .args([
-            "cp",
-            seed.to_str().unwrap(),
-            &format!("{name}:/work/terra/worker/seed"),
+            "exec",
+            "-u",
+            "0",
+            &name,
+            "sh",
+            "-c",
+            "printf 'workspace-survives-recreate\\n' > /work/terra/worker/seed && sync",
         ])
         .output()
         .unwrap();
     assert!(
-        copied.status.success(),
+        wrote.status.success(),
         "{}",
-        String::from_utf8_lossy(&copied.stderr)
+        diag(&format!(
+            "write seed: {}",
+            String::from_utf8_lossy(&wrote.stderr)
+        ))
     );
-    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    read_seed("before down");
+    // Probe, not an assert: does `docker cp` (the archive API, through the
+    // gate's relay) keep the body of a file in the workspace? The source is
+    // outside the work root, so only docker cp can put it in the bind
+    // source, also with a local Docker daemon (TER-527).
+    let probe = lab.bins.path().join("seed-cp");
+    std::fs::write(&probe, "docker-cp-probe\n").unwrap();
+    let copied = std::process::Command::new("docker")
+        .args([
+            "cp",
+            probe.to_str().unwrap(),
+            &format!("{name}:/work/terra/worker/seed-cp"),
+        ])
+        .output()
+        .unwrap();
+    let read = std::process::Command::new("docker")
+        .args(["exec", &name, "cat", "/work/terra/worker/seed-cp"])
+        .output()
+        .unwrap();
+    note(format!(
+        "docker cp probe: cp exited {:?} (stderr {:?}), cat exited {:?}, {} bytes, content ok: {}",
+        copied.status.code(),
+        String::from_utf8_lossy(&copied.stderr).trim(),
+        read.status.code(),
+        read.stdout.len(),
+        read.stdout == b"docker-cp-probe\n"
+    ));
+    let down = lab.td.post_empty("/api/targets/dbox/down").await;
+    down.ok();
+    assert_eq!(down.body["state"], "stopped", "{}", diag("down"));
     lab.td
         .patch("/api/targets/dbox", json!({"image":"alpine:3.21"}))
         .await
         .ok();
-    lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
+    let recreated = lab.td.post_empty("/api/targets/dbox/recreate").await;
+    recreated.ok();
+    assert_eq!(recreated.body["state"], "running", "{}", diag("recreate"));
+    wait_running("recreate").await;
     let after = inspect();
-    let content = std::process::Command::new("docker")
-        .args(["exec", &name, "cat", "/work/terra/worker/seed"])
-        .output()
-        .unwrap();
-    assert!(content.status.success());
-    assert_eq!(content.stdout, b"workspace-survives-recreate\n");
-    println!(
-        "docker inspect before: {}",
-        json!({"Id":before["Id"],"Image":before["Image"],"Mounts":before["Mounts"]})
-    );
+    read_seed("after recreate");
     println!(
         "docker inspect after: {}",
         json!({"Id":after["Id"],"Image":after["Image"],"Mounts":after["Mounts"]})

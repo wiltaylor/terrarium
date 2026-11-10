@@ -240,7 +240,7 @@ async fn fetch_script(
         argv: vec!["sh".into(), "-c".into(), s.script.clone()],
         env,
         timeout_secs: Some(s.timeout_secs),
-        holder: Some(format!("{project}/pipelines")),
+        holder: Some(terrarium_host::native::service_holder(project, "pipelines")),
         ..Default::default()
     };
     let run = match executor::start_cmd(state, &tdef, &cmd) {

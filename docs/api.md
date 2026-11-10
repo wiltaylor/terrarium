@@ -8654,7 +8654,7 @@ any number of `if_card` and `if_job` conditions on the current state
 `card_move` (`to`, `from?`, `comment?`, `position?` `top` or `bottom`),
 `card_label` (`add?`, `remove?`), `card_comment` (`text`), `card_assign`
 (`who`), `card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
-`job_queue` (`kind` `validate`, `merge`, or `batch`; `from`, `limit?`,
+`card_blocked_mail`, `card_done_mail`, `job_queue` (`kind` `validate`, `merge`, or `batch`; `from`, `limit?`,
 `min_cards?`, and `max_wait_minutes?` for a batch only;
 `max_wait_minutes` needs `min_cards`, and `min_cards` is at most
 `limit`), `job_cancel`, `job_rerun` (`max_attempts?`), `job_split`,
@@ -8904,6 +8904,15 @@ expression. No manual close endpoint exists.
   `project:<name>`, or an agent; one whose placeholder is empty is left
   out). The body defaults to the subject. A rule notifies the operator
   with `to = ["operator"]`.
+- `card_blocked_mail`, `card_done_mail`: the mails of a card move, with
+  the texts and recipients of the coded flow (TER-162 D10). On the
+  `moved` event of a move to a blocked column, `card_blocked_mail` mails
+  the blocked notice from `system` to the operator and the card's
+  creator, not to the mover. On the `moved` event of a move to `done`,
+  `card_done_mail` mails the done notice (the move's comment, else the
+  newest comment) to the participants of each linked thread. On another
+  event: a no-op. With `board_flow = code` the move sends these mails
+  itself.
 - `job_queue`: `validate` or `merge` queues a job for the run's card, of
   its repo and branch (the card's, else its ID in lower case), with the
   API's checks (the queue is set, a merge needs `project_admin` and a
@@ -9079,6 +9088,7 @@ Its rules, in order:
 | `merge-red-group`, `merge-red-split-note`, `merge-red-fix-note` | a red merge with two or more merged cards | `job_fix` (at most 3 fix cards), then `job_split` after 3; the split comment, or the labels off and a note of the fix card |
 | `job-fail-conflict`, `job-fail-red`, `job-fail-error` | a final failure | labels off, the failure block on the body, the top of `@ready` with the comment, unassign, a mail to the worker |
 | `job-cancelled` | a cancelled verdict | labels off |
+| `card-blocked-mail`, `card-done-mail` | a card move to the blocked column; to `done` | the blocked notice to the operator and the creator; the done notice on each linked thread |
 | `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `accepted` (names, as §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
 
 One change from the coded flow, by the operator's rule of 2026-11-07

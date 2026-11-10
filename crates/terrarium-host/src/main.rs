@@ -73,6 +73,9 @@ enum Cmd {
         /// The helper socket.
         #[arg(long, default_value = terrarium_host::native::DEFAULT_SOCKET)]
         socket: PathBuf,
+        /// For a stop: also stop the holder's slice of the user manager.
+        #[arg(long)]
+        user_slice: bool,
     },
     /// Read a token from stdin and write it to PATH with mode 0600.
     TokenFile {
@@ -506,12 +509,12 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::TokenFile { path }) => return write_token_file(path),
         Some(Cmd::Cert { names, out, force }) => return write_cert(names, out, *force),
         Some(Cmd::Fingerprint { cert }) => return fingerprint(cert),
-        Some(Cmd::Native { socket }) => {
+        Some(Cmd::Native { socket, user_slice }) => {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .context("start the runtime")?;
-            let code = rt.block_on(terrarium_host::native::shim(socket));
+            let code = rt.block_on(terrarium_host::native::shim(socket, *user_slice));
             // The stdin reader is a blocking read on the terminal that
             // never ends by itself: do not wait for it.
             rt.shutdown_background();

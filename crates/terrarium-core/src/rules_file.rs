@@ -229,6 +229,18 @@ pub const VERBS: &[Verb] = &[
         required: &["to", "subject"],
     },
     Verb {
+        kind: "card_blocked_mail",
+        name: "card.blocked_mail",
+        args: &[],
+        required: &[],
+    },
+    Verb {
+        kind: "card_done_mail",
+        name: "card.done_mail",
+        args: &[],
+        required: &[],
+    },
+    Verb {
         kind: "job_queue",
         name: "job.queue",
         args: &[
@@ -1787,6 +1799,8 @@ rule "validate-pass" {
             "agent-end-done",
             "agent-end-archived",
             "agent-end-merged",
+            "card-blocked-mail",
+            "card-done-mail",
         ] {
             assert!(names.contains(&want), "no rule `{want}` in {names:?}");
         }

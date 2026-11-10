@@ -325,6 +325,29 @@ rule "job-cancelled" {
   card_label { remove = ["validation:running", "validation:queued"] }
 }
 
+// ------------------------------------------------------- move mails
+//
+// The mails of a move that the coded flow sends in the move itself
+// (TER-162 D10), with the same texts and recipients.
+
+rule "card-blocked-mail" {
+  description = "A move to the blocked column mails the operator and the card's creator."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to_role" { eq = "blocked" }
+  card_blocked_mail {}
+}
+
+rule "card-done-mail" {
+  description = "A move to done mails the participants of each linked thread."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { eq = "done" }
+  card_done_mail {}
+}
+
 // ---------------------------------------------------- the bound agents
 //
 // Follow column roles, including boards that rename their wait columns.

@@ -542,6 +542,11 @@ async fn version_cut_default_pack_threshold_and_lead_notification() {
             .status,
         200
     );
+    // With six cards waiting the version-cut timer is due at once, so an
+    // engine tick between the sixth move and its planning would cut first
+    // and the move run would find nothing (TER-523). Hold the timers: only
+    // the move can cut here.
+    state(&td).rule_timers.hold(true);
     let mut members = Vec::new();
     for n in 0..5 {
         members.push(new_card(&td,"p",json!({"title":format!("member {n}"),"column":"accepted","labels":["version:vnext"]})).await);
@@ -1207,6 +1212,125 @@ async fn default_merge_group_sweep_repairs_stale_members_idempotently() {
     let group = card(&td, &gid).await;
     assert_eq!(group["archived"], true);
     assert_eq!(group["group"]["total"], 0);
+}
+
+/// A pending rule run for `card` of rule `rule`, as the engine plans one.
+/// Only inside a test write that also ends it: the engine's lane would
+/// run it otherwise.
+fn fake_pending_run(t: &rusqlite::Connection, rule: &str, card: &str) -> rusqlite::Result<usize> {
+    t.execute(
+        "INSERT INTO rule_runs (id, project, rule, rule_hash, ord, event_seq, card, lane,
+         rule_json, cause, state, created_at, updated_at)
+         VALUES ('test-run', 'p', ?1, 'test', 0, 0, ?2, 'test-lane', '{}', '{}', 'pending',
+         '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z')",
+        [rule, card],
+    )
+}
+
+/// TER-471: the merge group repair skips a group while a rule run of one
+/// of its members is pending (the `merge-group-returned` run after a
+/// move), and repairs it anyway once it waited `RECONCILE_WAIT`.
+#[tokio::test]
+async fn merge_group_repair_waits_for_a_pending_member_run_then_runs_anyway() {
+    use terrariumd::store::groups;
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
+    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (key, group) = (a.clone(), gid.clone());
+    let (waited, kept, forced, kept_after) = state(&td)
+        .db
+        .write("test", move |t| {
+            // a went to ready, and its rule run is still pending.
+            t.execute("UPDATE cards SET column_id = (SELECT id FROM board_columns WHERE project = 'p' AND name = 'ready') WHERE id = ?1", [&key])?;
+            fake_pending_run(t, "merge-group-returned", &key)?;
+            let now = chrono::Utc::now();
+            let waits = groups::reconcile_merge_groups(t, &Default::default(), now)?;
+            let kept = groups::get(t, &group)?.members.contains(&key);
+            // The same wait, 11 minutes later: the repair runs anyway.
+            let old: std::collections::HashMap<_, _> = waits
+                .keys()
+                .map(|g| (g.clone(), now - chrono::Duration::minutes(11)))
+                .collect();
+            let forced = groups::reconcile_merge_groups(t, &old, now)?;
+            let kept_after = groups::get(t, &group)?.members.contains(&key);
+            t.execute("DELETE FROM rule_runs WHERE id = 'test-run'", [])?;
+            Ok((waits, kept, forced, kept_after))
+        })
+        .await
+        .unwrap();
+    assert!(waited.contains_key(&gid), "{waited:?}");
+    assert!(kept, "the pending run keeps the member");
+    assert!(forced.is_empty(), "{forced:?}");
+    assert!(!kept_after, "the forced repair removes the member");
+    assert!(card(&td, &a).await.get("group").is_none());
+    assert_eq!(card(&td, &b).await["group"]["id"], gid);
+}
+
+/// TER-471: an empty merge group with a pending run of the rule that
+/// opened it (between its `group_open` and its `group_add`) stays open.
+/// With the engine idle, the repair closes it as abandoned.
+#[tokio::test]
+async fn merge_group_repair_keeps_an_empty_group_while_its_rule_runs() {
+    use terrariumd::store::groups;
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    store_job(&td, JobKind::Merge, &[&a]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (key, group) = (a.clone(), gid.clone());
+    let (waits, open_while, open_after) = state(&td)
+        .db
+        .write("test", move |t| {
+            // The group as `group_open` leaves it: no member yet.
+            t.execute("DELETE FROM group_members WHERE group_card = ?1", [&group])?;
+            let rule: String = t.query_row(
+                "SELECT rule FROM card_groups WHERE card = ?1",
+                [&group],
+                |r| r.get(0),
+            )?;
+            fake_pending_run(t, &rule, &key)?;
+            let waits = groups::reconcile_merge_groups(t, &Default::default(), chrono::Utc::now())?;
+            let open_while = groups::get(t, &group)?.closed_at.is_none();
+            t.execute("DELETE FROM rule_runs WHERE id = 'test-run'", [])?;
+            groups::expire(t)?;
+            let open_after = groups::get(t, &group)?.closed_at.is_none();
+            Ok((waits, open_while, open_after))
+        })
+        .await
+        .unwrap();
+    assert!(waits.contains_key(&gid), "{waits:?}");
+    assert!(
+        open_while,
+        "the opening rule's pending run keeps the empty group"
+    );
+    assert!(!open_after, "the idle repair closes the empty group");
+    assert_eq!(card(&td, &gid).await["archived"], true);
 }
 
 #[tokio::test]
@@ -2322,6 +2446,14 @@ rule "h-prepend" {
 rule "h-mail" {
   on = ["test.ping"]
   mail { to = ["operator"]  subject = "x" }
+}
+rule "h-blocked-mail" {
+  on = ["test.ping"]
+  card_blocked_mail {}
+}
+rule "h-done-mail" {
+  on = ["test.ping"]
+  card_done_mail {}
 }
 rule "h-queue" {
   on = ["test.ping"]

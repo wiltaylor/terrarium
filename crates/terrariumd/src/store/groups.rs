@@ -1,6 +1,8 @@
 //! Rule-owned board groups. Closed memberships remain as history but do not
 //! prevent a card from joining the next group in its lifecycle.
-use chrono::{Duration, Utc};
+use std::collections::HashMap;
+
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -8,6 +10,7 @@ use serde_json::json;
 use crate::db::Tx;
 use crate::error::{ApiError, ApiResult};
 use crate::store::board;
+use tracing::{debug, warn};
 
 fn event(t: &mut Tx<'_>, id: &str, change: &str) -> ApiResult<()> {
     let project = board::project_of(t, id)?;
@@ -565,10 +568,17 @@ pub fn step(
     Ok(true)
 }
 
+/// The merge group repair, then the `close_after` safeguard, in one write.
+/// The rule engine runs the two parts on its own ([`reconcile_merge_groups`]
+/// in its planning write, [`close_expired`] at its tick).
+pub fn expire(t: &mut Tx<'_>) -> ApiResult<()> {
+    reconcile_merge_groups(t, &HashMap::new(), Utc::now())?;
+    close_expired(t)
+}
+
 /// The safeguard is independent of whether the creating rule still exists.
 /// Its comment and rule-log row commit together with the close.
-pub fn expire(t: &mut Tx<'_>) -> ApiResult<()> {
-    reconcile_merge_groups(t)?;
+pub fn close_expired(t: &mut Tx<'_>) -> ApiResult<()> {
     let at = crate::time_param::stored(Utc::now());
     let due: Vec<(String, String, String)> = {
         let mut stmt = t.prepare(
@@ -595,9 +605,51 @@ pub fn expire(t: &mut Tx<'_>) -> ApiResult<()> {
     Ok(())
 }
 
+/// How long the repair of one merge group waits for its pending rule runs.
+/// After that it repairs anyway: a stopped lane keeps its row pending.
+pub const RECONCILE_WAIT: Duration = Duration::minutes(10);
+
+/// A pending rule run that can still change the merge group `id`: a run of
+/// the group card or of a member, or, while the group has no member, a run
+/// of the rule that opened it in its project (the run between its
+/// `group_open` and its first `group_add`). Only pending rows are read
+/// (`rule_runs_pending`).
+fn pending_run(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT r.id FROM card_groups g JOIN rule_runs r ON r.state = 'pending'
+             WHERE g.card = ?1 AND (
+                r.card = g.card
+                OR r.card IN (SELECT card FROM group_members WHERE group_card = g.card)
+                OR (NOT EXISTS (SELECT 1 FROM group_members WHERE group_card = g.card)
+                    AND r.project = g.project AND r.rule = g.rule))
+             LIMIT 1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// Repair memberships left by older rule packs. Review is also a valid
 /// member state: queued jobs may create their group before moving the cards.
-fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
+///
+/// A group with a pending rule run ([`pending_run`]) waits (TER-471). A run
+/// writes each action on its own, so a repair between `group_open` and
+/// `group_add` found an empty group and closed it as abandoned, and a
+/// repair between a card move and its `merge-group-returned` run removed
+/// the card before the rule did. The engine calls this in its planning
+/// write, only after a `plan_events` that read the log to its end, so each
+/// event before that write has its runs.
+///
+/// `waiting` holds when each waiting group was first skipped. A group that
+/// waited [`RECONCILE_WAIT`] is repaired anyway. Returns the groups that
+/// wait now, with that time.
+pub fn reconcile_merge_groups(
+    t: &mut Tx<'_>,
+    waiting: &HashMap<String, DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> ApiResult<HashMap<String, DateTime<Utc>>> {
+    let mut still = HashMap::new();
     let ids: Vec<String> = {
         let mut stmt = t.prepare(
             "SELECT card FROM card_groups WHERE closed_at IS NULL AND key LIKE 'merge:%'",
@@ -606,6 +658,16 @@ fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
             .collect::<Result<_, _>>()?
     };
     for id in ids {
+        if let Some(run) = pending_run(t, &id)? {
+            let since = waiting.get(&id).copied().unwrap_or(now);
+            if now - since < RECONCILE_WAIT {
+                debug!(group = %id, run = %run, "merge group repair waits for a pending rule run");
+                still.insert(id, since);
+                continue;
+            }
+            warn!(group = %id, run = %run, since = %since,
+                "merge group repair runs anyway: a rule run stayed pending for 10 minutes");
+        }
         let g = get(t, &id)?;
         for member in &g.members {
             let card = board::get_card(t, member)?;
@@ -628,5 +690,5 @@ fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
         }
         close_finished_merge(t, &id)?;
     }
-    Ok(())
+    Ok(still)
 }

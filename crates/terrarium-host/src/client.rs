@@ -1360,18 +1360,25 @@ impl Client {
         crate::limits::reservation_plan(&r.target, &r.holder, &r.limits)
     }
 
-    /// `resource.stop`, routed like [`Self::slice_apply_plan`].
+    /// `resource.stop` of a holder slice. With `[native_gpu]` in the
+    /// config, the holder can have native units in the helper's system
+    /// slice (also from before a restart of this process) and sessions in
+    /// the user slice (from a time the helper did not answer): the stop
+    /// always goes through the shim, which stops both and fails when the
+    /// helper cannot be reached. The helper's answer at `hello` does not
+    /// matter here: a stop never reports success while native units can
+    /// still run. Without `[native_gpu]`, only the user slice.
     pub(crate) fn slice_stop_plan(
         &self,
         r: &crate::protocol::ResourceStop,
     ) -> Result<VerbPlan, BuildError> {
-        match self.native_live() {
-            Some(native) => crate::native::verb_plan(
+        match self.opts.native.as_ref() {
+            Some(native) => crate::native::stop_plan(
                 native,
-                &crate::native::Request::Stop(crate::native::SliceRequest {
+                &crate::native::SliceRequest {
                     target: r.target.clone(),
                     holder: r.holder.clone(),
-                }),
+                },
             ),
             None => crate::limits::reservation_stop_plan(&r.target, &r.holder),
         }
@@ -1758,8 +1765,10 @@ mod tests {
             target: "box".into(),
             holder: "p/a".into(),
         };
-        // [native_gpu] on, but the helper does not answer: user slices, and
-        // a native exec is refused rather than run without device policy.
+        // [native_gpu] on, but the helper does not answer: apply goes to
+        // the user slice, a stop still goes to the helper (see
+        // `a_restarted_client_with_the_helper_down_stops_through_the_helper`),
+        // and a native exec is refused rather than run without device policy.
         let client = native_client(&socket);
         let hello = client.hello().await;
         assert!(!hello.capabilities.native_gpu.unwrap().enforced);
@@ -1769,7 +1778,7 @@ mod tests {
         );
         assert_eq!(
             client.slice_stop_plan(&stop).unwrap().exec.program,
-            "systemctl"
+            "/opt/terrarium-host"
         );
         let (plan, l) = native_exec();
         let e = client.native(plan, &l, 3).err().unwrap();
@@ -1798,7 +1807,9 @@ mod tests {
         let plan = client.native(plan, &l, 3).unwrap();
         assert_eq!(plan.exec.program, "/opt/terrarium-host");
 
-        // The helper goes away: the next hello turns routing back.
+        // The helper goes away: the next hello turns apply and exec back,
+        // but a stop still goes to the helper (its native units may still
+        // run) and to the user slice.
         helper.abort();
         let _ = helper.await;
         std::fs::remove_file(&socket).unwrap();
@@ -1812,7 +1823,60 @@ mod tests {
                 .enforced
         );
         assert_eq!(
-            client.slice_stop_plan(&stop).unwrap().exec.program,
+            client.slice_apply_plan(&apply).unwrap().exec.program,
+            "systemctl"
+        );
+        let plan = client.slice_stop_plan(&stop).unwrap();
+        assert_eq!(plan.exec.program, "/opt/terrarium-host");
+        assert_eq!(plan.exec.args.last().unwrap(), "--user-slice");
+        let (plan, l) = native_exec();
+        assert!(client.native(plan, &l, 3).is_err());
+    }
+
+    /// TER-503: a host agent that restarts while the helper is down has no
+    /// memory of an earlier enforcement, but native units of the holder
+    /// may still run in the helper's system slice. The stop goes to the
+    /// shim with `--user-slice`, which fails when the helper cannot be
+    /// reached (`a_shim_stop_also_stops_the_user_slice` in
+    /// `tests/native_helper.rs`), so the stop never reports success.
+    #[tokio::test]
+    async fn a_restarted_client_with_the_helper_down_stops_through_the_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("helper.sock");
+        let stop = crate::protocol::ResourceStop {
+            session: 1,
+            target: "box".into(),
+            holder: "p/a".into(),
+        };
+        // A new process: the helper never answered with enforcement here.
+        let client = native_client(&socket);
+        assert!(
+            !client
+                .hello()
+                .await
+                .capabilities
+                .native_gpu
+                .unwrap()
+                .enforced
+        );
+        let plan = client.slice_stop_plan(&stop).unwrap();
+        assert_eq!(plan.exec.program, "/opt/terrarium-host");
+        assert_eq!(plan.exec.args[0], "native");
+        assert_eq!(plan.exec.args.last().unwrap(), "--user-slice");
+        let req: crate::native::Request =
+            serde_json::from_str(&plan.exec.env[crate::native::REQUEST_ENV]).unwrap();
+        assert_eq!(
+            req,
+            crate::native::Request::Stop(crate::native::SliceRequest {
+                target: "box".into(),
+                holder: "p/a".into(),
+            })
+        );
+
+        // Without [native_gpu], only the user slice.
+        let plain = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
+        assert_eq!(
+            plain.slice_stop_plan(&stop).unwrap().exec.program,
             "systemctl"
         );
     }
