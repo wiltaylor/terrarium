@@ -109,6 +109,7 @@ import type {
   InboxAsk,
   InboxAskBody,
   InboxCounts,
+  ProjectCounts,
   InboxWatch,
   Tool,
   ToolGrant,
@@ -291,6 +292,8 @@ export interface Api {
     /** Sends `?confirm=true`. The daemon refuses a project with agents or a file project. */
     remove(name: string): Promise<void>;
     agents(name: string): Promise<Agent[]>;
+    /** `GET /api/projects/{name}/counts`: the blocked cards and the open questions, for the project tabs. */
+    counts(name: string): Promise<ProjectCounts>;
     targets(name: string): Promise<Target[]>;
     /** The global targets granted to the project for its project-owned monitors and schedules (docs/api.md §30.7). */
     targetGrants(name: string): Promise<TargetGrant[]>;
@@ -1145,6 +1148,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       update: (name, body) => patch(p(name), body),
       remove: (name) => del(p(name), { confirm: true }),
       agents: (name) => all(`${p(name)}/agents`),
+      counts: (name) => get(`${p(name)}/counts`),
       targets: async (name) => (await all<Target>(`${p(name)}/targets`)).map(withScope),
       targetGrants: (name) => get(`${p(name)}/target-grants`),
       repos: (name) => all(`${p(name)}/repos`),

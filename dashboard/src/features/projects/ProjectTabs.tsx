@@ -3,11 +3,15 @@
 // Agents active (TER-153), since /agents/:id sits outside /p.
 
 import { A, useLocation } from "@solidjs/router";
-import { createEffect, For, on } from "solid-js";
+import { createEffect, For, on, Show } from "solid-js";
 import { PROJECT_TABS } from "../../app/nav";
+import type { TabBadge } from "./tabCounts";
 
-/** `base` is the encoded project URL, `/p/<name>`. `active` says which tab path is selected. */
-export function ProjectTabs(props: { base: string; active: (path: string) => boolean }) {
+/**
+ * `base` is the encoded project URL, `/p/<name>`. `active` says which tab path is selected.
+ * `badge` gives the count of a tab (TER-154): the words go into the accessible name and the tooltip, the number is aria-hidden.
+ */
+export function ProjectTabs(props: { base: string; active: (path: string) => boolean; badge?: (path: string) => TabBadge | null }) {
   const location = useLocation();
   let tabs!: HTMLElement;
 
@@ -29,8 +33,24 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
     <nav ref={tabs} class="tabs project-tabs" aria-label="Project">
       <For each={PROJECT_TABS}>
         {(tab) => (
-          <A href={`${props.base}/${tab.path}`} class={props.active(tab.path) ? "active" : undefined} activeClass="" inactiveClass="">
+          <A
+            href={`${props.base}/${tab.path}`}
+            class={props.active(tab.path) ? "active" : undefined}
+            activeClass=""
+            inactiveClass=""
+            title={props.badge?.(tab.path)?.text}
+          >
             {tab.label}
+            <Show when={props.badge?.(tab.path)}>
+              {(b) => (
+                <>
+                  <span class={b().cls} aria-hidden="true">
+                    {b().n}
+                  </span>
+                  <span class="sr-only">, {b().text}</span>
+                </>
+              )}
+            </Show>
           </A>
         )}
       </For>

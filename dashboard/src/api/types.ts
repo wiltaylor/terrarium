@@ -1479,6 +1479,14 @@ export interface InboxQuery {
   project?: string;
 }
 
+/** `GET /api/projects/{name}/counts` (TER-154): the counts of the project tabs. */
+export interface ProjectCounts {
+  /** The cards in the `blocked` role columns, archived ones excluded. */
+  blocked_cards: number;
+  /** The open questions, bundles, and tool run approvals of the project, also those in a thread. `null` for a reader who may not list them. */
+  questions: { open: number; urgent: number; critical: number } | null;
+}
+
 /** `GET /api/inbox/counts`: the open items. `urgent` counts the open urgent and critical items; `critical` only the critical ones. */
 export interface InboxCounts {
   open: number;
