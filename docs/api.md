@@ -3393,7 +3393,7 @@ Bundles:
 To thread (GitHub #30, TER-469):
 
 - The operator moves an open question or notice into a new Inbox thread
-  with the asking agent: the Inbox action "To thread", `POST
+  with the asking agent: the Inbox action "Open in thread" (GitHub #32), `POST
   /api/questions/{id}/to-thread`, or `terrarium question to-thread <id>
   [-m <message>]` (also `terrarium admin question to-thread`).
 - The thread (§6.13) is in the project of the question, with the asking
@@ -3424,6 +3424,11 @@ To thread (GitHub #30, TER-469):
   retracts it, as an open question of the thread.
 - The recap turn lists the `in_thread` questions with their threads.
 - A bundle does not move (`409 conflict`): that is a follow-up.
+- In the dashboard (GitHub #32), "Open in thread" on a question or notice
+  with a linked thread opens that thread, also after the answer. On an
+  open one with none it moves it, as above, and opens the new thread.
+  "Show mail" opens the mail thread of the question (`thread_id`). The
+  thread shows the question in its conversation.
 
 ### 6.9 The Inbox
 

@@ -142,7 +142,7 @@ export default function ThreadPage() {
                       <Match when={entry.kind === "question" && entry.question}>
                         {(q) => (
                           <div class="thread-question">
-                            <Show when={q().kind === "bundle"} fallback={<QuestionCard question={q()} now={now()} showKind onChange={questionChanged} />}>
+                            <Show when={q().kind === "bundle"} fallback={<QuestionCard question={q()} now={now()} showKind inThread onChange={questionChanged} />}>
                               <BundleCard question={q()} now={now()} showKind onChange={questionChanged} />
                             </Show>
                           </div>
