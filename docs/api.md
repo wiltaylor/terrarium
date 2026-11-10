@@ -11913,8 +11913,9 @@ The updater:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TERRARIUM_UPDATE_VERIFY` | `gh` | The image check (§34.4): `gh`, `cosign`, `off`, or `command:<shell command>`. |
-| `TERRARIUM_UPDATE_WORKFLOW` | `.github/workflows/ci.yml` | The workflow in `TERRARIUM_UPDATE_REPO` that signs the releases (`--signer-workflow`). |
+| `TERRARIUM_UPDATE_VERIFY` | `cosign` | The image check (§34.4): `cosign`, `gh`, `cosign-keyless`, `off`, or `command:<shell command>`. |
+| `TERRARIUM_UPDATE_COSIGN_KEY` | `/opt/terrarium/release/cosign.pub` | The public key of the `cosign` check: the release key of the image (`docker/release/cosign.pub`). |
+| `TERRARIUM_UPDATE_WORKFLOW` | `.github/workflows/ci.yml` | The workflow in `TERRARIUM_UPDATE_REPO` that signed the releases (`gh`, `--signer-workflow`). |
 | `TERRARIUM_UPDATE_IMAGE` | `ghcr.io/wiltaylor/terrarium` | The image repository of the releases. |
 | `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium` | The GitHub repo: the identity of the signing workflow. |
 | `TERRARIUM_UPDATE_DRAIN_WAIT` | `600` | Seconds that the drain waits for the running turns. |
@@ -11971,12 +11972,22 @@ One run at a time: a request while a run runs is `409 conflict`.
 `TERRARIUM_UPDATE_VERIFY` names a program, so that the check follows the
 way the release signs its images ([release.md](release.md)):
 
-- `gh` (the default): `gh attestation verify oci://<repo image>@<digest>
+- `cosign` (the default): `cosign verify --key <TERRARIUM_UPDATE_COSIGN_KEY>
+  <repo image>@<digest>`. The local release build (`just release::publish`,
+  [release.md](release.md), "The local release build") signs the image
+  digest with the release key pair. cosign checks the signature and its
+  transparency log entry with the public key, which the image has at
+  `/opt/terrarium/release/cosign.pub` (`docker/release/cosign.pub`). The
+  image has cosign 3.1.4 (pinned with its SHA-256 in the Dockerfile). A
+  missing key file fails the check before cosign runs. A release that the
+  GitHub workflow made has no cosign signature: this check refuses it (see
+  release.md, "The switch from the workflow to the local build").
+- `gh`: `gh attestation verify oci://<repo image>@<digest>
   --repo <repo> --signer-workflow <repo>/.github/workflows/ci.yml
-  --bundle-from-oci`. The release signs only with
-  `actions/attest-build-provenance` and pushes the Sigstore bundle to the
-  registry; this is the check of [release.md](release.md), "How to verify
-  a release". gh reads the bundle from GHCR, and checks the signature, the
+  --bundle-from-oci`. The check of the releases that the GitHub workflow
+  made: they sign only with `actions/attest-build-provenance` and push the
+  Sigstore bundle to the registry ([release.md](release.md), "A release of
+  the workflow"). gh reads the bundle from GHCR, and checks the signature, the
   transparency log entry, the digest, and that the certificate is of the
   release workflow of the repo. The image has gh 2.100.0 (pinned with its
   SHA-256 in the Dockerfile). gh asks for a token before it starts, also
@@ -11984,18 +11995,12 @@ way the release signs its images ([release.md](release.md)):
   `GITHUB_TOKEN`, the updater gives gh a placeholder. gh sends it to no
   GitHub API in this mode; a call that needs a real token fails, and so
   does the update. Set `GH_TOKEN` in the updater env to use a real one.
-- `cosign`: `cosign verify --certificate-identity-regexp
+- `cosign-keyless`: `cosign verify --certificate-identity-regexp
   '^https://github\.com/<repo>/\.github/workflows/'
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
-  <ref>`. The release makes no cosign signature and the image has no
-  cosign: this mode is for an image of your own (`TERRARIUM_UPDATE_IMAGE`,
-  `TERRARIUM_UPDATER_IMAGE`).
-
-Why gh and not cosign: the release has only the GitHub attestation, and
-`gh attestation verify` is the documented check for it. cosign v2.4 reads
-signatures and attestations in its own format; its reading of the GitHub
-bundle in the OCI referrers was not proved to work, so it is not the
-default.
+  <ref>`. For an image of your own that a GitHub workflow signs with
+  keyless cosign (`TERRARIUM_UPDATE_IMAGE`, `TERRARIUM_UPDATER_IMAGE`).
+  Before TER-613 this mode was named `cosign`.
 - `command:<shell command>`: `sh -c <command>` with the image in
   `TERRARIUM_UPDATE_REF`. Exit 0 accepts the image.
 - `off`: no check. The `verify` step is `skipped`, and the updater logs a

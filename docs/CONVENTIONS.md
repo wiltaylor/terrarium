@@ -263,7 +263,7 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_UPDATE_CHANNEL` | `stable`. `pre`: pre-releases too. |
 | `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium`. The GitHub repo of the releases (the daemon), and the identity of the signing workflow (the updater). |
 | `TERRARIUM_UPDATER_SOCKET` | `/run/terrarium-updater/updater.sock`. The updater socket (the daemon and the updater). |
-| `TERRARIUM_UPDATE_VERIFY` | `gh`. The updater only: the image check of a release (`gh attestation verify` of the build provenance of the release workflow; `cosign`, `off`, or `command:<shell command>`; [api.md](api.md) §34.4). A check that fails stops the update. `TERRARIUM_UPDATE_WORKFLOW` (`.github/workflows/ci.yml`) is the signing workflow. |
+| `TERRARIUM_UPDATE_VERIFY` | `cosign`. The updater only: the image check of a release (`cosign verify --key` with the release public key, `TERRARIUM_UPDATE_COSIGN_KEY`, default `/opt/terrarium/release/cosign.pub`; `gh` for the releases of the GitHub workflow, `cosign-keyless`, `off`, or `command:<shell command>`; [api.md](api.md) §34.4). A check that fails stops the update. `TERRARIUM_UPDATE_WORKFLOW` (`.github/workflows/ci.yml`) is the signing workflow of `gh`. |
 | `TERRARIUM_UPDATE_IMAGE`, `TERRARIUM_UPDATE_DRAIN_WAIT`, `TERRARIUM_UPDATE_HEALTH_TIMEOUT`, `TERRARIUM_UPDATER_TARGET`, `TERRARIUM_UPDATER_STATE` | The updater only ([api.md](api.md) §34.2). |
 | `TERRARIUM_DOCKER_GID`, `TERRARIUM_UPDATER_IMAGE` | compose.yaml only: the group of `docker.sock` for the updater service, and its image (default: the image of the daemon). The daemon never gets `docker.sock`. |
 
