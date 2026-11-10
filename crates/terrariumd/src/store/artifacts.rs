@@ -81,7 +81,15 @@ pub struct ArtifactCtx {
     secret: Vec<u8>,
     /// Blob locks, one stripe per first digest byte ([`ArtifactCtx::digest_lock`]).
     locks: Vec<Arc<tokio::sync::Mutex<()>>>,
+    /// The upload permits of the daemon ([`ArtifactCtx::upload_permit`]).
+    uploads: Arc<tokio::sync::Semaphore>,
 }
+
+/// The most uploads that hold their bytes at one time, in the whole
+/// daemon. An upload task finishes after its client goes away (TER-583), so
+/// without a limit a client could send, disconnect, and repeat, and queue
+/// detached tasks with up to `max_file_bytes` each (TER-605).
+pub const MAX_CONCURRENT_UPLOADS: usize = 8;
 
 /// The number of blob lock stripes: one per value of the first digest byte.
 const LOCK_STRIPES: usize = 256;
@@ -176,6 +184,7 @@ pub fn context(state_dir: &Path, config_dir: &Path) -> ApiResult<Arc<ArtifactCtx
         secret: load_secret(state_dir)
             .map_err(|e| ApiError::internal(format!("cannot read the artifact URL key: {e}")))?,
         locks: new_locks(),
+        uploads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_UPLOADS)),
     });
     map.insert(state_dir.to_owned(), ctx.clone());
     Ok(ctx)
@@ -231,6 +240,24 @@ impl ArtifactCtx {
                     .fold(0usize, |a, b| a.wrapping_mul(31) ^ b as usize)
             });
         self.locks[i % self.locks.len()].clone()
+    }
+
+    /// One upload permit, when one is free within `wait`. Take it before
+    /// the upload decodes its bytes and hold it until the bytes are
+    /// dropped: in the store task, also after the client went away.
+    pub async fn upload_permit(
+        &self,
+        wait: std::time::Duration,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        tokio::time::timeout(wait, self.uploads.clone().acquire_owned())
+            .await
+            .ok()?
+            .ok()
+    }
+
+    /// The number of upload permits that are free now.
+    pub fn free_upload_permits(&self) -> usize {
+        self.uploads.available_permits()
     }
 }
 
@@ -1344,6 +1371,7 @@ mod tests {
             limits: Limits::default(),
             secret: vec![7; 32],
             locks: new_locks(),
+            uploads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_UPLOADS)),
         };
         let sig = ctx.sign("A", 100);
         assert!(ctx.verify("A", 100, &sig, 50));
