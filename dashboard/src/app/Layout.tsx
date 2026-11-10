@@ -8,7 +8,8 @@ import { isMock } from "../api";
 import { CriticalBanner } from "../components/CriticalBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
-import { agents, api, auth, events, inbox, pins, projectFolders, projects, signOutNow, subscriptions, theme } from "../stores";
+import { agents, api, auth, cardPeek, events, inbox, pins, projectFolders, projects, signOutNow, subscriptions, theme } from "../stores";
+import { CardPeek } from "../features/board/CardPeek";
 import { badge } from "../features/inbox/model";
 import { threadsBadge } from "../features/inbox/threads";
 import { SETTINGS_ITEMS, TOP_ITEMS } from "./nav";
@@ -59,6 +60,7 @@ export function Layout(props: RouteSectionProps) {
     void location.pathname;
     setOpen(false);
     pins.setOverlay(false);
+    cardPeek.close();
   });
 
   const inboxBadge = () => badge(inbox.counts());
@@ -178,6 +180,7 @@ export function Layout(props: RouteSectionProps) {
         </main>
       </div>
       <PinnedBar />
+      <CardPeek />
     </div>
   );
 }

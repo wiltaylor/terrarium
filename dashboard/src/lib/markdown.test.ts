@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderWiki, resolveWikilink, safeUrl, splitFrontMatter, targetHref } from "./markdown";
+import { cardOfHref, renderWiki, resolveWikilink, safeUrl, splitFrontMatter, targetHref } from "./markdown";
 
 const ctx = { project: "terrarium", pages: new Set(["index", "designs/runner-v2"]), cardPrefixes: new Set(["TER", "WEB"]), prefixProject: { TER: "terrarium", WEB: "webshop" } };
 
@@ -82,5 +82,50 @@ describe("helpers", () => {
     expect(safeUrl("relative/page")).toBe("relative/page");
     expect(safeUrl("JavaScript:alert(1)")).toBeNull();
     expect(safeUrl("data:text/html,<b>")).toBeNull();
+  });
+});
+
+describe("renderWiki cardKeys (TER-571)", () => {
+  const keys = { TER: "terrarium", WEB: "webshop" };
+  const md = (src: string) => renderWiki(src, { project: "terrarium", cardKeys: keys });
+
+  it("links a bare card key of the reader's projects", () => {
+    const html = md("Blocked by TER-12, WEB-4 and ABC-1.");
+    expect(html).toContain('<a class="wikilink wikilink-card" href="/p/terrarium/board?card=TER-12">TER-12</a>');
+    expect(html).toContain('href="/p/webshop/board?card=WEB-4"');
+    expect(html).not.toContain("ABC-1<");
+    expect(html).toContain("ABC-1.");
+  });
+
+  it("does not link a bare key inside a word, a link, or code", () => {
+    const html = md("XTER-1 a/TER-2 `TER-3` [TER-4 fix](https://example.com/TER-5)");
+    expect(html).not.toContain("card=TER-1");
+    expect(html).not.toContain("card=TER-2");
+    expect(html).not.toContain("card=TER-3");
+    expect(html).not.toContain("card=TER-4");
+    expect(html).toContain('<a href="https://example.com/TER-5" target="_blank" rel="noopener noreferrer">TER-4 fix</a>');
+  });
+
+  it("renders card: and wiki: links, and refuses a bad one as its text", () => {
+    expect(md("[the fix](card:TER-7)")).toContain('<a class="wikilink wikilink-card" href="/p/terrarium/board?card=TER-7">the fix</a>');
+    expect(md("[the design](wiki:designs/x)")).toContain('<a class="wikilink wikilink-page" href="/p/terrarium/knowledge/wiki/designs/x">the design</a>');
+    const bad = md("[a](card:ABC-1) [b](wiki:../x) [c](javascript:alert(1))");
+    expect(bad).not.toContain("<a");
+  });
+
+  it("opens bare URLs in a new tab", () => {
+    expect(md("See https://example.com/x.")).toContain('<a href="https://example.com/x" target="_blank" rel="noopener noreferrer">');
+  });
+
+  it("changes nothing without cardKeys", () => {
+    expect(renderWiki("TER-1 [x](card:TER-1)", { project: "terrarium" })).toBe("<p>TER-1 x</p>\n");
+  });
+});
+
+describe("cardOfHref", () => {
+  it("reads the card of a card link, and nothing else", () => {
+    expect(cardOfHref("/p/a%20b/board?card=TER-1")).toEqual({ project: "a b", id: "TER-1" });
+    expect(cardOfHref("/p/x/knowledge/wiki/TER-1")).toBeNull();
+    expect(cardOfHref("https://evil.example/p/x/board?card=TER-1")).toBeNull();
   });
 });
