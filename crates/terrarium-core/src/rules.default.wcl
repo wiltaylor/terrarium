@@ -210,7 +210,6 @@ rule "job-rerun-note" {
     add = ["validation:queued"]
   }
   card_comment { text = "{{job.rerun_comment}}" }
-  card_comment { text = "{{job.output_comment}}" }
 }
 
 rule "merge-red-group" {
@@ -238,7 +237,6 @@ rule "merge-red-split-note" {
     add = ["validation:queued"]
   }
   card_comment { text = "{{job.split_comment}}" }
-  card_comment { text = "{{job.output_comment}}" }
 }
 
 rule "job-infra" {
@@ -248,7 +246,6 @@ rule "job-infra" {
   when "data.verdict" { eq = "infra" }
   card_label { remove = ["validation:running", "validation:queued"] }
   card_comment { text = "{{job.infra_comment}}" }
-  card_comment { text = "{{job.output_comment}}" }
 }
 
 rule "merge-red-fix-note" {

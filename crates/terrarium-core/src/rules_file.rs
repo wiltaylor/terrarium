@@ -386,7 +386,6 @@ pub const JOB_FIELDS: &[&str] = &[
     "fail_comment",
     "fail_mail",
     "infra_comment",
-    "output_comment",
 ];
 
 /// The placeholders whose values the daemon makes: IDs, and the texts of

@@ -12434,9 +12434,9 @@ one key, the strictest applies until a cap write replaces them.
 - Each failed end has the step that failed as the last line of its `tail`:
   `[failed step: <step>]`, one of `setup`, `prepare`, `receive`, `secrets`,
   `recipe`, `push`. Next to a rerun, split, or infra comment, each card
-  gets a comment with the failed step and the last 20 lines of the tail
-  (`job.output_comment` in the rules; the rules quote it, as the output is
-  untrusted).
+  gets a comment with the failed step and the last 20 lines of the tail,
+  indented. The daemon writes it in both board flows, after each `red`,
+  `error`, or `infra` end and at the first infra end.
 
 A batch merge:
 

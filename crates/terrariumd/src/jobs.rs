@@ -1239,8 +1239,8 @@ fn infra_retry() -> Duration {
 /// The comment with the failed step and the last lines of the output of
 /// failed job `j` (TER-614 R3), next to its rerun, split, or infra
 /// comment. `None` without output. The output is untrusted text: it goes
-/// indented, as in the failure block, and the rule pack quotes it
-/// (`job.output_comment` is no raw field).
+/// indented, as in the failure block. The daemon writes it in both
+/// flows ([`on_end`]).
 pub fn output_comment(j: &Job) -> Option<String> {
     let t = j.tail.as_deref().filter(|t| !t.trim().is_empty())?;
     let lines: Vec<&str> = t.trim_end().lines().collect();
@@ -3070,6 +3070,14 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
 /// then the coded card flow (the move, the rerun, or the split).
 fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     emit_verdicts(t, j)?;
+    // The failed step and the output on each card that ran (TER-614 R3),
+    // from the daemon in both flows: the rules quote a template value
+    // onto one line, which would lose the lines of the output.
+    for v in card_views(j) {
+        if matches!(verdict_of(&v), "red" | "error" | "infra") {
+            output_note(t, &v)?;
+        }
+    }
     // With `board_flow = rules` the board rules act on the verdicts.
     if !code_flow(t, &j.project)? {
         return Ok(());
@@ -3098,7 +3106,6 @@ fn infra_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
             _ => {
                 set_labels(t, &v.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
                 comment(t, &v.card, &infra_comment(v, None))?;
-                output_note(t, v)?;
             }
         }
     }
@@ -3221,8 +3228,7 @@ fn single_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     if j.attempt < 2 && outcome != Some("conflict") && !split_red {
         let next = jobs::rerun(t, j, None)?;
         set_labels(t, &j.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
-        comment(t, &j.card, &rerun_comment(j, &next, false))?;
-        return output_note(t, j);
+        return comment(t, &j.card, &rerun_comment(j, &next, false));
     }
     fail_card(t, j, fail_phrase(j, j))
 }
@@ -3259,7 +3265,6 @@ fn batch_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
             let v = card_view(j, c);
             set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
             comment(t, &c.card, &split_comment(&v, &left, &right))?;
-            output_note(t, &v)?;
         }
         return Ok(());
     }
@@ -3269,9 +3274,7 @@ fn batch_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
         let next = jobs::rerun(t, j, Some(&merged))?;
         for c in &merged {
             set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
-            let v = card_view(j, c);
-            comment(t, &c.card, &rerun_comment(&v, &next, true))?;
-            output_note(t, &v)?;
+            comment(t, &c.card, &rerun_comment(&card_view(j, c), &next, true))?;
         }
         return Ok(());
     }
