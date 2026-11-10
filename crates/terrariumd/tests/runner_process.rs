@@ -2172,7 +2172,10 @@ async fn the_harness_credentials_come_through_exec_env_only() {
         let mut gcp_file = None;
         if c.agent == "claude-gcp" {
             use std::os::unix::fs::PermissionsExt;
-            assert!(!seen.contains("E2E-GCP-PRIVATE-KEY-14"), "the JSON is in a var");
+            assert!(
+                !seen.contains("E2E-GCP-PRIVATE-KEY-14"),
+                "the JSON is in a var"
+            );
             assert!(!seen.contains("E2E-GCP-KEY-ID-13"), "the JSON is in a var");
             let path = seen
                 .lines()

@@ -67,7 +67,11 @@ pub fn pick(
             .map(|w| crate::quota_policy::effective_pct(w.used_pct, w.resets_at.as_deref(), now))
             .fold(0.0, f64::max);
         // A cloud subscription: room up to its used-up budget.
-        let line = if sub.cloud_kind().is_some() { 100.0 } else { 80.0 };
+        let line = if sub.cloud_kind().is_some() {
+            100.0
+        } else {
+            80.0
+        };
         if used < line && used < lowest {
             best = Some(name.clone());
             lowest = used;

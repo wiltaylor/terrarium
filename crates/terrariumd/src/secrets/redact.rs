@@ -401,7 +401,11 @@ mod tests {
         crate::login_session::store_key(
             dir.path(),
             "aws",
-            &key("bedrock", "aws-secret-access-key-abc", Some("AKIAEXAMPLEKEYID")),
+            &key(
+                "bedrock",
+                "aws-secret-access-key-abc",
+                Some("AKIAEXAMPLEKEYID"),
+            ),
         )
         .unwrap();
         let json = r#"{"type":"service_account","private_key_id":"gcpkeyid0123456789","private_key":"-----BEGIN PRIVATE KEY-----MIIEgcpsecretbody-----END PRIVATE KEY-----"}"#;

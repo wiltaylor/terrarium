@@ -989,8 +989,13 @@ async fn spawn_alt_fallback_never_takes_a_cloud_subscription() {
     .await
     .ok();
     let login = r#"{"claudeAiOauth":{"accessToken":"test","refreshToken":"test","expiresAt":4102444800000}}"#;
-    terrariumd::accounts::write_credential(&s.state_dir, "main-a", HarnessId::Claude, login.as_bytes())
-        .unwrap();
+    terrariumd::accounts::write_credential(
+        &s.state_dir,
+        "main-a",
+        HarnessId::Claude,
+        login.as_bytes(),
+    )
+    .unwrap();
     td.post(
         "/api/subscriptions/aws/api-key",
         json!({"provider": "bedrock", "key": "bedrock-api-key-alt-test",
@@ -999,9 +1004,18 @@ async fn spawn_alt_fallback_never_takes_a_cloud_subscription() {
     .await
     .ok();
     for (name, spec) in [
-        ("cloudy", json!({"harness": "claude", "subscription": "main-a"})),
-        ("cloudy-alt", json!({"harness": "claude", "subscription": "aws"})),
-        ("aws-direct", json!({"harness": "claude", "subscription": "aws"})),
+        (
+            "cloudy",
+            json!({"harness": "claude", "subscription": "main-a"}),
+        ),
+        (
+            "cloudy-alt",
+            json!({"harness": "claude", "subscription": "aws"}),
+        ),
+        (
+            "aws-direct",
+            json!({"harness": "claude", "subscription": "aws"}),
+        ),
     ] {
         td.post(
             "/api/templates",
@@ -1029,7 +1043,9 @@ async fn spawn_alt_fallback_never_takes_a_cloud_subscription() {
     let r = spawn_as(&td, &o, &o, json!({"template": "cloudy"})).await;
     assert_eq!(r.status, 409, "{}", r.body);
     assert!(
-        r.body.to_string().contains("never taken by the automatic -alt fallback"),
+        r.body
+            .to_string()
+            .contains("never taken by the automatic -alt fallback"),
         "{}",
         r.body
     );

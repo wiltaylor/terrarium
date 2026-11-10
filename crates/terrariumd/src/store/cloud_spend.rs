@@ -84,7 +84,11 @@ pub fn prune(t: &mut Tx<'_>, oldest: &str) -> ApiResult<usize> {
 pub fn oldest_kept(now: chrono::DateTime<chrono::Utc>) -> String {
     use chrono::Datelike;
     let months = i64::from(now.year()) * 12 + i64::from(now.month0()) - i64::from(KEEP_MONTHS - 1);
-    format!("{:04}-{:02}", months.div_euclid(12), months.rem_euclid(12) + 1)
+    format!(
+        "{:04}-{:02}",
+        months.div_euclid(12),
+        months.rem_euclid(12) + 1
+    )
 }
 
 /// The IDs of the agents on `subscription` (index `agents_subscription`).
@@ -163,8 +167,9 @@ mod tests {
         let db = db();
         let plan: Vec<String> = db
             .read(|c| {
-                let mut stmt =
-                    c.prepare("EXPLAIN QUERY PLAN SELECT id FROM agents WHERE subscription = ?1 ORDER BY id")?;
+                let mut stmt = c.prepare(
+                    "EXPLAIN QUERY PLAN SELECT id FROM agents WHERE subscription = ?1 ORDER BY id",
+                )?;
                 let rows = stmt.query_map(["aws"], |r| r.get::<_, String>(3))?;
                 Ok(rows.collect::<Result<Vec<_>, _>>()?)
             })

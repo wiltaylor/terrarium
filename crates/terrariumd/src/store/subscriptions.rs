@@ -171,7 +171,11 @@ pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
 /// which is not an alias either ([`terrarium_core::cloud::model_refusal`]).
 pub fn model_refusal(sub: &Subscription, model: Option<&str>) -> Option<String> {
     sub.cloud_kind()?;
-    let models = sub.cloud.as_ref().map(|c| c.models.clone()).unwrap_or_default();
+    let models = sub
+        .cloud
+        .as_ref()
+        .map(|c| c.models.clone())
+        .unwrap_or_default();
     terrarium_core::cloud::model_refusal(&sub.name, &models, model)
 }
 
