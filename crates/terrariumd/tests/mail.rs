@@ -135,7 +135,8 @@ async fn replies_go_to_every_participant() {
     )
     .await
     .ok();
-    // The peer replies: the operator and the worker get it.
+    // The peer replies to the worker: only the worker gets it. The operator
+    // started the thread but did not write this message (TER-592).
     let peer_msg = td.mail_of("a/peer").await[0].clone();
     let replies = td
         .post_as(
@@ -150,7 +151,7 @@ async fn replies_go_to_every_participant() {
         .map(|m| m["to_name"].as_str().unwrap())
         .collect();
     to.sort();
-    assert_eq!(to, ["a/worker", "operator"]);
+    assert_eq!(to, ["a/worker"]);
     assert!(replies.iter().all(|m| m["subject"] == "Re: plan"));
     assert!(replies.iter().all(|m| m["thread_id"] == thread.as_str()));
     let orig = td
@@ -166,7 +167,7 @@ async fn replies_go_to_every_participant() {
     .await
     .err(403, "forbidden");
     let thread_view = td.get(&format!("/api/mail?thread={thread}")).await;
-    assert_eq!(thread_view.ok().as_array().unwrap().len(), 4);
+    assert_eq!(thread_view.ok().as_array().unwrap().len(), 3);
     // Mail raises an event on the recipient's stream.
     let worker = td.get("/api/agents/a%2Fworker").await.ok().clone();
     let events = td
@@ -176,6 +177,86 @@ async fn replies_go_to_every_participant() {
         ))
         .await;
     assert!(!events.ok().as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn replies_reach_the_operator_only_on_operator_messages() {
+    let td = two_projects().await;
+    let first = td
+        .post(
+            "/api/mail",
+            json!({"to": "a/worker", "subject": "plan", "body": "start"}),
+        )
+        .await
+        .ok()
+        .clone();
+    let thread = first["thread_id"].as_str().unwrap().to_owned();
+    td.post_as(
+        "a/worker",
+        "/api/mail",
+        json!({"to": "peer", "body": "fyi", "thread_id": thread}),
+    )
+    .await
+    .ok();
+    let recipients = |replies: &Value| {
+        let mut to: Vec<String> = replies
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["to_name"].as_str().unwrap().to_owned())
+            .collect();
+        to.sort();
+        to
+    };
+
+    // 1. A reply to the operator's message reaches the operator.
+    let reply = td
+        .post_as(
+            "a/worker",
+            &format!("/api/mail/{}/reply", first["id"].as_str().unwrap()),
+            json!({"body": "on it"}),
+        )
+        .await;
+    assert_eq!(recipients(reply.ok()), ["a/peer", "operator"]);
+
+    // 2. An agent-to-agent reply on the operator's thread does not.
+    let from_worker = td
+        .mail_of("a/peer")
+        .await
+        .into_iter()
+        .find(|m| m["from_name"] == "a/worker" && m["body"] == "fyi")
+        .expect("the worker's mail reached the peer");
+    let reply = td
+        .post_as(
+            "a/peer",
+            &format!("/api/mail/{}/reply", from_worker["id"].as_str().unwrap()),
+            json!({"body": "ack"}),
+        )
+        .await;
+    assert_eq!(recipients(reply.ok()), ["a/worker"]);
+
+    // 3. Mail addressed to the operator on the thread still reaches it.
+    let explicit = td
+        .post_as(
+            "a/peer",
+            "/api/mail",
+            json!({"to": "operator", "body": "status", "thread_id": thread}),
+        )
+        .await;
+    let explicit = explicit.ok();
+    assert_eq!(explicit["to_name"], "operator");
+    assert_eq!(explicit["thread_id"], thread.as_str());
+    let to_operator = td
+        .get(&format!("/api/mail?thread={thread}&to=operator"))
+        .await;
+    let bodies: Vec<&str> = to_operator
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(bodies, ["on it", "status"]);
 }
 
 #[tokio::test]

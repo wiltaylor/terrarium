@@ -75,7 +75,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use terrarium_core::config::Definitions;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub use artifacts::{artifact_router, run_prune, sweep_orphans};
 pub use config::spawn_config_sync;
@@ -886,10 +886,32 @@ pub async fn serve_unix(state: Shared, path: &Path) -> anyhow::Result<JoinHandle
         std::fs::remove_file(path)
             .with_context(|| format!("cannot remove stale socket {}", path.display()))?;
     }
-    let listener = tokio::net::UnixListener::bind(path)
-        .with_context(|| format!("cannot bind {}", path.display()))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
-        .with_context(|| format!("cannot set mode on {}", path.display()))?;
+    // Bind in a private 0700 directory next to the socket, give the socket
+    // mode 0660 there, then rename it into place: nobody else can connect
+    // between the bind and the chmod, whatever the umask (TER-587, as
+    // `terrarium_host::native::bind`).
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let private = tempfile::Builder::new()
+        .prefix(".b")
+        .tempdir_in(parent)
+        .with_context(|| format!("cannot create a bind dir in {}", parent.display()))?;
+    std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("cannot set mode on {}", private.path().display()))?;
+    let tmp = private.path().join("s");
+    let listener = tokio::net::UnixListener::bind(&tmp)
+        .with_context(|| format!("cannot bind {}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o660))
+        .with_context(|| format!("cannot set mode on {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("cannot move the socket to {}", path.display()))?;
+    // The socket is in place: a failed removal of the empty directory is
+    // not a failed bind.
+    if let Err(e) = private.close() {
+        warn!(error = %e, "cannot remove the private bind directory");
+    }
     info!(socket = %path.display(), "API listening on Unix socket");
     let app = unix_router(state);
     Ok(tokio::spawn(async move {
@@ -938,6 +960,26 @@ mod tests {
 
     fn state() -> Shared {
         state_with_web(crate::settings::WebConfig::default())
+    }
+
+    /// TER-587: the API socket is bound in a private directory and moved
+    /// into place with mode 0660; no bind directory is left, and a stale
+    /// socket is replaced.
+    #[tokio::test]
+    async fn the_unix_socket_comes_with_its_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api.sock");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        let server = serve_unix(state(), &path).await.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o660);
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["api.sock"]);
+        tokio::net::UnixStream::connect(&path).await.unwrap();
+        server.abort();
     }
 
     fn state_with_web(web: crate::settings::WebConfig) -> Shared {

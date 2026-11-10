@@ -540,9 +540,9 @@ pub async fn wake_with_work(state: &Shared, only: Option<AgentId>, cause: &'stat
 }
 
 /// Give the queued turns of a running agent to the supervisor, in order,
-/// and delete them. A turn that the supervisor refuses stays, with the
-/// turns after it. Each turn goes under the agent's turn lock
-/// ([`Lifecycle::turn_lock`]): a turn that was removed meanwhile is
+/// and delete the row of each turn that went out. A turn that the
+/// supervisor refuses stays, with the turns after it. Each turn goes
+/// under the agent's turn lock ([`Lifecycle::turn_lock`]): a turn that was removed meanwhile is
 /// skipped, and the row of a turn goes only after the supervisor took it,
 /// so a later turn cannot pass it (TER-25). A turn that the supervisor
 /// keeps for later ([`Supervisor::send_queued_turn`]) keeps its row: the

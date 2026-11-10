@@ -783,7 +783,10 @@ fn valid_env_name(k: &str) -> bool {
 /// daemon sends multi-line git trailers and hooks). Refused: NUL, which no
 /// environment can hold, and the characters that systemd's UTF-8 check
 /// (`unichar_is_valid`, v254) rejects, so that a request fails here with a
-/// clear error, not at unit start.
+/// clear error, not at unit start. Control characters are fine only because
+/// [`MIN_SYSTEMD`] is at least 248: from v248, systemd's `env_value_is_valid`
+/// accepts them, v239 to v247 drop a value with a carriage return, and older
+/// versions drop every control character but tab.
 fn valid_env_value(v: &str) -> bool {
     !v.chars().any(|c| {
         let u = u32::from(c);
@@ -798,7 +801,10 @@ fn valid_env_value(v: &str) -> bool {
 /// and expands nothing. systemd's own `write_env_var` writes a value with
 /// control characters the same way. Each of the four is escaped here, so
 /// no other backslash pair (and no backslash before a newline, which
-/// systemd would drop as a line continuation) can occur.
+/// systemd would drop as a line continuation) can occur. A multi-line
+/// value reaches the unit only because [`MIN_SYSTEMD`] is at least 248, the
+/// first systemd whose `env_value_is_valid` keeps control characters (see
+/// `valid_env_value`).
 pub fn env_line(key: &str, value: &str) -> String {
     let mut out = format!("{key}=\"");
     for c in value.chars() {

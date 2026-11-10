@@ -23,8 +23,12 @@
 //!   to result (then the child is killed). The engine's runs share
 //!   [`MAX_RUNNING`] slots and wait at most [`ENGINE_ACQUIRE`] for one.
 //!   The dry runs have their own [`DRY_RUN_SLOTS`] (wait at most
-//!   [`DRY_RUN_ACQUIRE`], at most [`DRY_RUN_TOTAL`] for one dry run), so
-//!   a dry run never holds a slot of the engine.
+//!   [`DRY_RUN_ACQUIRE`], at most [`DRY_RUN_TOTAL`] for one dry run, the
+//!   waits and the runs under one deadline), so a dry run never holds a
+//!   slot of the engine. One project holds at most its share of a pool
+//!   ([`PROJECT_ENGINE_SLOTS`], [`PROJECT_DRY_RUN_SLOTS`]): it waits for
+//!   its share first, in its own queue, so one project's slow scripts
+//!   do not keep the other projects out (TER-551).
 //! - **No inherited files.** The child closes each file from 3 up before
 //!   it reads its input, so an fd of the daemon without close-on-exec
 //!   does not reach the script.
@@ -37,11 +41,11 @@
 //! engine reads them with [`rules_file::script_actions`] and runs them in
 //! place of the step, as the rule actor, with the store's checks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,7 +53,7 @@ use terrarium_core::rules_file;
 use terrarium_core::rules_tools;
 use terrarium_core::template::{EventView, value_text};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use wscript::{Context, Module, Vm, VmConfig};
 
 use crate::rules_engine::{RunCtx, lookup};
@@ -75,6 +79,10 @@ pub const ENGINE_ACQUIRE: Duration = Duration::from_secs(30);
 /// The children of the dry runs at a time: their own pool, so a dry run
 /// never takes a slot of the engine.
 pub const DRY_RUN_SLOTS: usize = 1;
+/// The most engine slots that one project holds at a time.
+pub const PROJECT_ENGINE_SLOTS: usize = 2;
+/// The most dry-run slots that one project holds at a time.
+pub const PROJECT_DRY_RUN_SLOTS: usize = 1;
 /// The longest that a dry run waits for its slot; then it is refused.
 pub const DRY_RUN_ACQUIRE: Duration = Duration::from_secs(2);
 /// The most time of all the scripts of one dry run, waits included.
@@ -385,13 +393,83 @@ fn runner() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("cannot find the daemon binary: {e}"))
 }
 
+/// The slots of a pool: `all` for every project, and at most `share` of
+/// them for one project. A run first takes a slot of its project's
+/// share, then one of `all`: the waits beyond a project's share queue on
+/// that project alone, and the queue of `all` (first come, first served)
+/// holds at most `share` waits of each project.
+pub struct Slots {
+    all: Arc<Semaphore>,
+    share: usize,
+    projects: Mutex<HashMap<String, Arc<Semaphore>>>,
+}
+
+/// A slot of a [`Slots`]: the run holds it until it ends.
+pub struct Slot {
+    _all: OwnedSemaphorePermit,
+    _share: OwnedSemaphorePermit,
+}
+
+impl Slots {
+    /// `total` slots, at most `share` of them for one project.
+    pub fn new(total: usize, share: usize) -> Slots {
+        Slots {
+            all: Arc::new(Semaphore::new(total)),
+            share: share.clamp(1, total.max(1)),
+            projects: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The share of `project`. A share that nobody holds or waits for
+    /// (only the map has it) has all its slots back: drop it, so the map
+    /// holds only the projects that run scripts now.
+    fn share_of(&self, project: &str) -> Arc<Semaphore> {
+        let mut map = self
+            .projects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.retain(|_, s| Arc::strong_count(s) > 1);
+        map.entry(project.to_owned())
+            .or_insert_with(|| Arc::new(Semaphore::new(self.share)))
+            .clone()
+    }
+
+    /// A slot for `project` within `deadline` (both waits), else the
+    /// reason.
+    pub async fn acquire(&self, project: &str, deadline: Duration) -> Result<Slot, String> {
+        let share = self.share_of(project);
+        let all = self.all.clone();
+        let both = async move {
+            let share = share.acquire_owned().await?;
+            let all = all.acquire_owned().await?;
+            Ok::<_, tokio::sync::AcquireError>(Slot {
+                _all: all,
+                _share: share,
+            })
+        };
+        match tokio::time::timeout(deadline, both).await {
+            Ok(Ok(slot)) => Ok(slot),
+            Ok(Err(_)) => Err("the script slots are closed".to_owned()),
+            Err(_) => Err(busy(deadline)),
+        }
+    }
+}
+
+/// The reason of a wait for a slot that ran out after `deadline`.
+fn busy(deadline: Duration) -> String {
+    format!(
+        "the script slots are busy: no slot came free in {} ms; try again later",
+        deadline.as_millis()
+    )
+}
+
 /// The slots of a pool.
-fn slots(pool: Pool) -> &'static Semaphore {
-    static ENGINE: OnceLock<Semaphore> = OnceLock::new();
-    static DRY: OnceLock<Semaphore> = OnceLock::new();
+fn slots(pool: Pool) -> &'static Slots {
+    static ENGINE: OnceLock<Slots> = OnceLock::new();
+    static DRY: OnceLock<Slots> = OnceLock::new();
     match pool {
-        Pool::Engine => ENGINE.get_or_init(|| Semaphore::new(MAX_RUNNING)),
-        Pool::DryRun => DRY.get_or_init(|| Semaphore::new(DRY_RUN_SLOTS)),
+        Pool::Engine => ENGINE.get_or_init(|| Slots::new(MAX_RUNNING, PROJECT_ENGINE_SLOTS)),
+        Pool::DryRun => DRY.get_or_init(|| Slots::new(DRY_RUN_SLOTS, PROJECT_DRY_RUN_SLOTS)),
     }
 }
 
@@ -404,46 +482,49 @@ pub enum Pool {
     DryRun,
 }
 
-/// The time that one script may take: the wait for a slot, then the run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The time that one script of `project` may take: the wait for a slot
+/// (at most `acquire`), then the run (at most `wall`), and both together
+/// at most `total` when it is set.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
     pub pool: Pool,
+    pub project: String,
     pub acquire: Duration,
     pub wall: Duration,
+    pub total: Option<Duration>,
 }
 
 impl Budget {
-    /// A step of a run of the engine.
-    pub fn engine() -> Budget {
+    /// A step of a run of the engine for `project`.
+    pub fn engine(project: &str) -> Budget {
         Budget {
             pool: Pool::Engine,
+            project: project.to_owned(),
             acquire: ENGINE_ACQUIRE,
             wall: WALL_CLOCK,
+            total: None,
         }
     }
 
-    /// A script of a dry run that has `left` of its [`DRY_RUN_TOTAL`].
-    pub fn dry_run(left: Duration) -> Budget {
+    /// A script of a dry run of `project` that has `left` of its
+    /// [`DRY_RUN_TOTAL`]: one deadline of `left` for the wait and the run.
+    pub fn dry_run(project: &str, left: Duration) -> Budget {
         Budget {
             pool: Pool::DryRun,
+            project: project.to_owned(),
             acquire: DRY_RUN_ACQUIRE.min(left),
             wall: WALL_CLOCK.min(left),
+            total: Some(left),
         }
     }
-}
 
-/// A slot of `sem` within `deadline`, else the reason.
-pub async fn acquire_within(
-    sem: &Semaphore,
-    deadline: Duration,
-) -> Result<tokio::sync::SemaphorePermit<'_>, String> {
-    match tokio::time::timeout(deadline, sem.acquire()).await {
-        Ok(Ok(p)) => Ok(p),
-        Ok(Err(_)) => Err("the script slots are closed".to_owned()),
-        Err(_) => Err(format!(
-            "the script slots are busy: no slot came free in {} ms; try again later",
-            deadline.as_millis()
-        )),
+    /// The time of the run after a wait of `waited` for the slot: `wall`,
+    /// and no more than what is left of `total`.
+    pub fn run_time(&self, waited: Duration) -> Duration {
+        match self.total {
+            Some(t) => self.wall.min(t.saturating_sub(waited)),
+            None => self.wall,
+        }
     }
 }
 
@@ -460,7 +541,14 @@ pub async fn run(input: &Input, budget: Budget) -> Result<Reply, String> {
             body.len()
         ));
     }
-    let _slot = acquire_within(slots(budget.pool), budget.acquire).await?;
+    let asked = Instant::now();
+    let _slot = slots(budget.pool)
+        .acquire(&budget.project, budget.acquire)
+        .await?;
+    let wall = budget.run_time(asked.elapsed());
+    if wall.is_zero() {
+        return Err(busy(budget.acquire));
+    }
     let mut child = tokio::process::Command::new(runner()?)
         .arg(CHILD_ARG)
         .env_clear()
@@ -492,13 +580,13 @@ pub async fn run(input: &Input, budget: Budget) -> Result<Reply, String> {
             .map_err(|e| format!("cannot wait for the script process: {e}"))?;
         Ok::<_, String>((buf, status))
     };
-    let (buf, status) = match tokio::time::timeout(budget.wall, talk).await {
+    let (buf, status) = match tokio::time::timeout(wall, talk).await {
         Ok(r) => r?,
         // Dropping `talk` drops the child: kill_on_drop kills it.
         Err(_) => {
             return Err(format!(
                 "the script ran longer than {} ms and was stopped",
-                budget.wall.as_millis()
+                wall.as_millis()
             ));
         }
     };
@@ -663,33 +751,97 @@ fn main() -> string {
 
     #[tokio::test]
     async fn a_busy_pool_refuses_after_its_deadline() {
-        let busy = Semaphore::new(0);
+        let busy = Slots::new(1, 1);
+        let _held = busy.acquire("other", Duration::from_millis(50)).await;
         let started = std::time::Instant::now();
-        let e = acquire_within(&busy, Duration::from_millis(50))
+        let e = busy
+            .acquire("p", Duration::from_millis(50))
             .await
             .err()
             .unwrap_or_default();
         assert!(e.contains("slots are busy"), "{e}");
         assert!(started.elapsed() < Duration::from_secs(2));
-        let free = Semaphore::new(1);
-        assert!(
-            acquire_within(&free, Duration::from_millis(50))
-                .await
-                .is_ok()
-        );
+        let free = Slots::new(1, 1);
+        assert!(free.acquire("p", Duration::from_millis(50)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn one_project_holds_at_most_its_share() {
+        let pool = Slots::new(MAX_RUNNING, PROJECT_ENGINE_SLOTS);
+        let short = Duration::from_millis(50);
+        let mut held = Vec::new();
+        for _ in 0..PROJECT_ENGINE_SLOTS {
+            held.push(pool.acquire("a", short).await.ok());
+        }
+        assert!(held.iter().all(Option::is_some));
+        // A third slot for "a" waits for its share, though slots are free.
+        let e = pool.acquire("a", short).await.err().unwrap_or_default();
+        assert!(e.contains("slots are busy"), "{e}");
+        // The other projects still get the rest of the pool.
+        let b = pool.acquire("b", short).await;
+        let c = pool.acquire("c", short).await;
+        assert!(b.is_ok() && c.is_ok());
+        // The pool is full now: a fourth project waits.
+        assert!(pool.acquire("d", short).await.is_err());
+        // A slot that "a" gives back is again for "a".
+        held.pop();
+        assert!(pool.acquire("a", short).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_waits_of_one_project_do_not_queue_before_another() {
+        // One dry-run slot, held by "a"; "a" has more dry runs waiting.
+        let pool = Arc::new(Slots::new(DRY_RUN_SLOTS, PROJECT_DRY_RUN_SLOTS));
+        let held = pool.acquire("a", Duration::from_millis(50)).await.ok();
+        assert!(held.is_some());
+        let mut waits = Vec::new();
+        for _ in 0..3 {
+            let pool = pool.clone();
+            waits.push(tokio::spawn(async move {
+                pool.acquire("a", Duration::from_secs(5)).await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let b = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.acquire("b", Duration::from_secs(5)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // "b" queued after the 3 waits of "a", and gets the next slot.
+        drop(held);
+        let b = tokio::time::timeout(Duration::from_secs(1), b).await;
+        assert!(matches!(b, Ok(Ok(Ok(_)))), "b waited behind a");
+        for w in waits {
+            w.abort();
+        }
     }
 
     #[test]
     fn the_budgets_stay_in_their_limits() {
-        let e = Budget::engine();
+        let e = Budget::engine("p");
         assert_eq!(e.pool, Pool::Engine);
+        assert_eq!(e.project, "p");
         assert_eq!(e.acquire, ENGINE_ACQUIRE);
-        let d = Budget::dry_run(Duration::from_secs(1));
+        assert_eq!(e.run_time(Duration::from_secs(20)), WALL_CLOCK);
+        let d = Budget::dry_run("p", Duration::from_secs(1));
         assert_eq!(d.pool, Pool::DryRun);
         assert_eq!(d.wall, Duration::from_secs(1));
         assert_eq!(d.acquire, Duration::from_secs(1));
-        let d = Budget::dry_run(DRY_RUN_TOTAL);
+        let d = Budget::dry_run("p", DRY_RUN_TOTAL);
         assert_eq!((d.acquire, d.wall), (DRY_RUN_ACQUIRE, WALL_CLOCK));
+    }
+
+    #[test]
+    fn a_dry_run_has_one_deadline_for_the_wait_and_the_run() {
+        // 3 s left: a wait of 2 s leaves 1 s to run, not the 3 s of wall.
+        let d = Budget::dry_run("p", Duration::from_secs(3));
+        assert_eq!(d.run_time(Duration::ZERO), Duration::from_secs(3));
+        assert_eq!(d.run_time(DRY_RUN_ACQUIRE), Duration::from_secs(1));
+        assert_eq!(d.run_time(Duration::from_secs(4)), Duration::ZERO);
+        // The wait and the run of the last script end by DRY_RUN_TOTAL.
+        let left = Duration::from_secs(4);
+        let d = Budget::dry_run("p", left);
+        assert!(d.acquire + d.run_time(d.acquire) <= left);
     }
 
     #[test]
