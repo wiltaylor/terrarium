@@ -28,6 +28,7 @@ pub async fn group(ctx: &Ctx, cmd: &GroupCmd) -> anyhow::Result<()> {
                 .collect()
         }
         GroupCmd::Remove { key, card } => vec![(key, "remove", json!({"card":card}))],
+        GroupCmd::Add { key, card } => vec![(key, "add", json!({"card":card}))],
     };
     let many = calls.len() > 1;
     let mut results = Vec::new();
@@ -53,6 +54,11 @@ pub async fn group(ctx: &Ctx, cmd: &GroupCmd) -> anyhow::Result<()> {
                     "unchanged"
                 }
             ));
+            // `built` also moves accepted cards labelled with the version.
+            if let Some(ids) = v["also_done"].as_array().filter(|a| !a.is_empty()) {
+                let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
+                ctx.line(format!("also done by version label: {}", ids.join(", ")));
+            }
         })?;
     }
     if many && ctx.json {

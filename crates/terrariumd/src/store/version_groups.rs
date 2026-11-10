@@ -188,13 +188,100 @@ pub fn step(
     Ok(changed)
 }
 
+/// Add a late accepted card to an open version group (TER-608). The card
+/// must be in the accepted column and in no other open group.
+pub fn add(t: &mut Tx<'_>, actor: &Actor, project: &str, key: &str, card: &str) -> ApiResult<bool> {
+    policy::admin_project(actor, project, "adding a version group member")?;
+    let g = get(t, project, key)?;
+    if g.closed_at.is_some() {
+        return Err(ApiError::conflict("version group is closed"));
+    }
+    let accepted = board::role_name(t, project, "accepted", "accepted")?;
+    let c = board::get_card(t, card)?;
+    if c.project == project && !c.archived && c.column != accepted {
+        return Err(ApiError::conflict(format!(
+            "{card} must be in {accepted} to join a version group"
+        )));
+    }
+    let changed = groups::add(t, &g, card)?;
+    if changed {
+        t.audit(
+            "version.member_added",
+            &g.id,
+            Some(project),
+            json!({"card":card}),
+        )?;
+    }
+    Ok(changed)
+}
+
+/// `version` without a leading `v` before a digit: `v1.2.3` and `1.2.3`
+/// are the same version.
+pub fn bare(version: &str) -> &str {
+    match version.strip_prefix('v') {
+        Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => rest,
+        _ => version,
+    }
+}
+
+/// The `version:` labels that name `version`, in both forms
+/// (`version:X.Y.Z` and `version:vX.Y.Z`) whichever form is given.
+/// `version:vnext` never matches (it is the open version).
+pub fn labels_for(version: &str) -> Vec<String> {
+    let b = bare(version);
+    let mut out = if b.starts_with(|c: char| c.is_ascii_digit()) {
+        vec![format!("version:{b}"), format!("version:v{b}")]
+    } else {
+        vec![format!("version:{version}")]
+    };
+    out.retain(|l| l != "version:vnext");
+    out
+}
+
+/// The versions of a card's `version:` labels, in the bare form, without
+/// `vnext`.
+pub fn shipped_label_versions(labels: &[String]) -> Vec<String> {
+    labels
+        .iter()
+        .filter_map(|l| l.strip_prefix("version:"))
+        .filter(|v| *v != "vnext" && !v.is_empty())
+        .map(|v| bare(v).to_owned())
+        .collect()
+}
+
+/// The versions (bare form) that `group built` acknowledged in `project`:
+/// the closed version groups with a `Built <version>` status. The daemon
+/// sees no Git tags, so this acknowledgement is its record that the
+/// version tag is published. It reads `card_groups` by its
+/// `(project, key)` index, not the event log.
+pub fn built_versions(
+    conn: &Connection,
+    project: &str,
+) -> ApiResult<std::collections::BTreeSet<String>> {
+    let mut q = conn.prepare(
+        "SELECT status FROM card_groups WHERE project = ?1 AND key LIKE 'version:%'
+            AND closed_at IS NOT NULL AND status LIKE 'Built %'",
+    )?;
+    let rows = q
+        .query_map([project], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .iter()
+        .filter_map(|s| s.strip_prefix("Built "))
+        .map(|v| bare(v).to_owned())
+        .collect())
+}
+
+/// Acknowledge a built version. Moves the members, then every other
+/// active, unheld accepted card labelled with that version and in no open
+/// group, to done. Returns whether the group changed and the extra cards.
 pub fn built(
     t: &mut Tx<'_>,
     actor: &Actor,
     project: &str,
     key: &str,
     version: &str,
-) -> ApiResult<bool> {
+) -> ApiResult<(bool, Vec<String>)> {
     policy::admin_project(actor, project, "acknowledging a built version")?;
     let g = get(t, project, key)?;
     if version.trim().is_empty() || version.len() > 128 || version.chars().any(char::is_control) {
@@ -205,7 +292,7 @@ pub fn built(
     let status = format!("Built {version}");
     if g.closed_at.is_some() {
         return if g.status == status {
-            Ok(false)
+            Ok((false, Vec::new()))
         } else {
             Err(ApiError::conflict("group is already closed"))
         };
@@ -226,6 +313,23 @@ pub fn built(
         }
         board::assign_card(t, actor, id, None)?;
     }
+    // Cards that joined the version after the cut, by label (TER-608).
+    let names = labels_for(version);
+    let mut extra = Vec::new();
+    for c in board::get_board(t, project)?.cards {
+        if c.column != accepted
+            || c.kind != "card"
+            || g.members.contains(&c.id)
+            || !c.labels.iter().any(|l| names.contains(l))
+            || board::is_held(t, &c.id)?
+            || groups::for_card(t, &c.id)?.is_some()
+        {
+            continue;
+        }
+        board::move_card(t, actor, &c.id, &done, None, Some(&status))?;
+        board::assign_card(t, actor, &c.id, None)?;
+        extra.push(c.id);
+    }
     for step in STEPS {
         groups::step(t, &g, step, Some("done"), None, None)?;
     }
@@ -235,18 +339,18 @@ pub fn built(
         "version.built",
         &g.id,
         Some(project),
-        json!({"key":key,"version":version}),
+        json!({"key":key,"version":version,"also_done":extra}),
     )?;
     t.emit(
         crate::events::EventDraft::new(
             "version.built",
             &status,
-            json!({"key":key,"version":version,"members":g.members}),
+            json!({"key":key,"version":version,"members":g.members,"also_done":extra}),
         )
         .project(project)
         .card(&g.id),
     )?;
-    Ok(true)
+    Ok((true, extra))
 }
 
 pub fn get(conn: &Connection, project: &str, key: &str) -> ApiResult<groups::Group> {
@@ -258,4 +362,23 @@ pub fn get(conn: &Connection, project: &str, key: &str) -> ApiResult<groups::Gro
         return Err(ApiError::invalid("not a version group"));
     }
     Ok(g)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// TER-608: either form of a version names both label forms.
+    #[test]
+    fn labels_for_matches_both_forms_from_either_form() {
+        let both = vec!["version:1.2.3".to_owned(), "version:v1.2.3".to_owned()];
+        assert_eq!(labels_for("v1.2.3"), both);
+        assert_eq!(labels_for("1.2.3"), both);
+        assert!(labels_for("vnext").is_empty());
+        assert_eq!(labels_for("beta"), vec!["version:beta".to_owned()]);
+        assert_eq!(
+            shipped_label_versions(&["version:v0.36.0".into(), "version:vnext".into()]),
+            vec!["0.36.0".to_owned()]
+        );
+    }
 }
