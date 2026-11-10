@@ -32,8 +32,8 @@ class UnprivilegedTests(unittest.TestCase):
             artifact("/t/deps/native_helper-2"),
         ])
         self.assertEqual(ut.test_binaries(out, NAMES, ut.SELECT), [
-            ("/t/deps/terrarium_host-1", "/src/r/crates/terrarium-host"),
-            ("/t/deps/native_helper-2", "/src/r/crates/terrarium-host"),
+            ("/t/deps/terrarium_host-1", "/src/r/crates/terrarium-host", False),
+            ("/t/deps/native_helper-2", "/src/r/crates/terrarium-host", False),
         ])
 
     def test_terrariumd_runs_only_its_lib_and_it_targets(self):
@@ -47,9 +47,39 @@ class UnprivilegedTests(unittest.TestCase):
             artifact("/t/deps/unknown-6", manifest="/elsewhere/Cargo.toml"),
         ])
         self.assertEqual(ut.test_binaries(out, NAMES, ut.SELECT), [
-            ("/t/deps/terrariumd-1", "/src/r/crates/terrariumd"),
-            ("/t/deps/it-2", "/src/r/crates/terrariumd"),
+            ("/t/deps/terrariumd-1", "/src/r/crates/terrariumd", True),
+            ("/t/deps/it-2", "/src/r/crates/terrariumd", True),
         ])
+
+    def test_the_it_and_lib_binaries_never_run_beside_another(self):
+        # Cargo's order as in a real build: host binaries around the terrariumd ones.
+        out = "\n".join([
+            artifact("/t/deps/terrarium_host-1"),
+            artifact("/t/deps/reservation_capacity-2", kind=("test",), name="reservation_capacity"),
+            artifact("/t/deps/it-3", manifest=DAEMON, kind=("test",), name="it"),
+            artifact("/t/deps/limits_systemd-4", kind=("test",), name="limits_systemd"),
+            artifact("/t/deps/terrariumd-5", manifest=DAEMON, name="terrariumd"),
+            artifact("/t/deps/stub_daemon-6", kind=("test",), name="stub_daemon"),
+            artifact("/t/deps/native_helper-7", kind=("test",), name="native_helper"),
+            artifact("/t/deps/version_output-8", kind=("test",), name="version_output"),
+        ])
+        bins = ut.test_binaries(out, NAMES, ut.SELECT)
+        plan = ut.groups(bins)
+        exes = [[bins[n][0] for n in group] for group in plan]
+        self.assertIn(["/t/deps/it-3"], exes)
+        self.assertIn(["/t/deps/terrariumd-5"], exes)
+        for group in exes:
+            self.assertLessEqual(len(group), ut.WIDTH)
+            if "/t/deps/it-3" in group or "/t/deps/terrariumd-5" in group:
+                self.assertEqual(len(group), 1, group)
+        # Each binary runs exactly once.
+        self.assertEqual(sorted(n for group in plan for n in group), list(range(len(bins))))
+
+    def test_groups_keep_the_order_and_fill_to_the_width(self):
+        bins = [("a", "", False), ("b", "", False), ("it", "", True), ("c", "", False),
+                ("d", "", False), ("e", "", False)]
+        self.assertEqual(ut.groups(bins, width=2), [[0, 1], [2], [3, 4], [5]])
+        self.assertEqual(ut.groups(bins, width=1), [[0], [1], [2], [3], [4], [5]])
 
     def test_package_names_come_from_cargo_metadata(self):
         meta = json.dumps({"packages": [{"name": "terrariumd", "manifest_path": DAEMON}]})

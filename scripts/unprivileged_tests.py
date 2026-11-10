@@ -5,7 +5,8 @@ user passed in the merge suite and failed in the release CI (TER-494,
 TER-575). This step reuses the test binaries that the root run of `ci::test`
 built (`cargo test --workspace --no-run`, the same command and env, so no
 rebuild), keeps those that SELECT names, and runs each of them as UID with
-`setpriv`, each with its own private HOME, all binaries at once. TMPDIR is
+`setpriv`, each with its own private HOME, at most WIDTH at a time and the
+heavy terrariumd binaries (ALONE) on their own. TMPDIR is
 not set: the tests use the shared, sticky, root-owned /tmp like the release
 CI, which is what TER-575 failed on (a private TMPDIR hid that failure).
 Doctests are not run. Without root it skips: the main run is then already
@@ -30,6 +31,11 @@ SELECT: dict[str, frozenset[str] | None] = {
     "terrariumd": frozenset({"lib", "it"}),
 }
 UID = 1001
+# The merge job runs this on a loaded host: timing tests of these binaries
+# failed when another binary ran beside them (TER-611 review). They run alone.
+ALONE = frozenset({("terrariumd", "lib"), ("terrariumd", "it")})
+# The other binaries run at most this many at a time.
+WIDTH = 2
 # Only these reach the tests: the merge job's env stays with root. The rustup
 # and cargo homes let tests that run rustc or cargo find the pinned toolchain.
 PASS_ENV = ("PATH", "LANG", "LC_ALL", "TZ", "RUST_BACKTRACE", "RUST_LOG",
@@ -46,8 +52,8 @@ def target_label(target: dict) -> str:
 
 
 def test_binaries(cargo_output: str, names: dict[str, str],
-                  select: dict[str, frozenset[str] | None]) -> list[tuple[str, str]]:
-    """(executable, package manifest dir) of each selected test artifact, in order."""
+                  select: dict[str, frozenset[str] | None]) -> list[tuple[str, str, bool]]:
+    """(executable, package manifest dir, runs alone) of each selected test artifact, in order."""
     found = []
     for line in cargo_output.splitlines():
         try:
@@ -60,11 +66,31 @@ def test_binaries(cargo_output: str, names: dict[str, str],
         package = names.get(msg.get("manifest_path", ""))
         if not exe or package not in select:
             continue
+        label = target_label(msg.get("target", {}))
         targets = select[package]
-        if targets is not None and target_label(msg.get("target", {})) not in targets:
+        if targets is not None and label not in targets:
             continue
-        found.append((exe, str(Path(msg["manifest_path"]).parent)))
+        found.append((exe, str(Path(msg["manifest_path"]).parent), (package, label) in ALONE))
     return found
+
+
+def groups(bins: list[tuple[str, str, bool]], width: int = WIDTH) -> list[list[int]]:
+    """The indexes of BINS that run at the same time, group by group, in order.
+
+    A binary that runs alone is a group of its own; the others fill groups of
+    at most WIDTH, in cargo's order.
+    """
+    out: list[list[int]] = []
+    shared: list[int] = []
+    for n, (_, _, alone) in enumerate(bins):
+        if alone:
+            out.append([n])
+            continue
+        if not shared or len(shared) == width:
+            shared = []
+            out.append(shared)
+        shared.append(n)
+    return out
 
 
 def child_env(home: str) -> dict[str, str]:
@@ -129,26 +155,30 @@ def run() -> int:
         args = []
         if report:
             args = ["-Z", "unstable-options", "--format", "json", "--report-time"]
-        # The binaries run at the same time, each into its own log; the logs
-        # are then printed (and reported) one after another, in cargo's order.
-        for n, (exe, cwd) in enumerate(bins):
-            env = child_env(private_home(root, n, UID))
-            if report:
-                env["RUSTC_BOOTSTRAP"] = "1"
-            log = open(os.path.join(root, f"{n}.log"), "w+", encoding="utf-8",
-                       errors="replace")
-            running.append((exe, log, subprocess.Popen(
-                setpriv(UID) + [exe, *args], cwd=cwd, env=env, stdout=log)))
-        for exe, log, child in running:
-            code = child.wait()
-            log.seek(0)
-            print(f"unprivileged tests: uid {UID}: {exe}", flush=True)
-            for line in log:
-                print(line, end="", flush=True)
+        # The binaries of a group run at the same time, each into its own log;
+        # the logs are then printed (and reported) one after another.
+        for group in groups(bins):
+            running = []
+            for n in group:
+                exe, cwd, _ = bins[n]
+                env = child_env(private_home(root, n, UID))
                 if report:
-                    report.write(line)
-            if code:
-                failed.append(exe)
+                    env["RUSTC_BOOTSTRAP"] = "1"
+                log = open(os.path.join(root, f"{n}.log"), "w+", encoding="utf-8",
+                           errors="replace")
+                running.append((exe, log, subprocess.Popen(
+                    setpriv(UID) + [exe, *args], cwd=cwd, env=env, stdout=log)))
+            for exe, log, child in running:
+                code = child.wait()
+                log.seek(0)
+                print(f"unprivileged tests: uid {UID}: {exe}", flush=True)
+                for line in log:
+                    print(line, end="", flush=True)
+                    if report:
+                        report.write(line)
+                log.close()
+                if code:
+                    failed.append(exe)
     finally:
         for _, log, child in running:
             if child.poll() is None:
