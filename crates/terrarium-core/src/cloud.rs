@@ -316,6 +316,30 @@ pub fn model_for(models: &BTreeMap<String, String>, model: Option<&str>) -> Opti
     )
 }
 
+/// The model names that need no entry in the model map: Claude Code maps
+/// them with [`tier_env`] or its own default for the cloud.
+pub const ALIASES: [&str; 3] = ["opus", "sonnet", "haiku"];
+
+/// Why an agent on cloud subscription `sub` cannot use `model`: a name
+/// that is not an alias ([`ALIASES`]) and not a key of the model map. Such
+/// a name would fail only at the first turn, with a cloud API error. No
+/// model passes.
+pub fn model_refusal(
+    sub: &str,
+    models: &BTreeMap<String, String>,
+    model: Option<&str>,
+) -> Option<String> {
+    let m = model.map(str::trim).filter(|m| !m.is_empty())?;
+    let key = m.to_ascii_lowercase();
+    if ALIASES.contains(&key.as_str()) || models.contains_key(&key) {
+        return None;
+    }
+    Some(format!(
+        "model `{m}` is not in the model map of cloud subscription `{sub}`; add `cloud.models.{key}` \
+         (the cloud model id), or use opus, sonnet, or haiku"
+    ))
+}
+
 /// The env of Claude Code for a `kind` subscription with the settings `s`,
 /// the stored `key`, and the Bedrock access key ID `key_id`.
 pub fn claude_env(kind: Kind, s: &CloudSettings, key: &str, key_id: Option<&str>) -> CloudEnv {
@@ -645,6 +669,13 @@ mod tests {
             model_for(&m, Some("claude-sonnet-5")).as_deref(),
             Some("claude-sonnet-5")
         );
+        assert_eq!(model_refusal("aws", &m, None), None);
+        assert_eq!(model_refusal("aws", &m, Some("Haiku")), None);
+        assert_eq!(model_refusal("aws", &m, Some("claude-opus-5-5")), None);
+        let why = model_refusal("aws", &m, Some("claude-sonnet-5")).unwrap();
+        assert!(why.contains("`aws`"), "{why}");
+        assert!(why.contains("cloud.models.claude-sonnet-5"), "{why}");
+        assert!(model_refusal("aws", &BTreeMap::new(), Some("opsu")).is_some());
         let env = tier_env(&m);
         assert_eq!(
             env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),

@@ -3087,6 +3087,27 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     )
     .await
     .ok();
+    // The body had no `models`: the stored map stays.
+    let sub = td.get("/api/subscriptions/aws").await.ok().clone();
+    assert_eq!(sub["cloud"]["budget_usd"], 50);
+    assert_eq!(sub["cloud"]["models"]["opus"], "us.anthropic.claude-opus-5-5");
+    // An agent model that is neither an alias nor in the map: refused at
+    // create, naming the sub and the key.
+    let r = td
+        .post(
+            "/api/agents",
+            json!({"name": "typo", "project": "p", "harness": "claude",
+                   "subscription": "aws", "model": "claude-sonet-5"}),
+        )
+        .await;
+    r.err(422, "invalid");
+    let msg = r.body.to_string();
+    assert!(
+        msg.contains("`aws`") && msg.contains("cloud.models.claude-sonet-5"),
+        "{msg}"
+    );
+    td.agent("p", "aliased", json!({"subscription": "aws", "model": "sonnet"}))
+        .await;
     terrariumd::cloud_budget::check(&state, "aws")
         .await
         .unwrap();

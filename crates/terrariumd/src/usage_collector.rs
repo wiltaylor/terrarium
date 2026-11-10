@@ -1066,33 +1066,40 @@ impl Collector {
         }
         // The newest running USD total of the session, for the monthly
         // budget of a cloud subscription (`crate::cloud_budget`).
-        if let Some(total) = t.source.take_costs().into_iter().reduce(f64::max) {
+        // Only a session on a cloud subscription gets a row.
+        let total = t.source.take_costs().into_iter().reduce(f64::max);
+        if let (Some(total), Some(sub)) = (total, t.info.subscription.clone()) {
             let info = t.info.clone();
             let month = terrarium_core::cloud::month_key(Utc::now());
-            let (agent_id, session, sub) = (info.agent, info.session, info.subscription);
-            let sub2 = sub.clone();
+            let (agent_id, session) = (info.agent, info.session);
+            let name = sub.clone();
             let r = self
                 .state
                 .db
                 .write("system", move |tx| {
-                    crate::store::cloud_spend::record(
-                        tx,
-                        &agent_id,
-                        &session,
-                        sub2.as_deref(),
-                        &month,
-                        total,
-                    )
+                    let cloud = crate::store::subscriptions::find(tx, &name)?
+                        .is_some_and(|s| s.cloud_kind().is_some());
+                    if cloud {
+                        crate::store::cloud_spend::record(
+                            tx,
+                            &agent_id,
+                            &session,
+                            Some(&name),
+                            &month,
+                            total,
+                        )?;
+                    }
+                    Ok(cloud)
                 })
                 .await;
-            match (r, sub) {
-                (Err(e), _) => warn!(agent, "usage: cannot store the session cost: {e}"),
-                (Ok(()), Some(sub)) => {
+            match r {
+                Err(e) => warn!(agent, "usage: cannot store the session cost: {e}"),
+                Ok(true) => {
                     if let Err(e) = crate::cloud_budget::check(&self.state, &sub).await {
                         warn!(agent, "usage: cloud budget check failed: {e}");
                     }
                 }
-                (Ok(()), None) => {}
+                Ok(false) => {}
             }
         }
         let card = if samples.is_empty() {

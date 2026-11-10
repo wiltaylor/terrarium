@@ -2089,6 +2089,24 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                 ("AWS_BEARER_TOKEN_BEDROCK", "E2E-bedrock-api-key-11"),
             ],
         },
+        // The GCP JSON is a 0600 file; its var has the path (checked below).
+        Case {
+            agent: "claude-gcp",
+            harness: "claude",
+            sub: json!({"name": "vertex", "provider": "gcp",
+                        "cloud": {"project_id": "e2e-proj", "region": "global"}}),
+            key: Some((
+                "gcp",
+                r#"{"type":"service_account","private_key_id":"E2E-GCP-KEY-ID-13","private_key":"E2E-GCP-PRIVATE-KEY-14"}"#,
+            )),
+            account_token: None,
+            extra: Value::Null,
+            want: &[
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("CLOUD_ML_REGION", "global"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "e2e-proj"),
+            ],
+        },
         Case {
             agent: "claude-foundry",
             harness: "claude",
@@ -2149,6 +2167,32 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                 c.agent
             );
         }
+        // GCP: the var is the path of a 0600 file in the private runtime
+        // dir with the JSON, and the JSON is in no var.
+        let mut gcp_file = None;
+        if c.agent == "claude-gcp" {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(!seen.contains("E2E-GCP-PRIVATE-KEY-14"), "the JSON is in a var");
+            assert!(!seen.contains("E2E-GCP-KEY-ID-13"), "the JSON is in a var");
+            let path = seen
+                .lines()
+                .find_map(|l| l.strip_prefix("GOOGLE_APPLICATION_CREDENTIALS="))
+                .expect("no GOOGLE_APPLICATION_CREDENTIALS");
+            let path = std::path::PathBuf::from(path);
+            assert!(
+                path.starts_with(td.dir.path().join("run").join("credentials")),
+                "{}",
+                path.display()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), c.key.unwrap().1);
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(path.parent().unwrap()), 0o700);
+            gcp_file = Some(path);
+            // Not in runner.json, nor in a state-dir file (checked below).
+            values.push("E2E-GCP-PRIVATE-KEY-14".to_owned());
+            values.push("E2E-GCP-KEY-ID-13".to_owned());
+        }
         // The runner spec of this launch is there, with no value.
         let spec = std::fs::read_to_string(td.private_dir(&id).join("runner.json")).unwrap();
         assert!(spec.contains("exec-env"), "{}: {spec}", c.agent);
@@ -2163,6 +2207,17 @@ async fn the_harness_credentials_come_through_exec_env_only() {
         td.post(&format!("/api/agents/{id}/stop"), None).await;
         td.wait_status(&id, "stopped").await;
         td.wait_runner_gone(&id).await;
+        // Sandbox mode `none`: the file goes when the harness exits.
+        if let Some(path) = gcp_file {
+            let gone = || !path.exists();
+            for _ in 0..100 {
+                if gone() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(gone(), "{} is still there", path.display());
+        }
     }
     // No file of the state dir holds a value, except the credential
     // stores (`credentials/`).

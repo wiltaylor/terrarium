@@ -17,7 +17,7 @@
 //!
 //! - A credential file (`credential_files`: the service-account JSON of a
 //!   GCP subscription) is written with mode 0600 to a directory of the
-//!   agent ([`credential_dir`]), and its var
+//!   agent ([`credential_dir`], mode 0700), and its var
 //!   (`GOOGLE_APPLICATION_CREDENTIALS`) gets the path, over the env.
 //!
 //! When the daemon does not answer: with `--require-credentials` (the
@@ -160,13 +160,15 @@ fn parse(v: &Value) -> EnvVars {
     }
 }
 
-/// The directory of the credential files of the agent
-/// (`TERRARIUM_AGENT`): `$XDG_RUNTIME_DIR/terrarium-credentials/<agent>`
-/// when the runtime dir is set (a tmpfs of the user), else
+/// The directory of the credential files: `TERRARIUM_CREDENTIAL_DIR` when
+/// the daemon sets it (sandbox mode `none`: a private dir of the daemon's
+/// runtime dir, removed when the harness exits), else
 /// `$HOME/.terrarium/credentials/<agent>` (the sandbox home is a tmpfs, so
-/// the files go with the sandbox). One directory per agent, so two
-/// agents with sandbox mode `none` never share a file.
+/// the files go with the sandbox).
 fn credential_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("TERRARIUM_CREDENTIAL_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(d);
+    }
     let agent: String = std::env::var("TERRARIUM_AGENT")
         .unwrap_or_default()
         .chars()
@@ -177,14 +179,11 @@ fn credential_dir() -> PathBuf {
     } else {
         agent
     };
-    match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
-        Some(d) => PathBuf::from(d).join("terrarium-credentials").join(agent),
-        None => std::env::var_os("HOME")
-            .map_or_else(std::env::temp_dir, PathBuf::from)
-            .join(".terrarium")
-            .join("credentials")
-            .join(agent),
-    }
+    std::env::var_os("HOME")
+        .map_or_else(std::env::temp_dir, PathBuf::from)
+        .join(".terrarium")
+        .join("credentials")
+        .join(agent)
 }
 
 /// Write each credential file to `dir` (mode 0700) with mode 0600,
@@ -200,7 +199,10 @@ fn write_files(
         return Ok(Vec::new());
     }
     std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    // The dir and its parent: no other user lists or reads them.
+    for d in [dir, dir.parent().unwrap_or(dir)] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+    }
     let mut out = Vec::new();
     for (var, content) in files {
         let path = dir.join(format!("{}.json", var.to_ascii_lowercase()));

@@ -166,6 +166,15 @@ pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
     })
 }
 
+/// Why an agent with `model` cannot run on `sub`: a cloud subscription
+/// (`terrarium_core::cloud`) whose model map has no entry for the name,
+/// which is not an alias either ([`terrarium_core::cloud::model_refusal`]).
+pub fn model_refusal(sub: &Subscription, model: Option<&str>) -> Option<String> {
+    sub.cloud_kind()?;
+    let models = sub.cloud.as_ref().map(|c| c.models.clone()).unwrap_or_default();
+    terrarium_core::cloud::model_refusal(&sub.name, &models, model)
+}
+
 /// Why no new work may start on `sub`: it is disabled.
 pub fn disabled_refusal(sub: &Subscription) -> Option<String> {
     (!sub.enabled).then(|| {

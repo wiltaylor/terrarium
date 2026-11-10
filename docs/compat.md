@@ -2120,10 +2120,17 @@ and `bedrock:GetInferenceProfile` (Bedrock); `roles/aiplatform.user`
 
 Tested: the env of each kind (unit tests in `cloud.rs`), and the env that
 a fake Claude Code gets through the real `terrarium exec-env` for a
-Bedrock key pair, a Bedrock API key, and a Foundry key
+Bedrock key pair, a Bedrock API key, a GCP service-account JSON (the var
+is the path of a 0600 file, the JSON is in no var), and a Foundry key
 (`crates/terrariumd/tests/runner_process.rs`,
 `the_harness_credentials_come_through_exec_env_only`). Not tested: a turn
 on any cloud, and the cost that Claude Code writes on a cloud.
+
+The GCP file: in the bwrap sandbox it is in the tmpfs home and goes with
+the sandbox. Sandbox mode `none` is for development and tests only: there
+the file is in the daemon's runtime dir (`<runtime dir>/credentials/<agent>`,
+mode 0700), any process of the same user can read it while the agent
+runs, and the daemon removes it when the harness exits.
 
 ### Self-hosted model servers
 

@@ -9,6 +9,9 @@
 //! running value, so a tail that reads a session file again writes the
 //! same number and nothing counts twice.
 //!
+//! Only sessions on a cloud subscription get rows. [`prune`] removes the
+//! months that are more than [`KEEP_MONTHS`] old.
+//!
 //! `costUSD` is Claude Code's price of the tokens at the list price, not
 //! the bill of the cloud account (`docs/compat.md`, "Session file and
 //! usage accounting").
@@ -67,7 +70,24 @@ pub fn month_spend(conn: &Connection, subscription: &str, month: &str) -> ApiRes
         .unwrap_or(0.0))
 }
 
-/// The IDs of the agents on `subscription`.
+/// The months of spend that stay: the current one and the 12 before.
+pub const KEEP_MONTHS: u32 = 13;
+
+/// Remove the rows of the months before `oldest` (`2025-11`). Returns the
+/// rows removed.
+pub fn prune(t: &mut Tx<'_>, oldest: &str) -> ApiResult<usize> {
+    Ok(t.execute("DELETE FROM cloud_spend WHERE month < ?1", [oldest])?)
+}
+
+/// The oldest month that [`prune`] keeps at `now`: [`KEEP_MONTHS`] months
+/// with the month of `now`.
+pub fn oldest_kept(now: chrono::DateTime<chrono::Utc>) -> String {
+    use chrono::Datelike;
+    let months = i64::from(now.year()) * 12 + i64::from(now.month0()) - i64::from(KEEP_MONTHS - 1);
+    format!("{:04}-{:02}", months.div_euclid(12), months.rem_euclid(12) + 1)
+}
+
+/// The IDs of the agents on `subscription` (index `agents_subscription`).
 pub fn agents_on(conn: &Connection, subscription: &str) -> ApiResult<Vec<String>> {
     let mut stmt = conn.prepare("SELECT id FROM agents WHERE subscription = ?1 ORDER BY id")?;
     let rows = stmt.query_map([subscription], |r| r.get::<_, String>(0))?;
@@ -118,5 +138,41 @@ mod tests {
         assert_eq!(spend(&db, "aws", "2026-12").await, 2.5);
         assert_eq!(spend(&db, "aws", "2026-11").await, 7.0);
         assert_eq!(spend(&db, "aws", "2027-01").await, 0.0);
+        // The prune keeps 13 months.
+        let n = db.write("t", |t| prune(t, "2026-12")).await.unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(spend(&db, "aws", "2026-12").await, 2.5);
+        assert_eq!(spend(&db, "aws", "2026-11").await, 0.0);
+    }
+
+    #[test]
+    fn the_oldest_kept_month() {
+        let at = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        assert_eq!(oldest_kept(at("2026-11-10T00:00:00Z")), "2025-11");
+        assert_eq!(oldest_kept(at("2026-01-31T00:00:00Z")), "2025-01");
+        assert_eq!(oldest_kept(at("2026-12-01T00:00:00Z")), "2025-12");
+    }
+
+    /// The query of [`agents_on`] uses its index.
+    #[tokio::test]
+    async fn agents_on_uses_the_index() {
+        let db = db();
+        let plan: Vec<String> = db
+            .read(|c| {
+                let mut stmt =
+                    c.prepare("EXPLAIN QUERY PLAN SELECT id FROM agents WHERE subscription = ?1 ORDER BY id")?;
+                let rows = stmt.query_map(["aws"], |r| r.get::<_, String>(3))?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            })
+            .await
+            .unwrap();
+        assert!(
+            plan.iter().any(|p| p.contains("agents_subscription")),
+            "{plan:?}"
+        );
     }
 }

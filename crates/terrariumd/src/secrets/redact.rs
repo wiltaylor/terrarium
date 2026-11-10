@@ -380,6 +380,46 @@ mod tests {
         );
     }
 
+    /// TER-630: the matcher has the AWS access key ID of a Bedrock key, and
+    /// the `private_key` and `private_key_id` of a GCP service-account JSON,
+    /// beside the keys.
+    #[test]
+    fn cloud_key_parts_are_in_the_matcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = crate::secrets::tests::db();
+        let k = MasterKey::generate();
+        crypto::write_key(&crypto::key_path(dir.path()), &k).unwrap();
+        let key = |provider: &str, key: &str, key_id: Option<&str>| crate::login_session::ApiKey {
+            provider: provider.into(),
+            key: key.into(),
+            plan: None,
+            base_url: None,
+            models: Vec::new(),
+            key_id: key_id.map(str::to_owned),
+            cloud: None,
+        };
+        crate::login_session::store_key(
+            dir.path(),
+            "aws",
+            &key("bedrock", "aws-secret-access-key-abc", Some("AKIAEXAMPLEKEYID")),
+        )
+        .unwrap();
+        let json = r#"{"type":"service_account","private_key_id":"gcpkeyid0123456789","private_key":"-----BEGIN PRIVATE KEY-----MIIEgcpsecretbody-----END PRIVATE KEY-----"}"#;
+        crate::login_session::store_key(dir.path(), "vertex", &key("gcp", json, None)).unwrap();
+
+        let r = build(&c, dir.path()).unwrap();
+        assert_eq!(
+            r.redact_str("id AKIAEXAMPLEKEYID secret aws-secret-access-key-abc"),
+            "id [secret:subscription/aws] secret [secret:subscription/aws]"
+        );
+        assert_eq!(
+            r.redact_str(
+                "kid gcpkeyid0123456789 pk -----BEGIN PRIVATE KEY-----MIIEgcpsecretbody-----END PRIVATE KEY-----"
+            ),
+            "kid [secret:subscription/vertex] pk [secret:subscription/vertex]"
+        );
+    }
+
     #[test]
     fn no_secret_is_the_empty_matcher_without_a_key_file() {
         let dir = tempfile::tempdir().unwrap();

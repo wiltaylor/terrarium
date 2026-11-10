@@ -1436,11 +1436,19 @@ async fn api_key(
                     "subscription `{name}` comes from a file; set its `[cloud]` table there"
                 )));
             }
-            let settings = key
-                .cloud
-                .clone()
-                .or_else(|| exists.as_ref().and_then(|s| s.cloud.clone()))
-                .unwrap_or_default();
+            // A body without `models` keeps the stored model map.
+            let stored = exists.as_ref().and_then(|s| s.cloud.clone());
+            let settings = match key.cloud.clone() {
+                Some(mut c) => {
+                    if c.models.is_empty()
+                        && let Some(st) = &stored
+                    {
+                        c.models = st.models.clone();
+                    }
+                    c
+                }
+                None => stored.unwrap_or_default(),
+            };
             terrarium_core::cloud::check(kind, &settings)
                 .map_err(|e| ApiError::invalid(format!("subscription `{name}`: {e}")))?;
             Some(settings)

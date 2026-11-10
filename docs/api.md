@@ -6203,8 +6203,10 @@ keeps the secrets:
 `cloud` holds the settings, which are no secret. They go to the
 definition (`[cloud]` in `subscriptions/<name>.toml`, or `cloud` in `POST
 /api/subscriptions`), not to the key file. A key without `cloud` keeps
-the stored settings. A file subscription takes its `[cloud]` from the
-file only (`422 invalid` with `cloud`).
+the stored settings, and a `cloud` without `models` keeps the stored
+model map. A file subscription takes its `[cloud]` from the file only
+(`422 invalid` with `cloud`). Today the key endpoint is the only API path
+that changes `cloud`, so a new budget sends the key again.
 
 | Field | Kinds | Claude Code var |
 |---|---|---|
@@ -6221,10 +6223,12 @@ vars: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or
 `AWS_BEARER_TOKEN_BEDROCK`; `ANTHROPIC_FOUNDRY_API_KEY`. Every value comes
 through `terrarium exec-env` (`POST /api/agent/secrets/env`), never the
 launch spec. The GCP JSON is in `credential_files` of that answer:
-`exec-env` writes it with mode `0600` to
-`$XDG_RUNTIME_DIR/terrarium-credentials/<agent>/` (else
-`$HOME/.terrarium/credentials/<agent>/`, a tmpfs in the sandbox) and sets
-`GOOGLE_APPLICATION_CREDENTIALS` to the file. The redaction matcher has
+`exec-env` writes it with mode `0600` (the dir `0700`) to
+`$HOME/.terrarium/credentials/<agent>/`, a tmpfs in the bwrap sandbox,
+and sets `GOOGLE_APPLICATION_CREDENTIALS` to the file. In sandbox mode
+`none` (development and tests) the daemon names the dir in
+`TERRARIUM_CREDENTIAL_DIR`: `<runtime dir>/credentials/<agent>`, which it
+removes when the harness exits. The redaction matcher has
 the key, `key_id`, and the `private_key` and `private_key_id` of a GCP
 JSON.
 
@@ -6232,14 +6236,20 @@ JSON.
 inference profile id or ARN, a Vertex model id, a Foundry deployment
 name. The keys are lowercase (`opus`, `sonnet`, `haiku`, or a Claude id
 such as `claude-opus-5-5`). Claude Code gets `--model` with the map entry
-of the agent's `model`, else the model as it is (Claude Code maps an alias
-with the `ANTHROPIC_DEFAULT_*_MODEL` vars and a Claude id with its own
-table).
+of the agent's `model`, else the model as it is for the aliases `opus`,
+`sonnet`, and `haiku` (Claude Code maps them with the
+`ANTHROPIC_DEFAULT_*_MODEL` vars or its default for the cloud). Any other
+name that is not in the map is refused: `422 invalid` at agent create, a
+patch, a file sync, and a template; a start refusal (`NotReady`) at start.
+The message names the subscription and the missing `cloud.models.<name>`.
 
 A cloud subscription is never in the automatic account choice: the
-auto-swap after a usage limit (§16.6) never moves an agent to one, and the
+auto-swap after a usage limit (§16.6) never moves an agent to one, the
 spawn pick takes one only when the template or the agent names it as
-`subscription`, never from `subscription_pool`. A swap that names it is
+`subscription`, never from `subscription_pool`, and the `<template>-alt`
+fallback of a spawn without headroom never takes one, also when the alt
+template names it. The spawn pick counts a cloud subscription as full at
+100 percent of its budget window, not at 80. A swap that names it is
 allowed (`POST /api/agents/{id}/subscription`, §6.2, with the rules of a
 swap).
 

@@ -10,11 +10,15 @@ use crate::store::subscriptions as subs;
 /// Pick the account with most headroom below 80 percent in every window.
 /// Missing samples are not evidence that an account is full. A cloud
 /// subscription counts only when the definition names it as
-/// `subscription`, never from the pool.
+/// `subscription`, never from the pool, and never when `fallback` is true
+/// (the `<template>-alt` of the automatic main/alt switch). A cloud
+/// subscription has room up to 100 percent of its budget window: the
+/// operator's line is the alert at 80 and the hold at 100.
 pub fn pick(
     conn: &Connection,
     def: &AgentDef,
     state: &Shared,
+    fallback: bool,
     refusals: &mut Vec<String>,
 ) -> ApiResult<Option<String>> {
     let now = chrono::Utc::now();
@@ -32,7 +36,7 @@ pub fn pick(
         let login = sub.is_selfhosted()
             || crate::accounts::has_credential(&state.state_dir, name, def.harness)
             || sub.env_var.is_some();
-        let why = if let Some(why) = cloud_refusal(&sub, def.subscription.as_deref()) {
+        let why = if let Some(why) = cloud_refusal(&sub, def.subscription.as_deref(), fallback) {
             Some(why)
         } else if !sub.enabled {
             Some("disabled")
@@ -62,23 +66,35 @@ pub fn pick(
             .iter()
             .map(|w| crate::quota_policy::effective_pct(w.used_pct, w.resets_at.as_deref(), now))
             .fold(0.0, f64::max);
-        if used < 80.0 && used < lowest {
+        // A cloud subscription: room up to its used-up budget.
+        let line = if sub.cloud_kind().is_some() { 100.0 } else { 80.0 };
+        if used < line && used < lowest {
             best = Some(name.clone());
             lowest = used;
         }
-        if used >= 80.0 {
-            refusals.push(format!("{name}: window use {used}% is at or above 80%"));
+        if used >= line {
+            refusals.push(format!("{name}: window use {used}% is at or above {line}%"));
         }
     }
     Ok(best)
 }
 
 /// A cloud subscription (`terrarium_core::cloud`) is billed per token: it
-/// is a candidate only as the named `subscription` of the definition,
-/// never as a pool member.
-fn cloud_refusal(sub: &subs::Subscription, named: Option<&str>) -> Option<&'static str> {
-    (sub.cloud_kind().is_some() && named != Some(sub.name.as_str()))
-        .then_some("cloud subscription, used only when named")
+/// is a candidate only as the named `subscription` of the definition the
+/// caller asked for, never as a pool member and never on the `-alt`
+/// fallback (`fallback`).
+fn cloud_refusal(
+    sub: &subs::Subscription,
+    named: Option<&str>,
+    fallback: bool,
+) -> Option<&'static str> {
+    if sub.cloud_kind().is_none() {
+        return None;
+    }
+    if fallback {
+        return Some("cloud subscription, never taken by the automatic -alt fallback");
+    }
+    (named != Some(sub.name.as_str())).then_some("cloud subscription, used only when named")
 }
 
 #[cfg(test)]
@@ -94,10 +110,17 @@ mod tests {
             "created_at": "", "updated_at": ""
         }))
         .unwrap();
-        assert_eq!(cloud_refusal(&s, Some("aws")), None);
-        assert!(cloud_refusal(&s, None).is_some());
-        assert!(cloud_refusal(&s, Some("max")).is_some());
+        assert_eq!(cloud_refusal(&s, Some("aws"), false), None);
+        assert!(cloud_refusal(&s, None, false).is_some());
+        assert!(cloud_refusal(&s, Some("max"), false).is_some());
+        // The `-alt` fallback never takes it, even when the alt names it.
+        assert!(
+            cloud_refusal(&s, Some("aws"), true)
+                .unwrap()
+                .contains("-alt")
+        );
         s.provider = "anthropic".into();
-        assert_eq!(cloud_refusal(&s, None), None);
+        assert_eq!(cloud_refusal(&s, None, false), None);
+        assert_eq!(cloud_refusal(&s, None, true), None);
     }
 }

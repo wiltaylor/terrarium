@@ -18,3 +18,7 @@ CREATE TABLE cloud_spend (
     PRIMARY KEY (agent, session, month)
 );
 CREATE INDEX cloud_spend_sub ON cloud_spend(subscription, month);
+
+-- The agents on a subscription, for the budget hold under the write lock
+-- (`store::cloud_spend::agents_on`, TER-394: an indexed query).
+CREATE INDEX agents_subscription ON agents(subscription);
