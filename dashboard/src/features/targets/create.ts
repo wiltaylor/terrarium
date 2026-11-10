@@ -81,6 +81,8 @@ export const KIND_FIELDS: Record<TargetKind, readonly (keyof CreateTargetForm)[]
   vnc: ["host", "address", "username", "credential"],
   rdp: ["host", "address", "username", "domain", "credential"],
   desktop: ["host", "display", "display_name"],
+  // Not in the create dialog (KINDS): the operator defines exedev targets in a file or the API.
+  exedev: ["credential"],
 };
 
 /** The default port of a vnc or rdp address (docs/api.md §17.2). */

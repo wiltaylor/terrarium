@@ -437,7 +437,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     ...t,
     has_display: hasDisplay(t),
     scope: t.project ? "project" : "global",
-    host_online: t.kind === "ssh" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online"),
+    host_online: t.kind === "ssh" || t.kind === "exedev" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online"),
     access: "operator",
     lease: null,
     runtime: t.runtime ?? {},
@@ -447,7 +447,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   // The checks of the daemon's `store/targets.rs` validate (docs/api.md §17.2): a bad value is `422 invalid`.
   const targetDef = (b: NewTarget): NewTarget => {
     if (!b || typeof b.name !== "string" || !/^[a-z0-9][a-z0-9._-]*$/i.test(b.name)) fail(422, "invalid", "bad target name");
-    if (!["host", "ssh", "docker", "vmlab", "vnc", "rdp", "desktop"].includes(b.kind)) fail(422, "invalid", "`kind` must be host, ssh, docker, vmlab, vnc, rdp, or desktop");
+    if (!["host", "ssh", "docker", "vmlab", "vnc", "rdp", "desktop", "exedev"].includes(b.kind)) fail(422, "invalid", "`kind` must be host, ssh, docker, vmlab, vnc, rdp, desktop, or exedev");
     for (const f of ["host", "address", "credential", "image", "container", "machine", "lab_ref", "username", "domain"] as const) {
       const v = b[f];
       if (v !== undefined && (typeof v !== "string" || !v || /\s/.test(v) || v.startsWith("-"))) fail(422, "invalid", `bad \`${f}\` \`${String(v)}\`: not empty, no spaces, no leading \`-\``);
@@ -463,6 +463,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       need("address", !!b.address);
     }
     if (b.kind === "desktop") need("host", !!b.host);
+    if (b.kind === "exedev") {
+      need("credential", !!b.credential);
+      if (!b.ephemeral || b.keep) fail(422, "invalid", "an exedev target needs `ephemeral = true` and no `keep`: its VM is made on agent start and removed on agent stop");
+    }
     if ((b.display || b.display_name) && b.kind !== "docker" && b.kind !== "desktop")
       fail(422, "invalid", `\`display\` and \`display_name\` are for a docker or desktop target, not \`${b.kind}\``);
     if (b.username && b.kind !== "vnc" && b.kind !== "rdp") fail(422, "invalid", `\`username\` is for a vnc or rdp target, not \`${b.kind}\``);
