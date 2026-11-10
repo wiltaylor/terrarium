@@ -743,7 +743,10 @@ async fn shipped_accepted_marks_accepted_cards_of_a_built_version() {
         .unwrap();
     let (lead_before, worker_before) = (notices(&td, &lead).await, notices(&td, &worker).await);
     assert_signals(&td, &shipped, json!(["shipped_accepted"])).await;
-    assert_eq!(usage(&td, &v_form).await["signals"], json!(["shipped_accepted"]));
+    assert_eq!(
+        usage(&td, &v_form).await["signals"],
+        json!(["shipped_accepted"])
+    );
     assert_eq!(usage(&td, &unbuilt).await["signals"], json!([]));
     assert_eq!(usage(&td, &vnext).await["signals"], json!([]));
     assert_eq!(notices(&td, &lead).await, lead_before + 2);
