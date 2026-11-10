@@ -67,6 +67,7 @@ type Rule {
   @children("agent_park") agent_park: list<AgentPark>
   @children("agent_unpark") agent_unpark: list<AgentUnpark>
   @children("agent_end") agent_end: list<AgentEnd>
+  @children("script") script: list<Script>
 }
 
 // Group keys are scoped to the project. Membership uses the event's card.
@@ -274,4 +275,21 @@ type AgentUnpark {
 type AgentEnd {
   outcome: utf8
   result: utf8?
+}
+
+// A wscript program for what WCL cannot say (TER-173). It runs with fuel
+// (wscript instructions, default 100000, at most 10000000), a memory
+// limit and a wall-clock limit, in a child process with no file, process,
+// network or environment access. `use rule`: `rule::get(name)` reads the
+// value of a placeholder (`event.kind`, `event.data.x`, `card.column`,
+// `card.labels`, `job.state`, `group.key`, `rule.name`) as an
+// `Option[string]`, and `rule::quote(text)` writes a text as a WCL
+// string. `fn main() -> string` returns verb blocks of this file (for
+// example `card_move { to = "@review" }`); they run in place of the step,
+// with the same checks. Write the source as a raw heredoc (`<<'WS'`).
+// In a wscript string, `{x}` is a hole: write a brace as `{{` or `}}`.
+@block("script")
+type Script {
+  source: utf8
+  fuel: i64?
 }

@@ -56,6 +56,7 @@ pub mod research_helpers;
 pub mod reservations;
 pub mod reset;
 pub mod review_dispatcher;
+pub mod rule_script;
 pub mod rules_engine;
 pub mod rules_verbs;
 pub mod run_kill;

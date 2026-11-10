@@ -124,6 +124,8 @@ mod resets;
 mod rules;
 #[path = "../rules_engine.rs"]
 mod rules_engine;
+#[path = "../rules_script.rs"]
+mod rules_script;
 #[path = "../rules_tools.rs"]
 mod rules_tools;
 #[path = "../rules_verbs.rs"]
