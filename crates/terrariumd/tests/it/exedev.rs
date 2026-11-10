@@ -6,9 +6,9 @@
 //! VM, and a leftover VM with the prefix and the tag, but not other VMs.
 //!
 //! `live_round_trip_on_exe_dev` (ignored) does the same on the real
-//! exe.dev account: it needs `TERRARIUM_EXEDEV_LIVE_TOKEN` (the API
-//! token) and `TERRARIUM_EXEDEV_LIVE_KEY` (the ssh private key), and it
-//! removes each VM it makes.
+//! exe.dev account: it needs `EXEDEV_LIVE_TOKEN` (the API token) and
+//! `EXEDEV_LIVE_SSH_KEY_FILE` (a file with the ssh private key; or the key
+//! itself in `EXEDEV_LIVE_SSH_KEY`), and it removes each VM it makes.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
@@ -180,6 +180,27 @@ fn age(td: &TestDaemon, target: &str, secs: i64) {
     .unwrap();
 }
 
+/// The `target.destroy` audit rows of a target: `(vm, reason)`.
+fn destroyed(td: &TestDaemon, target: &str) -> Vec<(String, String)> {
+    let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
+    let rows: Vec<String> = conn
+        .prepare("SELECT detail FROM audit WHERE action = 'target.destroy' AND target = ?1")
+        .unwrap()
+        .query_map([target], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    rows.iter()
+        .map(|d| {
+            let v: Value = serde_json::from_str(d).unwrap();
+            (
+                v["vm"].as_str().unwrap_or("").to_owned(),
+                v["reason"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect()
+}
+
 fn vm_of(td: &TestDaemon, target: &str) -> Option<String> {
     let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
     let rt: String = conn
@@ -333,6 +354,10 @@ async fn exedev_targets_make_use_cap_and_sweep_vms_through_the_api() {
         subjects,
         vec![format!("exe.dev VM {vm1} removed: past its life")]
     );
+    assert_eq!(
+        destroyed(&td, "ex1"),
+        vec![(vm1.clone(), "exedev_expired".to_owned())]
+    );
     // Deleting a target removes its VM.
     td.post_empty("/api/targets/ex4/up").await.ok();
     assert!(vm_of(&td, "ex4").is_some());
@@ -341,35 +366,51 @@ async fn exedev_targets_make_use_cap_and_sweep_vms_through_the_api() {
 }
 
 /// The live round trip on the operator's exe.dev account (TER-294
-/// acceptance): make one VM through the kind, run a command on it over
-/// ssh, let the sweep remove it past a short life, and show with `ls` that
-/// no VM of the run is left. It removes each VM it made, also on a failure.
+/// acceptance): make one VM through the kind, check that `ls` lists it, run
+/// a command on it over ssh, let the sweep remove it past a short life, and
+/// show with `ls` that no VM of the run is left. It removes each VM it
+/// made, also on a failure.
+///
+/// The life is [`terrariumd::exedev::FIRST_SWEEP`] plus 60 s: the daemon's
+/// own first sweep (60 s after its start) must not remove the VM before the
+/// test's sweep does (the first live run, with a 60 s life, lost the VM to
+/// it).
 #[tokio::test]
-#[ignore = "live: needs TERRARIUM_EXEDEV_LIVE_TOKEN and TERRARIUM_EXEDEV_LIVE_KEY"]
+#[ignore = "live: needs EXEDEV_LIVE_TOKEN and EXEDEV_LIVE_SSH_KEY_FILE"]
 async fn live_round_trip_on_exe_dev() {
-    let token = std::env::var("TERRARIUM_EXEDEV_LIVE_TOKEN").expect("the API token");
-    let key = std::env::var("TERRARIUM_EXEDEV_LIVE_KEY").expect("the ssh private key");
+    let token = std::env::var("EXEDEV_LIVE_TOKEN").expect("EXEDEV_LIVE_TOKEN: the API token");
+    let key = match std::env::var("EXEDEV_LIVE_SSH_KEY_FILE") {
+        Ok(path) => std::fs::read_to_string(path).expect("the ssh key file"),
+        Err(_) => std::env::var("EXEDEV_LIVE_SSH_KEY")
+            .expect("EXEDEV_LIVE_SSH_KEY_FILE or EXEDEV_LIVE_SSH_KEY: the ssh private key"),
+    };
     let api = terrariumd::exedev::Api::new(
         terrariumd::exedev::DEFAULT_API,
         zeroize::Zeroizing::new(token.clone()),
     )
     .unwrap();
     let prefix = "terrarium-x-live";
-    let before = api.ls().await.unwrap();
-    println!(
-        "ls before: {:?}",
-        before.iter().map(|l| &l.name).collect::<Vec<_>>()
-    );
+    let names = |l: &[terrariumd::exedev::Listed]| -> Vec<String> {
+        l.iter().map(|x| x.name.clone()).collect()
+    };
+    println!("ls before: {:?}", names(&api.ls().await.unwrap()));
+    let life = terrariumd::exedev::FIRST_SWEEP.as_secs() + 60;
     let body = tokio::spawn(async move {
+        let api = terrariumd::exedev::Api::new(
+            terrariumd::exedev::DEFAULT_API,
+            zeroize::Zeroizing::new(token.clone()),
+        )
+        .unwrap();
         let td = TestDaemon::start().await;
         secrets(&td, &token, Some(&key)).await;
-        let mut t = target("live", 60);
-        t["sync_workspace"] = false.into();
-        td.post("/api/targets", t).await.ok();
+        td.post("/api/targets", target("live", life)).await.ok();
         let r = td.post_empty("/api/targets/live/up").await;
         assert_eq!(r.ok()["state"], "running", "{}", r.body);
+        let up_at = std::time::Instant::now();
         let vm = vm_of(&td, "live").unwrap();
-        println!("made VM {vm}");
+        let listed = names(&api.ls().await.unwrap());
+        println!("made VM {vm}; ls after up: {listed:?}");
+        assert!(listed.contains(&vm), "ls does not list {vm} after up");
         let r = td
             .post(
                 "/api/targets/live/exec",
@@ -383,39 +424,40 @@ async fn live_round_trip_on_exe_dev() {
             out.contains("Linux") && out.contains("git version"),
             "{out} {end}"
         );
-        // Past its life of 60 s, the sweep removes it.
-        tokio::time::sleep(Duration::from_secs(65)).await;
+        // Still there after the exec and the daemon's first sweep.
+        let past_first = terrariumd::exedev::FIRST_SWEEP + Duration::from_secs(5);
+        tokio::time::sleep(past_first.saturating_sub(up_at.elapsed())).await;
+        let listed = names(&api.ls().await.unwrap());
+        println!("ls after the first sweep: {listed:?}");
+        assert!(listed.contains(&vm), "{vm} is gone before its life ended");
+        assert_eq!(vm_of(&td, "live").as_deref(), Some(vm.as_str()));
+        // Past its life, the sweep removes it.
+        let past_life = Duration::from_secs(life + 5);
+        tokio::time::sleep(past_life.saturating_sub(up_at.elapsed())).await;
         let r = td.post_empty("/api/exedev/sweep").await;
         println!("sweep: {}", r.body);
         let removed = &r.ok()["removed"];
         assert_eq!(removed[0]["vm"], vm.as_str(), "{removed}");
         assert_eq!(removed[0]["reason"], "expired", "{removed}");
         assert_eq!(td.get("/api/targets/live").await.ok()["state"], "absent");
+        assert_eq!(
+            destroyed(&td, "live"),
+            vec![(vm.clone(), "exedev_expired".to_owned())]
+        );
         vm
     })
     .await;
     // Remove every VM of this run that is left, then report.
-    let left: Vec<String> = api
-        .ls()
-        .await
-        .unwrap()
+    let left: Vec<String> = names(&api.ls().await.unwrap())
         .into_iter()
-        .map(|l| l.name)
         .filter(|n| n.starts_with(prefix))
         .collect();
     if !left.is_empty() {
         api.rm(&left).await.unwrap();
     }
-    let after = api.ls().await.unwrap();
-    println!(
-        "ls after: {:?}",
-        after.iter().map(|l| &l.name).collect::<Vec<_>>()
-    );
+    let after = names(&api.ls().await.unwrap());
+    println!("ls after: {after:?}");
     let vm = body.unwrap();
     assert!(left.is_empty(), "the sweep left {left:?}");
-    assert!(
-        after
-            .iter()
-            .all(|l| l.name != vm && !l.name.starts_with(prefix))
-    );
+    assert!(after.iter().all(|n| n != &vm && !n.starts_with(prefix)));
 }

@@ -44,6 +44,8 @@ pub const MAX_VMS: usize = 3;
 pub const NAME_PREFIX: &str = "terrarium-x-";
 /// The sweep runs this often.
 pub const SWEEP_EVERY: Duration = Duration::from_secs(3600);
+/// The first sweep runs this long after the daemon starts.
+pub const FIRST_SWEEP: Duration = Duration::from_secs(60);
 /// A VM younger than this is not removed for having no running holder:
 /// its agent may still be starting.
 const UNHELD_GRACE_SECS: i64 = 600;
@@ -778,7 +780,7 @@ async fn after_removal(state: &Shared, target: &str, rm: &Removal) {
 pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let state = state.clone();
     tokio::spawn(async move {
-        let mut wait = Duration::from_secs(60);
+        let mut wait = FIRST_SWEEP;
         loop {
             tokio::time::sleep(wait).await;
             wait = SWEEP_EVERY;
@@ -928,6 +930,43 @@ mod tests {
                 ("terrarium-x-lost-1", Reason::Leftover),
             ]
         );
+    }
+
+    /// The first live run (60 s life) lost its VM to the daemon's own
+    /// first sweep at [`FIRST_SWEEP`]: a VM is expired from `expires_at`
+    /// on, so a sweep one second after it removes the VM, and one second
+    /// before keeps it.
+    #[test]
+    fn a_vm_is_expired_from_its_expires_at_on() {
+        let made = Utc::now();
+        let v = Vm {
+            name: "terrarium-x-live-1".into(),
+            ssh_dest: None,
+            created_at: made.to_rfc3339(),
+            expires_at: (made + chrono::Duration::seconds(60)).to_rfc3339(),
+        };
+        let rec = [Record {
+            target: "live".into(),
+            vm: v.clone(),
+            held: true,
+        }];
+        let at = |s: i64| {
+            plan(
+                made + chrono::Duration::seconds(s),
+                &rec,
+                &[],
+                &BTreeSet::new(),
+            )
+        };
+        assert!(at(59).is_empty());
+        assert_eq!(at(61)[0].reason, Reason::Expired);
+        assert!(v.expired(made + chrono::Duration::seconds(60)));
+        // A bad time counts as expired: the VM is never kept by mistake.
+        let bad = Vm {
+            expires_at: "never".into(),
+            ..v
+        };
+        assert!(bad.expired(made));
     }
 
     #[test]
