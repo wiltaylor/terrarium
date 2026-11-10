@@ -1086,6 +1086,75 @@ fn a_session_sees_only_its_own_holders_workspace() {
     assert_eq!(holder_workspace(&real, "terra/missing").unwrap(), None);
 }
 
+/// TER-635: the sessions of one holder can run as different pool UIDs
+/// (here 2001 and 2002). Both plans bind the same holder dir read-write,
+/// run with UMask=0007 (group rwx stays on what either UID makes, under
+/// the setgid workspace root), and trust any repo owner in git
+/// (`safe.directory=*`, after the request's own `GIT_CONFIG_*` entries).
+/// The operator gets the UMask but no git override.
+#[test]
+fn two_pool_uids_of_one_holder_share_its_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let real = std::fs::canonicalize(root.path()).unwrap();
+    let a = real.join("terra/w-1");
+    std::fs::create_dir_all(a.join("repo")).unwrap();
+    let ctx = ctx(root.path());
+    let plan_for = |holder: &str, cwd: &Path, uid: u32, env: &[(&str, &str)]| {
+        let mut req = request(root.path());
+        req.holder = holder.into();
+        req.gpus.clear();
+        req.exclusive_gpus.clear();
+        req.lease = None;
+        req.cwd = cwd.to_string_lossy().into_owned();
+        req.env = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let w = Identity {
+            name: String::new(),
+            uid,
+            gid: uid,
+        };
+        plan_start(&ctx, &req, &inventory(), &nodes(), 1, &w)
+    };
+    let p1 = plan_for("terra/w-1", &a, 2001, &[]).unwrap();
+    let p2 = plan_for("terra/w-1", &a.join("repo"), 2002, &[]).unwrap();
+    for (plan, uid) in [(&p1, 2001), (&p2, 2002)] {
+        let p = props(&plan.args);
+        assert!(plan.args.contains(&format!("--uid={uid}")));
+        assert!(p.contains(&"UMask=0007"), "{p:?}");
+        assert!(p.contains(&format!("BindPaths={}", a.display()).as_str()));
+        assert!(p.contains(&format!("ReadWritePaths={}", a.display()).as_str()));
+        assert_eq!(
+            plan.env,
+            "GIT_CONFIG_COUNT=\"1\"\nGIT_CONFIG_KEY_0=\"safe.directory\"\nGIT_CONFIG_VALUE_0=\"*\"\n"
+        );
+    }
+    // The request's own git config entries stay first.
+    let p = plan_for(
+        "terra/w-1",
+        &a,
+        2002,
+        &[
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "credential.helper"),
+            ("GIT_CONFIG_VALUE_0", "!terrarium repo credential"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        p.env,
+        "GIT_CONFIG_COUNT=\"2\"\nGIT_CONFIG_KEY_0=\"credential.helper\"\nGIT_CONFIG_KEY_1=\"safe.directory\"\nGIT_CONFIG_VALUE_0=\"!terrarium repo credential\"\nGIT_CONFIG_VALUE_1=\"*\"\n"
+    );
+    for bad in ["x", "-1", "1000"] {
+        assert!(plan_for("terra/w-1", &a, 2002, &[("GIT_CONFIG_COUNT", bad)]).is_err());
+    }
+    // The operator: the umask, no git override.
+    let op = plan_for("operator", &real, 2001, &[]).unwrap();
+    assert!(props(&op.args).contains(&"UMask=0007"));
+    assert_eq!(op.env, "");
+}
+
 /// The bind scope follows the holder's trust domain: a project service
 /// (`<project>/@jobs`, `@pipelines`, `@monitors`, `@schedules`) gets its
 /// project's directory, never another project's; an agent named like a
