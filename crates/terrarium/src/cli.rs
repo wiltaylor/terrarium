@@ -675,6 +675,13 @@ pub enum RepoCmd {
     },
     /// Attach a repo to the project (project_admin)
     Add(RepoAddArgs),
+    /// Remove a repo registration from the project (project_admin). The
+    /// clones in workspaces and on targets stay. Refused while a job, the
+    /// delivery config, a pipeline, or a bound agent's checkout uses it
+    Rm {
+        /// The repo name or ID
+        repo: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

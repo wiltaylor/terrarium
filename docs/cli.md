@@ -161,6 +161,7 @@ terrarium project repo-add <url> [--name n] [--branch b] [--credential key] [--p
 terrarium repo ls
 terrarium repo add <url> ...                  the same as project repo-add
 terrarium repo checkout <repo> [--target T] [--branch b] [--path p] [--depth n] [--agent a]
+terrarium repo rm <repo>                      project_admin; no confirm prompt
 ```
 
 `repo checkout` takes a repo name or ID. It clones or updates the repo in
