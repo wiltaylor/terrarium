@@ -211,7 +211,7 @@ pub fn check_env_name(name: &str) -> ApiResult<()> {
     if terrarium_core::env_deny::denied(name) {
         return Err(ApiError::invalid(format!(
             "`{name}` is an env var that the sandbox, the loader, a shell, a language runtime, \
-             a proxy, or a harness reads or sets; choose another name"
+             a proxy, a library that ssh loads, or a harness reads or sets; choose another name"
         )));
     }
     Ok(())
@@ -890,13 +890,15 @@ pub(crate) mod tests {
 
     /// TER-490: the host agent refuses a multi-line docker env value for
     /// each name that a grant cannot set, from the same list
-    /// ([`terrarium_core::env_deny`]), plus its own names. The daemon's own
-    /// `TERRARIUM_*` names are the one exception: it sends multi-line values
-    /// under them on each agent exec.
+    /// ([`terrarium_core::env_deny`]), plus its own names. The exact names
+    /// that the daemon sends multi-line values under
+    /// ([`terrarium_host::docker::CLI_ALLOWED_ENV`]) are the one exception
+    /// (TER-541): a grant cannot set them, and the fallback lets them
+    /// through. Any other `TERRARIUM_*` name is refused.
     #[test]
     fn the_host_agent_refuses_every_name_that_a_grant_refuses() {
         use terrarium_core::env_deny::{DENIED_ENV, DENIED_ENV_PREFIXES, DENIED_ENV_SUFFIXES};
-        use terrarium_host::docker::steers_the_cli;
+        use terrarium_host::docker::{CLI_ALLOWED_ENV, steers_the_cli};
         let mut names: Vec<String> = DENIED_ENV.iter().map(|n| n.to_string()).collect();
         names.extend(DENIED_ENV_PREFIXES.iter().map(|p| format!("{p}X")));
         names.extend(DENIED_ENV_SUFFIXES.iter().map(|p| format!("X{p}")));
@@ -905,13 +907,26 @@ pub(crate) mod tests {
                 .iter()
                 .map(|h| h.home_env().to_owned()),
         );
+        names.extend(
+            [
+                "OPENSSL_CONF",
+                "OPENSSL_MODULES",
+                "OPENSSL_ENGINES",
+                "KRB5_CONFIG",
+                "KRB5CCNAME",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "TERRARIUM_GIT_TRAILERS_FILE",
+            ]
+            .map(String::from),
+        );
         for n in &names {
             assert!(check_env_name(n).is_err(), "{n}");
-            // The daemon's own names are the one exception.
-            let own = n.starts_with(terrarium_host::docker::CLI_ALLOWED_PREFIX);
-            assert_eq!(steers_the_cli(n), !own, "{n}");
+            assert!(steers_the_cli(n), "{n}");
         }
-        assert!(names.iter().any(|n| n.starts_with("TERRARIUM_")));
+        for n in CLI_ALLOWED_ENV {
+            assert!(check_env_name(n).is_err(), "{n}");
+            assert!(!steers_the_cli(n), "{n}");
+        }
         assert!(check_env_name("DEPLOY_KEY").is_ok());
         assert!(!steers_the_cli("DEPLOY_KEY"));
     }

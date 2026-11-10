@@ -51,18 +51,28 @@ pub const CLI_DENIED_ENV: &[&str] = &["GODEBUG", "GETCONF_DIR", "NIS_PATH", "RES
 /// any case is refused too.
 pub const CLI_DENIED_ENV_PREFIXES: &[&str] = &["DOCKER_", "SSL_", "OTEL_"];
 
-/// The one prefix of the grant deny list that the fallback lets through:
-/// the daemon's own names. The daemon sends multi-line values under them on
-/// each agent exec (`TERRARIUM_GIT_TRAILERS`, `TERRARIUM_GIT_KNOWN_HOSTS`,
-/// `TERRARIUM_COMMIT_HOOK`), and neither the `docker` CLI nor its children
-/// read them. A grant cannot set them.
-pub const CLI_ALLOWED_PREFIX: &str = "TERRARIUM_";
+/// The exact names on the grant deny list that the fallback lets through:
+/// the daemon sends multi-line values under them. `TERRARIUM_GIT_TRAILERS`
+/// goes on each agent exec (terrariumd `executor.rs` `start_exec_secrets`), and
+/// `TERRARIUM_COMMIT_HOOK`, `TERRARIUM_GIT_KNOWN_HOSTS` and
+/// `TERRARIUM_GIT_SSH_KEY` go on a checkout (`checkout_env`,
+/// `checkout_on_target`). Neither the `docker` CLI nor its children read
+/// them. A grant cannot set them, but the daemon does not check the names
+/// in an agent's own exec env (`ExecBody.env`, terrariumd
+/// `api/targets.rs`), so the list is exact: any other `TERRARIUM_*` name
+/// with a multi-line value is refused (TER-541).
+pub const CLI_ALLOWED_ENV: &[&str] = &[
+    "TERRARIUM_GIT_TRAILERS",
+    "TERRARIUM_GIT_KNOWN_HOSTS",
+    "TERRARIUM_COMMIT_HOOK",
+    "TERRARIUM_GIT_SSH_KEY",
+];
 
 /// Does `k` steer the `docker` CLI, its children, or the loader under it?
-/// The grant deny list except [`CLI_ALLOWED_PREFIX`], plus
+/// The grant deny list except [`CLI_ALLOWED_ENV`], plus
 /// [`CLI_DENIED_ENV`] and [`CLI_DENIED_ENV_PREFIXES`].
 pub fn steers_the_cli(k: &str) -> bool {
-    (terrarium_core::env_deny::denied(k) && !k.starts_with(CLI_ALLOWED_PREFIX))
+    (terrarium_core::env_deny::denied(k) && !CLI_ALLOWED_ENV.contains(&k))
         || CLI_DENIED_ENV.contains(&k)
         || CLI_DENIED_ENV_PREFIXES.iter().any(|p| k.starts_with(p))
         || k.to_ascii_uppercase().ends_with("_PROXY")
@@ -984,6 +994,14 @@ mod tests {
             "OTEL_EXPORTER_OTLP_ENDPOINT",
             "TZDIR",
             "NIS_PATH",
+            "OPENSSL_CONF",
+            "OPENSSL_MODULES",
+            "OPENSSL_ENGINES",
+            "KRB5_CONFIG",
+            "KRB5CCNAME",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "TERRARIUM_GIT_TRAILERS_FILE",
+            "TERRARIUM_X",
         ] {
             for v in ["a\nb", "a\rb"] {
                 let err = plan_exec(&exec_req(json!({ k: v })), "docker").unwrap_err();
@@ -1076,9 +1094,20 @@ mod tests {
         names.extend(CLI_DENIED_ENV.iter().map(|n| n.to_string()));
         names.extend(CLI_DENIED_ENV_PREFIXES.iter().map(|p| format!("{p}X")));
         names.extend(["http_proxy".into(), "FOO".into(), "DEPLOY_KEY".into()]);
+        names.extend(
+            [
+                "OPENSSL_CONF",
+                "KRB5_CONFIG",
+                "KRB5CCNAME",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "TERRARIUM_X",
+            ]
+            .map(String::from),
+        );
+        names.extend(CLI_ALLOWED_ENV.iter().map(|n| n.to_string()));
         for n in &names {
             let expected = (terrarium_core::env_deny::denied(n)
-                && !n.starts_with(CLI_ALLOWED_PREFIX))
+                && !CLI_ALLOWED_ENV.contains(&n.as_str()))
                 || CLI_DENIED_ENV.contains(&n.as_str())
                 || CLI_DENIED_ENV_PREFIXES.iter().any(|p| n.starts_with(p))
                 || n.to_ascii_uppercase().ends_with("_PROXY");
@@ -1086,8 +1115,27 @@ mod tests {
         }
         assert!(!steers_the_cli("FOO") && !steers_the_cli("DEPLOY_KEY"));
         assert!(steers_the_cli("http_proxy") && steers_the_cli("SSH_ASKPASS"));
-        // The daemon's own multi-line names go through.
-        assert!(!steers_the_cli("TERRARIUM_GIT_TRAILERS"));
+        // The OpenSSL, Kerberos and D-Bus names come from the grant list.
+        for n in [
+            "OPENSSL_CONF",
+            "KRB5_CONFIG",
+            "KRB5CCNAME",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ] {
+            assert!(
+                terrarium_core::env_deny::denied(n) && steers_the_cli(n),
+                "{n}"
+            );
+        }
+        // Only the exact names that the daemon sends multi-line go through,
+        // not the whole TERRARIUM_ prefix.
+        assert!(steers_the_cli("TERRARIUM_X") && steers_the_cli("TERRARIUM_GIT_TRAILERS_FILE"));
+        for n in CLI_ALLOWED_ENV {
+            assert!(
+                terrarium_core::env_deny::denied(n) && !steers_the_cli(n),
+                "{n}"
+            );
+        }
         let plan = plan_exec(
             &exec_req(json!({"TERRARIUM_GIT_TRAILERS":"Terrarium-Agent: a\nTerrarium-Card: b\n"})),
             "docker",
