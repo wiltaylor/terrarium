@@ -1660,9 +1660,10 @@ written by the author of the code; an independent review is still to do.
   socket as the operator. The drain and resume routes are operator only,
   so an agent, also a sysadmin, cannot drain the daemon.
 - **The image.** The tag is resolved to a digest, and the signature check
-  (`TERRARIUM_UPDATE_VERIFY`; by default `gh attestation verify
-  --signer-workflow` of the release workflow, with the bundle from the
-  registry) runs on the digest, before the pull. A
+  (`TERRARIUM_UPDATE_VERIFY`; by default `cosign verify --key` with the
+  release public key in the image, since TER-613; `gh attestation verify
+  --signer-workflow` for the releases of the GitHub workflow) runs on the
+  digest, before the pull. A
   check that cannot run fails, and the update stops (fail closed). The
   pull and the new container use the digest.
 - **The new container** gets the settings of the old one from its inspect
@@ -1697,6 +1698,13 @@ written by the author of the code; an independent review is still to do.
   the network path to it can make the updater run any image as the
   terrarium container (not as root on the host: the container settings
   stay). The updater logs a warning at start for `off`.
+- **The release key (TER-613).** The cosign check trusts whoever holds
+  the private key of `release-cosign`. It is a Terrarium secret that only
+  the release run gets (`--key env://COSIGN_PRIVATE_KEY`, no key file;
+  docs/release.md, "Secrets"). A stolen key signs images that every
+  updater accepts until a release with a new `docker/release/cosign.pub`
+  is installed: that release must itself be signed with a key that the
+  running updaters trust.
 - **The verify command.** `command:<shell command>` runs in the updater as
   its uid with the docker group: it is root-equivalent. Only the operator
   who edits `.env` sets it.

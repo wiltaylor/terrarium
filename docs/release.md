@@ -1,8 +1,17 @@
 # Releases
 
 This document tells you how to make a Terrarium release and how to verify
-what a release publishes. The workflow is `.github/workflows/ci.yml`. The
-host agent self-update that uses the release binary is in
+what a release publishes. Two paths make a release:
+
+- The local release build, `just release::publish` (`scripts/release.py`):
+  the lead's release step runs it in the release build container on a
+  build target. It signs with cosign and the release key pair. See
+  "The local release build" below.
+- The GitHub workflow `.github/workflows/ci.yml`: it publishes the releases
+  until the switch to the local build is done (TER-622), and it stays the
+  fallback until then. It attests with GitHub build provenance.
+
+The host agent self-update that uses the release binary is in
 [host-protocol.md, "Self-update"](host-protocol.md#self-update).
 
 ## What a release publishes
@@ -125,6 +134,25 @@ To check the visibility, pull the image with no login:
 
 ## How to verify a release
 
+### A release of the local build (cosign)
+
+You need cosign 3 and the release public key, `docker/release/cosign.pub`
+in the repo (the image has it at `/opt/terrarium/release/cosign.pub`):
+
+```sh
+cosign verify --key cosign.pub ghcr.io/wiltaylor/terrarium@sha256:<digest>
+gh release download v<version> --repo wiltaylor/terrarium
+cosign verify-blob --key cosign.pub --bundle terrarium-host-<version>-linux-x86_64.sigstore.json terrarium-host-<version>-linux-x86_64
+cosign verify-blob --key cosign.pub --bundle terrarium-host-helper-<version>-linux-x86_64.sigstore.json terrarium-host-helper-<version>-linux-x86_64
+cosign verify-blob --key cosign.pub --bundle SHA256SUMS.sigstore.json SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+cosign also checks the entry of each signature in the public transparency
+log. The release notes give the digest and these commands.
+
+### A release of the workflow (GitHub attestation)
+
 You need the GitHub CLI (`gh`) 2.49 or later. `gh attestation verify`
 checks the Sigstore bundle. It also checks that the certificate identity
 is a workflow of the repository.
@@ -168,6 +196,83 @@ the daemon has the `SHA256SUMS` of the release, the host agent also
 checks the release hash ([host-protocol.md, "Self-update"](host-protocol.md#self-update)).
 The host agent does not verify the attestation itself: the image that
 holds the binary is the item to verify.
+
+## The local release build
+
+`just release::publish` runs `scripts/release.py` on a clean checkout of
+the commit to release, in the release build container
+(`docker/release.Dockerfile`: uid 1001, rootless BuildKit, crane, cosign,
+gh, and the toolchain of the gate). It uses the same trailers and version
+rules as the workflow (`scripts/release_version.py`). The steps:
+
+1. `version`: the version from the trailers of HEAD. No trailer: no
+   release, exit 0.
+2. `check`: a clean checkout, the secrets in the env, the tools on PATH,
+   `docker/release/cosign.pub`, and no tag or release `v<version>` yet.
+3. `gate`: `just ci::validate` as a non-root user (uid 1001; with
+   `setpriv` when the script runs as root). Its env has no secret, and
+   `RESULTS_DIR` is `release-out/results`. A red gate publishes nothing.
+4. `stamp`: the version into `Cargo.toml` and `Cargo.lock`.
+5. `image`: BuildKit builds the runtime stage of `docker/Dockerfile` for
+   `linux/amd64`, with the OCI labels, an SBOM, and provenance
+   (`mode=max`), and pushes `:<version>` and `:pre` or `:latest`.
+6. `extract`: crane pulls the pushed digest again, and the script takes
+   the host agent and the host helper out of it, with the two checks of
+   "What a release publishes", and writes `SHA256SUMS`.
+7. `sign`: cosign signs the image digest, both binaries, and `SHA256SUMS`
+   with the release key, and then verifies each signature with
+   `docker/release/cosign.pub` of the checkout. A key that does not match
+   stops the release here.
+8. `release`: `gh release create v<version> --target <commit>` (the API
+   makes the tag), with the binaries, `SHA256SUMS`, and the cosign bundles
+   (`<asset>.sigstore.json`).
+
+`release-out/summary.json` records each step: the version, the commit, the
+gate, the digest, the asset hashes, and the release URL. The lead pushes
+`release-out/results` with `terrarium test push`.
+
+`just release::dry-run` runs steps 1 to 6 with no secret: the image goes to
+an OCI layout in `release-out/image`, and nothing is pushed, signed, or
+released. `--no-gate` skips the gate in a dry run only.
+
+### Secrets
+
+The secrets are Terrarium secrets. The lead's run passes them into the env
+of the release process only (`terrarium run <target> -e
+GHCR_TOKEN=@secret:release-ghcr ...`), never into a sandbox.
+
+| Env | Secret | Scope | Who gets it |
+|---|---|---|---|
+| `GHCR_TOKEN` (`GHCR_USER`, default `wiltaylor`) | `release-ghcr` | a classic PAT with `write:packages` only (GHCR takes no fine-grained PAT) | BuildKit and crane, through a mode-0600 `config.json` in a private temporary directory that the script removes at the end |
+| `GH_TOKEN` | `release-github` | a fine-grained PAT for `wiltaylor/terrarium` only: Contents read and write, Metadata read | `gh` |
+| `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` | `release-cosign` (fields `private_key`, `password`) | the encrypted private key of the release key pair, and its password | `cosign sign` and `cosign sign-blob` only (`--key env://COSIGN_PRIVATE_KEY`: no key file) |
+
+No secret is on a command line, in the output, in `release-out/`, in the
+build context, or in an image layer: the gate and the image build get an
+env without them (`scripts/test_release.py` checks each of these).
+
+### The switch from the workflow to the local build
+
+A daemon checks a new release with the updater of the image that it runs.
+An updater before TER-613 checks with `gh` and can only accept a release
+that the workflow made. The order:
+
+1. Merge TER-613 (cosign and `docker/release/cosign.pub` in the image, the
+   updater's `cosign` default, the release build). The workflow stays.
+2. Release N with the workflow. The daemons install it with their `gh`
+   check.
+3. On each daemon on N, set `TERRARIUM_UPDATE_VERIFY=cosign` in `.env`
+   (an older `compose.yaml` passes `gh` by itself) and recreate the
+   updater.
+4. Remove the workflow (TER-622).
+5. Release N+1 with `just release::publish`. The updaters of N check it
+   with cosign.
+
+A daemon that still checks with `gh` at step 5 refuses N+1 (fail closed)
+until step 3. If the local build fails after step 4, the fallback is a
+revert of the TER-622 commit and a release with the workflow; that release
+has no cosign signature, so the daemons set `TERRARIUM_UPDATE_VERIFY=gh`
+for it.
 
 ## Not in this document
 
