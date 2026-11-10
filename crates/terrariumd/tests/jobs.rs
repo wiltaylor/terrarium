@@ -3085,7 +3085,7 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
     for config in bad {
         let r = lab.td.put("/api/projects/p/delivery", config.clone()).await;
         assert!(
-            matches!(r.status, 403 | 409 | 422),
+            matches!(r.status.as_u16(), 403 | 409 | 422),
             "{config}: {} {}",
             r.status,
             r.body
