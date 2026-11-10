@@ -262,8 +262,10 @@ signed, or released. `--no-gate` skips the gate in a dry run only.
 The daemon runs the release as a job of kind `release` (TER-623,
 [api.md §35.6](api.md)). The setup, once, by the operator or meta/lead:
 
-1. Define the release client (META-119) as an ssh target of the project,
-   user `release`, with its pinned host key. Once it is the release
+1. Define the release client (META-119) as a global ssh target (the
+   operator), user `release`, with its pinned host key. Install the
+   release tools system-wide (the job's `PATH` has no dir under the
+   release user's home). Once it is the release
    target, the daemon refuses every agent on it (exec, shell, copy,
    policy entries, leases, reservations); only the operator and the
    release job use it. Each release runs in a new HOME that goes after
@@ -271,7 +273,8 @@ The daemon runs the release as a job of kind `release` (TER-623,
 2. Grant `release-github`, `release-cosign`, and `docker-release-vm` to
    `delivery:terrarium` with `--level run --target <release client>`, and
    to nobody else.
-3. Set the delivery config:
+3. Set the delivery config (the operator only: the release fields are
+   the operator's):
 
    ```sh
    terrarium project delivery set --release-target <release client> \

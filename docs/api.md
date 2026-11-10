@@ -12783,8 +12783,11 @@ above.
 
 ### 35.6 Release jobs
 
-A release job (TER-623, kind `release`) is the lead's release step. A
-project admin queues it on the card of the release with `POST
+A release job (TER-623, kind `release`) is the lead's release step. The
+release config (`release_target`, `release_recipe`, `release_secrets`,
+`docker_release`) is the operator's: only the operator sets, changes or
+clears it. Any other actor gets `403` for a change of these four fields and
+may still set the other delivery fields. A project admin queues a release on the card of the release with `POST
 /api/cards/{id}/release` or `terrarium job release <card>`. It takes the
 head of `main` on the remote (the release merge commit), clones that commit
 on `release_target` into a new tree, and runs `release_recipe` there
@@ -12825,6 +12828,21 @@ The release secrets:
   - A target that an agent's `policy.targets` lists, or that has an active
     lease, cannot become a release target.
   - The operator keeps exec and shell on it, to set it up.
+  - A release target is a global target. Only the operator creates,
+    changes or deletes it, or a target on its machine.
+  - The machine counts too: a target on the same host agent, or with the
+    same ssh host and port, is refused for agents, policies, leases,
+    reservations, spawns and tools as the release target is.
+  - No tool may name the release target or its machine, a tool run there
+    is refused, and a target that a tool names cannot become one.
+  - The lifecycle verbs (`test`, `up`, `down`, `recreate`, `status`, the
+    snapshots) on it are the operator's.
+- The release recipe first removes the HOMEs that a killed release left
+  (`terrarium-release-home.*` under `TMPDIR`, else `/tmp`, owned by the
+  release user), and runs with the fixed `PATH`
+  `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`: no dir
+  under the release user's home. The release tools are installed
+  system-wide on the client.
 - The release recipe runs in a new HOME: a mode-0700 dir from `mktemp -d`
   (under `TMPDIR`, else `/tmp`), removed when the recipe ends, with the XDG
   config, cache, data and state dirs in it, `GIT_CONFIG_GLOBAL=/dev/null`,

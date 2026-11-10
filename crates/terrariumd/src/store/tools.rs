@@ -146,6 +146,13 @@ pub fn validate(conn: &Connection, def: &ToolDef, extra_dirs: &[&Path]) -> ApiRe
     let target = crate::store::targets::find(conn, &def.target)?.ok_or_else(|| {
         ApiError::invalid(format!("tool `{}`: no target `{}`", def.name, def.target))
     })?;
+    // TER-623 (review-ter-623-r2 finding 4): no tool on a release target or
+    // on its machine.
+    crate::store::jobs::check_not_release_target(
+        conn,
+        &def.target,
+        &format!("tool `{}` on the target", def.name),
+    )?;
     if let Some(p) = &def.project
         && target.def.project.as_deref() != Some(p.as_str())
     {

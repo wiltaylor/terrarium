@@ -1928,16 +1928,71 @@ pub fn release_target_of(conn: &Connection, target: &str) -> ApiResult<Option<St
 /// (TER-623): only the release job and the operator use it.
 pub fn release_only(target: &str, project: &str, what: &str) -> ApiError {
     ApiError::forbidden(format!(
-        "{what}: target `{target}` is the release target of project `{project}`, and a \
+        "{what}: target `{target}` is a release target of project `{project}`, and a \
          release target runs release jobs only (TER-623): no agent may exec, shell, copy, \
-         lease, reserve or list it in policy.targets; only the operator uses it"
+         lease, reserve, run a tool on, define or list it in policy.targets; only the \
+         operator uses it"
     ))
 }
 
-/// [`release_only`] when `target` is a release target.
+/// The machine of a target definition (TER-623, review-ter-623 F2 and r2
+/// finding 3): its host agent (by ID), or its ssh host and port, so a
+/// second target name for the same machine compares equal. Else its name.
+pub fn machine_key(conn: &Connection, def: &TargetDef) -> String {
+    if let Some(h) = def.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        let id = hosts::find(conn, h)
+            .ok()
+            .flatten()
+            .map_or_else(|| h.to_owned(), |x| x.id);
+        return format!("host:{id}");
+    }
+    if let Some(a) = def.address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        return format!("ssh:{}:{}", address_key(a), def.port.unwrap_or(22));
+    }
+    format!("name:{}", def.name)
+}
+
+/// [`machine_key`] of the target named `name`; a target that is gone keeps
+/// its name.
+pub fn machine_of(conn: &Connection, name: &str) -> String {
+    match targets::find(conn, name) {
+        Ok(Some(row)) => machine_key(conn, &row.def),
+        _ => format!("name:{name}"),
+    }
+}
+
+/// The release target that `def` is, or that is on the machine of `def`,
+/// with its project (TER-623): `(project, release target)`.
+pub fn release_match(conn: &Connection, def: &TargetDef) -> ApiResult<Option<(String, String)>> {
+    let mut st = conn.prepare("SELECT project FROM project_delivery ORDER BY project")?;
+    let names = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = machine_key(conn, def);
+    for p in names {
+        if let Some(r) = delivery(conn, &p)?.release_target()
+            && (r == def.name || machine_of(conn, r) == key)
+        {
+            return Ok(Some((p, r.to_owned())));
+        }
+    }
+    Ok(None)
+}
+
+/// [`release_only`] when `target` is a release target or on the machine of
+/// one (review-ter-623-r2 finding 3).
 pub fn check_not_release_target(conn: &Connection, target: &str, what: &str) -> ApiResult<()> {
-    match release_target_of(conn, target)? {
-        Some(p) => Err(release_only(target, &p, what)),
+    let found = match targets::find(conn, target)? {
+        Some(row) => release_match(conn, &row.def)?,
+        None => release_target_of(conn, target)?.map(|p| (p, target.to_owned())),
+    };
+    match found {
+        Some((p, r)) if r == target => Err(release_only(target, &p, what)),
+        Some((p, r)) => Err(release_only(
+            target,
+            &p,
+            &format!("{what} (it is on the machine of the release target `{r}`)"),
+        )),
         None => Ok(()),
     }
 }

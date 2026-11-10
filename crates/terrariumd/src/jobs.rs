@@ -635,7 +635,8 @@ pub fn check_delivery(
 ) -> ApiResult<()> {
     check_merge_refs(def)?;
     check_release_refs(def)?;
-    check_release_target(conn, actor, project, def)?;
+    check_release_owner(conn, actor, project, def)?;
+    check_release_target(conn, project, def)?;
     if def
         .failure_patterns
         .as_ref()
@@ -3053,6 +3054,39 @@ fn check_release_refs(delivery: &DeliveryDef) -> ApiResult<()> {
     Ok(())
 }
 
+/// The release config belongs to the operator (review-ter-623-r2 finding
+/// 1): `release_target`, `release_recipe`, `release_secrets` and
+/// `docker_release` decide what runs with the release secrets and where.
+/// Any other actor (a project admin, the lead, a sysadmin agent) may set
+/// the other fields, and must leave these four as they are stored.
+fn check_release_owner(
+    conn: &rusqlite::Connection,
+    actor: &Actor,
+    project: &str,
+    def: &DeliveryDef,
+) -> ApiResult<()> {
+    if actor.is_operator() {
+        return Ok(());
+    }
+    let old = jobs::delivery(conn, project)?;
+    let fields = [
+        ("release_target", old.release_target != def.release_target),
+        ("release_recipe", old.release_recipe != def.release_recipe),
+        ("release_secrets", old.release_secrets != def.release_secrets),
+        ("docker_release", old.docker_release != def.docker_release),
+    ];
+    let changed: Vec<&str> = fields.iter().filter(|(_, c)| *c).map(|(f, _)| *f).collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::forbidden(format!(
+        "changing {} of `{project}`: the release config is the operator's (TER-623): only the \
+         operator sets what runs with the release secrets and where; a project admin may \
+         start a release with it",
+        changed.join(", ")
+    )))
+}
+
 /// The checks of the release target (TER-623, D2): the target of this
 /// project (or a global one set by a sysadmin) that runs release jobs
 /// only. It is not the job target of any project, and not the release
@@ -3060,7 +3094,6 @@ fn check_release_refs(delivery: &DeliveryDef) -> ApiResult<()> {
 /// the release target of another project.
 fn check_release_target(
     conn: &rusqlite::Connection,
-    actor: &Actor,
     project: &str,
     def: &DeliveryDef,
 ) -> ApiResult<()> {
@@ -3073,7 +3106,7 @@ fn check_release_target(
         let d = jobs::delivery(conn, &p)?;
         others.push((p, d));
     }
-    let machine = |t: &str| machine_of(conn, t);
+    let machine = |t: &str| jobs::machine_of(conn, t);
     if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty()) {
         let host = machine(target);
         if let Some((p, r)) = others.iter().find_map(|(p, d)| {
@@ -3135,57 +3168,26 @@ fn check_release_target(
             l.agent
         )));
     }
-    let row = targets::get(conn, release)?;
-    match &row.def.project {
-        Some(p) if p == project => {}
-        Some(p) => {
-            return Err(ApiError::forbidden(format!(
-                "target `{release}` belongs to project `{p}`; the releases of `{project}` use its own targets"
+    // review-ter-623-r2 finding 4: no tool runs on it or on its machine.
+    for tool in crate::store::tools::list(conn)? {
+        let t = &tool.def.target;
+        if t == release || machine(t) == host {
+            return Err(ApiError::conflict(format!(
+                "release_target `{release}` is, or is on the machine of, `{t}`, the target of tool `{}`: remove the tool first; a release target runs release jobs only",
+                tool.def.name
             )));
         }
-        None => policy::sysadmin(
-            actor,
-            &format!("running the releases of `{project}` on the global target `{release}`"),
-        )?,
+    }
+    // review-ter-623-r2 finding 2: a global target, which only the operator
+    // defines (and patches or deletes, `api::targets`).
+    let row = targets::get(conn, release)?;
+    if let Some(p) = &row.def.project {
+        return Err(ApiError::invalid(format!(
+            "release_target `{release}` belongs to project `{p}`: a release target is a global target that the operator defines"
+        )));
     }
     executor::no_exec(&row.def)?;
     Ok(())
-}
-
-/// The machine of target `name` (TER-623, review-ter-623 F2): its host
-/// agent (by ID), or its ssh host and port, so a second target name for the
-/// same machine compares equal. A target that is gone keeps its name.
-fn machine_of(conn: &rusqlite::Connection, name: &str) -> String {
-    let Ok(row) = targets::get(conn, name) else {
-        return format!("name:{name}");
-    };
-    if let Some(h) = row
-        .def
-        .host
-        .as_deref()
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-    {
-        let id = crate::store::hosts::find(conn, h)
-            .ok()
-            .flatten()
-            .map_or_else(|| h.to_owned(), |x| x.id);
-        return format!("host:{id}");
-    }
-    if let Some(a) = row
-        .def
-        .address
-        .as_deref()
-        .map(str::trim)
-        .filter(|a| !a.is_empty())
-    {
-        return format!(
-            "ssh:{}:{}",
-            jobs::address_key(a),
-            row.def.port.unwrap_or(22)
-        );
-    }
-    format!("name:{name}")
 }
 
 /// The file of the changed paths in a job clone, relative to its root
@@ -3208,19 +3210,33 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
 /// it, and no global or system git config. So no `~/.docker`,
 /// `~/.gitconfig`, `~/.config` or cache that was left in the release
 /// user's home is read by the release. `XDG_RUNTIME_DIR` stays (the RAM dir
-/// of `scripts/release.py`).
+/// of `scripts/release.py`). It first removes the HOMEs that a killed
+/// release left (the EXIT trap did not run), and sets [`RELEASE_PATH`].
 fn release_home(recipe: &str) -> String {
     format!(
-        r#"home=$(mktemp -d "${{TMPDIR:-/tmp}}/terrarium-release-home.XXXXXXXX") || {{ echo "cannot make the release HOME"; exit 125; }}
+        r#"tmp=${{TMPDIR:-/tmp}}
+# Leftovers of a release that was killed before its EXIT trap: one release
+# runs at a time on the release target.
+for old in "$tmp"/terrarium-release-home.*; do
+  [ -d "$old" ] && [ ! -L "$old" ] && [ -O "$old" ] && rm -rf -- "$old"
+done
+export PATH={path}
+home=$(mktemp -d "$tmp/terrarium-release-home.XXXXXXXX") || {{ echo "cannot make the release HOME"; exit 125; }}
 trap 'rm -rf -- "$home"' EXIT
 trap 'exit 143' TERM INT HUP
 export HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" XDG_DATA_HOME="$home/.local/share" XDG_STATE_HOME="$home/.local/state" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 unset DOCKER_CONFIG CARGO_HOME RUSTUP_HOME UV_CACHE_DIR npm_config_cache
-sh -c {}
+sh -c {recipe}
 "#,
-        crate::executor::sh_quote(recipe)
+        path = RELEASE_PATH,
+        recipe = crate::executor::sh_quote(recipe)
     )
 }
+
+/// The `PATH` of a release recipe (review-ter-623-r2 finding 6): the system
+/// dirs only, nothing under the release user's home. The release tools are
+/// installed system-wide on the release client.
+pub const RELEASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Keep merged stdout/stderr outside the reusable slot, so the next checkout
 /// cannot clean it away. Only a bounded excerpt crosses the runner protocol.
@@ -4313,11 +4329,16 @@ mod tests {
         let recipe = format!(
             "printf '%s\\n' \"$HOME\" > '{o}'; test \"$(stat -c %a \"$HOME\")\" = 700 \
              && test \"$GIT_CONFIG_GLOBAL\" = /dev/null && test -z \"${{DOCKER_CONFIG:-}}\" \
-             && test \"$XDG_CONFIG_HOME\" = \"$HOME/.config\" && exit 7",
+             && test \"$XDG_CONFIG_HOME\" = \"$HOME/.config\" \
+             && test \"$PATH\" = '{path}' && exit 7",
+            path = RELEASE_PATH,
             o = out.display()
         );
+        let left = dir.path().join("terrarium-release-home.left");
+        std::fs::create_dir(&left).unwrap();
         let status = recipe_sh()
             .env("HOME", dir.path())
+            .env("PATH", format!("{}/bin:/usr/bin:/bin", dir.path().display()))
             .env("DOCKER_CONFIG", dir.path())
             .env("TMPDIR", dir.path())
             .args(["-c", &release_home(&recipe)])
@@ -4331,6 +4352,7 @@ mod tests {
             !std::path::Path::new(home).exists(),
             "the release HOME stayed"
         );
+        assert!(!left.exists(), "the HOME of a killed release stayed");
     }
 
     #[test]

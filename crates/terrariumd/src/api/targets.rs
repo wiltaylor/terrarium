@@ -374,6 +374,7 @@ async fn create(
     if let Some(p) = &def.project {
         def.name = prefixed(p, &def.name);
     }
+    let actor_of = actor.clone();
     if def.host.is_none() {
         crate::jobs::prepare_hosts(&state.db, def.address.clone()).await?;
     }
@@ -381,6 +382,7 @@ async fn create(
     let r = state
         .db
         .write(actor.label(), move |t| {
+            release_operator(t, &actor_of, &def, "defining the target")?;
             if let Some(p) = &def.project {
                 let n = targets::count_in_project(t, p)?;
                 if n >= max {
@@ -429,9 +431,15 @@ async fn update(
     let n = name.clone();
     let p = patch.clone();
     let label = actor.label().to_owned();
+    let (cur, a) = (current.def.clone(), actor.clone());
     let (candidate, _) = state
         .db
-        .read(move |t| targets::prepare_update(t, &label, &n, &p, live))
+        .read(move |t| {
+            let (candidate, x) = targets::prepare_update(t, &label, &n, &p, live)?;
+            release_operator(t, &a, &cur, "changing the target")?;
+            release_operator(t, &a, &candidate, "changing the target")?;
+            Ok((candidate, x))
+        })
         .await?;
     let mut before = serde_json::to_value(&current.def)?;
     let mut after = serde_json::to_value(&candidate)?;
@@ -517,9 +525,11 @@ async fn remove(
     let current = load(&state, &actor, name.clone()).await?;
     policy::define_target(&actor, current.def.project.as_deref())?;
     let reserved_name = name.clone();
+    let (cur, a) = (current.def.clone(), actor.clone());
     state
         .db
         .read(move |conn| {
+            release_operator(conn, &a, &cur, "deleting the target")?;
             crate::store::reservations::guard_identity(conn, "target", &reserved_name)
         })
         .await?;
@@ -537,10 +547,42 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// TER-623 (review-ter-623-r2 findings 2 and 3): only the operator
+/// defines, changes or deletes a release target or a target on the machine
+/// of one. So no agent can point the release target's name at another
+/// machine, or add a second name for its machine.
+fn release_operator(
+    conn: &rusqlite::Connection,
+    actor: &Actor,
+    def: &TargetDef,
+    what: &str,
+) -> ApiResult<()> {
+    if actor.is_operator() {
+        return Ok(());
+    }
+    match crate::store::jobs::release_match(conn, def)? {
+        Some((p, r)) => Err(crate::store::jobs::release_only(
+            &r,
+            &p,
+            &format!("{what} `{}`", def.name),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The target of a lifecycle verb or a snapshot call: the actor may use
-/// it, or may define it (docs/api.md §17.3).
+/// it, or may define it (docs/api.md §17.3). A release target, or a target
+/// on its machine: the operator only (review-ter-623-r2 finding 5).
 async fn verb_target(state: &Shared, actor: &Actor, name: String) -> ApiResult<TargetRow> {
     let r = load(state, actor, name).await?;
+    if !actor.is_operator() {
+        let def = r.def.clone();
+        let a = actor.clone();
+        state
+            .db
+            .read(move |c| release_operator(c, &a, &def, "a lifecycle verb on the target"))
+            .await?;
+    }
     if executor::usable(state, actor, &r.def.name).await.is_err() {
         policy::define_target(actor, r.def.project.as_deref()).map_err(|_| {
             ApiError::forbidden(format!(

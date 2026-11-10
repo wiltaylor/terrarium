@@ -2190,7 +2190,15 @@ pub async fn start_tool_exec(
     run: ToolRun,
 ) -> ApiResult<Arc<ExecSession>> {
     let n = name.to_owned();
-    let row = state.db.read(move |c| targets::get(c, &n)).await?;
+    let row = state
+        .db
+        .read(move |c| {
+            // TER-623: a tool defined before its target became a release
+            // target (or its machine one) does not run there.
+            crate::store::jobs::check_not_release_target(c, &n, "running a tool on the target")?;
+            targets::get(c, &n)
+        })
+        .await?;
     check_cap(state, actor)?;
     let def = resolved_def(state, &row, Some(actor), None).await?;
     let mut cmd = cmd;
