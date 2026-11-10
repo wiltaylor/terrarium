@@ -238,7 +238,7 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
             )?;
             let v = ctx
                 .api
-                .post(&format!("{}/test-runs", project_path(&p)), Some(body))
+                .post_upload(&format!("{}/test-runs", project_path(&p)), body)
                 .await?;
             let url = link(ctx, v["url"].as_str().unwrap_or_default());
             ctx.emit(&v, |c, v| {
