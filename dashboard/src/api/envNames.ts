@@ -24,7 +24,7 @@ const DENIED_PREFIX = [
   "LD_", "MALLOC_", "BASH_", "LC_", "GIT_", "TERRARIUM_", "XDG_", "SSH_", "WAYLAND_",
   "NODE_", "NPM_CONFIG_", "YARN_", "BUN_", "DENO_", "PYTHON", "PIP_", "UV_", "CONDA_", "PERL5", "RUBY",
   "GEM_", "BUNDLE_", "JAVA_", "DOTNET_", "COREHOST_", "CGO_", "CARGO_", "RUSTC", "RUSTDOC", "RUSTFLAGS",
-  "RUSTUP_", "LUA_", "SSL_CERT_",
+  "RUSTUP_", "LUA_", "SSL_CERT_", "OPENSSL_", "KRB5", "DBUS_",
   "ANTHROPIC_", "CLAUDE_", "OPENAI_", "CODEX_", "COPILOT_", "PI_", "DISABLE_",
 ];
 
@@ -32,6 +32,6 @@ const DENIED_PREFIX = [
 export function envNameError(env: string): string | null {
   if (!ENV_NAME_RE.test(env)) return "An env var name is an upper-case letter, then upper-case letters, digits, or _ (at most 128).";
   if (DENIED.has(env) || DENIED_PREFIX.some((p) => env.startsWith(p)) || env.endsWith("_PROXY"))
-    return `The sandbox, the loader, a shell, a language runtime, a proxy, or a harness reads or sets ${env}.`;
+    return `The sandbox, the loader, a shell, a language runtime, a proxy, a library that ssh loads, or a harness reads or sets ${env}.`;
   return null;
 }

@@ -1167,6 +1167,176 @@ async fn an_older_runner_upgrades_after_its_turn() {
     }
 }
 
+/// TER-524: a runner `blocked` on a question is in its turn. An account
+/// swap that cannot be live waits for the answer and the end of the turn,
+/// then restarts the harness with resume. A swap while the agent is
+/// `blocked` does not restart at once, and a swap that waits from
+/// `working` does not restart when the runner turns `blocked`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_swap_waits_for_a_blocked_turn() {
+    let td = Td::start().await;
+    for n in ["max-x", "max-y"] {
+        td.post(
+            "/api/subscriptions",
+            Some(json!({"name": n, "provider": "anthropic", "harnesses": ["claude"]})),
+        )
+        .await;
+    }
+    let id = td
+        .agent(
+            "asks",
+            json!({"subscription": "max-x", "subscription_pool": ["max-x", "max-y"]}),
+        )
+        .await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+
+    // Swap while blocked on a question: the restart waits.
+    let old = td.runner_pid(&id).unwrap();
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/question"})),
+    )
+    .await;
+    td.wait_status(&id, "blocked").await;
+    let mark = last_seq(&td, &id).await;
+    swap_waits(&td, &id, "max-y", old, 1).await;
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "y", "raw": true})),
+    )
+    .await;
+    restarted_after_turn(&td, &id, mark, 2, old).await;
+
+    // Swap while working: the runner turns `blocked` in the same turn
+    // (a question hook), and the restart still waits for its end.
+    let old = td.runner_pid(&id).unwrap();
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/hold"})),
+    )
+    .await;
+    td.wait_status(&id, "working").await;
+    let mark = last_seq(&td, &id).await;
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": "max-x"})),
+        )
+        .await;
+    assert_eq!(r["applied"], "restart_scheduled", "{r}");
+    let sock = td.run_dir().join(format!("agents/{id}.sock"));
+    hook(&sock, "Notification", json!({"message": "Allow the tool?"})).await;
+    td.wait_status(&id, "blocked").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(td.runner_pid(&id), Some(old), "no restart at blocked");
+    assert_eq!(td.events(&id, "session_started").await.len(), 2);
+    assert_eq!(td.status(&id).await, "blocked");
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "go", "raw": true})),
+    )
+    .await;
+    restarted_after_turn(&td, &id, mark, 3, old).await;
+
+    // Queued work does not hold the swap back, and it goes to the new
+    // launch: a mail that comes during the turn queues a pointer, and the
+    // pointer turn starts only in the new session.
+    let old = td.runner_pid(&id).unwrap();
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/hold"})),
+    )
+    .await;
+    td.wait_status(&id, "working").await;
+    let mark = last_seq(&td, &id).await;
+    let m = td
+        .post(
+            "/api/mail",
+            Some(json!({"to": "demo/asks", "body": "mail during the turn"})),
+        )
+        .await;
+    let thread = m["thread_id"].as_str().unwrap().to_owned();
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": "max-y"})),
+        )
+        .await;
+    assert_eq!(r["applied"], "restart_scheduled", "{r}");
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "go", "raw": true})),
+    )
+    .await;
+    restarted_after_turn(&td, &id, mark, 4, old).await;
+    let start = td.events(&id, "session_started").await[3]["seq"]
+        .as_u64()
+        .unwrap();
+    let pointed = |e: &Value| {
+        e["data"]["prompt"]
+            .as_str()
+            .is_some_and(|p| p.contains(&thread))
+    };
+    let turns = td
+        .wait_events(&id, "turn_start", |e| e.iter().any(pointed))
+        .await;
+    let seqs: Vec<u64> = turns
+        .iter()
+        .filter(|e| pointed(e))
+        .filter_map(|e| e["seq"].as_u64())
+        .collect();
+    assert!(
+        seqs.iter().all(|s| *s > start),
+        "the pointer went to the old harness: {start} {seqs:?} {turns:#?}"
+    );
+
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+}
+
+/// The `seq` of the newest status event of agent `id`.
+async fn last_seq(td: &Td, id: &str) -> u64 {
+    td.events(id, "status").await.last().unwrap()["seq"]
+        .as_u64()
+        .unwrap()
+}
+
+/// A swap of a `blocked` agent to `to` is scheduled, and for 500 ms the
+/// runner `old` and its `sessions` session starts stay.
+async fn swap_waits(td: &Td, id: &str, to: &str, old: u32, sessions: usize) {
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": to})),
+        )
+        .await;
+    assert_eq!(r["applied"], "restart_scheduled", "{r}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(td.runner_pid(id), Some(old), "no restart in a turn");
+    assert_eq!(td.events(id, "session_started").await.len(), sessions);
+    assert_eq!(td.status(id).await, "blocked");
+}
+
+/// The harness started its session number `n` on a new runner, after a
+/// `turn_end` of the turn that was open at `mark` (a `seq` from before the
+/// swap call).
+async fn restarted_after_turn(td: &Td, id: &str, mark: u64, n: usize, old: u32) {
+    let starts = td
+        .wait_events(id, "session_started", |e| e.len() == n)
+        .await;
+    let start = starts[n - 1]["seq"].as_u64().unwrap();
+    let ends = td.events(id, "turn_end").await;
+    assert!(
+        ends.iter()
+            .filter_map(|e| e["seq"].as_u64())
+            .any(|s| s > mark && s < start),
+        "no turn_end between the swap and the restart: {mark} {ends:#?} {starts:#?}"
+    );
+    td.wait_status(id, "idle").await;
+    assert_ne!(td.runner_pid(id), Some(old), "a new runner process");
+}
+
 /// M2 (TER-262): a stop between the kill of the old runner and the launch
 /// of the new one frees the upgrade slot: the next upgrade still runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

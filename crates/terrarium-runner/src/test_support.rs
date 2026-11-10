@@ -32,6 +32,13 @@ pub fn delivered_turn() -> crate::Delivery {
     crate::Delivery::from_parts(0, rx)
 }
 
+/// A failed delivery (`DeliveryError::Dropped`) for a fake `RunnerHandle`
+/// in another crate.
+pub fn failed_turn() -> crate::Delivery {
+    let (_, rx) = tokio::sync::oneshot::channel();
+    crate::Delivery::from_parts(0, rx)
+}
+
 /// How long [`RunnerProcessGuard`] waits after SIGTERM before SIGKILL.
 pub const TERM_GRACE: Duration = Duration::from_secs(2);
 

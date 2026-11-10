@@ -778,9 +778,27 @@ fn valid_env_name(k: &str) -> bool {
         && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
 }
 
-/// One line of a systemd environment file. In double quotes, systemd
-/// takes a backslash before `"`, `\`, `` ` ``, and `$` as the plain
-/// character, and expands nothing.
+/// A value that [`env_line`] carries to the unit byte for byte. Newlines,
+/// carriage returns, and other control characters are fine (TER-566: the
+/// daemon sends multi-line git trailers and hooks). Refused: NUL, which no
+/// environment can hold, and the characters that systemd's UTF-8 check
+/// (`unichar_is_valid`, v254) rejects, so that a request fails here with a
+/// clear error, not at unit start.
+fn valid_env_value(v: &str) -> bool {
+    !v.chars().any(|c| {
+        let u = u32::from(c);
+        u == 0 || (0xFDD0..=0xFDEF).contains(&u) || u & 0xFFFE == 0xFFFE
+    })
+}
+
+/// One assignment of a systemd environment file, in double quotes. In
+/// double quotes, systemd (`parse_env_file_internal`, v254) keeps every
+/// character as it is, also a newline or a carriage return, takes a
+/// backslash before `"`, `\`, `` ` ``, and `$` as the plain character,
+/// and expands nothing. systemd's own `write_env_var` writes a value with
+/// control characters the same way. Each of the four is escaped here, so
+/// no other backslash pair (and no backslash before a newline, which
+/// systemd would drop as a line continuation) can occur.
 pub fn env_line(key: &str, value: &str) -> String {
     let mut out = format!("{key}=\"");
     for c in value.chars() {
@@ -846,7 +864,7 @@ pub fn plan_start(
     }
     let mut env = String::new();
     for (k, v) in &req.env {
-        if !valid_env_name(k) || v.contains(['\0', '\n', '\r']) {
+        if !valid_env_name(k) || !valid_env_value(v) {
             return Err(Refusal::invalid(format!("bad environment variable {k:?}")));
         }
         size += k.len() + v.len() + 2;
