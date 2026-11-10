@@ -3024,7 +3024,11 @@ async fn a_fix_whose_next_merge_made_no_commit_is_refused() {
     let rb4 = lab.card("ter-rb4", "ter-rb4").await;
     let j = merge_and_wait(&lab, &rb4, None).await;
     assert_eq!(j["state"], "passed", "{j:#}");
-    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), next, "a no-op merge");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "next"]),
+        next,
+        "a no-op merge"
+    );
     let j = merge_and_wait(&lab, &rb4, Some("release/1.4.0")).await;
     assert_eq!(j["state"], "failed", "{j:#}");
     let tail = j["tail"].as_str().unwrap_or_default();
@@ -3061,7 +3065,10 @@ async fn a_fix_whose_next_merge_has_no_first_parent_is_refused() {
     git(&lab.work, &["add", "-A"]);
     git(&lab.work, &["commit", "-q", "-m", "root"]);
     let root = git(&lab.work, &["rev-parse", "HEAD"]);
-    git(&lab.work, &["push", "-q", "-f", "origin", "ter-rb5", "ter-rb5:next"]);
+    git(
+        &lab.work,
+        &["push", "-q", "-f", "origin", "ter-rb5", "ter-rb5:next"],
+    );
     let rb5 = lab.card("ter-rb5", "ter-rb5").await;
     let j = merge_and_wait(&lab, &rb5, None).await;
     assert_eq!(j["state"], "passed", "{j:#}");
