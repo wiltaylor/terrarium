@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +44,100 @@ pub struct ExecPlan {
     /// limits, [`crate::limits::wrap`]). A kill of the session kills the
     /// scope too.
     pub scope: Option<String>,
+    /// A private file that the program reads (a `docker --env-file`). The
+    /// session holds it until the process exits, then it is removed.
+    pub private_file: Option<PrivateFile>,
+}
+
+/// A file with mode 0600 in a private dir (mode 0700), removed when the
+/// last clone is dropped. It carries values that must not show in `ps` or
+/// reach the env of the program itself. A crash of the host agent can leave
+/// one behind: [`remove_private_files`] at the next start deletes it.
+#[derive(Debug, Clone)]
+pub struct PrivateFile(Arc<tempfile::TempPath>);
+
+impl PrivateFile {
+    /// Write `data` to a new file `<prefix><random>` in `dir`. The dir is
+    /// checked with [`private_dir`] first.
+    pub fn new(dir: &Path, prefix: &str, data: &[u8]) -> std::io::Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        private_dir(dir)?;
+        let mut f = tempfile::Builder::new()
+            .prefix(prefix)
+            .permissions(std::fs::Permissions::from_mode(0o600))
+            .tempfile_in(dir)?;
+        f.write_all(data)?;
+        f.flush()?;
+        Ok(Self(Arc::new(f.into_temp_path())))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl PartialEq for PrivateFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.path() == other.path()
+    }
+}
+
+impl Eq for PrivateFile {}
+
+/// Create `dir` (and its parents, each with mode 0700) and make sure that
+/// it is private: `dir` and its parent must be real dirs (not symlinks) of
+/// this user, and `dir` gets mode 0700.
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let euid = nix::unistd::geteuid().as_raw();
+    for d in [Some(dir), dir.parent()].into_iter().flatten() {
+        let m = std::fs::symlink_metadata(d)?;
+        if !m.file_type().is_dir() || m.uid() != euid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is not a dir of this user (uid {euid}); refusing it for private files",
+                    d.display()
+                ),
+            ));
+        }
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Delete the files in `dir` whose name starts with `prefix`: the private
+/// files that a crashed host agent left behind. Run it at the start, before
+/// any session. It does not recurse and follows no symlink. A file that it
+/// cannot delete is logged, and it goes on. Returns how many it deleted. A
+/// missing dir is no error. Two host agents on one data dir would delete
+/// each other's live files: run one per user.
+pub fn remove_private_files(dir: &Path, prefix: &str) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut n = 0;
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(prefix)
+            || !entry.file_type().is_ok_and(|t| t.is_file())
+        {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => n += 1,
+            Err(e) => tracing::warn!(
+                path = %entry.path().display(),
+                error = %e,
+                "cannot delete a leftover private file"
+            ),
+        }
+    }
+    Ok(n)
 }
 
 /// Input for a running session.
@@ -225,8 +319,11 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
 
     let timeout = plan.timeout;
     let scope = plan.scope.clone();
+    let private_file = plan.private_file;
     let mut group = GroupGuard(pid);
     let done = tokio::spawn(async move {
+        // Removed when the task ends, after the process has exited.
+        let _private_file = private_file;
         let scope = scope.as_deref();
         let mut stdin_tx = Some(stdin_tx);
         let mut forced: Option<ExitReason> = None;
@@ -428,8 +525,11 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
 
     let timeout = plan.timeout;
     let scope = plan.scope.clone();
+    let private_file = plan.private_file;
     let mut group = GroupGuard(pid);
     let done = tokio::spawn(async move {
+        // Removed when the task ends, after the process has exited.
+        let _private_file = private_file;
         let scope = scope.as_deref();
         let mut forced: Option<ExitReason> = None;
         let timer = deadline(timeout);

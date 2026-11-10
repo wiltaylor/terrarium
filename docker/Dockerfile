@@ -18,8 +18,9 @@
 #   dashboard    npm ci && npm run build for the SolidJS app
 #   rust         cargo build --release for terrariumd, terrarium, terrarium-runner, and terrarium-updater
 #                (terrariumd embeds the dashboard)
-#   host-build   static musl terrarium-host, for `just host::build` and for the
-#                runtime's /opt/terrarium/dist (GET /install/terrarium-host)
+#   host-build   static musl terrarium-host and terrarium-host-helper, for
+#                `just host::build` and for the runtime's /opt/terrarium/dist
+#                (GET /install/terrarium-host; the helper is a release asset)
 #   host-export  scratch stage that holds only the host binary, for `--output`
 #   gh           the GitHub CLI, pinned with its SHA-256, for the updater's image check
 #   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3, ripgrep, uv (no harness),
@@ -27,7 +28,8 @@
 #                the host agent self-update, and the updater with the gh CLI (the
 #                entrypoint of the terrarium-updater service, docs/api.md §34). The
 #                release image of CI (ghcr.io/wiltaylor/terrarium, docs/release.md): CI
-#                takes the release's terrarium-host asset out of this stage.
+#                takes the release's terrarium-host and terrarium-host-helper assets
+#                out of this stage.
 
 ARG RUST_IMAGE=rust:1.97-trixie
 # The git ref of the build (crates/terrarium-version): `<commit>` or
@@ -81,11 +83,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,id=terrarium-host-target \
     target="$(uname -m)-unknown-linux-musl" \
     && cargo build --release --locked --target "$target" -p terrarium-host \
+        --bin terrarium-host --bin terrarium-host-helper \
     && mkdir -p /out /dist \
-    && cp "target/$target/release/terrarium-host" /out/ \
-    && dist="terrarium-host-$(uname -m)-linux" \
-    && cp /out/terrarium-host "/dist/$dist" \
-    && (cd /dist && sha256sum "$dist" > "$dist.sha256")
+    && cp "target/$target/release/terrarium-host" "target/$target/release/terrarium-host-helper" /out/ \
+    && for bin in terrarium-host terrarium-host-helper; do \
+        dist="$bin-$(uname -m)-linux" \
+        && cp "/out/$bin" "/dist/$dist" \
+        && (cd /dist && sha256sum "$dist" > "$dist.sha256") || exit 1; \
+    done
 
 FROM scratch AS host-export
 COPY --from=host-build /out/terrarium-host /terrarium-host
