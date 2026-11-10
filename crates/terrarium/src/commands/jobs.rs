@@ -727,10 +727,15 @@ mod tests {
 
         // A key or a secret that is not a reference is refused.
         let args = parse_set(&["--docker-release-key", "plain-private-key"]).unwrap();
-        assert!(super::merged(&serde_json::json!({"docker_release": want}), &args.delivery).is_err());
+        assert!(
+            super::merged(&serde_json::json!({"docker_release": want}), &args.delivery).is_err()
+        );
         for bad in ["GH_TOKEN=ghp_plain", "GH_TOKEN", "=@secret:x"] {
             let args = parse_set(&["--release-secret", bad]).unwrap();
-            assert!(super::merged(&serde_json::json!({}), &args.delivery).is_err(), "{bad}");
+            assert!(
+                super::merged(&serde_json::json!({}), &args.delivery).is_err(),
+                "{bad}"
+            );
         }
 
         // Clear and reset.

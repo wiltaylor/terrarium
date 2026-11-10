@@ -3090,7 +3090,11 @@ fn check_release_target(
         return Ok(());
     };
     let host = machine(release);
-    if let Some(t) = def.target.as_deref().filter(|t| *t == release || machine(t) == host) {
+    if let Some(t) = def
+        .target
+        .as_deref()
+        .filter(|t| *t == release || machine(t) == host)
+    {
         return Err(ApiError::invalid(format!(
             "release_target `{release}` is, or is on the machine of, the job target `{t}`: the release target runs release jobs only"
         )));
@@ -3155,14 +3159,26 @@ fn machine_of(conn: &rusqlite::Connection, name: &str) -> String {
     let Ok(row) = targets::get(conn, name) else {
         return format!("name:{name}");
     };
-    if let Some(h) = row.def.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+    if let Some(h) = row
+        .def
+        .host
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
         let id = crate::store::hosts::find(conn, h)
             .ok()
             .flatten()
             .map_or_else(|| h.to_owned(), |x| x.id);
         return format!("host:{id}");
     }
-    if let Some(a) = row.def.address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+    if let Some(a) = row
+        .def
+        .address
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
         return format!(
             "ssh:{}:{}",
             jobs::address_key(a),
@@ -4311,7 +4327,10 @@ mod tests {
         let home = std::fs::read_to_string(&out).unwrap();
         let home = home.trim();
         assert!(home.contains("terrarium-release-home."), "{home}");
-        assert!(!std::path::Path::new(home).exists(), "the release HOME stayed");
+        assert!(
+            !std::path::Path::new(home).exists(),
+            "the release HOME stayed"
+        );
     }
 
     #[test]

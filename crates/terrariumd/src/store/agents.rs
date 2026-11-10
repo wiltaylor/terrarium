@@ -1454,7 +1454,11 @@ pub fn check_policy(
 ) -> ApiResult<()> {
     // TER-623: no policy lists a release target, whoever writes it.
     for t in &new.targets {
-        crate::store::jobs::check_not_release_target(conn, t, "listing the target in policy.targets")?;
+        crate::store::jobs::check_not_release_target(
+            conn,
+            t,
+            "listing the target in policy.targets",
+        )?;
     }
     crate::policy::set_policy(actor, project, old, new, &|n| {
         project_target(conn, project, n)

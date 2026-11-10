@@ -3204,7 +3204,9 @@ async fn the_release_target_is_for_the_release_job_only() {
                         "release_recipe": format!("touch '{}'", marker.display())});
     // Held by a policy, then by a lease: no release target.
     let w1 = format!("/api/agents/{}", lab.w1);
-    let r = td.patch(&w1, json!({"policy": {"targets": ["p-client"]}})).await;
+    let r = td
+        .patch(&w1, json!({"policy": {"targets": ["p-client"]}}))
+        .await;
     assert_eq!(r.status, 200, "{}", r.body);
     let r = td.put("/api/projects/p/delivery", config.clone()).await;
     assert_eq!(r.status, 409, "{}", r.body);
@@ -3225,7 +3227,9 @@ async fn the_release_target_is_for_the_release_job_only() {
 
     // Now nobody may list it or lease it.
     let rule = "release target runs release jobs only";
-    let r = td.patch(&w1, json!({"policy": {"targets": ["p-client"]}})).await;
+    let r = td
+        .patch(&w1, json!({"policy": {"targets": ["p-client"]}}))
+        .await;
     assert_eq!(r.status, 403, "{}", r.body);
     assert!(r.body.to_string().contains(rule), "{}", r.body);
     let r = td
@@ -3261,7 +3265,10 @@ async fn the_release_target_is_for_the_release_job_only() {
     for (path, body) in [
         ("/api/targets/p-client/exec", json!({"cmd": ["true"]})),
         ("/api/targets/p-client/exec", json!({"shell": true})),
-        ("/api/targets/p-client/cp", json!({"direction": "pull", "path": "/tmp/x"})),
+        (
+            "/api/targets/p-client/cp",
+            json!({"direction": "pull", "path": "/tmp/x"}),
+        ),
     ] {
         let r = td.post_as(&lab.w1, path, body).await;
         assert_eq!(r.status, 403, "{path}: {}", r.body);
@@ -3338,7 +3345,10 @@ async fn a_lost_or_cancelled_release_never_runs_again() {
         async move {
             let start = Instant::now();
             while !p.exists() {
-                assert!(start.elapsed() < DEADLINE, "the release recipe never started");
+                assert!(
+                    start.elapsed() < DEADLINE,
+                    "the release recipe never started"
+                );
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
@@ -3359,10 +3369,9 @@ async fn a_lost_or_cancelled_release_never_runs_again() {
     let release = move || {
         let c = c.clone();
         async move {
-            let r = l
-                .td
-                .post_as(&l.lead, &format!("/api/cards/{c}/release"), json!({}))
-                .await;
+            let r =
+                l.td.post_as(&l.lead, &format!("/api/cards/{c}/release"), json!({}))
+                    .await;
             assert_eq!(r.status, 201, "{}", r.body);
             r.body["job"]["id"].as_str().unwrap().to_owned()
         }
@@ -3377,7 +3386,10 @@ async fn a_lost_or_cancelled_release_never_runs_again() {
     assert_eq!(j["state"], "failed", "{j:#}");
     assert_eq!(j["outcome"], "error", "{j:#}");
     assert!(
-        j["tail"].as_str().unwrap().contains("does not run again by itself"),
+        j["tail"]
+            .as_str()
+            .unwrap()
+            .contains("does not run again by itself"),
         "{j:#}"
     );
     assert_eq!(j["attempt"], 1, "{j:#}");
