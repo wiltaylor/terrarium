@@ -3,7 +3,7 @@
 // shows its body and comments with links, the close button and the link to
 // the board close it, and Escape closes only the top panel when the panel is
 // open over the board drawer.
-import { createComponent, createSignal, type JSX } from "solid-js";
+import { type Component, createComponent, createSignal, type JSX, Show } from "solid-js";
 import { render } from "solid-js/web";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -57,6 +57,9 @@ function mount(view: () => JSX.Element) {
   );
   return el;
 }
+
+/** The non-keyed `Show`: `createComponent` takes the last overload, the keyed one, for its props type. */
+const ShowPlain = Show as unknown as Component<{ when: boolean; children: JSX.Element }>;
 
 const peek = () => document.querySelector<HTMLElement>(".card-peek");
 const escape = () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
@@ -121,7 +124,14 @@ describe("CardPeek", () => {
     const closeBoard = vi.fn(() => setBoardOpen(false));
     mount(() => [
       // The board drawer: `<Show when={boardOpen()}><Drawer .../></Show>`.
-      () => (boardOpen() ? createComponent(Drawer, { title: "Board card", onClose: closeBoard, children: "the board drawer" }) : null),
+      createComponent(ShowPlain, {
+        get when() {
+          return boardOpen();
+        },
+        get children() {
+          return createComponent(Drawer, { title: "Board card", onClose: closeBoard, children: "the board drawer" });
+        },
+      }),
       createComponent(CardPeek, {}),
     ]);
     cardPeek.open({ project: "terrarium", id: "TER-1" });
