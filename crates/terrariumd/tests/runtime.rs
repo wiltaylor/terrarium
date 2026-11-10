@@ -3553,10 +3553,11 @@ async fn a_failed_wake_is_an_error_and_stops_the_wakes() {
     assert_eq!(td.get(&format!("/api/agents/{id}")).await["queued"], 2);
 }
 
-/// TER-542: a wake whose start fails with a queued turn. The resume fails
-/// (exit 1 before the first idle), and the new session waits at its
-/// startup gate. The supervisor keeps the turn for the first idle, and the
-/// row of the turn stays in the store. Returns the agent ID.
+/// TER-542: a wake with a queued turn whose start ends before the first
+/// idle. The harness waits at its startup gate, so the supervisor keeps
+/// the turn for the first idle; then the operator stops the agent. The
+/// row of the turn stays in the store. Returns the agent ID, with the
+/// harness env cleared for the next start.
 async fn kept_queued_turn(td: &Td) -> String {
     let id = td.agent("demo", "bob", json!({})).await;
     td.post(&format!("/api/agents/{id}/start"), None).await;
@@ -3567,7 +3568,6 @@ async fn kept_queued_turn(td: &Td) -> String {
     let gate = td.dir.path().join("startup-gate");
     td.adapter
         .set_env("FAKE_TUI_STARTUP_GATE", &gate.display().to_string());
-    td.adapter.set_env("FAKE_TUI_RESUME_FAIL", "1");
     td.adapter
         .startup_hook
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3578,10 +3578,6 @@ async fn kept_queued_turn(td: &Td) -> String {
         )
         .await;
     assert_eq!(r["queued"], true, "{r}");
-    td.wait_events(&id, "status", |e| {
-        e.iter().any(|x| x["data"]["status"] == "restarting")
-    })
-    .await;
     let agent: AgentId = id.parse().unwrap();
     let start = Instant::now();
     while td.sup.kept_queued_turns(agent).len() != 1 {
@@ -3598,6 +3594,15 @@ async fn kept_queued_turn(td: &Td) -> String {
     let items = q["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "the turn shows once: {q}");
     assert_eq!(items[0]["source"], "store", "{q}");
+
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    let a = td.get(&format!("/api/agents/{id}")).await;
+    assert_eq!(a["queued"], 1, "the row stays after the stop: {a}");
+    td.adapter.clear_env();
+    td.adapter
+        .startup_hook
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     id
 }
 
@@ -3617,34 +3622,27 @@ async fn wake_up_turns(td: &Td, id: &str) -> usize {
         .count()
 }
 
-/// TER-542: a daemon restart before the first idle of the relaunch does
-/// not lose the kept turn: its row is still in the store, and the new
-/// daemon delivers it once.
+/// TER-542: a daemon restart before the next launch does not lose the
+/// kept turn: its row is still in the store, and the wake at the start of
+/// the new daemon delivers it once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_kept_queued_turn_survives_a_daemon_restart() {
     let mut td = Td::start().await;
     let id = kept_queued_turn(&td).await;
-    td.adapter.clear_env();
-    td.adapter
-        .startup_hook
-        .store(false, std::sync::atomic::Ordering::SeqCst);
     td.restart_daemon().await;
-    // A runner that lived through the restart (process mode) waits at
-    // the gate: open it.
-    std::fs::write(td.dir.path().join("startup-gate"), "").unwrap();
     assert_eq!(wake_up_turns(&td, &id).await, 1);
     let q = td.get(&format!("/api/agents/{id}/queued")).await;
     assert!(q["items"].as_array().unwrap().is_empty(), "{q}");
 }
 
-/// TER-542: with no daemon restart, the kept turn goes out once at the
-/// first idle of the relaunch, and its row goes with it. The wake at that
+/// TER-542: with no daemon restart, the next start keeps the turn, and
+/// it goes out once at the first idle, with its row. The wake at that
 /// idle finds the row gone or kept, and does not type the turn again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_kept_queued_turn_goes_out_once_without_a_restart() {
     let td = Td::start().await;
     let id = kept_queued_turn(&td).await;
-    std::fs::write(td.dir.path().join("startup-gate"), "").unwrap();
+    td.post(&format!("/api/agents/{id}/start"), None).await;
     assert_eq!(wake_up_turns(&td, &id).await, 1);
     let q = td.get(&format!("/api/agents/{id}/queued")).await;
     assert!(q["items"].as_array().unwrap().is_empty(), "{q}");
