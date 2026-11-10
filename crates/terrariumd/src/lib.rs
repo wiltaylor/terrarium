@@ -178,8 +178,11 @@ impl Daemon {
 pub const STATE_LOCK: &str = "daemon.lock";
 
 /// Take the exclusive lock of `state_dir`, or fail when another daemon
-/// holds it.
-fn lock_state_dir(state_dir: &std::path::Path) -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
+/// holds it. The CLI restore holds it too, so that no daemon starts on the
+/// state dir while it is replaced.
+pub fn lock_state_dir(
+    state_dir: &std::path::Path,
+) -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
     use nix::fcntl::{Flock, FlockArg};
     use std::os::unix::fs::OpenOptionsExt as _;
     let path = state_dir.join(STATE_LOCK);
@@ -683,7 +686,8 @@ fn spawn_artifact_sweep(state: Shared) -> JoinHandle<()> {
 /// schedule runs past the newest 500 of each schedule, and the webhook
 /// delivery IDs older than 7 days, the turn attachments older than 7
 /// days ([`api::attachments::prune`]), and the removed card files past
-/// the trash days with their blobs ([`api::card_files::prune`]).
+/// the trash days with their blobs ([`api::card_files::prune`]), and the
+/// agent write answers past a day ([`agent_rpc::prune_answers`]).
 fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = std::time::Duration::from_secs(3600);
@@ -777,6 +781,11 @@ fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
                 Ok(n) if n > 0 => info!(deliveries = n, "webhook delivery prune done"),
                 Ok(_) => {}
                 Err(e) => warn!("cannot prune the webhook deliveries: {e}"),
+            }
+            match agent_rpc::prune_answers(&state.db, chrono::Utc::now()).await {
+                Ok(n) if n > 0 => info!(answers = n, "agent write answer prune done"),
+                Ok(_) => {}
+                Err(e) => warn!("cannot prune the agent write answers: {e}"),
             }
             let hours = store::artifacts::context(&state.state_dir, &state.config_dir)
                 .map(|c| c.limits.prune_interval_hours)

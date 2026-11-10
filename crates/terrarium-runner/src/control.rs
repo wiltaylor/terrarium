@@ -73,6 +73,10 @@ pub enum ServerFrame {
     Delivery {
         delivery: u64,
         ok: bool,
+        /// With `ok`: the event seq at the start of the turn (TER-547). The
+        /// events go on another stream, so the daemon orders them by seq.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<WireDeliveryError>,
     },
@@ -308,6 +312,7 @@ mod tests {
         let d = serde_json::to_value(ServerFrame::Delivery {
             delivery: 3,
             ok: false,
+            seq: None,
             error: Some((&DeliveryError::NoSubmitHook { attempts: 2 }).into()),
         })
         .expect("delivery");
@@ -316,6 +321,22 @@ mod tests {
             json!({"type":"delivery","delivery":3,"ok":false,
                    "error":{"kind":"no_submit_hook","attempts":2}})
         );
+        let ok = serde_json::to_value(ServerFrame::Delivery {
+            delivery: 5,
+            ok: true,
+            seq: Some(12),
+            error: None,
+        })
+        .expect("delivery");
+        assert_eq!(
+            ok,
+            json!({"type":"delivery","delivery":5,"ok":true,"seq":12})
+        );
+        // A runner from before the seq: the frame still parses.
+        let old: ServerFrame =
+            serde_json::from_value(json!({"type":"delivery","delivery":6,"ok":true}))
+                .expect("old delivery");
+        assert!(matches!(old, ServerFrame::Delivery { seq: None, .. }));
         let end = serde_json::to_value(ServerFrame::End { id: 4, error: None }).expect("end");
         assert_eq!(end, json!({"type":"end","id":4}));
     }

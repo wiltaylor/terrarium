@@ -41,6 +41,17 @@ export function resolveWikilink(raw: string, ctx: ResolveContext): WikiTarget {
   return { kind: "page", project: ctx.project, path: ref };
 }
 
+/** A path part that is not empty, `.`, or `..`. */
+const safePart = (s: string): boolean => s.trim() !== "" && s !== "." && s !== "..";
+
+/**
+ * A page target that stays inside `/p/<project>/knowledge/wiki/` (TER-598):
+ * a project with no `/`, and a project and page path with no empty, `.`, or
+ * `..` part. A text or
+ * `wiki:` link refuses any other page.
+ */
+export const safePageTarget = (t: WikiTarget): boolean => t.kind === "page" && safePart(t.project) && !t.project.includes("/") && t.path.split("/").every(safePart);
+
 export function targetHref(t: WikiTarget): string {
   const p = `/p/${encodeURIComponent(t.project)}`;
   switch (t.kind) {
@@ -73,9 +84,23 @@ export function splitFrontMatter(src: string): { meta: FrontMatter; body: string
 
 const SAFE_URL = /^(https?:|mailto:|\/|#|\.|artifact:|data:image\/(png|gif|jpeg|webp);)/i;
 
+/** True when an http(s) or protocol-relative URL carries a user name or password (`https://user:pass@host`). */
+function hasUserInfo(h: string): boolean {
+  if (!/^(?:https?:|[\\/]{2})/i.test(h)) return false;
+  try {
+    // Without a base, `https:user@host` parses as on a page with another scheme: with the user.
+    const u = /^https?:/i.test(h) ? new URL(h) : new URL(h, "https://base.invalid/");
+    return u.username !== "" || u.password !== "";
+  } catch {
+    return true;
+  }
+}
+
+/** The URL when its scheme is safe, or null. An http(s) URL with a user name or password is refused, as in `LinkText` (TER-598). */
 export function safeUrl(href: string): string | null {
   const h = href.trim();
   if (!h) return null;
+  if (hasUserInfo(h)) return null;
   // Relative paths with no scheme are fine.
   if (!/^[a-z][a-z0-9+.-]*:/i.test(h)) return h;
   return SAFE_URL.test(h) ? h : null;
@@ -87,6 +112,42 @@ const esc = (s: string) =>
 export interface RenderOptions extends ResolveContext {
   /** Turn an artifact ID into a URL (a signed URL in real mode). */
   artifactUrl?: (id: string) => string | undefined;
+  /**
+   * Card prefix to project, for the projects of the reader (TER-571). With it,
+   * a bare card key such as `TER-12` and a `[text](card:TER-12)` link become
+   * card links (`wikilink-card`), and `[text](wiki:<page>)` a page link.
+   */
+  cardKeys?: Record<string, string>;
+}
+
+/** A bare card key at the start of `s`, with no letter, digit, or `_` after it. */
+const CARD_KEY_AT = /^([A-Z][A-Z0-9]{1,9})-\d{1,9}(?![A-Za-z0-9_])/;
+/** The first bare card key in `s` with no letter, digit, `_`, `-`, or `/` before it. */
+const CARD_KEY_START = /(?<![A-Za-z0-9_/-])[A-Z][A-Z0-9]{1,9}-\d{1,9}(?![A-Za-z0-9_])/g;
+
+/** The project of a card key of the reader, or null. */
+const keyProject = (key: string, keys: Record<string, string> | undefined): string | null => {
+  const m = CARD_KEY_AT.exec(key);
+  if (!keys || !m || m[0] !== key || !Object.hasOwn(keys, m[1]!)) return null;
+  return keys[m[1]!] ?? null;
+};
+
+/** The in-app href of `wiki:<page>` or `card:<KEY>`, or null (a refused link renders as its text). */
+function appLinkHref(href: string, opts: RenderOptions): { href: string; card: boolean } | null {
+  if (/^card:/i.test(href)) {
+    const id = href.slice("card:".length);
+    const project = keyProject(id, opts.cardKeys);
+    return project ? { href: targetHref({ kind: "card", project, id }), card: true } : null;
+  }
+  let page: string;
+  try {
+    page = decodeURIComponent(href.slice("wiki:".length)).trim();
+  } catch {
+    return null;
+  }
+  const t = resolveWikilink(page, { project: opts.project, cardPrefixes: new Set() });
+  if (!safePageTarget(t)) return null;
+  return { href: targetHref(t), card: false };
 }
 
 /** The longest query of a `db` block. The sanitizer drops a longer attribute. */
@@ -124,6 +185,7 @@ export function renderWiki(src: string, opts: RenderOptions): string {
           return `<a class="wikilink wikilink-${t.kind}${missing ? " missing" : ""}" href="${esc(targetHref(t))}">${esc(ref)}</a>`;
         },
       },
+      ...(opts.cardKeys ? [cardKeyExtension(opts.cardKeys)] : []),
     ],
     renderer: {
       html(token: Tokens.HTML | Tokens.Tag) {
@@ -140,6 +202,11 @@ export function renderWiki(src: string, opts: RenderOptions): string {
       },
       link(token: Tokens.Link) {
         const text = this.parser.parseInline(token.tokens);
+        if (opts.cardKeys && /^(?:wiki|card):/i.test(token.href.trim())) {
+          const app = appLinkHref(token.href.trim(), opts);
+          if (!app) return text;
+          return `<a class="wikilink wikilink-${app.card ? "card" : "page"}" href="${esc(app.href)}">${text}</a>`;
+        }
         const href = safeUrl(token.href);
         if (!href) return text;
         const art = /^artifact:(ART-\d+)$/.exec(href);
@@ -161,5 +228,41 @@ export function renderWiki(src: string, opts: RenderOptions): string {
   return md.parse(body, { async: false });
 }
 
-/** Render trusted-shape Markdown (artifacts, notes) with the same safety rules. */
-export const renderMarkdown = (src: string, project = ""): string => renderWiki(src, { project });
+/** A bare card key of the reader's projects: a `wikilink-card` link. Not inside a link (no `<a>` in an `<a>`). */
+function cardKeyExtension(keys: Record<string, string>) {
+  return {
+    name: "cardkey",
+    level: "inline" as const,
+    start: (s: string) => {
+      for (const m of s.matchAll(CARD_KEY_START)) if (keyProject(m[0], keys)) return m.index;
+      return undefined;
+    },
+    tokenizer(this: { lexer: { state: { inLink: boolean } } }, s: string, tokens: { raw: string }[]) {
+      if (this.lexer.state.inLink) return undefined;
+      // The tokenizer sees only the rest of the text: the key must not go on a word of the token before it.
+      if (/[A-Za-z0-9_/-]$/.test(tokens.at(-1)?.raw ?? "")) return undefined;
+      const m = CARD_KEY_AT.exec(s);
+      if (!m || !keyProject(m[0], keys)) return undefined;
+      return { type: "cardkey", raw: m[0], id: m[0] };
+    },
+    renderer(token: { id?: unknown }) {
+      const id = String(token.id);
+      const project = keyProject(id, keys)!;
+      return `<a class="wikilink wikilink-card" href="${esc(targetHref({ kind: "card", project, id }))}">${esc(id)}</a>`;
+    },
+  };
+}
+
+/** Render trusted-shape Markdown (artifacts, notes) with the same safety rules. `extra` adds options such as `cardKeys`. */
+export const renderMarkdown = (src: string, project = "", extra: Omit<RenderOptions, "project"> = {}): string => renderWiki(src, { ...extra, project });
+
+/** The card of a `wikilink-card` href (`/p/<project>/board?card=<id>`), or null. */
+export function cardOfHref(href: string): { project: string; id: string } | null {
+  const m = /^\/p\/([^/?#]+)\/board\?card=([^&#]+)$/.exec(href);
+  if (!m) return null;
+  try {
+    return { project: decodeURIComponent(m[1]!), id: decodeURIComponent(m[2]!) };
+  } catch {
+    return null;
+  }
+}

@@ -112,7 +112,7 @@ impl SpawnOptions {
     }
 }
 
-type DeliveryTx = oneshot::Sender<Result<(), DeliveryError>>;
+type DeliveryTx = oneshot::Sender<crate::runner::DeliveryOutcome>;
 
 enum Slot {
     Reply(oneshot::Sender<Result<Value, RpcError>>),
@@ -288,11 +288,12 @@ impl Shared {
             ServerFrame::Delivery {
                 delivery,
                 ok,
+                seq,
                 error,
             } => {
                 if let Some(tx) = lock(&self.deliveries).remove(&delivery) {
                     let outcome = if ok {
-                        Ok(())
+                        Ok(seq)
                     } else {
                         Err(error
                             .map(DeliveryError::from)

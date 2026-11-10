@@ -421,11 +421,17 @@ pub struct QueuedTurn {
 
 /// Keep `text` as a turn for agent `id`, after the turns that wait already.
 pub fn queue_turn(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<()> {
-    t.execute(
-        "INSERT INTO queued_turns (agent, text, created_at) VALUES (?1, ?2, ?3)",
+    queue_turn_row(t, id, text).map(|_| ())
+}
+
+/// [`queue_turn`], and the ID of the new row.
+pub fn queue_turn_row(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<i64> {
+    Ok(t.query_row(
+        "INSERT INTO queued_turns (agent, text, created_at) VALUES (?1, ?2, ?3)
+             RETURNING id",
         params![id, text, now()],
-    )?;
-    Ok(())
+        |r| r.get(0),
+    )?)
 }
 
 /// True when agent `id` has a turn that waits in the store.
@@ -1277,6 +1283,8 @@ pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     crate::secrets::grants::on_agent_deleted(t, id)?;
     // Its tool grants (`crate::store::tools`).
     crate::store::tools::on_agent_deleted(t, id)?;
+    // Its journaled write answers (`crate::agent_rpc`).
+    crate::agent_rpc::on_agent_deleted(t, id)?;
     // The sessions stay for the card links (migration 37); the session
     // files go to the archive after the commit (`crate::session_archive`).
     crate::store::session_refs::on_agent_deleted(t, id, a.agent.harness.as_str())?;

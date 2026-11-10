@@ -57,16 +57,27 @@ const PID_DIR: &str = "/tmp";
 /// `f` to the path of the PID file named `FILE`: a name in `/tmp` itself
 /// maps into `d`, other paths stay. `o` keeps a name in `/tmp`: the file
 /// of a job from before the upgrade, used only when it is a plain file of
-/// the same user. `own FILE` is true for such a file.
+/// the same user. `own FILE` is true for such a file. `n` is the path of
+/// a directory that was refused (another user's, a symlink, or not a
+/// directory), else empty: [`WRAP`] warns on stderr and [`KILL`] prints
+/// `nodir` with it, so the operator sees why the run has no PID file
+/// (TER-595).
+///
+/// The checks of `d` are not atomic. Between the `-h` and the `-O` test a
+/// user who already owns the name `/tmp/terrarium-run-<uid>` (who made it
+/// before this user did) can swap a symlink in. That user can already
+/// refuse the directory, so the swap gains nothing new: a PID file found
+/// through it must still pass `own` (a plain file of this user), and a
+/// file planted by that user does not (TER-595).
 macro_rules! private_dir {
     () => {
-        r#"d= u=$(id -u 2>/dev/null)
+        r#"d= n= u=$(id -u 2>/dev/null)
 case $u in
   ''|*[!0-9]*) ;;
   *)
     d=/tmp/terrarium-run-$u
     mkdir -m 700 "$d" 2>/dev/null
-    if [ -d "$d" ] && [ ! -h "$d" ] && [ -O "$d" ] && chmod 700 "$d" 2>/dev/null; then :; else d=; fi ;;
+    if [ -d "$d" ] && [ ! -h "$d" ] && [ -O "$d" ] && chmod 700 "$d" 2>/dev/null; then :; else n=$d d=; fi ;;
 esac
 own() { [ -n "$1" ] && [ -f "$1" ] && [ ! -h "$1" ] && [ -O "$1" ]; }
 p_at() {
@@ -90,10 +101,12 @@ p_at() {
 /// Missing PIDs are only dead when the proc mount proves unrestricted
 /// visibility. Without that proof (including no proc), retain the file.
 /// A name in `/tmp` goes into the private directory ([`private_dir!`]).
-/// Without a safe directory the command runs without a PID file.
+/// Without a safe directory the command runs without a PID file, and a
+/// warning on stderr names the refused directory (TER-595).
 pub const WRAP: &str = concat!(
     private_dir!(),
     r#"p_at "$1"; shift
+[ -n "$n" ] && [ -z "$f" ] && echo "terrarium-run: warning: $n is not a private directory of uid $u (a symlink or another user's): this run has no PID file, and a kill cannot end its processes on the target" >&2
 st() { s=; { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 0; s=${s##*) }; set -- $s; echo "${20}"; }
 visible=
 if [ -d /proc/self ] && [ -r /proc/mounts ]; then
@@ -137,10 +150,13 @@ exec "$@""#
 /// It reads the file in the private directory ([`private_dir!`]), else a
 /// file of the same name in `/tmp` that is a plain file of its user (a job
 /// from before TER-587). A file of another user or a symlink is not read.
+/// A refused private directory prints `nodir` and its path first
+/// (TER-595).
 pub const KILL: &str = concat!(
     private_dir!(),
     r#"g=${2:-5}; p= t=
 p_at "$1"
+[ -n "$n" ] && [ -z "$f" ] && echo nodir "$n"
 pick() { if own "$f"; then k=$f; elif own "$o"; then k=$o; else k=; fi; }
 pick
 [ -n "$k" ] || { sleep 1; pick; }
@@ -309,7 +325,8 @@ pub fn private_pidfile(pidfile: &str, uid: u32) -> String {
     }
 }
 
-/// Parse the output of [`KILL`].
+/// Parse the output of [`KILL`]. A refused private directory (`nodir`)
+/// goes in as `pid_dir_refused`, its path (TER-595).
 pub fn parse(stdout: &str) -> Value {
     let pids = |rest: &str| -> Vec<u32> {
         rest.split_whitespace()
@@ -325,6 +342,7 @@ pub fn parse(stdout: &str) -> Value {
                 r["pid"] = Value::Null;
                 r["stale"] = json!(pids(rest).first());
             }
+            "nodir" => r["pid_dir_refused"] = json!(rest.trim()),
             "pid" => r["pid"] = json!(pids(rest).first()),
             "term" | "kill" | "left" => r[key] = json!(pids(rest)),
             _ => {}
@@ -879,6 +897,7 @@ mod tests {
             let name = root.path().join("terrarium-run-X.pid");
             let out = sh(&rooted(WRAP, root.path()), &[&name, Path::new("true")]);
             assert!(out.status.success(), "{out:?}");
+            assert!(out.stderr.is_empty(), "{out:?}");
             assert!(!name.exists());
             let line = std::fs::read_to_string(own.join("terrarium-run-X.pid")).unwrap();
             assert!(
@@ -912,13 +931,25 @@ mod tests {
             .unwrap();
         assert!(out.status.success(), "{out:?}");
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ran");
+        // TER-595: the run says why it has no PID file.
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("warning") && err.contains(&own.display().to_string()),
+            "{err}"
+        );
         assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
         assert!(!name.exists());
         // A file planted in the target of the link is not read.
         let planted = elsewhere.join("terrarium-run-X.pid");
         std::fs::write(&planted, format!("{} 0\n", std::process::id())).unwrap();
         let out = sh(&rooted(KILL, root.path()), &[&name]);
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "none");
+        let r = parse(&String::from_utf8_lossy(&out.stdout));
+        assert_eq!(r["pid"], Value::Null, "{r}");
+        assert_eq!(
+            r["pid_dir_refused"],
+            json!(own.display().to_string()),
+            "{r}"
+        );
         let out = sh(&rooted(CLEAR, root.path()), &[&name]);
         assert!(out.status.success(), "{out:?}");
         assert!(planted.exists());
@@ -975,6 +1006,9 @@ mod tests {
             json!({"pid": 10, "term": [10, 11, 12], "kill": [12], "left": []})
         );
         assert_eq!(parse("none\n")["pid"], Value::Null);
+        let r = parse("nodir /tmp/terrarium-run-1000\nnone\n");
+        assert_eq!(r["pid"], Value::Null);
+        assert_eq!(r["pid_dir_refused"], json!("/tmp/terrarium-run-1000"));
     }
 
     #[test]

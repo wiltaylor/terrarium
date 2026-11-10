@@ -541,6 +541,12 @@ The `delivery` frame:
 | `false` | `write` | The write to the PTY failed. `error.message` tells why. |
 | `false` | `dropped` | The runner dropped the turn. |
 
+With `ok: true`, `seq` is the seq of the last line of `events.jsonl` when
+the turn started. The status events of the turn, and its end, have a higher
+seq. The events come on another stream than the `delivery` frame, so the
+daemon uses `seq` to tell whether the rest event of a short turn came
+before the outcome. A runner from before the field sends no `seq`.
+
 A delivery outcome goes only to the connection that typed the turn. When
 that connection closes first, the outcome is lost. A failed delivery is
 also an `Event::DeliveryFailed` in the events.

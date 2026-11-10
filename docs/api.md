@@ -3133,7 +3133,7 @@ redacted from the output, the log, and the tail, and writes a
 | `POST /api/agents/{id}/waits` | below | `201` the wait | the agent itself, the operator |
 | `POST /api/agents/{id}/run` | `{"target", "cmd": [..], "name"?, "cwd"?, "env"?, "timeout"?, "reason"?, "agent"?}` | `201 {"wait", "session_id", "target"}` | the agent itself, the operator; the run uses the agent's rights |
 | `GET /api/waits/{id}` | | `200` the wait | as for the list; else `404` |
-| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait: on a `host`, `docker`, or `ssh` target each process of the process group and session of the run gets `TERM`, then `KILL` after 5 s | `200` the cancelled wait; with a kill on such a target also `kill`: `{pid, term, kill, left}` (the PIDs on the target that got `TERM`, needed `KILL`, and still run) or `{error}`; a wait that is not open is `409 conflict` | as for the list |
+| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait: on a `host`, `docker`, or `ssh` target each process of the process group and session of the run gets `TERM`, then `KILL` after 5 s | `200` the cancelled wait; with a kill on such a target also `kill`: `{pid, term, kill, left}` (the PIDs on the target that got `TERM`, needed `KILL`, and still run), with `pid_dir_refused` (the path) when the private PID directory `/tmp/terrarium-run-<uid>` was refused as a symlink or another user's, so the run had no PID file, or `{error}`; a wait that is not open is `409 conflict` | as for the list |
 | `GET /api/waits/{id}/log` | `?max=` bytes (at most 65536) | `200 {"wait_id", "session_id", "target", "running", "output", "end"?}` | as for the list; a wait that is not `process` is `422` |
 
 The create body:
@@ -4362,6 +4362,11 @@ For an agent sender:
 | `GET /api/mail/{id}` | | `200` message |
 | `POST /api/mail/{id}/read` | none | `200` message |
 | `POST /api/mail/{id}/reply` | `{"body", "subject"?}` | `201` **array** of messages, one for each recipient |
+
+- A reply goes to every other participant of the thread. The operator is a
+  recipient only when the replied-to message came from or went to
+  `operator`. To reach the operator on another message of the thread, send
+  to `operator` with `thread_id`.
 
 - `state` is a state or `unread` (`queued` and `delivered`).
 - `project` keeps the messages from or to the inbox of the project, or
@@ -12445,6 +12450,28 @@ start with `Job queue:`.
 
 A held card (the GitHub author gate, §8.3) gets no validate or merge
 job, from any caller (`403`).
+
+A merge takes the reviewed commit of each card (TER-553): the head of the
+card branch that the daemon recorded when the card moved into the merge
+queue. A card in the merge queue without a reviewed commit for the branch
+of the merge is refused with `409` (TER-580): the head is not recorded
+yet, the commit is of another branch (a `branch` in the body, or a branch
+changed after the accept), or the card has no round (a column got the
+`merge_queue` role while it held the card). A card outside the merge
+queue merges the head of its branch on the remote at queue time.
+
+The daemon reads the head right before the move, and in the background
+after it when that read failed. The background read fills a round only
+within 10 minutes of the accept; after that the round needs a fresh
+accept. The rounds that the TER-553 upgrade opened for the cards already
+in the merge queue need one too (TER-580): they hold no reviewed commit.
+For each such round the card gets one `Job queue:` comment with the
+reason. To go on, review the head of the branch, then move the card out
+of the merge queue and back in.
+
+**Upgrade step (TER-580).** After the upgrade, each card that was in the
+merge queue at the TER-553 upgrade and has not left it since stays out of
+merges until it is moved out of the merge queue and back in.
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
