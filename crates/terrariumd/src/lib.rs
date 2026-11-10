@@ -147,7 +147,7 @@ pub struct DaemonConfig {
 pub struct Daemon {
     pub state: Shared,
     /// The `flock` on [`STATE_LOCK`], held until the daemon drops.
-    _state_lock: std::fs::File,
+    _state_lock: nix::fcntl::Flock<std::fs::File>,
     pub socket: PathBuf,
     pub tcp_addr: Option<std::net::SocketAddr>,
     /// The bound address of the artifact origin, when it listens.
@@ -179,7 +179,10 @@ pub const STATE_LOCK: &str = "daemon.lock";
 
 /// Take the exclusive lock of `state_dir`, or fail when another daemon
 /// holds it.
-fn lock_state_dir(state_dir: &std::path::Path) -> anyhow::Result<std::fs::File> {
+fn lock_state_dir(
+    state_dir: &std::path::Path,
+) -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
+    use nix::fcntl::{Flock, FlockArg};
     use std::os::unix::fs::OpenOptionsExt as _;
     let path = state_dir.join(STATE_LOCK);
     let file = std::fs::OpenOptions::new()
@@ -190,16 +193,15 @@ fn lock_state_dir(state_dir: &std::path::Path) -> anyhow::Result<std::fs::File> 
         .mode(0o600)
         .open(&path)
         .with_context(|| format!("cannot open the state lock {}", path.display()))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(lock) => Ok(lock),
+        Err((_, nix::errno::Errno::EWOULDBLOCK)) => anyhow::bail!(
             "another daemon uses the state dir {} ({} is locked): stop it first",
             state_dir.display(),
             path.display()
         ),
-        Err(std::fs::TryLockError::Error(e)) => {
-            Err(e).with_context(|| format!("cannot lock {}", path.display()))
-        }
+        Err((_, e)) => Err(std::io::Error::from(e))
+            .with_context(|| format!("cannot lock {}", path.display())),
     }
 }
 
