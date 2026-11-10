@@ -12480,7 +12480,7 @@ authors, and pins stay `operator`. `GET /api/session` gives `kind: "link"`.
 The deny list (`403 link_forbidden`):
 
 - The credentials of the remote: `POST` and `DELETE /api/session`,
-  `/api/sessions`, `/api/auth/...`, `POST /api/secrets/{scope}/{name}/reveal`,
+  `DELETE /api/sessions`, `/api/auth/...`, `POST /api/secrets/{scope}/{name}/reveal`,
   `/api/agent/secrets/...`, the writes of `/api/credentials`,
   `POST /api/hosts`, `DELETE /api/hosts/{name}`,
   `/api/hosts/{name}/rotate`, `/api/subscriptions/login...` (§16.4), and
@@ -12494,6 +12494,14 @@ The deny list (`403 link_forbidden`):
 - The config repo push (§25): `POST /api/config/push`,
   `POST /api/config/sync`, and the writes of `/api/config/remote`.
 - Any path outside `/api` (`/install/...`, `/hosts/connect`, `/a/...`).
+
+A link also may not reach the denied routes through a sysadmin agent
+(`403 link_forbidden` too): it may not grant or revoke `sysadmin` (`PUT
+/api/agents/{id}/roles`, an agent create or a spawn with that role), and
+may not drive an agent that holds `sysadmin`: no turn (`.../send`), keys,
+answer, PTY attach, `PATCH /api/agents/{id}`, compact or new session with
+`then`, or spawn for it. Reads, start, stop, pause, and interrupt of such an
+agent work.
 
 The check decodes the path, drops empty and `.` segments, and ignores case,
 so no other spelling of a denied route passes; a path with `..` is denied.

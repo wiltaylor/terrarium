@@ -53,6 +53,36 @@ pub fn current_label() -> Option<String> {
     CALLER.try_with(|c| format!("link:{}", c.id)).ok()
 }
 
+/// Whether the current task serves a link request.
+pub fn is_link_call() -> bool {
+    CALLER.try_with(|_| ()).is_ok()
+}
+
+/// `403 link_forbidden` for a link request, else `Ok`. `what` says what
+/// the link may not do.
+pub fn refuse_for_link(what: &str) -> ApiResult<()> {
+    if is_link_call() {
+        Err(ApiError::new(
+            crate::error::Code::LinkForbidden,
+            format!("a link key may not {what} (docs/api.md §36.4)"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// A link may not drive an agent that holds `sysadmin` (TER-61 review,
+/// O2): that agent calls the API with its own rights, outside the deny
+/// list, and `sysadmin` may push the config repo and run the self-update.
+/// `what` is the action, for example "send a turn to".
+pub fn refuse_sysadmin_agent(roles: &[terrarium_core::Role], what: &str) -> ApiResult<()> {
+    if roles.contains(&terrarium_core::Role::Sysadmin) {
+        refuse_for_link(&format!("{what} an agent that holds sysadmin"))
+    } else {
+        Ok(())
+    }
+}
+
 /// Why the deny list refuses a link request, or `None` when it may pass.
 /// `path` is the request path (with `/api`), `websocket` an upgrade.
 ///
@@ -92,7 +122,7 @@ pub fn denied(
         ["links", ..] => Some("the links of this daemon"),
         // The credentials of this daemon.
         ["session"] if !get => Some("the login sessions of this daemon"),
-        ["sessions", ..] => Some("the login sessions of this daemon"),
+        ["sessions"] if *method == Method::DELETE => Some("the login sessions of this daemon"),
         ["auth", ..] => Some("the operator password"),
         ["secrets", _, _, "reveal"] => Some("revealing a secret"),
         ["agent", "secrets", ..] => Some("revealing a secret"),
@@ -392,6 +422,8 @@ mod tests {
             (Method::GET, "/api/secrets"),
             (Method::DELETE, "/api/links/self"),
             (Method::GET, "/api/system/instance"),
+            (Method::GET, "/api/sessions/S1"),
+            (Method::GET, "/api/sessions/S1/transcript"),
         ];
         for (m, p) in cases {
             assert!(!deny(m.clone(), p), "{m} {p} refused");

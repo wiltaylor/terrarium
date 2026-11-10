@@ -3040,4 +3040,141 @@ mod tests {
         .await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     }
+
+    /// Seed project `p` with the agents `sys` (sysadmin) and `dev`; give
+    /// their IDs.
+    async fn seed_sysadmin(s: &Shared) -> (String, String) {
+        s.db.write("operator", |t| {
+            crate::store::projects::create(
+                t,
+                &crate::store::projects::NewProject {
+                    name: "p".into(),
+                    ..Default::default()
+                },
+                "api",
+            )?;
+            for n in ["sys", "dev"] {
+                crate::store::agents::create(t, &toml_def(n, "p"), Path::new("/state"), "api")?;
+            }
+            let sys: String =
+                t.query_row("SELECT id FROM agents WHERE name = 'sys'", [], |r| r.get(0))?;
+            crate::store::agents::set_roles(t, &sys, "p", &[terrarium_core::Role::Sysadmin])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let id = |n: &'static str| {
+            let s = s.clone();
+            async move {
+                s.db.read(move |c| {
+                    Ok(c.query_row("SELECT id FROM agents WHERE name = ?1", [n], |r| r.get(0))?)
+                })
+                .await
+                .unwrap()
+            }
+        };
+        (id("sys").await, id("dev").await)
+    }
+
+    /// TER-61 review, O1 and O2: a link cannot make a sysadmin, and cannot
+    /// drive one; a plain agent still takes its turns.
+    #[tokio::test]
+    async fn a_link_cannot_grant_or_drive_sysadmin() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, dev) = seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let forbidden = |r: Response| async move {
+            assert_eq!(r.status(), StatusCode::FORBIDDEN);
+            let v = json_of(r).await;
+            assert_eq!(v["error"]["code"], "link_forbidden", "{v}");
+        };
+        let roles = serde_json::json!({"roles": ["sysadmin"]});
+        let r = send_body(link_app(&s), "PUT", &format!("/api/agents/{dev}/roles"), &h, &roles).await;
+        forbidden(r).await;
+        let new = serde_json::json!({"name": "boss", "project": "p", "harness": "claude",
+                                     "roles": ["sysadmin"]});
+        let r = send_body(link_app(&s), "POST", "/api/agents", &h, &new).await;
+        forbidden(r).await;
+        let turn = serde_json::json!({"text": "push the config repo"});
+        let r = send_body(link_app(&s), "POST", &format!("/api/agents/{sys}/send"), &h, &turn).await;
+        forbidden(r).await;
+        let keys = serde_json::json!({"keys": ["enter"]});
+        let r = send_body(link_app(&s), "POST", &format!("/api/agents/{sys}/keys"), &h, &keys).await;
+        forbidden(r).await;
+        let r = send(link_app(&s), "GET", &format!("/api/agents/{sys}/pty"), &h).await;
+        forbidden(r).await;
+        let patch = serde_json::json!({"prompt": "you push"});
+        let r = send_body(link_app(&s), "PATCH", &format!("/api/agents/{sys}"), &h, &patch).await;
+        forbidden(r).await;
+        let then = serde_json::json!({"then": "push"});
+        let r = send_body(link_app(&s), "POST", &format!("/api/agents/{sys}/new-session"), &h, &then).await;
+        forbidden(r).await;
+        // A plain agent: the turn passes the link checks (the agent is not
+        // running, so it is not a 403).
+        let r = send_body(link_app(&s), "POST", &format!("/api/agents/{dev}/send"), &h, &turn).await;
+        assert_ne!(r.status(), StatusCode::FORBIDDEN);
+        // The operator still grants sysadmin.
+        let r = send_body(
+            link_app(&s),
+            "PUT",
+            &format!("/api/agents/{dev}/roles"),
+            &[("authorization", "Bearer t")],
+            &roles,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    /// A revoke drops the event WebSocket of the link.
+    #[tokio::test]
+    async fn a_revoke_closes_the_event_websocket_of_the_link() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (id, key) = paired(&s, false).await;
+        let app = link_app(&s).into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let mut req = format!("ws://{addr}/api/events?live=1")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_str(&format!("bearer.{key}")).unwrap(),
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+        // Open: nothing ends it within a short time.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), ws.next())
+                .await
+                .is_err(),
+            "the socket ended before the revoke"
+        );
+        let r = send(
+            link_app(&s),
+            "DELETE",
+            &format!("/api/links/{id}"),
+            &[("authorization", "Bearer t")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        // The socket ends: a close frame, an error, or the end of the stream.
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) => break,
+                    Some(Ok(m)) if m.is_close() => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "the socket stays open after the revoke");
+        server.abort();
+    }
 }

@@ -1026,10 +1026,20 @@ async fn session_ws(
     Ok(ws.on_upgrade(move |socket| crate::links::until_revoked(guard, ws_bridge(socket, s))))
 }
 
+/// Aborts its task when dropped, so a bridge that is dropped mid-way (a
+/// link revoke, `crate::links::until_revoked`) leaves no task behind.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn ws_bridge(socket: WebSocket, s: std::sync::Arc<ExecSession>) {
     let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<PtyInput>(16);
-    let reader = {
+    let _reader = AbortOnDrop({
         let s = s.clone();
         tokio::spawn(async move {
             let mut since = 0u64;
@@ -1050,8 +1060,8 @@ async fn ws_bridge(socket: WebSocket, s: std::sync::Arc<ExecSession>) {
                 }
             }
         })
-    };
-    let writer = {
+    });
+    let _writer = AbortOnDrop({
         let s = s.clone();
         tokio::spawn(async move {
             while let Some(i) = in_rx.recv().await {
@@ -1064,7 +1074,7 @@ async fn ws_bridge(socket: WebSocket, s: std::sync::Arc<ExecSession>) {
                 }
             }
         })
-    };
+    });
     super::streams::pty_session(
         socket,
         PtyAttachment {
@@ -1074,8 +1084,6 @@ async fn ws_bridge(socket: WebSocket, s: std::sync::Arc<ExecSession>) {
         },
     )
     .await;
-    reader.abort();
-    writer.abort();
 }
 
 // ------------------------------------------------------------------ leases

@@ -491,6 +491,7 @@ pub async fn pty(
 ) -> ApiResult<Response> {
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "attaching to an agent terminal")?;
+    crate::links::refuse_sysadmin_agent(&a.agent.roles, "attach to the terminal of")?;
     if !is_websocket(&req) {
         return Err(ApiError::bad_request(
             "the PTY is a WebSocket; send an upgrade request",

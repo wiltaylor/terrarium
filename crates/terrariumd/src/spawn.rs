@@ -334,6 +334,11 @@ pub async fn spawn_with(
         .iter()
         .map(|g| spawn_rights::parse_grant(g))
         .collect::<ApiResult<Vec<_>>>()?;
+    // A link may not spawn for a sysadmin agent (TER-61 review, O2): the
+    // child would take over its owner's grants and rights.
+    if let Some(v) = &owner.view {
+        crate::links::refuse_sysadmin_agent(&v.agent.roles, "spawn for")?;
+    }
     // The owner's spawn policy. The operator spawns with no policy.
     let rules = match &owner.view {
         Some(v) => match &v.agent.policy.spawn {

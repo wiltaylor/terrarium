@@ -1750,6 +1750,16 @@ code; the lead's security review is still to do.
   than the router matches; `..` is denied. Tests:
   `every_route_of_the_deny_list_is_refused`,
   `spellings_of_a_denied_route_are_refused`, and the HTTP test above.
+- **No way around the deny list through a sysadmin agent** (review
+  round 1, finding 1; lead decision O1 plus O2). A sysadmin agent calls the
+  API with its own rights, and `policy::sysadmin` may push the config repo
+  and run the self-update. So a link may not grant or revoke `sysadmin`
+  (`policy::change_role`: `PUT /api/agents/{id}/roles`, an agent create, a
+  spawn), and may not drive an agent that holds `sysadmin`
+  (`links::refuse_sysadmin_agent`): no turn or raw send, no keys, no
+  answer, no PTY attach, no change of its prompt or settings (`PATCH`), no
+  `then` turn of a compact or new session, and no spawn for it. Each is
+  `403 link_forbidden`. Test: `a_link_cannot_grant_or_drive_sysadmin`.
 - **Read-only links** (Q2) pass `GET` and `HEAD` only, and a WebSocket only
   on an `.../events` route: no PTY, no target shell, no turn. Tests:
   `read_only_reads_and_opens_only_the_event_socket`,
@@ -1759,6 +1769,7 @@ code; the lead's security review is still to do.
   reaches it. A revoke or rotate ends a pending answer (`401`), a streamed
   body, and the event, PTY, and target WebSockets of the key. Tests:
   `a_revoke_closes_the_open_streams_of_the_link`,
+  `a_revoke_closes_the_event_websocket_of_the_link`,
   `a_revoke_reaches_each_guard_and_frees_the_signal`.
 - **Audit.** Actions of a link carry the actor `link:<id>`, so this
   daemon's operator sees what each link did; `link.forbidden` records deny
@@ -1784,8 +1795,27 @@ code; the lead's security review is still to do.
 - **The actor label is a task-local.** The rights check sees the operator;
   `Actor::label()` reads the link from the task-local of the request. Work
   that a request hands to another task (a background job, the socket task
-  of a WebSocket) records `operator`, not `link:<id>`. The deny list does
-  not depend on it.
+  of a WebSocket) records `operator`, not `link:<id>`. The deny list itself
+  does not depend on it. It holds for the link's own requests only: what a
+  link sets in motion runs with the rights of whoever runs it. A link
+  starts, stops, and sends turns to agents that are not sysadmin, and those
+  act with their own rights (a project_admin agent with the rights of a
+  project_admin). That is the near-operator intent of the design. The
+  sysadmin agents, whose rights reach the denied routes, are closed to a
+  link (above).
+- **Indirect input still reaches a sysadmin agent.** A link may still send
+  mail as `operator`, write cards, card comments, and wiki pages that a
+  sysadmin agent reads. The agents treat mail, cards, and pages as data,
+  not as instructions (their system prompt), and only mail from the lead
+  counts as work; operator mail is a request. A sysadmin agent that obeys
+  such text could push the config repo for the link. Not closed in code.
+- **Config auto-sync** (review round 1, finding 2). With
+  `TERRARIUM_CONFIG_SYNC=sync`, the background loop of this daemon commits
+  and pushes the config repo as the operator. A link may change the state
+  that the config repo exports, and may call `POST /api/config/commit`; the
+  next sync then pushes it, though the link never calls a denied route. A
+  link cannot turn auto-sync on. Leave auto-sync off on a remote whose
+  config repo a link must not reach.
 - **`X-Terrarium-Link`** (the home's instance ID on each call, design D1) is
   not checked: the home ID recorded at pairing is the record, and a thief
   of the key could send the header too.
