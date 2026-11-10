@@ -2218,10 +2218,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                 }
             }
             if gone.is_empty() {
-                return failed(format!(
-                    "cannot fetch next and {}: {e}",
-                    branches.join(" ")
-                ));
+                return failed(format!("cannot fetch next and {}: {e}", branches.join(" ")));
             }
         }
         let mut cur = match repo.commit_of("refs/remotes/job/next") {
@@ -2277,10 +2274,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                     );
                 }
                 Err(e) => {
-                    left.insert(
-                        i,
-                        Left::conflict(format!("the merge of `{b}` failed: {e}")),
-                    );
+                    left.insert(i, Left::conflict(format!("the merge of `{b}` failed: {e}")));
                 }
             }
         }
@@ -4858,7 +4852,10 @@ mod tests {
         assert_eq!(failed_step(Some(&tail)), Some("receive"));
         // Only a known step on the last line counts (review, minor 6).
         assert_eq!(failed_step(Some("out\n[failed step: evil]")), None);
-        assert_eq!(failed_step(Some("[failed step: recipe]\nmore output")), None);
+        assert_eq!(
+            failed_step(Some("[failed step: recipe]\nmore output")),
+            None
+        );
         // A failure in the daemon is no host failure (review, major 1).
         let job = ended(JobKind::Merge, jobs::JobState::Failed, Some("error"));
         let prepare = with_failed_step(error_end("cannot fetch next"), STEP_PREPARE);
