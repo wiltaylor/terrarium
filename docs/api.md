@@ -3854,28 +3854,6 @@ focus.
 
 ### 6.12 Project folders
 
-#### Sidebar bookmarks
-
-`/api/bookmarks` stores the operator's sidebar bookmarks in SQLite, shared
-across browsers. All methods are operator-only. GET returns an array of
-`{title, href}` in insertion order. PUT accepts `{title, href}`, adds or
-renames that URL, and returns the list. DELETE accepts `{href}` and returns
-the list, including when the URL was absent. Mutations write `bookmark.add`
-or `bookmark.remove` audit rows.
-
-PUT also accepts an optional `previous_href` to edit an existing bookmark's
-title and URL atomically, preserving its position. A missing source or a URL
-already used by another bookmark returns `422 invalid` without changing the list.
-
-Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
-without credentials, or a relative `/p/<project>/knowledge/wiki` path.
-URLs are normalized and deduplicated, and are limited to 8192 bytes on add.
-Invalid values return `422 invalid`. Wiki links open in place. External
-links open in a new window. The dashboard refreshes on focus and every 30
-seconds and imports its old `terrarium.bookmarks` list on first load,
-clearing that list only after successful import. Existing daemon titles win
-over legacy titles during migration.
-
 The code is in `crates/terrariumd/src/store/project_folders.rs` and
 `crates/terrariumd/src/api/project_folders.rs`. The tables are
 `project_folders` and `project_placements` (migration 68).
@@ -4310,6 +4288,34 @@ rows: `thread.open`, `thread.agent`, `thread.respond`,
 `thread.propose_close`, `thread.remind`, `thread.track`,
 `thread.card_link`, `thread.card_wake`, `thread.close` (with `reason`,
 `session`, and the commented `cards`).
+
+### 6.14 Sidebar bookmarks
+
+The code is in `crates/terrariumd/src/api/bookmarks.rs` (migration 93).
+
+`/api/bookmarks` stores the operator's sidebar bookmarks in SQLite, shared
+across browsers. All methods are operator-only. GET returns an array of
+`{title, href}` in insertion order. PUT accepts `{title, href}`, adds or
+renames that URL, and returns the list. DELETE accepts `{href}` and returns
+the list, including when the URL was absent. Mutations write `bookmark.add`
+or `bookmark.remove` audit rows.
+
+PUT also accepts an optional `previous_href` to edit an existing bookmark's
+title and URL atomically, preserving its position. A missing source or a URL
+already used by another bookmark returns `422 invalid` without changing the list.
+
+Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
+without credentials, or a relative `/p/<project>/knowledge/wiki` path.
+URLs are normalized and deduplicated, and are limited to 8192 bytes on add.
+Invalid values return `422 invalid`. Wiki links open in place. External
+links open in a new window. The dashboard refreshes on focus and every 30
+seconds and imports its old `terrarium.bookmarks` list on first load.
+It clears that list only after each row was imported or refused: a row that
+the daemon refuses (`422 invalid`, for example a title over 500 bytes) is
+skipped and reported once in the sidebar, and it does not block the import
+or later changes (TER-257). Existing daemon titles win over legacy titles
+during migration. A dashboard user that is not the operator gets `403`: the
+dashboard then keeps the bookmarks in that browser only, with no error.
 
 ## 7. Mail
 
