@@ -72,5 +72,11 @@ export function shortQuestion(text: string, max = 80): string {
 /** The board with the drawer of `card` open (`?card=`). */
 export const cardHref = (project: string, card: string): string => `/p/${encodeURIComponent(project)}/board?card=${encodeURIComponent(card)}`;
 
+/** The mail thread of a question ("Show mail", GitHub #32): the Mail tab of the logs, filtered to the thread, with the thread open. */
+export const mailThreadHref = (thread: string): string => `/logs/mail?thread=${encodeURIComponent(thread)}&open=${encodeURIComponent(thread)}`;
+
+/** "Open in thread" (GitHub #32): open the linked Inbox thread, or create one from an open question or notice (to-thread). A bundle does not move. */
+export const canOpenInThread = (q: Pick<Question, "kind" | "status" | "thread">): boolean => !!q.thread || (q.kind !== "bundle" && q.status === "open");
+
 /** The Inbox item ID of a question, bundle, or notice: `<kind>:<id>` (docs/api.md §6.9). */
 export const questionItemId = (q: Pick<Question, "id" | "kind">): string => `${q.kind}:${q.id}`;
