@@ -2951,6 +2951,45 @@ async fn a_merge_onto_a_release_branch_pushes_that_branch_only() {
     );
 }
 
+/// TER-607 review round 3: a card X branched from `next` before the cut
+/// merges onto `next` after it. A fix stacked on X's branch brings X's
+/// own commits (second-parent commits of `next`, not on its first-parent
+/// line), so the merge onto the release is refused and the release stays.
+#[tokio::test]
+async fn a_fix_stacked_on_a_card_merged_after_the_cut_is_refused() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    let xwork = lab.branch("ter-x", "next", &[("OK", "yes\n"), ("XWORK", "x\n")]);
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    let x = lab.card("x", "ter-x").await;
+    let j = merge_and_wait(&lab, &x, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    // The fix is stacked on X's branch.
+    lab.branch("ter-rb3", "ter-x", &[("OK", "rb3\n")]);
+    let rb3 = lab.card("ter-rb3", "ter-rb3").await;
+    let j = merge_and_wait(&lab, &rb3, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    let j = merge_and_wait(&lab, &rb3, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("is not based on `release/1.4.0`"), "{tail}");
+    assert!(tail.contains(&xwork), "names X's commit: {tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        frozen,
+        "the release stays"
+    );
+}
+
 /// TER-607 review round 2, finding 3: a batch of two or more cards with a
 /// release-blocker card is refused; the fix merges alone.
 #[tokio::test]

@@ -1916,10 +1916,16 @@ fn none_merged(job: &Job, left: HashMap<usize, Left>, batch: Option<Vec<BatchCar
 /// fetched as `refs/remotes/job/next`, with `next` as
 /// `refs/remotes/job/upstream`: the job has one card with a tested commit,
 /// that commit is on `next` (its passed merge onto `next` took it), and
-/// the fix branch is based on the release branch. The last means that the
-/// commit brings no commit of the first-parent line of `next` (a merge of
-/// another card, or `next` itself) into the release: a branch made from
-/// `next` would take unreleased cards into the frozen version.
+/// it brings nothing into the release that `next` had before the fix.
+///
+/// The last rule (review round 3): let M be the oldest commit of the
+/// first-parent line of `next` that holds the tested commit (the merge of
+/// the fix). No commit of `release..tested` may be in `release..M^1`, the
+/// history of `next` before the fix landed. So a fix branch made from
+/// `next` after the cut, or stacked on (or merging) a card that merged
+/// onto `next` before the fix, is refused: it would take unreleased
+/// cards into the frozen version. A fix that merges a card branch that
+/// is not on `next` yet cannot be told apart from the fix's own commits.
 fn release_fix(repo: &git::JobRepo, job: &Job, release: &str) -> Result<(), String> {
     let onto = job.onto();
     let cards = job.cards();
@@ -1943,20 +1949,57 @@ fn release_fix(repo: &git::JobRepo, job: &Job, release: &str) -> Result<(), Stri
         Ok(false) => return Err(format!("the tested commit {want} is not on next")),
         Err(e) => return Err(e.to_string()),
     }
-    let foreign = repo
-        .first_parent_commits_in(release, &tested, upstream)
-        .map_err(|e| e.to_string())?;
+    let foreign =
+        brought_from_next(repo, release, &tested, upstream).map_err(|e| e.to_string())?;
     if !foreign.is_empty() {
         let shown: Vec<&str> = foreign.iter().take(5).map(String::as_str).collect();
         return Err(format!(
-            "branch `{}` is not based on `{onto}`: its commit {want} brings {} commit(s) of \
-             next that are not in the release ({}). Make the fix branch from `{onto}`",
+            "branch `{}` is not based on `{onto}`: its commit {want} brings {} commit(s) that \
+             were on next before the fix and are not in the release ({}). Make the fix \
+             branch from `{onto}`, with no other card in it",
             card.branch,
             foreign.len(),
             shown.join(", ")
         ));
     }
     Ok(())
+}
+
+/// The commits of `release..tested` that `next` (`upstream`) held before
+/// the merge of `tested` (see [`release_fix`]), newest first. M, the
+/// oldest first-parent commit of `upstream` that holds `tested`, is found
+/// by a binary search: along the first-parent line, once a commit holds
+/// `tested`, each newer one does too.
+fn brought_from_next(
+    repo: &git::JobRepo,
+    release: &str,
+    tested: &str,
+    upstream: &str,
+) -> Result<Vec<String>, git::GitError> {
+    // Newest first, so the commits that hold `tested` are a prefix.
+    let line = repo.rev_list(upstream, release, true)?;
+    let (mut lo, mut hi) = (0, line.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if repo.is_ancestor(tested, &line[mid])? {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    // `line[lo - 1]` is M. Without one, `tested` is in the release already.
+    let Some(m) = lo.checked_sub(1).map(|i| &line[i]) else {
+        return Ok(Vec::new());
+    };
+    let Some(before) = repo.commit_of(&format!("{m}^1"))? else {
+        return Ok(Vec::new());
+    };
+    let had: HashSet<String> = repo.rev_list(&before, release, false)?.into_iter().collect();
+    Ok(repo
+        .rev_list(tested, release, false)?
+        .into_iter()
+        .filter(|c| had.contains(c))
+        .collect())
 }
 
 /// Step 1, in the daemon, with the repo credential (TER-103): fetch, check

@@ -12475,7 +12475,8 @@ merges until it is moved out of the merge queue and back in.
 
 **A release-blocker fix (TER-607).** A frozen version keeps its members.
 A fix for it goes in a card with the label `release-blocker`, on a branch
-made from the release branch `release/X.Y.Z`, not from `next`.
+made from the release branch `release/X.Y.Z`, not from `next` and not on
+top of another card.
 
 1. The batch rule of the merge queue takes the first card of the column
    with the label that could go, alone and at once, as a batch of one.
@@ -12491,13 +12492,19 @@ made from the release branch `release/X.Y.Z`, not from `next`.
    job never takes the head of the card branch: a push after the merge
    onto `next` does not reach the release. A card without a passed merge
    of its branch onto `next` is refused with `409`.
-3. The job checks that the fix branch is based on the release branch:
-   the tested commit must be on `next`, and it must bring no commit of
-   the first-parent line of `next` (the merge of another card, or a
-   commit made on `next`) that is not in the release branch. A branch
-   made from `next` after the cut would take unreleased cards into the
-   frozen version. The job then fails with outcome `error`, the release
-   branch stays, and the tail names the commits.
+3. The job checks what the fix brings into the release. The tested
+   commit must be on `next`. Let M be the oldest commit of the
+   first-parent line of `next` that holds the tested commit (the merge
+   of the fix onto `next`). No commit of `release/X.Y.Z..tested` may be
+   in `release/X.Y.Z..M^1`, the history of `next` before the fix landed
+   that the release does not have. So a fix branch made from `next`
+   after the cut is refused, and so is a fix stacked on, or merging, a
+   card that merged onto `next` before the fix: both would take
+   unreleased cards into the frozen version. The job then fails with
+   outcome `error`, the release branch stays, and the tail names the
+   commits. Limit: a fix that merges a card branch that is not on `next`
+   yet passes, since its commits cannot be told apart from the fix's own
+   commits. Those commits then reach `next` in the same merge as the fix.
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
