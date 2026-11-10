@@ -1116,14 +1116,25 @@ mod tests {
         assert!(!steers_the_cli("FOO") && !steers_the_cli("DEPLOY_KEY"));
         assert!(steers_the_cli("http_proxy") && steers_the_cli("SSH_ASKPASS"));
         // The OpenSSL, Kerberos and D-Bus names come from the grant list.
-        for n in ["OPENSSL_CONF", "KRB5_CONFIG", "KRB5CCNAME", "DBUS_SESSION_BUS_ADDRESS"] {
-            assert!(terrarium_core::env_deny::denied(n) && steers_the_cli(n), "{n}");
+        for n in [
+            "OPENSSL_CONF",
+            "KRB5_CONFIG",
+            "KRB5CCNAME",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ] {
+            assert!(
+                terrarium_core::env_deny::denied(n) && steers_the_cli(n),
+                "{n}"
+            );
         }
         // Only the exact names that the daemon sends multi-line go through,
         // not the whole TERRARIUM_ prefix.
         assert!(steers_the_cli("TERRARIUM_X") && steers_the_cli("TERRARIUM_GIT_TRAILERS_FILE"));
         for n in CLI_ALLOWED_ENV {
-            assert!(terrarium_core::env_deny::denied(n) && !steers_the_cli(n), "{n}");
+            assert!(
+                terrarium_core::env_deny::denied(n) && !steers_the_cli(n),
+                "{n}"
+            );
         }
         let plan = plan_exec(
             &exec_req(json!({"TERRARIUM_GIT_TRAILERS":"Terrarium-Agent: a\nTerrarium-Card: b\n"})),
