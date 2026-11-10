@@ -119,7 +119,9 @@ pub struct Job {
     pub repo: String,
     pub branch: String,
     /// The card commit that a validate job checks out. A merge job merges
-    /// the head of the branch.
+    /// this commit, the reviewed one (TER-553), and only while it is still
+    /// the head of the branch; a batch has one per card
+    /// ([`BatchCard::commit`]), and this is the first card's.
     pub commit: Option<String>,
     pub state: JobState,
     pub attempt: i64,

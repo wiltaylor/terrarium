@@ -2733,7 +2733,16 @@ const MOVED_PHRASE: &str =
 
 /// The comment of the final failure of a card ([`fail_phrase`]).
 pub fn fail_comment(j: &Job, v: &Job) -> String {
-    end_comment(v, fail_phrase(j, v))
+    let mut s = end_comment(v, fail_phrase(j, v));
+    // A branch that moved (TER-553): the reviewed commit and the head, in
+    // the comment of the move back to review. The daemon wrote the tail.
+    if v.outcome.as_deref() == Some(OUTCOME_MOVED)
+        && let Some(tail) = &v.tail
+    {
+        s.push(' ');
+        s.push_str(tail);
+    }
+    s
 }
 
 /// The body of the mail to the worker of a card that failed.
@@ -2983,12 +2992,7 @@ fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
 fn back_to_review(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
     let to = board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?;
-    let mut note = end_comment(j, MOVED_PHRASE);
-    if let Some(tail) = &j.tail {
-        note.push(' ');
-        note.push_str(tail);
-    }
-    move_or_comment(t, &j.card, &to, None, &note)?;
+    move_or_comment(t, &j.card, &to, None, &fail_comment(j, j))?;
     unassign(t, &j.card)
 }
 

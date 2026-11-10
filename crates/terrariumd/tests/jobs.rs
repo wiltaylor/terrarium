@@ -5030,3 +5030,205 @@ async fn a_lost_run_past_the_cap_ends_red_after_the_kill() {
         panic!("the capped lost run {pid} outlived its end");
     }
 }
+
+/// The lab board with a merge queue column (TER-553).
+async fn with_merge_queue(lab: &Lab) {
+    let r = lab
+        .td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"}, {"name": "validating"},
+                {"name": "review"}, {"name": "merge_queue", "role": "merge_queue"},
+                {"name": "accepted"},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// The lead moves card `id` to review, then accepts it into the merge
+/// queue (TER-553).
+async fn accept(lab: &Lab, id: &str) {
+    for column in ["review", "merge_queue"] {
+        let r = lab
+            .td
+            .post_as(
+                &lab.lead,
+                &format!("/api/cards/{id}/move"),
+                json!({"column": column}),
+            )
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+}
+
+/// A commit more on `branch` of the remote, after its review: its head.
+fn push_after_review(lab: &Lab, branch: &str, file: &str) -> String {
+    git(&lab.work, &["fetch", "-q", "origin"]);
+    git(
+        &lab.work,
+        &["checkout", "-q", "-B", branch, &format!("origin/{branch}")],
+    );
+    std::fs::write(lab.work.join(file), "not reviewed\n").unwrap();
+    git(&lab.work, &["add", "-A"]);
+    git(&lab.work, &["commit", "-q", "-m", "after the review"]);
+    git(&lab.work, &["push", "-q", "origin", branch]);
+    git(&lab.work, &["rev-parse", "HEAD"])
+}
+
+fn on_next(lab: &Lab, commit: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&lab.origin)
+        .args(["merge-base", "--is-ancestor", commit, "next"])
+        .status()
+        .unwrap()
+        .success()
+}
+
+both_flows!(a_push_after_the_accept_is_not_merged);
+/// TER-553 (Fable F1): the merge takes the commit that was the head of the
+/// branch at the review accept. A push after the accept never reaches
+/// `next`: the job ends `moved`, with no rerun, and the card goes back to
+/// review. A new accept records the new head, and that merge passes.
+async fn a_push_after_the_accept_is_not_merged(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
+    with_merge_queue(&lab).await;
+    let reviewed = lab.branch("ter-mv", "next", &[("mv", "1\n"), ("OK", "y\n")]);
+    let card = lab.card("mv", "ter-mv").await;
+    accept(&lab, &card).await;
+    let pushed = push_after_review(&lab, "ter-mv", "late");
+    let before = git(&lab.origin, &["rev-parse", "next"]);
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["commit"], reviewed.as_str(), "{}", r.body);
+    let c = lab
+        .until_card(&card, "review", |c| c["column"] == "review")
+        .await;
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "no rerun: {jobs:#?}");
+    assert_eq!(jobs[0]["state"], "failed", "{jobs:#?}");
+    assert_eq!(jobs[0]["outcome"], "moved", "{jobs:#?}");
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), before);
+    assert!(!on_next(&lab, &pushed));
+    let text = comments(&c);
+    assert!(text.contains("moved after its review"), "{text}");
+    assert!(text.contains(&reviewed) && text.contains(&pushed), "{text}");
+    let l = labels(&c);
+    assert!(
+        !l.iter().any(|l| l.starts_with("validation:")),
+        "{l:?}"
+    );
+    assert!(c["assignee"].is_null(), "{c:#}");
+
+    // The lead reviews the new commit and accepts again: it merges.
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{card}/move"),
+            json!({"column": "merge_queue"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["commit"], pushed.as_str(), "{}", r.body);
+    lab.until_card(&card, "accepted", |c| c["column"] == "accepted")
+        .await;
+    assert!(on_next(&lab, &pushed));
+}
+
+both_flows!(a_branch_that_moved_leaves_the_batch);
+/// TER-553: each card of a batch merges its reviewed commit. A card whose
+/// branch moved after the accept leaves the batch with the outcome
+/// `moved` and goes back to review; the other cards merge in the same job.
+async fn a_branch_that_moved_leaves_the_batch(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
+    with_merge_queue(&lab).await;
+    let h1 = lab.branch("ter-b1", "next", &[("b1", "1\n"), ("OK", "y\n")]);
+    lab.branch("ter-b2", "next", &[("b2", "2\n"), ("OK", "y\n")]);
+    let h3 = lab.branch("ter-b3", "next", &[("b3", "3\n"), ("OK", "y\n")]);
+    let c1 = lab.card("b1", "ter-b1").await;
+    let c2 = lab.card("b2", "ter-b2").await;
+    let c3 = lab.card("b3", "ter-b3").await;
+    for c in [&c1, &c2, &c3] {
+        accept(&lab, c).await;
+    }
+    let pushed = push_after_review(&lab, "ter-b2", "late");
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let b2 = lab
+        .until_card(&c2, "review", |c| c["column"] == "review")
+        .await;
+    for c in [&c1, &c3] {
+        lab.until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "{jobs:#?}");
+    assert_eq!(jobs[0]["state"], "passed", "{jobs:#?}");
+    assert_eq!(jobs[0]["batch"][1]["outcome"], "moved", "{jobs:#?}");
+    assert!(on_next(&lab, &h1) && on_next(&lab, &h3));
+    assert!(!on_next(&lab, &pushed));
+    assert_eq!(
+        next_merges(&lab),
+        ["Merge ter-b1 onto next", "Merge ter-b3 onto next"]
+    );
+    let text = comments(&b2);
+    assert!(text.contains("moved after its review"), "{text}");
+    assert!(text.contains(&pushed), "{text}");
+}
+
+/// TER-553: the batch rule takes a card only with its reviewed commit, and
+/// the batch job carries it. A card that came into the merge queue
+/// without a review accept (a role given to its column later) has none,
+/// and the batch leaves it out with the reason.
+#[tokio::test]
+async fn the_batch_rule_takes_the_reviewed_commit() {
+    let lab = lab_flow(2, "rules").await;
+    with_merge_queue(&lab).await;
+    lab.branch("ter-r1", "next", &[("r1", "1\n"), ("OK", "y\n")]);
+    let c1 = lab.card("r1", "ter-r1").await;
+    accept(&lab, &c1).await;
+    push_after_review(&lab, "ter-r1", "late");
+    let db = lab.td.daemon.as_ref().unwrap().state.db.clone();
+    let pick = db
+        .read(|c| terrariumd::rules_verbs::pick_batch(c, "p", "merge_queue", None))
+        .await
+        .unwrap();
+    assert_eq!(pick.cards.len(), 1, "{pick:?}");
+    // A card put into the column without a move has no round.
+    lab.branch("ter-r2", "next", &[("r2", "2\n"), ("OK", "y\n")]);
+    let c2 = lab.card("r2", "ter-r2").await;
+    let id = c2.clone();
+    db.write("test", move |t| {
+        t.execute(
+            "UPDATE cards SET column_id = (SELECT id FROM board_columns
+               WHERE project = 'p' AND name = 'merge_queue') WHERE id = ?1",
+            [&id],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let pick = db
+        .read(|c| terrariumd::rules_verbs::pick_batch(c, "p", "merge_queue", None))
+        .await
+        .unwrap();
+    let ids: Vec<&str> = pick.cards.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, [c1.as_str()], "{pick:?}");
+    let out = format!("{:?}", pick.left_out);
+    assert!(out.contains(&c2) && out.contains("no reviewed commit"), "{out}");
+}
