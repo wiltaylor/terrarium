@@ -1,52 +1,42 @@
 # syntax=docker/dockerfile:1.7
 #
-# The release client container (TER-613, docs/release.md): the image of the
-# target where the release job runs `just release::publish`. The recipe runs
-# as root in the container (no privileges, no capability beyond the
-# default): scripts/release.py runs the gate as uid 1001 (the user of the
-# old GitHub release CI, `release`), so the code of the gate cannot read the
-# secrets in the env of the root process tree. With:
+# The release client (TER-613, docs/release.md): the tools of the target where
+# the release job runs `just release::publish`, as the non-root user `release`.
+# META-119 makes the client a small VM; this file is the pinned list of its
+# tools, and a container image of it for a test. The client runs no code of the
+# release: the gate and the image build run on the release VM's Docker daemon
+# (TERRARIUM_DOCKER_HOST, the daemon's relay). The client only pushes the built
+# bytes (crane), signs them (cosign, with Rekor), and creates the GitHub release
+# (gh). With:
 #
-#   the toolchain of the gate   rust 1.97.1 with rustfmt and clippy, just, uv, node 22, bubblewrap, git
-#   the image build             the docker CLI with buildx: the build runs on the release VM's
-#                               Docker daemon (TERRARIUM_DOCKER_HOST, the daemon's relay)
-#   the publish                 crane (push the built layout), cosign, gh
+#   git, python3 (3.11 or later), curl, jq     Debian 13 packages
+#   the docker CLI 29.0.3 with buildx          no daemon on the client
+#   crane 0.22.1, cosign 3.1.4, gh 2.100.0     downloads checked by SHA-256
 #
-# Every tool is pinned: the base images by digest, the downloads by SHA-256.
-# cosign has the version of the cosign stage of docker/Dockerfile (the
-# updater verifies with it).
-#
-# Build: docker build -f docker/release.Dockerfile -t terrarium-release:<date> docker/
-# (the context needs no file). The container needs no privilege, no Docker
-# socket of its host, and no secret: the release job passes the secrets
-# into the env of its process only, and this target runs no other job.
+# cosign has the version of the cosign stage of docker/Dockerfile (the updater
+# verifies with it; scripts/test_release.py checks it). The secrets reach only
+# the env of the release process; the registry login and the state of cosign
+# and gh live in a RAM directory (/dev/shm or XDG_RUNTIME_DIR, on tmpfs).
 
-ARG RUST_IMAGE=rust:1.97.1-trixie@sha256:b1b3c9c0d921d7fa0a6d1f9ec7e4eab87f8c8ec97644c3d791450f131dec813f
-# harnesses.toml [node] image.
-ARG NODE_IMAGE=node:22.23.4-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6
+ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 ARG DOCKER_CLI_IMAGE=docker:29.0.3-cli@sha256:200642d6d6e6dbdc0f240d34f0636db56bbb1cc28a39195570f13eaf1c80134c
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.0
 
 FROM ${DOCKER_CLI_IMAGE} AS docker-cli
-FROM ${NODE_IMAGE} AS node
-FROM ${UV_IMAGE} AS uv
 
 # ---------------------------------------------------------------------------
 # The downloads, each checked against its SHA-256 (amd64 only).
-FROM ${RUST_IMAGE} AS tools
-ARG JUST_VERSION=1.59.0
-ARG JUST_SHA256=409044617b6f06517c1035e55ca38c8c856ff8b650e41bc2aa1ef82d5903a23e
+FROM ${DEBIAN_IMAGE} AS tools
 ARG CRANE_VERSION=0.22.1
 ARG CRANE_SHA256=0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
 ARG COSIGN_VERSION=3.1.4
 ARG COSIGN_SHA256=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
 ARG GH_VERSION=2.100.0
 ARG GH_SHA256=e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
     mkdir -p /out /tmp/dl; cd /tmp/dl; \
     fetch() { curl -fsSL -o "$1" "$2"; echo "$3  $1" | sha256sum -c -; }; \
-    fetch just.tgz "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz" "$JUST_SHA256"; \
-    tar -xzf just.tgz just && mv just /out/just; \
     fetch crane.tgz "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" "$CRANE_SHA256"; \
     tar -xzf crane.tgz crane && mv crane /out/crane; \
     fetch /out/cosign "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64" "$COSIGN_SHA256"; \
@@ -55,25 +45,13 @@ RUN set -eu; \
     chmod 0755 /out/*
 
 # ---------------------------------------------------------------------------
-FROM ${RUST_IMAGE}
+FROM ${DEBIAN_IMAGE}
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        bubblewrap ca-certificates git python3 util-linux \
-    && rm -rf /var/lib/apt/lists/* \
-    && rustup component add rustfmt clippy --toolchain 1.97.1
-COPY --from=node /usr/local/bin/node /usr/local/bin/node
-COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
-COPY --from=uv /uv /uvx /usr/local/bin/
+    && apt-get install -y --no-install-recommends ca-certificates curl git jq python3 \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
 COPY --from=tools /out/ /usr/local/bin/
-RUN groupadd -g 1001 release \
-    && useradd -m -u 1001 -g 1001 -s /bin/bash release \
-    && mkdir -p /src && chown release:release /src
-# No USER: the recipe runs as root, and the gate as `release` (uid 1001)
-# with its own CARGO_HOME (scripts/release.py). The toolchain of rustup
-# in the base image (/usr/local/rustup) is readable by 1001.
-WORKDIR /src
-ENV RUSTUP_TOOLCHAIN=1.97.1
+RUN groupadd -g 1001 release && useradd -m -u 1001 -g 1001 -s /bin/bash release
+USER release
+WORKDIR /home/release

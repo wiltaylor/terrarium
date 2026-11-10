@@ -1,8 +1,12 @@
 """The local release build: test, build, sign, and publish a release (TER-613).
 
 It replaces the version, image and release jobs of the GitHub CI
-(docs/release.md). The lead runs it in the release build container on a
-clean checkout of the commit to release, as a named run:
+(docs/release.md). The release job runs it on the release client (a small
+VM, as the non-root user `release`) on a clean checkout of the commit to
+release. Everything that runs the code of the release (the gate and the
+image build) runs on the release VM's Docker daemon (TERRARIUM_DOCKER_HOST,
+the daemon's relay), which gets no secret. The client only pushes, signs,
+and creates the release:
 
     just release::dry-run          # all but the push, the signatures and the release
     just release::publish          # the release
@@ -15,12 +19,13 @@ Steps (each one writes its part of <out>/summary.json):
             PATH, docker/release/cosign.pub, the scopes and the expiry of
             the GitHub token (the headers only), and no tag or release
             v<version> yet.
-3. gate     `just ci::validate` (or --gate) on its own clone
-            (<out>/gate-src) as uid 1001 (setpriv). Publish runs as root,
-            so the gate cannot read the secrets in /proc/<pid>/environ of
-            this process tree. The env of the gate has no secret.
-            RESULTS_DIR is <out>/results. Red: stop, nothing is published.
-4. stamp    the version into Cargo.toml and Cargo.lock.
+3. gate     `just ci::validate` (or --gate) as uid 1001 in a container
+            on the release VM: the image of docker/release-gate.Dockerfile
+            (the toolchain of the old CI), and a clone of the commit copied
+            in. The container gets no secret. Its RESULTS_DIR comes back to
+            <out>/results. Red: stop, nothing is published.
+4. stamp    the version into Cargo.toml and Cargo.lock (the workspace
+            crates), as .github/stamp-version.sh did, without cargo.
 5. image    `docker buildx build` of the runtime stage of docker/Dockerfile
             for linux/amd64, with the OCI labels, an SBOM and provenance
             (mode=max), on the Docker daemon of TERRARIUM_DOCKER_HOST (the
@@ -39,14 +44,16 @@ Steps (each one writes its part of <out>/summary.json):
 9. release  publish: `gh release create v<version> --target <commit>`
             (the tag comes with the release) with the assets and bundles.
 
-Secrets, only in the env of this process: GHCR_TOKEN (GHCR_USER, default
-wiltaylor) and GH_TOKEN (both the Terrarium secret release-github, one
-classic token), COSIGN_PRIVATE_KEY (release-cosign.private_key: the PEM,
-or the PEM base64-encoded in one line) and COSIGN_PASSWORD. Each command
-gets only the secrets that it needs: the gate and the build get none,
-crane reads the registry login from a mode-0600 file in a private
-temporary directory that is removed at the end, and no secret is on a
-command line or in the output.
+Secrets, only in the env of this process on the client: GHCR_TOKEN
+(GHCR_USER, default wiltaylor) and GH_TOKEN (both the Terrarium secret
+release-github, one classic token), COSIGN_PRIVATE_KEY
+(release-cosign.private_key: the PEM, or the PEM base64-encoded in one
+line) and COSIGN_PASSWORD. Each command gets only the secrets that it
+needs: docker (the gate and the build) gets none. The registry login
+(DOCKER_CONFIG) and the state of cosign and gh live in a mode-0700
+directory in RAM that is removed at the end, also on SIGTERM. No secret is
+on a command line or in the output. cosign signs with the public
+transparency log (Rekor), and every verification requires its entry.
 """
 
 from __future__ import annotations
@@ -76,7 +83,7 @@ DEFAULT_GATE = "just ci::validate"
 GATE_UID = 1001
 REGISTRY = "ghcr.io"
 KEY_PATH = "docker/release/cosign.pub"
-STAMP = ".github/stamp-version.sh"
+GATE_DOCKERFILE = "docker/release-gate.Dockerfile"
 PLATFORM = "linux/amd64"
 BINARIES = ("terrarium-host", "terrarium-host-helper")
 DIST = "/opt/terrarium/dist"
@@ -126,11 +133,12 @@ def say(msg: str) -> None:
     print(f"release: {msg}", flush=True)
 
 
-def run(argv: list[str], env: dict[str, str], cwd: Path, *, stdout=None) -> subprocess.CompletedProcess:
+def run(argv: list[str], env: dict[str, str], cwd: Path, *, stdout=None, stdin=None,
+        text: bool = True) -> subprocess.CompletedProcess:
     """Run argv; a failure names the command (argv holds no secret) and its exit code."""
     say("$ " + shlex.join(argv))
     try:
-        proc = subprocess.run(argv, env=env, cwd=cwd, stdout=stdout, text=True, check=False)
+        proc = subprocess.run(argv, env=env, cwd=cwd, stdout=stdout, stdin=stdin, text=text, check=False)
     except FileNotFoundError as e:
         raise ReleaseError(f"{argv[0]} is not installed: {e}") from e
     if proc.returncode != 0:
@@ -169,11 +177,7 @@ def step_check(ctx: Ctx, version: str) -> None:
         raise ReleaseError(f"the tag v{version} exists")
     if not ctx.publish:
         return
-    missing = [k for k in ("GHCR_TOKEN", "GH_TOKEN", "COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
-               if not ctx.environ.get(k)]
-    if missing:
-        raise ReleaseError("publish needs these secrets in the env: " + ", ".join(missing))
-    for tool in ("docker", "crane", "cosign", "gh"):
+    for tool in ("git", "docker", "crane", "cosign", "gh"):
         if not shutil.which(tool, path=ctx.environ.get("PATH")):
             raise ReleaseError(f"{tool} is not on PATH")
     if not (ctx.repo_dir / KEY_PATH).is_file():
@@ -186,6 +190,13 @@ def step_check(ctx: Ctx, version: str) -> None:
     )
     if view.returncode == 0:
         raise ReleaseError(f"the release v{version} exists on {ctx.gh_repo}")
+
+
+def check_secrets(ctx: Ctx) -> None:
+    missing = [k for k in ("GHCR_TOKEN", "GH_TOKEN", "COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
+               if not ctx.environ.get(k)]
+    if missing:
+        raise ReleaseError("publish needs these secrets in the env: " + ", ".join(missing))
 
 
 def cosign_key(ctx: Ctx) -> str:
@@ -230,50 +241,96 @@ def token_info(ctx: Ctx) -> None:
 
 
 # 3 ---------------------------------------------------------------------------
-def step_gate(ctx: Ctx) -> None:
-    """The gate on its own clone of the commit, as uid 1001 when this runs as root.
+def _src_tar(src: Path, dest: Path) -> None:
+    """A tar of the gate's clone as /src, owned by the gate user (docker cp -a keeps it)."""
 
-    The secrets are in the env of this process and of its parents (the
-    recipe's sh and just). A process of the same uid can read
-    /proc/<pid>/environ, so the gate, which runs the code and the build
-    scripts of the release, must run as another uid: publish runs as root
-    and drops the gate to 1001. Its own clone keeps the build context out of
-    its reach.
+    def owner(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        info.uid = info.gid = GATE_UID
+        info.uname = info.gname = ""
+        return info
+
+    with tarfile.open(dest, "w") as tar:
+        tar.add(src, arcname="src", filter=owner)
+
+
+def step_gate(ctx: Ctx, commit: str) -> None:
+    """The gate in a container on the release VM, as uid 1001, with no secret.
+
+    The gate runs the code and the build scripts of the release: it runs
+    where the image build runs, never next to the secrets of the client.
     """
     results = ctx.out / "results"
-    home = ctx.out / "gate-home"
     src = ctx.out / "gate-src"
-    shutil.rmtree(src, ignore_errors=True)
-    results.mkdir(parents=True, exist_ok=True)
-    home.mkdir(parents=True, exist_ok=True)
+    for path in (src, results):
+        shutil.rmtree(path, ignore_errors=True)
     run(["git", "clone", "--quiet", "--local", "--no-hardlinks", str(ctx.repo_dir), str(src)],
         ctx.base_env(), ctx.out)
-    argv = shlex.split(ctx.gate)
-    uid = os.geteuid()
-    env = ctx.base_env(HOME=str(home), RESULTS_DIR=str(results))
-    if uid == 0:
-        # The release CI ran as uid 1001; root hides permission bugs (TER-579).
-        for path in (src, results, home):
-            run(["chown", "-R", f"{GATE_UID}:{GATE_UID}", str(path)], ctx.base_env(), ctx.out)
-        argv = ["setpriv", f"--reuid={GATE_UID}", f"--regid={GATE_UID}", "--clear-groups", "--", *argv]
-        uid = GATE_UID
-        # Root's CARGO_HOME is not the gate's to write: its own registry cache.
-        env["CARGO_HOME"] = str(home / ".cargo")
-    ctx.summary["gate"] = {"command": ctx.gate, "uid": uid, "results": str(results), "source": str(src)}
+    _src_tar(src, ctx.out / "gate-src.tar")
+    image = f"terrarium-release-gate:{commit[:12]}"
+    name = f"terrarium-release-gate-{commit[:12]}-{os.getpid()}"
+    denv = docker_env(ctx)
+    ctx.summary["gate"] = {"command": ctx.gate, "image": image, "uid": GATE_UID, "results": str(results)}
     ctx.save()
+    run(["docker", "buildx", "build", "--load", "--file", GATE_DOCKERFILE, "--tag", image, "docker"],
+        denv, ctx.repo_dir)
+    created = False
     try:
-        run(argv, env, src)
-    except ReleaseError as e:
-        ctx.summary["gate"]["passed"] = False
-        ctx.save()
-        raise ReleaseError(f"the gate is red ({e}): nothing is published") from e
-    ctx.summary["gate"]["passed"] = True
+        # Only these two variables: the container gets nothing of this env.
+        run(["docker", "create", "--name", name, "--user", f"{GATE_UID}:{GATE_UID}", "--workdir", "/src",
+             "--env", "RESULTS_DIR=/results", "--env", "HOME=/home/release", image, "sh", "-c", ctx.gate],
+            denv, ctx.out, stdout=subprocess.DEVNULL)
+        created = True
+        with (ctx.out / "gate-src.tar").open("rb") as f:
+            run(["docker", "cp", "--archive", "-", f"{name}:/"], denv, ctx.out, stdin=f, text=False)
+        try:
+            run(["docker", "start", "--attach", name], denv, ctx.out)
+            passed = True
+        except ReleaseError:
+            passed = False
+        # The results also of a red gate: the lead reads them (terrarium test push).
+        with (ctx.out / "results.tar").open("wb") as f:
+            run(["docker", "cp", f"{name}:/results", "-"], denv, ctx.out, stdout=f, text=False)
+        extract_tar(ctx.out / "results.tar", ctx.out / "results-tmp", "the gate results")
+        (ctx.out / "results-tmp" / "results").rename(results)
+    finally:
+        if created:
+            subprocess.run(["docker", "rm", "--force", name], env=denv, cwd=ctx.out,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        for path in (ctx.out / "gate-src.tar", ctx.out / "results.tar"):
+            path.unlink(missing_ok=True)
+        shutil.rmtree(ctx.out / "results-tmp", ignore_errors=True)
+    ctx.summary["gate"]["passed"] = passed
     ctx.save()
+    if not passed:
+        raise ReleaseError(f"the gate is red ({ctx.gate} in {image}): nothing is published")
 
 
 # 4 ---------------------------------------------------------------------------
 def step_stamp(ctx: Ctx, version: str) -> None:
-    run(["bash", str(ctx.repo_dir / STAMP), version], ctx.base_env(), ctx.repo_dir)
+    """[workspace.package] version and the lock entries of the workspace crates (no source)."""
+    toml = ctx.repo_dir / "Cargo.toml"
+    lines = toml.read_text().splitlines(keepends=True)
+    section, done = "", False
+    for i, line in enumerate(lines):
+        if line.startswith("["):
+            section = line.strip()
+        elif section == "[workspace.package]" and line.startswith("version = "):
+            lines[i] = f'version = "{version}"\n'
+            done = True
+    if not done:
+        raise ReleaseError("stamp: Cargo.toml has no [workspace.package] version")
+    toml.write_text("".join(lines))
+    lock = ctx.repo_dir / "Cargo.lock"
+    if lock.is_file():
+        blocks = lock.read_text().split("\n[[package]]\n")
+        for i, block in enumerate(blocks[1:], start=1):
+            if "\nsource = " not in block:
+                blocks[i] = "\n".join(
+                    f'version = "{version}"' if ln.startswith("version = ") else ln
+                    for ln in block.split("\n"))
+        lock.write_text("\n[[package]]\n".join(blocks))
+    ctx.summary["stamp"] = version
+    ctx.save()
 
 
 # 5 ---------------------------------------------------------------------------
@@ -314,12 +371,17 @@ def build_argv(ctx: Ctx, version: str, commit: str) -> list[str]:
 
 def extract_layout(archive: Path, dest: Path) -> None:
     """Unpack the OCI layout tar of the build: plain files and dirs inside `dest` only."""
+    extract_tar(archive, dest, "the image export")
+
+
+def extract_tar(archive: Path, dest: Path, what: str) -> None:
+    """Unpack plain files and dirs inside `dest` only (Python 3.11 has no tar filter)."""
     dest.mkdir(parents=True)
     with tarfile.open(archive) as tar:
         for m in tar:
             rel = PurePosixPath(m.name)
             if rel.is_absolute() or ".." in rel.parts:
-                raise ReleaseError(f"the image export has the path {m.name!r}")
+                raise ReleaseError(f"{what} has the path {m.name!r}")
             target = dest.joinpath(*rel.parts) if rel.parts not in ((), (".",)) else dest
             if m.isdir():
                 target.mkdir(parents=True, exist_ok=True)
@@ -330,7 +392,7 @@ def extract_layout(archive: Path, dest: Path) -> None:
                 with src, target.open("wb") as f:
                     shutil.copyfileobj(src, f)
             else:
-                raise ReleaseError(f"the image export has a link or device {m.name!r}")
+                raise ReleaseError(f"{what} has a link or device {m.name!r}")
 
 
 def step_image(ctx: Ctx, version: str, commit: str) -> str:
@@ -504,9 +566,13 @@ def step_extract(ctx: Ctx, version: str) -> list[Path]:
 
 # 7 ---------------------------------------------------------------------------
 def crane_env(ctx: Ctx) -> dict[str, str]:
+    """The env of crane, cosign and gh: their login and state in the RAM directory."""
     env = ctx.base_env()
     if ctx.secret_dir:
-        env["DOCKER_CONFIG"] = str(ctx.secret_dir)
+        d = ctx.secret_dir
+        env.update(DOCKER_CONFIG=str(d), GH_CONFIG_DIR=str(d / "gh"), TUF_ROOT=str(d / "sigstore"),
+                   XDG_CONFIG_HOME=str(d / "config"), XDG_CACHE_HOME=str(d / "cache"),
+                   XDG_DATA_HOME=str(d / "data"))
     return env
 
 
@@ -573,9 +639,9 @@ def step_sign(ctx: Ctx, digest: str, files: list[Path]) -> list[Path]:
 
 # 9 ---------------------------------------------------------------------------
 def gh_env(ctx: Ctx) -> dict[str, str]:
-    return ctx.base_env(
-        GH_TOKEN=ctx.environ.get("GH_TOKEN", ""), GH_PROMPT_DISABLED="1", GH_NO_UPDATE_NOTIFIER="1"
-    )
+    env = crane_env(ctx)
+    env.update(GH_TOKEN=ctx.environ.get("GH_TOKEN", ""), GH_PROMPT_DISABLED="1", GH_NO_UPDATE_NOTIFIER="1")
+    return env
 
 
 def notes(ctx: Ctx, version: str, digest: str) -> str:
@@ -636,9 +702,11 @@ def _is_tmpfs(path: str) -> bool:
 
 
 def registry_login(ctx: Ctx) -> None:
-    """A private DOCKER_CONFIG for crane and cosign in RAM; the token is in no argv."""
+    """The RAM directory of the registry login (DOCKER_CONFIG) and of the state of cosign and gh."""
     ctx.secret_dir = Path(tempfile.mkdtemp(prefix="terrarium-release-", dir=ram_dir(ctx.environ)))
     ctx.secret_dir.chmod(0o700)
+    for sub in ("gh", "sigstore", "config", "cache", "data"):
+        (ctx.secret_dir / sub).mkdir(mode=0o700)
     user = ctx.environ.get("GHCR_USER", "wiltaylor")
     auth = base64.b64encode(f"{user}:{ctx.environ['GHCR_TOKEN']}".encode()).decode()
     cfg = ctx.secret_dir / "config.json"
@@ -656,17 +724,19 @@ def release(ctx: Ctx) -> int:
     commit = git(ctx, "rev-parse", "HEAD").strip()
     ctx.summary.update(commit=commit, mode="publish" if ctx.publish else "dry-run")
     say(f"{ctx.summary['mode']} {version} (prerelease={prerelease}) of {commit}")
-    step_check(ctx, version)
-    if ctx.run_gate:
-        step_gate(ctx)
-    else:
-        ctx.summary["gate"] = {"skipped": True}
-    step_stamp(ctx, version)
     try:
+        if ctx.publish:
+            check_secrets(ctx)
+            registry_login(ctx)
+        step_check(ctx, version)
+        if ctx.run_gate:
+            step_gate(ctx, commit)
+        else:
+            ctx.summary["gate"] = {"skipped": True}
+        step_stamp(ctx, version)
         digest = step_image(ctx, version, commit)
         files = step_extract(ctx, version)
         if ctx.publish:
-            registry_login(ctx)
             step_push(ctx, version, prerelease, digest)
             bundles = step_sign(ctx, digest, files)
             step_release(ctx, version, prerelease, commit, digest, files + bundles)
@@ -695,9 +765,6 @@ def main(argv: list[str] | None = None) -> int:
     if publish and a.no_gate:
         ap.error("--no-gate is for the dry run only: a release passes the gate")
     testing = os.environ.get("TERRARIUM_RELEASE_TEST") == "1"
-    if publish and os.geteuid() != 0 and not testing:
-        ap.error("publish runs as root in the release client container: the gate drops to uid 1001, "
-                 "so it cannot read the secrets in the env of this process tree")
     if publish and a.signing_config and not testing:
         ap.error("--signing-config is for the tests only (TERRARIUM_RELEASE_TEST=1)")
     if a.github_api != GITHUB_API and not testing:

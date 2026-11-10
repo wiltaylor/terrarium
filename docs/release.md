@@ -199,17 +199,17 @@ holds the binary is the item to verify.
 
 ## The local release build
 
-`just release::publish` runs `scripts/release.py` on a clean checkout of
-the commit to release. The release job runs it on the release client target
-(the image of `docker/release.Dockerfile`: root in the container for the
-recipe, the user `release` (uid 1001) for the gate, the docker CLI with
-buildx, crane, cosign, gh, and the toolchain of the gate). The image build
-runs on the release VM's Docker daemon, which the Terrarium daemon reaches
-through its Docker relay: the recipe gets only
-`TERRARIUM_DOCKER_HOST=unix://<job socket>`, as merge jobs get the Docker CI
-VM ([api.md](api.md), the delivery `docker_ci` settings). The VM gets no
-secret. It uses the same trailers and version rules as the workflow
-(`scripts/release_version.py`). The steps:
+`just release::publish` runs `scripts/release.py` on a clean checkout of the
+commit to release. The release job (TER-623) runs it on the release client:
+a small VM (META-119), as the non-root user `release`, with only git,
+python3, curl, jq, the docker CLI with buildx (no daemon), crane, cosign,
+and gh (`docker/release.Dockerfile` pins them). The client runs no code of
+the release. The gate and the image build run on the release VM's Docker
+daemon, which the Terrarium daemon reaches through its Docker relay: the
+recipe gets only `TERRARIUM_DOCKER_HOST=unix://<job socket>`, as merge jobs
+get the Docker CI VM ([api.md](api.md), the delivery `docker_ci` settings).
+The VM gets no secret. The release uses the same trailers and version rules
+as the workflow (`scripts/release_version.py`). The steps:
 
 1. `version`: the version from the trailers of HEAD. No trailer: no
    release, exit 0.
@@ -218,14 +218,17 @@ secret. It uses the same trailers and version rules as the workflow
    logs the `X-OAuth-Scopes` and `github-authentication-token-expiration`
    headers of `GET https://api.github.com/user` (never the token), and stops
    when the token lacks `repo` or `write:packages`.
-3. `gate`: `just ci::validate` on its own clone of the commit
-   (`release-out/gate-src`) as uid 1001 (`setpriv`). Publish runs as root
-   in the client container and refuses to run as another user: a process of
-   the same uid could read the secrets in `/proc/<pid>/environ` of the
-   recipe's process tree, and the gate runs the code and the build scripts
-   of the release. The gate's env has no secret, and `RESULTS_DIR` is
-   `release-out/results`. A red gate publishes nothing.
-4. `stamp`: the version into `Cargo.toml` and `Cargo.lock`.
+3. `gate`: `just ci::validate` as uid 1001 in a container on the release
+   VM. The image is `docker/release-gate.Dockerfile` (the toolchain of the
+   old CI: rust 1.97.1, rustfmt, clippy, just, uv, node 22, bubblewrap), and
+   a clone of the commit with its `.git` is copied in as `/src`. The
+   container gets only `RESULTS_DIR` and `HOME`. Its `/results` comes back
+   to `release-out/results`, also from a red gate. A red gate publishes
+   nothing.
+4. `stamp`: the version into `[workspace.package]` of `Cargo.toml` and the
+   workspace crates of `Cargo.lock` (the entries with no `source`), as
+   `.github/stamp-version.sh` did, without cargo. The image build's
+   `cargo build --locked` checks the result.
 5. `image`: `docker buildx build` of the runtime stage of
    `docker/Dockerfile` for `linux/amd64`, with the OCI labels, an SBOM,
    and provenance (`mode=max`). The export is an OCI layout that comes back
@@ -235,7 +238,8 @@ secret. It uses the same trailers and version rules as the workflow
 7. `push`: crane pushes the same layout as `:<version>` (the same bytes, so
    the digest of the build) and tags `:pre` or `:latest`.
 8. `sign`: cosign signs the image digest, both binaries, and `SHA256SUMS`
-   with the release key, and then verifies each signature with
+   with the release key and the public transparency log (Rekor), and then
+   verifies each signature, with its log entry, with
    `docker/release/cosign.pub` of the checkout. A key that does not match
    stops the release here.
 9. `release`: `gh release create v<version> --target <commit>` (the API
@@ -260,13 +264,13 @@ never into a sandbox or to the VM.
 
 | Env | Secret | What it is | Who gets it |
 |---|---|---|---|
-| `GHCR_TOKEN` (`GHCR_USER`, default `wiltaylor`) and `GH_TOKEN` | `release-github` (field `value`) | one classic token with `repo` and `write:packages` (the operator's choice; it reaches all of the operator's repos) | crane and cosign through a mode-0600 `config.json` in a private directory in RAM (`XDG_RUNTIME_DIR` or `/dev/shm` on tmpfs; no tmpfs stops the release) that the script removes at the end, also when the run is stopped by SIGTERM, SIGHUP or SIGINT; `gh` and the scope check as `GH_TOKEN` |
+| `GHCR_TOKEN` (`GHCR_USER`, default `wiltaylor`) and `GH_TOKEN` | `release-github` (field `value`) | one classic token with `repo` and `write:packages` (the operator's choice; it reaches all of the operator's repos) | crane, cosign and gh through a mode-0600 `config.json` in a private mode-0700 directory in RAM (`XDG_RUNTIME_DIR` or `/dev/shm` on tmpfs; no tmpfs stops the release), which also holds the state of cosign (`TUF_ROOT`) and gh (`GH_CONFIG_DIR`) and which the script removes at the end, also when the run is stopped by SIGTERM, SIGHUP or SIGINT; `gh` and the scope check as `GH_TOKEN` |
 | `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` | `release-cosign` (fields `private_key`, `password`) | the encrypted private key of the release key pair (cosign 3.1.4), base64-encoded in one line, and its password | `cosign sign` and `cosign sign-blob` only. The script decodes the key in memory and passes the PEM in the env (`--key env://COSIGN_PRIVATE_KEY`): no key file |
 
 No secret is on a command line, in the output, in `release-out/`, in the
-build context, or in an image layer: the gate, the stamp, and the image
-build get an env without them (`scripts/test_release.py` checks each of
-these).
+build context, in an image layer, or on the release VM: docker (the gate and
+the image build) gets an env without them, and the client runs no code of the
+release (`scripts/test_release.py` checks each of these).
 
 ### The switch from the workflow to the local build
 

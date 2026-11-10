@@ -6,8 +6,9 @@
 //! - `cosign` (the default): `cosign verify --key <TERRARIUM_UPDATE_COSIGN_KEY>
 //!   <ref>`. The local release build (`just release::publish`, TER-613)
 //!   signs the image digest with the release key pair; the image holds the
-//!   public key at [`DEFAULT_COSIGN_KEY`] and the pinned cosign. cosign
-//!   checks the signature and its transparency log entry.
+//!   public key at [`DEFAULT_COSIGN_KEY`] and the pinned cosign. The release
+//!   signs with the public transparency log (Rekor), and cosign checks the
+//!   signature and requires its log entry (no `--insecure-ignore-tlog`).
 //! - `gh`: `gh attestation verify oci://<ref> --repo <owner>/<repo>
 //!   --signer-workflow <owner>/<repo>/<workflow> --bundle-from-oci`. The
 //!   check of the releases that GitHub Actions made
@@ -301,6 +302,11 @@ mod tests {
             a.join(" "),
             "cosign verify --key /opt/terrarium/release/cosign.pub \
              ghcr.io/wiltaylor/terrarium@sha256:ab"
+        );
+        // The release signs with Rekor: the check requires the log entry.
+        assert!(
+            !a.iter()
+                .any(|x| x.contains("insecure-ignore-tlog") || x.contains("private-infrastructure"))
         );
         let s = Signer {
             key: "/keys/mine.pub".into(),

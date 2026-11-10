@@ -47,6 +47,9 @@ SECRETS = {
     "COSIGN_PRIVATE_KEY": base64.b64encode(PEM.encode()).decode(),
     "COSIGN_PASSWORD": "cosign-secret-pass-4",
 }
+# The gate on the release VM: its image, its container, the source in, the run, the results out.
+GATE = [("docker", "buildx"), ("docker", "create"), ("docker", "cp"), ("docker", "start"),
+        ("docker", "cp"), ("docker", "rm")]
 LEAKS = (TOKEN, SECRETS["COSIGN_PRIVATE_KEY"], "cosign-secret-key-body-3", "cosign-secret-pass-4")
 
 
@@ -80,7 +83,8 @@ log = cfg["FAKE_LOG"]
 SECRETS = ("GHCR_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 entry = {"tool": tool, "argv": args, "secrets": {k: os.environ[k] for k in SECRETS if k in os.environ},
          "uid": os.geteuid(), "docker_config": os.environ.get("DOCKER_CONFIG"),
-         "docker_host": os.environ.get("DOCKER_HOST"), "cwd": os.getcwd()}
+         "docker_host": os.environ.get("DOCKER_HOST"), "cwd": os.getcwd(),
+         "state": {k: os.environ.get(k) for k in ("GH_CONFIG_DIR", "TUF_ROOT", "XDG_CACHE_HOME")}}
 dc = os.environ.get("DOCKER_CONFIG")
 if dc and Path(dc, "config.json").exists():
     entry["config_mode"] = oct(stat.S_IMODE(os.stat(Path(dc, "config.json")).st_mode))
@@ -89,18 +93,40 @@ with open(log, "a") as f:
     f.write(json.dumps(entry) + "\n")
 def opt(name):
     return args[args.index(name) + 1]
-if tool == "gate":
-    sys.exit(int(cfg.get("FAKE_GATE_RC", "0")))
 def layout_digest():
     return json.loads(Path(cfg["FAKE_LAYOUT"], "index.json").read_text())["manifests"][0]["digest"]
-if tool == "docker":
+import io, tarfile
+def note(**kw):
+    with open(log, "a") as f:
+        f.write(json.dumps({"tool": "note", "argv": [], "secrets": {}, **kw}) + "\n")
+if tool == "docker" and args[:2] == ["buildx", "build"] and "--load" in args:
+    pass  # the gate image
+elif tool == "docker" and args[:2] == ["buildx", "build"]:
     Path(opt("--metadata-file")).write_text(json.dumps(
         {"containerimage.digest": cfg.get("FAKE_BUILD_DIGEST") or layout_digest()}))
     dest = [p.split("=", 1)[1] for p in opt("--output").split(",") if p.startswith("dest=")][0]
-    import tarfile
     with tarfile.open(dest, "w") as tar:
         for f in sorted(Path(cfg["FAKE_LAYOUT"]).rglob("*")):
             tar.add(f, arcname=f.relative_to(cfg["FAKE_LAYOUT"]).as_posix(), recursive=False)
+elif tool == "docker" and args[0] == "cp" and args[-2] == "-":
+    # The gate source: a tar on stdin.
+    with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read())) as tar:
+        members = tar.getmembers()
+    note(src_names=sorted({m.name for m in members})[:2000], src_uids=sorted({m.uid for m in members}))
+elif tool == "docker" and args[0] == "cp":
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, data in (("results", None), ("results/rust.json", b'{"type":"suite"}\n')):
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    sys.stdout.buffer.write(buf.getvalue())
+elif tool == "docker" and args[0] == "start":
+    sys.exit(int(cfg.get("FAKE_GATE_RC", "0")))
 elif tool == "crane" and args[0] == "push":
     if cfg.get("FAKE_PUSH_SLEEP"):
         import time
@@ -204,8 +230,11 @@ class Release(unittest.TestCase):
         self.repo = self.tmp / "repo"
         (self.repo / ".github").mkdir(parents=True)
         (self.repo / "docker/release").mkdir(parents=True)
-        shutil.copy(REPO / release.STAMP, self.repo / release.STAMP)
-        (self.repo / "Cargo.toml").write_text('[workspace.package]\nversion = "0.0.0"\n\n[workspace]\n')
+        (self.repo / "Cargo.toml").write_text('[workspace.package]\nversion = "0.1.0"\n\n[workspace]\n')
+        (self.repo / "Cargo.lock").write_text(
+            '# lock\nversion = 4\n\n[[package]]\nname = "serde"\nversion = "0.1.0"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\n\n'
+            '[[package]]\nname = "terrarium"\nversion = "0.1.0"\ndependencies = [\n "serde",\n]\n')
         (self.repo / release.KEY_PATH).write_text("test public key\n")
         git(self.repo, "init", "-q", "-b", "main")
         git(self.repo, "add", "-A")
@@ -215,7 +244,7 @@ class Release(unittest.TestCase):
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         fake = FAKE.replace("PYTHON", sys.executable)
-        for tool in ("docker", "crane", "cosign", "gh", "cargo", "gate"):
+        for tool in ("docker", "crane", "cosign", "gh"):
             p = self.bin / tool
             p.write_text(fake)
             p.chmod(0o755)
@@ -246,7 +275,6 @@ class Release(unittest.TestCase):
         e.update(env or {})
         proc = subprocess.run(
             [sys.executable, "-I", str(SCRIPT), mode, "--out", str(self.out),
-             "--gate", str(self.bin / "gate"),
              "--github-api", f"http://127.0.0.1:{self.api.server_address[1]}", *extra],
             cwd=self.repo, env=e, capture_output=True, text=True, check=False,
         )
@@ -254,6 +282,12 @@ class Release(unittest.TestCase):
         return proc
 
     def calls(self):
+        return [c for c in self.entries() if c["tool"] != "note"]
+
+    def notes(self):
+        return [c for c in self.entries() if c["tool"] == "note"]
+
+    def entries(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
     def tools(self):
@@ -283,13 +317,14 @@ class Release(unittest.TestCase):
         image = release.DEFAULT_IMAGE
         self.assertEqual(
             self.tools(),
-            [("gh", "release"), ("gate", ""), ("cargo", "update"), ("docker", "buildx"),
+            [("gh", "release"), *GATE, ("docker", "buildx"),
              ("crane", "push"), ("crane", "tag"), ("cosign", "sign"), ("cosign", "verify"),
              ("cosign", "sign-blob"), ("cosign", "sign-blob"), ("cosign", "sign-blob"),
              ("cosign", "verify-blob"), ("cosign", "verify-blob"), ("cosign", "verify-blob"),
              ("gh", "release")],
         )
-        calls = self.calls()
+        # The same indexes as before the gate moved to the VM: 3 is the image build.
+        calls = self.calls()[4:]
         build = calls[3]["argv"]
         self.assertEqual(build[:2], ["buildx", "build"])
         self.assertEqual(build[-1], ".")
@@ -305,9 +340,19 @@ class Release(unittest.TestCase):
         self.assertIn(f"org.opencontainers.image.revision={commit}", build)
         # The daemon's relay socket becomes DOCKER_HOST of docker only.
         self.assertEqual(calls[3]["docker_host"], "unix:///run/job/docker.sock")
-        for c in calls:
+        for c in self.calls():
             if c["tool"] != "docker":
                 self.assertIsNone(c["docker_host"], c["tool"])
+            else:
+                self.assertEqual(c["docker_host"], "unix:///run/job/docker.sock", c["argv"])
+            # cosign signs with the public log, and every check requires its entry.
+            self.assertNotIn("--signing-config", c["argv"])
+            self.assertNotIn("--insecure-ignore-tlog", c["argv"])
+            if c["tool"] in ("cosign", "gh", "crane"):
+                ram = Path(c["docker_config"])
+                self.assertEqual(c["state"]["GH_CONFIG_DIR"], str(ram / "gh"))
+                self.assertEqual(c["state"]["TUF_ROOT"], str(ram / "sigstore"))
+                self.assertTrue(release._is_tmpfs(str(ram.parent)), ram)
         self.assertEqual(calls[4]["argv"], ["push", str(self.out / "image"), f"{image}:{self.VERSION}"])
         self.assertEqual(calls[5]["argv"], ["tag", f"{image}@{digest}", "latest"])
         self.assertEqual(calls[6]["argv"][-1], f"{image}@{digest}")
@@ -359,10 +404,9 @@ class Release(unittest.TestCase):
         self.assertEqual(push["config_mode"], "0o600")
         self.assertEqual(base64.b64decode(push["config_auth"]).decode(), f"wiltaylor:{TOKEN}")
         self.assertFalse(Path(push["docker_config"]).exists())
-        for tool in ("docker", "gate", "cargo"):
-            c = next(c for c in self.calls() if c["tool"] == tool)
-            self.assertIsNone(c["docker_config"], tool)
-        self.assertNotEqual(next(c for c in self.calls() if c["tool"] == "gate")["uid"], 0)
+        for c in self.calls():
+            if c["tool"] == "docker":
+                self.assertIsNone(c["docker_config"], c["argv"])
         # The token goes to the GitHub API, and nowhere else.
         self.assertEqual(FakeGitHub.seen, [f"token {TOKEN}"])
         self.assert_no_secret_leaks()
@@ -375,7 +419,7 @@ class Release(unittest.TestCase):
         e = {"PATH": f"{self.bin}:{os.environ['PATH']}", "HOME": str(self.tmp), "TERRARIUM_RELEASE_TEST": "1",
              **SECRETS}
         proc = subprocess.Popen(
-            [sys.executable, "-I", str(SCRIPT), "publish", "--out", str(self.out), "--gate", str(self.bin / "gate"),
+            [sys.executable, "-I", str(SCRIPT), "publish", "--out", str(self.out),
              "--github-api", f"http://127.0.0.1:{self.api.server_address[1]}"],
             cwd=self.repo, env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
@@ -393,26 +437,46 @@ class Release(unittest.TestCase):
         self.assertFalse(Path(push["docker_config"]).exists())
         self.assertTrue(release._is_tmpfs(str(Path(push["docker_config"]).parent)))
 
-    def test_the_gate_runs_on_its_own_clone(self):
-        proc = self.run_release("dry-run", secrets=False)
+    def test_the_gate_runs_on_the_vm_as_1001_with_no_secret(self):
+        proc = self.run_release("publish")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        gate = next(c for c in self.calls() if c["tool"] == "gate")
-        self.assertEqual(gate["cwd"], str(self.out / "gate-src"))
-        head = subprocess.run(["git", "-c", "safe.directory=*", "rev-parse", "HEAD"], cwd=self.out / "gate-src",
-                              capture_output=True, text=True, check=True).stdout
-        self.assertEqual(head.strip(), self.summary()["commit"])
-        if os.geteuid() == 0:
-            self.assertEqual(gate["uid"], 1001)
-            self.assertEqual((self.out / "gate-src").stat().st_uid, 1001)
-            # The build context (the checkout) stays root's.
-            self.assertEqual((self.repo / "Cargo.toml").stat().st_uid, 0)
+        calls = self.calls()
+        self.assertEqual(self.tools()[1:7], GATE)
+        image = calls[1]["argv"]
+        self.assertEqual(image[:3], ["buildx", "build", "--load"])
+        self.assertIn("docker/release-gate.Dockerfile", image)
+        create = calls[2]["argv"]
+        name = create[create.index("--name") + 1]
+        self.assertEqual(create[create.index("--user") + 1], "1001:1001")
+        envs = [create[i + 1] for i, a in enumerate(create) if a == "--env"]
+        self.assertEqual(envs, ["RESULTS_DIR=/results", "HOME=/home/release"])
+        self.assertNotIn("--privileged", create)
+        self.assertEqual(create[-3:], ["sh", "-c", "just ci::validate"])
+        self.assertEqual(calls[3]["argv"], ["cp", "--archive", "-", f"{name}:/"])
+        self.assertEqual(calls[4]["argv"], ["start", "--attach", name])
+        self.assertEqual(calls[5]["argv"], ["cp", f"{name}:/results", "-"])
+        self.assertEqual(calls[6]["argv"], ["rm", "--force", name])
+        # The source: a clone of the commit with its .git, owned by 1001.
+        src = self.notes()[0]
+        self.assertEqual(src["src_uids"], [1001])
+        self.assertIn("src/.git", src["src_names"])
+        self.assertIn("src/Cargo.toml", src["src_names"])
+        self.assertFalse(any(n.startswith("src/release-out") for n in src["src_names"]))
+        # The results come back for terrarium test push.
+        self.assertEqual((self.out / "results/rust.json").read_text(), '{"type":"suite"}\n')
+        s = self.summary()["gate"]
+        self.assertEqual((s["uid"], s["passed"]), (1001, True))
+        # The stamp: the workspace crates only, and before the image build.
+        self.assertIn(f'version = "{self.VERSION}"', (self.repo / "Cargo.toml").read_text())
+        lock = (self.repo / "Cargo.lock").read_text()
+        self.assertIn(f'name = "terrarium"\nversion = "{self.VERSION}"', lock)
+        self.assertIn('name = "serde"\nversion = "0.1.0"', lock)
 
-    @unittest.skipIf(os.geteuid() == 0, "as root publish is allowed")
-    def test_publish_refuses_to_run_as_the_gate_user(self):
-        proc = self.run_release("publish", env={"TERRARIUM_RELEASE_TEST": "0"})
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("publish runs as root in the release client container", proc.stderr)
-        self.assertEqual(self.calls(), [])
+    def test_the_client_needs_no_root(self):
+        # publish runs as the user release on the client (META-119): no root rule.
+        proc = self.run_release("publish", env={"TERRARIUM_RELEASE_TEST": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("setpriv", " ".join(" ".join(c["argv"]) for c in self.calls()))
 
     def test_a_token_without_the_scopes_stops_before_the_gate(self):
         FakeGitHub.scopes = "repo"
@@ -463,7 +527,7 @@ class Release(unittest.TestCase):
     def test_dry_run_builds_and_extracts_but_publishes_nothing(self):
         proc = self.run_release("dry-run", secrets=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(self.tools(), [("gate", ""), ("cargo", "update"), ("docker", "buildx")])
+        self.assertEqual(self.tools(), [*GATE, ("docker", "buildx")])
         self.assertEqual(len((self.out / "dist/SHA256SUMS").read_text().splitlines()), 2)
         self.assertTrue((self.out / "image/index.json").is_file())
         self.assertFalse((self.out / "image.tar").exists())
@@ -475,7 +539,7 @@ class Release(unittest.TestCase):
     def test_dry_run_can_skip_the_gate_but_publish_cannot(self):
         proc = self.run_release("dry-run", "--no-gate", secrets=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertNotIn(("gate", ""), self.tools())
+        self.assertEqual(self.tools(), [("docker", "buildx")])
         proc = self.run_release("publish", "--no-gate")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("--no-gate is for the dry run only", proc.stderr)
@@ -484,7 +548,9 @@ class Release(unittest.TestCase):
         proc = self.run_release("publish", fake={"FAKE_GATE_RC": "1"})
         self.assertEqual(proc.returncode, 1)
         self.assertIn("the gate is red", proc.stderr)
-        self.assertEqual(self.tools(), [("gh", "release"), ("gate", "")])
+        # The results of the red gate still come back, and the container goes.
+        self.assertEqual(self.tools(), [("gh", "release"), *GATE])
+        self.assertTrue((self.out / "results/rust.json").is_file())
         self.assertFalse(self.summary()["gate"]["passed"])
         self.assert_no_secret_leaks()
 
@@ -518,7 +584,7 @@ class Release(unittest.TestCase):
         proc = self.run_release("publish", fake={"FAKE_RELEASE_EXISTS": "1"})
         self.assertEqual(proc.returncode, 1)
         self.assertIn(f"the release v{self.VERSION} exists", proc.stderr)
-        self.assertNotIn("gate", [t for t, _ in self.tools()])
+        self.assertNotIn("docker", [t for t, _ in self.tools()])
 
     def test_a_hash_mismatch_in_the_image_signs_nothing(self):
         shutil.rmtree(self.layout)
@@ -553,10 +619,12 @@ class Release(unittest.TestCase):
         proc = self.run_release("dry-run", "--signing-config", "/x.json", env={"TERRARIUM_RELEASE_TEST": "0"})
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("--github-api is for the tests only", proc.stderr)
-        if os.geteuid() == 0:
-            proc = self.run_release("publish", "--signing-config", "/x.json", env={"TERRARIUM_RELEASE_TEST": "0"})
-            self.assertNotEqual(proc.returncode, 0)
-            self.assertIn("--signing-config is for the tests only", proc.stderr)
+        proc = subprocess.run(
+            [sys.executable, "-I", str(SCRIPT), "publish", "--out", str(self.out), "--signing-config", "/x.json"],
+            cwd=self.repo, env={"PATH": os.environ["PATH"], "HOME": str(self.tmp)},
+            capture_output=True, text=True, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("--signing-config is for the tests only", proc.stderr)
         self.assertEqual(self.calls(), [])
 
 
@@ -617,13 +685,20 @@ class Pins(unittest.TestCase):
         self.assertIn("COPY docker/release/ /opt/terrarium/release/", runtime)
         self.assertIn("!docker/release/**", (REPO / "docker/Dockerfile.dockerignore").read_text())
 
-    def test_the_base_images_of_the_release_container_are_pinned_by_digest(self):
-        build = (REPO / "docker/release.Dockerfile").read_text()
-        for name in ("RUST_IMAGE", "NODE_IMAGE", "DOCKER_CLI_IMAGE"):
-            self.assertIn("@sha256:", self.arg(build, name), name)
-        # The recipe runs as root; the gate drops to the user release (uid 1001).
-        self.assertNotRegex(build, r"(?m)^USER ")
-        self.assertIn("useradd -m -u 1001", build)
+    def test_the_images_of_the_client_and_the_gate_are_pinned(self):
+        client = (REPO / "docker/release.Dockerfile").read_text()
+        gate = (REPO / release.GATE_DOCKERFILE).read_text()
+        for name in ("DEBIAN_IMAGE", "DOCKER_CLI_IMAGE"):
+            self.assertIn("@sha256:", self.arg(client, name), name)
+        for name in ("RUST_IMAGE", "NODE_IMAGE", "UV_IMAGE"):
+            self.assertIn("@sha256:", self.arg(gate, name), name)
+        # The client runs as the user release; it has no toolchain to run the code of the release.
+        self.assertRegex(client, r"(?m)^USER release$")
+        for tool in ("rustup", "node_modules", "uv", "just", "bubblewrap"):
+            self.assertNotIn(tool, client.split("ARG DEBIAN_IMAGE")[1], tool)
+        # The gate runs as 1001 with the results dir that the script copies back.
+        self.assertRegex(gate, r"(?m)^USER 1001$")
+        self.assertIn("mkdir -p /src /results && chown release:release /src /results", gate)
 
     def test_the_release_public_key_is_in_the_repo(self):
         # The updater's default check and release.py need it (docker/release/README.md).
