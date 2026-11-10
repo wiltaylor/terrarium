@@ -3092,29 +3092,71 @@ mod tests {
             assert_eq!(v["error"]["code"], "link_forbidden", "{v}");
         };
         let roles = serde_json::json!({"roles": ["sysadmin"]});
-        let r = send_body(link_app(&s), "PUT", &format!("/api/agents/{dev}/roles"), &h, &roles).await;
+        let r = send_body(
+            link_app(&s),
+            "PUT",
+            &format!("/api/agents/{dev}/roles"),
+            &h,
+            &roles,
+        )
+        .await;
         forbidden(r).await;
         let new = serde_json::json!({"name": "boss", "project": "p", "harness": "claude",
                                      "roles": ["sysadmin"]});
         let r = send_body(link_app(&s), "POST", "/api/agents", &h, &new).await;
         forbidden(r).await;
         let turn = serde_json::json!({"text": "push the config repo"});
-        let r = send_body(link_app(&s), "POST", &format!("/api/agents/{sys}/send"), &h, &turn).await;
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/agents/{sys}/send"),
+            &h,
+            &turn,
+        )
+        .await;
         forbidden(r).await;
         let keys = serde_json::json!({"keys": ["enter"]});
-        let r = send_body(link_app(&s), "POST", &format!("/api/agents/{sys}/keys"), &h, &keys).await;
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/agents/{sys}/keys"),
+            &h,
+            &keys,
+        )
+        .await;
         forbidden(r).await;
         let r = send(link_app(&s), "GET", &format!("/api/agents/{sys}/pty"), &h).await;
         forbidden(r).await;
         let patch = serde_json::json!({"prompt": "you push"});
-        let r = send_body(link_app(&s), "PATCH", &format!("/api/agents/{sys}"), &h, &patch).await;
+        let r = send_body(
+            link_app(&s),
+            "PATCH",
+            &format!("/api/agents/{sys}"),
+            &h,
+            &patch,
+        )
+        .await;
         forbidden(r).await;
         let then = serde_json::json!({"then": "push"});
-        let r = send_body(link_app(&s), "POST", &format!("/api/agents/{sys}/new-session"), &h, &then).await;
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/agents/{sys}/new-session"),
+            &h,
+            &then,
+        )
+        .await;
         forbidden(r).await;
         // A plain agent: the turn passes the link checks (the agent is not
         // running, so it is not a 403).
-        let r = send_body(link_app(&s), "POST", &format!("/api/agents/{dev}/send"), &h, &turn).await;
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/agents/{dev}/send"),
+            &h,
+            &turn,
+        )
+        .await;
         assert_ne!(r.status(), StatusCode::FORBIDDEN);
         // The operator still grants sysadmin.
         let r = send_body(
