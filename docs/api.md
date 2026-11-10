@@ -7254,8 +7254,12 @@ max_life_secs = 28800        # 60 to 28800 (8 hours)
 ```
 
 - The lifecycle goes through `POST https://exe.dev/exec` with the token
-  in the `Authorization` header only: `new --name=terrarium-x-<target>-<id>
-  --sandbox --tag=<tag> --cpu=<n> --memory=<n>GB`, `ls`, `rm`. Commands,
+  in the `Authorization` header only: `new
+  --name=terrarium-x-<instance>-<target>-<id> --sandbox --tag=<tag>
+  --cpu=<n> --memory=<n>GB`, `ls`, `rm`. `<instance>` is the exe.dev
+  instance id of the daemon: 8 hex characters, made once in its database
+  (table `exedev_instance`). Two daemons on one exe.dev account have two
+  ids. Commands,
   copies and the workspace sync go over ssh to `<user>@<ssh_dest>` (the
   API stops a command at 30 s and a body at 64 KB). `up` waits up to 180 s
   for ssh.
@@ -7269,7 +7273,9 @@ max_life_secs = 28800        # 60 to 28800 (8 hours)
   removal of that target's VM. An `up` that finds a recorded VM in `ls`,
   in its life, adopts it (also a row that `new` never answered: the ssh
   host then comes from `ls`). A recorded VM past its life is removed and
-  replaced, never adopted. A `new` that fails removes its VM; when that
+  replaced, never adopted. A row with no ssh host that `ls` does not list
+  stays for 10 minutes after its `created_at` (its `new` may still run):
+  `status` answers `absent`, and `up` makes a new VM next to it. A `new` that fails removes its VM; when that
   `rm` fails too, the row stays for the sweep.
 - At most 3 VMs at once over all exedev targets (the recorded ones and the
   `terrarium-x-` VMs in `ls`). The fourth `up` answers `409` with
@@ -7284,10 +7290,14 @@ max_life_secs = 28800        # 60 to 28800 (8 hours)
     inbox (or to the operator for a global target);
   - `orphaned`: a recorded VM whose target is gone;
   - `unready`: a recorded VM with no ssh host after 10 minutes, held or not;
-  - `unheld`: a recorded VM that no running agent holds after 10 minutes;
-  - `leftover`: a VM in `ls` with the `terrarium-x-` prefix and a tag of
-    the account, that no row of any account records, 10 minutes after its
-    `created_at` in `ls` (or after the sweep first saw it).
+  - `unheld`: a recorded VM that no running agent holds after 10 minutes
+    (the holders are read again under the target lock, right before the
+    `rm`);
+  - `leftover`: a VM in `ls` with this daemon's `terrarium-x-<instance>-`
+    prefix and a tag of the account, that no row of any account records,
+    10 minutes after its `created_at` in `ls` (or after the sweep first
+    saw it). A VM of another daemon (another instance id) is never a
+    leftover here.
   Each removal of a recorded VM writes `target.destroy` with
   `"reason": "exedev_<reason>"`. A VM without the prefix is never removed.
 - Deleting the target removes its VM. When that `rm` fails, the target is
