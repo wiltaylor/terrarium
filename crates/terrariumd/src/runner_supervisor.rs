@@ -47,8 +47,10 @@
 //!   made the change. Per project, one batch goes out in each
 //!   `lead_nudge_interval` (10 s); the changes in between go out together.
 //! - A quota hold ([`Supervisor::hold_turns`]) shows an idle agent as
-//!   `blocked` with the reason and the reset time. Operator turns, push
-//!   pointers, and the recap turn wait. The release types the waiting turns
+//!   `blocked` with the reason and the reset time. Each turn of
+//!   [`Supervisor::send_turn`] (the operator `/send`, the card reminder,
+//!   the prompt after a compaction), the store turns, push pointers, and
+//!   the recap turn wait. The release types the waiting turns
 //!   in order, then the pending pointer.
 //! - A compaction ([`Supervisor::compact`], PLAN §18 "Auto compact") types
 //!   the compact command of the harness into an idle agent and shows it
@@ -1155,13 +1157,13 @@ impl Slot {
     }
 }
 
-/// A quota hold and the operator turns that wait for its end. It lives
+/// A quota hold and the turns that wait for its end. It lives
 /// outside the slot, so a hold on an agent that does not run applies when
 /// it starts, and survives a restart of the harness. A store turn
 /// (`PendingTurn::queued`) keeps its `queued_turns` row while it waits
 /// here, so a daemon restart during the hold delivers it again (TER-562).
-/// A plain turn ([`Supervisor::send_turn`]) gets a row first, and waits
-/// here as a store turn (TER-586).
+/// A plain turn of any [`Supervisor::send_turn`] caller gets a row
+/// first, and waits here as a store turn (TER-586).
 struct Held {
     hold: TurnHold,
     waiting: Vec<crate::supervisor::PendingTurn>,
@@ -1424,7 +1426,7 @@ impl RunnerSupervisor {
             .unwrap_or_default()
     }
 
-    /// The operator turns that wait for the end of a quota hold. For tests.
+    /// The turns that wait for the end of a quota hold. For tests.
     pub fn waiting_turns(&self, agent: AgentId) -> Vec<String> {
         lock(&self.inner.holds)
             .get(&agent)
@@ -4916,7 +4918,21 @@ impl Supervisor for RunnerSupervisor {
         Box::pin(async move {
             // A quota hold: the turn goes in the store first and waits as a
             // store turn, so a daemon restart, or the end of the hold while
-            // the agent does not run, does not lose it (TER-586).
+            // the agent does not run, does not lose it (TER-586). The row
+            // write, the hand-over, and the delete of the row go under the
+            // turn lock of the agent, as in `lifecycle::deliver_turns`: a
+            // wake that reads the new row waits, and then finds it gone or
+            // kept, so the turn does not go in twice (TER-601). No caller
+            // of `send_turn` holds that lock, and `send_pending` does not
+            // wait for it.
+            let lock = self
+                .held(agent)
+                .and_then(|_| self.state())
+                .map(|state| state.lifecycle.turn_lock(agent));
+            let _held = match &lock {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
             let Some(row) = self.store_held_turn(agent, &text).await else {
                 return self.send_pending(agent, text.into()).await.map(|_| ());
             };

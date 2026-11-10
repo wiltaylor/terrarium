@@ -20,6 +20,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::json;
 use terrarium_core::rules_file::{self, BoardColumn, Context, Rule, RuleSet};
+use terrarium_core::rules_tools;
 use terrarium_core::template_file::FileError;
 
 use crate::db::{Tx, now};
@@ -435,6 +436,116 @@ pub fn file_projects(conn: &Connection) -> ApiResult<Vec<String>> {
         .query_map([SOURCE_FILE], |r| r.get(0))?
         .collect::<Result<Vec<String>, _>>()?;
     Ok(rows)
+}
+
+/// TER-243: the `agent-park` and `agent-unpark` overrides that a migration
+/// before TER-222 wrote into the API rules of a project get the wait
+/// column `merge_queue`, one time
+/// ([`rules_tools::add_merge_queue_to_wait_overrides`]). At each load of
+/// the config (the start and `POST /api/reload`); a changed block carries
+/// [`rules_tools::MERGE_QUEUE_MARK`], so a later pass leaves it alone. A
+/// file's rules stay as the file has them. Each change is a [`put`] with
+/// the hash it read (audit `rules.put`). This step never fails the load:
+/// each problem, also a DB error, is one line for the report of the load.
+pub async fn add_merge_queue(db: &crate::db::Db) -> Vec<String> {
+    let line = |project: &str, what: &str, e: &ApiError| {
+        format!(
+            "rules of project `{project}`: merge_queue wait column not added: {what}: {}",
+            e.message
+        )
+    };
+    let read = db
+        .read(|c| {
+            let mut out = Vec::new();
+            for (project, text) in of_api(c)? {
+                if !text.contains(rules_tools::MIGRATION_HEADER) {
+                    continue;
+                }
+                let found = row(c, &project).and_then(|r| Ok((r, context(c, &project)?)));
+                out.push(match found {
+                    Ok((r, ctx)) => Ok((project, text, r.map(|r| r.hash).unwrap_or_default(), ctx)),
+                    Err(e) => Err((project, e)),
+                });
+            }
+            Ok(out)
+        })
+        .await;
+    let rows = match read {
+        Ok(rows) => rows,
+        Err(e) => {
+            return vec![format!(
+                "rules: merge_queue wait column step: read: {}",
+                e.message
+            )];
+        }
+    };
+    let mut errors = Vec::new();
+    let mut puts = Vec::new();
+    for found in rows {
+        let (project, text, hash, ctx) = match found {
+            Ok(r) => r,
+            Err((project, e)) => {
+                errors.push(line(&project, "read", &e));
+                continue;
+            }
+        };
+        let any_columns = Context {
+            columns: None,
+            max_rules: usize::MAX,
+        };
+        let own = match parse_off(text.clone(), rules_file::FILE_NAME.to_owned(), any_columns).await
+        {
+            Ok(Ok(own)) => own,
+            // A stored file that no longer parses: its problems show on
+            // GET /rules; this step leaves it alone.
+            Ok(Err(_)) => continue,
+            Err(e) => {
+                errors.push(line(&project, "check", &e));
+                continue;
+            }
+        };
+        let columns = ctx.columns.clone().unwrap_or_default();
+        let Some(new) = rules_tools::add_merge_queue_to_wait_overrides(&text, &own, &columns)
+        else {
+            continue;
+        };
+        match parse_off(new.clone(), rules_file::FILE_NAME.to_owned(), ctx.clone()).await {
+            Ok(Ok(set)) => puts.push((project, new, set, ctx, hash)),
+            Ok(Err(e)) => errors.push(format!(
+                "rules of project `{project}`: merge_queue wait column not added: the new text does not check: {}",
+                e.to_string().lines().next().unwrap_or_default()
+            )),
+            Err(e) => errors.push(line(&project, "check", &e)),
+        }
+    }
+    if puts.is_empty() {
+        return errors;
+    }
+    let stored = db
+        .write("system", move |t| {
+            let mut errors = Vec::new();
+            for (project, text, set, ctx, hash) in puts {
+                // A write or a board change since the read: the next load
+                // tries again.
+                match put(t, &project, &text, set, &ctx, Some(&hash)) {
+                    Ok(_) => tracing::info!(
+                        project,
+                        "rules: added merge_queue to the migrated wait overrides"
+                    ),
+                    Err(e) => errors.push(line(&project, "write", &e)),
+                }
+            }
+            Ok(errors)
+        })
+        .await;
+    match stored {
+        Ok(e) => errors.extend(e),
+        Err(e) => errors.push(format!(
+            "rules: merge_queue wait column step: write: {}",
+            e.message
+        )),
+    }
+    errors
 }
 
 /// The API rules of every project, by project name: the export of the

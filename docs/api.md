@@ -3749,8 +3749,8 @@ agent:
 
 | Card event | Bound agent |
 |---|---|
-| Moved to `validating`, `review`, or `accepted` | parked |
-| Moved out of `validating`, `review`, or `accepted` while parked (for example to `ready` after a failed job, or to `in_progress`) | unparked |
+| Moved to `validating`, `review`, `merge_queue`, or `accepted` | parked |
+| Moved out of `validating`, `review`, `merge_queue`, or `accepted` while parked (for example to `ready` after a failed job, or to `in_progress`) | unparked |
 | Moved between two other columns (for example `in_progress` to `blocked` or `ready`) | nothing |
 | A merge job passed (merged onto `next`), or moved to `done` | closed, `done` |
 | Archived | closed, `cancelled` |
@@ -3762,8 +3762,9 @@ reason}`), `agent.unpark_queued` (`{spawn_id, name, bound, cause,
 owner}`), `agent.unpark_dropped` (`{spawn_id, name, bound, reason}`: the
 card moved into a wait column again while its unpark waited, so the
 unpark and its return turn are dropped), and `agent.unparked`
-(`{spawn_id, name, bound, cause}`) are on the bound agent. The wait columns are names: a board without them never
-parks its bound agents.
+(`{spawn_id, name, bound, cause}`) are on the bound agent. A wait column is a column whose role is one of these,
+or a column with no role whose name is one: a board without them never parks
+its bound agents.
 
 **Finish.** Only these end an ephemeral agent:
 
@@ -8867,7 +8868,7 @@ tests, and publishes. Later accepted cards are not added to that snapshot.
 
 | endpoint | body | result |
 |---|---|---|
-| `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A closed group rejects updates. |
+| `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A step after `cut` that starts (running, done or failed) also finishes `cut`. A closed group rejects updates. |
 | `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, group}`. Explicit acknowledgement after release CI publishes. Moves only the snapshot's accepted members to done, clears assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
 | `POST /api/projects/{project}/version-groups/{key}/remove` | `{card}` | `{changed, group}`. Explicitly drops a member from an open snapshot without moving or editing that card. Use for a card returned for a fix, archived, or held. Removal is audited. Duplicate removal is a no-op. Closed groups reject removal. |
 
@@ -8878,7 +8879,12 @@ contains `key`, `version`, and `members` and names the group card.
 Lead CLI (uses `--project`, else the agent's project):
 `terrarium group status <key> --step "version branch e2e" --state running --eta 10m`,
 `terrarium group remove <key> <card>`, and
-`terrarium group built <key> vX.Y.Z`. Removed cards do not count in that build.
+`terrarium group built <key>... vX.Y.Z` (one call for each key; repeat the
+command after a failure, as built is idempotent). Removed cards do not count in that build.
+
+The `version_cut` rule opens no new group while another version group of the
+project is open past its cut step (the cut step is done, or a later step has
+started). The accepted cards wait for the next version (TER-609).
 
 - `group_open`: required `key`, `title`, `column`, and `done_when`. The key
   is project-scoped. Repeating an open is a no-op, even after closure.
@@ -9161,7 +9167,7 @@ Its rules, in order:
 | `job-fail-conflict`, `job-fail-red`, `job-fail-error` | a final failure | labels off, the failure block on the body, the top of `@ready` with the comment, unassign, a mail to the worker |
 | `job-cancelled` | a cancelled verdict | labels off |
 | `card-blocked-mail`, `card-done-mail` | a card move to the blocked column; to `done` | the blocked notice to the operator and the creator; the done notice on each linked thread |
-| `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `accepted` (names, as §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
+| `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `merge_queue`, `accepted` (roles, with the names as fallback, §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
 
 The move mails of the rules differ from the mails of the coded move
 (TER-536):
@@ -9269,7 +9275,7 @@ board screen.
 
 **The migration.** The pack names columns by role (`@review`,
 `@accepted`, `@ready`), and its bound agent rules name the wait columns
-(`validating`, `review`, `accepted`). A board can lack some of them. On
+(`validating`, `review`, `merge_queue`, `accepted`). A board can lack some of them. On
 such a board a run of the pack fails (§19.9). The migration maps the pack
 to the board's columns:
 
@@ -9295,6 +9301,18 @@ Each changed pack rule becomes an override (a rule with the pack rule's
 name, §19.11) at the end of the project's `rules.wcl`, with the reasons
 in its `description`. A pack rule that `rules.wcl` replaces already stays
 as it is (`kept`). A second migration of the same board changes nothing.
+
+A migration before TER-222 left `merge_queue` out of the `agent-park` and
+`agent-unpark` overrides, so a move from review to the merge queue woke
+the bound agent. Each load of the config (the start and `POST
+/api/reload`) adds it one time to the API rules of a project (TER-243). It
+changes only a block that is still exactly the text of that old migration
+for the board, and the board needs a merge queue column (the role
+`merge_queue`, else the name on a column with no role). The changed block
+gets `merge_queue added (TER-243).` at the end of its `description`, and
+a block with that note is never changed again. An edited block and a
+file's rules stay as they are. The write is a `rules.put` audit row. A
+problem is one line in the load report and does not fail the load.
 
 **The lint.** It reads the rules that the engine runs: the pack with the
 project's own rules for `board_flow = rules`, else only its own rules.
@@ -11400,6 +11418,36 @@ has no restore, because a restore replaces the database under the daemon.
    root that the backup does not have (`work`, without `--work`) does not
    change; `--skip-work` leaves the work root too.
 
+**The restore drill.** Test a backup before you need it:
+
+```sh
+terrariumd backup drill <file> [--base <full>] [--passphrase-file <file>] [--into <dir>] [--keep] [--json]
+```
+
+The drill restores the backup into an empty scratch dir (default: a new
+`.drill-<id>` dir in the backup dir), with the roots `state`, `config`,
+and `work` in it. It then checks that each manifest entry is in place
+with its size, that the restored database passes `PRAGMA
+integrity_check` and has the schema version of the header, and that
+`secrets.key` is back. The live data does not change, so the daemon can
+run. The scratch dir holds the secrets in plain form: the drill deletes it
+at the end unless `--keep`. A dir with content is refused. Run a drill
+after the first scheduled backup, after a key rotation, and after an
+upgrade of terrariumd.
+
+**The restore, step by step.**
+
+1. Pick the backup: `terrariumd backup ls`. For a diff, its base must be in
+   the same dir (or give `--base`).
+2. Get the passphrase: the `backup-key` secret is in the backup itself, so
+   use your off-server copy. A backup older than the last rotation needs
+   the old passphrase.
+3. Drill it: `terrariumd backup drill <file> --passphrase-file <file>`.
+4. Stop the daemon.
+5. Restore: `terrariumd backup restore <file> --passphrase-file <file>`.
+6. Start the daemon. Check the board, the agents, and `terrarium secret
+   ls`.
+
 Delete the `.terrarium-pre-restore-*` dirs when the daemon runs well. The
 restore writes the files as the user that runs it: run it as the user of
 the daemon. A database from an older terrariumd migrates at the next
@@ -11408,18 +11456,65 @@ migrations of this build) does not start.
 
 ### 32.4 Scheduled backups
 
-`TERRARIUM_BACKUP_SCHEDULE` (default `off`; `daily`, `weekly`, or a
-duration of `1h` or more): a daemon task makes a backup one interval after
-the newest backup in the dir, and not before 10 minutes after the start. A
-failed run waits one interval too. The backup is `full` when the dir has no
-full backup or when the newest is older than `TERRARIUM_BACKUP_FULL_EVERY`
-(default `7d`); else it is a `diff` of the newest full backup. Then the
-task keeps the newest `TERRARIUM_BACKUP_KEEP` (default `4`) full backups and
-their diffs, and deletes the rest (audit `backup.prune`).
-`TERRARIUM_BACKUP_WORK=on` adds the workspaces.
-`TERRARIUM_BACKUP_PASSPHRASE_FILE` seals each backup with the first line
-of that file. The audit actor is `system:backup`. A failure writes the
-audit row `backup.failed` with the error.
+The settings are daemon env vars:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TERRARIUM_BACKUP_SCHEDULE` | `off` | `daily`, `weekly`, or a duration of `1h` or more. |
+| `TERRARIUM_BACKUP_FULL_EVERY` | `7d` | The longest time between two full backups. |
+| `TERRARIUM_BACKUP_KEEP` | `4` | The full backups to keep, each with its diffs. |
+| `TERRARIUM_BACKUP_WORK` | `off` | `on`: add the workspaces. |
+| `TERRARIUM_BACKUP_KEY_SECRET` | `backup-key` | The global secret with the passphrase. |
+| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. |
+
+A bad value stops the daemon start. With a schedule, a daemon task makes a
+backup one interval after the newest backup in the dir, and not before 10
+minutes after the start. A failed run waits one interval too.
+
+**Kind.** The backup is `full` when the dir has no full backup, when the
+newest is older than `TERRARIUM_BACKUP_FULL_EVERY`, or when the key does
+not open the newest full backup (it is not sealed, or the key was
+rotated). Else it is a `diff` of the newest full backup. A diff and its
+base so always have the same key.
+
+**The key.** A scheduled backup holds every secret, so it is always
+sealed (§32.2). The passphrase is the `passphrase` field of the global
+secret `backup-key`, else its `value` field (`terrarium secret set
+backup-key`; an `api_key` or a `generic` secret). With no key the run
+fails and the operator gets a mail. The key never goes into a log, an
+event, an audit row, or an error. Keep a copy of the passphrase off the
+server: the secret store is in the backup, so a lost server takes the
+secret with it.
+
+**Rotation.** Set a new value on the secret. The next run is a full backup
+with the new key. The older backups keep the old key: keep the old
+passphrase until the retention deletes the last of them (after
+`TERRARIUM_BACKUP_KEEP` newer full backups). Restore or verify an old
+backup with the old passphrase (`--passphrase-file`).
+
+**Verify and record.** Each run reads the new backup back and checks each
+file against the manifest (§32.3 `verify`). The audit actor is
+`system:backup`. The rows are `backup.create`, `backup.verify` (`name`,
+`id`, `kind`, `checked_files`), `backup.prune`, `backup.failed` (`kind`,
+`error`), `backup.recovered`, and `backup.missed` (`due`). Each run also
+writes a global event of the kind `backup` with `change`: `verified`,
+`pruned`, `failed` (`level: error`), `recovered`, or `missed`
+(`level: error`). A backup that does not verify moves to
+`.unverified-<name>` in the backup dir: it is not a base and not a kept
+backup.
+
+**Retention.** Only a full backup that verified prunes the dir: it keeps
+the newest `TERRARIUM_BACKUP_KEEP` full backups and their diffs, and
+deletes the rest. Nothing is deleted before a newer full backup is
+verified, and nothing is deleted while the runs fail.
+
+**Alerts.** The first failed run of a streak mails the operator from
+`system` (subject `Scheduled backup failed`, with the error). The next
+failures write events only, and the first good run writes `recovered`. A
+missed run (no backup and no try for one interval and one hour, for
+example after the daemon was down) mails the operator once per due time
+(subject `Scheduled backup missed`). A new backup then runs 10 minutes
+after the start.
 
 This task is not a project schedule (§19): a project schedule starts agent
 turns in one project, and a backup is of the whole daemon.
@@ -11427,7 +11522,8 @@ turns in one project, and a backup is of the whole daemon.
 ### 32.5 The API
 
 The operator only (`403` for an agent, also a sysadmin). One backup runs at
-a time: a create while one runs is `409 conflict`.
+a time per backup dir: a create while one runs is `409 conflict`. A scheduled run waits
+for a running backup instead.
 
 #### `POST /api/backups`
 
