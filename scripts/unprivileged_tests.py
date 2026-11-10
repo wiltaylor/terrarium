@@ -25,8 +25,10 @@ SELECT: dict[str, frozenset[str] | None] = {
     "terrariumd": frozenset({"lib", "it"}),
 }
 UID = 1001
-# Only these reach the tests: the merge job's env stays with root.
-PASS_ENV = ("PATH", "LANG", "LC_ALL", "TZ", "RUST_BACKTRACE", "RUST_LOG")
+# Only these reach the tests: the merge job's env stays with root. The rustup
+# and cargo homes let tests that run rustc or cargo find the pinned toolchain.
+PASS_ENV = ("PATH", "LANG", "LC_ALL", "TZ", "RUST_BACKTRACE", "RUST_LOG",
+            "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "CARGO_HOME")
 
 
 def package_names(metadata: str) -> dict[str, str]:
