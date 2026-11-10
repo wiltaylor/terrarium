@@ -263,7 +263,11 @@ The daemon runs the release as a job of kind `release` (TER-623,
 [api.md §35.6](api.md)). The setup, once, by the operator or meta/lead:
 
 1. Define the release client (META-119) as an ssh target of the project,
-   user `release`, with its pinned host key. Give no agent access to it.
+   user `release`, with its pinned host key. Once it is the release
+   target, the daemon refuses every agent on it (exec, shell, copy,
+   policy entries, leases, reservations); only the operator and the
+   release job use it. Each release runs in a new HOME that goes after
+   it.
 2. Grant `release-github`, `release-cosign`, and `docker-release-vm` to
    `delivery:terrarium` with `--level run --target <release client>`, and
    to nobody else.

@@ -12813,9 +12813,27 @@ The release secrets:
   name and the reference, never the value.
 - `release_target` is not the `target` of any project, and not the release
   target of another project; a project's `target` is not another project's
-  release target. Every process on that target that runs as the release
-  user can read the secrets of a running release, so the target must run
-  release jobs only and give no agent a shell or a run.
+  release target. The check compares machines too: a target on the same
+  host agent, or with the same ssh host and port, counts as the same.
+  Every process on that target that runs as the release user can read the
+  secrets of a running release, so the target runs release jobs only:
+  - No agent may use it: exec, shell, copy and the screen are refused, also
+    for an agent whose policy lists it or that holds a lease.
+  - No policy may list it, no lease, lease extension or reservation may
+    name it, and a spawn may not take it, whoever asks (also the operator
+    and a project admin). A fleet file that lists it has an error.
+  - A target that an agent's `policy.targets` lists, or that has an active
+    lease, cannot become a release target.
+  - The operator keeps exec and shell on it, to set it up.
+- The release recipe runs in a new HOME: a mode-0700 dir from `mktemp -d`
+  (under `TMPDIR`, else `/tmp`), removed when the recipe ends, with the XDG
+  config, cache, data and state dirs in it, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1`, and no `DOCKER_CONFIG`, `CARGO_HOME`,
+  `RUSTUP_HOME` or `UV_CACHE_DIR`. So no `~/.docker`, `~/.gitconfig`,
+  `~/.config` or cache in the release user's home is read. `XDG_RUNTIME_DIR`
+  stays. The login shell of the ssh user still reads its own start files
+  (for example `~/.bashrc`) before the job: they belong to the operator's
+  setup of the target, which no agent can reach.
 - `docker_release` is the release VM. The daemon resolves its `key` (with
   the same grant rule), keeps it in a private run dir, and opens the SSH
   forward with the pinned `known_hosts` line, as for `docker_ci` (§35.1),
