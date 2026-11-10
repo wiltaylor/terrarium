@@ -1238,6 +1238,11 @@ pub struct SubscriptionDef {
     /// [`crate::selfhosted`]). `None` for every other provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selfhosted: Option<crate::selfhosted::SelfHosted>,
+    /// The settings of a cloud subscription (`[cloud]`, providers
+    /// `bedrock`, `gcp`, and `foundry`; [`crate::cloud`]). `None` for
+    /// every other provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<crate::cloud::CloudSettings>,
 }
 
 fn default_alert_at() -> u8 {

@@ -129,11 +129,13 @@ fn subscription_entries(state_dir: &Path) -> Vec<Entry<Zeroizing<String>>> {
             continue;
         };
         if let Some(k) = crate::login_session::read_key(state_dir, name) {
-            out.push(Entry {
-                label: format!("{SUBSCRIPTION_PREFIX}{name}"),
-                scope: Some(GLOBAL.to_owned()),
-                value: Zeroizing::new(k.key),
-            });
+            for value in k.secret_values() {
+                out.push(Entry {
+                    label: format!("{SUBSCRIPTION_PREFIX}{name}"),
+                    scope: Some(GLOBAL.to_owned()),
+                    value: Zeroizing::new(value),
+                });
+            }
         }
     }
     out
@@ -365,6 +367,8 @@ mod tests {
                 plan: None,
                 base_url: None,
                 models: Vec::new(),
+                key_id: None,
+                cloud: None,
             },
         )
         .unwrap();

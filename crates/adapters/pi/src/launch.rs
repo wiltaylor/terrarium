@@ -213,6 +213,7 @@ mod tests {
             probe: None,
             alert_at: 80,
             selfhosted: None,
+            cloud: None,
         }
     }
 

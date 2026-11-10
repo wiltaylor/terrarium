@@ -170,7 +170,9 @@ pub async fn swap(
 /// order (then from the start) that did not hit a limit (`limited` is
 /// false), is not expired or missing, and has a login of the harness (or a
 /// stored key). `None`: no member is left. A probe window does not count:
-/// a probe can show 100 percent while the plan still serves turns.
+/// a probe can show 100 percent while the plan still serves turns. A cloud
+/// subscription (`terrarium_core::cloud`, billed per token) is never
+/// picked: an agent moves to one only by a swap that names it.
 pub fn pick(
     state_dir: &std::path::Path,
     view: &AgentView,
@@ -189,6 +191,9 @@ pub fn pick(
         let Some(s) = members.iter().find(|s| &s.name == name) else {
             continue;
         };
+        if s.cloud_kind().is_some() {
+            continue;
+        }
         let usable = matches!(
             s.login_status.as_str(),
             subs::LOGGED_IN | subs::EXPIRING | "unknown" | subs::API_KEY
@@ -314,6 +319,29 @@ mod tests {
         assert_eq!(pick(state, &v, &m3, |_| false).as_deref(), Some("c"));
         let e = check(state, &v, Some(&m3[0]), &m3[1]).unwrap_err();
         assert!(e.message.contains("disabled"), "{}", e.message);
+    }
+
+    /// A cloud subscription is never the auto-swap's pick, even when it is
+    /// the only member with room; a swap that names it is allowed.
+    #[test]
+    fn pick_never_takes_a_cloud_subscription() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path();
+        for s in ["a", "c"] {
+            crate::accounts::write_credential(state, s, HarnessId::Claude, b"{}").unwrap();
+        }
+        let mut members = vec![sub("a", "logged_in"), sub("b", "api_key"), sub("c", "logged_in")];
+        members[1].provider = "bedrock".into();
+        members[1].env_var = Some("AWS_BEARER_TOKEN_BEDROCK".into());
+        let v = view("a", &["a", "b", "c"]);
+        assert_eq!(pick(state, &v, &members, |_| false).as_deref(), Some("c"));
+        assert_eq!(pick(state, &v, &members, |n| n == "c"), None);
+        for p in ["gcp", "foundry"] {
+            members[1].provider = p.into();
+            assert_eq!(pick(state, &v, &members, |n| n == "c"), None, "{p}");
+        }
+        // Named by a swap of an agent with no subscription: allowed.
+        assert!(check(state, &v, None, &members[1]).is_ok());
     }
 
     #[test]

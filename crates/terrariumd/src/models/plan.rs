@@ -706,6 +706,8 @@ mod tests {
             plan: None,
             base_url: None,
             models: vec![],
+            key_id: None,
+            cloud: None,
         };
         assert_eq!(
             kind(&sub("anthropic", HarnessId::Claude), None),

@@ -383,6 +383,7 @@ mod tests {
             probe: None,
             alert_at: 80,
             selfhosted: None,
+            cloud: None,
         };
         let with = a.launch_for(&agent, Some(&id), Some(&sub));
         assert_eq!(value_after(&with, "--provider"), Some("openai"));
@@ -529,6 +530,7 @@ mod tests {
                 max_output_tokens: Some(4096),
                 ..SelfHosted::default()
             }),
+            cloud: None,
         };
         a.materialize_for(&agent, &home, Some(&sub))
             .expect("materialize");

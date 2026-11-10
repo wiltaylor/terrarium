@@ -67,7 +67,8 @@ pub struct WindowView {
     pub balance: Option<Balance>,
 }
 
-/// A credit balance, from the `raw` of a credits window.
+/// A credit balance, from the `raw` of a credits window, or of the monthly
+/// `budget` window of a cloud subscription (`crate::cloud_budget`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Balance {
     pub total: f64,
@@ -78,11 +79,15 @@ pub struct Balance {
 
 impl Balance {
     fn from_raw(raw: &serde_json::Value) -> Option<Self> {
-        let num = |k: &str| raw.get(k).and_then(serde_json::Value::as_f64);
+        let num = |k: &str, budget: &str| {
+            raw.get(k)
+                .or_else(|| raw.get(budget))
+                .and_then(serde_json::Value::as_f64)
+        };
         Some(Self {
-            total: num("total_credits")?,
-            used: num("total_usage")?,
-            remaining: num("remaining")?,
+            total: num("total_credits", "budget_usd")?,
+            used: num("total_usage", "used_usd")?,
+            remaining: num("remaining", "remaining_usd")?,
             currency: raw
                 .get("currency")
                 .and_then(serde_json::Value::as_str)
@@ -477,6 +482,10 @@ struct NewSubscription {
     /// (`terrarium_core::selfhosted::SelfHosted`).
     #[serde(default)]
     selfhosted: Option<SelfHosted>,
+    /// The settings of a cloud subscription (`bedrock`, `gcp`, `foundry`;
+    /// `terrarium_core::cloud::CloudSettings`).
+    #[serde(default)]
+    cloud: Option<terrarium_core::cloud::CloudSettings>,
 }
 
 async fn create(
@@ -500,14 +509,22 @@ async fn create(
     if b.alert_at.is_some_and(|a| a == 0 || a > 100) {
         return Err(ApiError::invalid("alert_at is a percent, 1 to 100"));
     }
+    // A cloud subscription is for Claude Code only: no harnesses given
+    // means Claude Code.
+    let harnesses = if b.harnesses.is_empty() && terrarium_core::cloud::is_cloud(&b.provider) {
+        terrarium_core::cloud::HARNESSES.to_vec()
+    } else {
+        b.harnesses
+    };
     let def = SubscriptionDef {
         name: b.name,
         provider: b.provider,
         plan: b.plan,
-        harnesses: b.harnesses,
+        harnesses,
         probe: b.probe,
         alert_at: b.alert_at.unwrap_or(80),
         selfhosted: b.selfhosted,
+        cloud: b.cloud,
     };
     // `openai-compatible` is the old word of `selfhosted` (OpenAI style).
     let def = if selfhosted::is_alias(&def.provider) {
@@ -1313,9 +1330,31 @@ async fn api_key(
     }
     let Some((var, url_var)) = login::env_var_for(&key.provider) else {
         return Err(ApiError::invalid(format!(
-            "unknown provider `{}`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, github, zai, or moonshot",
+            "unknown provider `{}`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, github, zai, moonshot, bedrock, gcp, or foundry",
             key.provider
         )));
+    };
+    let cloud_kind = terrarium_core::cloud::kind(&key.provider);
+    // A cloud key (Claude Code only): the key and `key_id` are checked
+    // here, without showing them; the settings below.
+    let var = match cloud_kind {
+        Some(kind) => {
+            terrarium_core::cloud::check_key(kind, key.key.trim(), key.key_id.as_deref())
+                .map_err(ApiError::invalid)?;
+            if key.base_url.is_some() || !key.models.is_empty() {
+                return Err(ApiError::invalid(
+                    "a cloud key takes `cloud.base_url` and `cloud.models`, not `base_url` and `models`",
+                ));
+            }
+            kind.key_var(key.key_id.is_some())
+        }
+        None if key.key_id.is_some() || key.cloud.is_some() => {
+            return Err(ApiError::invalid(format!(
+                "`key_id` and `cloud` are for bedrock, gcp, and foundry, not `{}`",
+                key.provider
+            )));
+        }
+        None => var,
     };
     let moonshot = terrarium_core::moonshot::is_moonshot(&key.provider);
     // The plan word of a provider with plans: Z.ai and Moonshot.
@@ -1380,9 +1419,48 @@ async fn api_key(
         }
         _ => {}
     }
+    // A cloud key goes on a cloud subscription of the same kind only. The
+    // settings: the ones given, else the stored ones; checked for the kind.
+    let cloud_settings = match cloud_kind {
+        Some(kind) => {
+            if let Some(s) = &exists
+                && s.cloud_kind() != Some(kind)
+            {
+                return Err(ApiError::invalid(format!(
+                    "cannot store a {} key on subscription `{name}`: it is a {} subscription",
+                    key.provider, s.provider
+                )));
+            }
+            if key.cloud.is_some()
+                && exists.as_ref().is_some_and(|s| s.source != SOURCE_API)
+            {
+                return Err(ApiError::invalid(format!(
+                    "subscription `{name}` comes from a file; set its `[cloud]` table there"
+                )));
+            }
+            let settings = key
+                .cloud
+                .clone()
+                .or_else(|| exists.as_ref().and_then(|s| s.cloud.clone()))
+                .unwrap_or_default();
+            terrarium_core::cloud::check(kind, &settings)
+                .map_err(|e| ApiError::invalid(format!("subscription `{name}`: {e}")))?;
+            Some(settings)
+        }
+        None => None,
+    };
     let source = exists.as_ref().map(|s| s.source.clone());
     let dir = state.state_dir.clone();
-    let k = key.clone();
+    // The file keeps the secrets; the settings go to the definition.
+    let k = ApiKey {
+        cloud: None,
+        key: if cloud_kind.is_some() {
+            key.key.trim().to_owned()
+        } else {
+            key.key.clone()
+        },
+        ..key.clone()
+    };
     let (n, provider, base_url, models) = (
         name.clone(),
         key.provider.clone(),
@@ -1398,7 +1476,25 @@ async fn api_key(
             login::store_key(&dir, &n, &k)
                 .map_err(|e| ApiError::internal(format!("cannot store the key: {e}")))?;
             t.rebuild_redactor(&dir);
-            if let Some(plan) = key_plan {
+            if let (Some(kind), Some(settings)) = (cloud_kind, cloud_settings.as_ref()) {
+                // Claude Code only; never a default or a pool pick
+                // (`terrarium_core::cloud`).
+                if source.is_none() {
+                    let def = SubscriptionDef {
+                        name: n.clone(),
+                        provider: kind.as_str().into(),
+                        plan: None,
+                        harnesses: terrarium_core::cloud::HARNESSES.to_vec(),
+                        probe: None,
+                        alert_at: 80,
+                        selfhosted: None,
+                        cloud: Some(settings.clone()),
+                    };
+                    subs::upsert_def(t, &def, SOURCE_API)?;
+                } else if source.as_deref() == Some(SOURCE_API) {
+                    subs::set_cloud(t, &n, settings)?;
+                }
+            } else if let Some(plan) = key_plan {
                 // Z.ai: Claude Code and pi. Moonshot: pi only. No probe in
                 // the definition: the read gives the default probe of the
                 // plan (`subs::default_probe`).
@@ -1416,6 +1512,7 @@ async fn api_key(
                         probe: None,
                         alert_at: 80,
                         selfhosted: None,
+                        cloud: None,
                     };
                     subs::upsert_def(t, &def, SOURCE_API)?;
                 } else if source.as_deref() == Some(SOURCE_API) {
@@ -1437,6 +1534,7 @@ async fn api_key(
                         models: models.clone(),
                         ..SelfHosted::default()
                     }),
+                    cloud: None,
                 };
                 subs::upsert_def(t, &def, SOURCE_API)?;
             } else if source.is_none() {
@@ -1453,13 +1551,14 @@ async fn api_key(
                     },
                     alert_at: 80,
                     selfhosted: None,
+                    cloud: None,
                 };
                 subs::upsert_def(t, &def, SOURCE_API)?;
             }
             // A file subscription keeps its definition; the env var is
             // daemon state.
             subs::set_env_var(t, &n, Some(var))?;
-            let status = if key_plan.is_some() || is_sh {
+            let status = if key_plan.is_some() || is_sh || cloud_kind.is_some() {
                 subs::API_KEY
             } else {
                 subs::LOGGED_IN
@@ -1469,7 +1568,8 @@ async fn api_key(
                 "subscription.api_key",
                 &n,
                 None,
-                json!({"provider": provider, "plan": key_plan, "env_var": var, "base_url": base_url, "models": models}),
+                json!({"provider": provider, "plan": key_plan, "env_var": var, "base_url": base_url, "models": models,
+                       "cloud": cloud_settings}),
             )
         })
         .await?;
@@ -1477,9 +1577,11 @@ async fn api_key(
 }
 
 /// The name of a provider whose subscription is an API key only (no
-/// harness login): Z.ai and Moonshot.
+/// harness login): Z.ai, Moonshot, self-hosted, and the cloud providers.
 fn key_only_provider(provider: &str) -> Option<&'static str> {
-    if terrarium_core::zai::is_zai(provider) {
+    if let Some(k) = terrarium_core::cloud::kind(provider) {
+        Some(k.display_name())
+    } else if terrarium_core::zai::is_zai(provider) {
         Some("Z.ai")
     } else if terrarium_core::moonshot::is_moonshot(provider) {
         Some("Moonshot")

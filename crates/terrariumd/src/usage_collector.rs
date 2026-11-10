@@ -229,6 +229,13 @@ pub trait UsageSource: Send {
     }
     /// The compaction of [`UsageSource::compaction_started`] ended.
     fn compaction_ended(&mut self) {}
+    /// The running USD totals of the session that the last polls found
+    /// (Claude Code's `totalCostUSD`), oldest first. The collector keeps
+    /// the newest for the monthly budget of a cloud subscription
+    /// ([`crate::cloud_budget`]). The default has none.
+    fn take_costs(&mut self) -> Vec<f64> {
+        Vec::new()
+    }
 }
 
 /// Makes a [`UsageSource`] for the sessions of one harness.
@@ -419,6 +426,10 @@ impl UsageSource for Guarded {
     fn compaction_ended(&mut self) {
         self.inner.compaction_ended();
     }
+
+    fn take_costs(&mut self) -> Vec<f64> {
+        self.inner.take_costs()
+    }
 }
 
 /// Claude Code: tail the session JSONL with the adapter's
@@ -426,19 +437,28 @@ impl UsageSource for Guarded {
 /// one sample.
 pub struct ClaudeSource {
     tail: TranscriptTail,
+    /// The `totalCostUSD` of each `cost-state` record since the last
+    /// [`UsageSource::take_costs`].
+    costs: Vec<f64>,
 }
 
 impl ClaudeSource {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             tail: TranscriptTail::new(path),
+            costs: Vec::new(),
         }
     }
 }
 
 impl UsageSource for ClaudeSource {
+    fn take_costs(&mut self) -> Vec<f64> {
+        std::mem::take(&mut self.costs)
+    }
+
     fn poll(&mut self) -> Result<Vec<SourceSample>, String> {
         let records = self.tail.poll().map_err(|e| e.to_string())?;
+        let costs = &mut self.costs;
         Ok(records
             .into_iter()
             .filter_map(|r| match r {
@@ -451,7 +471,10 @@ impl UsageSource for ClaudeSource {
                     at: s.at,
                     message_id: s.message_id,
                 }),
-                UsageRecord::Cost { .. } => None,
+                UsageRecord::Cost { totals, .. } => {
+                    costs.push(totals.total_cost_usd);
+                    None
+                }
             })
             .collect())
     }
@@ -1040,6 +1063,37 @@ impl Collector {
         }
         if ended {
             t.source.compaction_ended();
+        }
+        // The newest running USD total of the session, for the monthly
+        // budget of a cloud subscription (`crate::cloud_budget`).
+        if let Some(total) = t.source.take_costs().into_iter().reduce(f64::max) {
+            let info = t.info.clone();
+            let month = terrarium_core::cloud::month_key(Utc::now());
+            let (agent_id, session, sub) = (info.agent, info.session, info.subscription);
+            let sub2 = sub.clone();
+            let r = self
+                .state
+                .db
+                .write("system", move |tx| {
+                    crate::store::cloud_spend::record(
+                        tx,
+                        &agent_id,
+                        &session,
+                        sub2.as_deref(),
+                        &month,
+                        total,
+                    )
+                })
+                .await;
+            match (r, sub) {
+                (Err(e), _) => warn!(agent, "usage: cannot store the session cost: {e}"),
+                (Ok(()), Some(sub)) => {
+                    if let Err(e) = crate::cloud_budget::check(&self.state, &sub).await {
+                        warn!(agent, "usage: cloud budget check failed: {e}");
+                    }
+                }
+                (Ok(()), None) => {}
+            }
         }
         let card = if samples.is_empty() {
             None

@@ -1967,6 +1967,8 @@ async fn the_harness_credentials_come_through_exec_env_only() {
         key: Option<(&'static str, &'static str)>,
         /// A Copilot plan account token, if any.
         account_token: Option<&'static str>,
+        /// More fields of the key body (`key_id` and `cloud` of a cloud key).
+        extra: Value,
         /// The vars that the harness must see with the value.
         want: &'static [(&'static str, &'static str)],
     }
@@ -1977,6 +1979,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
             sub: json!({"name": "ant", "provider": "anthropic", "harnesses": ["claude"]}),
             key: Some(("anthropic", "sk-ant-E2E-anthropic-1")),
             account_token: None,
+            extra: Value::Null,
             want: &[("ANTHROPIC_API_KEY", "sk-ant-E2E-anthropic-1")],
         },
         Case {
@@ -1986,6 +1989,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                         "harnesses": ["claude", "pi"]}),
             key: Some(("zai", "zai-E2E-glm-key-2")),
             account_token: None,
+            extra: Value::Null,
             want: &[
                 ("ANTHROPIC_AUTH_TOKEN", "zai-E2E-glm-key-2"),
                 ("ZAI_API_KEY", "zai-E2E-glm-key-2"),
@@ -1999,6 +2003,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                         "harnesses": ["pi"]}),
             key: Some(("zai", "zai-E2E-pi-key-3")),
             account_token: None,
+            extra: Value::Null,
             want: &[("ZAI_API_KEY", "zai-E2E-pi-key-3")],
         },
         Case {
@@ -2008,6 +2013,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                         "harnesses": ["pi"]}),
             key: Some(("moonshot", "sk-E2E-moonshot-4")),
             account_token: None,
+            extra: Value::Null,
             want: &[
                 ("MOONSHOT_API_KEY", "sk-E2E-moonshot-4"),
                 ("KIMI_API_KEY", "sk-E2E-moonshot-4"),
@@ -2019,6 +2025,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
             sub: json!({"name": "or", "provider": "openrouter", "harnesses": ["pi"]}),
             key: Some(("openrouter", "sk-or-E2E-openrouter-5")),
             account_token: None,
+            extra: Value::Null,
             want: &[("OPENROUTER_API_KEY", "sk-or-E2E-openrouter-5")],
         },
         Case {
@@ -2027,6 +2034,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
             sub: json!({"name": "oa", "provider": "openai", "harnesses": ["codex"]}),
             key: Some(("openai", "sk-E2E-openai-6")),
             account_token: None,
+            extra: Value::Null,
             want: &[("OPENAI_API_KEY", "sk-E2E-openai-6")],
         },
         Case {
@@ -2035,6 +2043,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
             sub: json!({"name": "pat", "provider": "github", "harnesses": ["copilot"]}),
             key: Some(("github", "github_pat_E2E_copilot_7")),
             account_token: None,
+            extra: Value::Null,
             want: &[("COPILOT_GITHUB_TOKEN", "github_pat_E2E_copilot_7")],
         },
         Case {
@@ -2043,23 +2052,75 @@ async fn the_harness_credentials_come_through_exec_env_only() {
             sub: json!({"name": "ghplan", "provider": "github", "harnesses": ["copilot"]}),
             key: None,
             account_token: Some("gho_E2E_copilot_plan_8"),
+            extra: Value::Null,
             want: &[("COPILOT_GITHUB_TOKEN", "gho_E2E_copilot_plan_8")],
+        },
+        // The cloud kinds (TER-630), Claude Code only. A mocked call: the
+        // fake harness shows the env that Claude Code would get.
+        Case {
+            agent: "claude-bedrock",
+            harness: "claude",
+            sub: json!({"name": "aws", "provider": "bedrock",
+                        "cloud": {"region": "us-east-1",
+                                  "models": {"opus": "us.anthropic.claude-opus-5-5"}}}),
+            key: Some(("bedrock", "E2E-aws-secret-access-key-9")),
+            account_token: None,
+            extra: json!({"key_id": "AKIAE2EACCESSKEYID10"}),
+            want: &[
+                ("CLAUDE_CODE_USE_BEDROCK", "1"),
+                ("AWS_REGION", "us-east-1"),
+                ("AWS_ACCESS_KEY_ID", "AKIAE2EACCESSKEYID10"),
+                ("AWS_SECRET_ACCESS_KEY", "E2E-aws-secret-access-key-9"),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", "us.anthropic.claude-opus-5-5"),
+            ],
+        },
+        Case {
+            agent: "claude-bedrock-key",
+            harness: "claude",
+            sub: json!({"name": "aws-key", "provider": "bedrock"}),
+            key: Some(("bedrock", "E2E-bedrock-api-key-11")),
+            account_token: None,
+            extra: Value::Null,
+            want: &[
+                ("CLAUDE_CODE_USE_BEDROCK", "1"),
+                ("AWS_BEARER_TOKEN_BEDROCK", "E2E-bedrock-api-key-11"),
+            ],
+        },
+        Case {
+            agent: "claude-foundry",
+            harness: "claude",
+            sub: json!({"name": "azure", "provider": "foundry",
+                        "cloud": {"resource": "e2e-res"}}),
+            key: Some(("foundry", "E2E-foundry-api-key-12")),
+            account_token: None,
+            extra: Value::Null,
+            want: &[
+                ("CLAUDE_CODE_USE_FOUNDRY", "1"),
+                ("ANTHROPIC_FOUNDRY_RESOURCE", "e2e-res"),
+                ("ANTHROPIC_FOUNDRY_API_KEY", "E2E-foundry-api-key-12"),
+            ],
         },
     ];
 
     let td = Td::start_with_cli().await;
     let state = td.dir.path().join("state");
-    let mut values = Vec::new();
+    let mut values: Vec<String> = Vec::new();
     for c in &cases {
         let name = c.sub["name"].as_str().unwrap();
         td.post("/api/subscriptions", Some(c.sub.clone())).await;
         if let Some((provider, key)) = c.key {
-            td.post(
-                &format!("/api/subscriptions/{name}/api-key"),
-                Some(json!({"provider": provider, "key": key})),
-            )
-            .await;
-            values.push(key);
+            let mut body = json!({"provider": provider, "key": key});
+            if let Value::Object(extra) = &c.extra {
+                for (k, v) in extra {
+                    body[k] = v.clone();
+                    if let Some(s) = v.as_str() {
+                        values.push(s.to_owned());
+                    }
+                }
+            }
+            td.post(&format!("/api/subscriptions/{name}/api-key"), Some(body))
+                .await;
+            values.push(key.to_owned());
         }
         if let Some(token) = c.account_token {
             terrariumd::accounts::write_credential(
@@ -2069,7 +2130,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                 token.as_bytes(),
             )
             .unwrap();
-            values.push(token);
+            values.push(token.to_owned());
         }
         let id = td
             .agent(c.agent, json!({"harness": c.harness, "subscription": name}))
@@ -2090,7 +2151,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
         assert!(spec.contains("exec-env"), "{}: {spec}", c.agent);
         assert!(spec.contains("--require-credentials"), "{}", c.agent);
         for v in &values {
-            assert!(!spec.contains(v), "{}: runner.json holds a key", c.agent);
+            assert!(!spec.contains(v.as_str()), "{}: runner.json holds a key", c.agent);
         }
         td.post(&format!("/api/agents/{id}/stop"), None).await;
         td.wait_status(&id, "stopped").await;
@@ -2101,7 +2162,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
     let all = tree_text(&state, &[state.join("credentials")]);
     assert!(!all.is_empty());
     for v in &values {
-        assert!(!all.contains(v), "a file of the state dir holds {v}");
+        assert!(!all.contains(v.as_str()), "a file of the state dir holds {v}");
     }
 }
 

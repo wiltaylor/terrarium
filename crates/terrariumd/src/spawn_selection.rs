@@ -8,7 +8,9 @@ use crate::error::ApiResult;
 use crate::store::subscriptions as subs;
 
 /// Pick the account with most headroom below 80 percent in every window.
-/// Missing samples are not evidence that an account is full.
+/// Missing samples are not evidence that an account is full. A cloud
+/// subscription counts only when the definition names it as
+/// `subscription`, never from the pool.
 pub fn pick(
     conn: &Connection,
     def: &AgentDef,
@@ -30,7 +32,9 @@ pub fn pick(
         let login = sub.is_selfhosted()
             || crate::accounts::has_credential(&state.state_dir, name, def.harness)
             || sub.env_var.is_some();
-        let why = if !sub.enabled {
+        let why = if let Some(why) = cloud_refusal(&sub, def.subscription.as_deref()) {
+            Some(why)
+        } else if !sub.enabled {
             Some("disabled")
         } else if !sub.harnesses.contains(&def.harness)
             || subs::plan_refusal(def.harness, &sub).is_some()
@@ -67,4 +71,33 @@ pub fn pick(
         }
     }
     Ok(best)
+}
+
+/// A cloud subscription (`terrarium_core::cloud`) is billed per token: it
+/// is a candidate only as the named `subscription` of the definition,
+/// never as a pool member.
+fn cloud_refusal(sub: &subs::Subscription, named: Option<&str>) -> Option<&'static str> {
+    (sub.cloud_kind().is_some() && named != Some(sub.name.as_str()))
+        .then_some("cloud subscription, used only when named")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cloud_subscription_is_a_candidate_only_when_named() {
+        let mut s: subs::Subscription = serde_json::from_value(serde_json::json!({
+            "name": "aws", "provider": "bedrock", "harnesses": ["claude"], "alert_at": 80,
+            "source": "api", "login_status": "api_key", "probe_status": "none",
+            "created_at": "", "updated_at": ""
+        }))
+        .unwrap();
+        assert_eq!(cloud_refusal(&s, Some("aws")), None);
+        assert!(cloud_refusal(&s, None).is_some());
+        assert!(cloud_refusal(&s, Some("max")).is_some());
+        s.provider = "anthropic".into();
+        assert_eq!(cloud_refusal(&s, None), None);
+    }
 }

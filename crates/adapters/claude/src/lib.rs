@@ -243,6 +243,17 @@ impl Adapter for ClaudeAdapter {
                 a.model = Some(terrarium_core::zai::model_for(agent.model.as_deref()));
                 self.launch(&a, resume)
             }
+            // A cloud subscription (`terrarium_core::cloud`: Bedrock,
+            // Vertex AI, Foundry): `--model` through the model map. The
+            // switch, the region, the key, and the
+            // `ANTHROPIC_DEFAULT_*_MODEL` vars come from the daemon through
+            // `terrarium exec-env`; the launch has no cloud var.
+            Some(s) if terrarium_core::cloud::is_cloud(&s.provider) => {
+                let mut a = agent.clone();
+                let models = s.cloud.as_ref().map(|c| c.models.clone()).unwrap_or_default();
+                a.model = terrarium_core::cloud::model_for(&models, agent.model.as_deref());
+                self.launch(&a, resume)
+            }
             // A self-hosted Anthropic-style server
             // (`terrarium_core::selfhosted`): `--model` and the env of the
             // endpoint and the limits. The daemon refuses an OpenAI-style
@@ -377,6 +388,7 @@ mod tests {
             probe: None,
             alert_at: 80,
             selfhosted: None,
+            cloud: None,
         };
         s.selfhosted = Some(terrarium_core::selfhosted::SelfHosted {
             api: terrarium_core::selfhosted::Api::Anthropic,
@@ -423,6 +435,7 @@ mod tests {
             probe: None,
             alert_at: 80,
             selfhosted: None,
+            cloud: None,
         };
         let model = |spec: &LaunchSpec| {
             let i = spec.args.iter().position(|x| x == "--model")?;
@@ -451,6 +464,66 @@ mod tests {
         let agent = test_agent_in(tmp.path(), Some("haiku"));
         let spec = a.launch_for(&agent, None, Some(&sub("anthropic", Some("Max 20x"))));
         assert_eq!(model(&spec).as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn cloud_subscription_maps_the_model_and_has_no_secret_in_the_launch() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let a = ClaudeAdapter::new(ClaudeOptions {
+            run_as_root: Some(false),
+            ..ClaudeOptions::default()
+        });
+        let models: std::collections::BTreeMap<String, String> = [
+            ("opus", "us.anthropic.claude-opus-5-5"),
+            ("claude-opus-5-5", "arn:aws:bedrock:us-east-2:1:application-inference-profile/p"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        let model = |spec: &LaunchSpec| {
+            let i = spec.args.iter().position(|x| x == "--model")?;
+            spec.args.get(i + 1).cloned()
+        };
+        for provider in ["bedrock", "gcp", "foundry"] {
+            let sub = SubscriptionDef {
+                name: "c".into(),
+                provider: provider.into(),
+                plan: None,
+                harnesses: vec![HarnessId::Claude],
+                probe: None,
+                alert_at: 80,
+                selfhosted: None,
+                cloud: Some(terrarium_core::cloud::CloudSettings {
+                    region: Some("us-east-1".into()),
+                    models: models.clone(),
+                    ..Default::default()
+                }),
+            };
+            for (agent_model, want) in [
+                (Some("opus"), Some("us.anthropic.claude-opus-5-5")),
+                (
+                    Some("claude-opus-5-5"),
+                    Some("arn:aws:bedrock:us-east-2:1:application-inference-profile/p"),
+                ),
+                (Some("sonnet"), Some("sonnet")),
+                (None, None),
+            ] {
+                let agent = test_agent_in(tmp.path(), agent_model);
+                let spec = a.launch_for(&agent, None, Some(&sub));
+                assert_eq!(model(&spec).as_deref(), want, "{provider} {agent_model:?}");
+                // No cloud var and no key in the launch: the daemon gives
+                // them through `terrarium exec-env`.
+                for k in spec.env.keys() {
+                    assert!(
+                        !k.starts_with("AWS_")
+                            && !k.starts_with("GOOGLE_")
+                            && !k.starts_with("CLAUDE_CODE_USE_")
+                            && !k.starts_with("ANTHROPIC_"),
+                        "{provider}: {k}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

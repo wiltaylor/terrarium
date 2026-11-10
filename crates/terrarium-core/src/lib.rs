@@ -7,6 +7,7 @@
 pub mod adapter;
 pub mod agent_template;
 pub mod ci;
+pub mod cloud;
 pub mod config;
 pub mod display;
 pub mod env_deny;

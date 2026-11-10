@@ -47,6 +47,7 @@ fn one_kimi_turn_through_pi() {
         probe: None,
         alert_at: 80,
         selfhosted: None,
+        cloud: None,
     };
     let provider = provider_for(&sub).expect("a pi provider");
     let model = flags::default_model(&provider).expect("a default model");
