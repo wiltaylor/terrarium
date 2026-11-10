@@ -398,7 +398,7 @@ class Release(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         gate = next(c for c in self.calls() if c["tool"] == "gate")
         self.assertEqual(gate["cwd"], str(self.out / "gate-src"))
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.out / "gate-src",
+        head = subprocess.run(["git", "-c", "safe.directory=*", "rev-parse", "HEAD"], cwd=self.out / "gate-src",
                               capture_output=True, text=True, check=True).stdout
         self.assertEqual(head.strip(), self.summary()["commit"])
         if os.geteuid() == 0:
