@@ -368,7 +368,9 @@ async fn version_cut_waits_while_a_group_is_past_cut_and_a_later_step_finishes_c
         json!({"title":"b","column":"accepted","labels":["version:vnext"]}),
     )
     .await;
-    let second = cut_now(&td, "p").await.expect("second cut while first is in cut");
+    let second = cut_now(&td, "p")
+        .await
+        .expect("second cut while first is in cut");
     let step = td
         .post(
             &format!("{path}/status"),
