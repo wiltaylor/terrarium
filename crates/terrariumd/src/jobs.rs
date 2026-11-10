@@ -1034,8 +1034,7 @@ async fn prepare_hosts_with(
     extra: Option<String>,
     resolve: impl Fn(&str) -> String + Send + Sync + 'static,
 ) -> ApiResult<()> {
-    static PREPARE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _prepare = PREPARE.lock().await;
+    let _prepare = db.host_pins().lock().await;
     let names = db.read(move |c| jobs::unresolved_hosts(c, extra)).await?;
     if names.is_empty() {
         return Ok(());

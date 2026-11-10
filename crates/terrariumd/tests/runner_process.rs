@@ -40,7 +40,10 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-const WAIT: Duration = Duration::from_secs(20);
+/// The fixed deadlines of this file. 20 s was too short at load 40 to 60
+/// on 32 cores (TER-647). The state waits of [`Td`] count only time
+/// without progress ([`common::Stall`]).
+const WAIT: Duration = common::WAIT;
 
 fn fake_tui() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../terrarium-runner/tests/fake_tui/fake_tui.py")
@@ -478,17 +481,29 @@ impl Td {
         self.get(&format!("/api/agents/{id}")).await["status"].clone()
     }
 
+    /// The newest event `seq` of the agent and its status: what moves
+    /// while a start, a restart or a turn goes on.
+    async fn progress(&self, id: &str) -> (Value, Value) {
+        let newest = self
+            .get(&format!("/api/agents/{id}/events?order=desc&limit=1"))
+            .await;
+        (newest[0]["seq"].clone(), self.status(id).await)
+    }
+
     async fn wait_status(&self, id: &str, want: &str) {
-        let start = Instant::now();
+        let mut stall = common::Stall::new(self.progress(id).await);
         loop {
             let s = self.status(id).await;
             if s == want {
                 return;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "agent never reached {want}; last {s}"
-            );
+            if stall.due() {
+                let mark = self.progress(id).await;
+                assert!(
+                    stall.moved(mark),
+                    "agent never reached {want}; last {s} ({stall})"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -502,16 +517,19 @@ impl Td {
     }
 
     async fn wait_events(&self, id: &str, kind: &str, f: impl Fn(&[Value]) -> bool) -> Vec<Value> {
-        let start = Instant::now();
+        let mut stall = common::Stall::new(self.progress(id).await);
         loop {
             let ev = self.events(id, kind).await;
             if f(&ev) {
                 return ev;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "{kind} events never matched: {ev:#?}"
-            );
+            if stall.due() {
+                let mark = self.progress(id).await;
+                assert!(
+                    stall.moved(mark),
+                    "{kind} events never matched ({stall}): {ev:#?}"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
     }

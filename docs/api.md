@@ -7254,8 +7254,12 @@ max_life_secs = 28800        # 60 to 28800 (8 hours)
 ```
 
 - The lifecycle goes through `POST https://exe.dev/exec` with the token
-  in the `Authorization` header only: `new --name=terrarium-x-<target>-<id>
-  --sandbox --tag=<tag> --cpu=<n> --memory=<n>GB`, `ls`, `rm`. Commands,
+  in the `Authorization` header only: `new
+  --name=terrarium-x-<instance>-<target>-<id> --sandbox --tag=<tag>
+  --cpu=<n> --memory=<n>GB`, `ls`, `rm`. `<instance>` is the exe.dev
+  instance id of the daemon: 8 hex characters, made once in its database
+  (table `exedev_instance`). Two daemons on one exe.dev account have two
+  ids. Commands,
   copies and the workspace sync go over ssh to `<user>@<ssh_dest>` (the
   API stops a command at 30 s and a body at 64 KB). `up` waits up to 180 s
   for ssh.
@@ -7269,7 +7273,9 @@ max_life_secs = 28800        # 60 to 28800 (8 hours)
   removal of that target's VM. An `up` that finds a recorded VM in `ls`,
   in its life, adopts it (also a row that `new` never answered: the ssh
   host then comes from `ls`). A recorded VM past its life is removed and
-  replaced, never adopted. A `new` that fails removes its VM; when that
+  replaced, never adopted. A row with no ssh host that `ls` does not list
+  stays for 10 minutes after its `created_at` (its `new` may still run):
+  `status` answers `absent`, and `up` makes a new VM next to it. A `new` that fails removes its VM; when that
   `rm` fails too, the row stays for the sweep.
 - At most 3 VMs at once over all exedev targets (the recorded ones and the
   `terrarium-x-` VMs in `ls`). The fourth `up` answers `409` with
@@ -7284,10 +7290,14 @@ max_life_secs = 28800        # 60 to 28800 (8 hours)
     inbox (or to the operator for a global target);
   - `orphaned`: a recorded VM whose target is gone;
   - `unready`: a recorded VM with no ssh host after 10 minutes, held or not;
-  - `unheld`: a recorded VM that no running agent holds after 10 minutes;
-  - `leftover`: a VM in `ls` with the `terrarium-x-` prefix and a tag of
-    the account, that no row of any account records, 10 minutes after its
-    `created_at` in `ls` (or after the sweep first saw it).
+  - `unheld`: a recorded VM that no running agent holds after 10 minutes
+    (the holders are read again under the target lock, right before the
+    `rm`);
+  - `leftover`: a VM in `ls` with this daemon's `terrarium-x-<instance>-`
+    prefix and a tag of the account, that no row of any account records,
+    10 minutes after its `created_at` in `ls` (or after the sweep first
+    saw it). A VM of another daemon (another instance id) is never a
+    leftover here.
   Each removal of a recorded VM writes `target.destroy` with
   `"reason": "exedev_<reason>"`. A VM without the prefix is never removed.
 - Deleting the target removes its VM. When that `rm` fails, the target is
@@ -9321,11 +9331,25 @@ or name) and a `review` column:
 |---|---|---|
 | `merge-queue-move` | a new merge job (`card merge`, `POST /api/merges`, or the batch rule) | each card to `@merge_queue` (a card there already stays) |
 | `merge-queue-cancel` | a cancelled merge verdict | the card from `@merge_queue` back to `@review` |
-| `merge-queue-batch` | a card moved to the `merge_queue` role column, and its timer | one batch merge of the cards that wait in `@merge_queue`, in board order: `limit = 8`, `min_cards = 8`, `max_wait_minutes = 30` (8 cards wait, or 30 minutes after the first one) |
+| `merge-queue-batch` | a card moved to the `merge_queue` role column, and its timer | one batch merge of the cards that wait in `@merge_queue`, in board order, when the merge lane is free: `limit = 8`, `min_cards = 4`, `max_wait_minutes = 30` (4 cards wait, or 30 minutes after the first one) |
 
 The pass (`@accepted`), the red result (the top of `@ready`), and the
 labels and comments stay with the flow of the project. Change the three
 numbers of `merge-queue-batch` to change the batch.
+
+The merge lane (TER-644): a `job_queue` batch is a no-op while a merge
+job of the project is queued or running, with the job in `lane` of the
+run detail, so the cards wait and the next batch takes them all. The
+engine checks each batch rule with `min_cards` and `max_wait_minutes`
+about every 10 seconds: when the lane is free and `min_cards` cards wait,
+or the first one came `max_wait_minutes` ago, it writes a `rule.timer`
+event that runs the rule. While the lane is busy it writes no timer and
+keeps the wait, so 1 to 3 cards go soon after the lane is free once they
+waited 30 minutes. A `release-blocker` card (TER-607) also waits for a
+busy lane, then goes first and alone with no count or wait. A project
+trigger on the end of a merge job (for
+example a schedule that mails the lead) can stay as a notice; the batch
+does not need it.
 
 A switch back from `rules` to `code` drops the pack at the next pass of
 the engine. A job that ended under `rules` but whose events the engine
