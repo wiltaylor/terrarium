@@ -772,24 +772,70 @@ mod tests {
         });
         drop(rt);
         let _ = std::fs::remove_file(&pidfile);
-        let gone = || {
-            nix::sys::signal::kill(Pid::from_raw(child), None).is_err()
-                || std::fs::read_to_string(format!("/proc/{child}/stat")).is_ok_and(|s| {
-                    s.rsplit(')')
-                        .next()
-                        .is_some_and(|r| r.trim_start().starts_with('Z'))
-                })
-        };
+        // TER-590: under load a killed child can take seconds to reach
+        // the zombie state, so a SIGKILL that landed counts as killed.
+        let killed = || child_killed(child);
         let started = std::time::Instant::now();
-        while !gone() && started.elapsed() < Duration::from_secs(10) {
+        while !killed() && started.elapsed() < Duration::from_secs(10) {
             std::thread::sleep(Duration::from_millis(20));
         }
-        let left = !gone();
-        if left {
+        let left = (!killed()).then(|| child_state(child));
+        if left.is_some() {
             let _ = nix::sys::signal::kill(Pid::from_raw(child), Signal::SIGKILL);
         }
         drop(run);
-        assert!(!left, "the background child {child} outlived the session");
+        if let Some(state) = left {
+            panic!("the background child {child} outlived the session: {state}");
+        }
+    }
+
+    /// The child is gone, a zombie, exiting, or has a SIGKILL pending.
+    fn child_killed(pid: i32) -> bool {
+        if nix::sys::signal::kill(Pid::from_raw(pid), None).is_err() {
+            return true;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return true;
+        };
+        // After the comm: state, ppid, pgrp, session, tty_nr, tpgid, flags.
+        let fields: Vec<&str> = stat
+            .rsplit_once(')')
+            .map(|(_, r)| r.split_whitespace().collect())
+            .unwrap_or_default();
+        const PF_EXITING: u64 = 0x4;
+        let state_dead = fields.first().is_some_and(|s| matches!(*s, "Z" | "X" | "x"));
+        let exiting = fields
+            .get(6)
+            .and_then(|f| f.parse::<u64>().ok())
+            .is_some_and(|f| f & PF_EXITING != 0);
+        state_dead || exiting || sigkill_pending(pid)
+    }
+
+    /// SIGKILL is in the thread or the shared pending set of the process.
+    fn sigkill_pending(pid: i32) -> bool {
+        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            return false;
+        };
+        const SIGKILL_BIT: u64 = 1 << (9 - 1);
+        status.lines().any(|line| {
+            ["SigPnd:", "ShdPnd:"].iter().any(|key| {
+                line.strip_prefix(key)
+                    .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
+                    .is_some_and(|mask| mask & SIGKILL_BIT != 0)
+            })
+        })
+    }
+
+    /// The stat line and pending signals of a process, for a failure.
+    fn child_state(pid: i32) -> String {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        let pending: Vec<&str> = status
+            .lines()
+            .filter(|l| l.starts_with("SigPnd:") || l.starts_with("ShdPnd:"))
+            .collect();
+        let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan")).unwrap_or_default();
+        format!("stat={} {} wchan={wchan}", stat.trim(), pending.join(" "))
     }
 
     #[tokio::test]
