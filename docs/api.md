@@ -8868,7 +8868,7 @@ tests, and publishes. Later accepted cards are not added to that snapshot.
 
 | endpoint | body | result |
 |---|---|---|
-| `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A closed group rejects updates. |
+| `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A step after `cut` that starts (running, done or failed) also finishes `cut`. A closed group rejects updates. |
 | `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, group}`. Explicit acknowledgement after release CI publishes. Moves only the snapshot's accepted members to done, clears assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
 | `POST /api/projects/{project}/version-groups/{key}/remove` | `{card}` | `{changed, group}`. Explicitly drops a member from an open snapshot without moving or editing that card. Use for a card returned for a fix, archived, or held. Removal is audited. Duplicate removal is a no-op. Closed groups reject removal. |
 
@@ -8879,7 +8879,12 @@ contains `key`, `version`, and `members` and names the group card.
 Lead CLI (uses `--project`, else the agent's project):
 `terrarium group status <key> --step "version branch e2e" --state running --eta 10m`,
 `terrarium group remove <key> <card>`, and
-`terrarium group built <key> vX.Y.Z`. Removed cards do not count in that build.
+`terrarium group built <key>... vX.Y.Z` (one call for each key; repeat the
+command after a failure, as built is idempotent). Removed cards do not count in that build.
+
+The `version_cut` rule opens no new group while another version group of the
+project is open past its cut step (the cut step is done, or a later step has
+started). The accepted cards wait for the next version (TER-609).
 
 - `group_open`: required `key`, `title`, `column`, and `done_when`. The key
   is project-scoped. Repeating an open is a no-op, even after closure.
