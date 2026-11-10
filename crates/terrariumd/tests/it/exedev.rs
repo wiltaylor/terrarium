@@ -11,6 +11,12 @@
 //!   is adopted after a restart. A failed `new` removes the VM. A target
 //!   deleted while `rm` fails leaves a record that the sweep acts on. Two
 //!   accounts of one exe.dev account do not remove each other's VMs.
+//! - TER-653: two daemons on one exe.dev account keep each other's VMs (an
+//!   instance id in the name prefix). The sweep reads the holders again
+//!   under the target lock. A target whose file goes, and a target whose
+//!   `api_token` changes, keep the VM on the account it was made on. A
+//!   record with no ssh host stays through a miss in `ls` until its grace
+//!   time.
 //!
 //! `live_round_trip_on_exe_dev` (ignored) runs on the real exe.dev
 //! account: it needs `EXEDEV_LIVE_TOKEN` (the API token) and
@@ -29,6 +35,8 @@ use serde_json::{Value, json};
 use crate::common::TestDaemon;
 
 const TOKEN: &str = "exe1.fixture-s3cret-token";
+/// A second token of the same fake account.
+const TOKEN2: &str = "exe1.fixture-s3cret-token-2";
 
 /// The fake account: its VMs (name to tags and creation time), each
 /// command it got, and the faults to inject.
@@ -36,6 +44,8 @@ const TOKEN: &str = "exe1.fixture-s3cret-token";
 struct Fake {
     vms: BTreeMap<String, (Vec<String>, chrono::DateTime<chrono::Utc>)>,
     commands: Vec<String>,
+    /// The token of each command, in the order of `commands`.
+    tokens: Vec<String>,
     /// `new` makes the VM and then answers 504.
     fail_new: bool,
     /// `rm` answers 500 and removes nothing.
@@ -80,14 +90,20 @@ async fn fake_api() -> (String, FakeRef) {
         post(move |h: HeaderMap, body: String| {
             let f = f.clone();
             async move {
-                let auth = h.get("authorization").and_then(|v| v.to_str().ok());
-                if auth != Some(&format!("Bearer {TOKEN}")) {
+                let auth = h
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .unwrap_or("")
+                    .to_owned();
+                if auth != TOKEN && auth != TOKEN2 {
                     return (StatusCode::UNAUTHORIZED, "bad token".to_owned());
                 }
                 let words: Vec<String> = body.split_whitespace().map(str::to_owned).collect();
                 let delay = {
                     let mut g = f.lock().unwrap();
                     g.commands.push(body.clone());
+                    g.tokens.push(auth);
                     if words.first().map(String::as_str) == Some("new") {
                         g.new_delay_ms
                     } else {
@@ -155,13 +171,15 @@ async fn fake_api() -> (String, FakeRef) {
 }
 
 /// A fake `ssh`: it logs the destination and runs the remote command here.
+/// While the file `ssh-slow` is in `dir`, it waits before it runs.
 fn fake_ssh(dir: &std::path::Path) -> (String, std::path::PathBuf) {
     let log = dir.join("ssh.log");
     let bin = dir.join("fake-ssh");
     std::fs::write(
         &bin,
         format!(
-            "#!/bin/sh\nfor a; do last=\"$a\"; done\nprev=\"\"\nfor a; do [ \"$prev\" = \"--\" ] && echo \"$a\" >> '{}'; prev=\"$a\"; done\nexec sh -c \"$last\"\n",
+            "#!/bin/sh\nwhile [ -e '{}' ]; do sleep 0.1; done\nfor a; do last=\"$a\"; done\nprev=\"\"\nfor a; do [ \"$prev\" = \"--\" ] && echo \"$a\" >> '{}'; prev=\"$a\"; done\nexec sh -c \"$last\"\n",
+            dir.join("ssh-slow").display(),
             log.display()
         ),
     )
@@ -241,6 +259,11 @@ fn db(td: &TestDaemon) -> rusqlite::Connection {
     terrariumd::db::open(&td.state.join("terrarium.db")).unwrap()
 }
 
+/// The name prefix of the VMs of this daemon (TER-653).
+fn prefix(td: &TestDaemon) -> String {
+    terrariumd::exedev::prefix_of(&terrariumd::exedev::instance(&db(td)).unwrap())
+}
+
 /// Move the times of a target's recorded VM `secs` into the past.
 fn age(td: &TestDaemon, target: &str, secs: i64) {
     let conn = db(td);
@@ -260,6 +283,47 @@ fn age(td: &TestDaemon, target: &str, secs: i64) {
         rusqlite::params![target, back(&c), back(&e)],
     )
     .unwrap();
+}
+
+/// Write a record of a VM of `target`, `age_secs` old, with an 8 hour life.
+fn insert_record(td: &TestDaemon, name: &str, target: &str, ssh_dest: Option<&str>, age_secs: i64) {
+    let at = chrono::Utc::now() - chrono::Duration::seconds(age_secs);
+    db(td)
+        .execute(
+            "INSERT INTO exedev_vms (name, target, project, api_token, admin_set, tag,
+                                     ssh_dest, created_at, expires_at)
+             VALUES (?1, ?2, NULL, 'exedev-api-token', 1, 'terrarium-dev-ssh', ?3, ?4, ?5)",
+            rusqlite::params![
+                name,
+                target,
+                ssh_dest,
+                at.to_rfc3339(),
+                (at + chrono::Duration::hours(8)).to_rfc3339()
+            ],
+        )
+        .unwrap();
+}
+
+/// Whether a VM of this name has a record.
+fn recorded(td: &TestDaemon, name: &str) -> bool {
+    db(td)
+        .query_row(
+            "SELECT count(*) FROM exedev_vms WHERE name = ?1",
+            [name],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+        == 1
+}
+
+/// The number of `ls` calls that the fake got.
+fn ls_calls(fake: &FakeRef) -> usize {
+    fake.lock()
+        .unwrap()
+        .commands
+        .iter()
+        .filter(|c| c.starts_with("ls "))
+        .count()
 }
 
 /// The recorded VM of a target, and its ssh host.
@@ -344,8 +408,9 @@ async fn exedev_targets_make_use_cap_and_sweep_vms_through_the_api() {
     // `up` makes a VM with the tag and the size; exec runs over ssh on it.
     let r = td.post_empty("/api/targets/ex1/up").await;
     assert_eq!(r.ok()["state"], "running", "{}", r.body);
+    let p = prefix(&td);
     let vm1 = vm_of(&td, "ex1").unwrap();
-    assert!(vm1.starts_with("terrarium-x-ex1-"), "{vm1}");
+    assert!(vm1.starts_with(&format!("{p}ex1-")), "{vm1}");
     {
         let f = fake.lock().unwrap();
         assert_eq!(f.vms[&vm1].0, vec!["terrarium-dev-ssh".to_owned()]);
@@ -396,10 +461,10 @@ async fn exedev_targets_make_use_cap_and_sweep_vms_through_the_api() {
     age(&td, "ex2", 3600);
     {
         let mut f = fake.lock().unwrap();
-        f.add("terrarium-x-lost-1", "terrarium-dev-ssh", 3600);
-        f.add("terrarium-x-young-1", "terrarium-dev-ssh", 0);
+        f.add(&format!("{p}lost-1"), "terrarium-dev-ssh", 3600);
+        f.add(&format!("{p}young-1"), "terrarium-dev-ssh", 0);
         f.add("personal", "terrarium-dev-ssh", 3600);
-        f.add("terrarium-x-other-1", "other", 3600);
+        f.add(&format!("{p}other-1"), "other", 3600);
     }
     td.project("p").await;
     let agent = td.agent("p", "a", json!({})).await;
@@ -414,12 +479,16 @@ async fn exedev_targets_make_use_cap_and_sweep_vms_through_the_api() {
         vec![
             (vm1.clone(), "expired".to_owned()),
             (vm2, "unheld".to_owned()),
-            ("terrarium-x-lost-1".to_owned(), "leftover".to_owned()),
+            (format!("{p}lost-1"), "leftover".to_owned()),
         ]
     );
     assert_eq!(
         fake.lock().unwrap().names(),
-        vec!["personal", "terrarium-x-other-1", "terrarium-x-young-1"]
+        vec![
+            "personal".to_owned(),
+            format!("{p}other-1"),
+            format!("{p}young-1")
+        ]
     );
     assert!(vm_of(&td, "ex1").is_none() && vm_of(&td, "ex2").is_none());
     assert_eq!(td.get("/api/targets/ex1").await.ok()["state"], "absent");
@@ -643,6 +712,205 @@ async fn two_accounts_of_one_exe_dev_account_keep_each_others_vms() {
     assert_eq!(fake.lock().unwrap().vms.len(), 2);
 }
 
+/// TER-653 finding 1: two daemons on one exe.dev account (the main daemon
+/// and a test, staging or dev daemon) each have their own instance id in
+/// the name prefix. The sweep of each removes only its own leftovers and
+/// keeps the other daemon's VMs, also when they are old in `ls`.
+#[tokio::test]
+async fn two_daemons_on_one_exe_dev_account_keep_each_others_vms() {
+    let (a, fake, _, url, _) = daemon().await;
+    let mut b = TestDaemon::start().await;
+    let (ssh_b, _) = fake_ssh(b.dir.path());
+    reboot(&mut b, &url, &ssh_b).await;
+    secrets(&b, TOKEN, None).await;
+    let (pa, pb) = (prefix(&a), prefix(&b));
+    assert_ne!(pa, pb);
+    for td in [&a, &b] {
+        td.post("/api/targets", target("ex", 8 * 3600)).await.ok();
+        let r = td.post_empty("/api/targets/ex/up").await;
+        assert_eq!(r.ok()["state"], "running", "{}", r.body);
+    }
+    let (va, vb) = (vm_of(&a, "ex").unwrap(), vm_of(&b, "ex").unwrap());
+    assert!(va.starts_with(&format!("{pa}ex-")), "{va}");
+    assert!(vb.starts_with(&format!("{pb}ex-")), "{vb}");
+    {
+        let mut f = fake.lock().unwrap();
+        f.add(&format!("{pa}lost-1"), "terrarium-dev-ssh", 0);
+        f.add(&format!("{pb}lost-1"), "terrarium-dev-ssh", 0);
+        // `ls` shows each VM as an hour old: past the leftover grace time.
+        f.ls_older_secs = 3600;
+    }
+    assert_eq!(
+        sweep(&a).await,
+        vec![(format!("{pa}lost-1"), "leftover".to_owned())]
+    );
+    assert_eq!(
+        sweep(&b).await,
+        vec![(format!("{pb}lost-1"), "leftover".to_owned())]
+    );
+    let mut want = vec![va.clone(), vb.clone()];
+    want.sort();
+    assert_eq!(fake.lock().unwrap().names(), want);
+    assert_eq!(vm_of(&a, "ex"), Some(va));
+    assert_eq!(vm_of(&b, "ex"), Some(vb));
+}
+
+/// TER-653 finding 2: the sweep plans an unheld VM, then waits for the
+/// target lock (a slow `up` holds it). An agent that holds the target
+/// starts in that time. Under the lock the sweep reads the holders again
+/// and keeps the VM.
+#[tokio::test]
+async fn the_sweep_reads_the_holders_again_under_the_target_lock() {
+    let (td, fake, _, _, _) = daemon().await;
+    td.post("/api/targets", target("ex", 8 * 3600)).await.ok();
+    td.post_empty("/api/targets/ex/up").await.ok();
+    let vm = vm_of(&td, "ex").unwrap();
+    age(&td, "ex", 3600);
+    // An agent that holds the target by its policy; not running yet.
+    td.project("p").await;
+    let a = td
+        .agent("p", "w", json!({"policy": {"targets": ["ex"]}}))
+        .await;
+    let w = a["id"].as_str().unwrap().to_owned();
+    // The adopting `up` holds the target lock while its ssh check waits.
+    let slow = td.dir.path().join("ssh-slow");
+    std::fs::write(&slow, "").unwrap();
+    let before = ls_calls(&fake);
+    let up = td.post_empty("/api/targets/ex/up");
+    let swept = async {
+        // After the `ls` of the `up`: the `up` holds the lock.
+        while ls_calls(&fake) < before + 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        td.post_empty("/api/exedev/sweep").await
+    };
+    let holder = async {
+        // After the `ls` of the sweep, it reads the holders (none) and
+        // waits for the lock.
+        while ls_calls(&fake) < before + 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        td.post_empty(&format!("/api/agents/{w}/start")).await.ok();
+        td.wait_status(&w, "idle").await;
+        std::fs::remove_file(&slow).unwrap();
+    };
+    let (up, swept, ()) = tokio::join!(up, swept, holder);
+    assert_eq!(up.ok()["state"], "running", "{}", up.body);
+    let body = swept.ok().clone();
+    assert_eq!(body["removed"], json!([]), "{body}");
+    assert_eq!(body["errors"], json!([]), "{body}");
+    assert_eq!(fake.lock().unwrap().names(), vec![vm.clone()]);
+    assert_eq!(vm_of(&td, "ex"), Some(vm));
+}
+
+/// TER-653 finding 3: a target from a file whose file goes is deleted on
+/// reload. Its VM's record stays, and the sweep removes the VM as
+/// `orphaned`.
+#[tokio::test]
+async fn a_vm_of_a_target_whose_file_goes_is_removed_by_the_sweep() {
+    let (td, fake, _, _, _) = daemon().await;
+    crate::common::write(
+        &td.config,
+        "targets/fx.toml",
+        "kind = \"exedev\"\nephemeral = true\ncredential = \"vmkey\"\n",
+    );
+    td.post_empty("/api/reload").await.ok();
+    assert_eq!(td.get("/api/targets/fx").await.ok()["source"], "file");
+    let r = td.post_empty("/api/targets/fx/up").await;
+    assert_eq!(r.ok()["state"], "running", "{}", r.body);
+    let vm = vm_of(&td, "fx").unwrap();
+    std::fs::remove_file(td.config.join("targets/fx.toml")).unwrap();
+    td.post_empty("/api/reload").await.ok();
+    td.get("/api/targets/fx").await.err(404, "not_found");
+    assert_eq!(vm_of(&td, "fx").as_deref(), Some(vm.as_str()));
+    assert_eq!(sweep(&td).await, vec![(vm, "orphaned".to_owned())]);
+    assert!(fake.lock().unwrap().vms.is_empty());
+    assert!(vm_of(&td, "fx").is_none());
+}
+
+/// TER-653 finding 3: the target's `[exedev] api_token` changes while it
+/// has a VM. `down` removes the VM with the token it was made with; the
+/// next `up` uses the new token.
+#[tokio::test]
+async fn a_changed_api_token_removes_the_vm_on_the_account_it_was_made_on() {
+    let (td, fake, _, _, _) = daemon().await;
+    let r = td
+        .post(
+            "/api/secrets",
+            json!({"name": "exedev-other", "kind": "api_key", "fields": {"value": TOKEN2}}),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 201, "{}", r.body);
+    td.post("/api/targets", target("ex", 8 * 3600)).await.ok();
+    td.post_empty("/api/targets/ex/up").await.ok();
+    let vm = vm_of(&td, "ex").unwrap();
+    let r = td
+        .patch(
+            "/api/targets/ex",
+            json!({"exedev": {"api_token": "exedev-other"}}),
+        )
+        .await;
+    assert!(r.status.is_success(), "{}", r.body);
+    // Two accounts now (the record's and the target's): the young VM stays.
+    assert!(sweep(&td).await.is_empty());
+    assert_eq!(fake.lock().unwrap().names(), vec![vm.clone()]);
+    let from = fake.lock().unwrap().commands.len();
+    let r = td.post_empty("/api/targets/ex/down").await;
+    assert_eq!(r.ok()["state"], "absent", "{}", r.body);
+    td.post_empty("/api/targets/ex/up").await.ok();
+    let f = fake.lock().unwrap();
+    let used: Vec<(&str, &str)> = f.commands[from..]
+        .iter()
+        .zip(&f.tokens[from..])
+        .filter_map(|(c, t)| Some((c.split_whitespace().next()?, t.as_str())))
+        .filter(|(c, _)| *c == "rm" || *c == "new")
+        .collect();
+    assert_eq!(used, vec![("rm", TOKEN), ("new", TOKEN2)], "{:?}", f.commands);
+    assert!(!f.vms.contains_key(&vm));
+    assert_eq!(f.vms.len(), 1);
+}
+
+/// TER-653 finding 4: a record with no ssh host (its `new` may still run)
+/// that `ls` does not list stays through `status` and `up`. The `up` makes
+/// a new VM. When the first VM shows up late, the sweep removes it as
+/// `unready` after the grace time.
+#[tokio::test]
+async fn a_record_with_no_ssh_host_stays_through_an_ls_miss_until_its_grace_time() {
+    let (td, fake, _, _, _) = daemon().await;
+    td.post("/api/targets", target("ex", 8 * 3600)).await.ok();
+    let late = "terrarium-x-ex-late";
+    insert_record(&td, late, "ex", None, 0);
+    let r = td.post_empty("/api/targets/ex/status").await;
+    assert_eq!(r.ok()["state"], "absent", "{}", r.body);
+    assert!(recorded(&td, late), "status kept the record");
+    let r = td.post_empty("/api/targets/ex/up").await;
+    assert_eq!(r.ok()["state"], "running", "{}", r.body);
+    assert!(recorded(&td, late), "up kept the record");
+    let new = vm_of(&td, "ex").unwrap();
+    assert_ne!(new, late);
+    // The first `new` lands late; after the grace time the sweep removes it.
+    fake.lock().unwrap().add(late, "terrarium-dev-ssh", 0);
+    assert!(sweep(&td).await.is_empty());
+    let back = (chrono::Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339();
+    db(&td)
+        .execute(
+            "UPDATE exedev_vms SET created_at = ?2 WHERE name = ?1",
+            rusqlite::params![late, back],
+        )
+        .unwrap();
+    assert_eq!(sweep(&td).await, vec![(late.to_owned(), "unready".to_owned())]);
+    assert_eq!(fake.lock().unwrap().names(), vec![new.clone()]);
+    assert!(!recorded(&td, late));
+    // Past the grace time, a miss in `ls` forgets a record with no ssh host.
+    let old = "terrarium-x-ex-old";
+    td.post_empty("/api/targets/ex/down").await.ok();
+    insert_record(&td, old, "ex", None, 3600);
+    let r = td.post_empty("/api/targets/ex/status").await;
+    assert_eq!(r.ok()["state"], "absent", "{}", r.body);
+    assert!(!recorded(&td, old));
+}
+
 /// The live round trip on the operator's exe.dev account (TER-294
 /// acceptance): make one VM through the kind, check that `ls` lists it, run
 /// a command on it over ssh, let the sweep timer remove it at the end of
@@ -666,7 +934,13 @@ async fn live_round_trip_on_exe_dev() {
         zeroize::Zeroizing::new(token.clone()),
     )
     .unwrap();
-    let prefix = "terrarium-x-live";
+    // Its own instance id (TER-653): its sweep never takes a VM of another
+    // daemon on the account, and the clean-up below takes only its own.
+    let inst = format!(
+        "live{:04x}",
+        chrono::Utc::now().timestamp_subsec_micros() & 0xffff
+    );
+    let prefix = terrariumd::exedev::prefix_of(&inst);
     let names = |l: &[terrariumd::exedev::Listed]| -> Vec<String> {
         l.iter().map(|x| x.name.clone()).collect()
     };
@@ -679,12 +953,16 @@ async fn live_round_trip_on_exe_dev() {
         )
         .unwrap();
         let td = TestDaemon::start().await;
+        db(&td)
+            .execute("UPDATE exedev_instance SET id = ?1", [&inst])
+            .unwrap();
         secrets(&td, &token, Some(&key)).await;
         td.post("/api/targets", target("live", life)).await.ok();
         let r = td.post_empty("/api/targets/live/up").await;
         assert_eq!(r.ok()["state"], "running", "{}", r.body);
         let up_at = std::time::Instant::now();
         let vm = vm_of(&td, "live").unwrap();
+        assert!(vm.starts_with(&terrariumd::exedev::prefix_of(&inst)), "{vm}");
         let listed = names(&api.ls().await.unwrap());
         println!("made VM {vm}; ls after up: {listed:?}");
         assert!(listed.contains(&vm), "ls does not list {vm} after up");
@@ -727,7 +1005,7 @@ async fn live_round_trip_on_exe_dev() {
     // Remove every VM of this run that is left, then report.
     let left: Vec<String> = names(&api.ls().await.unwrap())
         .into_iter()
-        .filter(|n| n.starts_with(prefix))
+        .filter(|n| n.starts_with(&prefix))
         .collect();
     if !left.is_empty() {
         api.rm(&left).await.unwrap();
@@ -736,5 +1014,5 @@ async fn live_round_trip_on_exe_dev() {
     println!("ls after: {after:?}");
     let vm = body.unwrap();
     assert!(left.is_empty(), "the sweep left {left:?}");
-    assert!(after.iter().all(|n| n != &vm && !n.starts_with(prefix)));
+    assert!(after.iter().all(|n| n != &vm && !n.starts_with(&prefix)));
 }

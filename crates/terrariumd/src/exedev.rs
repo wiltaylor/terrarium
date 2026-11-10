@@ -21,9 +21,10 @@
 //!   `expires_at` and at least every hour; and `POST /api/exedev/sweep`)
 //!   removes a VM past its life (and mails the project), a VM whose target
 //!   is gone, a VM with no running holder or no ssh host after
-//!   [`GRACE_SECS`], and a VM with the Terrarium name prefix
-//!   ([`NAME_PREFIX`]) and a known tag that no row records, after
-//!   [`GRACE_SECS`].
+//!   [`GRACE_SECS`], and a VM with this daemon's name prefix
+//!   ([`prefix_of`] its [`instance`] id) and a known tag that no row
+//!   records, after [`GRACE_SECS`]. A VM of another daemon on the same
+//!   account has another prefix, so it is never a leftover here (TER-653).
 //! - The token is never on a command line or in a log: it goes only into
 //!   the `Authorization` header, and an answer that holds it is not shown.
 
@@ -48,8 +49,9 @@ use crate::store::targets;
 pub const DEFAULT_API: &str = "https://exe.dev/exec";
 /// At most this many exe.dev VMs at once (operator, E4).
 pub const MAX_VMS: usize = 3;
-/// The name prefix of each VM that Terrarium makes. The sweep removes an
-/// unrecorded VM only with this prefix.
+/// The name prefix of each VM that Terrarium makes, of every daemon. The
+/// cap counts the VMs in `ls` with it. The sweep removes an unrecorded VM
+/// only with the longer prefix of its own daemon ([`prefix_of`]).
 pub const NAME_PREFIX: &str = "terrarium-x-";
 /// The sweep runs at least this often.
 pub const SWEEP_EVERY: Duration = Duration::from_secs(3600);
@@ -152,6 +154,12 @@ impl Vm {
     fn age_secs(&self, now: DateTime<Utc>) -> i64 {
         parse_time(&self.created_at).map_or(i64::MAX, |t| (now - t).num_seconds())
     }
+
+    /// No ssh host yet and younger than [`GRACE_SECS`]: its `new` may still
+    /// run, so a miss in `ls` does not mean that the VM is gone.
+    pub fn starting(&self, now: DateTime<Utc>) -> bool {
+        self.ssh_dest.is_none() && self.age_secs(now) < GRACE_SECS
+    }
 }
 
 fn parse_time(s: &str) -> Option<DateTime<Utc>> {
@@ -193,6 +201,29 @@ pub fn record_of(conn: &Connection, target: &str) -> ApiResult<Option<Vm>> {
             vm_row,
         )
         .optional()?)
+}
+
+/// The exe.dev instance id of this daemon: one row of `exedev_instance`,
+/// made once by its migration (8 hex characters). Read each time, so a
+/// test can set it.
+pub fn instance(conn: &Connection) -> ApiResult<String> {
+    let id: Option<String> = conn
+        .query_row("SELECT id FROM exedev_instance LIMIT 1", [], |r| r.get(0))
+        .optional()?;
+    match id {
+        Some(i) if plain_word(&i) => Ok(i),
+        Some(i) => Err(ApiError::internal(format!(
+            "bad exe.dev instance id `{i}` in `exedev_instance`"
+        ))),
+        None => Err(ApiError::internal(
+            "no exe.dev instance id in `exedev_instance`",
+        )),
+    }
+}
+
+/// The name prefix of the VMs of one daemon: `terrarium-x-<instance>-`.
+pub fn prefix_of(instance: &str) -> String {
+    format!("{NAME_PREFIX}{instance}-")
 }
 
 fn record_named(conn: &Connection, name: &str) -> ApiResult<Option<Vm>> {
@@ -323,9 +354,10 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
     Ok(())
 }
 
-/// A new VM name for `target`: [`NAME_PREFIX`], the target name (lower
-/// case, at most 20 characters), and 8 random characters.
-pub fn new_name(target: &str) -> String {
+/// A new VM name for `target` on the daemon `instance`: [`prefix_of`] the
+/// instance, the target name (lower case, at most 20 characters), and 8
+/// random characters.
+pub fn new_name(instance: &str, target: &str) -> String {
     let mut t: String = target
         .to_ascii_lowercase()
         .chars()
@@ -335,10 +367,11 @@ pub fn new_name(target: &str) -> String {
     t = t.trim_matches('-').to_owned();
     let id = ulid::Ulid::new().to_string().to_ascii_lowercase();
     let tail = &id[id.len() - 8..];
+    let prefix = prefix_of(instance);
     if t.is_empty() {
-        format!("{NAME_PREFIX}{tail}")
+        format!("{prefix}{tail}")
     } else {
-        format!("{NAME_PREFIX}{t}-{tail}")
+        format!("{prefix}{t}-{tail}")
     }
 }
 
@@ -636,14 +669,23 @@ async fn up_locked(state: &Shared, def: &TargetDef) -> ApiResult<String> {
                 return Ok("running".into());
             }
             // Past its life: never adopted.
-            Some(_) => api.rm(std::slice::from_ref(&vm.name)).await?,
-            None => {}
+            Some(_) => {
+                api.rm(std::slice::from_ref(&vm.name)).await?;
+                forget(state, &vm.name).await?;
+            }
+            // Not in `ls` while its `new` may still run (a restart during
+            // `new`): the record stays, so the sweep removes the VM when it
+            // shows up (`unready` after the grace time). A new VM is made.
+            None if vm.starting(now) => {
+                info!(target = %def.name, vm = %vm.name, "the exe.dev VM is not in ls yet; its record stays");
+            }
+            None => forget(state, &vm.name).await?,
         }
-        forget(state, &vm.name).await?;
     }
     let d = def.clone();
     let account = state.db.read(move |c| Account::of_target(c, &d)).await?;
     let api = api_for(state, &account)?;
+    let inst = state.db.read(instance).await?;
     let one = state.executor.exedev.create.lock().await;
     let mut running: BTreeSet<String> = state
         .db
@@ -664,7 +706,7 @@ async fn up_locked(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     }
     let life = chrono::Duration::seconds(i64::try_from(s.max_life_secs).unwrap_or(i64::MAX));
     let mut vm = Vm {
-        name: new_name(&def.name),
+        name: new_name(&inst, &def.name),
         target: def.name.clone(),
         project: account.project.clone(),
         api_token: account.api_token.clone(),
@@ -756,8 +798,9 @@ async fn destroy_locked(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     Ok("absent".into())
 }
 
-/// `status`: `running` when the recorded VM is in `ls`, else `absent` (and
-/// the record goes).
+/// `status`: `running` when the recorded VM is in `ls`, else `absent`. The
+/// record goes, except while the VM is [`Vm::starting`]: then it stays for
+/// the grace time.
 pub async fn status(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     let lock = state.executor.exedev.target(&def.name);
     let _target = lock.lock().await;
@@ -769,7 +812,9 @@ pub async fn status(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     if listed.iter().any(|l| l.name == vm.name) {
         Ok("running".into())
     } else {
-        forget(state, &vm.name).await?;
+        if !vm.starting(Utc::now()) {
+            forget(state, &vm.name).await?;
+        }
         Ok("absent".into())
     }
 }
@@ -788,8 +833,8 @@ pub enum Reason {
     Unready,
     /// No running agent holds its target, after the grace time.
     Unheld,
-    /// In `ls` with the prefix and a known tag, but no row records it,
-    /// after the grace time.
+    /// In `ls` with this daemon's prefix and a known tag, but no row
+    /// records it, after the grace time.
     Leftover,
 }
 
@@ -818,6 +863,8 @@ pub struct Facts<'a> {
     pub now: DateTime<Utc>,
     /// The account of this `ls`.
     pub account: &'a Account,
+    /// The name prefix of this daemon's VMs ([`prefix_of`]).
+    pub prefix: &'a str,
     /// Every recorded VM, of every account.
     pub records: &'a [Vm],
     /// The names of the `exedev` targets that exist.
@@ -834,7 +881,7 @@ pub struct Facts<'a> {
 pub fn plan(f: &Facts<'_>) -> Vec<Removal> {
     let mut out = Vec::new();
     for v in f.records.iter().filter(|v| v.account() == *f.account) {
-        if let Some(reason) = record_reason(f, v) {
+        if let Some(reason) = record_reason(f, v, f.held.contains(&v.target)) {
             out.push(Removal {
                 vm: v.name.clone(),
                 target: Some(v.target.clone()),
@@ -847,7 +894,7 @@ pub fn plan(f: &Facts<'_>) -> Vec<Removal> {
         let old = l
             .created_at
             .is_some_and(|t| (f.now - t).num_seconds() >= GRACE_SECS);
-        if l.name.starts_with(NAME_PREFIX)
+        if l.name.starts_with(f.prefix)
             && l.tags.iter().any(|t| f.tags.contains(t))
             && !known.contains(l.name.as_str())
             && old
@@ -862,7 +909,9 @@ pub fn plan(f: &Facts<'_>) -> Vec<Removal> {
     out
 }
 
-fn record_reason(f: &Facts<'_>, v: &Vm) -> Option<Reason> {
+/// Why the sweep removes a recorded VM. `held`: a running agent holds its
+/// target.
+fn record_reason(f: &Facts<'_>, v: &Vm, held: bool) -> Option<Reason> {
     let old = v.age_secs(f.now) >= GRACE_SECS;
     if v.expired(f.now) {
         Some(Reason::Expired)
@@ -870,7 +919,7 @@ fn record_reason(f: &Facts<'_>, v: &Vm) -> Option<Reason> {
         Some(Reason::Orphaned)
     } else if old && v.ssh_dest.is_none() {
         Some(Reason::Unready)
-    } else if old && !f.held.contains(&v.target) {
+    } else if old && !held {
         Some(Reason::Unheld)
     } else {
         None
@@ -899,6 +948,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<Value> {
         let a = state.db.read(move |c| Account::of_target(c, &d)).await?;
         accounts.entry(a).or_default().insert(settings(&r.def).tag);
     }
+    let prefix = prefix_of(&state.db.read(instance).await?);
     let mut removed = Vec::new();
     let mut errors = Vec::new();
     for (account, tags) in &accounts {
@@ -951,6 +1001,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<Value> {
         let facts = Facts {
             now,
             account,
+            prefix: &prefix,
             records: &all,
             targets: &names,
             held: &held,
@@ -986,8 +1037,8 @@ pub async fn sweep(state: &Shared) -> ApiResult<Value> {
 }
 
 /// Remove one planned VM. A recorded VM is removed under its target's
-/// lock, after a fresh read shows the reason still holds. `false`: no
-/// longer to remove.
+/// lock, after a fresh read of the record and of the target's running
+/// holders shows the reason still holds. `false`: no longer to remove.
 async fn remove(state: &Shared, api: &Api, f: &Facts<'_>, rm: &Removal) -> ApiResult<bool> {
     let Some(target) = &rm.target else {
         // A leftover: still unrecorded right before the `rm`.
@@ -1004,7 +1055,13 @@ async fn remove(state: &Shared, api: &Api, f: &Facts<'_>, rm: &Removal) -> ApiRe
     let Some(vm) = state.db.read(move |c| record_named(c, &n)).await? else {
         return Ok(false);
     };
-    if record_reason(f, &vm) != Some(rm.reason) {
+    // The holders now, under the lock: an agent that started after the
+    // plan holds the VM (TER-653).
+    let held = f.targets.contains(&vm.target)
+        && !crate::executor::running_holders(state, &vm.target, None)
+            .await?
+            .is_empty();
+    if record_reason(f, &vm, held) != Some(rm.reason) {
         return Ok(false);
     }
     api.rm(std::slice::from_ref(&vm.name)).await?;
@@ -1172,12 +1229,30 @@ mod tests {
 
     #[test]
     fn a_new_name_has_the_prefix_the_target_and_a_random_tail() {
-        let a = new_name("Build_Box");
-        let b = new_name("Build_Box");
-        assert!(a.starts_with("terrarium-x-build-box-"), "{a}");
+        let a = new_name("0a1b2c3d", "Build_Box");
+        let b = new_name("0a1b2c3d", "Build_Box");
+        assert!(a.starts_with("terrarium-x-0a1b2c3d-build-box-"), "{a}");
         assert_ne!(a, b);
         assert!(plain_word(&a), "{a}");
-        assert!(new_name(&"x".repeat(60)).len() <= NAME_PREFIX.len() + 20 + 9);
+        // A DNS label (`<name>.exe.xyz`) has at most 63 characters.
+        let long = new_name("0a1b2c3d", &"x".repeat(60));
+        assert_eq!(long.len(), prefix_of("0a1b2c3d").len() + 20 + 9);
+        assert!(long.len() <= 63, "{long}");
+    }
+
+    /// The migration makes one instance id, a plain word of 8 hex
+    /// characters, and a second open keeps it.
+    #[test]
+    fn the_instance_id_is_made_once_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let id = instance(&crate::db::open(&path).unwrap()).unwrap();
+        assert_eq!(id.len(), 8, "{id}");
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "{id}");
+        assert_eq!(instance(&crate::db::open(&path).unwrap()).unwrap(), id);
+        let other = tempfile::tempdir().unwrap();
+        let id2 = instance(&crate::db::open(&other.path().join("t.db")).unwrap()).unwrap();
+        assert_ne!(id, id2, "two daemons have two ids");
     }
 
     fn account() -> Account {
@@ -1239,6 +1314,9 @@ mod tests {
         }
     }
 
+    /// The prefix of this daemon in the plan tests.
+    const P: &str = "terrarium-x-aaaa0001-";
+
     fn run_plan(
         records: &[Vm],
         targets: &[&str],
@@ -1252,6 +1330,7 @@ mod tests {
         plan(&Facts {
             now: Utc::now(),
             account: &a,
+            prefix: P,
             records,
             targets: &targets,
             held: &held,
@@ -1282,9 +1361,13 @@ mod tests {
         ];
         let ls = vec![
             listed("terrarium-x-a-1", "terrarium-dev-ssh", 3600),
-            listed("terrarium-x-lost-1", "terrarium-dev-ssh", 3600),
-            listed("terrarium-x-new-1", "terrarium-dev-ssh", 60),
-            listed("terrarium-x-other-1", "someone-else", 3600),
+            listed(&format!("{P}lost-1"), "terrarium-dev-ssh", 3600),
+            listed(&format!("{P}new-1"), "terrarium-dev-ssh", 60),
+            listed(&format!("{P}other-1"), "someone-else", 3600),
+            // TER-653: a VM of another daemon on the account, and one of
+            // the old prefix with no instance, are no leftovers here.
+            listed("terrarium-x-bbbb0002-lost-1", "terrarium-dev-ssh", 3600),
+            listed("terrarium-x-lost-2", "terrarium-dev-ssh", 3600),
             listed("terrarium-ssh2", "terrarium-dev-ssh", 3600),
             listed("personal-vm", "terrarium-dev-ssh", 3600),
         ];
@@ -1301,7 +1384,7 @@ mod tests {
                 ("terrarium-x-b-1".into(), Reason::Unheld),
                 ("terrarium-x-gone-1".into(), Reason::Orphaned),
                 ("terrarium-x-e-1".into(), Reason::Unready),
-                ("terrarium-x-lost-1".into(), Reason::Leftover),
+                (format!("{P}lost-1"), Reason::Leftover),
             ]
         );
     }
@@ -1313,14 +1396,14 @@ mod tests {
         let other = Vm {
             project: Some("p".into()),
             admin_set: false,
-            ..vm("terrarium-x-p-1", "p-ex", 3600, 8 * 3600)
+            ..vm(&format!("{P}p-1"), "p-ex", 3600, 8 * 3600)
         };
-        let ls = vec![listed("terrarium-x-p-1", "terrarium-dev-ssh", 3600)];
+        let ls = vec![listed(&format!("{P}p-1"), "terrarium-dev-ssh", 3600)];
         assert!(run_plan(&[other], &["p-ex"], &["p-ex"], &ls).is_empty());
         // Unrecorded, it is a leftover.
         assert_eq!(
             run_plan(&[], &[], &[], &ls),
-            vec![("terrarium-x-p-1".into(), Reason::Leftover)]
+            vec![(format!("{P}p-1"), Reason::Leftover)]
         );
     }
 
@@ -1343,6 +1426,7 @@ mod tests {
             plan(&Facts {
                 now: made + chrono::Duration::seconds(s),
                 account: &a,
+                prefix: P,
                 records: &recs,
                 targets: &t,
                 held: &h,
