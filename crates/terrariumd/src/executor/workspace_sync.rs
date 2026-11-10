@@ -489,7 +489,7 @@ mod tests {
             crate::store::targets::validate(&def)
                 .unwrap_err()
                 .message
-                .contains("requires an ssh target")
+                .contains("requires an ssh or exedev target")
         );
     }
 
