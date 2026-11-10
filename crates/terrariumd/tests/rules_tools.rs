@@ -624,11 +624,22 @@ async fn a_reload_adds_the_merge_queue_to_old_wait_overrides() {
         .patch("/api/projects/p/board", json!({"columns": cols}))
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let old = format!(
-        "{}\nrule \"agent-park\" {{\n  description = \"Parks. Mapped to this board: the board has no column `validating`: dropped from `data.to`.\"\n  on = [\"card\"]\n  max_per_hour = 600\n  when \"data.change\" {{ eq = \"moved\" }}\n  when \"data.to\" {{ one_of = [\"review\"] }}\n  agent_park {{ reason = \"card in {{{{card.column}}}}\" }}\n}}\n\n\
-rule \"agent-unpark\" {{\n  description = \"Wakes. Mapped to this board: the board has no column `validating`: `data.to ne validating` always holds, dropped.\"\n  on = [\"card\"]\n  max_per_hour = 600\n  when \"data.change\" {{ eq = \"moved\" }}\n  when \"data.to\" {{ ne = \"review\" }}\n  when \"data.to\" {{ ne = \"done\" }}\n  agent_unpark {{}}\n}}\n",
-        terrarium_core::rules_tools::MIGRATION_HEADER
-    );
+    // The text of a migration before TER-222 for this board.
+    let columns = state(&td)
+        .db
+        .read(|c| Ok(terrariumd::store::rules::context(c, "p")?.columns.unwrap()))
+        .await
+        .unwrap();
+    let ctx = terrarium_core::rules_file::Context::default();
+    let old_pack = terrarium_core::rules_file::parse(
+        terrarium_core::rules_tools::PRE_TER_222_WAIT_RULES,
+        "old",
+        &ctx,
+    )
+    .unwrap();
+    let none = terrarium_core::rules_file::RuleSet::default();
+    let old = terrarium_core::rules_tools::migrate(&old_pack, "", &none, &columns).text;
+    assert!(old.contains("one_of = [\"review\"] }"), "{old}");
     let r = td.put("/api/projects/p/rules", json!({"text": old})).await;
     assert_eq!(r.status, 200, "{}", r.body);
 
@@ -650,8 +661,21 @@ rule \"agent-unpark\" {{\n  description = \"Wakes. Mapped to this board: the boa
     let puts = audit_rows(&td, "rules.put").await;
     assert_eq!(puts.len(), 2, "{puts:?}");
 
+    assert!(text.contains("merge_queue added (TER-243)."), "{text}");
     // A second load changes nothing.
     td.post_empty("/api/reload").await.ok();
     assert_eq!(td.get("/api/projects/p/rules").await.ok()["text"], text);
     assert_eq!(audit_rows(&td, "rules.put").await.len(), 2);
+
+    // The operator takes merge_queue out again in the same form: the next
+    // load keeps it out.
+    let removed = text
+        .replace(", \"merge_queue\"] }", "] }")
+        .replace("  when \"data.to\" { ne = \"merge_queue\" }\n", "");
+    assert!(!removed.contains("\"merge_queue\""), "{removed}");
+    let r = td.put("/api/projects/p/rules", json!({"text": removed})).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    td.post_empty("/api/reload").await.ok();
+    assert_eq!(td.get("/api/projects/p/rules").await.ok()["text"], removed);
+    assert_eq!(audit_rows(&td, "rules.put").await.len(), 3);
 }

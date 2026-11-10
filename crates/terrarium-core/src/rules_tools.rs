@@ -573,55 +573,39 @@ pub fn migrate(
     }
 }
 
-/// `rule` (a migrated `agent-park` or `agent-unpark`) with the wait column
-/// `merge_queue` (TER-222), or `None` when it has it. `mq` is the name of
-/// the board's column for a `data.to` or `data.from`; a `_role` path takes
-/// the role `merge_queue`.
+/// `rule` (an `agent-park` or `agent-unpark` of [`PRE_TER_222_WAIT_RULES`]
+/// mapped to a board) with the wait column `mq` (the name of the board's
+/// merge queue column) on `data.to`, or `None` when it has it.
 fn with_merge_queue(rule: &Rule, mq: &str) -> Option<Rule> {
-    let value = |path: &str| -> String {
-        if path.ends_with("_role") {
-            "merge_queue".to_owned()
-        } else {
-            mq.to_owned()
-        }
-    };
-    let column_path = |p: &str| {
-        matches!(
-            p,
-            "data.to" | "data.from" | "data.to_role" | "data.from_role"
-        )
-    };
+    let to = |m: &MatchRule| m.path == "data.to";
+    let v = Value::from(mq);
     let mut out = rule.clone();
     let mut changed = false;
-    for m in &mut out.when {
-        if m.op != MatchOp::In || !column_path(&m.path) {
-            continue;
-        }
-        let v = Value::String(value(&m.path));
-        if let Value::Array(items) = &mut m.value
+    for m in out.when.iter_mut().filter(|m| m.op == MatchOp::In) {
+        if m.path == "data.to"
+            && let Value::Array(items) = &mut m.value
             && !items.contains(&v)
         {
-            items.push(v);
+            items.push(v.clone());
             changed = true;
         }
     }
     if rule.name == "agent-unpark" {
-        let to = |m: &MatchRule| matches!(m.path.as_str(), "data.to" | "data.to_role");
-        let has = rule.when.iter().any(|m| {
-            m.op == MatchOp::Ne && to(m) && m.value.as_str() == Some(value(&m.path).as_str())
-        });
+        let has = rule
+            .when
+            .iter()
+            .any(|m| m.op == MatchOp::Ne && to(m) && m.value.as_str() == Some(mq));
         let last = rule
             .when
             .iter()
             .rposition(|m| m.op == MatchOp::Ne && to(m) && m.value.as_str() != Some("done"));
         if let (false, Some(i)) = (has, last) {
-            let path = rule.when[i].path.clone();
             out.when.insert(
                 i + 1,
                 MatchRule {
-                    value: Value::String(value(&path)),
-                    path,
+                    path: "data.to".to_owned(),
                     op: MatchOp::Ne,
+                    value: v,
                 },
             );
             changed = true;
@@ -630,37 +614,110 @@ fn with_merge_queue(rule: &Rule, mq: &str) -> Option<Rule> {
     changed.then_some(out)
 }
 
+/// The `agent-park` and `agent-unpark` rules of the pack before TER-222
+/// (from f2e53210 to 07982934^): the wait columns as names, without
+/// `merge_queue`. [`add_merge_queue_to_wait_overrides`] changes only an
+/// override that is this text mapped to the board.
+pub const PRE_TER_222_WAIT_RULES: &str = r#"rule "agent-park" {
+  description = "The card waits on others: its bound agent parks."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { one_of = ["validating", "review", "accepted"] }
+  agent_park { reason = "card in {{card.column}}" }
+}
+
+rule "agent-unpark" {
+  description = "The card came back out of a wait column: its parked agent wakes with the move and the failure block."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { ne = "validating" }
+  when "data.to" { ne = "review" }
+  when "data.to" { ne = "accepted" }
+  when "data.to" { ne = "done" }
+  agent_unpark {}
+}
+"#;
+
+/// The note that [`add_merge_queue_to_wait_overrides`] appends to the
+/// description of each override it changes. A block with it is never
+/// changed again.
+pub const MERGE_QUEUE_MARK: &str = "merge_queue added (TER-243).";
+
+/// The board's merge queue column as `bound.rs` finds a wait column: the
+/// column with the role `merge_queue`, else a column with no role and the
+/// name `merge_queue`.
+fn merge_queue_column(columns: &[BoardColumn]) -> Option<&BoardColumn> {
+    columns
+        .iter()
+        .find(|c| c.role.as_deref() == Some("merge_queue"))
+        .or_else(|| {
+            columns
+                .iter()
+                .find(|c| c.role.is_none() && c.name == "merge_queue")
+        })
+}
+
+/// The overrides that [`migrate`] wrote for `columns` before TER-222, as
+/// the blocks of its text, by rule name.
+fn pre_ter_222_overrides(columns: &[BoardColumn]) -> Vec<(String, String)> {
+    let Ok(old) = rules_file::parse(
+        PRE_TER_222_WAIT_RULES,
+        "pre-ter-222",
+        &rules_file::Context::default(),
+    ) else {
+        return Vec::new();
+    };
+    old.rules
+        .iter()
+        .filter_map(|r| match map_rule(r, columns) {
+            Some((m, false, _)) => Some((m.name.clone(), to_wcl(&m))),
+            _ => None,
+        })
+        .collect()
+}
+
 /// TER-243: add the wait column `merge_queue` (TER-222) to the
-/// `agent-park` and `agent-unpark` overrides that an older [`migrate`]
-/// wrote into `text` (the project's file, `own` its rules read without the
-/// column check). Without it a move from review to the merge queue wakes
-/// the bound agent with a return turn. Only an override after the
-/// [`MIGRATION_HEADER`] whose block is still the migration's text is
-/// changed: an edited rule stays. `None`: nothing to change, or the board
-/// has no `merge_queue` column (by name, else by role).
+/// `agent-park` and `agent-unpark` overrides that a [`migrate`] before
+/// TER-222 wrote into `text` (the project's file, `own` its rules read
+/// without the column check). Without it a move from review to the merge
+/// queue wakes the bound agent with a return turn. A one-time step: only
+/// a block after the [`MIGRATION_HEADER`] that is exactly the old
+/// migration's text for this board is changed, and the change appends
+/// [`MERGE_QUEUE_MARK`] to its description. Any edit, and any block with
+/// the mark, stays as it is. `None`: nothing to change, or the board has
+/// no merge queue column ([`merge_queue_column`]).
 pub fn add_merge_queue_to_wait_overrides(
     text: &str,
     own: &RuleSet,
     columns: &[BoardColumn],
 ) -> Option<String> {
     let header = text.find(MIGRATION_HEADER)?;
-    let mq = column_named_or_role(columns, "merge_queue")?;
+    let mq = merge_queue_column(columns)?;
+    let old_blocks = pre_ter_222_overrides(columns);
     let mut out = text.to_owned();
     let mut changed = false;
     for r in &own.rules {
         if !matches!(r.name.as_str(), "agent-park" | "agent-unpark")
-            || !r.enabled
-            || !r
+            || r
                 .description
                 .as_deref()
-                .is_some_and(|d| d.contains("Mapped to this board:"))
+                .is_some_and(|d| d.contains(MERGE_QUEUE_MARK))
         {
             continue;
         }
-        let Some(new) = with_merge_queue(r, &mq.name) else {
+        let old = to_wcl(r);
+        if !old_blocks.iter().any(|(n, b)| *n == r.name && *b == old) {
+            continue;
+        }
+        let Some(mut new) = with_merge_queue(r, &mq.name) else {
             continue;
         };
-        let old = to_wcl(r);
+        new.description = Some(match &new.description {
+            Some(d) => format!("{d} {MERGE_QUEUE_MARK}"),
+            None => MERGE_QUEUE_MARK.to_owned(),
+        });
         let Some(at) = out[header..].find(&old) else {
             continue;
         };
@@ -1419,14 +1476,14 @@ rule "to-blocked" {
         assert!(code.iter().all(|r| r.origin == ORIGIN_OWN));
     }
 
-    /// The overrides that `migrate` wrote before TER-222, on a board with
-    /// no `validating` column: no `merge_queue` in the wait columns.
-    fn old_wait_overrides() -> String {
-        format!(
-            "rule \"mine\" {{\n  on = [\"card\"]\n  card_comment {{ text = \"x\" }}\n}}\n\n{MIGRATION_HEADER}\n\
-rule \"agent-park\" {{\n  description = \"The card waits on others: its bound agent parks. Mapped to this board: the board has no column `validating`: dropped from `data.to`.\"\n  on = [\"card\"]\n  max_per_hour = 600\n  when \"data.change\" {{ eq = \"moved\" }}\n  when \"data.to\" {{ one_of = [\"review\", \"accepted\"] }}\n  agent_park {{ reason = \"card in {{{{card.column}}}}\" }}\n}}\n\n\
-rule \"agent-unpark\" {{\n  description = \"The card came back out of a wait column. Mapped to this board: the board has no column `validating`: `data.to ne validating` always holds, dropped.\"\n  on = [\"card\"]\n  max_per_hour = 600\n  when \"data.change\" {{ eq = \"moved\" }}\n  when \"data.to\" {{ ne = \"review\" }}\n  when \"data.to\" {{ ne = \"accepted\" }}\n  when \"data.to\" {{ ne = \"done\" }}\n  agent_unpark {{}}\n}}\n"
-        )
+    const MINE: &str = "rule \"mine\" {\n  on = [\"card\"]\n  card_comment { text = \"x\" }\n}\n";
+
+    /// The text that `migrate` wrote before TER-222 for `board`: the own
+    /// rule `mine`, then the overrides of the old wait rules.
+    fn old_migration(board: &[BoardColumn]) -> String {
+        let old = parse(PRE_TER_222_WAIT_RULES, "old", &Context::default()).unwrap();
+        let mine = parse(MINE, "rules.wcl", &Context::default()).unwrap();
+        migrate(&old, MINE, &mine, board).text
     }
 
     fn queue_board() -> Vec<BoardColumn> {
@@ -1442,28 +1499,33 @@ rule \"agent-unpark\" {{\n  description = \"The card came back out of a wait col
         ])
     }
 
+    fn upgrade(text: &str, board: &[BoardColumn]) -> Option<String> {
+        let own = parse(text, "rules.wcl", &ctx(board)).expect("the text checks");
+        add_merge_queue_to_wait_overrides(text, &own, board)
+    }
+
+    fn rule_of(text: &str, name: &str) -> Rule {
+        let set = parse(text, "rules.wcl", &Context::default()).unwrap();
+        set.rules.into_iter().find(|r| r.name == name).unwrap()
+    }
+
     #[test]
-    fn old_wait_overrides_get_the_merge_queue() {
+    fn old_wait_overrides_get_the_merge_queue_once() {
         let board = queue_board();
-        let text = old_wait_overrides();
-        let own = parse(&text, "rules.wcl", &ctx(&board)).expect("the old text checks");
-        // The literal is what `to_wcl` writes, so the blocks are found.
-        for r in own.rules.iter().filter(|r| r.name.starts_with("agent-")) {
-            assert!(text.contains(&to_wcl(r)), "{}", to_wcl(r));
-        }
-        let new = add_merge_queue_to_wait_overrides(&text, &own, &board).expect("a change");
-        let set = parse(&new, "rules.wcl", &ctx(&board)).expect("the new text checks");
-        let rule = |n: &str| set.rules.iter().find(|r| r.name == n).unwrap().clone();
+        let text = old_migration(&board);
+        assert!(text.contains("one_of = [\"review\", \"accepted\"] }"), "{text}");
+        let new = upgrade(&text, &board).expect("a change");
+        let park = rule_of(&new, "agent-park");
         assert_eq!(
-            rule("agent-park").when[1].value,
+            park.when[1].value,
             serde_json::json!(["review", "accepted", "queue"])
         );
-        let nes: Vec<Value> = rule("agent-unpark")
-            .when
-            .iter()
-            .skip(1)
-            .map(|w| w.value.clone())
-            .collect();
+        assert!(
+            park.description.as_deref().unwrap().ends_with(MERGE_QUEUE_MARK),
+            "{new}"
+        );
+        let unpark = rule_of(&new, "agent-unpark");
+        let nes: Vec<Value> = unpark.when.iter().skip(1).map(|w| w.value.clone()).collect();
         assert_eq!(
             nes,
             vec![
@@ -1473,64 +1535,54 @@ rule \"agent-unpark\" {{\n  description = \"The card came back out of a wait col
                 Value::from("done")
             ]
         );
-        // The own rule and the descriptions stay; a second pass changes
-        // nothing.
-        assert!(new.starts_with("rule \"mine\" {"));
-        assert_eq!(rule("agent-park").description, own.rules[1].description);
-        assert_eq!(add_merge_queue_to_wait_overrides(&new, &set, &board), None);
+        assert!(unpark.description.as_deref().unwrap().ends_with(MERGE_QUEUE_MARK));
+        assert!(new.starts_with(MINE.trim_end()));
+        assert_eq!(upgrade(&new, &board), None);
     }
 
     #[test]
-    fn role_overrides_get_the_merge_queue_role() {
+    fn a_canonical_edit_after_the_upgrade_stays() {
         let board = queue_board();
-        let text = old_wait_overrides()
-            .replace("\"data.to\" { one_of", "\"data.to_role\" { one_of")
-            .replace(
-                "\"data.to\" { ne = \"review\"",
-                "\"data.to_role\" { ne = \"review\"",
-            )
-            .replace(
-                "\"data.to\" { ne = \"accepted\"",
-                "\"data.to_role\" { ne = \"accepted\"",
-            );
-        let own = parse(&text, "rules.wcl", &ctx(&board)).unwrap();
-        let new = add_merge_queue_to_wait_overrides(&text, &own, &board).expect("a change");
-        assert!(
-            new.contains(
-                "when \"data.to_role\" { one_of = [\"review\", \"accepted\", \"merge_queue\"] }"
-            ),
-            "{new}"
-        );
-        assert!(new.contains("when \"data.to_role\" { ne = \"accepted\" }\n  when \"data.to_role\" { ne = \"merge_queue\" }\n  when \"data.to\" { ne = \"done\" }"), "{new}");
+        let new = upgrade(&old_migration(&board), &board).unwrap();
+        // The operator takes merge_queue out again, in to_wcl form.
+        let removed = new
+            .replace(", \"queue\"] }", "] }")
+            .replace("  when \"data.to\" { ne = \"queue\" }\n", "");
+        assert!(!removed.contains("queue\""), "{removed}");
+        assert_eq!(upgrade(&removed, &board), None);
     }
 
     #[test]
-    fn edited_or_unmigrated_wait_overrides_stay() {
+    fn edited_or_other_wait_overrides_stay() {
         let board = queue_board();
-        let text = old_wait_overrides();
+        let text = old_migration(&board);
         // A board without a merge queue column.
         let plain = cols(&[("review", Some("review")), ("accepted", Some("accepted"))]);
-        let own = parse(&text, "rules.wcl", &ctx(&plain)).unwrap();
-        assert_eq!(add_merge_queue_to_wait_overrides(&text, &own, &plain), None);
-        // An override that the admin edited after the migration: its
-        // block is no longer the text that the migration wrote.
-        let edited = text.replace(
-            "  when \"data.to\" { one_of",
-            "  // kept as it is\n  when \"data.to\" { one_of",
-        );
-        let own = parse(&edited, "rules.wcl", &ctx(&board)).unwrap();
-        let new = add_merge_queue_to_wait_overrides(&edited, &own, &board).expect("unpark changes");
-        assert!(
-            new.contains("one_of = [\"review\", \"accepted\"] }"),
-            "{new}"
-        );
+        assert_eq!(upgrade(&old_migration(&plain), &plain), None);
+        // A canonical edit before the upgrade: that block stays.
+        let edited = text.replacen("max_per_hour = 600", "max_per_hour = 60", 1);
+        let new = upgrade(&edited, &board).expect("unpark changes");
+        assert_eq!(rule_of(&new, "agent-park"), rule_of(&edited, "agent-park"));
         assert!(new.contains("ne = \"queue\""), "{new}");
         // The same rules without the migration header are the project's own.
         let own_only = text.replace(MIGRATION_HEADER, "");
-        let own = parse(&own_only, "rules.wcl", &ctx(&board)).unwrap();
-        assert_eq!(
-            add_merge_queue_to_wait_overrides(&own_only, &own, &board),
-            None
-        );
+        assert_eq!(upgrade(&own_only, &board), None);
+        // A migration of the current pack already has the merge queue.
+        let mine = parse(MINE, "rules.wcl", &Context::default()).unwrap();
+        let current = migrate(default_pack(), MINE, &mine, &board).text;
+        assert_eq!(upgrade(&current, &board), None);
+    }
+
+    #[test]
+    fn the_merge_queue_column_is_found_by_role_first() {
+        let board = cols(&[
+            ("merge_queue", Some("review")),
+            ("mq", Some("merge_queue")),
+        ]);
+        assert_eq!(merge_queue_column(&board).unwrap().name, "mq");
+        let named = cols(&[("merge_queue", None)]);
+        assert_eq!(merge_queue_column(&named).unwrap().name, "merge_queue");
+        let other = cols(&[("merge_queue", Some("accepted"))]);
+        assert!(merge_queue_column(&other).is_none());
     }
 }

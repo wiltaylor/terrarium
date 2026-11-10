@@ -53,7 +53,8 @@
 //! | moved out of a wait column while parked (`ready` after a failure, `in_progress`) | unpark |
 //! | moved between two other columns | nothing |
 //!
-//! The wait columns are names, not roles: a board without them never
+//! A wait column is a column whose role is one of [`WAIT_COLUMNS`], or a
+//! column with no role whose name is one: a board without them never
 //! parks its bound agents.
 //!
 //! With `board_flow = rules` (TER-170) the rules `agent-park`, `agent-unpark`,
