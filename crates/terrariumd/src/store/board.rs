@@ -184,6 +184,9 @@ pub struct Card {
     /// The dependencies that are neither accepted nor done yet.
     pub blocked_by: Vec<String>,
     pub comments: Vec<Comment>,
+    /// The review round (TER-614 R9): with a review dispatcher, its round
+    /// (`card_reviews`); else each move of the card into review
+    /// (`cards.review_entries`). 0: never in review.
     #[serde(default)]
     pub review_round: u32,
     pub links: Vec<Link>,
@@ -284,6 +287,13 @@ struct CardRow {
     done_at: Option<String>,
     idle_since: Option<String>,
 }
+
+/// The review round of card `?1` ([`Card::review_round`], TER-614 R9).
+const REVIEW_ROUND_SQL: &str = "SELECT CASE
+    WHEN (SELECT p.review_dispatcher FROM projects p WHERE p.name = c.project) IS NOT NULL
+    THEN coalesce((SELECT round FROM card_reviews WHERE card = c.id), 0)
+    ELSE c.review_entries END
+  FROM cards c WHERE c.id = ?1";
 
 fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
     Ok(CardRow {
@@ -724,14 +734,7 @@ fn render(
     };
     Ok(Card {
         trouble: crate::trouble::active_signals(conn, &row.id)?,
-        review_round: conn
-            .query_row(
-                "SELECT round FROM card_reviews WHERE card = ?1",
-                [&row.id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0),
+        review_round: conn.query_row(REVIEW_ROUND_SQL, [&row.id], |r| r.get(0))?,
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,
         tests: crate::store::test_runs::card_chip(conn, &row.id)?,
@@ -859,6 +862,9 @@ pub fn board_summary(
           'eta_set_by', c.eta_set_by,
           'eta_set_by_name', coalesce(eb.project || '/' || eb.name, ebr.project || '/' || ebr.name, c.eta_set_by),
           'done_at', c.done_at, 'idle_since', c.idle_since,
+          'review_round', CASE WHEN (SELECT review_dispatcher FROM projects WHERE name = c.project) IS NOT NULL
+            THEN coalesce((SELECT round FROM card_reviews WHERE card = c.id), 0)
+            ELSE c.review_entries END,
           'trouble', (SELECT json_group_array(signal) FROM
             (SELECT signal FROM card_trouble WHERE card = c.id AND active = 1 ORDER BY signal)),
           'tests', (SELECT json_object('id', r.id, 'name', r.name, 'created_at', r.created_at,

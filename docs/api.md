@@ -886,7 +886,13 @@ uses the project's `card-review` template, falling back to `global:card-review`,
 and that admin's spawn rights, caps, and template grants.
 
 Each card in review gets at most one review agent at a time. `review_round`
-on the card counts successful review spawns. Only the current review agent's
+on the card counts successful review spawns. A card of a project without a
+review dispatcher counts each move into its review column instead (TER-614),
+so a review by the lead counts too; `0` means it was never in review.
+`review_round` is in `GET /api/cards/{id}` and in each card of the board list.
+`trouble` on a card holds its active trouble signals (TER-79): the trouble
+pass sets them while the card is in a working or review column, and clears
+them when it leaves, so a done card shows `[]`. Only the current review agent's
 comment can supply a verdict: its first line must be `Review verdict: accept` or
 `Review verdict: changes` (bare `accept` and `changes` also work), with findings below it.
 At three rounds, automatic reviews stop and the owner is notified.
@@ -8804,7 +8810,7 @@ one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
 of a `job` event, `data.id`, or of a `job.verdict` event, `data.job`; a
 rule with one runs only for those events): `state` (`queued`, `running`,
 `passed`, `failed`, `cancelled`), `outcome` (`red`, `conflict`, `error`,
-`none`), and the booleans `split` (the job is a half of a split batch),
+`infra`, `none`), and the booleans `split` (the job is a half of a split batch),
 `batch` (two or more cards of the job merged, did not conflict), `rerun`
 (a rerun of the job is queued or ran), and `halves` (the job was split).
 Every field that is set must hold; every block must hold.
@@ -12098,8 +12104,16 @@ Answers `202` with `{run}`. No previous switch: the run fails at once
 
 #### `POST /api/system/update/drain`, `POST /api/system/update/resume`
 
-The operator only. Answer `{on, since, by, busy, jobs}`. The drain writes the
-audit row `system.drain`.
+The operator only. Answer `{on, since, by, busy, jobs, jobs_drain}`. The drain
+writes the audit row `system.drain`.
+
+With the body `{"jobs_only": true}` (TER-614, `terrarium admin update
+drain-jobs`) only the job slots drain, for example once an update is
+announced: no job of the job queue starts, the running jobs finish, and
+the agents go on. `jobs` lists the running jobs; `jobs_drain` is `{since,
+by}` while it is on, else `null`. The queued jobs wait. `resume` ends it,
+and so does a restart (it lives in memory). A running job that must not
+wait for its end is cancelled with the job cancel.
 
 ### 34.8 Mail
 
@@ -12501,7 +12515,33 @@ one key, the strictest applies until a cap write replaces them.
   way at most 3 times in a row in one daemon run: the next lost run gets
   the same kill (and the slot mark), then it is `red`, and its `tail`
   starts with `the infrastructure lost the run 4
-  times in a row, so this run counts as red: <why>`.
+  times in a row, so this run counts as red: <why>`. A merge job ends
+  `infra` instead (below).
+- A merge job that failed on its host before its tests (TER-614) is not a
+  test failure. It does not split, does not rerun at once, and uses no
+  attempt. Two paths. An end with outcome `error`, no tested commit
+  (`head`), and a failed step `receive`, `secrets`, or `recipe` (the
+  recipe did not start) goes back to the queue (event change `requeued`)
+  and runs once more after 5 minutes, and not while its host agent is
+  offline (a host agent that comes back online ends the wait early); each
+  card gets a comment that says so. A second such end ends the job with
+  outcome `infra` (verdict `infra`). A run lost past the cap above ends
+  `infra` at once, with no delayed retry. An `infra` end has no rerun, no
+  split, and no failure block: its cards lose the job labels and stay in
+  the merge queue with no job, with a comment. They go in the next batch
+  when a card enters the merge queue or the lead queues them. The retry
+  mark lives in memory: a daemon restart gives at most one extra run.
+- A failure in the daemon before the tests (`setup`, `prepare`) stays
+  `error`. A card branch that the daemon cannot fetch (deleted or
+  rewritten after the accept) or merge leaves the merge as a conflict does:
+  the failure block, the top of `ready`, a mail to its worker; the other
+  cards of the batch go on.
+- Each failed end has the step that failed as the last line of its `tail`:
+  `[failed step: <step>]`, one of `setup`, `prepare`, `receive`, `secrets`,
+  `recipe`, `push`. Each card gets a comment with the failed step and the
+  last 20 lines of the tail, indented. The daemon writes it in both board flows, after each `error`
+  or `infra` end and at the first infra end. A `red` end has the output in
+  its failure block.
 
 A batch merge:
 

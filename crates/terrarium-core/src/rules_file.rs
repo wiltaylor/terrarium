@@ -385,6 +385,7 @@ pub const JOB_FIELDS: &[&str] = &[
     "split_comment",
     "fail_comment",
     "fail_mail",
+    "infra_comment",
 ];
 
 /// The placeholders whose values the daemon makes: IDs, and the texts of
@@ -418,6 +419,7 @@ pub const RAW_FIELDS: &[&str] = &[
     "job.split_comment",
     "job.fail_comment",
     "job.fail_mail",
+    "job.infra_comment",
     "rule.name",
 ];
 

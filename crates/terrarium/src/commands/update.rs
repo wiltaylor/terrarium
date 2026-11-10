@@ -49,7 +49,8 @@ pub async fn update(ctx: &Ctx, cmd: &UpdateCmd) -> anyhow::Result<()> {
                 ));
             })
         }
-        UpdateCmd::Drain { wait } => drain(ctx, Duration::from_secs(*wait)).await,
+        UpdateCmd::Drain { wait } => drain(ctx, Duration::from_secs(*wait), false).await,
+        UpdateCmd::DrainJobs { wait } => drain(ctx, Duration::from_secs(*wait), true).await,
         UpdateCmd::Resume => {
             let v = ctx.api.post("/api/system/update/resume", None).await?;
             ctx.emit(&v, |c, _| {
@@ -63,11 +64,18 @@ pub async fn update(ctx: &Ctx, cmd: &UpdateCmd) -> anyhow::Result<()> {
 /// `wait`. The end of the wait is no error: the turns that still run end
 /// with the stop, and resume after the start; the jobs that still run
 /// are killed and queued again by the new daemon (TER-123).
-async fn drain(ctx: &Ctx, wait: Duration) -> anyhow::Result<()> {
-    let mut v = ctx.api.post("/api/system/update/drain", None).await?;
+/// With `jobs_only` (TER-614 R4): the job slots only, and the wait is for
+/// the running jobs.
+async fn drain(ctx: &Ctx, wait: Duration, jobs_only: bool) -> anyhow::Result<()> {
+    let body = jobs_only.then(|| json!({"jobs_only": true}));
+    let mut v = ctx.api.post("/api/system/update/drain", body).await?;
     let started = Instant::now();
     loop {
-        let busy = v["busy"].as_array().map_or(0, Vec::len);
+        let busy = if jobs_only {
+            0
+        } else {
+            v["busy"].as_array().map_or(0, Vec::len)
+        };
         let jobs = v["jobs"].as_array().map_or(0, Vec::len);
         if busy == 0 && jobs == 0 {
             break;
@@ -89,6 +97,15 @@ async fn drain(ctx: &Ctx, wait: Duration) -> anyhow::Result<()> {
         v = r["drain"].clone();
     }
     v["waited_s"] = json!(started.elapsed().as_secs());
+    if jobs_only {
+        return ctx.emit(&v, |c, v| {
+            c.line(format!(
+                "the job slots drain: no new jobs, the agents go on; waited {}s; running jobs: {}. End it with `terrarium admin update resume`",
+                field(v, "waited_s"),
+                field(v, "jobs")
+            ));
+        });
+    }
     ctx.emit(&v, |c, v| {
         c.line(format!(
             "drained: no new turns or jobs; waited {}s for the running turns and jobs",
@@ -171,6 +188,15 @@ fn print_status(c: &Ctx, v: &Value) {
             "drain:     on since {} (busy: {}; jobs: {})",
             field(&v["drain"], "since"),
             field(&v["drain"], "busy"),
+            field(&v["drain"], "jobs")
+        ));
+    }
+    let jd = &v["drain"]["jobs_drain"];
+    if jd.is_object() {
+        c.line(format!(
+            "job drain: on since {} by {} (running jobs: {})",
+            field(jd, "since"),
+            field(jd, "by"),
             field(&v["drain"], "jobs")
         ));
     }
