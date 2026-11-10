@@ -610,11 +610,13 @@ fn with_merge_queue(rule: &Rule, mq: &str) -> Option<Rule> {
         let has = rule
             .when
             .iter()
-            .any(|m| m.op == MatchOp::Ne && to(m) && m.value == Value::String(value(&m.path)));
+            .any(|m| {
+                m.op == MatchOp::Ne && to(m) && m.value.as_str() == Some(value(&m.path).as_str())
+            });
         let last = rule
             .when
             .iter()
-            .rposition(|m| m.op == MatchOp::Ne && to(m) && m.value != Value::from("done"));
+            .rposition(|m| m.op == MatchOp::Ne && to(m) && m.value.as_str() != Some("done"));
         if let (false, Some(i)) = (has, last) {
             let path = rule.when[i].path.clone();
             out.when.insert(
