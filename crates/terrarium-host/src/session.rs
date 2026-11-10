@@ -803,7 +803,9 @@ mod tests {
             .map(|(_, r)| r.split_whitespace().collect())
             .unwrap_or_default();
         const PF_EXITING: u64 = 0x4;
-        let state_dead = fields.first().is_some_and(|s| matches!(*s, "Z" | "X" | "x"));
+        let state_dead = fields
+            .first()
+            .is_some_and(|s| matches!(*s, "Z" | "X" | "x"));
         let exiting = fields
             .get(6)
             .and_then(|f| f.parse::<u64>().ok())
