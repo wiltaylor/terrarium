@@ -19,6 +19,7 @@ pub async fn group(ctx: &Ctx, cmd: &GroupCmd) -> anyhow::Result<()> {
         ),
         GroupCmd::Built { key, version } => (key, "built", json!({"version":version})),
         GroupCmd::Remove { key, card } => (key, "remove", json!({"card":card})),
+        GroupCmd::Add { key, card } => (key, "add", json!({"card":card})),
     };
     let path = format!(
         "/api/projects/{}/version-groups/{}/{action}",
@@ -37,5 +38,10 @@ pub async fn group(ctx: &Ctx, cmd: &GroupCmd) -> anyhow::Result<()> {
                 "unchanged"
             }
         ));
+        // `built` also moves accepted cards labelled with the version.
+        if let Some(ids) = v["also_done"].as_array().filter(|a| !a.is_empty()) {
+            let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
+            ctx.line(format!("also done by version label: {}", ids.join(", ")));
+        }
     })
 }

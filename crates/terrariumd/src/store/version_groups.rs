@@ -142,13 +142,79 @@ pub fn cut(
     Ok(Some(key))
 }
 
+/// Add a late accepted card to an open version group (TER-608). The card
+/// must be in the accepted column and in no other open group.
+pub fn add(t: &mut Tx<'_>, actor: &Actor, project: &str, key: &str, card: &str) -> ApiResult<bool> {
+    policy::admin_project(actor, project, "adding a version group member")?;
+    let g = get(t, project, key)?;
+    if g.closed_at.is_some() {
+        return Err(ApiError::conflict("version group is closed"));
+    }
+    let accepted = board::role_name(t, project, "accepted", "accepted")?;
+    let c = board::get_card(t, card)?;
+    if c.project == project && !c.archived && c.column != accepted {
+        return Err(ApiError::conflict(format!(
+            "{card} must be in {accepted} to join a version group"
+        )));
+    }
+    let changed = groups::add(t, &g, card)?;
+    if changed {
+        t.audit(
+            "version.member_added",
+            &g.id,
+            Some(project),
+            json!({"card":card}),
+        )?;
+    }
+    Ok(changed)
+}
+
+/// The `version:` labels that name `version`: as given and without a
+/// leading `v`. `version:vnext` never matches (it is the open version).
+pub fn labels_for(version: &str) -> Vec<String> {
+    let mut out = vec![format!("version:{version}")];
+    if let Some(bare) = version.strip_prefix('v')
+        && bare.starts_with(|c: char| c.is_ascii_digit())
+    {
+        out.push(format!("version:{bare}"));
+    }
+    out.retain(|l| l != "version:vnext");
+    out
+}
+
+/// The `version:X.Y.Z` labels of a card that are not `version:vnext`.
+pub fn shipped_label_versions(labels: &[String]) -> Vec<String> {
+    labels
+        .iter()
+        .filter_map(|l| l.strip_prefix("version:"))
+        .filter(|v| *v != "vnext" && !v.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// True when `group built` acknowledged `version` (as `X.Y.Z` or
+/// `vX.Y.Z`) in `project`. The daemon sees no Git tags. This
+/// acknowledgement is its record that the version tag is published.
+pub fn is_built(conn: &Connection, project: &str, version: &str) -> ApiResult<bool> {
+    let bare = version.strip_prefix('v').unwrap_or(version);
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE project = ?1 AND kind = 'version.built'
+            AND json_extract(payload, '$.version') IN (?2, 'v' || ?2))",
+        rusqlite::params![project, bare],
+        |r| r.get(0),
+    )?)
+}
+
+/// Acknowledge a built version. Moves the members, then every other
+/// active, unheld accepted card labelled with that version and in no open
+/// group, to done. Returns whether the group changed and the extra cards.
 pub fn built(
     t: &mut Tx<'_>,
     actor: &Actor,
     project: &str,
     key: &str,
     version: &str,
-) -> ApiResult<bool> {
+) -> ApiResult<(bool, Vec<String>)> {
     policy::admin_project(actor, project, "acknowledging a built version")?;
     let g = get(t, project, key)?;
     if version.trim().is_empty() || version.len() > 128 || version.chars().any(char::is_control) {
@@ -159,7 +225,7 @@ pub fn built(
     let status = format!("Built {version}");
     if g.closed_at.is_some() {
         return if g.status == status {
-            Ok(false)
+            Ok((false, Vec::new()))
         } else {
             Err(ApiError::conflict("group is already closed"))
         };
@@ -180,6 +246,23 @@ pub fn built(
         }
         board::assign_card(t, actor, id, None)?;
     }
+    // Cards that joined the version after the cut, by label (TER-608).
+    let names = labels_for(version);
+    let mut extra = Vec::new();
+    for c in board::get_board(t, project)?.cards {
+        if c.column != accepted
+            || c.kind != "card"
+            || g.members.contains(&c.id)
+            || !c.labels.iter().any(|l| names.contains(l))
+            || board::is_held(t, &c.id)?
+            || groups::for_card(t, &c.id)?.is_some()
+        {
+            continue;
+        }
+        board::move_card(t, actor, &c.id, &done, None, Some(&status))?;
+        board::assign_card(t, actor, &c.id, None)?;
+        extra.push(c.id);
+    }
     for step in STEPS {
         groups::step(t, &g, step, Some("done"), None, None)?;
     }
@@ -189,18 +272,18 @@ pub fn built(
         "version.built",
         &g.id,
         Some(project),
-        json!({"key":key,"version":version}),
+        json!({"key":key,"version":version,"also_done":extra}),
     )?;
     t.emit(
         crate::events::EventDraft::new(
             "version.built",
             &status,
-            json!({"key":key,"version":version,"members":g.members}),
+            json!({"key":key,"version":version,"members":g.members,"also_done":extra}),
         )
         .project(project)
         .card(&g.id),
     )?;
-    Ok(true)
+    Ok((true, extra))
 }
 
 pub fn get(conn: &Connection, project: &str, key: &str) -> ApiResult<groups::Group> {

@@ -786,6 +786,7 @@ fn version_group_actions_use_project_scoped_api() {
         ],
         vec!["group", "remove", "version:cut-1", "TER-7"],
         vec!["group", "built", "version:cut-1", "v1.2.3"],
+        vec!["group", "add", "version:cut-1", "TER-8"],
     ] {
         let o = bin()
             .env("TERRARIUM_AGENT", "01AGENT")
@@ -802,8 +803,8 @@ fn version_group_actions_use_project_scoped_api() {
         .filter(|r| r["method"] == "http")
         .map(|r| &r["params"])
         .collect();
-    assert_eq!(http.len(), 3);
-    for (r, action) in http.iter().zip(["status", "remove", "built"]) {
+    assert_eq!(http.len(), 4);
+    for (r, action) in http.iter().zip(["status", "remove", "built", "add"]) {
         assert_eq!(r["method"], "POST");
         assert_eq!(
             r["path"],
@@ -814,6 +815,7 @@ fn version_group_actions_use_project_scoped_api() {
     assert_eq!(http[0]["body"]["eta"], "10m");
     assert_eq!(http[1]["body"]["card"], "TER-7");
     assert_eq!(http[2]["body"]["version"], "v1.2.3");
+    assert_eq!(http[3]["body"]["card"], "TER-8");
     std::fs::remove_dir_all(dir).ok();
 }
 

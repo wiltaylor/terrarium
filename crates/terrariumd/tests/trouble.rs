@@ -682,3 +682,54 @@ async fn passed_eta_still_mails_worker_when_reminders_are_disabled() {
     assert_eq!(notices(&td, &worker).await, 1);
     assert_eq!(notices(&td, &lead).await, 1);
 }
+
+/// TER-608: an accepted card labelled with a version that `group built`
+/// acknowledged gets `shipped_accepted`, with one lead notice. It clears
+/// when the card moves on. A vnext card and an unbuilt version do not.
+#[tokio::test]
+async fn shipped_accepted_marks_accepted_cards_of_a_built_version() {
+    let (td, lead, _worker, _card) = setup().await;
+    let new = |title: &str, label: &str| {
+        json!({"title": title, "column": "accepted", "labels": [label]})
+    };
+    let shipped = id(td
+        .post("/api/projects/p/cards", new("shipped", "version:0.36.0"))
+        .await
+        .ok());
+    let unbuilt = id(td
+        .post("/api/projects/p/cards", new("unbuilt", "version:0.37.0"))
+        .await
+        .ok());
+    let vnext = id(td
+        .post("/api/projects/p/cards", new("open", "version:vnext"))
+        .await
+        .ok());
+    assert_signals(&td, &shipped, json!([])).await;
+    let before = notices(&td, &lead).await;
+    state(&td)
+        .db
+        .write("system", |t| {
+            t.emit(
+                terrariumd::events::EventDraft::new(
+                    "version.built",
+                    "Built v0.36.0",
+                    json!({"key": "version:x", "version": "v0.36.0", "members": []}),
+                )
+                .project("p"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_signals(&td, &shipped, json!(["shipped_accepted"])).await;
+    assert_eq!(usage(&td, &unbuilt).await["signals"], json!([]));
+    assert_eq!(usage(&td, &vnext).await["signals"], json!([]));
+    assert_eq!(notices(&td, &lead).await, before + 1);
+    td.post(
+        &format!("/api/cards/{shipped}/move"),
+        json!({"column": "done"}),
+    )
+    .await
+    .ok();
+    assert_signals(&td, &shipped, json!([])).await;
+}

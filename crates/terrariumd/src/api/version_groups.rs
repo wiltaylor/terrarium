@@ -28,6 +28,25 @@ pub fn routes() -> Router<Shared> {
             "/projects/{project}/version-groups/{key}/remove",
             post(remove),
         )
+        .route("/projects/{project}/version-groups/{key}/add", post(add))
+}
+
+async fn add(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((project, key)): Path<(String, String)>,
+    Json(req): Json<Member>,
+) -> ApiResult<Json<Value>> {
+    policy::admin_project(&actor, &project, "adding a version group member")?;
+    let label = actor.label();
+    let result = state
+        .db
+        .write(&label, move |t| {
+            let changed = version_groups::add(t, &actor, &project, &key, &req.card)?;
+            Ok(json!({"changed":changed,"group":version_groups::get(t,&project,&key)?}))
+        })
+        .await?;
+    Ok(Json(result))
 }
 
 #[derive(Deserialize)]
@@ -36,7 +55,7 @@ struct Built {
 }
 
 #[derive(Deserialize)]
-struct Remove {
+struct Member {
     card: String,
 }
 
@@ -44,7 +63,7 @@ async fn remove(
     State(state): State<Shared>,
     actor: Actor,
     Path((project, key)): Path<(String, String)>,
-    Json(req): Json<Remove>,
+    Json(req): Json<Member>,
 ) -> ApiResult<Json<Value>> {
     policy::admin_project(&actor, &project, "removing a version group member")?;
     let result = state
@@ -80,8 +99,13 @@ async fn built(
     let result = state
         .db
         .write(&label, move |t| {
-            let changed = version_groups::built(t, &actor, &project, &key, &req.version)?;
-            Ok(json!({"changed":changed,"group":version_groups::get(t,&project,&key)?}))
+            let (changed, also_done) =
+                version_groups::built(t, &actor, &project, &key, &req.version)?;
+            Ok(json!({
+                "changed":changed,
+                "also_done":also_done,
+                "group":version_groups::get(t,&project,&key)?
+            }))
         })
         .await?;
     Ok(Json(result))

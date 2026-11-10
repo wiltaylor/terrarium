@@ -3807,6 +3807,8 @@ pub enum GroupCmd {
     Built { key: String, version: String },
     /// Remove a snapshot member, for example a card returned for a fix
     Remove { key: String, card: String },
+    /// Add a late accepted card to an open version group
+    Add { key: String, card: String },
 }
 
 /// `terrarium rule` (docs/api.md §19.12). The project is `--project`, else

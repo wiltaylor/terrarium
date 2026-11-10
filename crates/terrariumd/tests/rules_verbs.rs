@@ -462,6 +462,77 @@ async fn version_cut_freezes_members_and_explicit_built_completes_only_snapshot(
     );
 }
 
+/// TER-608: `group add` takes a late accepted card into an open snapshot,
+/// and `group built` also moves the other accepted cards that carry the
+/// version label, but not held cards or cards of another version.
+#[tokio::test]
+async fn version_group_add_and_built_moves_same_version_accepted_cards() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let worker = td.agent("p", "worker", json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let accepted = |title: &str, labels: Value| json!({"title":title,"column":"accepted","labels":labels});
+    let a = new_card(&td, "p", accepted("member", json!(["version:vnext"]))).await;
+    let key = state(&td)
+        .db
+        .write("test", |t| {
+            terrariumd::store::version_groups::cut(t, &Actor::Operator, "p", "test", 1, 240)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let path = format!("/api/projects/p/version-groups/{key}");
+    let late = new_card(&td, "p", accepted("late", json!(["version:vnext"]))).await;
+    let ready = new_card(&td, "p", json!({"title":"not accepted","column":"ready"})).await;
+    let tagged = new_card(&td, "p", accepted("tagged", json!(["version:1.2.3"]))).await;
+    let held = new_card(&td, "p", accepted("held", json!(["version:1.2.3", "hold"]))).await;
+    let other = new_card(&td, "p", accepted("other", json!(["version:1.2.4"]))).await;
+    let vnext = new_card(&td, "p", accepted("open version", json!(["version:vnext"]))).await;
+
+    assert_eq!(
+        td.post_as(&worker, &format!("{path}/add"), json!({"card":late}))
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        td.post(&format!("{path}/add"), json!({"card":ready}))
+            .await
+            .status,
+        409
+    );
+    let added = td.post(&format!("{path}/add"), json!({"card":late})).await;
+    assert_eq!(added.status, 200, "{}", added.body);
+    assert_eq!(added.body["changed"], true);
+    assert_eq!(added.body["group"]["total"], 2);
+    assert_eq!(
+        td.post(&format!("{path}/add"), json!({"card":late}))
+            .await
+            .body["changed"],
+        false
+    );
+
+    let built = td
+        .post(&format!("{path}/built"), json!({"version":"v1.2.3"}))
+        .await;
+    assert_eq!(built.status, 200, "{}", built.body);
+    assert_eq!(built.body["also_done"], json!([tagged]));
+    for id in [&a, &late, &tagged] {
+        assert_eq!(card(&td, id).await["column"], "done", "{id}");
+    }
+    for id in [&held, &other, &vnext] {
+        assert_eq!(card(&td, id).await["column"], "accepted", "{id}");
+    }
+    assert_eq!(
+        td.post(&format!("{path}/add"), json!({"card":other}))
+            .await
+            .status,
+        409
+    );
+}
+
 #[tokio::test]
 async fn version_cut_age_timer_waits_for_merge_group_close() {
     let mut td = TestDaemon::start().await;
