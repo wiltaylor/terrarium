@@ -482,6 +482,9 @@ impl TestDaemon {
     pub async fn put_as(&self, agent: &str, path: &str, body: Value) -> Resp {
         self.req(Method::PUT, path, Some(body), Some(agent)).await
     }
+    pub async fn delete_as(&self, agent: &str, path: &str) -> Resp {
+        self.req(Method::DELETE, path, None, Some(agent)).await
+    }
 
     /// Open a WebSocket on the Unix socket.
     pub async fn ws(

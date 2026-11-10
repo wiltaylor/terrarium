@@ -936,3 +936,127 @@ on_agent_create = ["app"]
             .err(422, "invalid");
     }
 }
+
+/// `DELETE /api/repos/{id}` (TER-658): project_admin only; refused while a
+/// job, `next_repos`, a github pipeline, or a bound agent's checkout uses
+/// the repo, and for a repo of a project file; audited; the clones stay.
+#[tokio::test]
+async fn repo_rm_refuses_while_in_use_then_removes() {
+    let (td, _origin, _remotes) = daemon_with_repo().await;
+    // A repo of the project file belongs to the file.
+    let proj = td.get("/api/projects/terra/repos").await.ok().as_array().unwrap()
+        .iter()
+        .find(|r| r["name"] == "proj")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    td.delete(&format!("/api/repos/{proj}"))
+        .await
+        .err(409, "file_managed");
+
+    td.agent("terra", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let w = td.agent("terra", "w", json!({})).await;
+    let r = td
+        .post_as(
+            "terra/lead",
+            "/api/projects/terra/repos",
+            json!({"url": "https://github.com/Acme/App.git", "name": "app"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let id = r.body["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/repos/{id}");
+
+    // A member may not remove it; another project cannot see it.
+    td.delete_as("terra/w", &path).await.err(403, "forbidden");
+    td.project("other").await;
+    td.agent("other", "x", json!({"roles": ["project_admin"]}))
+        .await;
+    td.delete_as("other/x", &path).await.err(403, "forbidden");
+
+    let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
+    let in_use = |r: common::Resp, what: &str| {
+        r.err(409, "conflict");
+        let msg = r.body["error"]["message"].as_str().unwrap();
+        assert!(msg.contains(what), "{what}: {msg}");
+    };
+
+    // A queued job.
+    conn.execute(
+        "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt, created_by,
+                           created_at)
+         VALUES ('j1', 'terra', 'TER-1', 'merge', 'app', 'b', 'queued', 1, 'operator',
+                 '2026-11-10T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    in_use(td.delete_as("terra/lead", &path).await, "queued merge job of TER-1");
+    // A finished job does not count.
+    conn.execute("UPDATE jobs SET state = 'passed' WHERE id = 'j1'", [])
+        .unwrap();
+
+    // The delivery config.
+    conn.execute(
+        "INSERT INTO project_delivery (project, def, updated_by, updated_at)
+         VALUES ('terra', '{\"next_repos\": [\"app\"]}', 'operator', '2026-11-10T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    in_use(td.delete_as("terra/lead", &path).await, "next_repos");
+    conn.execute("DELETE FROM project_delivery WHERE project = 'terra'", [])
+        .unwrap();
+
+    // A github pipeline of the same owner/name, in another case.
+    conn.execute(
+        "INSERT INTO pipelines (id, project, name, adapter, enabled, def, created_by, run_as,
+                                created_at, updated_at, anchor_at)
+         VALUES ('P1', 'terra', 'ci', 'github', 0,
+                 '{\"name\": \"ci\", \"source\": {\"kind\": \"github\", \"repo\": \"acme/app\"}}',
+                 'operator', 'operator', '2026-11-10T00:00:00Z', '2026-11-10T00:00:00Z',
+                 '2026-11-10T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    in_use(td.delete_as("terra/lead", &path).await, "pipeline `ci`");
+    conn.execute("DELETE FROM pipelines WHERE id = 'P1'", [])
+        .unwrap();
+
+    // An open bound agent with a checkout at the repo's path.
+    let ws = PathBuf::from(w["workspace"].as_str().unwrap());
+    std::fs::create_dir_all(ws.join("app/.git")).unwrap();
+    std::fs::write(ws.join("app/keep.txt"), "x").unwrap();
+    conn.execute(
+        "INSERT INTO spawns (id, owner, owner_name, project, name, template, harness, task,
+         spawned_by, spawned_at, deadline_at, bound_kind, bound_id)
+         VALUES (?1, 'operator', 'operator', 'terra', 'w', 'worker', 'claude', 'test',
+         'operator', '2026-01-01', '2099-01-01', 'card', 'TER-1')",
+        [w["id"].as_str().unwrap()],
+    )
+    .unwrap();
+    in_use(td.delete_as("terra/lead", &path).await, "bound agent `w`");
+    conn.execute(
+        "UPDATE spawns SET finished_at = '2026-11-10T00:00:00Z' WHERE id = ?1",
+        [w["id"].as_str().unwrap()],
+    )
+    .unwrap();
+
+    // Free: removed, audited, and the clone stays.
+    let r = td.delete_as("terra/lead", &path).await;
+    assert_eq!(r.ok()["name"], "app");
+    td.get(&path).await.err(404, "not_found");
+    let names: Vec<String> = td.get("/api/projects/terra/repos").await.ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(!names.contains(&"app".to_owned()), "{names:?}");
+    let audit = td.get("/api/audit?action=repo.delete").await;
+    let rows = audit.ok().as_array().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["target"], "terra/app");
+    assert!(ws.join("app/keep.txt").is_file());
+    td.delete_as("terra/lead", &path).await.err(404, "not_found");
+}
