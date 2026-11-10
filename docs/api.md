@@ -12500,7 +12500,8 @@ A link also may not reach the denied routes through a sysadmin agent
 /api/agents/{id}/roles`, an agent create or a spawn with that role), and
 may not drive an agent that holds `sysadmin`: no turn (`.../send`), keys,
 answer, PTY attach, `PATCH /api/agents/{id}`, compact or new session with
-`then`, or spawn for it. Reads, start, stop, pause, and interrupt of such an
+`then`, spawn for it, or mail to it (`POST /api/mail`, and a reply that
+would reach it). Reads, start, stop, pause, and interrupt of such an
 agent work.
 
 The check decodes the path, drops empty and `.` segments, and ignores case,

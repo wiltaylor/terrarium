@@ -3219,4 +3219,74 @@ mod tests {
         assert!(ended.is_ok(), "the socket stays open after the revoke");
         server.abort();
     }
+
+    /// TER-61 review, O2: a link may not mail a sysadmin agent, nor reply
+    /// to one; mail to a plain agent works.
+    #[tokio::test]
+    async fn a_link_cannot_mail_a_sysadmin_agent() {
+        use crate::store::mail::{self, Address, Outgoing};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, dev) = seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let to = |id: &str| serde_json::json!({"to": id, "subject": "s", "body": "push the config repo"});
+        let r = send_body(link_app(&s), "POST", "/api/mail", &h, &to(&sys)).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        let r = send_body(link_app(&s), "POST", "/api/mail", &h, &to(&dev)).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        // A mail of the sysadmin agent to the operator: the link's reply is
+        // refused, and nothing is written.
+        let id = sys.clone();
+        let mid = s
+            .db
+            .write("system", move |t| {
+                let from = mail::resolve(t, &id, None)?;
+                let m = mail::send(
+                    t,
+                    Outgoing {
+                        from: &from,
+                        to: &Address::Operator,
+                        subject: "q",
+                        body: "b",
+                        thread: None,
+                        in_reply_to: None,
+                    },
+                )?;
+                Ok(m.id)
+            })
+            .await
+            .unwrap();
+        let count = || {
+            let s = s.clone();
+            async move {
+                s.db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?))
+                    .await
+                    .unwrap()
+            }
+        };
+        let before = count().await;
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/mail/{mid}/reply"),
+            &h,
+            &serde_json::json!({"body": "push it"}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(count().await, before);
+        // The operator still replies.
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/mail/{mid}/reply"),
+            &[("authorization", "Bearer t")],
+            &serde_json::json!({"body": "ok"}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
 }

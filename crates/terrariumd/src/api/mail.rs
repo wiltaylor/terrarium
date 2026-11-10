@@ -194,17 +194,46 @@ pub(crate) fn send_checked(
     )
 }
 
+/// A link may not mail an agent that holds `sysadmin` (TER-61 review,
+/// O2): the agent would act on it with rights outside the link's deny list.
+/// `link`: the request came with a link key (`crate::links::is_link_call`,
+/// read before the database task, where the task-local is not set).
+fn refuse_link_to_sysadmin<'a>(
+    t: &Tx<'_>,
+    link: bool,
+    agents: impl IntoIterator<Item = &'a str>,
+) -> ApiResult<()> {
+    if !link {
+        return Ok(());
+    }
+    for id in agents {
+        let sysadmin = crate::store::agents::get(t, id)
+            .is_ok_and(|v| v.agent.roles.contains(&terrarium_core::Role::Sysadmin));
+        if sysadmin {
+            return Err(ApiError::new(
+                crate::error::Code::LinkForbidden,
+                "a link key may not mail an agent that holds sysadmin (docs/api.md §36.4)",
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn send(
     State(state): State<Shared>,
     actor: Actor,
     ApiJson(m): ApiJson<NewMail>,
 ) -> ApiResult<(StatusCode, Json<Message>)> {
+    let link = crate::links::is_link_call();
     let msg = state
         .db
         .write(actor.label(), move |t| {
             let from = sender(t, &actor, m.from.as_deref())?;
             let context = from.project().map(str::to_owned);
             let to = mail::resolve(t, &m.to, context.as_deref())?;
+            if let Address::Agent { id, .. } = &to {
+                refuse_link_to_sysadmin(t, link, [id.as_str()])?;
+            }
             send_checked(
                 t,
                 &actor,
@@ -312,11 +341,21 @@ async fn reply(
     Path(id): Path<String>,
     ApiJson(r): ApiJson<ReplyBody>,
 ) -> ApiResult<(StatusCode, Json<Vec<Message>>)> {
+    let link = crate::links::is_link_call();
     let out = state
         .db
         .write(actor.label(), move |t| {
             let m = mail::get(t, &id)?;
-            reply_from(t, &actor, &m, &r)
+            let out = reply_from(t, &actor, &m, &r)?;
+            // An error here rolls the reply back with the transaction.
+            refuse_link_to_sysadmin(
+                t,
+                link,
+                out.iter()
+                    .filter(|m| m.to_kind == "agent")
+                    .map(|m| m.to.as_str()),
+            )?;
+            Ok(out)
         })
         .await?;
     Ok((StatusCode::CREATED, Json(out)))

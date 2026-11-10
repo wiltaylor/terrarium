@@ -1758,8 +1758,11 @@ code; the lead's security review is still to do.
   spawn), and may not drive an agent that holds `sysadmin`
   (`links::refuse_sysadmin_agent`): no turn or raw send, no keys, no
   answer, no PTY attach, no change of its prompt or settings (`PATCH`), no
-  `then` turn of a compact or new session, and no spawn for it. Each is
-  `403 link_forbidden`. Test: `a_link_cannot_grant_or_drive_sysadmin`.
+  `then` turn of a compact or new session, no spawn for it, and no mail or
+  reply to it (`api::mail::refuse_link_to_sysadmin`; a refused reply rolls
+  back). Each is `403 link_forbidden`. Tests:
+  `a_link_cannot_grant_or_drive_sysadmin`,
+  `a_link_cannot_mail_a_sysadmin_agent`.
 - **Read-only links** (Q2) pass `GET` and `HEAD` only, and a WebSocket only
   on an `.../events` route: no PTY, no target shell, no turn. Tests:
   `read_only_reads_and_opens_only_the_event_socket`,
@@ -1803,12 +1806,12 @@ code; the lead's security review is still to do.
   project_admin). That is the near-operator intent of the design. The
   sysadmin agents, whose rights reach the denied routes, are closed to a
   link (above).
-- **Indirect input still reaches a sysadmin agent.** A link may still send
-  mail as `operator`, write cards, card comments, and wiki pages that a
-  sysadmin agent reads. The agents treat mail, cards, and pages as data,
-  not as instructions (their system prompt), and only mail from the lead
-  counts as work; operator mail is a request. A sysadmin agent that obeys
-  such text could push the config repo for the link. Not closed in code.
+- **Indirect input still reaches a sysadmin agent.** A link may still
+  write cards, card comments, wiki pages, and project inbox mail that a
+  sysadmin agent reads, and a schedule that a link makes mails later as its
+  own owner. The agents treat cards and pages as data, not as instructions
+  (their system prompt). A sysadmin agent that obeys such text could push
+  the config repo for the link. Not closed in code.
 - **Config auto-sync** (review round 1, finding 2). With
   `TERRARIUM_CONFIG_SYNC=sync`, the background loop of this daemon commits
   and pushes the config repo as the operator. A link may change the state
