@@ -98,7 +98,7 @@ export interface RenderOptions extends ResolveContext {
 /** A bare card key at the start of `s`, with no letter, digit, or `_` after it. */
 const CARD_KEY_AT = /^([A-Z][A-Z0-9]{1,9})-\d{1,9}(?![A-Za-z0-9_])/;
 /** The first bare card key in `s` with no letter, digit, `_`, `-`, or `/` before it. */
-const CARD_KEY_START = /(?<![A-Za-z0-9_/-])[A-Z][A-Z0-9]{1,9}-\d{1,9}(?![A-Za-z0-9_])/;
+const CARD_KEY_START = /(?<![A-Za-z0-9_/-])[A-Z][A-Z0-9]{1,9}-\d{1,9}(?![A-Za-z0-9_])/g;
 
 /** The project of a card key of the reader, or null. */
 const keyProject = (key: string, keys: Record<string, string> | undefined): string | null => {
@@ -209,11 +209,13 @@ function cardKeyExtension(keys: Record<string, string>) {
     name: "cardkey",
     level: "inline" as const,
     start: (s: string) => {
-      const m = CARD_KEY_START.exec(s);
-      return m ? m.index : undefined;
+      for (const m of s.matchAll(CARD_KEY_START)) if (keyProject(m[0], keys)) return m.index;
+      return undefined;
     },
-    tokenizer(this: { lexer: { state: { inLink: boolean } } }, s: string) {
+    tokenizer(this: { lexer: { state: { inLink: boolean } } }, s: string, tokens: { raw: string }[]) {
       if (this.lexer.state.inLink) return undefined;
+      // The tokenizer sees only the rest of the text: the key must not go on a word of the token before it.
+      if (/[A-Za-z0-9_/-]$/.test(tokens.at(-1)?.raw ?? "")) return undefined;
       const m = CARD_KEY_AT.exec(s);
       if (!m || !keyProject(m[0], keys)) return undefined;
       return { type: "cardkey", raw: m[0], id: m[0] };
