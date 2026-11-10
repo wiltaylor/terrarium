@@ -908,7 +908,7 @@ async fn queue_lab() -> TestDaemon {
     let r = td
         .post(
             "/api/projects/p/repos",
-            json!({"name": "app", "url": "https://git.example/x/app.git"}),
+            json!({"name": "app", "url": common::branch_remote()}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
@@ -2026,7 +2026,7 @@ rule "merge" {
 rule "batch" {
   on = ["test.ping"]
   when "data.n" { eq = "3" }
-  job_queue { kind = "batch"  from = "@accepted"  limit = 2 }
+  job_queue { kind = "batch"  from = "@merge_queue"  limit = 2 }
 }
 "#;
 
@@ -2040,16 +2040,21 @@ async fn job_queue_validates_merges_and_batches() {
         json!({"title": "a", "column": "in_progress", "labels": ["by:w1"]}),
     )
     .await;
-    let b = new_card(&td, "p", json!({"title": "b", "column": "review"})).await;
     let held = new_card(
         &td,
         "p",
-        json!({"title": "From GitHub", "column": "accepted", "labels": ["github", "hold"]}),
+        json!({"title": "From GitHub", "column": "merge_queue", "labels": ["github", "hold"]}),
     )
     .await;
-    let c = new_card(&td, "p", json!({"title": "c", "column": "accepted"})).await;
-    let d = new_card(&td, "p", json!({"title": "d", "column": "accepted"})).await;
-    let e = new_card(&td, "p", json!({"title": "e", "column": "accepted"})).await;
+    // A merge takes the reviewed commit of the accept (TER-553): each card
+    // comes into the merge queue with a move.
+    let mut accepted = Vec::new();
+    for t in ["c", "d", "e", "b"] {
+        let id = new_card(&td, "p", json!({"title": t, "column": "review"})).await;
+        move_to(&td, &id, "merge_queue").await;
+        accepted.push(id);
+    }
+    let [c, d, e, b] = <[String; 4]>::try_from(accepted).unwrap();
     settle(&td).await;
 
     ping(&td, "p", &a, 1).await;
@@ -2560,7 +2565,8 @@ async fn every_verb_refuses_a_held_card() {
 #[tokio::test]
 async fn a_rule_without_admin_rights_cannot_queue_a_merge() {
     let td = queue_lab().await;
-    let b = new_card(&td, "p", json!({"title": "b", "column": "accepted"})).await;
+    let b = new_card(&td, "p", json!({"title": "b", "column": "review"})).await;
+    move_to(&td, &b, "merge_queue").await;
     let seq = ping(&td, "p", &b, 1).await;
     let mut args = Map::new();
     args.insert("kind".into(), json!("merge"));
@@ -3308,7 +3314,7 @@ async fn add_repo(td: &TestDaemon, name: &str) {
     let r = td
         .post(
             "/api/projects/p/repos",
-            json!({"name": name, "url": format!("https://git.example/x/{name}.git")}),
+            json!({"name": name, "url": common::branch_remote()}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
@@ -3591,7 +3597,7 @@ async fn an_error_in_one_project_does_not_stop_the_timers_of_another() {
     let r = td
         .post(
             "/api/projects/q/repos",
-            json!({"name": "app", "url": "https://git.example/x/qapp.git"}),
+            json!({"name": "app", "url": common::branch_remote()}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
