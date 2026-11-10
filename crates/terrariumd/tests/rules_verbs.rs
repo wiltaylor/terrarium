@@ -1507,6 +1507,12 @@ async fn merge_group_failure_tracks_the_phase_that_actually_started() {
         .await;
         let job = store_job(&td, JobKind::Merge, &[&a]).await;
         settle(&td).await;
+        // Read the group by its id at the end, as the TER-419 test does:
+        // after a red verdict the delivery flow takes card a out of it.
+        let gid = card(&td, &a).await["group"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let id = job.id.clone();
         state(&td)
             .db
@@ -1548,7 +1554,7 @@ async fn merge_group_failure_tracks_the_phase_that_actually_started() {
             .unwrap();
         verdict(&td, &failed, &a, outcome).await;
         settle(&td).await;
-        let g = card(&td, &a).await["group"].clone();
+        let g = card(&td, &gid).await["group"].clone();
         assert_eq!(
             g["steps"][1]["state"],
             if recipe { "done" } else { "failed" }
