@@ -12,7 +12,8 @@ host agent self-update that uses the release binary is in
 | The image | `ghcr.io/wiltaylor/terrarium:<version>` |
 | The channel tag | `:latest` for a stable release, `:pre` for a pre-release |
 | The host agent | `terrarium-host-<version>-linux-x86_64` on the GitHub release |
-| The checksums | `SHA256SUMS` on the GitHub release (the host agent) |
+| The host helper | `terrarium-host-helper-<version>-linux-x86_64` on the GitHub release ([native-gpu-helper.md](native-gpu-helper.md)) |
+| The checksums | `SHA256SUMS` on the GitHub release (the host agent and the host helper) |
 | The tag | `v<version>` on the commit |
 
 The image has these parts:
@@ -41,7 +42,13 @@ before the upload:
    that hash.
 2. `terrarium-host --version` reports the release version.
 
-The binary also gets a GitHub build provenance attestation.
+The host helper (`terrarium-host-helper`, the root helper of native GPU
+enforcement) is built in the same Dockerfile stage as the host agent
+(static musl, `cargo build --locked`) and comes out of the same directory
+(`/opt/terrarium/dist/terrarium-host-helper-x86_64-linux`). CI makes the
+same two checks for it. `SHA256SUMS` lists both binaries.
+
+Both binaries also get a GitHub build provenance attestation.
 
 ## How to make a release
 
@@ -73,10 +80,10 @@ The jobs run in this sequence:
 2. `version`: it calculates the version from the last `v*` tag (0.x
    semantics: a breaking change bumps the minor).
 3. `image`: it stamps the version into `Cargo.toml`, builds and pushes
-   the image, attests it, takes the host agent out of it, writes
-   `SHA256SUMS`, and attests the host agent.
+   the image, attests it, takes the host agent and the host helper out
+   of it, writes `SHA256SUMS`, and attests both binaries.
 4. `release`: it pushes the tag and makes the GitHub release with the
-   host agent, `SHA256SUMS`, and notes that give the image digest.
+   host agent, the host helper, `SHA256SUMS`, and notes that give the image digest.
 
 The `image` job pushes the image before the `release` job makes the tag.
 If `release` fails, the image exists with no release. Run the `release`
@@ -150,6 +157,10 @@ gh attestation verify terrarium-host-0.3.0-linux-x86_64 \
   --repo wiltaylor/terrarium \
   --signer-workflow wiltaylor/terrarium/.github/workflows/ci.yml
 ```
+
+The host helper is verified the same way, with
+`terrarium-host-helper-0.3.0-linux-x86_64` (releases after v0.35.0-alpha; see
+[native-gpu-helper.md](native-gpu-helper.md), install step 3).
 
 A host agent that updates itself checks the SHA-256 that the daemon
 sends. The daemon reads that hash from the image. When the dist dir of

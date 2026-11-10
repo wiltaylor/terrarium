@@ -430,13 +430,38 @@ output.
 
 Each Docker verb runs one `docker` CLI process as a session. Its output
 streams like `exec`. The table shows the command line. Environment values
-never go on the command line: the host agent passes `-e KEY` and sets `KEY`
-in the environment of the `docker` process.
+never go on the command line or into the environment of the `docker`
+process: the host agent writes them to a 0600 file in its env dir
+(`<data_dir>/terrarium-host/env`, mode 0700), passes `--env-file FILE`, and
+removes the file when the `docker` process exits. For `docker exec` that is
+the end of the command, not its start: the CLI gives no sign that it has
+read the file. The host agent deletes the files that a crash left in the
+env dir at its next start. So the CLI keeps the host agent's own
+`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG` and other env, and a
+command env cannot change which daemon it talks to (TER-490).
+
+Only a multi-line value (a newline or a carriage return, for example a key)
+falls back to `-e K` with the value in the env of the `docker` process,
+which its children (credential helpers, the ssh connection helper) inherit
+too. That fallback refuses (`bad_request`) each name that a secret grant
+cannot set (`terrarium_core::env_deny`: the loader, the C library, the
+shells, `SSH_*`, `GIT_*`, the language runtimes, the proxies and CA files,
+the harnesses; except the daemon's own `TERRARIUM_*` names, which carry
+multi-line values such as `TERRARIUM_GIT_TRAILERS` on each agent exec, and
+which neither the CLI nor its children read), and also `DOCKER_*`, `SSL_*`, `OTEL_*`, `GODEBUG`,
+`GETCONF_DIR`, `NIS_PATH`, `RESOLV_HOST_CONF` and each name that ends in
+`_PROXY` in any case (`terrarium_host::docker::steers_the_cli`). A
+single-line value over 60 KiB, and a name with whitespace or a leading `#`
+or BOM, are refused (`bad_request`): an env file line cannot hold them.
+The env dir and its parent must be real dirs of the host agent's user;
+with neither `XDG_DATA_HOME` nor `HOME` it is
+`<temp_dir>/terrarium-host-<euid>/env`. The host agent checks it at the
+start and logs an error when it is not usable.
 
 | Frame | Fields | Command |
 |---|---|---|
-| `docker.run` | `image`, `name`, `detach` (default true), `rm`, `init`, `env`, `volumes` [`{source, target, read_only}`], `workspaces` [`{path}`], `workdir`, `network`, `user`, `labels`, `command`, `pty`, `timeout_secs`, `limits` | `docker run -d [--rm] [--init] [--cpus=C] [--memory=M --memory-swap=M+S] [--pids-limit=P] [--blkio-weight=W] [--name N] [-e K]... [-v S:T[:ro]]... [-v <work_dir>/<path>:/work/<path>]... [-w W] [--network N] [-u U] [--label K=V]... IMAGE [COMMAND...]`. With `detach: false`: `-i`, and `-t` with a `pty`. `workspaces`: see [Workspaces](#workspaces). `limits`: see [Resource limits](#resource-limits). |
-| `docker.exec` | `container`, `cmd`, `args`, `cwd`, `env`, `user`, `pty`, `timeout_secs` | `docker exec -i [-t] [-w CWD] [-e K]... [-u U] CONTAINER CMD ARGS...` |
+| `docker.run` | `image`, `name`, `detach` (default true), `rm`, `init`, `env`, `volumes` [`{source, target, read_only}`], `workspaces` [`{path}`], `workdir`, `network`, `user`, `labels`, `command`, `pty`, `timeout_secs`, `limits` | `docker run -d [--rm] [--init] [--cpus=C] [--memory=M --memory-swap=M+S] [--pids-limit=P] [--blkio-weight=W] [--name N] [--env-file FILE] [-e K]... [-v S:T[:ro]]... [-v <work_dir>/<path>:/work/<path>]... [-w W] [--network N] [-u U] [--label K=V]... IMAGE [COMMAND...]`. With `detach: false`: `-i`, and `-t` with a `pty`. `workspaces`: see [Workspaces](#workspaces). `limits`: see [Resource limits](#resource-limits). |
+| `docker.exec` | `container`, `cmd`, `args`, `cwd`, `env`, `user`, `pty`, `timeout_secs` | `docker exec -i [-t] [-w CWD] [--env-file FILE] [-e K]... [-u U] CONTAINER CMD ARGS...` |
 | `docker.start` | `container` | `docker start CONTAINER`. The container keeps its files. |
 | `docker.stop` | `container`, `grace_secs` | `docker stop [-t G] CONTAINER` |
 | `docker.rm` | `container`, `force`, `volumes` | `docker rm [-f] [-v] CONTAINER` |

@@ -343,11 +343,28 @@ not run it on a shared target or a DGX Spark without that decision.
    done
    ```
 
-3. **The binary**, root-owned:
+3. **The binary**: download it from the GitHub release of the daemon's
+   version and verify it; do not build it. Each release has
+   `terrarium-host-helper-<version>-linux-x86_64` (static musl, built
+   with `--locked` in the release CI, next to `terrarium-host`) and its
+   line in `SHA256SUMS` ([release.md](release.md)). Then install it
+   root-owned:
 
    ```sh
-   install -o root -g root -m 0755 terrarium-host-helper /usr/local/libexec/terrarium-host-helper
+   v=<version>   # the version of the daemon and the host agent, without the v
+   gh release download "v$v" --repo wiltaylor/terrarium \
+     --pattern "terrarium-host-helper-$v-linux-x86_64" --pattern SHA256SUMS
+   sha256sum -c --ignore-missing SHA256SUMS
+   gh attestation verify "terrarium-host-helper-$v-linux-x86_64" --repo wiltaylor/terrarium \
+     --signer-workflow wiltaylor/terrarium/.github/workflows/ci.yml
+   install -o root -g root -m 0755 "terrarium-host-helper-$v-linux-x86_64" /usr/local/libexec/terrarium-host-helper
+   /usr/local/libexec/terrarium-host-helper --version
    ```
+
+   Without `gh`, take both files from the release page with `curl -fLO`
+   and run the `sha256sum` check. A release up to v0.35.0-alpha has no
+   such file: build it from the tag with `cargo build
+   --release --locked -p terrarium-host --bin terrarium-host-helper`.
 
 4. **The workspace**: a group that both users share, with the setgid bit,
    so files stay writable for the host agent and the sessions:

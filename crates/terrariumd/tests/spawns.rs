@@ -831,7 +831,7 @@ async fn a_stop_of_the_owner_leaves_them() {
 /// read the owner.
 #[tokio::test]
 async fn spawned_lists_page_and_rights() {
-    let (td, _lead, w) = setup().await;
+    let (td, lead, w) = setup().await;
     td.patch(
         &format!("/api/agents/{w}"),
         json!({"policy": {"spawn": {"templates": ["worker"], "max_concurrent": 5}}}),
@@ -870,12 +870,25 @@ async fn spawned_lists_page_and_rights() {
         .await
         .err(403, "forbidden");
     // The operator's own list.
-    td.post(
-        "/api/agents/operator/spawn",
-        json!({"template": "worker", "task": "x", "project": "p"}),
-    )
-    .await
-    .ok();
+    let op = id(td
+        .post(
+            "/api/agents/operator/spawn",
+            json!({"template": "worker", "task": "x", "project": "p"}),
+        )
+        .await
+        .ok());
+    // A spawn of the operator: the operator only, not a worker or the lead
+    // of its project (TER-558).
+    td.get(&format!("/api/spawns/{op}")).await.ok();
+    td.get_as(&other, &format!("/api/spawns/{op}"))
+        .await
+        .err(403, "forbidden");
+    td.get_as(&lead, &format!("/api/spawns/{op}"))
+        .await
+        .err(403, "forbidden");
+    td.get_as(&other, &format!("/api/spawns/{first}"))
+        .await
+        .ok();
     let ops = td.get("/api/agents/operator/spawned?project=p").await;
     assert_eq!(ops.ok().as_array().unwrap().len(), 1);
     assert_eq!(ops.body[0]["name"], "operator-worker-1");

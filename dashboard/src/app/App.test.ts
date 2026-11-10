@@ -10,7 +10,13 @@ import { MOVED_ROUTES, movedTo, PROJECT_TABS } from "./nav";
 const { stub } = vi.hoisted(() => ({ stub: (label: string) => () => label }));
 
 vi.mock("../api", () => ({ isMock: false }));
-vi.mock("../stores", () => ({ auth: { mode: () => "operator" } }));
+// The project shell reads the tab counts (TER-154): no agent, no count.
+vi.mock("../stores", () => ({
+  auth: { mode: () => "operator" },
+  agents: { inProject: () => [] },
+  api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) } },
+  events: { on: () => () => {} },
+}));
 vi.mock("./Layout", () => ({ Layout: (props: { children?: unknown }) => props.children }));
 vi.mock("./LoginScreen", () => ({ LoginScreen: stub("Login") }));
 vi.mock("../features/home/Home", () => ({ Home: stub("Home page") }));

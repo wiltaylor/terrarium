@@ -94,6 +94,10 @@ enum Arg {
     Columns,
     /// One of the given words.
     OneOf(&'static [&'static str]),
+    /// The source of a script ([`SCRIPT_VERB`]): a text of 1 to
+    /// [`MAX_SCRIPT_BYTES`] bytes, without templates (the script reads its
+    /// values with `rule::get`).
+    Code,
 }
 
 /// One verb: its block kind in the file, its name in the API, and its
@@ -301,7 +305,37 @@ pub const VERBS: &[Verb] = &[
         ],
         required: &["outcome"],
     },
+    Verb {
+        kind: "script",
+        name: SCRIPT_VERB,
+        args: &[("source", Arg::Code), ("fuel", Arg::Count)],
+        required: &["source"],
+    },
 ];
+
+/// The verb of a script step (TER-173, TER-162 D1): a wscript program for
+/// what WCL cannot say. The engine runs it in a child process
+/// (`terrariumd::rule_script`) with fuel, a memory limit and a wall-clock
+/// limit, with a read-only view of the event, the card and the job. It
+/// returns verb blocks in the WCL syntax of this file; [`script_actions`]
+/// checks them as the verbs of a rule, and the engine runs them in place
+/// of the step, with the same actor, checks and dry run.
+pub const SCRIPT_VERB: &str = "script.run";
+
+/// The largest script source, in bytes.
+pub const MAX_SCRIPT_BYTES: usize = 16 * 1024;
+
+/// The fuel (wscript instructions) of a script step without `fuel`.
+pub const DEFAULT_SCRIPT_FUEL: u64 = 100_000;
+
+/// The highest `fuel` of a script step.
+pub const MAX_SCRIPT_FUEL: u64 = 10_000_000;
+
+/// The largest output of a script (its verb blocks), in bytes.
+pub const MAX_SCRIPT_OUTPUT: usize = 16 * 1024;
+
+/// The most verbs that one script step returns.
+pub const MAX_SCRIPT_ACTIONS: usize = 20;
 
 /// The block kind of a rule.
 const RULE: &str = "rule";
@@ -841,6 +875,15 @@ fn check_arg(ctx: &Context, arg: Arg, v: &Value) -> Result<(), String> {
             }
             Ok(())
         }
+        Arg::Code => match v.as_str() {
+            Some(s) if s.trim().is_empty() => Err("is empty".into()),
+            Some(s) if s.len() > MAX_SCRIPT_BYTES => Err(format!(
+                "has {} bytes; a script has at most {MAX_SCRIPT_BYTES}",
+                s.len()
+            )),
+            Some(_) => Ok(()),
+            None => Err("must be a text".into()),
+        },
         Arg::Bool => {
             if v.is_boolean() {
                 Ok(())
@@ -1291,6 +1334,16 @@ pub fn parse(text: &str, file: &str, ctx: &Context) -> Result<RuleSet, FileError
                     problems.push(problem_at(text, Some(cat), format!("rule `{name}`: {e}")));
                 }
             }
+            if verb.name == SCRIPT_VERB
+                && let Some(f) = args.get("fuel").and_then(Value::as_u64)
+                && f > MAX_SCRIPT_FUEL
+            {
+                problems.push(problem_at(
+                    text,
+                    Some(cat),
+                    format!("rule `{name}`: script.fuel is at most {MAX_SCRIPT_FUEL}, not {f}"),
+                ));
+            }
             if verb.kind == "card_label" && args.is_empty() {
                 problems.push(problem_at(
                     text,
@@ -1329,6 +1382,84 @@ pub fn parse(text: &str, file: &str, ctx: &Context) -> Result<RuleSet, FileError
     Ok(RuleSet { rules })
 }
 
+/// The first line of the rule around the output of a script in
+/// [`script_actions`].
+const SCRIPT_WRAP: &str = "rule \"script\" {\n  on = [\"script\"]\n";
+
+/// The verbs that a script returned: `output` holds verb blocks in the
+/// syntax of a rules file (for example `card_move { to = "@review" }`).
+/// They are checked as the verbs of one rule ([`parse`], with the columns
+/// of `ctx`), and nothing else may be in the output: no second rule, no
+/// condition, no field of the rule, no script step. An empty output is
+/// no verb. `Err` is the message, with the lines of the output.
+pub fn script_actions(output: &str, ctx: &Context) -> Result<Vec<Action>, String> {
+    if output.len() > MAX_SCRIPT_OUTPUT {
+        return Err(format!(
+            "the script returned {} bytes; a script returns at most {MAX_SCRIPT_OUTPUT}",
+            output.len()
+        ));
+    }
+    if output.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let text = format!("{SCRIPT_WRAP}{output}\n}}\n");
+    let ctx = Context {
+        columns: ctx.columns.clone(),
+        max_rules: 1,
+    };
+    let lines = SCRIPT_WRAP.matches('\n').count();
+    let set = parse(&text, "script output", &ctx).map_err(|e| {
+        let problems: Vec<String> = e
+            .problems
+            .iter()
+            .take(5)
+            .map(|p| match p.line.checked_sub(lines) {
+                Some(l) if l >= 1 => format!("line {l}: {}", p.message),
+                _ => p.message.clone(),
+            })
+            .collect();
+        format!(
+            "the script output is not verb blocks: {}",
+            problems.join("; ")
+        )
+    })?;
+    let [rule] = set.rules.as_slice() else {
+        return Err("the script output holds a rule; it holds verb blocks only".into());
+    };
+    let plain = Rule {
+        actions: rule.actions.clone(),
+        line: rule.line,
+        ..Rule {
+            name: "script".into(),
+            description: None,
+            enabled: true,
+            on: vec!["script".into()],
+            when: Vec::new(),
+            if_card: Vec::new(),
+            if_job: Vec::new(),
+            max_per_hour: None,
+            actions: Vec::new(),
+            line: 0,
+        }
+    };
+    if *rule != plain {
+        return Err(
+            "the script output sets a field or a condition of the rule; it holds verb blocks only"
+                .into(),
+        );
+    }
+    if rule.actions.iter().any(|a| a.verb == SCRIPT_VERB) {
+        return Err("a script cannot return a script step".into());
+    }
+    if rule.actions.len() > MAX_SCRIPT_ACTIONS {
+        return Err(format!(
+            "the script returned {} verbs; a script returns at most {MAX_SCRIPT_ACTIONS}",
+            rule.actions.len()
+        ));
+    }
+    Ok(rule.actions.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1354,6 +1485,99 @@ mod tests {
             ),
             max_rules: DEFAULT_MAX_RULES,
         }
+    }
+
+    const SCRIPTED: &str = r#"rule "scripted" {
+  on = ["card"]
+  script {
+    fuel = 5000
+    source = <<'WS'
+      use rule
+      fn main() -> string {
+        let t = "{{event.not.a.template}}"
+        "card_comment {{ text = \"x\" }}"
+      }
+      WS
+  }
+  card_comment { text = "after" }
+}
+"#;
+
+    #[test]
+    fn a_script_step_reads_with_its_source_as_it_is() {
+        let set = parse(SCRIPTED, "rules.wcl", &board()).unwrap();
+        let r = &set.rules[0];
+        assert_eq!(r.actions.len(), 2);
+        assert_eq!(r.actions[0].verb, SCRIPT_VERB);
+        assert_eq!(r.actions[0].args["fuel"], serde_json::json!(5000));
+        let src = r.actions[0].args["source"].as_str().unwrap();
+        assert!(src.starts_with("use rule\n"), "{src:?}");
+        assert!(src.contains("{{event.not.a.template}}"), "{src:?}");
+        assert_eq!(r.actions[1].verb, "card.comment");
+    }
+
+    #[test]
+    fn a_script_step_has_bounds() {
+        let big = SCRIPTED.replace("fuel = 5000", "fuel = 10000001");
+        let e = parse(&big, "rules.wcl", &board()).unwrap_err().to_string();
+        assert!(e.contains("script.fuel is at most 10000000"), "{e}");
+        let empty = "rule \"s\" {\n  on = [\"card\"]\n  script { source = \"  \" }\n}\n";
+        let e = parse(empty, "rules.wcl", &board()).unwrap_err().to_string();
+        assert!(e.contains("script.source is empty"), "{e}");
+        let long = format!(
+            "rule \"s\" {{\n  on = [\"card\"]\n  script {{ source = \"{}\" }}\n}}\n",
+            "x".repeat(MAX_SCRIPT_BYTES + 1)
+        );
+        let e = parse(&long, "rules.wcl", &board()).unwrap_err().to_string();
+        assert!(e.contains("a script has at most"), "{e}");
+        let none = "rule \"s\" {\n  on = [\"card\"]\n  script { fuel = 10 }\n}\n";
+        assert!(parse(none, "rules.wcl", &board()).is_err());
+    }
+
+    #[test]
+    fn script_output_is_checked_as_verbs() {
+        let ctx = board();
+        let a = script_actions(
+            "card_move { to = \"review\" }\ncard_label { add = [\"x\"] }",
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].verb, "card.move");
+        assert_eq!(a[1].args["add"], serde_json::json!(["x"]));
+        assert!(script_actions("  \n", &ctx).unwrap().is_empty());
+
+        let bad = [
+            ("card_move { to = \"nowhere\" }", "unknown column `nowhere`"),
+            ("card_comment { text = \"{{nope}}\" }", "line 1"),
+            ("card_move { to = 3 }", "not verb blocks"),
+            ("let x = 1", "not verb blocks"),
+            (
+                "}\nrule \"two\" {\n on = [\"x\"]\n card_comment { text = \"t\" }",
+                "not verb blocks",
+            ),
+            (
+                "when \"kind\" { eq = \"x\" }\ncard_comment { text = \"t\" }",
+                "verb blocks only",
+            ),
+            ("enabled = false", "verb blocks only"),
+            (
+                "description = \"d\"\ncard_comment { text = \"t\" }",
+                "verb blocks only",
+            ),
+            ("script { source = \"x\" }", "cannot return a script step"),
+            ("card_comment { text = 1 2 }", "not verb blocks"),
+        ];
+        for (out, want) in bad {
+            let e = script_actions(out, &ctx).unwrap_err();
+            assert!(e.contains(want), "{out:?}: {e}");
+        }
+        let many = "card_comment { text = \"t\" }\n".repeat(MAX_SCRIPT_ACTIONS + 1);
+        let e = script_actions(&many, &ctx).unwrap_err();
+        assert!(e.contains("at most 20"), "{e}");
+        let huge = "x".repeat(MAX_SCRIPT_OUTPUT + 1);
+        let e = script_actions(&huge, &ctx).unwrap_err();
+        assert!(e.contains("returns at most"), "{e}");
     }
 
     const GOOD: &str = r#"// The flow of a validate job.

@@ -445,6 +445,20 @@ pub fn role_name(
         .map_or_else(|| fallback.to_owned(), |c| c.name))
 }
 
+/// The cards in the `blocked` role columns of `project`, archived cards not
+/// counted. One count per column through `cards_column` (TER-154): the
+/// project tabs read it on each board change, so it reads no card rows.
+pub fn blocked_count(conn: &Connection, project: &str) -> ApiResult<i64> {
+    let mut n = 0;
+    for c in column_rows(conn, project)?
+        .into_iter()
+        .filter(|c| c.is(BLOCKED))
+    {
+        n += active_count(conn, c.id)?;
+    }
+    Ok(n)
+}
+
 fn active_count(conn: &Connection, column_id: i64) -> ApiResult<i64> {
     Ok(conn.query_row(
         "SELECT count(*) FROM cards WHERE column_id = ?1 AND archived = 0 AND kind = 'card'",

@@ -298,8 +298,19 @@ esac"#,
             snaps = dir.join("vmlab.snaps").display()
         ),
     };
+    // The log shows the names in a `--env-file` (comma-separated), not its
+    // temp path: the host agent removes the file when the call ends.
     format!(
-        "#!/bin/sh\necho \"{tool} $* (in $(pwd))\" >> '{log}'\n{body}\nexit 0\n",
+        r#"#!/bin/sh
+line=; prev=
+for a in "$@"; do
+  if [ "$prev" = --env-file ]; then a=$(cut -d= -f1 "$a" | paste -sd, -); fi
+  line="$line $a"; prev=$a
+done
+echo "{tool}$line (in $(pwd))" >> '{log}'
+{body}
+exit 0
+"#,
         log = log.display()
     )
 }
@@ -964,7 +975,11 @@ async fn owned_target_roots_fall_back_to_the_agent_home() {
     let log = lab.log();
     // The owned build env is set (docker gets it by name; build_env gives
     // the value under the root of the prepared base).
-    assert!(log.contains("-e CARGO_TARGET_DIR"), "{log}");
+    assert!(
+        log.lines()
+            .any(|l| env_file_names(l).contains(&"CARGO_TARGET_DIR")),
+        "{log}"
+    );
     // Any later failure at the stored fallback names work_root too.
     std::fs::write(lab.bins.path().join("broken-fallback-base"), "").unwrap();
     let r = lab
@@ -1687,7 +1702,7 @@ async fn lifecycle_verbs_map_to_docker_and_vmlab() {
         .err(422, "invalid");
     let log = lab.log();
     assert!(
-        log.contains("docker run -d --init --name terrarium-dbox -e NVIDIA_VISIBLE_DEVICES --label terrarium.target=dbox alpine:3 sleep infinity"),
+        log.contains("docker run -d --init --name terrarium-dbox --env-file NVIDIA_VISIBLE_DEVICES --label terrarium.target=dbox alpine:3 sleep infinity"),
         "{log}"
     );
     assert!(log.contains("docker rm -f -v terrarium-dbox"), "{log}");
@@ -3529,6 +3544,14 @@ async fn a_host_connect_reconciles_the_target_states() {
 
 // ------------------------------------------------------------ mode 1
 
+/// The names in the `--env-file` of a logged call ([`fake_tool`]).
+fn env_file_names(line: &str) -> Vec<&str> {
+    line.split_once("--env-file ")
+        .and_then(|(_, rest)| rest.split(' ').next())
+        .map(|names| names.split(',').collect())
+        .unwrap_or_default()
+}
+
 /// The `docker run` lines of the fake's log.
 fn runs(lab: &Lab) -> Vec<String> {
     lab.log()
@@ -3596,7 +3619,8 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
     assert_eq!(r.len(), 1, "{r:?}");
     let v1 = format!("-v {}:/work/terra/w1", ws("w1").display());
     assert!(
-        r[0].contains("--name terrarium-terra-dbox -e HOME") && r[0].contains(&v1),
+        r[0].contains("--name terrarium-terra-dbox --env-file HOME,NVIDIA_VISIBLE_DEVICES")
+            && r[0].contains(&v1),
         "{}",
         r[0]
     );

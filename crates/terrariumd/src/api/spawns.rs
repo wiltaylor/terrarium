@@ -136,6 +136,9 @@ async fn show(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Spawn>> {
     let sp = state.db.read(move |c| spawns::get(c, &id)).await?;
+    if sp.owner == OPERATOR {
+        policy::operator_only(&actor, "reading a spawn of the operator")?;
+    }
     policy::read_project(&actor, &sp.project)?;
     Ok(Json(sp))
 }

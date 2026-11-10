@@ -225,6 +225,23 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/var/lib"))
 }
 
+/// The private dir of the `docker --env-file` files (TER-490):
+/// `<data_dir>/terrarium-host/env`, mode 0700. With neither `XDG_DATA_HOME`
+/// nor `HOME`, [`data_dir`] is `/var/lib`, which a user agent cannot write:
+/// then `<temp_dir>/terrarium-host-<euid>/env`. The host agent checks the
+/// dir and deletes the leftover files in it at the start.
+pub fn default_env_dir() -> PathBuf {
+    let has_home = ["XDG_DATA_HOME", "HOME"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+    let base = if has_home {
+        data_dir().join("terrarium-host")
+    } else {
+        std::env::temp_dir().join(format!("terrarium-host-{}", nix::unistd::geteuid()))
+    };
+    absolute(base.join("env"))
+}
+
 fn absolute(p: PathBuf) -> PathBuf {
     if p.is_absolute() {
         p

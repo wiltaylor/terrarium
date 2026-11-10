@@ -191,158 +191,10 @@ pub(crate) fn label_of(conn: &Connection, key: &str) -> ApiResult<String> {
     Ok(key.to_owned())
 }
 
-/// Env var names that a grant cannot set (docs/api.md §5.2, "The name
-/// rule"): the loader and the C library, the shell, the sandbox and the
-/// daemon, the locale and the terminal, the proxy and CA vars, and the
-/// vars that a harness adapter or an account sets.
-const DENIED_ENV: &[&str] = &[
-    // The sandbox, the daemon, the session.
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "TERM",
-    "TERMINFO",
-    "TERMINFO_DIRS",
-    "TERMCAP",
-    "LANG",
-    "LANGUAGE",
-    "TZ",
-    "TZDIR",
-    "PWD",
-    "OLDPWD",
-    "DISPLAY",
-    "MAIL",
-    "MAILPATH",
-    // The loader and the C library.
-    "GCONV_PATH",
-    "GLIBC_TUNABLES",
-    "LOCPATH",
-    "NLSPATH",
-    "HOSTALIASES",
-    "RES_OPTIONS",
-    "LOCALDOMAIN",
-    "TMPDIR",
-    // The shell.
-    "IFS",
-    "ENV",
-    "SHELLOPTS",
-    "BASHOPTS",
-    "PS1",
-    "PS2",
-    "PS4",
-    "PROMPT_COMMAND",
-    "CDPATH",
-    "GLOBIGNORE",
-    "HISTFILE",
-    "INPUTRC",
-    "POSIXLY_CORRECT",
-    // Programs that other programs start.
-    "EDITOR",
-    "VISUAL",
-    "PAGER",
-    "MANPAGER",
-    "LESSOPEN",
-    "LESSCLOSE",
-    "BROWSER",
-    // Language runtimes.
-    "PERLLIB",
-    "CLASSPATH",
-    "JDK_JAVA_OPTIONS",
-    "GOFLAGS",
-    "GOPATH",
-    "GOROOT",
-    "GOPROXY",
-    "GOENV",
-    "GOTOOLCHAIN",
-    "GOINSECURE",
-    "GOPRIVATE",
-    "GONOSUMDB",
-    "GONOPROXY",
-    "VIRTUAL_ENV",
-    "TCLLIBPATH",
-    "PHPRC",
-    // Proxies and CA files.
-    "NO_PROXY",
-    "CURL_CA_BUNDLE",
-    "CURL_HOME",
-    "REQUESTS_CA_BUNDLE",
-    "SSLKEYLOGFILE",
-    "WGETRC",
-    "GNUPGHOME",
-    // The harness adapters and the accounts.
-    "IS_SANDBOX",
-    "ENABLE_CLAUDEAI_MCP_SERVERS",
-    "GEMINI_API_KEY",
-    "OPENROUTER_API_KEY",
-    "XAI_API_KEY",
-    "GROQ_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "MISTRAL_API_KEY",
-    "ZAI_API_KEY",
-    "KIMI_API_KEY",
-    "MOONSHOT_API_KEY",
-];
-
-/// Prefixes of the env var names that a grant cannot set.
-const DENIED_ENV_PREFIXES: &[&str] = &[
-    // The loader, the C library, the shell, the locale.
-    "LD_",
-    "MALLOC_",
-    "BASH_",
-    "LC_",
-    // git: the config, the dirs, the ssh command, the identity.
-    "GIT_",
-    // The sandbox and the daemon.
-    "TERRARIUM_",
-    "XDG_",
-    "SSH_",
-    "WAYLAND_",
-    // Language runtimes and package managers.
-    "NODE_",
-    "NPM_CONFIG_",
-    "YARN_",
-    "BUN_",
-    "DENO_",
-    "PYTHON",
-    "PIP_",
-    "UV_",
-    "CONDA_",
-    "PERL5",
-    "RUBY",
-    "GEM_",
-    "BUNDLE_",
-    "JAVA_",
-    "DOTNET_",
-    "COREHOST_",
-    "CGO_",
-    "CARGO_",
-    "RUSTC",
-    "RUSTDOC",
-    "RUSTFLAGS",
-    "RUSTUP_",
-    "LUA_",
-    // CA files.
-    "SSL_CERT_",
-    // The harnesses and their accounts.
-    "ANTHROPIC_",
-    "CLAUDE_",
-    "OPENAI_",
-    "CODEX_",
-    "COPILOT_",
-    "PI_",
-    "DISABLE_",
-];
-
-/// Suffixes of the env var names that a grant cannot set: the proxies
-/// (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`).
-const DENIED_ENV_SUFFIXES: &[&str] = &["_PROXY"];
-
 /// Check an env var name of a grant (docs/api.md §5.2, "The name rule"):
 /// it matches `^[A-Z][A-Z0-9_]{0,127}$`, and it is not in the deny set
-/// ([`DENIED_ENV`], [`DENIED_ENV_PREFIXES`], [`DENIED_ENV_SUFFIXES`], and
-/// the harness home vars). The daemon checks each final name (also each
+/// ([`terrarium_core::env_deny`]: the names, the prefixes, the suffixes,
+/// and the harness home vars). The daemon checks each final name (also each
 /// `<ENV>_<FIELD>` of a `generic` secret) when it writes a grant, when a
 /// config import writes one, and again at each launch.
 pub fn check_env_name(name: &str) -> ApiResult<()> {
@@ -356,14 +208,7 @@ pub fn check_env_name(name: &str) -> ApiResult<()> {
              letters, digits, or `_` (at most 128)"
         )));
     }
-    let home_env = terrarium_core::HarnessId::ALL
-        .iter()
-        .any(|h| h.home_env() == name);
-    if DENIED_ENV.contains(&name)
-        || home_env
-        || DENIED_ENV_PREFIXES.iter().any(|p| name.starts_with(p))
-        || DENIED_ENV_SUFFIXES.iter().any(|p| name.ends_with(p))
-    {
+    if terrarium_core::env_deny::denied(name) {
         return Err(ApiError::invalid(format!(
             "`{name}` is an env var that the sandbox, the loader, a shell, a language runtime, \
              a proxy, or a harness reads or sets; choose another name"
@@ -1042,6 +887,34 @@ pub(crate) mod tests {
 
     pub(crate) const AGENT: &str = "01K8AGENT0000000000000000A";
     pub(crate) const OTHER: &str = "01K8AGENT0000000000000000B";
+
+    /// TER-490: the host agent refuses a multi-line docker env value for
+    /// each name that a grant cannot set, from the same list
+    /// ([`terrarium_core::env_deny`]), plus its own names. The daemon's own
+    /// `TERRARIUM_*` names are the one exception: it sends multi-line values
+    /// under them on each agent exec.
+    #[test]
+    fn the_host_agent_refuses_every_name_that_a_grant_refuses() {
+        use terrarium_core::env_deny::{DENIED_ENV, DENIED_ENV_PREFIXES, DENIED_ENV_SUFFIXES};
+        use terrarium_host::docker::steers_the_cli;
+        let mut names: Vec<String> = DENIED_ENV.iter().map(|n| n.to_string()).collect();
+        names.extend(DENIED_ENV_PREFIXES.iter().map(|p| format!("{p}X")));
+        names.extend(DENIED_ENV_SUFFIXES.iter().map(|p| format!("X{p}")));
+        names.extend(
+            terrarium_core::HarnessId::ALL
+                .iter()
+                .map(|h| h.home_env().to_owned()),
+        );
+        for n in &names {
+            assert!(check_env_name(n).is_err(), "{n}");
+            // The daemon's own names are the one exception.
+            let own = n.starts_with(terrarium_host::docker::CLI_ALLOWED_PREFIX);
+            assert_eq!(steers_the_cli(n), !own, "{n}");
+        }
+        assert!(names.iter().any(|n| n.starts_with("TERRARIUM_")));
+        assert!(check_env_name("DEPLOY_KEY").is_ok());
+        assert!(!steers_the_cli("DEPLOY_KEY"));
+    }
 
     pub(crate) fn db() -> Connection {
         let c = crate::secrets::tests::db();

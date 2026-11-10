@@ -927,6 +927,16 @@ Logs, and Settings, in that order (`app/nav.ts` `PROJECT_TABS`).
 on deep links. Knowledge, Logs, and Settings keep their own tab row below the
 project tabs. The board has none (TER-507).
 
+Three tabs show a count (TER-154, `features/projects/tabCounts.ts`): Agents
+the agents blocked or in error (from the agents store, as on the project row
+of the sidebar), Board the blocked cards, and Dashboard the open questions of
+the project (warn colour when one is urgent or critical). The last two come
+from `GET /api/projects/{name}/counts`, read when the project opens and again
+300 ms after the last `card` or `question` event of the project. The words
+("2 blocked cards") are in the accessible name and the tooltip of the tab;
+the number is `aria-hidden`. A reader that may not list the questions gets
+`questions: null` and no Dashboard count.
+
 | Route | View | API calls |
 |---|---|---|
 | `/` | Home: usage strip (each tile has the `display_name` of the subscription, its name in small text, and the windows of the last good probe, shortest first, with clear labels: "5-hour", "Weekly", "Weekly, Fable"; an Anthropic Ultra plan has no 5-hour window, so its weekly window leads; `lib/format.ts` `orderWindows`, `windowLabel`), host cards (see "Home: hosts"); the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; hosts: `GET /api/hosts`, `GET /api/hosts/{name}/metrics?minutes=15` |
