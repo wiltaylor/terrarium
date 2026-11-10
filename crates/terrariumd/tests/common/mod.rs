@@ -351,7 +351,7 @@ impl TestDaemon {
         ssh: Option<&str>,
     ) {
         if let Some(d) = self.daemon.take() {
-            d.shutdown();
+            d.shutdown_and_wait().await;
         }
         seed_database(&self.state);
         let mut executor = terrariumd::executor::Executor::default();

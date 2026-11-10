@@ -171,6 +171,24 @@ impl Daemon {
             warn!(socket = %self.socket.display(), "cannot remove socket: {e}");
         }
     }
+
+    /// [`Daemon::shutdown`], but it waits until the tasks have ended and no
+    /// database call of them still runs, before it lets the state lock go.
+    /// For a start again on the same state dir in the same process (tests):
+    /// an aborted task ends at its next await, but a database call that it
+    /// started runs on to its end on the blocking pool (TER-646).
+    pub async fn shutdown_and_wait(mut self) {
+        let tasks = std::mem::take(&mut self.tasks);
+        for t in &tasks {
+            t.abort();
+        }
+        for t in tasks {
+            let _ = t.await;
+        }
+        // The connection mutex: a call on the blocking pool holds it.
+        let _ = self.state.db.read(|_| Ok(())).await;
+        self.shutdown();
+    }
 }
 
 /// The lock file in the state dir: the running daemon holds an exclusive
