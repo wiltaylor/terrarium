@@ -5421,7 +5421,10 @@ async fn a_lost_host_agent_session_reruns_the_whole_batch() {
 /// True when `flock` with a wait works here: the TER-676 tests need it.
 fn flock_waits() -> bool {
     std::process::Command::new("sh")
-        .args(["-c", "command -v flock >/dev/null 2>&1 && flock -E 75 -w 1 /dev/null true"])
+        .args([
+            "-c",
+            "command -v flock >/dev/null 2>&1 && flock -E 75 -w 1 /dev/null true",
+        ])
         .output()
         .is_ok_and(|o| o.status.success())
 }
@@ -5540,8 +5543,7 @@ async fn a_lost_run_whose_slot_stays_held_ends_with_the_lock_in_its_tail() {
     }
     let lab = lab(1).await;
     let marks = tempfile::tempdir().unwrap();
-    let (_c1, job_id, holder) =
-        lose_a_run_with_a_held_slot(&lab, marks.path(), 120, Some(2)).await;
+    let (_c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 120, Some(2)).await;
     let jobs = lab.until_idle().await;
     stop_group(holder);
     assert_eq!(jobs.len(), 1, "{jobs:#?}");
