@@ -783,6 +783,10 @@ a.project-name {
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
+/* The count of a project tab (TER-154). The words are in a .sr-only span. */
+.project-tabs .nav-count {
+  margin-left: 6px;
+}
 /* A phone: tabs of 40px or more, for a finger. */
 @media (max-width: 760px) {
   .tabs a,

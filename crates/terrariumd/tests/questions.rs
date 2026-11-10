@@ -1232,3 +1232,87 @@ async fn a_question_is_linked_to_a_card_and_unlinked() {
         .count();
     assert_eq!(cards, 4, "{}", audit.body);
 }
+
+/// `GET /api/projects/{name}/counts` (TER-154): the blocked cards and the
+/// open questions of one project, for the project tabs of the dashboard.
+#[tokio::test]
+async fn project_counts_give_blocked_cards_and_open_questions() {
+    let World {
+        td,
+        lead,
+        worker,
+        sys,
+        other_lead,
+    } = setup().await;
+    let empty = td.get("/api/projects/p/counts").await.ok().clone();
+    assert_eq!(
+        empty,
+        json!({"blocked_cards": 0, "questions": {"open": 0, "urgent": 0, "critical": 0}})
+    );
+
+    // Two blocked cards, one archived, and one card in another column.
+    let mut blocked = Vec::new();
+    for title in ["A", "B", "C"] {
+        blocked.push(id(td
+            .post(
+                "/api/projects/p/cards",
+                json!({"title": title, "column": "blocked", "comment": "Needs a decision"}),
+            )
+            .await
+            .ok()));
+    }
+    td.post("/api/projects/p/cards", json!({"title": "Ready"}))
+        .await
+        .ok();
+    td.post(
+        "/api/projects/q/cards",
+        json!({"title": "Q", "column": "blocked", "comment": "Needs a decision"}),
+    )
+    .await
+    .ok();
+    td.delete(&format!("/api/cards/{}", blocked[2])).await.ok();
+
+    // Open questions of each kind that needs a decision; a notice, an
+    // answered question, and another project's question do not count.
+    ask(&td, &lead, json!({"text": "Normal?"})).await;
+    ask(&td, &lead, json!({"text": "Urgent?", "priority": "urgent"})).await;
+    ask(
+        &td,
+        &lead,
+        json!({"kind": "bundle", "text": "Choices", "priority": "critical",
+            "items": [{"text": "A?"}, {"text": "B?"}]}),
+    )
+    .await;
+    ask(
+        &td,
+        &lead,
+        json!({"kind": "notice", "text": "Done", "card": blocked[0]}),
+    )
+    .await;
+    let answered = ask(&td, &lead, json!({"text": "Answered?"})).await;
+    td.post(
+        &format!("/api/questions/{}/answer", id(&answered)),
+        json!({"answer": "Yes"}),
+    )
+    .await
+    .ok();
+    ask(&td, &other_lead, json!({"text": "Other project?"})).await;
+
+    let want = json!({"blocked_cards": 2, "questions": {"open": 3, "urgent": 2, "critical": 1}});
+    assert_eq!(td.get("/api/projects/p/counts").await.ok(), &want);
+    // The project lead and a sysadmin read the questions too.
+    assert_eq!(td.get_as(&lead, "/api/projects/p/counts").await.ok(), &want);
+    assert_eq!(td.get_as(&sys, "/api/projects/p/counts").await.ok(), &want);
+    // A worker may not list the questions: it reads only the cards.
+    assert_eq!(
+        td.get_as(&worker, "/api/projects/p/counts").await.ok(),
+        &json!({"blocked_cards": 2, "questions": null})
+    );
+    // An agent of another project may not read the project at all.
+    td.get_as(&other_lead, "/api/projects/p/counts")
+        .await
+        .err(403, "forbidden");
+    td.get("/api/projects/nope/counts")
+        .await
+        .err(404, "not_found");
+}

@@ -638,6 +638,9 @@ mod fake {
         /// The reset gate ([`Supervisor::reset_gate`]): no early turn and
         /// no mail pointer goes out while it is closed.
         gated: bool,
+        /// The next starts that end in `stopped` before the agent is ready
+        /// ([`InMemorySupervisor::stop_after_starts`]).
+        failed_starts: usize,
         /// How the next compactions end.
         compact: FakeCompact,
         /// The compactions that started. For tests.
@@ -787,6 +790,21 @@ mod fake {
             };
             self.set_status(agent, AgentStatus::Starting, reason);
             self.later(agent, epoch, move |me| {
+                let failed = {
+                    let mut inner = me.lock();
+                    match inner.agents.get_mut(&agent) {
+                        Some(a) if a.failed_starts > 0 => {
+                            a.failed_starts -= 1;
+                            a.epoch += 1;
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if failed {
+                    me.set_status(agent, AgentStatus::Stopped, Some("exited"));
+                    return;
+                }
                 let session =
                     resume.unwrap_or_else(|| HarnessSessionId(format!("fake-{}", AgentId::new())));
                 me.emit(
@@ -827,6 +845,13 @@ mod fake {
             {
                 a.early.insert(0, text);
             }
+        }
+
+        /// Make the next `n` starts of `agent` end in `stopped` instead of
+        /// `idle`, as a harness that exits at its start does. Its early
+        /// turns stay for the next start. For tests (TER-231).
+        pub fn stop_after_starts(&self, agent: AgentId, n: usize) {
+            self.lock().agents.entry(agent).or_default().failed_starts = n;
         }
 
         /// The text of each turn that started, in order. For tests.

@@ -919,6 +919,7 @@ three letters and digits in upper case, then longer, then with a number
 | `DELETE /api/projects/{name}?confirm=true` | | `204` | sysadmin |
 | `GET /api/projects/{name}/agents` | | `200` agents by ID | read |
 | `GET /api/projects/{name}/targets` | | `200` targets, the project's and the global ones | read |
+| `GET /api/projects/{name}/counts` | | `200` `{"blocked_cards", "questions"}`, below | read |
 | `GET /api/projects/{name}/target-grants` | | `200` the global targets granted to the project for its project-owned monitors and schedules (§30.7) | read |
 | `POST /api/projects/{name}/target-grants` | `{target, for}` | `201` the grant | sysadmin |
 | `DELETE /api/projects/{name}/target-grants/{target}/{for}` | | `204` | sysadmin |
@@ -928,6 +929,19 @@ three letters and digits in upper case, then longer, then with a number
 Names are 1 to 63 of `a-z`, `0-9`, `-`, `_`, and start with a letter or a
 digit. `card_prefix` is 1 to 10 of `A-Z` and `0-9`, and starts with a
 letter. The prefix cannot change after the first card (`conflict`).
+
+`GET /api/projects/{name}/counts` gives the counts of the project tabs of
+the dashboard (TER-154). `blocked_cards` counts the cards in the columns with
+the `blocked` role, archived cards not counted. `questions` is `{"open",
+"urgent", "critical"}`: the open questions, bundles, and tool run approvals
+of the project, also those in a thread (a notice needs no decision).
+`urgent` counts the urgent and the critical ones, `critical` only the
+critical ones. `questions` is `null` for an actor that may not list the
+questions of the project (`GET /api/questions?project=`: the operator, a
+sysadmin or architect, or a project_admin of the project). The counts use
+indexes and read no card or question rows, so the dashboard reads them again
+on each `card` and `question` event of the project. An unknown project is
+`404`.
 
 `idle_alert` is the threshold of the idle alert (§6.2, "Idle alert"): a
 duration (`15m`, `1h`), or `off` (also `0`). `null` sets the default
@@ -8651,12 +8665,13 @@ any number of `if_card` and `if_job` conditions on the current state
 `card_move` (`to`, `from?`, `comment?`, `position?` `top` or `bottom`),
 `card_label` (`add?`, `remove?`), `card_comment` (`text`), `card_assign`
 (`who`), `card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
-`job_queue` (`kind` `validate`, `merge`, or `batch`; `from`, `limit?`,
+`card_blocked_mail`, `card_done_mail`, `job_queue` (`kind` `validate`, `merge`, or `batch`; `from`, `limit?`,
 `min_cards?`, and `max_wait_minutes?` for a batch only;
 `max_wait_minutes` needs `min_cards`, and `min_cards` is at most
 `limit`), `job_cancel`, `job_rerun` (`max_attempts?`), `job_split`,
-`job_fix` (`to?`, `labels?`), `agent_park`, `agent_unpark` (`turn?`), and
-`agent_end` (`outcome` `done` or `cancelled`).
+`job_fix` (`to?`, `labels?`), `agent_park`, `agent_unpark` (`turn?`),
+`agent_end` (`outcome` `done` or `cancelled`), and `script` (`source`,
+`fuel?`; TER-173, see "Script steps" in §19.9).
 
 The checks beyond the schema:
 
@@ -8901,6 +8916,15 @@ expression. No manual close endpoint exists.
   `project:<name>`, or an agent; one whose placeholder is empty is left
   out). The body defaults to the subject. A rule notifies the operator
   with `to = ["operator"]`.
+- `card_blocked_mail`, `card_done_mail`: the mails of a card move, with
+  the texts and recipients of the coded flow (TER-162 D10). On the
+  `moved` event of a move to a blocked column, `card_blocked_mail` mails
+  the blocked notice from `system` to the operator and the card's
+  creator, not to the mover. On the `moved` event of a move to `done`,
+  `card_done_mail` mails the done notice (the move's comment, else the
+  newest comment) to the participants of each linked thread. On another
+  event: a no-op. With `board_flow = code` the move sends these mails
+  itself.
 - `job_queue`: `validate` or `merge` queues a job for the run's card, of
   its repo and branch (the card's, else its ID in lower case), with the
   API's checks (the queue is set, a merge needs `project_admin` and a
@@ -8952,6 +8976,54 @@ expression. No manual close endpoint exists.
   turn. `agent_park` takes a `reason` (default `rule <name>`).
   `agent_end` closes the agent with `outcome` as `agent done` does, with
   `result` for the owner (default `the rule <name> ended it`).
+
+Script steps (TER-173): `script { source = <<'WS' ... WS  fuel = n }`
+holds a wscript program (Configweave/wscript, tag v0.3.0) for what WCL
+cannot say. `source` is 1 to 16384 bytes and has no templates; `fuel` is
+the most wscript instructions (default 100000, at most 10000000). The
+program has one module, `rule`: `rule::get(name)` reads the value of a
+placeholder (`event.<path>`, `card.*`, `group.*`, `job.*`, `rule.name`)
+as an `Option[string]`, as a template of the step would read it now,
+and `rule::quote(text)` writes a text as a WCL string. No other module
+(no fs, process, json, or env), no import, and `print` writes nowhere.
+`fn main() -> string` returns verb blocks in the syntax of `rules.wcl`
+(at most 16384 bytes and 20 verbs; empty: none), for example
+`card_move { to = "@review" }`. In a wscript string `{x}` is a hole, so
+a brace is `{{` or `}}`.
+
+- The engine runs the program in a child process of the daemon binary
+  (`terrariumd __rule-script`): an empty environment, `/` as its
+  directory, its input (the source and the values, at most 256 KiB) on
+  stdin and its result on stdout. The child first closes each file from
+  3 up, then sets its own limits: 256 MiB of data (`RLIMIT_DATA`), 10 s
+  of CPU, no file writes, no core file, 16 open files. The parent stops
+  it after 5 s, with a call depth of 200. The runs of the engine share 4
+  children at a time and wait at most 30 s for a slot (then the step
+  fails: "the script slots are busy"). The program runs between two
+  writes of the run, never inside a database closure.
+- The returned blocks are checked as the verbs of one rule (the schema,
+  the arguments, the templates, the columns of the board): no rule, no
+  condition, no field of the rule, and no script step. The step is then
+  replaced by those verbs in the stored rule of the run, so a restart
+  runs them and not the program again. Each runs as the rule actor,
+  with the checks of a verb of the file; their `{{...}}` placeholders
+  are filled quoted. Each line of each text argument (also a text in a
+  list) that starts with a turn tag is defused (`[User]` becomes
+  `[\User]`).
+- The step's result in `steps` is `{verb: "script.run", ok, changed:
+  false, detail: {verbs, fuel_used}}`. A program that does not compile,
+  fails, runs out of fuel, hits a limit, or returns blocks that do not
+  check fails the run at the step (`action <n> (script.run) failed:
+  <reason>`); the actions after it do not run.
+- The dry run runs the programs after its read and shows `{verb:
+  "script.run", fuel_used, returned}` followed by the returned verbs,
+  filled as the others. A program that fails makes the plan `failed`,
+  with the reason. A dry run whose rules (stored or `text`) hold a
+  script step needs `project_admin` of the project (else `403`). The dry
+  runs have their own single child slot, never one of the engine's: a
+  dry run waits at most 2 s for it (then the plan fails: "the script
+  slots are busy"), runs at most 20 programs, and all its programs take
+  at most 15 s together; the ones after that are not run.
 
 Timers (TER-172): the engine checks the batch rules (`job_queue` of kind
 `batch` with `min_cards` and `max_wait_minutes`) about every 10 seconds.
@@ -9076,6 +9148,7 @@ Its rules, in order:
 | `merge-red-group`, `merge-red-split-note`, `merge-red-fix-note` | a red merge with two or more merged cards | `job_fix` (at most 3 fix cards), then `job_split` after 3; the split comment, or the labels off and a note of the fix card |
 | `job-fail-conflict`, `job-fail-red`, `job-fail-error` | a final failure | labels off, the failure block on the body, the top of `@ready` with the comment, unassign, a mail to the worker |
 | `job-cancelled` | a cancelled verdict | labels off |
+| `card-blocked-mail`, `card-done-mail` | a card move to the blocked column; to `done` | the blocked notice to the operator and the creator; the done notice on each linked thread |
 | `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `accepted` (names, as §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
 
 One change from the coded flow, by the operator's rule of 2026-11-07

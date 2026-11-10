@@ -2416,6 +2416,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           audit("project.delete", name, name, {});
         }),
       agents: (name) => reply(() => (project(name), w.agents.filter((a) => a.project === name).sort((a, b) => a.id.localeCompare(b.id)))),
+      // The mock operator reads every count: the open questions of the project, also those in a thread.
+      counts: (name) =>
+        reply(() => {
+          project(name);
+          const open = (w.questions ?? []).filter((q) => q.project === name && q.status === "open" && q.kind !== "notice");
+          return {
+            blocked_cards: w.cards.filter((c) => c.project === name && !c.archived && roleOf(name, c.column) === "blocked").length,
+            questions: {
+              open: open.length,
+              urgent: open.filter((q) => q.priority === "urgent" || q.priority === "critical").length,
+              critical: open.filter((q) => q.priority === "critical").length,
+            },
+          };
+        }),
       targets: (name) => reply(() => (project(name), w.targets.filter((t) => !t.project || t.project === name).map(targetView))),
       // The seed grants the global `pi-runner` to `terrarium` for its project-owned monitors.
       targetGrants: (name) =>
