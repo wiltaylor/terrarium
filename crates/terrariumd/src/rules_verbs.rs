@@ -41,6 +41,7 @@ use crate::db::Tx;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
 use crate::rules_engine::{Done, RunCtx, lookup};
+use crate::store::accepted_heads;
 use crate::store::board::{self, Card, CardPatch, NewCard, NewLink};
 use crate::store::jobs::{self, BatchCard, Job, JobKind, JobState, NewJob};
 use crate::store::mail::{self, Address};
@@ -72,6 +73,9 @@ pub enum Effect {
     Kick,
     /// Kill the run of a cancelled job that was running.
     Kill(String),
+    /// Record the reviewed commit of the cards that came into the merge
+    /// queue (TER-553).
+    RecordAccepted,
     /// Run the queued unparks of an owner.
     RetryOwner(String),
     /// Wake an unparked agent.
@@ -90,6 +94,7 @@ pub async fn apply(state: &Shared, effects: Vec<Effect>) {
         match e {
             Effect::Kick => crate::jobs::kick(state),
             Effect::Kill(id) => crate::jobs::kill(&id),
+            Effect::RecordAccepted => crate::jobs::record_accepted_soon(state),
             Effect::RetryOwner(owner) => crate::bound::retry_owner(state, &owner).await,
             Effect::Wake(id) => {
                 if let Ok(a) = id.parse::<AgentId>() {
@@ -278,7 +283,7 @@ pub fn perform(
         "group.open" | "group.add" | "group.remove" | "group.status" | "group.close" => {
             group_verb(t, actor, ctx, &a)?
         }
-        "card.move" => card_move(t, actor, ctx, &a)?,
+        "card.move" => card_move(t, actor, ctx, &a, &mut effects)?,
         "card.label" => card_label(t, actor, ctx, &a)?,
         "card.comment" => {
             let card = the_card(ctx, verb)?;
@@ -414,7 +419,13 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
     })
 }
 
-fn card_move(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
+fn card_move(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    a: &Args<'_>,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
     let card = the_card(ctx, "card.move")?;
     let to = column_name(ctx, a.raw("to").unwrap_or_default())?;
     let from = a.columns("from")?;
@@ -432,7 +443,10 @@ fn card_move(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiRe
     }
     let position = (a.raw("position") == Some("top")).then_some(0);
     let comment = a.text("comment");
-    board::move_card(t, actor, &card.id, &to, position, comment.as_deref())?;
+    let moved = board::move_card(t, actor, &card.id, &to, position, comment.as_deref())?;
+    if crate::store::accepted_heads::is_queue(&moved.column, moved.column_role.as_deref()) {
+        effects.push(Effect::RecordAccepted);
+    }
     Ok(changed(
         json!({"card": card.id, "from": card.column, "to": to}),
     ))
@@ -681,6 +695,19 @@ fn job_queue(
         )));
     }
     let branch = api_jobs::branch_of(card, None)?;
+    // A merge takes the reviewed commit that the accept recorded, never
+    // the head at run time (TER-553). A validate tests the head.
+    let commit = if kind == JobKind::Merge {
+        match accepted_heads::commit_for(t, &card.id, &branch)? {
+            Some(c) => Some(c),
+            None => {
+                let why = accepted_heads::missing_reason(t, &card.id, &branch)?;
+                return Ok(noop(json!({"card": card.id, "reason": why})));
+            }
+        }
+    } else {
+        None
+    };
     if let Some(open) = open_job(t, &card.id)? {
         return Ok(noop(json!({
             "card": card.id, "job": open.id,
@@ -696,7 +723,7 @@ fn job_queue(
             kind,
             repo,
             branch,
-            commit: None,
+            commit,
             by_agent: worker_of(card),
             batch: Vec::new(),
             planned_secs: None,
@@ -756,6 +783,23 @@ pub fn pick_batch(
         if let Some(j) = open_job(conn, &c.id)? {
             out.left_out
                 .push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
+            continue;
+        }
+        // A card goes in a batch only with its reviewed commit, the head
+        // that the review accept recorded (TER-553); until then it waits,
+        // and does not count as waiting.
+        let branch = match api_jobs::branch_of(c, None) {
+            Ok(b) => b,
+            Err(e) if e.code == Code::Invalid => {
+                out.left_out
+                    .push(json!({"card": c.id, "reason": e.message}));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        if accepted_heads::commit_for(conn, &c.id, &branch)?.is_none() {
+            let why = accepted_heads::missing_reason(conn, &c.id, &branch)?;
+            out.left_out.push(json!({"card": c.id, "reason": why}));
             continue;
         }
         // A card without a usable repo (none in a project of several
@@ -866,10 +910,13 @@ fn queue_batch(
     }
     let mut batch = Vec::new();
     for c in &pick.cards {
+        let branch = api_jobs::branch_of(c, None)?;
+        let commit = accepted_heads::commit_for(t, &c.id, &branch)?;
         batch.push(BatchCard {
             card: c.id.clone(),
-            branch: api_jobs::branch_of(c, None)?,
+            branch,
             by_agent: crate::jobs::by_agent_of(&c.labels),
+            commit,
             outcome: None,
             note: None,
         });
@@ -890,7 +937,7 @@ fn queue_batch(
             kind: JobKind::Merge,
             repo,
             branch: first.branch.clone(),
-            commit: None,
+            commit: first.commit.clone(),
             by_agent: first.by_agent.clone(),
             batch: if batch.len() > 1 { batch } else { Vec::new() },
             planned_secs: None,
@@ -936,11 +983,12 @@ fn job_cancel(
     Ok(changed(json!({"job": j.id, "was": job.state})))
 }
 
-/// The cards of a job that did not conflict.
+/// The cards of a job that did not conflict, and whose branch did not
+/// move after its review (TER-553).
 fn merged(j: &Job) -> Vec<BatchCard> {
     j.cards()
         .into_iter()
-        .filter(|c| c.outcome.as_deref() != Some("conflict"))
+        .filter(|c| !crate::jobs::left_merge(c.outcome.as_deref()))
         .collect()
 }
 
@@ -1058,10 +1106,11 @@ fn job_rerun(
     let max = a.count("max_attempts").unwrap_or(2);
     let why = if j.state != JobState::Failed {
         Some(format!("job {} is {}", j.id, j.state.as_str()))
-    } else if j.outcome.as_deref() == Some("conflict") {
+    } else if crate::jobs::left_merge(j.outcome.as_deref()) {
         Some(format!(
-            "job {} is a conflict: a conflict never runs again",
-            j.id
+            "job {} is a {}: it never runs again",
+            j.id,
+            j.outcome.as_deref().unwrap_or_default()
         ))
     } else if j.attempt >= max {
         Some(format!("job {} is attempt {} of {max}", j.id, j.attempt))

@@ -1796,6 +1796,14 @@ fn apply_move(
                "to_role": to.role, "comment": comment, "assignee": moved.assignee,
                "previous_eta_at": card.eta_at, "author": author}),
     )?;
+    // The review accept opens a round of the reviewed commit; a move out
+    // of the merge queue ends it (TER-553).
+    crate::store::accepted_heads::on_move(
+        t,
+        &card.id,
+        (&card.column, card.column_role.as_deref()),
+        (&to.name, to.role.as_deref()),
+    )?;
     // A thread that tracks this card wakes its agent on a move to blocked,
     // and when all its cards are in review or later (TER-148).
     crate::store::threads::on_card_moved(

@@ -529,6 +529,7 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
             card,
             branch: "b".into(),
             by_agent: Some("w".into()),
+            commit: None,
             outcome: None,
             note: None,
         })

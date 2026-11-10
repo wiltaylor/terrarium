@@ -949,6 +949,7 @@ async fn store_job(td: &TestDaemon, kind: JobKind, cards: &[&str]) -> Job {
                 card: (*c).to_owned(),
                 branch: c.to_lowercase(),
                 by_agent: None,
+                commit: None,
                 outcome: None,
                 note: None,
             })

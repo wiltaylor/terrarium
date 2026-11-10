@@ -1203,7 +1203,7 @@ fn check_start(rule: &Rule, row: &RunRow, ctx: &RunCtx) -> Result<(), (bool, Str
         let merged = job
             .cards()
             .iter()
-            .filter(|c| c.outcome.as_deref() != Some("conflict"))
+            .filter(|c| !crate::jobs::left_merge(c.outcome.as_deref()))
             .count();
         let flags = [
             (

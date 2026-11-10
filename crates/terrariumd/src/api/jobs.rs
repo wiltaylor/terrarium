@@ -36,6 +36,8 @@
 //!   operator, TER-105): the addresses of a host agent, so an SSH target
 //!   on one of them counts on the host agent's cap.
 
+use std::collections::HashMap;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -52,7 +54,7 @@ use crate::jobs as rt;
 use crate::policy;
 use crate::store::board::{self, Card, CardPatch};
 use crate::store::jobs::{self, Job, JobKind, JobState, NewJob};
-use crate::store::{github_gate, hosts, projects, repos};
+use crate::store::{accepted_heads, github_gate, hosts, projects, repos};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -694,6 +696,14 @@ async fn merge(
 ) -> ApiResult<Response> {
     let planned_secs = planned(b.eta.as_deref())?;
     rt::prepare_hosts(&state.db, None).await?;
+    let commits = merge_commits(
+        &state,
+        &actor,
+        vec![id.clone()],
+        b.repo.clone(),
+        b.branch.clone(),
+    )
+    .await?;
     let job = state
         .db
         .write(actor.label(), move |t| {
@@ -712,6 +722,7 @@ async fn merge(
                 )));
             }
             let branch = branch_of(&card, b.branch)?;
+            let commit = merge_commit(&commits, &card.id, &branch)?;
             let job = jobs::create(
                 t,
                 NewJob {
@@ -720,7 +731,7 @@ async fn merge(
                     kind: JobKind::Merge,
                     repo: repo.clone(),
                     branch: branch.clone(),
-                    commit: None,
+                    commit: Some(commit),
                     by_agent: rt::by_agent_of(&card.labels),
                     batch: Vec::new(),
                     planned_secs,
@@ -749,6 +760,66 @@ async fn merge(
     Ok(queued_answer(job.0, job.1, job.2, job.3))
 }
 
+/// The commit that a merge takes for each of the cards `ids`, with its
+/// branch, by card ID (TER-553): the reviewed commit that the merge queue
+/// recorded at the accept, else the head of the branch on its remote now.
+/// The merge then takes that commit, never a later push. Read before the
+/// write of the job: the head is a `git ls-remote`.
+async fn merge_commits(
+    state: &Shared,
+    actor: &Actor,
+    ids: Vec<String>,
+    repo: Option<String>,
+    branch: Option<String>,
+) -> ApiResult<HashMap<String, (String, String)>> {
+    let a = actor.clone();
+    let places = state
+        .db
+        .read(move |c| {
+            let mut out = Vec::new();
+            for id in &ids {
+                let card = board::get_card(c, &board::normalise_id(id))?;
+                policy::admin_project(&a, &card.project, "queueing a merge onto next")?;
+                let r = repo_of(c, &card, repo.clone())?;
+                let b = branch_of(&card, branch.clone())?;
+                let recorded = accepted_heads::commit_for(c, &card.id, &b)?;
+                out.push((card.id, card.project, r, b, recorded));
+            }
+            Ok(out)
+        })
+        .await?;
+    let mut map = HashMap::new();
+    for (card, project, repo, branch, recorded) in places {
+        let commit = match recorded {
+            Some(c) => c,
+            None => match rt::remote_head(state, &project, &repo, &branch).await? {
+                Some(h) => h,
+                None => {
+                    return Err(ApiError::conflict(format!(
+                        "branch `{branch}` of card {card} is not on the remote of `{repo}`: push it first"
+                    )));
+                }
+            },
+        };
+        map.insert(card, (branch, commit));
+    }
+    Ok(map)
+}
+
+/// The commit of `card` from [`merge_commits`], for `branch`.
+fn merge_commit(
+    commits: &HashMap<String, (String, String)>,
+    card: &str,
+    branch: &str,
+) -> ApiResult<String> {
+    match commits.get(card) {
+        Some((b, c)) if b == branch => Ok(c.clone()),
+        _ => Err(ApiError::conflict(format!(
+            "card {card} changed while the merge was queued: queue it again"
+        ))),
+    }
+}
+
 /// One merge job for several cards (TER-112): merged onto `next` in the
 /// given order, validated once, pushed when green. All cards are of one
 /// project and one repo; each branch is the card's (or its ID in lower
@@ -764,6 +835,7 @@ async fn merge_batch(
         ));
     }
     let planned_secs = planned(b.eta.as_deref())?;
+    let commits = merge_commits(&state, &actor, b.cards.clone(), b.repo.clone(), None).await?;
     let job = state
         .db
         .write(actor.label(), move |t| {
@@ -807,10 +879,13 @@ async fn merge_batch(
                     }
                     _ => repo = Some(r),
                 }
+                let branch = branch_of(card, None)?;
+                let commit = merge_commit(&commits, &card.id, &branch)?;
                 batch.push(jobs::BatchCard {
                     card: card.id.clone(),
-                    branch: branch_of(card, None)?,
+                    branch,
                     by_agent: rt::by_agent_of(&card.labels),
+                    commit: Some(commit),
                     outcome: None,
                     note: None,
                 });
@@ -830,7 +905,7 @@ async fn merge_batch(
                     kind: JobKind::Merge,
                     repo: repo.clone(),
                     branch: first.branch.clone(),
-                    commit: None,
+                    commit: first.commit.clone(),
                     by_agent: first.by_agent.clone(),
                     batch: if batch.len() > 1 {
                         batch.clone()

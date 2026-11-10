@@ -175,8 +175,15 @@ pub struct BatchCard {
     pub branch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by_agent: Option<String>,
+    /// The reviewed commit (TER-553): the head of the branch when the card
+    /// was accepted into the merge queue. The merge takes this commit, and
+    /// only while it is still the head of the branch. `None` in a job of
+    /// an older daemon: the merge takes the head at run time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
     /// `conflict` when the branch did not merge onto `next` and the cards
-    /// before it; the card then left the batch. `None`: it merged.
+    /// before it, `moved` when the branch head is no longer the reviewed
+    /// commit; the card then left the batch. `None`: it merged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
     /// The conflicting files of a conflict.
@@ -194,6 +201,7 @@ impl Job {
             card: self.card.clone(),
             branch: self.branch.clone(),
             by_agent: self.by_agent.clone(),
+            commit: self.commit.clone(),
             outcome: None,
             note: None,
         }]
@@ -369,7 +377,8 @@ pub struct JobStats {
     /// Ended reruns (attempt 2 or more): `passed` is a failure that the
     /// rerun did not repeat.
     pub reruns: FirstAttempts,
-    /// First attempts that ended in a merge conflict.
+    /// First attempts that ended in a merge conflict, or with a branch
+    /// that moved after its review (TER-553).
     pub conflicts: u64,
     /// First attempts and reruns that could not run (outcome `error`).
     pub errors: u64,
@@ -506,7 +515,9 @@ pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStat
             s.reruns.add(passed);
             continue;
         }
-        if outcome.as_deref() == Some("conflict") {
+        // A branch that moved after its review (TER-553) never ran the
+        // tests either: it counts with the conflicts.
+        if matches!(outcome.as_deref(), Some("conflict" | "moved")) {
             s.conflicts += 1;
             continue;
         }
@@ -1254,7 +1265,6 @@ struct Insert<'a> {
     project: &'a str,
     kind: JobKind,
     repo: &'a str,
-    commit: Option<&'a str>,
     attempt: i64,
     parent: Option<&'a str>,
     split_path: &'a str,
@@ -1276,7 +1286,9 @@ fn insert(t: &mut Tx<'_>, i: Insert<'_>) -> ApiResult<Job> {
             i.kind.as_str(),
             i.repo,
             i.first.branch,
-            i.commit,
+            // The first card's commit: a rerun or a split half of a batch
+            // starts with another card than its job (TER-553).
+            i.first.commit,
             i.attempt,
             i.first.by_agent,
             i.created_by,
@@ -1388,6 +1400,10 @@ pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
         card: n.card.clone(),
         branch: n.branch.clone(),
         by_agent: n.by_agent.clone(),
+        commit: n
+            .batch
+            .first()
+            .map_or_else(|| n.commit.clone(), |c| c.commit.clone()),
         outcome: None,
         note: None,
     };
@@ -1426,7 +1442,6 @@ pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
             project: &n.project,
             kind: n.kind,
             repo: &n.repo,
-            commit: n.commit.as_deref(),
             attempt: 1,
             parent: None,
             split_path: "",
@@ -1463,7 +1478,6 @@ pub fn rerun(t: &mut Tx<'_>, failed: &Job, cards: Option<&[BatchCard]>) -> ApiRe
             project: &failed.project,
             kind: failed.kind,
             repo: &failed.repo,
-            commit: failed.commit.as_deref(),
             attempt: failed.attempt + 1,
             parent: failed.parent.as_deref(),
             split_path: &failed.split_path,
@@ -1514,7 +1528,6 @@ pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, 
                 project: &red.project,
                 kind: red.kind,
                 repo: &red.repo,
-                commit: None,
                 attempt: 1,
                 parent: Some(&red.id),
                 split_path: &path,
