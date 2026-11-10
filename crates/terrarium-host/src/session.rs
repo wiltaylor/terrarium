@@ -85,9 +85,8 @@ impl PartialEq for PrivateFile {
 impl Eq for PrivateFile {}
 
 /// Create `dir` (and its parents, each with mode 0700) and make sure that
-/// it is private: `dir` must be a real dir (not a symlink) of this user, and
-/// its parent a real dir of this user or a sticky dir of root (like `/tmp`,
-/// where no other user can rename or delete `dir`). `dir` gets mode 0700.
+/// it is private: `dir` and its parent must be real dirs (not symlinks) of
+/// this user, and `dir` gets mode 0700.
 pub fn private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     std::fs::DirBuilder::new()
@@ -95,10 +94,9 @@ pub fn private_dir(dir: &Path) -> std::io::Result<()> {
         .mode(0o700)
         .create(dir)?;
     let euid = nix::unistd::geteuid().as_raw();
-    for (d, is_parent) in [(Some(dir), false), (dir.parent(), true)] {
-        let Some(d) = d else { continue };
+    for d in [Some(dir), dir.parent()].into_iter().flatten() {
         let m = std::fs::symlink_metadata(d)?;
-        if !owned_ok(m.file_type().is_dir(), m.uid(), m.mode(), euid, is_parent) {
+        if !m.file_type().is_dir() || m.uid() != euid {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
@@ -109,12 +107,6 @@ pub fn private_dir(dir: &Path) -> std::io::Result<()> {
         }
     }
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-}
-
-/// The ownership rule of [`private_dir`] for one dir: a real dir of `euid`,
-/// or for the parent also a sticky (`S_ISVTX`) dir of root.
-fn owned_ok(is_dir: bool, uid: u32, mode: u32, euid: u32, is_parent: bool) -> bool {
-    is_dir && (uid == euid || (is_parent && uid == 0 && mode & 0o1000 != 0))
 }
 
 /// Delete the files in `dir` whose name starts with `prefix`: the private
@@ -885,38 +877,6 @@ mod tests {
         assert_eq!(info.code, Some(4));
         let out = String::from_utf8_lossy(&collect(&mut rx, StreamTag::Stdout)).to_string();
         assert!(out.contains("33 101"), "pty output: {out:?}");
-    }
-
-    #[test]
-    fn a_sticky_root_parent_is_accepted_and_other_owners_are_refused() {
-        use super::owned_ok;
-        // The dir itself: only a real dir of this user.
-        assert!(owned_ok(true, 1001, 0o700, 1001, false));
-        assert!(!owned_ok(true, 0, 0o1777, 1001, false));
-        assert!(!owned_ok(false, 1001, 0o700, 1001, false));
-        // The parent: this user, or a sticky dir of root (/tmp).
-        assert!(owned_ok(true, 1001, 0o755, 1001, true));
-        assert!(owned_ok(true, 0, 0o1777, 1001, true));
-        assert!(!owned_ok(true, 0, 0o777, 1001, true));
-        assert!(!owned_ok(true, 1002, 0o1777, 1001, true));
-        assert!(!owned_ok(false, 0, 0o1777, 1001, true));
-    }
-
-    #[test]
-    fn a_private_dir_in_the_temp_dir_is_accepted() {
-        // /tmp (root, sticky) as the parent, as a user other than root.
-        let tmp = std::path::Path::new("/tmp");
-        let sticky_root = std::fs::symlink_metadata(tmp).is_ok_and(|m| {
-            use std::os::unix::fs::MetadataExt;
-            m.is_dir() && m.uid() == 0 && m.mode() & 0o1000 != 0
-        });
-        if !sticky_root {
-            return;
-        }
-        let dir = tmp.join(format!("terrarium-host-test-private-{}", std::process::id()));
-        let res = super::private_dir(&dir);
-        let _ = std::fs::remove_dir(&dir);
-        res.unwrap();
     }
 
     #[test]
