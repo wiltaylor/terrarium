@@ -424,7 +424,11 @@ fn a_restore_with_a_dir_entry_on_a_symlink_entry_changes_nothing() {
             None,
             fx.state.join("credentials/accounts/claude/a"),
         ),
-        ("state/agents/A1/escape", Some(outside_link), outside.clone()),
+        (
+            "state/agents/A1/escape",
+            Some(outside_link),
+            outside.clone(),
+        ),
     ];
     for (n, (link, new_target, target)) in cases.into_iter().enumerate() {
         let before = mode(&target);
@@ -448,7 +452,9 @@ fn a_restore_with_a_dir_entry_on_a_symlink_entry_changes_nothing() {
                                 .any(|e| e.path == link && e.kind == EntryKind::Symlink)
                         ),
                         Some(t) => {
-                            assert!(Path::new(t).is_absolute() && !Path::new(t).starts_with(&fx.state));
+                            assert!(
+                                Path::new(t).is_absolute() && !Path::new(t).starts_with(&fx.state)
+                            );
                             m.entries
                                 .push(entry(link, EntryKind::Symlink, Some(t.as_str())));
                         }

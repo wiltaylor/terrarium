@@ -201,7 +201,10 @@ fn the_offline_commands_round_trip_a_full_and_a_diff() {
         let out = terrariumd(d, &state, &["backup", "restore", &diff_path]);
         assert!(!out.status.success());
         let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("is locked") && err.contains("stop it first"), "{err}");
+        assert!(
+            err.contains("is locked") && err.contains("stop it first"),
+            "{err}"
+        );
     }
 
     // A restore refuses while a daemon answers on the socket.
