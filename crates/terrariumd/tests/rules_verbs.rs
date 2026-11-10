@@ -488,7 +488,20 @@ async fn version_group_add_and_built_moves_same_version_accepted_cards() {
     let late = new_card(&td, "p", accepted("late", json!(["version:vnext"]))).await;
     let ready = new_card(&td, "p", json!({"title":"not accepted","column":"ready"})).await;
     let tagged = new_card(&td, "p", accepted("tagged", json!(["version:1.2.3"]))).await;
-    let held = new_card(&td, "p", accepted("held", json!(["version:1.2.3", "hold"]))).await;
+    let held = new_card(&td, "p", accepted("held", json!(["version:1.2.3"]))).await;
+    // The GitHub author gate holds a card with both labels (TER-85).
+    let id = held.clone();
+    state(&td)
+        .db
+        .write("test", move |t| {
+            t.execute(
+                "UPDATE cards SET labels = '[\"version:1.2.3\",\"github\",\"hold\"]' WHERE id = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let other = new_card(&td, "p", accepted("other", json!(["version:1.2.4"]))).await;
     let vnext = new_card(&td, "p", accepted("open version", json!(["version:vnext"]))).await;
 
