@@ -851,7 +851,7 @@ fn host_down(conn: &rusqlite::Connection, state: &Shared, def: &DeliveryDef) -> 
 
 /// [`host_down`] of a target that is read.
 fn agent_down(state: &Shared, name: &str, def: &TargetDef) -> Option<String> {
-    if def.kind == TargetKind::Ssh {
+    if matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
         return None;
     }
     let host = def.host.as_deref()?;

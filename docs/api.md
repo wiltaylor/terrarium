@@ -7230,6 +7230,70 @@ leave the targets as they are. Each of these verbs writes an audit row
 with the actor `system`: `target.up` with `"reason": "agent_start"`, and
 `target.destroy` with `"reason": "agent_stop"`.
 
+#### exe.dev VMs (`kind = "exedev"`)
+
+An `exedev` target is an exe.dev VM that the daemon makes on `up` and
+removes on `down` (`crate::exedev`, TER-294). It needs `ephemeral = true`,
+no `keep`, no `address`, `host` or `port`, and a `credential`: an
+`ssh_key` that exe.dev accepts for VMs with the target's tag.
+`sync_workspace = true` mirrors the holder's workspace as on an ssh target.
+
+```toml
+kind = "exedev"
+ephemeral = true
+credential = "github-deploy-cloud-test"
+sync_workspace = true
+
+[exedev]                     # every key is optional
+api_token = "exedev-api-token"   # the API token secret: new, ls, rm
+cpu = 2                      # new --cpu
+memory_gb = 4                # new --memory=<n>GB, at most 2 per vCPU
+tag = "terrarium-dev-ssh"    # new --tag
+user = "exedev"              # the ssh user on the VM
+max_life_secs = 28800        # 60 to 28800 (8 hours)
+```
+
+- The lifecycle goes through `POST https://exe.dev/exec` with the token
+  in the `Authorization` header only: `new --name=terrarium-x-<target>-<id>
+  --sandbox --tag=<tag> --cpu=<n> --memory=<n>GB`, `ls`, `rm`. Commands,
+  copies and the workspace sync go over ssh to `<user>@<ssh_dest>` (the
+  API stops a command at 30 s and a body at 64 KB). `up` waits up to 180 s
+  for ssh.
+- Each VM has a row in the table `exedev_vms`, written before `new` runs:
+  the VM name, the target, the account it was made on (the token secret
+  name, the target's project, and whether an admin set the target), the
+  tag, the ssh host, and `created_at` and `expires_at`. The row outlives
+  the target: `rm` always runs on the account the VM was made on, also
+  after the target's `api_token` changes or the target is deleted.
+- One lock per target serializes `up`, `down`, `status` and the sweep's
+  removal of that target's VM. An `up` that finds a recorded VM in `ls`,
+  in its life, adopts it (also a row that `new` never answered: the ssh
+  host then comes from `ls`). A recorded VM past its life is removed and
+  replaced, never adopted. A `new` that fails removes its VM; when that
+  `rm` fails too, the row stays for the sweep.
+- At most 3 VMs at once over all exedev targets (the recorded ones and the
+  `terrarium-x-` VMs in `ls`). The fourth `up` answers `409` with
+  `exe.dev cap: 3 of 3 VMs run (...)`.
+- The sweep runs one minute after the start, then at the next `expires_at`
+  of a recorded VM and at least every hour, and on
+  `POST /api/exedev/sweep` (the operator only; the answer is
+  `{removed: [{vm, target, reason}], errors}`, audit row `exedev.sweep`).
+  It runs `ls` once for each account of the rows and the targets, and
+  removes:
+  - `expired`: a recorded VM past its life, with a mail to the project
+    inbox (or to the operator for a global target);
+  - `orphaned`: a recorded VM whose target is gone;
+  - `unready`: a recorded VM with no ssh host after 10 minutes, held or not;
+  - `unheld`: a recorded VM that no running agent holds after 10 minutes;
+  - `leftover`: a VM in `ls` with the `terrarium-x-` prefix and a tag of
+    the account, that no row of any account records, 10 minutes after its
+    `created_at` in `ls` (or after the sweep first saw it).
+  Each removal of a recorded VM writes `target.destroy` with
+  `"reason": "exedev_<reason>"`. A VM without the prefix is never removed.
+- Deleting the target removes its VM. When that `rm` fails, the target is
+  deleted and the row stays, so the next sweep removes the VM as
+  `orphaned`.
+
 ### 17.7 Target leases
 
 A lease gives one agent one target at run time, for a time or until a

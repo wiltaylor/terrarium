@@ -780,8 +780,10 @@ pub fn host_frame(
             timeout_secs: cmd.timeout_secs,
         }),
         // `no_exec` refused the display-only kinds above.
+        // An exedev target never reaches a host agent: it runs over ssh.
         TargetKind::Host
         | TargetKind::Ssh
+        | TargetKind::Exedev
         | TargetKind::Vnc
         | TargetKind::Rdp
         | TargetKind::Desktop => DaemonFrame::Exec(ExecRequest {
@@ -1314,6 +1316,11 @@ pub struct Executor {
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
     pub max_per_agent: usize,
     pub ssh_bin: String,
+    /// The exe.dev HTTPS API of `exedev` targets ([`crate::exedev`]).
+    /// Tests point it at a fake.
+    pub exedev_api: String,
+    /// The locks and the sweep timer of `exedev` targets.
+    pub exedev: crate::exedev::Locks,
     pub buffer_limit: usize,
     reaper: AtomicBool,
     /// The input rate limit of target displays (docs/api.md §17.10).
@@ -1330,6 +1337,8 @@ impl Default for Executor {
             sessions: Mutex::default(),
             max_per_agent: MAX_SESSIONS_PER_AGENT,
             ssh_bin: std::env::var("TERRARIUM_SSH").unwrap_or_else(|_| "ssh".into()),
+            exedev_api: crate::exedev::DEFAULT_API.into(),
+            exedev: crate::exedev::Locks::default(),
             buffer_limit: SESSION_BUFFER,
             reaper: AtomicBool::new(false),
             display_limiter: crate::display::Limiter::default(),
@@ -1802,6 +1811,11 @@ pub(crate) fn start_cmd_locked(
     cmd: &RemoteCmd,
 ) -> ApiResult<Running> {
     no_exec(def)?;
+    // An exedev target runs its commands over ssh on its VM.
+    if def.kind == TargetKind::Exedev {
+        let d = crate::exedev::exec_def(state, def)?;
+        return start_cmd_locked(state, &d, cmd);
+    }
     // SSH takes a separate execution path, but must not bypass a host's
     // exclusive reservation policy.
     if def.kind == TargetKind::Ssh {
@@ -2553,7 +2567,8 @@ pub async fn start_cp(
             };
             tokio::spawn(attach(pump_host(hs), sess.clone(), ctl, push, !push));
         }
-        TargetKind::Docker | TargetKind::Ssh => {
+        // `resolved_def` made an exedev target the ssh target of its VM.
+        TargetKind::Docker | TargetKind::Ssh | TargetKind::Exedev => {
             let st = state.clone();
             let d = def.clone();
             let start = move |c: RemoteCmd| start_cmd(&st, &d, &c);
@@ -3315,6 +3330,12 @@ pub async fn lifecycle(
                 V::Snapshot | V::Restore => return unsupported("snapshot"),
             }
         }
+        TargetKind::Exedev => match verb_kind {
+            V::Status => crate::exedev::status(state, def).await?,
+            V::Up => crate::exedev::up(state, def).await?,
+            V::Down | V::Destroy => crate::exedev::destroy(state, def).await?,
+            V::Snapshot | V::Restore => return unsupported("snapshot"),
+        },
         TargetKind::Vmlab => {
             host_online(state, def)?;
             match verb_kind {
@@ -4142,6 +4163,9 @@ pub async fn resolved_def(
     actor: Option<&Actor>,
     agent: Option<&str>,
 ) -> ApiResult<TargetDef> {
+    if row.def.kind == TargetKind::Exedev {
+        return crate::exedev::exec_def(state, &row.def);
+    }
     if !is_instance_kind(&row.def) {
         return Ok(row.def.clone());
     }
@@ -4478,6 +4502,14 @@ async fn instance_lifecycle(
 /// the container of an ephemeral docker target, and the lab instances of a
 /// vmlab instance target. Best effort: a failure is logged.
 pub async fn teardown(state: &Shared, row: &TargetRow) {
+    if row.def.kind == TargetKind::Exedev {
+        // A failed `rm` keeps the VM's record, which outlives the target:
+        // the sweep removes the VM on the account it was made on.
+        if let Err(e) = crate::exedev::destroy(state, &row.def).await {
+            warn!(target = %row.def.name, "cannot remove the exe.dev VM; the sweep will: {e}");
+        }
+        return;
+    }
     if !is_instance_kind(&row.def)
         || !row
             .def
