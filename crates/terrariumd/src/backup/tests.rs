@@ -427,7 +427,11 @@ fn a_restore_with_a_dir_entry_on_a_symlink_entry_changes_nothing() {
             f.read_to_end(&mut data).unwrap();
             if name == MANIFEST {
                 let mut m: Manifest = serde_json::from_slice(&data).unwrap();
-                assert!(m.entries.iter().any(|e| e.path == link && e.kind == EntryKind::Symlink));
+                assert!(
+                    m.entries
+                        .iter()
+                        .any(|e| e.path == link && e.kind == EntryKind::Symlink)
+                );
                 let mut dir = entry(link, EntryKind::Dir, None);
                 dir.mode = 0o777;
                 m.entries.push(dir);
