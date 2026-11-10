@@ -710,6 +710,7 @@ async fn merge(
         vec![id.clone()],
         b.repo.clone(),
         b.branch.clone(),
+        b.onto.clone(),
     )
     .await?;
     let job = state
@@ -780,13 +781,19 @@ async fn merge(
 /// the queue. The merge then takes that
 /// commit, never a later push. Read before the write of the job: the head
 /// is a `git ls-remote`.
+///
+/// With `onto` a release branch (TER-607), the commit is the one that the
+/// card's newest passed merge onto `next` took, never the head of the
+/// branch: a card without one gets a 409.
 async fn merge_commits(
     state: &Shared,
     actor: &Actor,
     ids: Vec<String>,
     repo: Option<String>,
     branch: Option<String>,
+    onto: Option<String>,
 ) -> ApiResult<HashMap<String, (String, String)>> {
+    let release = onto.filter(|o| o != jobs::NEXT);
     let a = actor.clone();
     let places = state
         .db
@@ -804,6 +811,17 @@ async fn merge_commits(
                 enabled(&jobs::delivery(c, &card.project)?, &card.project)?;
                 let r = repo_of(c, &card, repo.clone())?;
                 let b = branch_of(&card, branch.clone())?;
+                if let Some(rel) = &release {
+                    let Some(tested) = jobs::passed_next_commit(c, &card.id, &b)? else {
+                        return Err(ApiError::conflict(format!(
+                            "card {} has no passed merge of branch `{b}` onto next: \
+                             merge it onto next first, then onto `{rel}`",
+                            card.id
+                        )));
+                    };
+                    out.push((card.id, card.project, r, b, Some(tested)));
+                    continue;
+                }
                 let recorded = accepted_heads::commit_for(c, &card.id, &b)?;
                 if recorded.is_none()
                     && accepted_heads::is_queue(&card.column, card.column_role.as_deref())
@@ -863,7 +881,15 @@ async fn merge_batch(
         ));
     }
     let planned_secs = planned(b.eta.as_deref())?;
-    let commits = merge_commits(&state, &actor, b.cards.clone(), b.repo.clone(), None).await?;
+    let commits = merge_commits(
+        &state,
+        &actor,
+        b.cards.clone(),
+        b.repo.clone(),
+        None,
+        None,
+    )
+    .await?;
     let job = state
         .db
         .write(actor.label(), move |t| {
@@ -890,6 +916,20 @@ async fn merge_batch(
                     )));
                 }
                 cards.push(card);
+            }
+            // A release-blocker fix merges alone (TER-607).
+            if cards.len() > 1
+                && let Some(c) = cards.iter().find(|c| {
+                    c.labels
+                        .iter()
+                        .any(|l| l == crate::rules_verbs::RELEASE_BLOCKER)
+                })
+            {
+                return Err(ApiError::conflict(format!(
+                    "card {} has the label `{}`: it merges alone, as a batch of one",
+                    c.id,
+                    crate::rules_verbs::RELEASE_BLOCKER
+                )));
             }
             let project = cards[0].project.clone();
             let def = jobs::delivery(t, &project)?;

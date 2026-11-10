@@ -614,6 +614,33 @@ pub fn open_of_card(conn: &Connection, card: &str) -> ApiResult<Option<Job>> {
         .optional()?)
 }
 
+/// The commit of `card` on `branch` that its newest passed merge onto
+/// `next` took (TER-607): the tested commit that `card merge --onto
+/// release/X.Y.Z` may merge. `None` when no passed merge onto `next`
+/// merged the card on that branch with a recorded commit.
+pub fn passed_next_commit(conn: &Connection, card: &str, branch: &str) -> ApiResult<Option<String>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {COLS} FROM jobs WHERE kind = 'merge' AND state = 'passed'
+           AND (onto IS NULL OR onto = 'next')
+           AND (card = ?1 OR EXISTS (SELECT 1 FROM json_each(jobs.batch)
+                                     WHERE json_extract(value, '$.card') = ?1))
+         ORDER BY ended_at DESC, created_at DESC"
+    ))?;
+    let jobs = st
+        .query_map([card], row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    for j in jobs {
+        if let Some(c) = j.cards().into_iter().find(|c| c.card == card)
+            && c.outcome.is_none()
+            && c.branch == branch
+            && c.commit.is_some()
+        {
+            return Ok(c.commit);
+        }
+    }
+    Ok(None)
+}
+
 /// The jobs that are running, in all projects.
 pub fn running(conn: &Connection) -> ApiResult<Vec<Job>> {
     let mut st = conn.prepare(&format!(

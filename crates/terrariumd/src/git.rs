@@ -2574,6 +2574,34 @@ impl JobRepo {
         }
     }
 
+    /// The commits of `base..commit` that are on the first-parent line of
+    /// `line` and not in `base` (TER-607): the merges and direct commits of
+    /// `line` that `commit` would bring into `base`, newest first. A card
+    /// branch reaches `next` through the second parent of its merge, so
+    /// its own commits are not in the list.
+    pub fn first_parent_commits_in(
+        &self,
+        base: &str,
+        commit: &str,
+        line: &str,
+    ) -> Result<Vec<String>, GitError> {
+        let not_base = format!("^{base}");
+        let of_line = self.local(&[
+            "rev-list",
+            "--first-parent",
+            "--end-of-options",
+            line,
+            &not_base,
+        ])?;
+        let of_line: std::collections::HashSet<&str> = of_line.split_whitespace().collect();
+        let brought = self.local(&["rev-list", "--end-of-options", commit, &not_base])?;
+        Ok(brought
+            .split_whitespace()
+            .filter(|c| of_line.contains(c))
+            .map(str::to_owned)
+            .collect())
+    }
+
     /// Point `refname` at `sha`.
     pub fn set_ref(&self, refname: &str, sha: &str) -> Result<(), GitError> {
         self.local(&["update-ref", refname, sha]).map(|_| ())
