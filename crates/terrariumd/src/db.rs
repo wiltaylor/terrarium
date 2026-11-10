@@ -3181,9 +3181,14 @@ pub fn now() -> String {
 pub fn open(path: &Path) -> anyhow::Result<Connection> {
     let mut conn =
         Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    // The busy timeout comes first: the pragmas take locks too. Without it,
+    // an open while another connection to the file holds the exclusive lock
+    // fails at once with `database is locked`. The last connection of a WAL
+    // database takes that lock when it closes, to checkpoint (TER-646: a
+    // test daemon started again while the old daemon's connection closed).
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     migrate(&mut conn)?;
     Ok(conn)
 }
