@@ -339,6 +339,21 @@ impl RunDirs {
     /// state dir at a time.
     pub fn clear_stale(state_dir: &Path) -> io::Result<usize> {
         let base = Self::base(state_dir);
+        // `credentials` and `.run` must be real dirs: read_dir follows a
+        // link, and the clear would then empty the link target.
+        for d in [credentials_dir(state_dir), base.clone()] {
+            match fs::symlink_metadata(&d) {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => {
+                    return Err(io::Error::other(format!(
+                        "{} is not a dir (a symlink?): the run dirs stay",
+                        d.display()
+                    )));
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+                Err(e) => return Err(e),
+            }
+        }
         let entries = match fs::read_dir(&base) {
             Ok(e) => e,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -1286,6 +1301,23 @@ pub(crate) mod tests {
         assert_eq!(fs::read_dir(RunDirs::base(dir.path())).unwrap().count(), 0);
         // The store still makes run dirs.
         runs.run_dir().unwrap();
+    }
+
+    #[test]
+    fn clear_stale_refuses_a_linked_base_and_leaves_the_target() {
+        for linked in ["credentials", "credentials/.run"] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = dir.path().join("state");
+            let outside = dir.path().join("outside");
+            fs::create_dir_all(outside.join("keep")).unwrap();
+            fs::write(outside.join("keep/f"), "x").unwrap();
+            let link = state.join(linked);
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            let err = RunDirs::clear_stale(&state).unwrap_err();
+            assert!(err.to_string().contains("not a dir"), "{linked}: {err}");
+            assert!(outside.join("keep/f").exists(), "{linked}");
+        }
     }
 
     #[test]

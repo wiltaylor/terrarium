@@ -146,6 +146,8 @@ pub struct DaemonConfig {
 /// A running daemon.
 pub struct Daemon {
     pub state: Shared,
+    /// The `flock` on [`STATE_LOCK`], held until the daemon drops.
+    _state_lock: std::fs::File,
     pub socket: PathBuf,
     pub tcp_addr: Option<std::net::SocketAddr>,
     /// The bound address of the artifact origin, when it listens.
@@ -167,6 +169,36 @@ impl Daemon {
         self.state.supervisor.shutdown();
         if let Err(e) = std::fs::remove_file(&self.socket) {
             warn!(socket = %self.socket.display(), "cannot remove socket: {e}");
+        }
+    }
+}
+
+/// The lock file in the state dir: the running daemon holds an exclusive
+/// `flock` on it.
+pub const STATE_LOCK: &str = "daemon.lock";
+
+/// Take the exclusive lock of `state_dir`, or fail when another daemon
+/// holds it.
+fn lock_state_dir(state_dir: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = state_dir.join(STATE_LOCK);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("cannot open the state lock {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+            "another daemon uses the state dir {} ({} is locked): stop it first",
+            state_dir.display(),
+            path.display()
+        ),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("cannot lock {}", path.display()))
         }
     }
 }
@@ -217,11 +249,15 @@ async fn start_with_usage_and_executor(
 ) -> anyhow::Result<Daemon> {
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("cannot create state dir {}", cfg.state_dir.display()))?;
+    // One daemon per state dir, for its whole life: a second one stops
+    // here, before it opens the database or clears the run dirs.
+    let state_lock = lock_state_dir(&cfg.state_dir)?;
     let db_path = cfg.state_dir.join("terrarium.db");
     let conn = db::open(&db_path)?;
     info!(path = %db_path.display(), "database ready");
     // The run dirs of a daemon that stopped without its drops: before any
-    // request or job can make a new one.
+    // request or job can make a new one. The lock above makes sure that no
+    // live daemon owns them.
     match secrets::RunDirs::clear_stale(&cfg.state_dir) {
         Ok(0) => {}
         Ok(n) => info!(count = n, "removed stale secret run dirs"),
@@ -365,6 +401,7 @@ async fn start_with_usage_and_executor(
     }
     Ok(Daemon {
         state,
+        _state_lock: state_lock,
         socket: cfg.socket,
         tcp_addr,
         artifact_addr,

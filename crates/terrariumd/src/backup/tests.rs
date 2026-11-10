@@ -376,6 +376,24 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
         };
         assert!(check_paths(&m).is_err(), "{path}");
     }
+    // The same path twice, of any kinds: a dir entry on a symlink entry
+    // would chmod the link target.
+    for kinds in [
+        [EntryKind::Symlink, EntryKind::Dir],
+        [EntryKind::Dir, EntryKind::Symlink],
+        [EntryKind::File, EntryKind::File],
+        [EntryKind::Dir, EntryKind::Dir],
+    ] {
+        let m = Manifest {
+            id: "X".into(),
+            entries: kinds
+                .iter()
+                .map(|k| entry("state/a", *k, Some("/root/.ssh")))
+                .collect(),
+        };
+        let err = check_paths(&m).unwrap_err();
+        assert!(format!("{err:#}").contains("twice"), "{kinds:?}: {err:#}");
+    }
     // A symlink next to a file of the same prefix is fine.
     let m = Manifest {
         id: "X".into(),
@@ -386,6 +404,48 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
         ],
     };
     check_paths(&m).unwrap();
+}
+
+#[test]
+fn a_restore_with_a_dir_entry_on_a_symlink_entry_changes_nothing() {
+    let fx = fixture();
+    let full = fx.make(Kind::Full, false, None);
+    let link = "state/agents/A1/harness/cred/account";
+    let target = fx.state.join("credentials/accounts/claude/a");
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+    let before = mode(&target);
+    // Copy the zip with a second manifest entry on the symlink: a dir of
+    // mode 0777.
+    let bad = fx.dir.join("dup.zip");
+    {
+        let mut src = ZipArchive::new(File::open(&full.path).unwrap()).unwrap();
+        let mut out = ZipWriter::new(File::create(&bad).unwrap());
+        for i in 0..src.len() {
+            let mut f = src.by_index(i).unwrap();
+            let name = f.name().unwrap().into_owned();
+            let mut data = Vec::new();
+            f.read_to_end(&mut data).unwrap();
+            if name == MANIFEST {
+                let mut m: Manifest = serde_json::from_slice(&data).unwrap();
+                assert!(m.entries.iter().any(|e| e.path == link && e.kind == EntryKind::Symlink));
+                let mut dir = entry(link, EntryKind::Dir, None);
+                dir.mode = 0o777;
+                m.entries.push(dir);
+                data = serde_json::to_vec(&m).unwrap();
+            }
+            out.start_file(name, SimpleFileOptions::default()).unwrap();
+            out.write_all(&data).unwrap();
+        }
+        out.finish().unwrap();
+    }
+    let err = restore(&bad, &fx.roots(false), &RestoreOptions::default()).unwrap_err();
+    assert!(format!("{err:#}").contains("twice"), "{err:#}");
+    assert_eq!(mode(&target), before);
+    assert!(
+        !fx.state
+            .join(format!("{STAGING_PREFIX}{}", full.header.id))
+            .exists()
+    );
 }
 
 #[test]

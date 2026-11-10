@@ -968,8 +968,9 @@ fn source_of<'a>(
 }
 
 /// Each path is `<known root>/<relative path>` in plain form (no empty,
-/// `.`, or `..` part), and no path is below a symlink entry: the restore
-/// would write through the link, out of the root.
+/// `.`, or `..` part), no path is in the manifest twice, and no path is
+/// below a symlink entry: the restore would write through the link, out of
+/// the root.
 fn check_paths(m: &Manifest) -> anyhow::Result<()> {
     for e in &m.entries {
         let (root, rel) = split(&e.path)?;
@@ -983,6 +984,15 @@ fn check_paths(m: &Manifest) -> anyhow::Result<()> {
                 .all(|c| matches!(c, Component::Normal(_)));
         if !ok {
             bail!("bad path in the manifest: {}", e.path);
+        }
+    }
+    // One entry per path: a second entry on the same path could act
+    // through the first (a dir entry on a symlink entry sets the mode of
+    // the link target).
+    let mut seen: HashSet<&str> = HashSet::new();
+    for e in &m.entries {
+        if !seen.insert(e.path.as_str()) {
+            bail!("bad manifest: the path {} is in it twice", e.path);
         }
     }
     // The paths are in plain form, so a string prefix is a path prefix.
