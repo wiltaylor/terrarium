@@ -945,7 +945,11 @@ mod tests {
         let out = sh(&rooted(KILL, root.path()), &[&name]);
         let r = parse(&String::from_utf8_lossy(&out.stdout));
         assert_eq!(r["pid"], Value::Null, "{r}");
-        assert_eq!(r["pid_dir_refused"], json!(own.display().to_string()), "{r}");
+        assert_eq!(
+            r["pid_dir_refused"],
+            json!(own.display().to_string()),
+            "{r}"
+        );
         let out = sh(&rooted(CLEAR, root.path()), &[&name]);
         assert!(out.status.success(), "{out:?}");
         assert!(planted.exists());
