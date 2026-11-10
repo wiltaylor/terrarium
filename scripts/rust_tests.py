@@ -9,18 +9,30 @@ import shutil
 import subprocess
 import sys
 
+import rerun_tests
 
-def reported(cmd: list[str], results: str, env: dict[str, str], filename: str = "doctests.json") -> int:
+
+def reported(cmd: list[str], results: str, env: dict[str, str], filename: str = "doctests.json",
+             outcomes: rerun_tests.Outcomes | None = None) -> int:
     """Tee this invocation, not previous appended results, and keep its status."""
     with Path(results, filename).open("a", encoding="utf-8") as out:
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8",
-                              errors="replace", env=env) as child:
-            assert child.stdout is not None
-            for line in child.stdout:
+        return teed(cmd, env, out, outcomes)
+
+
+def teed(cmd: list[str], env: dict[str, str] | None, out=None,
+         outcomes: rerun_tests.Outcomes | None = None) -> int:
+    """Run `cmd`, print its stdout as it comes, and copy it to `out` and `outcomes`."""
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8",
+                          errors="replace", env=env) as child:
+        assert child.stdout is not None
+        for line in child.stdout:
+            if out is not None:
                 out.write(line)
                 out.flush()
-                print(line, end="", flush=True)
-            return child.wait()
+            if outcomes is not None:
+                outcomes.feed(line)
+            print(line, end="", flush=True)
+        return child.wait()
 
 
 def junit_source() -> Path:
@@ -69,16 +81,52 @@ def run_nextest(args: list[str]) -> int:
     return code
 
 
+JSON = ["-Z", "unstable-options", "--format", "json", "--report-time"]
+# Cargo arguments that select test targets: the run then has no doctests.
+TARGETS = ("--lib", "--bins", "--test", "--bin", "--tests", "--all-targets", "--doc",
+           "--example", "--examples", "--bench", "--benches")
+
+
 def run(args: list[str]) -> int:
     if args and args[0] == "--nextest":
         return run_nextest(args[1:])
     cmd = ["cargo", "test", *args]
     results = os.environ.get("RESULTS_DIR")
-    if not results:
+    first = rerun_tests.Outcomes() if rerun_tests.enabled() else None
+    if not results and first is None:
         return subprocess.call(cmd)
-    Path(results).mkdir(parents=True, exist_ok=True)
-    return reported(cmd + ["--", "-Z", "unstable-options", "--format", "json", "--report-time"],
-                    results, dict(os.environ, RUSTC_BOOTSTRAP="1"), "rust.json")
+    if results:
+        Path(results).mkdir(parents=True, exist_ok=True)
+        code = reported(cmd + ["--", *JSON], results, dict(os.environ, RUSTC_BOOTSTRAP="1"),
+                        "rust.json", first)
+    else:
+        code = teed(cmd, None, None, first)
+    if code == 0 or first is None:
+        return code
+    return rerun_failed(cmd, results, first.done(), code)
+
+
+def rerun_failed(cmd: list[str], results: str | None, first: rerun_tests.Outcomes,
+                 code: int) -> int:
+    """Run the failed tests of a merge job once more (TER-683, rerun_tests.py)."""
+    why = rerun_tests.why_not(first)
+    if why:
+        print(f"rerun: test: no rerun: {why}", flush=True)
+        return code
+    names = sorted(first.failed)
+    print(f"rerun: test: {len(names)} failed tests run once more: {', '.join(names)}", flush=True)
+    # The same command, so the same build and env. Without a target
+    # selection `--tests` leaves out the doctests: none of them failed.
+    again = cmd if any(a in cmd for a in TARGETS) else [*cmd, "--tests"]
+    tests = [*names, "--exact"]
+    out = rerun_tests.Outcomes()
+    if results:
+        Path(results, "rust-rerun.json").write_text("", encoding="utf-8")
+        rc = reported([*again, "--", *JSON, *tests], results, dict(os.environ, RUSTC_BOOTSTRAP="1"),
+                      "rust-rerun.json", out)
+    else:
+        rc = teed([*again, "--", *tests], None, None, out)
+    return 0 if rerun_tests.report("test", first, names, out.done(), rc) else code
 
 
 if __name__ == "__main__":

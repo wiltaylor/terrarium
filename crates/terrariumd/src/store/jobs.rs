@@ -170,6 +170,34 @@ pub struct Job {
     /// `card merge --onto`. See [`Job::onto`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onto: Option<String>,
+    /// The failed tests that the recipe ran once more (TER-683), with both
+    /// results. Empty: no rerun.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reruns: Vec<Rerun>,
+}
+
+/// A failed test that a merge recipe ran once more (TER-683,
+/// `scripts/rerun_tests.py`). From the job log: untrusted, bounded text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rerun {
+    /// The test step: `test` (root) or `test-unprivileged` (uid 1001).
+    pub step: String,
+    /// The full libtest name of the test.
+    pub test: String,
+    /// The first result: `failed`.
+    pub first: String,
+    /// The result of the rerun: `ok`, `failed`, or `missing`.
+    pub rerun: String,
+    /// The end of the output of the first failure.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tail: String,
+}
+
+impl Rerun {
+    /// Failed, then passed: a flaky test.
+    pub fn flaky(&self) -> bool {
+        self.first == "failed" && self.rerun == "ok"
+    }
 }
 
 /// The branch that a merge job goes onto by default.
@@ -288,17 +316,23 @@ pub struct JobEnd {
     /// The batch with the outcome of each card (a conflict), when the job
     /// merged a batch.
     pub batch: Option<Vec<BatchCard>>,
+    /// The failed tests that the recipe ran once more (TER-683).
+    pub reruns: Vec<Rerun>,
 }
 
 const COLS: &str = "id, project, card, kind, repo, branch, commit_sha, state, attempt, outcome,
                     exit_code, tail, head, by_agent, created_by, created_at, started_at, ended_at,
-                    host, batch, parent, split_path, planned_secs, slot, onto";
+                    host, batch, parent, split_path, planned_secs, slot, onto, reruns";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
     let kind: String = r.get(3)?;
     let state: String = r.get(7)?;
     let batch: Option<String> = r.get(19)?;
     let batch = batch
+        .and_then(|b| serde_json::from_str(&b).ok())
+        .unwrap_or_default();
+    let reruns: Option<String> = r.get(25)?;
+    let reruns = reruns
         .and_then(|b| serde_json::from_str(&b).ok())
         .unwrap_or_default();
     Ok(Job {
@@ -327,6 +361,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
         planned_secs: r.get(22)?,
         slot: r.get(23)?,
         onto: r.get(24)?,
+        reruns,
     })
 }
 
@@ -1700,7 +1735,7 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
     };
     let n = t.execute(
         "UPDATE jobs SET state = ?2, outcome = ?3, exit_code = ?4, tail = ?5, head = ?6,
-                         ended_at = ?7, batch = COALESCE(?8, batch)
+                         ended_at = ?7, batch = COALESCE(?8, batch), reruns = ?9
          WHERE id = ?1 AND state = 'running'",
         params![
             id,
@@ -1713,6 +1748,11 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
             match &end.batch {
                 Some(b) => batch_text(b)?,
                 None => None,
+            },
+            if end.reruns.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&end.reruns)?)
             }
         ],
     )?;
@@ -2122,6 +2162,7 @@ mod tests {
             planned_secs: None,
             slot: None,
             onto: None,
+            reruns: Vec::new(),
         }
     }
 

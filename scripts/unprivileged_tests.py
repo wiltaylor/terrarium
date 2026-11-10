@@ -25,6 +25,8 @@ import subprocess
 import sys
 import tempfile
 
+import rerun_tests
+
 # Package -> the test targets to run ("lib" for the unit tests), None for all.
 SELECT: dict[str, frozenset[str] | None] = {
     "terrarium-host": None,
@@ -119,6 +121,54 @@ def setpriv(uid: int) -> list[str]:
     return ["setpriv", f"--reuid={uid}", f"--regid={uid}", "--clear-groups", "--"]
 
 
+def rerun(failed: list[tuple[str, str, rerun_tests.Outcomes]], root: str, first_home: int,
+          args: list[str], results: str | None) -> bool:
+    """Run the failed tests of each failed binary once more, as UID (TER-683).
+
+    Each binary runs again with only its failed tests, from the same
+    directory, with the same env and a fresh private HOME. True when every
+    rerun test passed: the step then passes.
+    """
+    step = "test-unprivileged"
+    first = rerun_tests.Outcomes()
+    for _, _, seen in failed:
+        first.started += seen.started
+        first.finished += seen.finished
+        first.failed.update(seen.failed)
+    why = rerun_tests.why_not(first)
+    if why is None:
+        why = next((w for _, _, seen in failed if (w := rerun_tests.why_not(seen))), None)
+    if why:
+        print(f"rerun: {step}: no rerun: {why}", flush=True)
+        return False
+    names = sorted(first.failed)
+    print(f"rerun: {step}: {len(names)} failed tests run once more as uid {UID}:"
+          f" {', '.join(names)}", flush=True)
+    again = rerun_tests.Outcomes()
+    worst = 0
+    out = Path(results, "rust-unprivileged-rerun.json").open("w", encoding="utf-8") if results else None
+    try:
+        for n, (exe, cwd, seen) in enumerate(failed):
+            env = child_env(private_home(root, first_home + n, UID))
+            if out:
+                env["RUSTC_BOOTSTRAP"] = "1"
+            cmd = setpriv(UID) + [exe, *args, *sorted(seen.failed), "--exact"]
+            print(f"unprivileged tests: uid {UID}: rerun: {exe}", flush=True)
+            child = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, text=True,
+                                   encoding="utf-8", errors="replace", check=False)
+            for line in child.stdout.splitlines(keepends=True):
+                print(line, end="", flush=True)
+                again.feed(line)
+                if out:
+                    out.write(line)
+            again.done()
+            worst = worst or child.returncode
+    finally:
+        if out:
+            out.close()
+    return rerun_tests.report(step, first, names, again, worst)
+
+
 def run() -> int:
     if os.geteuid() != 0:
         print("unprivileged tests: skipped, not root (the main run is already unprivileged)")
@@ -150,6 +200,8 @@ def run() -> int:
     root = tempfile.mkdtemp(prefix="terrarium-ci-home-")
     os.chmod(root, 0o711)
     failed = []
+    # (exe, cwd, results) of each failed binary, for the rerun (TER-683).
+    outcomes = []
     running = []
     try:
         args = []
@@ -168,17 +220,23 @@ def run() -> int:
                            errors="replace")
                 running.append((exe, log, subprocess.Popen(
                     setpriv(UID) + [exe, *args], cwd=cwd, env=env, stdout=log)))
-            for exe, log, child in running:
+            for n, (exe, log, child) in zip(group, running):
                 code = child.wait()
                 log.seek(0)
                 print(f"unprivileged tests: uid {UID}: {exe}", flush=True)
+                seen = rerun_tests.Outcomes()
                 for line in log:
                     print(line, end="", flush=True)
+                    seen.feed(line)
                     if report:
                         report.write(line)
                 log.close()
                 if code:
                     failed.append(exe)
+                    outcomes.append((exe, bins[n][1], seen.done()))
+        running = []
+        if failed and rerun_tests.enabled() and rerun(outcomes, root, len(bins), args, results):
+            failed = []
     finally:
         for _, log, child in running:
             if child.poll() is None:

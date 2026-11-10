@@ -2347,6 +2347,76 @@ exit 101"#;
     }
 }
 
+/// The cards of project `p` with the label `label`.
+async fn cards_with_label(lab: &Lab, label: &str) -> Vec<Value> {
+    let board = lab.td.get("/api/projects/p/board").await.ok().clone();
+    board["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| labels(c).iter().any(|l| l == label))
+        .cloned()
+        .collect()
+}
+
+/// A fake merge recipe that prints the rerun line of one test, as
+/// `scripts/rerun_tests.py` does, and ends with `code`.
+fn rerun_recipe(test: &str, rerun: &str, code: i32) -> String {
+    let line = json!({"step": "test", "test": test, "first": "failed", "rerun": rerun,
+                      "tail": "thread x panicked at src/a.rs:9:5:\ntimed out"});
+    format!(
+        "printf '%s\\n' 'test {test} ... FAILED' '[terrarium rerun] {line}' 'rerun: test: done'\nexit {code}"
+    )
+}
+
+/// TER-683: a test that passed on its rerun keeps the merge green and
+/// files one flaky card in backlog; a second job with the same flake adds
+/// a comment to that card; a second failure is red and files no card.
+#[tokio::test]
+async fn a_pass_on_rerun_is_green_and_files_one_flaky_card() {
+    let lab = lab(1).await;
+    let test = "hosts::a_flaky_one";
+    let label = terrariumd::jobs::flaky_label(test);
+    let job = merge_with_recipe(&lab, "ter-flaky-1", &rerun_recipe(test, "ok", 0)).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let shown = lab.td.get(&format!("/api/jobs/{}", job["id"].as_str().unwrap())).await.ok().clone();
+    assert_eq!(shown["reruns"][0]["test"], test, "{shown:#}");
+    assert_eq!(shown["reruns"][0]["first"], "failed");
+    assert_eq!(shown["reruns"][0]["rerun"], "ok");
+    assert!(shown["reruns"][0]["tail"].as_str().unwrap().contains("timed out"));
+    let tail = shown["tail"].as_str().unwrap();
+    assert!(tail.contains(&format!("[rerun once: test {test}: failed, then ok]")), "{tail}");
+    assert!(!tail.contains("[terrarium rerun] "), "{tail}");
+    let flaky = cards_with_label(&lab, &label).await;
+    assert_eq!(flaky.len(), 1, "{flaky:#?}");
+    let card = lab.card_of(flaky[0]["id"].as_str().unwrap()).await;
+    assert_eq!(card["column"], "backlog");
+    assert_eq!(card["title"], format!("Flaky test: {test}"));
+    for l in ["flaky", "version:vnext", "type:small"] {
+        assert!(labels(&card).iter().any(|x| x == l), "{card:#}");
+    }
+    let body = card["body"].as_str().unwrap();
+    assert!(body.contains(job["id"].as_str().unwrap()) && body.contains("timed out"), "{body}");
+
+    // The same flake in a second job: a comment on the open card.
+    let second = merge_with_recipe(&lab, "ter-flaky-2", &rerun_recipe(test, "ok", 0)).await;
+    assert_eq!(second["state"], "passed", "{second:#}");
+    assert_eq!(cards_with_label(&lab, &label).await.len(), 1);
+    let card = lab.card_of(flaky[0]["id"].as_str().unwrap()).await;
+    let notes = comments(&card);
+    assert!(notes.contains(second["id"].as_str().unwrap()), "{notes}");
+
+    // A second failure: red as before, and no card for that test.
+    let other = "hosts::a_broken_one";
+    let red = merge_with_recipe(&lab, "ter-flaky-3", &rerun_recipe(other, "failed", 101)).await;
+    assert_eq!(red["state"], "failed", "{red:#}");
+    assert_eq!(red["outcome"], "red");
+    let shown = lab.td.get(&format!("/api/jobs/{}", red["id"].as_str().unwrap())).await.ok().clone();
+    assert_eq!(shown["reruns"][0]["rerun"], "failed", "{shown:#}");
+    let label = terrariumd::jobs::flaky_label(other);
+    assert!(cards_with_label(&lab, &label).await.is_empty());
+}
+
 /// Queue a merge of a new card on `branch` with `recipe`, wait for the
 /// end, and return the job.
 async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
@@ -2358,7 +2428,8 @@ async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
         )
         .await
         .ok();
-    lab.branch(branch, "next", &[("OK", "yes\n")]);
+    // A file of its own too, so a second merge in one lab is no empty commit.
+    lab.branch(branch, "next", &[("OK", "yes\n"), (branch, "yes\n")]);
     let id = lab.card(branch, branch).await;
     let r = lab
         .td
