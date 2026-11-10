@@ -353,16 +353,23 @@ not run it on a shared target or a DGX Spark without that decision.
    ```sh
    v=<version>   # the version of the daemon and the host agent, without the v
    gh release download "v$v" --repo wiltaylor/terrarium \
-     --pattern "terrarium-host-helper-$v-linux-x86_64" --pattern SHA256SUMS
-   sha256sum -c --ignore-missing SHA256SUMS
+     --pattern "terrarium-host-helper-$v-linux-x86_64" --pattern SHA256SUMS &&
+   sha256sum -c --ignore-missing SHA256SUMS &&
    gh attestation verify "terrarium-host-helper-$v-linux-x86_64" --repo wiltaylor/terrarium \
-     --signer-workflow wiltaylor/terrarium/.github/workflows/ci.yml
-   install -o root -g root -m 0755 "terrarium-host-helper-$v-linux-x86_64" /usr/local/libexec/terrarium-host-helper
+     --signer-workflow wiltaylor/terrarium/.github/workflows/ci.yml &&
+   install -o root -g root -m 0755 "terrarium-host-helper-$v-linux-x86_64" /usr/local/libexec/terrarium-host-helper &&
    /usr/local/libexec/terrarium-host-helper --version
    ```
 
+   The commands are joined with `&&`: when the download or a check fails,
+   the install does not run.
+
    Without `gh`, take both files from the release page with `curl -fLO`
-   and run the `sha256sum` check. A release up to v0.35.0-alpha has no
+   and run the `sha256sum` check. `SHA256SUMS` comes from the same release
+   as the binary, so a matching hash proves only that the download is
+   whole, not where the binary comes from. Run the `gh attestation verify`
+   check before the install, on another machine with `gh` if this host has
+   none. A release up to v0.35.0-alpha has no
    such file: build it from the tag with `cargo build
    --release --locked -p terrarium-host --bin terrarium-host-helper`.
 

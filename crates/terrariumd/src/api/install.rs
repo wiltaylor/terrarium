@@ -552,6 +552,11 @@ mod tests {
         let sums = format!(
             "{h}  terrarium-host-helper-0.3.0-linux-x86_64\n{a}  terrarium-host-0.3.0-linux-x86_64\n"
         );
+        assert_eq!(release_sum(&sums, "x86_64"), Some(a.clone()));
+        // The order of the release CI: the host agent first, then the helper.
+        let sums = format!(
+            "{a}  terrarium-host-0.3.0-linux-x86_64\n{h}  terrarium-host-helper-0.3.0-linux-x86_64\n"
+        );
         assert_eq!(release_sum(&sums, "x86_64"), Some(a));
         assert_eq!(
             release_sum(
