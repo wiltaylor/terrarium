@@ -423,10 +423,16 @@ pub async fn merge(
     repo: &Option<String>,
     branch: &Option<String>,
     eta: &Option<String>,
+    onto: &Option<String>,
 ) -> anyhow::Result<()> {
     let eta = planned(eta)?;
     let mut body = json!({});
-    for (k, v) in [("repo", repo), ("branch", branch), ("eta", &eta)] {
+    for (k, v) in [
+        ("repo", repo),
+        ("branch", branch),
+        ("eta", &eta),
+        ("onto", onto),
+    ] {
         if let Some(v) = v {
             body[k] = json!(v);
         }

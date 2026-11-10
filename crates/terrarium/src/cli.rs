@@ -1383,7 +1383,10 @@ pub enum CardCmd {
     /// cards, one job merges them in the given order, validates once, and
     /// pushes `next` when green. A card that conflicts goes back to
     /// `ready`; on red the batch splits in halves until the failing card is
-    /// found, and the others merge
+    /// found, and the others merge. With `--onto release/X.Y.Z` (one
+    /// card), the job merges the card's tested commit onto that release
+    /// branch of a frozen version instead, and pushes it there; main then
+    /// gets the release merge as usual
     Merge {
         /// The cards, in merge order
         #[arg(required = true, value_name = "ID")]
@@ -1399,6 +1402,11 @@ pub enum CardCmd {
         /// ETA of each card is the job start plus this. Without it, no ETA
         #[arg(long, value_name = "DURATION")]
         eta: Option<String>,
+        /// The branch to merge onto: `next` (the default), or the release
+        /// branch `release/X.Y.Z` of a frozen version, for a release-blocker
+        /// fix (one card only)
+        #[arg(long, value_name = "BRANCH")]
+        onto: Option<String>,
     },
     /// Move a card to a column. A move to another column clears the ETA
     Move {

@@ -12596,8 +12596,8 @@ start with `Job queue:`.
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?, eta?}`. `eta` is the planned duration (§35.5). The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
-| `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?}`. `eta` is the planned duration (§35.5). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
-| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of one or more cards, in this order (no limit of the daemon; the batch rule of the merge queue sets its own, §19.11). All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
+| `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?, onto?}`. `eta` is the planned duration (§35.5). `onto` is `next` (the default) or a release branch `release/X.Y.Z` (see the release-blocker fix below). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of one or more cards, in this order (no limit of the daemon; the batch rule of the merge queue sets its own, §19.11). All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. A batch of two or more cards with a `release-blocker` card is refused with `409`: that card merges alone. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/projects/{name}/jobs/stats` | members                            | `?since=`: an RFC 3339 time, or a duration back from now such as `7d` (the default); anything else is `400`. The jobs created at or after `since` (a rerun keeps the `created_at` of its first try): `{project, since, jobs, first_attempt, validate, merge, reruns, conflicts, errors, cancelled, open, splits, failed_steps: [{step, failed}], failed_targets: [{target, failed, first_attempt}], untargeted_test_fails}`. Each of `first_attempt`, `validate`, `merge`, and `reruns` is `{ended, passed, failed, pass_rate}`; `pass_rate` is `passed / ended` from 0 to 1, `null` with none ended. A first attempt is attempt 1 and no split half; a `conflict` counts in `conflicts`, not in `ended`. A job with outcome `error` could not run (host agent offline, prepare step failed, push to `next` failed): first attempts and reruns with it count in `errors`, not in `ended`, so an outage does not lower the rate. Split halves count in `splits` only. `failed_targets` (most first) come from the `error: N targets failed:` lines of the failed jobs' output tails, all attempts; `failed_steps` from the first ``error: recipe `<step>` failed`` line, or `timeout`. `untargeted_test_fails` counts the failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
@@ -12627,6 +12627,39 @@ of the merge queue and back in.
 **Upgrade step (TER-580).** After the upgrade, each card that was in the
 merge queue at the TER-553 upgrade and has not left it since stays out of
 merges until it is moved out of the merge queue and back in.
+
+**A release-blocker fix (TER-607).** A frozen version keeps its members.
+A fix for it goes in a card with the label `release-blocker`, on a branch
+made from the release branch `release/X.Y.Z`, not from `next` and not on
+top of another card.
+
+1. The batch rule of the merge queue takes the first card of the column
+   with the label that could go, alone and at once, as a batch of one.
+   The other cards wait for the next batch. There is no preemption: a
+   merge job that is queued or running already, and the halves of a red
+   batch that splits, still run before the blocker. A `card merge` (`POST
+   /api/merges`) of two or more cards with a `release-blocker` card is
+   refused with `409`.
+2. After its merge onto `next` passed, `card merge <id> --onto
+   release/X.Y.Z` (`onto` in the body; one card, a project admin) merges
+   the commit that this merge took onto the release branch, and pushes
+   only that branch. `main` then gets the release merge as usual. The
+   job never takes the head of the card branch: a push after the merge
+   onto `next` does not reach the release. A card without a passed merge
+   of its branch onto `next` is refused with `409`.
+3. The job checks what the fix brings into the release. The tested
+   commit must be on `next`. Let M be the oldest commit of the
+   first-parent line of `next` that holds the tested commit (the merge
+   of the fix onto `next`). No commit of `release/X.Y.Z..tested` may be
+   in `release/X.Y.Z..M^1`, the history of `next` before the fix landed
+   that the release does not have. So a fix branch made from `next`
+   after the cut is refused, and so is a fix stacked on, or merging, a
+   card that merged onto `next` before the fix: both would take
+   unreleased cards into the frozen version. The job then fails with
+   outcome `error`, the release branch stays, and the tail names the
+   commits. Limit: a fix that merges a card branch that is not on `next`
+   yet passes, since its commits cannot be told apart from the fix's own
+   commits. Those commits then reach `next` in the same merge as the fix.
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
