@@ -964,6 +964,18 @@ pub fn plan_start(
         "CapabilityBoundingSet=",
         "AmbientCapabilities=",
         "RestrictSUIDSGID=yes",
+        // The unit's /proc shows only the processes of its own UID
+        // (hidepid=invisible, TER-638): a session sees neither the host's
+        // processes nor their command lines, and cannot open
+        // /proc/<pid>/root or cwd of a session of another UID. The UID is
+        // that of one holder only ([`Sessions::admit`]), so every process
+        // that stays visible is of the same holder and has the same
+        // workspace scope. ProcSubset=pid is not set: CUDA and nvidia-smi
+        // read /proc/driver/nvidia, and build tools read /proc/meminfo.
+        // PrivatePIDs= needs systemd 257 (above [`MIN_SYSTEMD`]) and makes
+        // the command PID 1, which ignores SIGINT and SIGTERM without a
+        // handler.
+        "ProtectProc=invisible",
         // A pool UID passes to another holder when its holder's last
         // session ends. What the UID can reach from one holder to the next:
         // /tmp and /var/tmp are private to the unit; systemd removes the

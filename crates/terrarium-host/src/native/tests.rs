@@ -217,6 +217,11 @@ fn a_gpu_session_allows_only_its_gpu_and_the_support_nodes() {
     assert!(p.contains(&"PrivateTmp=yes"));
     assert!(p.contains(&"RemoveIPC=yes"));
     assert!(p.contains(&"ProtectSystem=strict"));
+    // /proc shows only the processes of the session's UID (TER-638), with
+    // the full /proc of those (CUDA reads /proc/driver/nvidia).
+    assert!(p.contains(&"ProtectProc=invisible"), "{p:?}");
+    assert!(!p.iter().any(|x| x.starts_with("ProcSubset=")), "{p:?}");
+    assert!(!p.iter().any(|x| x.starts_with("PrivatePIDs=")), "{p:?}");
     // No holder workspace yet: the workspace root is an empty read-only
     // tmpfs, nothing is bound in, nothing is writable.
     let real = std::fs::canonicalize(root.path()).unwrap();
