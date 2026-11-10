@@ -29,6 +29,10 @@
 //!   ([`PROJECT_ENGINE_SLOTS`], [`PROJECT_DRY_RUN_SLOTS`]): it waits for
 //!   its share first, in its own queue, so one project's slow scripts
 //!   do not keep the other projects out (TER-551).
+//! - **seccomp.** After its rlimits the child sets `no_new_privs` and a
+//!   seccomp filter ([`confine`], TER-545): it may read its stdin, write
+//!   its stdout and stderr, manage its memory, and exit. Each other call
+//!   (an open, a socket, an exec) fails with `EPERM`.
 //! - **No inherited files.** The child closes each file from 3 up before
 //!   it reads its input, so an fd of the daemon without close-on-exec
 //!   does not reach the script.
@@ -321,6 +325,115 @@ fn limit_self() -> Result<(), String> {
     Err("scripts run on Unix only".into())
 }
 
+/// Confine this process (the child) after its rlimits (TER-545): set
+/// `no_new_privs`, then a seccomp filter that allows only the calls that
+/// the rest of [`child_main`] needs:
+///
+/// - `read` on fd 0 and `write` on fds 1 and 2 (the input, the reply,
+///   a panic message),
+/// - `exit` and `exit_group`,
+/// - memory: `brk`, `mmap` and `mprotect` without `PROT_EXEC`, `munmap`,
+///   `mremap`, `madvise`,
+/// - `futex`, `rt_sigreturn`, `sigaltstack`, `clock_gettime`, and
+///   `getrandom` (the keys of a std `HashMap`),
+/// - an end by a signal: `abort` (a failed allocation at the memory
+///   limit) sends `SIGABRT` to itself. `tgkill` only to this process,
+///   `getpid`, `gettid`, and `rt_sigaction`. Without them `abort` falls
+///   back to a fault, and the stack overflow handler of std, which then
+///   cannot reset its action, runs that fault again without end,
+/// - threads: the wscript compiler runs on a thread of its own (a 32 MiB
+///   stack). `clone` only with `CLONE_THREAD` (a thread shares the
+///   process, so it is no new process), `set_robust_list`, `rseq`,
+///   `rt_sigprocmask` and `sched_yield`. The flags of `clone3` are in
+///   memory, where seccomp cannot read them: a first filter makes
+///   `clone3` fail with `ENOSYS`, and the C library then uses `clone`.
+///
+/// Each other call (an `open`, a `socket`, an `execve`, a `kill` of
+/// another process, a `fork`) fails with `EPERM`. A call of another architecture ends the
+/// process (the filter's architecture check). The filters hold for the
+/// rest of the process, its threads too, and cannot be removed.
+#[cfg(target_os = "linux")]
+pub fn confine() -> Result<(), String> {
+    use nix::libc;
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule,
+    };
+    nix::sys::prctl::set_no_new_privs().map_err(|e| format!("cannot set no_new_privs: {e}"))?;
+    let bad = |e: seccompiler::BackendError| format!("cannot build the seccomp filter: {e}");
+    let arch: seccompiler::TargetArch = std::env::consts::ARCH.try_into().map_err(bad)?;
+    let apply = |rules: BTreeMap<i64, Vec<SeccompRule>>, mismatch, matched| {
+        let filter = SeccompFilter::new(rules, mismatch, matched, arch).map_err(bad)?;
+        let program: BpfProgram = filter.try_into().map_err(bad)?;
+        seccompiler::apply_filter(&program)
+            .map_err(|e| format!("cannot set the seccomp filter: {e}"))
+    };
+    // 1. `clone3` fails with ENOSYS, each other call goes on to filter 2
+    //    (which allows `clone3`, so this filter's result holds).
+    apply(
+        BTreeMap::from([(libc::SYS_clone3, Vec::new())]),
+        SeccompAction::Allow,
+        SeccompAction::Errno(libc::ENOSYS as u32),
+    )?;
+    // 2. The allow list. One rule per value: the rules of a call are or-ed.
+    let arg_is = |arg: u8, op: SeccompCmpOp, value: u64| {
+        SeccompCondition::new(arg, SeccompCmpArgLen::Dword, op, value)
+            .and_then(|c| SeccompRule::new(vec![c]))
+            .map_err(bad)
+    };
+    let fd = |n: u64| arg_is(0, SeccompCmpOp::Eq, n);
+    let no_exec = || arg_is(2, SeccompCmpOp::MaskedEq(libc::PROT_EXEC as u64), 0);
+    let thread = libc::CLONE_THREAD as u64;
+    let me = u64::from(std::process::id());
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::from([
+        (libc::SYS_read, vec![fd(0)?]),
+        (libc::SYS_write, vec![fd(1)?, fd(2)?]),
+        (libc::SYS_mmap, vec![no_exec()?]),
+        (libc::SYS_mprotect, vec![no_exec()?]),
+        (
+            libc::SYS_clone,
+            vec![arg_is(0, SeccompCmpOp::MaskedEq(thread), thread)?],
+        ),
+        (libc::SYS_tgkill, vec![arg_is(0, SeccompCmpOp::Eq, me)?]),
+    ]);
+    for call in [
+        libc::SYS_exit,
+        libc::SYS_exit_group,
+        libc::SYS_brk,
+        libc::SYS_munmap,
+        libc::SYS_mremap,
+        libc::SYS_madvise,
+        libc::SYS_futex,
+        libc::SYS_rt_sigreturn,
+        libc::SYS_rt_sigprocmask,
+        libc::SYS_sigaltstack,
+        libc::SYS_clock_gettime,
+        libc::SYS_getrandom,
+        libc::SYS_set_robust_list,
+        libc::SYS_rseq,
+        libc::SYS_sched_yield,
+        libc::SYS_getpid,
+        libc::SYS_gettid,
+        libc::SYS_rt_sigaction,
+        // Filter 1 refuses it (ENOSYS). With EPERM here, this newer filter
+        // would win: of two `Errno` results the kernel keeps the newest.
+        libc::SYS_clone3,
+    ] {
+        rules.insert(call, Vec::new());
+    }
+    apply(
+        rules,
+        SeccompAction::Errno(libc::EPERM as u32),
+        SeccompAction::Allow,
+    )
+}
+
+/// Without seccomp a script does not run: the child fails closed.
+#[cfg(not(target_os = "linux"))]
+pub fn confine() -> Result<(), String> {
+    Err("scripts run on Linux only (a seccomp filter)".into())
+}
+
 /// Close each file of this process (the child) from 3 up: the daemon's
 /// files have close-on-exec, and this makes sure (TER-173 review). The
 /// open files are read from `/proc/self/fd` (or `/dev/fd`); without
@@ -344,12 +457,13 @@ fn close_inherited() {
 #[cfg(not(unix))]
 fn close_inherited() {}
 
-/// The child: close the inherited files, set the limits, read the input
+/// The child: close the inherited files, set the limits and the seccomp
+/// filter ([`confine`]), read the input
 /// from stdin, run the script, and write the [`Reply`] to stdout. The
 /// exit code is 0 when it wrote a reply.
 pub fn child_main() -> i32 {
     close_inherited();
-    let reply = match limit_self() {
+    let reply = match limit_self().and_then(|()| confine()) {
         Err(e) => Reply::failed(e),
         Ok(()) => {
             let mut buf = Vec::new();
@@ -842,6 +956,82 @@ fn main() -> string {
         let left = Duration::from_secs(4);
         let d = Budget::dry_run("p", left);
         assert!(d.acquire + d.run_time(d.acquire) <= left);
+    }
+
+    /// The env of [`a_confined_child_runs_a_script_and_cannot_open_a_file`]
+    /// in its copy of this test binary: confine, then probe.
+    #[cfg(target_os = "linux")]
+    const PROBE_ENV: &str = "TERRARIUM_TEST_CONFINE_PROBE";
+
+    /// The probe (TER-545): in a copy of this test binary, [`confine`]
+    /// this thread like a script child, then read stdin, run a script,
+    /// try an open and an exec, and write what happened to stdout.
+    /// Without [`PROBE_ENV`] it does nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn confine_probe() {
+        if std::env::var_os(PROBE_ENV).is_none() {
+            return;
+        }
+        let mut out = std::io::stdout();
+        if let Err(e) = confine() {
+            let _ = writeln!(out, "confine: {e}");
+            std::process::exit(2);
+        }
+        let mut stdin = String::new();
+        let read = std::io::stdin().read_to_string(&mut stdin).map(|_| stdin);
+        let script = execute(input("fn main() -> string { \"from the script\" }"));
+        let open = std::fs::File::open("/etc/hostname").map(|_| ());
+        let exec = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("true")
+            .status()
+            .map(|_| ());
+        // A signal to another process (init): refused, a signal to itself is not.
+        let kill = nix::sys::signal::kill(nix::unistd::Pid::from_raw(1), None);
+        let text = format!(
+            "read: {read:?}\nscript: {:?} {:?}\nopen: {:?}\nexec: {:?}\nkill: {kill:?}\n",
+            script.output,
+            script.error,
+            open.map_err(|e| e.raw_os_error()),
+            exec.map_err(|e| e.raw_os_error()),
+        );
+        let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
+        // End here: libtest would go on with calls that the filter refuses.
+        std::process::exit(0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_confined_child_runs_a_script_and_cannot_open_a_file() {
+        let exe = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(exe)
+            .args([
+                "rule_script::tests::confine_probe",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(PROBE_ENV, "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"the input").unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{:?}: {text}", out.status);
+        let eperm = Some(nix::libc::EPERM);
+        assert!(text.contains("read: Ok(\"the input\")"), "{text}");
+        assert!(
+            text.contains("script: Some(\"from the script\") None"),
+            "{text}"
+        );
+        assert!(text.contains(&format!("open: Err({eperm:?})")), "{text}");
+        assert!(text.contains(&format!("exec: Err({eperm:?})")), "{text}");
+        assert!(text.contains("kill: Err(EPERM)"), "{text}");
     }
 
     #[test]

@@ -102,6 +102,10 @@ chrono-tz.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 
+# The rule script child (TER-545): a seccomp filter after its rlimits.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler.workspace = true
+
 [dev-dependencies]
 # The integration tests use the fake supervisor.
 terrariumd = { path = ".", features = ["fake-supervisor"] }
