@@ -257,6 +257,39 @@ push`.
 `just release::dry-run` runs steps 1 to 6 with no secret: nothing is pushed,
 signed, or released. `--no-gate` skips the gate in a dry run only.
 
+### The release job
+
+The daemon runs the release as a job of kind `release` (TER-623,
+[api.md §35.6](api.md)). The setup, once, by the operator or meta/lead:
+
+1. Define the release client (META-119) as an ssh target of the project,
+   user `release`, with its pinned host key. Give no agent access to it.
+2. Grant `release-github`, `release-cosign`, and `docker-release-vm` to
+   `delivery:terrarium` with `--level run --target <release client>`, and
+   to nobody else.
+3. Set the delivery config:
+
+   ```sh
+   terrarium project delivery set --release-target <release client> \
+     --release-secret GHCR_TOKEN=@secret:release-github \
+     --release-secret GH_TOKEN=@secret:release-github \
+     --release-secret COSIGN_PRIVATE_KEY=@secret:release-cosign.private_key \
+     --release-secret COSIGN_PASSWORD=@secret:release-cosign.password \
+     --docker-release-destination root@10.3.0.2 --docker-release-port 2251 \
+     --docker-release-known-hosts '<the pinned known_hosts line>' \
+     --docker-release-key @secret:docker-release-vm
+   ```
+
+   The daemon refuses a release target that is the job target of any
+   project.
+
+The lead's release step, after the release merge onto `main`:
+`terrarium job release <version card>` (the head of `main`, or
+`--commit <sha>` to make sure it is that commit). The job clones the
+commit into a new tree on the client, opens the relay to the release VM,
+and runs `just release::publish` with the secrets in its env. The end comes
+as a comment on the card. A lost run does not run again by itself.
+
 ### Secrets
 
 The secrets are Terrarium secrets, granted to the release job's principal

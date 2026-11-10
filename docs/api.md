@@ -12248,6 +12248,10 @@ or the operator) read and set the config. The body is a JSON object:
 | `failure_patterns` | literal strings to extract from recipe output, with three following lines of context | `["FAILED", "panicked", "test result: FAILED", "failures:"]` |
 | `merge_secrets` | `DOCKER_CI_KEY` and `DOCKER_CI_RESET_KEY` mapped to `@secret:<name>[.<field>]`, consumed only by the daemon for merge jobs | `{}` |
 | `docker_ci` | public SSH settings: `destination`, `port`, `known_hosts`, `reset_destination`, `reset_port`, `reset_known_hosts` | none |
+| `release_target` | the release client target of release jobs (§35.6); it runs release jobs only | none: no releases |
+| `release_recipe` | the release command, run with `sh -c` in the root of the clone | `just release::publish` |
+| `release_secrets` | `GHCR_TOKEN`, `GH_TOKEN`, `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` mapped to `@secret:<name>[.<field>]`, the env of release jobs only | `{}` |
+| `docker_release` | the release VM: `destination`, `port`, `known_hosts`, and `key` (`@secret:<name>[.<field>]`, used by the daemon only) | none |
 
 `merge_secrets` uses the project's `delivery:<project>` principal, never
 agent or project grants. A delivery grant requires `level: run`, named
@@ -12670,6 +12674,7 @@ start with `Job queue:`.
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?, eta?}`. `eta` is the planned duration (§35.5). The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?, onto?}`. `eta` is the planned duration (§35.5). `onto` is `next` (the default) or a release branch `release/X.Y.Z` (see the release-blocker fix below). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `POST /api/cards/{id}/release`     | a project admin                       | `{repo?, commit?, eta?}` (§35.6): a release job at the head of `main` on the remote; `commit`, when given, must be that head. The project needs `release_target`. The card does not move. `201` as above |
 | `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of one or more cards, in this order (no limit of the daemon; the batch rule of the merge queue sets its own, §19.11). All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. A batch of two or more cards with a `release-blocker` card is refused with `409`: that card merges alone. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/projects/{name}/jobs/stats` | members                            | `?since=`: an RFC 3339 time, or a duration back from now such as `7d` (the default); anything else is `400`. The jobs created at or after `since` (a rerun keeps the `created_at` of its first try): `{project, since, jobs, first_attempt, validate, merge, reruns, conflicts, errors, cancelled, open, splits, failed_steps: [{step, failed}], failed_targets: [{target, failed, first_attempt}], untargeted_test_fails}`. Each of `first_attempt`, `validate`, `merge`, and `reruns` is `{ended, passed, failed, pass_rate}`; `pass_rate` is `passed / ended` from 0 to 1, `null` with none ended. A first attempt is attempt 1 and no split half; a `conflict` counts in `conflicts`, not in `ended`. A job with outcome `error` could not run (host agent offline, prepare step failed, push to `next` failed): first attempts and reruns with it count in `errors`, not in `ended`, so an outage does not lower the rate. Split halves count in `splits` only. `failed_targets` (most first) come from the `error: N targets failed:` lines of the failed jobs' output tails, all attempts; `failed_steps` from the first ``error: recipe `<step>` failed`` line, or `timeout`. `untargeted_test_fails` counts the failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off) |
@@ -12775,6 +12780,54 @@ line of the end. `failure_block` is the `Validation failed:` block for
 `red`, `conflict`, and `error`, else `null`. The verdict says what the run
 found, not what the queue does next: the rerun and the split stay as
 above.
+
+### 35.6 Release jobs
+
+A release job (TER-623, kind `release`) is the lead's release step. A
+project admin queues it on the card of the release with `POST
+/api/cards/{id}/release` or `terrarium job release <card>`. It takes the
+head of `main` on the remote (the release merge commit), clones that commit
+on `release_target` into a new tree, and runs `release_recipe` there
+(default `just release::publish`, docs/release.md). Releases have their own
+lane: one at a time per project, on the host of the release target, beside
+the merge and validate jobs. The card does not move and gets no label: it
+gets a comment when the job is queued and when it ends (with the output on
+a failure). A release emits `job` events but no `job.verdict`, so the board
+rules do not act on it. A release whose run is lost (the daemon stopped, or
+the link to the target broke) ends as an error and never runs again by
+itself: its push or GitHub release may be done, so the lead checks them and
+queues a new one.
+
+The release secrets:
+
+- `release_secrets` resolve through the `delivery:<project>` principal
+  with a `run` grant that names the release target, only for a release job,
+  only on that target. A grant that names another target fails the job
+  before its recipe and before the tunnel. Merge and validate jobs never
+  resolve them: they run on `target`, and the code path reads them for
+  release jobs only.
+- The values go into the env of the release recipe only. The executor sends
+  the env on stdin, never on a command line. The recipe output, the
+  retained log excerpt and the tail are redacted with each value. Each use
+  emits `secret.run` with the job, `kind: release`, the target, the env
+  name and the reference, never the value.
+- `release_target` is not the `target` of any project, and not the release
+  target of another project; a project's `target` is not another project's
+  release target. Every process on that target that runs as the release
+  user can read the secrets of a running release, so the target must run
+  release jobs only and give no agent a shell or a run.
+- `docker_release` is the release VM. The daemon resolves its `key` (with
+  the same grant rule), keeps it in a private run dir, and opens the SSH
+  forward with the pinned `known_hosts` line, as for `docker_ci` (§35.1),
+  with no reset. The recipe gets only `TERRARIUM_DOCKER_HOST=unix://<job
+  socket>` through the relay on the release target, never the key.
+
+`terrarium project delivery set` sets them with `--release-target`,
+`--release-recipe`, `--release-secret NAME=@secret:name[.field]` (repeat;
+replaces the list; `--clear-release-secrets`), and
+`--docker-release-destination`, `--docker-release-port`,
+`--docker-release-known-hosts`, `--docker-release-key` (all four at the
+first set; `--clear-docker-release`).
 
 ## Agent calls during daemon restarts
 
