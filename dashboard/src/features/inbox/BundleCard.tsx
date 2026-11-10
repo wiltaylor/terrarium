@@ -10,12 +10,12 @@ import { A } from "@solidjs/router";
 import { createEffect, createSignal, For, type JSX, on, Show } from "solid-js";
 import { ApiError } from "../../api/http";
 import type { Question } from "../../api/types";
-import { LinkText, openCardLink } from "../../components/LinkText";
+import { LinkText, openCardLink, readerCardKeys } from "../../components/LinkText";
 import { SafeHtml } from "../../components/SafeHtml";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api, projects } from "../../stores";
+import { api } from "../../stores";
 import {
   andList,
   type BundleDraft,
@@ -150,7 +150,7 @@ export function BundleCard(props: { question: Question; now: number; showAgent?:
         <LinkText text={q().text} project={q().project} />
       </p>
 
-      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: projects.prefixes() })} onClick={openCardLink} />}</Show>
+      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={openCardLink} />}</Show>
 
       <Show when={open()}>
         <form class="stack" style={{ gap: "10px" }} onSubmit={send} aria-label="Answer all items">
@@ -178,7 +178,7 @@ export function BundleCard(props: { question: Question; now: number; showAgent?:
                           <span class="chip ok small bundle-check">answered</span>
                         </Show>
                       </legend>
-                      <Show when={item.context}>{(c) => <SafeHtml class="prose question-context small" html={renderMarkdown(c(), q().project, { cardKeys: projects.prefixes() })} onClick={openCardLink} />}</Show>
+                      <Show when={item.context}>{(c) => <SafeHtml class="prose question-context small" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={openCardLink} />}</Show>
                       <Show when={item.options.length}>
                         <div class="row" style={{ "flex-wrap": "wrap", gap: "6px" }} role="group" aria-label={`${label()} options`}>
                           <For each={item.options}>

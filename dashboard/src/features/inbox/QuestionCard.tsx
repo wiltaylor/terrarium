@@ -7,12 +7,12 @@
 import { A } from "@solidjs/router";
 import { createEffect, createSignal, For, type JSX, on, Show } from "solid-js";
 import type { Question } from "../../api/types";
-import { LinkText, openCardLink } from "../../components/LinkText";
+import { LinkText, openCardLink, readerCardKeys } from "../../components/LinkText";
 import { SafeHtml } from "../../components/SafeHtml";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api, projects } from "../../stores";
+import { api } from "../../stores";
 import { ackText, answerBody, cardHref, chosenLabel, statusChip, THREAD_MOVE_MESSAGE_MAX } from "./questions";
 import { threadHref } from "./threads";
 
@@ -99,7 +99,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
         <LinkText text={q().text} project={q().project} />
       </p>
 
-      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: projects.prefixes() })} onClick={openCardLink} />}</Show>
+      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={openCardLink} />}</Show>
 
       <Show when={q().status === "in_thread" && q().thread}>
         {(t) => (

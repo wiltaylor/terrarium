@@ -25,8 +25,12 @@ export function openCardLink(e: MouseEvent) {
   cardPeek.open(card);
 }
 
+/** Card prefix to project, for the projects of the reader: only their keys become card links. */
+export const readerCardKeys = (): Record<string, string> =>
+  Object.fromEntries(projects.projects().filter((p) => p.card_prefix).map((p) => [p.card_prefix, p.name]));
+
 export function LinkText(props: { text: string; project: string }) {
-  const segments = () => linkSegments(props.text, { project: props.project, prefixProject: projects.prefixes() });
+  const segments = () => linkSegments(props.text, { project: props.project, prefixProject: readerCardKeys() });
   return (
     <For each={segments()}>
       {(s) => (
