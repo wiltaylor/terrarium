@@ -107,6 +107,51 @@ impl Resp {
 /// UTC midnight, the first line lands on midnight instead (so a run in the
 /// first seconds of a day can get stamps a few seconds in the future). Lines
 /// that are not JSON stay as they are. The source fixture file is not changed.
+/// A local bare repo for tests of the merge queue (TER-553): the API and
+/// the review accept read the head of each card branch with `git
+/// ls-remote`, so the repo of such a test needs the branches. It has `next`
+/// and the branches of the cards of projects `p`, `q`, `coded`, and
+/// `ruled` (`p-1` to `p-40`, and so on), all at one commit. Its directory
+/// lives until the test process ends. Returns its path, for a repo `url`.
+pub fn branch_remote() -> String {
+    let dir = std::env::temp_dir().join(format!("terrarium-remote-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str], input: Option<&str>| -> String {
+        use std::io::Write;
+        let mut c = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin
+            .take()
+            .unwrap()
+            .write_all(input.unwrap_or("").as_bytes())
+            .unwrap();
+        let out = c.wait_with_output().unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q", "--bare", "-b", "main"], None);
+    let tree = git(&["mktree"], Some(""));
+    let commit = git(&["commit-tree", &tree, "-m", "base"], None);
+    let mut refs = format!("update refs/heads/main {commit}\nupdate refs/heads/next {commit}\n");
+    for prefix in ["p", "q", "cod", "rul"] {
+        for i in 1..=40 {
+            refs.push_str(&format!("update refs/heads/{prefix}-{i} {commit}\n"));
+        }
+    }
+    git(&["update-ref", "--stdin"], Some(&refs));
+    dir.display().to_string()
+}
+
 pub fn restamp_transcript(text: &str) -> String {
     use chrono::{DateTime, Utc};
     let stamps: Vec<DateTime<Utc>> = text

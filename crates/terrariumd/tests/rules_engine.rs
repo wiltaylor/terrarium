@@ -909,7 +909,7 @@ async fn the_pack_matches_code_flow_after_ten_runs_for_one_card() {
         td.project(project).await;
         td.post(
             &format!("/api/projects/{project}/repos"),
-            json!({"name": "app", "url": "https://git.example/x/app.git"}),
+            json!({"name": "app", "url": common::branch_remote()}),
         )
         .await
         .ok();

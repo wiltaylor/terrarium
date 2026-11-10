@@ -691,6 +691,13 @@ fn small_parsers() {
     assert_eq!(env_line("A", "plain"), "A=\"plain\"\n");
 }
 
+/// Multi-line values in [`env_line`] need systemd 248 or later: older
+/// `env_value_is_valid` drops values with control characters (TER-573).
+#[test]
+fn min_systemd_keeps_control_characters_in_env_values() {
+    const { assert!(MIN_SYSTEMD >= 248) };
+}
+
 /// A port of `parse_env_file_internal` of systemd v254
 /// (`src/basic/env-file.c`), the parser that PID 1 runs on an
 /// `EnvironmentFile=`, state for state and byte for byte. It returns the

@@ -281,8 +281,14 @@ async fn pty_exec_echoes_stdin() {
     conn.hello().await;
     conn.welcome(vec![]).await;
 
-    conn.send(exec(5, "sh", &[], Some(PtySize { rows: 24, cols: 80 })))
-        .await;
+    // An empty PS1 keeps the interactive shell's prompt out of the output:
+    // sh can print its first prompt while the terminal still echoes the
+    // typed line, which splits "echo pty-..." (TER-568).
+    let mut req = exec(5, "sh", &[], Some(PtySize { rows: 24, cols: 80 }));
+    if let DaemonFrame::Exec(r) = &mut req {
+        r.env.insert("PS1".into(), String::new());
+    }
+    conn.send(req).await;
     conn.send_data(5, StreamTag::Stdin, b"echo pty-$((40+2))\n")
         .await;
     conn.send_data(5, StreamTag::Stdin, b"exit 7\n").await;
