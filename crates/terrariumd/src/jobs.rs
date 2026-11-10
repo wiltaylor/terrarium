@@ -4147,11 +4147,17 @@ mod tests {
         )
         .unwrap();
         let out = std::process::Command::new("sh")
-            .args(["-c", &log_excerpt(log.to_str().unwrap(), Some(&[] as &[String]))])
+            .args([
+                "-c",
+                &log_excerpt(log.to_str().unwrap(), Some(&[] as &[String])),
+            ])
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.starts_with("[terrarium rerun] {\"test\":\"t\"}\n"), "{text}");
+        assert!(
+            text.starts_with("[terrarium rerun] {\"test\":\"t\"}\n"),
+            "{text}"
+        );
     }
 
     #[test]

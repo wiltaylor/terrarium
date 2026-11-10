@@ -2379,13 +2379,26 @@ async fn a_pass_on_rerun_is_green_and_files_one_flaky_card() {
     let label = terrariumd::jobs::flaky_label(test);
     let job = merge_with_recipe(&lab, "ter-flaky-1", &rerun_recipe(test, "ok", 0)).await;
     assert_eq!(job["state"], "passed", "{job:#}");
-    let shown = lab.td.get(&format!("/api/jobs/{}", job["id"].as_str().unwrap())).await.ok().clone();
+    let shown = lab
+        .td
+        .get(&format!("/api/jobs/{}", job["id"].as_str().unwrap()))
+        .await
+        .ok()
+        .clone();
     assert_eq!(shown["reruns"][0]["test"], test, "{shown:#}");
     assert_eq!(shown["reruns"][0]["first"], "failed");
     assert_eq!(shown["reruns"][0]["rerun"], "ok");
-    assert!(shown["reruns"][0]["tail"].as_str().unwrap().contains("timed out"));
+    assert!(
+        shown["reruns"][0]["tail"]
+            .as_str()
+            .unwrap()
+            .contains("timed out")
+    );
     let tail = shown["tail"].as_str().unwrap();
-    assert!(tail.contains(&format!("[rerun once: test {test}: failed, then ok]")), "{tail}");
+    assert!(
+        tail.contains(&format!("[rerun once: test {test}: failed, then ok]")),
+        "{tail}"
+    );
     assert!(!tail.contains("[terrarium rerun] "), "{tail}");
     let flaky = cards_with_label(&lab, &label).await;
     assert_eq!(flaky.len(), 1, "{flaky:#?}");
@@ -2396,7 +2409,10 @@ async fn a_pass_on_rerun_is_green_and_files_one_flaky_card() {
         assert!(labels(&card).iter().any(|x| x == l), "{card:#}");
     }
     let body = card["body"].as_str().unwrap();
-    assert!(body.contains(job["id"].as_str().unwrap()) && body.contains("timed out"), "{body}");
+    assert!(
+        body.contains(job["id"].as_str().unwrap()) && body.contains("timed out"),
+        "{body}"
+    );
 
     // The same flake in a second job: a comment on the open card.
     let second = merge_with_recipe(&lab, "ter-flaky-2", &rerun_recipe(test, "ok", 0)).await;
@@ -2411,7 +2427,12 @@ async fn a_pass_on_rerun_is_green_and_files_one_flaky_card() {
     let red = merge_with_recipe(&lab, "ter-flaky-3", &rerun_recipe(other, "failed", 101)).await;
     assert_eq!(red["state"], "failed", "{red:#}");
     assert_eq!(red["outcome"], "red");
-    let shown = lab.td.get(&format!("/api/jobs/{}", red["id"].as_str().unwrap())).await.ok().clone();
+    let shown = lab
+        .td
+        .get(&format!("/api/jobs/{}", red["id"].as_str().unwrap()))
+        .await
+        .ok()
+        .clone();
     assert_eq!(shown["reruns"][0]["rerun"], "failed", "{shown:#}");
     let label = terrariumd::jobs::flaky_label(other);
     assert!(cards_with_label(&lab, &label).await.is_empty());
