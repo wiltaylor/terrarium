@@ -3553,6 +3553,102 @@ async fn a_failed_wake_is_an_error_and_stops_the_wakes() {
     assert_eq!(td.get(&format!("/api/agents/{id}")).await["queued"], 2);
 }
 
+/// TER-542: a wake with a queued turn whose start ends before the first
+/// idle. The harness waits at its startup gate, so the supervisor keeps
+/// the turn for the first idle; then the operator stops the agent. The
+/// row of the turn stays in the store. Returns the agent ID, with the
+/// harness env cleared for the next start.
+async fn kept_queued_turn(td: &Td) -> String {
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+
+    let gate = td.dir.path().join("startup-gate");
+    td.adapter
+        .set_env("FAKE_TUI_STARTUP_GATE", &gate.display().to_string());
+    td.adapter
+        .startup_hook
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/send"),
+            Some(json!({"text": "wake up"})),
+        )
+        .await;
+    assert_eq!(r["queued"], true, "{r}");
+    let agent: AgentId = id.parse().unwrap();
+    let start = Instant::now();
+    while td.sup.kept_queued_turns(agent).len() != 1 {
+        assert!(
+            start.elapsed() < WAIT,
+            "the supervisor never kept the turn: {:?}",
+            td.sup.kept_queued_turns(agent)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let a = td.get(&format!("/api/agents/{id}")).await;
+    assert_eq!(a["queued"], 1, "the row stays while the turn is kept: {a}");
+    let q = td.get(&format!("/api/agents/{id}/queued")).await;
+    let items = q["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "the turn shows once: {q}");
+    assert_eq!(items[0]["source"], "store", "{q}");
+
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    let a = td.get(&format!("/api/agents/{id}")).await;
+    assert_eq!(a["queued"], 1, "the row stays after the stop: {a}");
+    td.adapter.clear_env();
+    td.adapter
+        .startup_hook
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    id
+}
+
+/// The turn starts of the queued turn of [`kept_queued_turn`], once the
+/// agent is idle after it.
+async fn wake_up_turns(td: &Td, id: &str) -> usize {
+    let is_it = |x: &Value| x["data"]["prompt"] == "[User] wake up";
+    td.wait_events(id, "turn_start", |e| e.iter().any(is_it))
+        .await;
+    td.wait_status(id, "idle").await;
+    // A second delivery, if any, has time to start.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    td.events(id, "turn_start")
+        .await
+        .iter()
+        .filter(|x| is_it(x))
+        .count()
+}
+
+/// TER-542: a daemon restart before the next launch does not lose the
+/// kept turn: its row is still in the store, and the wake at the start of
+/// the new daemon delivers it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_queued_turn_survives_a_daemon_restart() {
+    let mut td = Td::start().await;
+    let id = kept_queued_turn(&td).await;
+    td.restart_daemon().await;
+    assert_eq!(wake_up_turns(&td, &id).await, 1);
+    let q = td.get(&format!("/api/agents/{id}/queued")).await;
+    assert!(q["items"].as_array().unwrap().is_empty(), "{q}");
+}
+
+/// TER-542: with no daemon restart, the next start keeps the turn, and
+/// it goes out once at the first idle, with its row. The wake at that
+/// idle finds the row gone or kept, and does not type the turn again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_queued_turn_goes_out_once_without_a_restart() {
+    let td = Td::start().await;
+    let id = kept_queued_turn(&td).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    assert_eq!(wake_up_turns(&td, &id).await, 1);
+    let q = td.get(&format!("/api/agents/{id}/queued")).await;
+    assert!(q["items"].as_array().unwrap().is_empty(), "{q}");
+    assert!(td.sup.kept_queued_turns(id.parse().unwrap()).is_empty());
+}
+
 /// PLAN §18 "Auto compact" with the real supervisor and runner: a manual
 /// compaction types `/compact` as a raw command, shows `working` with the
 /// reason `compacting`, and holds a new turn until the PostCompact hook.
