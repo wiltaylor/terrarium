@@ -162,25 +162,42 @@ async fn boot(config: impl FnOnce(&Path), tune: impl FnOnce(&mut UsageConfig, &P
 }
 
 /// The `login_sessions` row of an ended login has no URL and no device
-/// code (`docs/security-review.md` F6).
+/// code (`docs/security-review.md` F6). The API answers from the session
+/// view, and the row is written just after it: wait for the row, up to
+/// [`common::WAIT`]. Under load the check read the row before that write
+/// (TER-667).
 async fn assert_login_row_clean(td: &TestDaemon, id: &str) {
-    let key = id.to_owned();
-    let (url, code): (Option<String>, Option<String>) = td
-        .daemon
-        .as_ref()
-        .unwrap()
-        .state
-        .db
-        .read(move |c| {
-            Ok(c.query_row(
-                "SELECT url, device_code FROM login_sessions WHERE id = ?1",
-                [&key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .await
-        .unwrap();
-    assert_eq!((url, code), (None, None), "login {id}");
+    let row = || async {
+        let key = id.to_owned();
+        let row: (Option<String>, Option<String>) = td
+            .daemon
+            .as_ref()
+            .unwrap()
+            .state
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT url, device_code FROM login_sessions WHERE id = ?1",
+                    [&key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        row
+    };
+    let start = std::time::Instant::now();
+    loop {
+        let (url, code) = row().await;
+        if url.is_none() && code.is_none() {
+            return;
+        }
+        assert!(
+            start.elapsed() < common::WAIT,
+            "login {id} row kept url {url:?} and device code {code:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 fn claude_creds(home: &Path) {
