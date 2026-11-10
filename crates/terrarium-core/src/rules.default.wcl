@@ -110,7 +110,7 @@ rule "merge-group-failed" {
   on = ["job.verdict"]
   max_per_hour = 600
   when "data.kind" { eq = "merge" }
-  when "data.verdict" { one_of = ["red", "conflict", "moved", "error", "cancelled"] }
+  when "data.verdict" { one_of = ["red", "conflict", "moved", "error", "infra", "cancelled"] }
   group_status { key = "{{job.group_key}}" step = "{{group.failed_step}}" state = "failed" }
 }
 
@@ -210,6 +210,7 @@ rule "job-rerun-note" {
     add = ["validation:queued"]
   }
   card_comment { text = "{{job.rerun_comment}}" }
+  card_comment { text = "{{job.output_comment}}" }
 }
 
 rule "merge-red-group" {
@@ -237,6 +238,17 @@ rule "merge-red-split-note" {
     add = ["validation:queued"]
   }
   card_comment { text = "{{job.split_comment}}" }
+  card_comment { text = "{{job.output_comment}}" }
+}
+
+rule "job-infra" {
+  description = "A merge job that failed before its tests twice (an infra failure, TER-614): no rerun, no split; the cards stay in the merge queue."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "infra" }
+  card_label { remove = ["validation:running", "validation:queued"] }
+  card_comment { text = "{{job.infra_comment}}" }
+  card_comment { text = "{{job.output_comment}}" }
 }
 
 rule "merge-red-fix-note" {

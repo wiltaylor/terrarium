@@ -79,7 +79,18 @@
 //! - A deploy drains the daemon first (`POST /api/system/update/drain`):
 //!   while it drains, no job starts, and the running ones go on. The drain
 //!   lists them ([`busy_jobs`]) and waits for them; one that still runs at
-//!   the stop is killed and put back by the next daemon (above).
+//!   the stop is killed and put back by the next daemon (above). Before an
+//!   update, the job slots alone can drain (TER-614 R4, `{"jobs_only":
+//!   true}`): no job starts, the running ones finish, the agents go on.
+//! - A merge job that failed before its tests (TER-614 R3,
+//!   [`OUTCOME_INFRA`]: a setup error with no tested commit, or a run lost
+//!   past [`MAX_LOST_RERUNS`]) is no test failure: no split, no rerun at
+//!   once, no attempt used. The first such end goes back to the queue for
+//!   one retry after [`INFRA_RETRY`] and while its host agent is offline;
+//!   the second ends the job `infra`, and its cards stay in the merge
+//!   queue. Each failed end keeps its step as the last line of its tail
+//!   (`[failed step: ...]`), and the rerun, split, and infra comments come
+//!   with a comment of the step and the last lines of the output.
 //! - A host that cannot be reached is not a failure (TER-160). A job whose
 //!   target's host agent is offline is not started: it stays queued. A job
 //!   whose target could not be reached before its recipe started (the host
@@ -171,6 +182,24 @@ pub const LONG_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How long a job whose ssh target could not be reached waits before the
 /// next try (TER-160).
 pub const RETRY: Duration = Duration::from_secs(60);
+/// The outcome of a merge job that failed before its tests (TER-614 R3):
+/// a setup error with no tested commit, or a run that the infrastructure
+/// lost past [`MAX_LOST_RERUNS`]. Its batch does not split, it does not
+/// rerun at once, and its cards stay in the merge queue.
+pub const OUTCOME_INFRA: &str = "infra";
+/// How long a merge job that failed before its tests waits before its
+/// one retry (TER-614 R3), by default. The host must be back too.
+pub const INFRA_RETRY: Duration = Duration::from_secs(5 * 60);
+/// The steps of a job, for the `[failed step: ...]` line of a failed
+/// end (TER-614 R3).
+const STEP_SETUP: &str = "setup";
+const STEP_PREPARE: &str = "prepare";
+const STEP_RECEIVE: &str = "receive";
+const STEP_SECRETS: &str = "secrets";
+const STEP_RECIPE: &str = "recipe";
+const STEP_PUSH: &str = "push";
+/// The lines of the job output in a card comment of a failed job.
+const COMMENT_TAIL_LINES: usize = 20;
 /// The size of one stdin chunk of a step (the bundle of a job).
 const STDIN_CHUNK: usize = 64 * 1024;
 /// The dir of the daemon's job repos, in the state dir (TER-103).
@@ -862,8 +891,9 @@ fn note_long_waits(t: &mut Tx<'_>) -> ApiResult<()> {
 pub async fn tick(state: &Shared) -> ApiResult<()> {
     prepare_hosts(&state.db, None).await?;
     // A deploy drains the daemon first: no job starts, and the running
-    // ones go on (TER-123, P5). The end of the drain kicks the queue.
-    let drain = state.self_update.draining();
+    // ones go on (TER-123, P5). The end of the drain kicks the queue. A
+    // drain of the job slots only (TER-614 R4) does the same for jobs.
+    let drain = state.self_update.jobs_draining();
     // The live runs are read and added in the write, so two ticks and a
     // cancel (all writes) see them in order.
     let st = state.clone();
@@ -907,6 +937,23 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
         let state = state.clone();
         tokio::spawn(async move {
             let end = match run(&state, &job, &def).await {
+                // A merge that failed before its tests (TER-614 R3): one
+                // retry after the wait, with no attempt used; the second
+                // such end is an infra end.
+                Ran::End(end) if before_tests(&job, &end) => {
+                    let first = infra_retried().insert(job.id.clone());
+                    if first {
+                        set_control(&job.id, None);
+                        requeue_before_tests(&state, &job, &end).await;
+                        drop(live_run);
+                        return;
+                    }
+                    infra_retried().remove(&job.id);
+                    JobEnd {
+                        outcome: Some(OUTCOME_INFRA.into()),
+                        ..end
+                    }
+                }
                 Ran::End(end) => end,
                 Ran::Wait { why, ssh } => {
                     set_control(&job.id, None);
@@ -1126,6 +1173,88 @@ fn error_end(message: impl Into<String>) -> JobEnd {
     }
 }
 
+/// The marker of the failed step in the tail of a job.
+const FAILED_STEP: &str = "[failed step: ";
+
+/// A failed end with the step that failed as the last line of its tail
+/// (TER-614 R3), so the job keeps it. The tail is clipped from its start,
+/// so the last line stays.
+fn with_failed_step(mut end: JobEnd, step: &str) -> JobEnd {
+    if end.passed {
+        return end;
+    }
+    let mut tail = end.tail.take().unwrap_or_default();
+    if !tail.is_empty() && !tail.ends_with('\n') {
+        tail.push('\n');
+    }
+    tail.push_str(&format!("{FAILED_STEP}{step}]"));
+    end.tail = Some(tail);
+    end
+}
+
+/// The step that failed, from the tail of a job ([`with_failed_step`]).
+pub fn failed_step(tail: Option<&str>) -> Option<&str> {
+    tail?
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix(FAILED_STEP)?.strip_suffix(']'))
+}
+
+/// A merge end that failed before its tests (TER-614 R3): the job could
+/// not run (outcome `error`) and has no tested commit. A failed push
+/// after the tests has one, and stays an error.
+fn before_tests(job: &Job, end: &JobEnd) -> bool {
+    job.kind == JobKind::Merge
+        && !end.passed
+        && end.outcome.as_deref() == Some("error")
+        && end.head.is_none()
+}
+
+/// The merge jobs that failed before their tests and wait for their one
+/// retry ([`OUTCOME_INFRA`]), by job ID. An end of the job clears it.
+fn infra_retried() -> MutexGuard<'static, HashSet<String>> {
+    static S: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    match S.get_or_init(Mutex::default).lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// The wait before the retry of a merge job that failed before its tests,
+/// in milliseconds ([`INFRA_RETRY`]; the tests set it).
+static INFRA_RETRY_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(INFRA_RETRY.as_millis() as u64);
+
+/// Set the wait before the retry of a merge job that failed before its
+/// tests. For the tests only.
+#[doc(hidden)]
+pub fn set_infra_retry(d: Duration) {
+    INFRA_RETRY_MS.store(d.as_millis() as u64, Ordering::SeqCst);
+}
+
+fn infra_retry() -> Duration {
+    Duration::from_millis(INFRA_RETRY_MS.load(Ordering::SeqCst))
+}
+
+/// The comment with the failed step and the last lines of the output of
+/// failed job `j` (TER-614 R3), next to its rerun, split, or infra
+/// comment. `None` without output. The output is untrusted text: it goes
+/// indented, as in the failure block, and the rule pack quotes it
+/// (`job.output_comment` is no raw field).
+pub fn output_comment(j: &Job) -> Option<String> {
+    let t = j.tail.as_deref().filter(|t| !t.trim().is_empty())?;
+    let lines: Vec<&str> = t.trim_end().lines().collect();
+    let from = lines.len().saturating_sub(COMMENT_TAIL_LINES);
+    let step = failed_step(Some(t)).unwrap_or("-");
+    let body: String = lines[from..].iter().map(|l| format!("    {l}\n")).collect();
+    Some(format!(
+        "Job queue: {} job {} (attempt {}), failed step: {step}. Job output, last lines:\n\n{body}",
+        j.kind.as_str(),
+        j.id,
+        j.attempt
+    ))
+}
+
 /// Run one step on the target and read it to the end. The step can be
 /// killed through [`kill`] while it runs.
 ///
@@ -1282,20 +1411,82 @@ async fn requeue(state: &Shared, job: &Job, why: String, ssh: bool) {
     }
 }
 
+/// Put a merge job that failed before its tests back in the queue for
+/// its one retry (TER-614 R3): no attempt, no split, no card move. It
+/// waits [`INFRA_RETRY`], and while its host agent is offline. The job
+/// keeps the output and the failed step in its tail, and each card gets
+/// them in a comment.
+async fn requeue_before_tests(state: &Shared, job: &Job, end: &JobEnd) {
+    let wait = infra_retry();
+    let tail = end.tail.clone().unwrap_or_default();
+    let why = tail
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("no output")
+        .to_owned();
+    warn!(job = %job.id, "a merge job failed before its tests: {why}");
+    hold(
+        &job.id,
+        format!("it failed before its tests: {why}"),
+        Some(Instant::now() + wait),
+    );
+    let id = job.id.clone();
+    let after = if wait >= Duration::from_secs(60) {
+        format!("{} min", wait.as_secs().div_ceil(60))
+    } else {
+        format!("{} s", wait.as_secs().max(1))
+    };
+    let back = state
+        .db
+        .write("system", move |t| {
+            let Some(j) = jobs::requeue_before_tests(t, &id, &tail)? else {
+                return Ok(None);
+            };
+            let flow = code_flow(t, &j.project)?;
+            for v in card_views(&j) {
+                if flow {
+                    set_labels(t, &v.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
+                }
+                comment(t, &v.card, &infra_comment(&v, Some(&after)))?;
+                output_note(t, &v)?;
+            }
+            Ok(Some(j))
+        })
+        .await;
+    match back {
+        Ok(Some(j)) => debug!(job = %j.id, "the job waits for its retry"),
+        Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
+        Err(e) => warn!(job = %job.id, "cannot put a job back in the queue: {e}"),
+    }
+}
+
+/// The job as each of its cards sees it ([`card_view`]): the job itself
+/// for a job of one card.
+fn card_views(j: &Job) -> Vec<Job> {
+    if j.batch.is_empty() {
+        vec![j.clone()]
+    } else {
+        j.batch.iter().map(|c| card_view(j, c)).collect()
+    }
+}
+
 /// Run a job to its end. Never fails: an error is a failed end, a wait
 /// when the target could not be reached before the recipe started, or a
 /// lost run when the infrastructure lost the recipe run (TER-196).
 async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> Ran {
     let recipe = AtomicBool::new(false);
     let lost = OnceLock::new();
-    let end = match run_inner(state, job, def, &recipe, &lost).await {
+    let step = Mutex::new(STEP_SETUP);
+    let end = match run_inner(state, job, def, &recipe, &lost, &step).await {
         Ok(end) => end,
         Err(e) => error_end(format!("the job could not run: {}", e.message)),
     };
+    let at = *step.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let end = with_failed_step(end, at);
     if !end.passed
         && let Some(why) = lost.into_inner()
     {
-        return lost_or_red(&job.id, why, end);
+        return lost_or_red(&job.id, job.kind == JobKind::Merge, why, end);
     }
     if end.passed || end.outcome.as_deref() != Some("error") || recipe.load(Ordering::SeqCst) {
         return Ran::End(end);
@@ -1309,8 +1500,10 @@ async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> Ran {
 /// A lost run of job `job`: it reruns ([`Ran::Lost`] without `red`) up
 /// to [`MAX_LOST_RERUNS`] times in a row. The next lost run ends red,
 /// with the reason in its tail, so a run that keeps getting lost ends.
-/// Both get the kill of a lost run first.
-fn lost_or_red(job: &str, why: String, end: JobEnd) -> Ran {
+/// Both get the kill of a lost run first. A merge job (`merge`) ends with
+/// [`OUTCOME_INFRA`], not red (TER-614 R3): the tests did not fail, so its
+/// batch does not split and its cards stay in the merge queue.
+fn lost_or_red(job: &str, merge: bool, why: String, end: JobEnd) -> Ran {
     let n = {
         let mut m = lost_runs();
         let n = m.entry(job.to_owned()).or_insert(0);
@@ -1321,12 +1514,17 @@ fn lost_or_red(job: &str, why: String, end: JobEnd) -> Ran {
         return Ran::Lost { why, red: None };
     }
     lost_runs().remove(job);
+    let (outcome, counts) = if merge {
+        (OUTCOME_INFRA, "an infra failure, not a test failure")
+    } else {
+        ("red", "red")
+    };
     let tail = format!(
-        "the infrastructure lost the run {n} times in a row, so this run counts as red: {why}\n{}",
+        "the infrastructure lost the run {n} times in a row, so this run counts as {counts}: {why}\n{}",
         end.tail.as_deref().unwrap_or("")
     );
     let red = JobEnd {
-        outcome: Some("red".into()),
+        outcome: Some(outcome.into()),
         tail: Some(tail),
         ..end
     };
@@ -1464,6 +1662,7 @@ async fn run_inner(
     def: &DeliveryDef,
     recipe_started: &AtomicBool,
     recipe_lost: &OnceLock<String>,
+    step: &Mutex<&'static str>,
 ) -> ApiResult<JobEnd> {
     let target = def
         .target
@@ -1548,6 +1747,7 @@ async fn run_inner(
         ionice,
         recipe_started,
         recipe_lost,
+        step,
         ssh_host: row
             .def
             .address
@@ -1730,6 +1930,9 @@ struct StepCtx<'a> {
     /// Set when the infrastructure lost the recipe run, with why
     /// ([`lost_run`], TER-196): the job goes back to the queue.
     recipe_lost: &'a OnceLock<String>,
+    /// The step that runs now, for the `[failed step: ...]` line of a
+    /// failed end (TER-614 R3).
+    step: &'a Mutex<&'static str>,
     /// The host of an ssh target ([`jobs::address_key`]), for the lines of
     /// the ssh client about a broken link.
     ssh_host: Option<String>,
@@ -1741,6 +1944,14 @@ struct StepCtx<'a> {
 }
 
 impl StepCtx<'_> {
+    /// Note that step `name` of the job starts now.
+    fn at(&self, name: &'static str) {
+        *self
+            .step
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = name;
+    }
+
     /// A git step on the target, without any credential.
     fn plain_cmd(&self, script: &str, args: &[&str]) -> RemoteCmd {
         let mut argv = vec![
@@ -2056,6 +2267,7 @@ async fn steps(
             }
         }
     }
+    x.at(STEP_PREPARE);
     let (j, bundle) = (job.clone(), x.bundle.clone());
     let (head, batch, base) = match x
         .daemon(move |r| {
@@ -2097,6 +2309,7 @@ async fn steps(
         RECEIVE_SCRIPT,
         &[x.dir, &head, job.kind.as_str(), &base, &tree, wipe],
     );
+    x.at(STEP_RECEIVE);
     let c = x.run(&receive, STEP_MAX, Some(data)).await?;
     let received = result_line(&c.stdout).get("outcome").map(String::as_str) == Some("ok");
     if received && x.wipe {
@@ -2150,6 +2363,7 @@ async fn steps(
             warn!(job = %job.id, "cannot update merge group recipe boundary: {e}");
         }
     }
+    x.at(STEP_SECRETS);
     let injected = merge_secrets(x.state, job, delivery).await?;
     let own: Vec<_> = injected
         .iter()
@@ -2193,6 +2407,7 @@ async fn steps(
         holder: x.holder.clone(),
         ..RemoteCmd::default()
     };
+    x.at(STEP_RECIPE);
     // An error here is a recipe that did not start: no session.
     if killed(&job.id) {
         return Err(ApiError::conflict("the job was cancelled"));
@@ -2273,6 +2488,7 @@ async fn steps(
     if !ok || job.kind != JobKind::Merge {
         return Ok(result);
     }
+    x.at(STEP_PUSH);
     // Step 3, in the daemon, with the credential: push the recorded merge
     // commit from the daemon's repo. The recipe never had that repo, so
     // nothing it did to its clone reaches the push.
@@ -2776,6 +2992,24 @@ pub fn split_comment(v: &Job, left: &Job, right: &Job) -> String {
     )
 }
 
+/// The comment of a merge job that failed before its tests
+/// ([`OUTCOME_INFRA`], TER-614 R3). `retry`: the wait to its one retry
+/// (`5 min`), `None` at the end (the retry failed too).
+pub fn infra_comment(v: &Job, retry: Option<&str>) -> String {
+    match retry {
+        Some(m) => format!(
+            "Job queue: {} job {} (attempt {}) failed before its tests: an infra failure, not a test failure. No attempt is used and the batch does not split. The cards stay in the merge queue, and the job runs once more in {m}, when its host is back.",
+            v.kind.as_str(),
+            v.id,
+            v.attempt
+        ),
+        None => format!(
+            "{} The job failed before its tests again: an infra failure, not a test failure. It does not rerun and the batch does not split. The cards stay in the merge queue for the next batch; fix the cause, then queue them again.",
+            end_comment(v, "failed")
+        ),
+    }
+}
+
 /// The verdict word of the final failure of a card: `j` is the job, `v`
 /// the card's view of it ([`card_view`]).
 pub fn fail_phrase(j: &Job, v: &Job) -> &'static str {
@@ -2838,11 +3072,35 @@ fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     if !code_flow(t, &j.project)? {
         return Ok(());
     }
+    if j.outcome.as_deref() == Some(OUTCOME_INFRA) {
+        return infra_end(t, j);
+    }
     if j.batch.is_empty() {
         single_end(t, j)
     } else {
         batch_end(t, j)
     }
+}
+
+/// The end of a merge job that failed before its tests twice
+/// ([`OUTCOME_INFRA`], TER-614 R3): no rerun, no split, no failure of a
+/// card. Each card keeps its column (the merge queue), loses the job
+/// labels, and gets the comment with the failed step and the output.
+fn infra_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    for v in &card_views(j) {
+        // A card that left the merge (a conflict, a moved branch) did so
+        // before the run was lost: it ends as in a batch end.
+        match v.outcome.as_deref() {
+            Some(OUTCOME_MOVED) => back_to_review(t, v)?,
+            Some(OUTCOME_CONFLICT) => fail_card(t, v, fail_phrase(j, v))?,
+            _ => {
+                set_labels(t, &v.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
+                comment(t, &v.card, &infra_comment(v, None))?;
+                output_note(t, v)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The verdict of a job for one card (TER-167): `passed`, `red`,
@@ -2855,6 +3113,7 @@ fn verdict_of(j: &Job) -> &'static str {
     match j.outcome.as_deref() {
         Some("conflict") => "conflict",
         Some(OUTCOME_MOVED) => "moved",
+        Some(OUTCOME_INFRA) => "infra",
         _ if j.state == jobs::JobState::Passed => "passed",
         Some("red") => "red",
         _ => "error",
@@ -2877,7 +3136,11 @@ pub fn verdict_comment(v: &Job) -> String {
 /// The failure block of the verdict of `v`, for a failure only. It holds
 /// the tail of the job output: untrusted text.
 pub fn verdict_failure(v: &Job) -> Option<String> {
-    matches!(verdict_of(v), "red" | "conflict" | "moved" | "error").then(|| failure_block(v))
+    matches!(
+        verdict_of(v),
+        "red" | "conflict" | "moved" | "error" | "infra"
+    )
+    .then(|| failure_block(v))
 }
 
 /// The `job.verdict` event data of each card of an ended or cancelled
@@ -2923,6 +3186,7 @@ pub fn emit_verdicts(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     // Each end and each cancel (API or rule) comes here: the job's count
     // of lost runs goes (TER-196 review 2, minor 2).
     lost_runs().remove(&j.id);
+    infra_retried().remove(&j.id);
     for data in verdicts(j) {
         let card = data["card"].as_str().unwrap_or_default().to_owned();
         let summary = format!(
@@ -2955,7 +3219,8 @@ fn single_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     if j.attempt < 2 && outcome != Some("conflict") && !split_red {
         let next = jobs::rerun(t, j, None)?;
         set_labels(t, &j.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
-        return comment(t, &j.card, &rerun_comment(j, &next, false));
+        comment(t, &j.card, &rerun_comment(j, &next, false))?;
+        return output_note(t, j);
     }
     fail_card(t, j, fail_phrase(j, j))
 }
@@ -2992,6 +3257,7 @@ fn batch_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
             let v = card_view(j, c);
             set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
             comment(t, &c.card, &split_comment(&v, &left, &right))?;
+            output_note(t, &v)?;
         }
         return Ok(());
     }
@@ -3001,7 +3267,9 @@ fn batch_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
         let next = jobs::rerun(t, j, Some(&merged))?;
         for c in &merged {
             set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
-            comment(t, &c.card, &rerun_comment(&card_view(j, c), &next, true))?;
+            let v = card_view(j, c);
+            comment(t, &c.card, &rerun_comment(&v, &next, true))?;
+            output_note(t, &v)?;
         }
         return Ok(());
     }
@@ -3098,6 +3366,15 @@ fn unassign(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
         Ok(_) => Ok(()),
         Err(e) if e.code.status().is_client_error() => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+/// The comment with the failed step and the output of `v`
+/// ([`output_comment`]), when it has output.
+fn output_note(t: &mut Tx<'_>, v: &Job) -> ApiResult<()> {
+    match output_comment(v) {
+        Some(text) => comment(t, &v.card, &text),
+        None => Ok(()),
     }
 }
 
@@ -4430,12 +4707,12 @@ mod tests {
             ..JobEnd::default()
         };
         for _ in 0..MAX_LOST_RERUNS {
-            let r = lost_or_red(&job, "error lost: gone".into(), end());
+            let r = lost_or_red(&job, false, "error lost: gone".into(), end());
             assert!(matches!(r, Ran::Lost { ref why, red: None } if why == "error lost: gone"));
         }
         // Past the cap: still a lost run, so it gets the kill of a lost
         // run, but it ends red (review 2, major 1).
-        let Ran::Lost { red: Some(e), .. } = lost_or_red(&job, "error lost: gone".into(), end())
+        let Ran::Lost { red: Some(e), .. } = lost_or_red(&job, false, "error lost: gone".into(), end())
         else {
             panic!("the run after the cap has no red end");
         };
@@ -4454,10 +4731,69 @@ mod tests {
             "{tail}"
         );
         assert!(matches!(
-            lost_or_red(&job, "again".into(), end()),
+            lost_or_red(&job, false, "again".into(), end()),
             Ran::Lost { red: None, .. }
         ));
         lost_runs().remove(&job);
+    }
+
+    /// TER-614 R3: a merge job whose runs keep getting lost ends as an
+    /// infra failure, not red, so its batch does not split.
+    #[test]
+    fn lost_merge_runs_past_the_cap_are_infra() {
+        let job = ulid::Ulid::new().to_string();
+        let end = || JobEnd {
+            outcome: Some("error".into()),
+            tail: Some("output".into()),
+            ..JobEnd::default()
+        };
+        for _ in 0..MAX_LOST_RERUNS {
+            assert!(matches!(
+                lost_or_red(&job, true, "error lost: gone".into(), end()),
+                Ran::Lost { red: None, .. }
+            ));
+        }
+        let Ran::Lost { red: Some(e), .. } = lost_or_red(&job, true, "error lost: gone".into(), end())
+        else {
+            panic!("the run after the cap has no end");
+        };
+        assert_eq!(e.outcome.as_deref(), Some(OUTCOME_INFRA));
+        assert!(e.tail.unwrap().contains("an infra failure"));
+    }
+
+    /// TER-614 R3: a failed end keeps its step as the last line of its
+    /// tail, and the card comment shows the step and the last lines.
+    #[test]
+    fn a_failed_end_keeps_its_step_and_tail() {
+        let end = with_failed_step(error_end("line 1\n[error lost: gone]"), STEP_RECEIVE);
+        let tail = end.tail.clone().unwrap();
+        assert!(tail.ends_with("[failed step: receive]"), "{tail}");
+        assert_eq!(failed_step(Some(&tail)), Some("receive"));
+        let pass = with_failed_step(
+            JobEnd {
+                passed: true,
+                tail: Some("ok".into()),
+                ..JobEnd::default()
+            },
+            STEP_RECIPE,
+        );
+        assert_eq!(pass.tail.as_deref(), Some("ok"));
+        let long: String = (0..50).map(|i| format!("line {i}\n")).collect();
+        let j = Job {
+            tail: with_failed_step(error_end(long), STEP_RECIPE).tail,
+            ..ended(JobKind::Merge, jobs::JobState::Failed, Some("error"))
+        };
+        let note = output_comment(&j).unwrap();
+        assert!(note.contains("failed step: recipe."), "{note}");
+        assert!(
+            note.contains("    line 49\n") && !note.contains("line 30\n"),
+            "{note}"
+        );
+        let none = Job {
+            tail: None,
+            ..ended(JobKind::Merge, jobs::JobState::Failed, Some("error"))
+        };
+        assert!(output_comment(&none).is_none());
     }
 
     #[test]
@@ -4735,6 +5071,7 @@ mod tests {
             (Failed, Some("red"), "red", "failed"),
             (Failed, Some("conflict"), "conflict", "failed"),
             (Failed, Some("error"), "error", "failed"),
+            (Failed, Some(OUTCOME_INFRA), "infra", "failed"),
             (Failed, None, "error", "failed"),
             (Cancelled, None, "cancelled", "was cancelled"),
         ];

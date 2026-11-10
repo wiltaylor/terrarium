@@ -1433,6 +1433,8 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
                 },
                 "fail_comment" => Some(crate::jobs::fail_comment(j, &v)),
                 "fail_mail" => Some(crate::jobs::fail_mail(&v)),
+                "infra_comment" => Some(crate::jobs::infra_comment(&v, None)),
+                "output_comment" => crate::jobs::output_comment(&v),
                 "end_comment" => Some(crate::jobs::verdict_comment(&v)),
                 "failure_block" => crate::jobs::verdict_failure(&v),
                 _ => None,

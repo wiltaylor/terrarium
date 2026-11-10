@@ -886,7 +886,13 @@ uses the project's `card-review` template, falling back to `global:card-review`,
 and that admin's spawn rights, caps, and template grants.
 
 Each card in review gets at most one review agent at a time. `review_round`
-on the card counts successful review spawns. Only the current review agent's
+on the card counts successful review spawns. A card of a project without a
+review dispatcher counts each move into its review column instead (TER-614),
+so a review by the lead counts too; `0` means it was never in review.
+`review_round` is in `GET /api/cards/{id}` and in each card of the board list.
+`trouble` on a card holds its active trouble signals (TER-79): the trouble
+pass sets them while the card is in a working or review column, and clears
+them when it leaves, so a done card shows `[]`. Only the current review agent's
 comment can supply a verdict: its first line must be `Review verdict: accept` or
 `Review verdict: changes` (bare `accept` and `changes` also work), with findings below it.
 At three rounds, automatic reviews stop and the owner is notified.
@@ -8803,7 +8809,7 @@ one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
 of a `job` event, `data.id`, or of a `job.verdict` event, `data.job`; a
 rule with one runs only for those events): `state` (`queued`, `running`,
 `passed`, `failed`, `cancelled`), `outcome` (`red`, `conflict`, `error`,
-`none`), and the booleans `split` (the job is a half of a split batch),
+`infra`, `none`), and the booleans `split` (the job is a half of a split batch),
 `batch` (two or more cards of the job merged, did not conflict), `rerun`
 (a rerun of the job is queued or ran), and `halves` (the job was split).
 Every field that is set must hold; every block must hold.
@@ -12002,8 +12008,16 @@ Answers `202` with `{run}`. No previous switch: the run fails at once
 
 #### `POST /api/system/update/drain`, `POST /api/system/update/resume`
 
-The operator only. Answer `{on, since, by, busy, jobs}`. The drain writes the
-audit row `system.drain`.
+The operator only. Answer `{on, since, by, busy, jobs, jobs_drain}`. The drain
+writes the audit row `system.drain`.
+
+With the body `{"jobs_only": true}` (TER-614, `terrarium admin update
+drain-jobs`) only the job slots drain, for example once an update is
+announced: no job of the job queue starts, the running jobs finish, and
+the agents go on. `jobs` lists the running jobs; `jobs_drain` is `{since,
+by}` while it is on, else `null`. The queued jobs wait. `resume` ends it,
+and so does a restart (it lives in memory). A running job that must not
+wait for its end is cancelled with the job cancel.
 
 ### 34.8 Mail
 
@@ -12405,7 +12419,24 @@ one key, the strictest applies until a cap write replaces them.
   way at most 3 times in a row in one daemon run: the next lost run gets
   the same kill (and the slot mark), then it is `red`, and its `tail`
   starts with `the infrastructure lost the run 4
-  times in a row, so this run counts as red: <why>`.
+  times in a row, so this run counts as red: <why>`. A merge job ends
+  `infra` instead (below).
+- A merge job that failed before its tests (TER-614) is not a test
+  failure: an end with outcome `error` and no tested commit (`head`), such
+  as a setup or prepare error or a lost host session in the clone step,
+  or a lost run past the cap above. It does not split, does not rerun at
+  once, and uses no attempt. The first such end goes back to the queue
+  (event change `requeued`) and runs once more after 5 minutes, and not
+  while its host agent is offline; each card gets a comment that says so.
+  A second such end of the job ends it with outcome `infra` (verdict
+  `infra`): no rerun, no split, no failure block. Its cards lose the job
+  labels and stay in the merge queue with a comment, for the next batch.
+- Each failed end has the step that failed as the last line of its `tail`:
+  `[failed step: <step>]`, one of `setup`, `prepare`, `receive`, `secrets`,
+  `recipe`, `push`. Next to a rerun, split, or infra comment, each card
+  gets a comment with the failed step and the last 20 lines of the tail
+  (`job.output_comment` in the rules; the rules quote it, as the output is
+  untrusted).
 
 A batch merge:
 

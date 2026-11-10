@@ -4642,6 +4642,128 @@ async fn a_drain_starts_no_job_and_lists_the_running_ones() {
         .await;
 }
 
+/// TER-614 R4: a drain of the job slots only starts no job, lets the
+/// running one finish, and leaves the agents alone (no full drain). The
+/// resume starts the queued job.
+#[tokio::test]
+async fn a_jobs_only_drain_holds_the_slots_and_not_the_agents() {
+    let lab = lab(2).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let work_dir = lab._dirs.path().join("jobs-drain-only");
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "if test -f SLOW; then sleep 6; fi; test -f OK",
+                   "slots": 2, "next_repos": ["app"],
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let slow = queue_green(&lab, "ter-j1", "runs into the job drain", true).await;
+    let start = Instant::now();
+    let running = loop {
+        let j = job_of(&lab, &slow).await;
+        if j.first().is_some_and(|j| j["state"] == "running") {
+            break j[0]["id"].as_str().unwrap().to_owned();
+        }
+        assert!(start.elapsed() < DEADLINE, "the slow job never started: {j:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let r = lab
+        .td
+        .post("/api/system/update/drain", json!({"jobs_only": true}))
+        .await;
+    let d = r.ok().clone();
+    assert_eq!(d["on"], false, "a jobs-only drain is no full drain: {d}");
+    assert!(d["jobs_drain"]["since"].is_string(), "{d}");
+    assert_eq!(d["jobs"], json!([running]), "{d}");
+    assert!(!state.self_update.draining());
+    assert!(state.self_update.jobs_draining());
+
+    let fast = queue_green(&lab, "ter-j2", "queued in the job drain", false).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    terrariumd::jobs::tick(&state).await.unwrap();
+    let j = job_of(&lab, &fast).await;
+    assert_eq!(j[0]["state"], "queued", "a job started during the drain: {j:?}");
+
+    lab.until_card(&slow, "review", |c| c["column"] == "review")
+        .await;
+    let v = lab.td.get("/api/system/update").await.ok().clone();
+    assert_eq!(v["drain"]["jobs"], json!([]), "{v}");
+    assert!(v["drain"]["jobs_drain"].is_object(), "{v}");
+
+    let r = lab.td.post_empty("/api/system/update/resume").await;
+    assert!(r.ok()["jobs_drain"].is_null());
+    assert!(!state.self_update.jobs_draining());
+    lab.until_card(&fast, "review", |c| c["column"] == "review")
+        .await;
+}
+
+both_flows!(a_merge_that_fails_before_its_tests_keeps_its_cards_in_the_queue);
+/// TER-614 R3: a merge job that fails before its tests (the clone on the
+/// target fails, so there is no tested commit) is an infra failure: no
+/// split, no rerun as a test failure, no attempt used. It runs once more
+/// after the wait; the second such end ends it `infra`, and its cards stay
+/// in the merge queue with the failed step and the output in comments.
+async fn a_merge_that_fails_before_its_tests_keeps_its_cards_in_the_queue(flow: &'static str) {
+    terrariumd::jobs::set_infra_retry(Duration::from_millis(200));
+    let lab = lab_flow(2, flow).await;
+    with_merge_queue(&lab).await;
+    // A work dir under a file: the receive step on the target cannot make
+    // the slot tree.
+    let file = lab._dirs.path().join("not-a-dir");
+    std::fs::write(&file, "x").unwrap();
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "slots": 2, "next_repos": ["app"],
+                   "work_dir": file.join("work").display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    lab.branch("ter-i1", "next", &[("i1", "1\n"), ("OK", "y\n")]);
+    lab.branch("ter-i2", "next", &[("i2", "2\n"), ("OK", "y\n")]);
+    let c1 = lab.card("i1", "ter-i1").await;
+    let c2 = lab.card("i2", "ter-i2").await;
+    for c in [&c1, &c2] {
+        accept(&lab, c).await;
+    }
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "no split and no rerun job: {jobs:#?}");
+    let j = &jobs[0];
+    assert_eq!(j["state"], "failed", "{j:#}");
+    assert_eq!(j["outcome"], "infra", "{j:#}");
+    assert_eq!(j["attempt"], 1, "no attempt used: {j:#}");
+    let tail = j["tail"].as_str().unwrap();
+    assert!(tail.ends_with("[failed step: receive]"), "{tail}");
+    for id in [&c1, &c2] {
+        let c = lab
+            .until_card(id, "infra comment", |c| {
+                comments(c).contains("failed before its tests again")
+            })
+            .await;
+        assert_eq!(c["column"], "merge_queue", "{c:#}");
+        let text = comments(&c);
+        assert!(text.contains("the job runs once more in"), "{text}");
+        assert!(text.contains("failed step: receive"), "{text}");
+        assert!(!text.contains("splits to find"), "{text}");
+        let l = labels(&c);
+        assert!(!l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
+        assert!(!c["body"].as_str().unwrap().contains("Validation failed"));
+    }
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
+}
+
 both_flows!(a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects);
 /// TER-160: the host agent of the target is offline when the queue picks
 /// the job. The job stays queued with no attempt used and the card does
