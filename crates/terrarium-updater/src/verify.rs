@@ -323,7 +323,7 @@ mod tests {
         std::fs::write(
             &staging,
             format!(
-                "#!/bin/sh\necho \"$*\" > {}\n[ \"$5\" = {REF} ]\n",
+                "#!/bin/sh\necho \"$*\" > {}\n[ \"$4\" = {REF} ]\n",
                 log.display()
             ),
         )
