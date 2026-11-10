@@ -394,8 +394,11 @@ async fn a_deleted_agent_retracts_its_moved_questions() {
     lab.td
         .post_empty(&format!("/api/questions/{qid}/to-thread"))
         .await;
+    // The to-thread call starts a turn for the asking agent, so its session
+    // can be live here. The test is about the retraction, not the confirm
+    // guard (TER-594).
     lab.td
-        .delete(&format!("/api/agents/{}", lab.lead))
+        .delete(&format!("/api/agents/{}?confirm=true", lab.lead))
         .await
         .ok();
     assert_eq!(lab.question(&qid).await["status"], "retracted");

@@ -4,8 +4,9 @@
 import { createEffect } from "solid-js";
 import { setSafeHtml } from "../lib/sanitize";
 
-export function SafeHtml(props: { html: string; class?: string }) {
+/** `onClick`: a delegated click on the content, for example `openCardLink` (TER-571). */
+export function SafeHtml(props: { html: string; class?: string; onClick?: (e: MouseEvent) => void }) {
   let el!: HTMLDivElement;
   createEffect(() => setSafeHtml(el, props.html));
-  return <div class={props.class} ref={el} />;
+  return <div class={props.class} ref={el} onClick={(e) => props.onClick?.(e)} />;
 }

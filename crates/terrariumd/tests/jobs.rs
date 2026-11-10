@@ -4107,12 +4107,22 @@ fn orphan(job: &str) -> (std::process::Child, u32) {
         .nth(19)
         .unwrap()
         .to_owned();
-    std::fs::write(
-        terrariumd::run_kill::job_pidfile(job),
-        format!("{pid} {st}\n"),
-    )
-    .unwrap();
+    std::fs::write(private_job_pidfile(job), format!("{pid} {st}\n")).unwrap();
     (leader, child)
+}
+
+/// The job PID file of `job` where the wrapper of this user writes it
+/// (TER-587), its private directory made.
+fn private_job_pidfile(job: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let f = terrariumd::run_kill::private_pidfile(
+        &terrariumd::run_kill::job_pidfile(job),
+        nix::unistd::geteuid().as_raw(),
+    );
+    let dir = Path::new(&f).parent().unwrap();
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    f
 }
 
 /// Wait until the fake docker has held every kill before execution.
@@ -4295,7 +4305,7 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots(f
         .collect();
     assert_eq!(l.len(), usize::from(flow == "code"), "{card}");
     // The requeued job writes its own file again when it runs.
-    let f = terrariumd::run_kill::job_pidfile(&cancel_id);
+    let f = private_job_pidfile(&cancel_id);
     assert!(!Path::new(&f).exists(), "{f} is left");
     // Now the slots are free: the requeued job and the queued validation
     // start. End them.

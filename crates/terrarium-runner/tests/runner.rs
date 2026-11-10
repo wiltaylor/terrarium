@@ -401,10 +401,11 @@ async fn turn_runs_starting_idle_working_idle() {
     until_screen(&h, "fake tui 1.0").await;
 
     let delivery = h.runner.type_turn("hello");
-    timeout(wait(), delivery.wait())
+    let started = timeout(wait(), delivery.wait_started())
         .await
         .expect("delivery in time")
-        .expect("delivered");
+        .expect("delivered")
+        .expect("a seq");
     let seen = until_status(&mut h.events, AgentStatus::Idle).await;
     assert!(seen.contains(&Event::TurnStart {
         prompt: Some("hello".into())
@@ -425,6 +426,19 @@ async fn turn_runs_starting_idle_working_idle() {
             AgentStatus::Stopped
         ]
     );
+    // TER-547: the delivery seq splits the status events. The idle before
+    // the turn is at or below it; the working and the idle of the turn are
+    // above it.
+    let seqs: Vec<(AgentStatus, u64)> = all
+        .iter()
+        .filter_map(|r| match r.event {
+            Event::StatusChanged { to, .. } => Some((to, r.seq.expect("seq"))),
+            _ => None,
+        })
+        .collect();
+    assert!(seqs[1].1 <= started, "{seqs:?} started {started}");
+    assert!(seqs[2].1 > started, "{seqs:?} started {started}");
+    assert!(seqs[3].1 > started, "{seqs:?} started {started}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

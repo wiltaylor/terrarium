@@ -277,6 +277,18 @@ fn xml_refuses_doctype_entities_and_external_references() {
 }
 
 #[test]
+fn xml_root_scan_handles_multi_byte_input_at_the_doctype_cut() {
+    // Byte 9 falls inside a multi-byte character: no panic, no DOCTYPE.
+    assert_eq!(xml::root_name("<abcdefg\u{e9}/>").unwrap(), "abcdefg\u{e9}");
+    assert_eq!(
+        xml::root_name("<!-- x --> <ns:abcdef\u{20ac}/>").unwrap(),
+        "abcdef\u{20ac}"
+    );
+    let m = invalid_msg(parse("<abcdefg\u{e9}/>".as_bytes(), None));
+    assert!(!m.contains("DOCTYPE"), "{m}");
+}
+
+#[test]
 fn xml_errors_are_clear() {
     let m = invalid_msg(parse(b"<testsuites><testsuite>", None));
     assert!(m.starts_with("bad XML"), "{m}");

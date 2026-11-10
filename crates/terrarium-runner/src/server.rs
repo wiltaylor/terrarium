@@ -568,15 +568,17 @@ impl Conn {
                     self.send(ServerFrame::reply(id, Ok(json!({ "delivery": d }))))
                         .await;
                     self.tasks.spawn(async move {
-                        let frame = match delivery.wait().await {
-                            Ok(()) => ServerFrame::Delivery {
+                        let frame = match delivery.wait_started().await {
+                            Ok(seq) => ServerFrame::Delivery {
                                 delivery: d,
                                 ok: true,
+                                seq,
                                 error: None,
                             },
                             Err(e) => ServerFrame::Delivery {
                                 delivery: d,
                                 ok: false,
+                                seq: None,
                                 error: Some(WireDeliveryError::from(&e)),
                             },
                         };

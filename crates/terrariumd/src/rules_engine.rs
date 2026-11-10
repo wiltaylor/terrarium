@@ -1021,7 +1021,8 @@ pub async fn run_one(state: &Shared, id: &str, live: &HashSet<(String, String)>)
                     max_rules: 1,
                 };
                 let result =
-                    rule_script::actions(&input, &ctx, rule_script::Budget::engine()).await;
+                    rule_script::actions(&input, &ctx, rule_script::Budget::engine(&row.project))
+                        .await;
                 let rid = row.id.clone();
                 let cause = row.cause.clone();
                 let more = state
@@ -2069,7 +2070,13 @@ pub async fn dry_run_scripts(plans: &mut [DryPlan]) {
                 columns: Some(ctx.columns.clone()),
                 max_rules: 1,
             };
-            match rule_script::actions(&input, &check, rule_script::Budget::dry_run(left)).await {
+            match rule_script::actions(
+                &input,
+                &check,
+                rule_script::Budget::dry_run(&ctx.project, left),
+            )
+            .await
+            {
                 Ok((returned, fuel_used)) => {
                     out.push(json!({
                         "verb": a.verb,

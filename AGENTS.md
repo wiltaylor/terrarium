@@ -111,6 +111,16 @@ Validate the pushed commit, not your working tree:
 
 5. Push the results with `terrarium test push <file> --card <card-id>`.
 
+Do not run `git fetch`, `git pull` or `git ls-remote` against `origin` on the
+target. A plain exec has no repo key and no repo host keys there (no
+`~/.ssh`), so ssh to `git@github.com` fails with `Host key verification
+failed`. Only `terrarium repo checkout` reaches the remote: the daemon gives
+that one run the host keys (`TERRARIUM_GIT_KNOWN_HOSTS`) and the credential.
+A new clone has `origin/next` as of the clone, which is what the
+`merge-base` above needs. An update of an existing path fetches only the
+branch, so `origin/next` there stays old. For a newer `next`, check out to a
+new path.
+
 ### Load and reruns
 
 A failure counts as load, not as a fail, when it is in tests that the card does

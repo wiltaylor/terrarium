@@ -1152,7 +1152,8 @@ pub enum MailCmd {
         #[arg(long)]
         from: Option<String>,
     },
-    /// Reply to every participant of the message's thread
+    /// Reply to every participant of the message's thread (the operator
+    /// only on a message from or to the operator)
     Reply {
         id: String,
         /// The body, or `-` for stdin (or `--body`)
