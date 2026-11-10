@@ -3141,7 +3141,7 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
         .td
         .post(
             "/api/targets",
-            json!({"name": "gshared", "kind": "host", "host": "lab1"}),
+            json!({"name": "gshared", "kind": "host", "host": "lab2"}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
