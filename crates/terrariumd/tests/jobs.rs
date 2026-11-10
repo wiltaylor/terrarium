@@ -2929,7 +2929,10 @@ async fn a_merge_onto_a_release_branch_pushes_that_branch_only() {
         "the tested fix commit, not the later push"
     );
     let files = git(&lab.origin, &["ls-tree", "--name-only", "release/1.4.0"]);
-    assert!(!files.lines().any(|f| f == "EVIL" || f == "OTHER"), "{files}");
+    assert!(
+        !files.lines().any(|f| f == "EVIL" || f == "OTHER"),
+        "{files}"
+    );
     assert_eq!(git(&lab.origin, &["rev-parse", "next"]), next, "next stays");
 
     // A fix branch made from `next` brings the other card along.
@@ -2940,10 +2943,7 @@ async fn a_merge_onto_a_release_branch_pushes_that_branch_only() {
     let j = merge_and_wait(&lab, &rb2, Some("release/1.4.0")).await;
     assert_eq!(j["state"], "failed", "{j:#}");
     let tail = j["tail"].as_str().unwrap_or_default();
-    assert!(
-        tail.contains("is not based on `release/1.4.0`"),
-        "{tail}"
-    );
+    assert!(tail.contains("is not based on `release/1.4.0`"), "{tail}");
     assert_eq!(
         git(&lab.origin, &["rev-parse", "release/1.4.0"]),
         rel,

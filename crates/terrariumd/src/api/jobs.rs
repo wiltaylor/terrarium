@@ -881,15 +881,8 @@ async fn merge_batch(
         ));
     }
     let planned_secs = planned(b.eta.as_deref())?;
-    let commits = merge_commits(
-        &state,
-        &actor,
-        b.cards.clone(),
-        b.repo.clone(),
-        None,
-        None,
-    )
-    .await?;
+    let commits =
+        merge_commits(&state, &actor, b.cards.clone(), b.repo.clone(), None, None).await?;
     let job = state
         .db
         .write(actor.label(), move |t| {

@@ -2001,7 +2001,11 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
         if let Err(e) = repo.fetch(&specs) {
             return failed(format!(
                 "cannot fetch {onto} and {} (does the repo have a {onto} branch?): {e}",
-                if release { "next".to_owned() } else { branches.join(" ") }
+                if release {
+                    "next".to_owned()
+                } else {
+                    branches.join(" ")
+                }
             ));
         }
         let mut cur = match repo.commit_of("refs/remotes/job/next") {
