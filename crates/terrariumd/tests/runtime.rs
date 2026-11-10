@@ -3633,8 +3633,8 @@ async fn a_kept_queued_turn_survives_a_daemon_restart() {
     // the gate: open it.
     std::fs::write(td.dir.path().join("startup-gate"), "").unwrap();
     assert_eq!(wake_up_turns(&td, &id).await, 1);
-    let a = td.get(&format!("/api/agents/{id}")).await;
-    assert_eq!(a["queued"], 0, "{a}");
+    let q = td.get(&format!("/api/agents/{id}/queued")).await;
+    assert!(q["items"].as_array().unwrap().is_empty(), "{q}");
 }
 
 /// TER-542: with no daemon restart, the kept turn goes out once at the
@@ -3646,8 +3646,8 @@ async fn a_kept_queued_turn_goes_out_once_without_a_restart() {
     let id = kept_queued_turn(&td).await;
     std::fs::write(td.dir.path().join("startup-gate"), "").unwrap();
     assert_eq!(wake_up_turns(&td, &id).await, 1);
-    let a = td.get(&format!("/api/agents/{id}")).await;
-    assert_eq!(a["queued"], 0, "{a}");
+    let q = td.get(&format!("/api/agents/{id}/queued")).await;
+    assert!(q["items"].as_array().unwrap().is_empty(), "{q}");
     assert!(td.sup.kept_queued_turns(id.parse().unwrap()).is_empty());
 }
 
