@@ -5,7 +5,9 @@ user passed in the merge suite and failed in the release CI (TER-494,
 TER-575). This step reuses the test binaries that the root run of `ci::test`
 built (`cargo test --workspace --no-run`, the same command and env, so no
 rebuild), keeps those that SELECT names, and runs each of them as UID with
-`setpriv`, with its own private HOME and TMPDIR, all binaries at once.
+`setpriv`, each with its own private HOME, all binaries at once. TMPDIR is
+not set: the tests use the shared, sticky, root-owned /tmp like the release
+CI, which is what TER-575 failed on (a private TMPDIR hid that failure).
 Doctests are not run. Without root it skips: the main run is then already
 unprivileged. As root it fails early when UID has no passwd entry (OpenSSH
 needs one); the host needs the user (useradd, see the message).
@@ -65,21 +67,18 @@ def test_binaries(cargo_output: str, names: dict[str, str],
     return found
 
 
-def child_env(home: str, tmp: str) -> dict[str, str]:
+def child_env(home: str) -> dict[str, str]:
     env = {k: os.environ[k] for k in PASS_ENV if k in os.environ}
-    env.update(HOME=home, TMPDIR=tmp, USER="ci", LOGNAME="ci")
+    env.update(HOME=home, USER="ci", LOGNAME="ci")
     return env
 
 
-def private_dirs(root: str, n: int, uid: int) -> tuple[str, str]:
-    """A fresh HOME and TMPDIR under ROOT for binary N, owned by UID, mode 0700."""
-    dirs = []
-    for kind in ("h", "t"):
-        d = os.path.join(root, f"{n}{kind}")
-        os.mkdir(d, 0o700)
-        os.chown(d, uid, uid)
-        dirs.append(d)
-    return dirs[0], dirs[1]
+def private_home(root: str, n: int, uid: int) -> str:
+    """A fresh HOME under ROOT for binary N, owned by UID, mode 0700."""
+    d = os.path.join(root, f"{n}h")
+    os.mkdir(d, 0o700)
+    os.chown(d, uid, uid)
+    return d
 
 
 def has_user(uid: int) -> bool:
@@ -122,9 +121,7 @@ def run() -> int:
         Path(results).mkdir(parents=True, exist_ok=True)
         report = Path(results, "rust-unprivileged.json").open("w", encoding="utf-8")
     # Root-owned, 0711: uid UID can enter it but not list it or add to it.
-    # Keep the paths short: tests bind Unix sockets under TMPDIR, and a socket
-    # path has at most 108 bytes (a longer prefix broke a jobs test, TER-611).
-    root = tempfile.mkdtemp(prefix="u", dir="/tmp")
+    root = tempfile.mkdtemp(prefix="terrarium-ci-home-")
     os.chmod(root, 0o711)
     failed = []
     running = []
@@ -135,7 +132,7 @@ def run() -> int:
         # The binaries run at the same time, each into its own log; the logs
         # are then printed (and reported) one after another, in cargo's order.
         for n, (exe, cwd) in enumerate(bins):
-            env = child_env(*private_dirs(root, n, UID))
+            env = child_env(private_home(root, n, UID))
             if report:
                 env["RUSTC_BOOTSTRAP"] = "1"
             log = open(os.path.join(root, f"{n}.log"), "w+", encoding="utf-8",

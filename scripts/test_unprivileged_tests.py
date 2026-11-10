@@ -55,31 +55,27 @@ class UnprivilegedTests(unittest.TestCase):
         meta = json.dumps({"packages": [{"name": "terrariumd", "manifest_path": DAEMON}]})
         self.assertEqual(ut.package_names(meta), {DAEMON: "terrariumd"})
 
-    def test_the_child_gets_its_dirs_and_not_the_job_env(self):
+    def test_the_child_gets_its_home_and_not_the_job_env(self):
         env = {"PATH": "/usr/bin", "TERRARIUM_TOKEN": "x", "HOME": "/root", "RUST_BACKTRACE": "1",
-               "TMPDIR": "/tmp", "RUSTUP_HOME": "/r", "RUSTUP_TOOLCHAIN": "1.97.1",
+               "TMPDIR": "/root/tmp", "RUSTUP_HOME": "/r", "RUSTUP_TOOLCHAIN": "1.97.1",
                "CARGO_HOME": "/c", "CARGO_TARGET_DIR": "/t"}
         with mock.patch.dict(os.environ, env, clear=True):
-            child = ut.child_env("/tmp/h", "/tmp/t")
+            child = ut.child_env("/tmp/h")
+        # No TMPDIR: the tests use the shared /tmp, like the release CI (TER-575).
         self.assertEqual(child, {"PATH": "/usr/bin", "RUST_BACKTRACE": "1", "RUSTUP_HOME": "/r",
                                  "RUSTUP_TOOLCHAIN": "1.97.1", "CARGO_HOME": "/c",
-                                 "HOME": "/tmp/h", "TMPDIR": "/tmp/t", "USER": "ci",
-                                 "LOGNAME": "ci"})
+                                 "HOME": "/tmp/h", "USER": "ci", "LOGNAME": "ci"})
 
-    def test_each_binary_gets_fresh_private_dirs(self):
+    def test_each_binary_gets_a_fresh_private_home(self):
         with tempfile.TemporaryDirectory() as root, \
                 mock.patch.object(ut.os, "chown") as chown:
-            first = ut.private_dirs(root, 0, 1001)
-            second = ut.private_dirs(root, 1, 1001)
-            for d in first + second:
+            homes = [ut.private_home(root, n, 1001) for n in (0, 1)]
+            for d in homes:
                 self.assertTrue(os.path.isdir(d))
                 self.assertEqual(os.stat(d).st_mode & 0o777, 0o700)
-                self.assertTrue(d.startswith(root + os.sep))
-        self.assertEqual(len(set(first + second)), 4)
-        # Unix socket paths under TMPDIR stay short (TER-611).
-        self.assertEqual([os.path.relpath(d, root) for d in first + second],
-                         ["0h", "0t", "1h", "1t"])
-        self.assertEqual([c.args[1:] for c in chown.call_args_list], [(1001, 1001)] * 4)
+                self.assertEqual(os.path.dirname(d), root)
+        self.assertEqual(len(set(homes)), 2)
+        self.assertEqual([c.args[1:] for c in chown.call_args_list], [(1001, 1001)] * 2)
 
     def test_setpriv_drops_uid_gid_and_groups(self):
         self.assertEqual(ut.setpriv(1001), [
