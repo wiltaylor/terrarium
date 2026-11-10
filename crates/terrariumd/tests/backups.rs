@@ -395,7 +395,11 @@ async fn a_scheduled_backup_that_does_not_verify_is_set_aside_and_missed_mails_o
     };
     let now = chrono::Utc::now();
     let mut runner = Runner::new(cfg.clone());
-    assert!(!runner.check_missed(&state, now + chrono::Duration::days(3), None).await);
+    assert!(
+        !runner
+            .check_missed(&state, now + chrono::Duration::days(3), None)
+            .await
+    );
     assert!(dir.join(MARKS_FILE).is_file());
     let late = now + chrono::Duration::days(5);
     assert!(runner.check_missed(&state, late, None).await);

@@ -370,7 +370,10 @@ impl Marks {
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let tmp = dir.join(format!("{MARKS_FILE}.tmp"));
-        std::fs::write(&tmp, serde_json::to_vec(self).map_err(std::io::Error::other)?)?;
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec(self).map_err(std::io::Error::other)?,
+        )?;
         std::fs::rename(tmp, dir.join(MARKS_FILE))
     }
 }
@@ -391,8 +394,7 @@ async fn update_marks(dir: PathBuf, f: impl FnOnce(&mut Marks) + Send + 'static)
 }
 
 /// The check of a new backup: [`super::verify`].
-pub type VerifyFn =
-    fn(&Path, Option<&Path>, Option<&str>) -> anyhow::Result<super::Verified>;
+pub type VerifyFn = fn(&Path, Option<&Path>, Option<&str>) -> anyhow::Result<super::Verified>;
 
 /// The scheduled backup between runs: the settings and the alert mark.
 #[derive(Debug)]
@@ -490,10 +492,7 @@ impl Runner {
             .await;
             return false;
         };
-        let since = newest
-            .max(last_run)
-            .max(marks.last_run)
-            .max(Some(on_since));
+        let since = newest.max(last_run).max(marks.last_run).max(Some(on_since));
         let Some(due) = missed(interval, now, since) else {
             return false;
         };
@@ -579,7 +578,9 @@ pub fn set_aside(path: &Path) -> Result<String, String> {
     match std::fs::rename(path, &aside) {
         Ok(()) => Ok(format!("moved to {UNVERIFIED_PREFIX}{name}")),
         Err(re) => match std::fs::remove_file(path) {
-            Ok(()) => Ok(format!("deleted: cannot move it to {UNVERIFIED_PREFIX}{name}: {re}")),
+            Ok(()) => Ok(format!(
+                "deleted: cannot move it to {UNVERIFIED_PREFIX}{name}: {re}"
+            )),
             Err(de) => Err(format!(
                 "cannot move it to {UNVERIFIED_PREFIX}{name} ({re}) or delete it ({de}): \
                  it is still in the backup dir; delete it by hand"
@@ -813,7 +814,11 @@ mod tests {
         let r = set_aside(&f).unwrap();
         assert!(r.starts_with("moved"), "{r}");
         assert!(!f.exists());
-        assert!(tmp.path().join(format!("{UNVERIFIED_PREFIX}a.zip")).exists());
+        assert!(
+            tmp.path()
+                .join(format!("{UNVERIFIED_PREFIX}a.zip"))
+                .exists()
+        );
         // The rename fails (a dir with content has the name): delete it.
         let g = tmp.path().join("b.zip");
         std::fs::write(&g, "bad").unwrap();
