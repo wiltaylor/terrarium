@@ -3063,14 +3063,14 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
     // lab1), and two ssh targets for one ssh host and port.
     for t in [
         json!({"name": "p-alias", "kind": "host", "host": "lab1", "project": "p"}),
-        json!({"name": "s-one", "kind": "ssh", "address": "release@10.9.0.2", "port": 2252, "project": "p"}),
-        json!({"name": "s-two", "kind": "ssh", "address": "other@10.9.0.2", "port": 2252, "project": "p"}),
-        json!({"name": "s-port", "kind": "ssh", "address": "release@10.9.0.2", "port": 2253, "project": "p"}),
+        json!({"name": "p-s-one", "kind": "ssh", "address": "release@10.9.0.2", "port": 2252, "project": "p"}),
+        json!({"name": "p-s-two", "kind": "ssh", "address": "other@10.9.0.2", "port": 2252, "project": "p"}),
+        json!({"name": "p-s-port", "kind": "ssh", "address": "release@10.9.0.2", "port": 2253, "project": "p"}),
     ] {
         let r = lab.td.post("/api/targets", t).await;
         assert_eq!(r.status, 201, "{}", r.body);
     }
-    for (target, release) in [("p-box", "p-alias"), ("s-one", "s-two")] {
+    for (target, release) in [("p-box", "p-alias"), ("p-s-one", "p-s-two")] {
         let r = lab
             .td
             .put(
@@ -3086,7 +3086,7 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
         .td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "s-one", "recipe": "true", "release_target": "s-port"}),
+            json!({"target": "p-s-one", "recipe": "true", "release_target": "p-s-port"}),
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
