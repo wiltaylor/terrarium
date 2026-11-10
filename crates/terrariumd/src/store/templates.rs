@@ -233,6 +233,12 @@ pub fn checked(conn: &Connection, spec: &Spec) -> ApiResult<Spec> {
         &def.subscription_pool,
     )
     .map_err(|e| spec_error(e.message))?;
+    crate::store::agents::check_cloud_model(
+        conn,
+        def.subscription.as_deref(),
+        def.model.as_deref(),
+    )
+    .map_err(|e| spec_error(e.message))?;
     Ok(n)
 }
 

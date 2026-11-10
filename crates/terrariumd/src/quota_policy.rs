@@ -464,7 +464,9 @@ pub async fn reapply(state: &Shared) -> ApiResult<usize> {
     Ok(legacy.len())
 }
 
-/// The policy timer: release expired holds on each probe tick.
+/// The policy timer: release expired holds on each probe tick, and check
+/// the monthly budgets of the cloud subscriptions
+/// ([`crate::cloud_budget::check_all`]).
 pub fn spawn(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(e) = reapply(&state).await {
@@ -477,6 +479,8 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                 Ok(n) => info!(holds = n, "quota holds ended after their reset"),
                 Err(e) => warn!("cannot release expired quota holds: {e}"),
             }
+            // A raised budget ends the hold of a cloud subscription here.
+            crate::cloud_budget::check_all(&state).await;
         }
     })
 }

@@ -73,6 +73,9 @@ pub struct Subscription {
     /// the definition.
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// The settings of a cloud subscription (`terrarium_core::cloud`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<terrarium_core::cloud::CloudSettings>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -88,12 +91,20 @@ impl Subscription {
             probe: self.probe.clone(),
             alert_at: self.alert_at,
             selfhosted: self.selfhosted.clone(),
+            cloud: self.cloud.clone(),
         }
     }
 
     /// True for a `selfhosted` subscription.
     pub fn is_selfhosted(&self) -> bool {
         selfhosted::is_selfhosted(&self.provider)
+    }
+
+    /// The kind of a cloud subscription (`bedrock`, `gcp`, `foundry`). A
+    /// cloud subscription is never in the automatic account choice: an
+    /// agent or a template uses it only when it names it.
+    pub fn cloud_kind(&self) -> Option<terrarium_core::cloud::Kind> {
+        terrarium_core::cloud::kind(&self.provider)
     }
 
     /// The most agents of a `selfhosted` subscription that may run a turn
@@ -127,10 +138,15 @@ fn yes() -> bool {
 }
 
 /// Why `harness` must not spend `sub`: pi and a plan login (PLAN §16.3),
-/// and a harness that a self-hosted server does not serve
+/// a harness that a self-hosted server does not serve
 /// (`terrarium_core::selfhosted`, for example Copilot, or Claude Code on
-/// an OpenAI-style server).
+/// an OpenAI-style server), and a harness other than Claude Code on a
+/// cloud subscription (`terrarium_core::cloud`).
 pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
+    if sub.cloud_kind().is_some() {
+        return terrarium_core::cloud::harness_refusal(&[harness])
+            .map(|why| format!("subscription `{}`: {why}", sub.name));
+    }
     if sub.is_selfhosted() {
         let api = sub.selfhosted.as_ref().map(|s| s.api).unwrap_or_default();
         return (!api.harnesses().contains(&harness)).then(|| {
@@ -148,6 +164,19 @@ pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
             terrarium_adapter_pi::provider::PLAN_REFUSAL
         )
     })
+}
+
+/// Why an agent with `model` cannot run on `sub`: a cloud subscription
+/// (`terrarium_core::cloud`) whose model map has no entry for the name,
+/// which is not an alias either ([`terrarium_core::cloud::model_refusal`]).
+pub fn model_refusal(sub: &Subscription, model: Option<&str>) -> Option<String> {
+    sub.cloud_kind()?;
+    let models = sub
+        .cloud
+        .as_ref()
+        .map(|c| c.models.clone())
+        .unwrap_or_default();
+    terrarium_core::cloud::model_refusal(&sub.name, &models, model)
 }
 
 /// Why no new work may start on `sub`: it is disabled.
@@ -196,7 +225,9 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Subscription> {
     let plan: Option<String> = r.get("plan")?;
     let probe: Option<String> = r.get("probe")?;
     let sh: Option<String> = r.get("selfhosted")?;
+    let cloud: Option<String> = r.get("cloud")?;
     let mut s = Subscription {
+        cloud: cloud.and_then(|t| serde_json::from_str(&t).ok()),
         selfhosted: sh.and_then(|t| serde_json::from_str(&t).ok()),
         enabled: r.get("enabled")?,
         name: r.get("name")?,
@@ -263,6 +294,7 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
     if terrarium_core::zai::is_zai(&def.provider) {
         terrarium_core::zai::parse_plan(def.plan.as_deref()).map_err(ApiError::invalid)?;
     }
+    check_cloud(def)?;
     // Moonshot is for pi only (an operator decision; `docs/PLAN.md` §16).
     if terrarium_core::moonshot::is_moonshot(&def.provider) {
         terrarium_core::moonshot::parse_plan(def.plan.as_deref()).map_err(ApiError::invalid)?;
@@ -280,15 +312,17 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let cloud = def.cloud.as_ref().map(serde_json::to_string).transpose()?;
     t.execute(
         "INSERT INTO subscriptions (name, provider, plan, harnesses, probe, alert_at, source,
-                                    created_at, updated_at, selfhosted)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)
+                                    created_at, updated_at, selfhosted, cloud)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10)
          ON CONFLICT (name) DO UPDATE SET
              provider = excluded.provider, plan = excluded.plan,
              harnesses = excluded.harnesses, probe = excluded.probe,
              alert_at = excluded.alert_at,
              selfhosted = coalesce(excluded.selfhosted, subscriptions.selfhosted),
+             cloud = coalesce(excluded.cloud, subscriptions.cloud),
              source = CASE WHEN excluded.source = 'api' AND subscriptions.source GLOB 'fleet:*'
                            THEN subscriptions.source ELSE excluded.source END,
              updated_at = excluded.updated_at",
@@ -301,10 +335,61 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
             i64::from(def.alert_at),
             source,
             at,
-            sh
+            sh,
+            cloud
         ],
     )?;
     get(t, &def.name)
+}
+
+/// A cloud definition (`bedrock`, `gcp`, `foundry`) is for Claude Code
+/// only and has checked `[cloud]` settings; a definition of another
+/// provider has no `[cloud]`. A cloud definition with no `[cloud]` keeps
+/// the stored settings (the upsert keeps them), so it is checked only
+/// when it has them.
+fn check_cloud(def: &SubscriptionDef) -> ApiResult<()> {
+    use terrarium_core::cloud;
+    let Some(kind) = cloud::kind(&def.provider) else {
+        if def.cloud.is_some() {
+            return Err(ApiError::invalid(format!(
+                "subscription `{}`: `cloud` is only for the providers bedrock, gcp, and foundry, \
+                 not `{}`",
+                def.name, def.provider
+            )));
+        }
+        return Ok(());
+    };
+    if let Some(why) = cloud::harness_refusal(&def.harnesses) {
+        return Err(ApiError::invalid(format!(
+            "subscription `{}`: {why}",
+            def.name
+        )));
+    }
+    if def.plan.is_some() {
+        return Err(ApiError::invalid(format!(
+            "subscription `{}`: a cloud subscription has no plan",
+            def.name
+        )));
+    }
+    if let Some(s) = &def.cloud {
+        cloud::check(kind, s)
+            .map_err(|e| ApiError::invalid(format!("subscription `{}`: {e}", def.name)))?;
+    }
+    Ok(())
+}
+
+/// Set the `[cloud]` settings of a subscription (the key endpoint gives
+/// them with the key).
+pub fn set_cloud(
+    t: &mut Tx<'_>,
+    name: &str,
+    cloud: &terrarium_core::cloud::CloudSettings,
+) -> ApiResult<()> {
+    t.execute(
+        "UPDATE subscriptions SET cloud = ?2, updated_at = ?3 WHERE name = ?1",
+        params![name, serde_json::to_string(cloud)?, now()],
+    )?;
+    Ok(())
 }
 
 /// A `selfhosted` (or `openai-compatible`) definition in its stored form:
@@ -1580,6 +1665,7 @@ mod tests {
             probe: None,
             alert_at: 80,
             selfhosted: None,
+            cloud: None,
         };
         for plan in [None, Some("coding"), Some("api")] {
             let d = zai(plan);
@@ -1615,6 +1701,7 @@ mod tests {
             probe: None,
             alert_at: 80,
             selfhosted: None,
+            cloud: None,
         };
         for plan in [
             None,
@@ -1686,6 +1773,7 @@ mod tests {
             probe: probe.map(str::to_owned),
             alert_at: 80,
             selfhosted: None,
+            cloud: None,
         };
         db.write("t", move |t| {
             upsert_def(t, &zai("zc", Some("coding"), None), "api")?;

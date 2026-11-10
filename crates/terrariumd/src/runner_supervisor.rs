@@ -347,6 +347,26 @@ pub fn not_ready(harness: HarnessId) -> SupervisorError {
     ))
 }
 
+/// The env var that names the dir of the credential files for `terrarium
+/// exec-env` (TER-630). A path, no secret.
+pub const CREDENTIAL_DIR_ENV: &str = "TERRARIUM_CREDENTIAL_DIR";
+
+/// The dir of the credential files of agent `id` in sandbox mode `none`:
+/// `<runtime>/credentials/<id>`.
+pub fn credential_dir(runtime_dir: &std::path::Path, id: AgentId) -> std::path::PathBuf {
+    runtime_dir.join("credentials").join(id.to_string())
+}
+
+/// Remove the credential files of agent `id` ([`credential_dir`]).
+fn remove_credential_dir(runtime_dir: &std::path::Path, id: AgentId) {
+    let dir = credential_dir(runtime_dir, id);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => debug!(agent = %id, "removed the credential files"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!(agent = %id, "cannot remove {}: {e}", dir.display()),
+    }
+}
+
 /// The definition of a stored subscription, as the adapters take it.
 pub(crate) fn sub_def(s: &Subscription) -> SubscriptionDef {
     s.def()
@@ -1320,6 +1340,14 @@ fn check_subscription(
     {
         return Err(SupervisorError::NotReady(why));
     }
+    // A cloud subscription takes only a model of its map or an alias
+    // (`terrarium_core::cloud::model_refusal`): say it at the start, not
+    // at the first turn's cloud API error.
+    if let Some(SubscriptionCheck::Found(s)) = sub
+        && let Some(why) = crate::store::subscriptions::model_refusal(s, agent.model.as_deref())
+    {
+        return Err(SupervisorError::NotReady(why));
+    }
     // A disabled subscription starts no agent (PLAN §16): a running agent
     // goes on, but no start, wake, or relaunch.
     if let Some(SubscriptionCheck::Found(s)) = sub
@@ -1970,6 +1998,18 @@ impl RunnerSupervisor {
             );
             layout.exec_env = true;
             layout.exec_env_credentials = true;
+            // Sandbox mode `none` (development and tests): the credential
+            // files (the GCP JSON) go to a private dir of the runtime dir,
+            // which `on_exit` removes. The bwrap sandbox writes them to
+            // its tmpfs home.
+            if cfg.sandbox.mode == SandboxMode::None {
+                spec.env.insert(
+                    CREDENTIAL_DIR_ENV.to_owned(),
+                    credential_dir(&cfg.runtime_dir, agent.id)
+                        .display()
+                        .to_string(),
+                );
+            }
         }
         let (secret_vars, mut secret_warnings) =
             secret_env(&mut spec.env, &credential_vars, &view.secrets);
@@ -3334,6 +3374,11 @@ impl RunnerSupervisor {
     }
 
     async fn on_exit(&self, id: AgentId, epoch: u64, status: ExitStatus) {
+        // The credential files of sandbox mode `none` go with the harness;
+        // a relaunch writes them again.
+        if self.inner.cfg.sandbox.mode == SandboxMode::None {
+            remove_credential_dir(&self.inner.cfg.runtime_dir, id);
+        }
         if self.inner.shutting_down.load(Ordering::SeqCst) {
             return;
         }

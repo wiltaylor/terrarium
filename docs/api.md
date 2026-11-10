@@ -5759,7 +5759,7 @@ keep their card.
 | `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. A plan account: removes the account directory and nothing else; no harness command runs, so no other account and no shared file changes. `409 conflict` while an agent's current subscription is this one. A subscription with no account (a shared login before its migration): runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command (it uses API keys only): `422 invalid`. An old pi plan account (from before pi took API keys only) logs out as any plan account: its directory goes. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
 | `POST /api/subscriptions/{name}/default` | | The subscription (§16.1), with `default: true`. Its plan account becomes the default account of its harness; the old default stops being one, in the same transaction. The audit row is `subscription.default` (`{harness, from, to, reason}`), and a `subscription` event (§16.7) follows. `422 invalid` for an API-key subscription, a subscription with no plan account, and a pi account or a provider that is not the plan provider of the harness. `404 not_found` for an unknown name. |
 | `PUT /api/subscriptions/{name}/label` | `{label}` | The subscription (§16.1). `label` is a string (at most 80 characters, no control characters) or `null`; `null` or only spaces removes it, and `display_name` comes from the vendor table again. Text for people only: the name, the ids, and the keys stay. Works on a file subscription too. Needs the operator or sysadmin. The audit row is `subscription.label` (`{label}`). |
-| `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?}` | The subscription, without the key. `plan` is for `zai` and `moonshot` only. See §16.5. |
+| `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?, key_id?, cloud?}` | The subscription, without the key. `plan` is for `zai` and `moonshot` only; `key_id` for `bedrock`, `cloud` for `bedrock`, `gcp`, and `foundry`. See §16.5. |
 | `GET /api/subscriptions/detect` | | Logins found in the Claude Code, Codex, and Copilot homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, logged_in, plan?, detail?, suggested}]`. pi uses API keys only: no pi login is found. `suggested` is a subscription definition. |
 | `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
 | `GET /api/subscriptions/login/{id}` | | The login session. |
@@ -6033,6 +6033,9 @@ directories are `0700`), and sets `env_var`:
 | `github` | `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with Copilot Requests; the Copilot probe uses it) |
 | `zai` (takes `plan`) | `ZAI_API_KEY`, and the Claude Code vars below |
 | `moonshot` (takes `plan`; pi only) | `MOONSHOT_API_KEY`, and `KIMI_API_KEY` for a Kimi Code plan |
+| `bedrock` (takes `key_id` and `cloud`; Claude Code only) | `AWS_SECRET_ACCESS_KEY` with `key_id`, else `AWS_BEARER_TOKEN_BEDROCK`; the Claude Code vars below |
+| `gcp` (takes `cloud`; Claude Code only) | `GOOGLE_APPLICATION_CREDENTIALS` (a file); the Claude Code vars below |
+| `foundry` (takes `cloud`; Claude Code only) | `ANTHROPIC_FOUNDRY_API_KEY`; the Claude Code vars below |
 
 A new name makes an `api` subscription (harness `pi`, or `copilot` for
 `github`, or `claude` and `pi` for `zai`). No endpoint returns the key. The
@@ -6185,6 +6188,84 @@ every agent whose `subscription` has `env_var`
 the adapter's env. The start log and `terrariumd sandbox-dry-run` show the
 value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
 `<redacted>`.
+
+**Cloud providers (Claude Code only).** `provider` `bedrock` (Amazon
+Bedrock), `gcp` (Google Cloud Vertex AI), or `foundry` (Microsoft
+Foundry); the code is `crates/terrarium-core/src/cloud.rs`. The
+subscription gets `harnesses = ["claude"]` (another harness is `422
+invalid`), no plan, no probe, and `login_status` `api_key`. The key file
+keeps the secrets:
+
+- `bedrock`: `key` is the secret access key and `key_id` the access key
+  ID of an IAM user, or `key` alone is an Amazon Bedrock API key.
+- `gcp`: `key` is the service-account JSON (an object with `type`).
+- `foundry`: `key` is the API key of the resource.
+
+`cloud` holds the settings, which are no secret. They go to the
+definition (`[cloud]` in `subscriptions/<name>.toml`, or `cloud` in `POST
+/api/subscriptions`), not to the key file. A key without `cloud` keeps
+the stored settings, and a `cloud` without `models` keeps the stored
+model map. A file subscription takes its `[cloud]` from the file only
+(`422 invalid` with `cloud`). Today the key endpoint is the only API path
+that changes `cloud`, so a new budget sends the key again.
+
+| Field | Kinds | Claude Code var |
+|---|---|---|
+| `region` | `bedrock`, `gcp` | `AWS_REGION`, `CLOUD_ML_REGION` |
+| `project_id` (needed) | `gcp` | `ANTHROPIC_VERTEX_PROJECT_ID` |
+| `resource` (or `base_url`, one of them needed) | `foundry` | `ANTHROPIC_FOUNDRY_RESOURCE` |
+| `base_url` (`https://`) | all | `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`, `ANTHROPIC_FOUNDRY_BASE_URL` |
+| `models` | all | `ANTHROPIC_DEFAULT_OPUS_MODEL`, `_SONNET_MODEL`, `_HAIKU_MODEL` for the keys `opus`, `sonnet`, `haiku`; and `--model` |
+| `budget_usd` | all | none: the monthly budget (below) |
+
+The env of an agent on it adds the switch (`CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, or `CLAUDE_CODE_USE_FOUNDRY` = `1`) and the key
+vars: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or
+`AWS_BEARER_TOKEN_BEDROCK`; `ANTHROPIC_FOUNDRY_API_KEY`. Every value comes
+through `terrarium exec-env` (`POST /api/agent/secrets/env`), never the
+launch spec. The GCP JSON is in `credential_files` of that answer:
+`exec-env` writes it with mode `0600` (the dir `0700`) to
+`$HOME/.terrarium/credentials/<agent>/`, a tmpfs in the bwrap sandbox,
+and sets `GOOGLE_APPLICATION_CREDENTIALS` to the file. In sandbox mode
+`none` (development and tests) the daemon names the dir in
+`TERRARIUM_CREDENTIAL_DIR`: `<runtime dir>/credentials/<agent>`, which it
+removes when the harness exits. The redaction matcher has
+the key, `key_id`, and the `private_key` and `private_key_id` of a GCP
+JSON.
+
+`models` maps Terrarium model names to cloud model ids: a Bedrock
+inference profile id or ARN, a Vertex model id, a Foundry deployment
+name. The keys are lowercase (`opus`, `sonnet`, `haiku`, or a Claude id
+such as `claude-opus-5-5`). Claude Code gets `--model` with the map entry
+of the agent's `model`, else the model as it is for the aliases `opus`,
+`sonnet`, and `haiku` (Claude Code maps them with the
+`ANTHROPIC_DEFAULT_*_MODEL` vars or its default for the cloud). Any other
+name that is not in the map is refused: `422 invalid` at agent create, a
+patch, a file sync, and a template; a start refusal (`NotReady`) at start.
+The message names the subscription and the missing `cloud.models.<name>`.
+
+A cloud subscription is never in the automatic account choice: the
+auto-swap after a usage limit (§16.6) never moves an agent to one, the
+spawn pick takes one only when the template or the agent names it as
+`subscription`, never from `subscription_pool`, and the `<template>-alt`
+fallback of a spawn without headroom never takes one, also when the alt
+template names it. The spawn pick counts a cloud subscription as full at
+100 percent of its budget window, not at 80. A swap that names it is
+allowed (`POST /api/agents/{id}/subscription`, §6.2, with the rules of a
+swap).
+
+**The monthly budget.** With `budget_usd`, the daemon keeps the spend of
+the UTC month: the sum of the `costUSD` running totals of the Claude Code
+sessions on the subscription (`cost-state` of the session file; the list
+price of the tokens, not the cloud bill). The subscription shows a
+`budget` window with `used_pct`, `resets_at` (the start of the next month),
+and `balance` (`total` the budget, `used`, `remaining`, `currency` `USD`).
+The quota notices of §16.6 mail the operator at `alert_at` (default 80),
+90, and 100 percent. At 100 percent, new turns of the agents on the
+subscription wait: a hold with the cause `cloud-budget:<name>` until the
+start of the next month (`quota.blocked`). A raised or removed budget ends
+the hold at the next check (after each new session total, and on each
+policy tick).
 
 ### 16.6 The quota policy
 
