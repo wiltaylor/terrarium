@@ -5888,9 +5888,11 @@ An ETA at or before now produces `eta_overdue`. The other signal names are
 `time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
 `validation_red`, `timer_polls`, `compactions`, `review_wait`, `no_progress`
 and `shipped_accepted`. `shipped_accepted` (TER-608) marks an accepted card
-with a `version:X.Y.Z` label (not `version:vnext`) when the project has a
-`version.built` event for `X.Y.Z` or `vX.Y.Z`. The daemon sees no Git tags,
-so that acknowledgement is its record of a published tag. Only the leads get
+with a `version:X.Y.Z` or `version:vX.Y.Z` label (not `version:vnext`) when
+a closed version group of the project has the status `Built X.Y.Z` or
+`Built vX.Y.Z` (from `group built`). The daemon sees no Git tags, so that
+acknowledgement is its record of a published tag. Each pass reads the built
+versions once per project from `card_groups`, not from the event log. Only the leads get
 its mail. It clears when the card leaves accepted or loses the label.
 Review wait starts at the most recent entry into review and clears on return to work.
 Assignment changes while the card stays in review do not reset its age.
@@ -8874,7 +8876,7 @@ by the rule. The lead adds a late card with `group add`.
 | endpoint | body | result |
 |---|---|---|
 | `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A closed group rejects updates. |
-| `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, also_done, group}`. Explicit acknowledgement after release CI publishes. Moves the snapshot's accepted members to done, then every other active, unheld accepted card labelled `version:vX.Y.Z` or `version:X.Y.Z` that is in no open group (TER-608), listed in `also_done`. Clears their assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
+| `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, also_done, group}`. Explicit acknowledgement after release CI publishes. Moves the snapshot's accepted members to done, then every other active, unheld accepted card labelled `version:vX.Y.Z` or `version:X.Y.Z` (either form of the given version) that is in no open group (TER-608), listed in `also_done`. Clears their assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
 | `POST /api/projects/{project}/version-groups/{key}/remove` | `{card}` | `{changed, group}`. Explicitly drops a member from an open snapshot without moving or editing that card. Use for a card returned for a fix, archived, or held. Removal is audited. Duplicate removal is a no-op. Closed groups reject removal. |
 | `POST /api/projects/{project}/version-groups/{key}/add` | `{card}` | `{changed, group}`. Adds a late card to an open snapshot (TER-608). The card must be active, unheld, in the accepted column, and in no other open group. Addition is audited (`version.member_added`). Duplicate addition is a no-op. Closed groups reject addition. |
 

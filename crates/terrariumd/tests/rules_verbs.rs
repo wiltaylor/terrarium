@@ -462,9 +462,11 @@ async fn version_cut_freezes_members_and_explicit_built_completes_only_snapshot(
     );
 }
 
-/// TER-608: `group add` takes a late accepted card into an open snapshot,
-/// and `group built` also moves the other accepted cards that carry the
-/// version label, but not held cards or cards of another version.
+/// TER-608: `group add` takes a late accepted card into an open snapshot
+/// (audited), and `group built` also moves the other accepted cards that
+/// carry the version label in either form and clears their assignee. It
+/// skips held cards, cards of another open group, other versions and a
+/// label that is only a prefix of the version.
 #[tokio::test]
 async fn version_group_add_and_built_moves_same_version_accepted_cards() {
     let td = TestDaemon::start().await;
@@ -504,6 +506,34 @@ async fn version_group_add_and_built_moves_same_version_accepted_cards() {
         .unwrap();
     let other = new_card(&td, "p", accepted("other", json!(["version:1.2.4"]))).await;
     let vnext = new_card(&td, "p", accepted("open version", json!(["version:vnext"]))).await;
+    let prefix = new_card(&td, "p", accepted("prefix", json!(["version:1.2"]))).await;
+    let v_form = new_card(&td, "p", accepted("v form", json!(["version:v1.2.3"]))).await;
+    let grouped = new_card(&td, "p", accepted("grouped", json!(["version:1.2.3"]))).await;
+    let (ids, who) = ((tagged.clone(), grouped.clone()), worker.clone());
+    state(&td)
+        .db
+        .write("test", move |t| {
+            terrariumd::store::board::assign_card(t, &Actor::Operator, &ids.0, Some(&who))?;
+            terrariumd::store::groups::open(
+                t,
+                terrariumd::store::groups::Open {
+                    project: "p",
+                    rule: "test",
+                    key: "batch",
+                    title: "another open group",
+                    column: "accepted",
+                    done_when: "done",
+                    eta: None,
+                    close_after: None,
+                },
+            )?;
+            let g = terrariumd::store::groups::by_key(t, "p", "batch")?.unwrap();
+            terrariumd::store::groups::add(t, &g, &ids.1)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(card(&td, &tagged).await["assignee"], worker.as_str());
 
     assert_eq!(
         td.post_as(&worker, &format!("{path}/add"), json!({"card":late}))
@@ -527,16 +557,36 @@ async fn version_group_add_and_built_moves_same_version_accepted_cards() {
             .body["changed"],
         false
     );
+    let l = late.clone();
+    let audited = state(&td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM audit WHERE action = 'version.member_added'
+                    AND json_extract(detail, '$.card') = ?1",
+                [&l],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(audited, 1, "one audit row for one real add");
 
+    // The bare form matches both label forms.
     let built = td
-        .post(&format!("{path}/built"), json!({"version":"v1.2.3"}))
+        .post(&format!("{path}/built"), json!({"version":"1.2.3"}))
         .await;
     assert_eq!(built.status, 200, "{}", built.body);
-    assert_eq!(built.body["also_done"], json!([tagged]));
-    for id in [&a, &late, &tagged] {
+    let mut also: Vec<String> = serde_json::from_value(built.body["also_done"].clone()).unwrap();
+    also.sort();
+    let mut want = vec![tagged.clone(), v_form.clone()];
+    want.sort();
+    assert_eq!(also, want);
+    for id in [&a, &late, &tagged, &v_form] {
         assert_eq!(card(&td, id).await["column"], "done", "{id}");
     }
-    for id in [&held, &other, &vnext] {
+    assert!(card(&td, &tagged).await["assignee"].is_null());
+    for id in [&held, &other, &vnext, &prefix, &grouped] {
         assert_eq!(card(&td, id).await["column"], "accepted", "{id}");
     }
     assert_eq!(

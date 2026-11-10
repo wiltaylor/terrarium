@@ -169,40 +169,61 @@ pub fn add(t: &mut Tx<'_>, actor: &Actor, project: &str, key: &str, card: &str) 
     Ok(changed)
 }
 
-/// The `version:` labels that name `version`: as given and without a
-/// leading `v`. `version:vnext` never matches (it is the open version).
-pub fn labels_for(version: &str) -> Vec<String> {
-    let mut out = vec![format!("version:{version}")];
-    if let Some(bare) = version.strip_prefix('v')
-        && bare.starts_with(|c: char| c.is_ascii_digit())
-    {
-        out.push(format!("version:{bare}"));
+/// `version` without a leading `v` before a digit: `v1.2.3` and `1.2.3`
+/// are the same version.
+pub fn bare(version: &str) -> &str {
+    match version.strip_prefix('v') {
+        Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => rest,
+        _ => version,
     }
+}
+
+/// The `version:` labels that name `version`, in both forms
+/// (`version:X.Y.Z` and `version:vX.Y.Z`) whichever form is given.
+/// `version:vnext` never matches (it is the open version).
+pub fn labels_for(version: &str) -> Vec<String> {
+    let b = bare(version);
+    let mut out = if b.starts_with(|c: char| c.is_ascii_digit()) {
+        vec![format!("version:{b}"), format!("version:v{b}")]
+    } else {
+        vec![format!("version:{version}")]
+    };
     out.retain(|l| l != "version:vnext");
     out
 }
 
-/// The `version:X.Y.Z` labels of a card that are not `version:vnext`.
+/// The versions of a card's `version:` labels, in the bare form, without
+/// `vnext`.
 pub fn shipped_label_versions(labels: &[String]) -> Vec<String> {
     labels
         .iter()
         .filter_map(|l| l.strip_prefix("version:"))
         .filter(|v| *v != "vnext" && !v.is_empty())
-        .map(str::to_owned)
+        .map(|v| bare(v).to_owned())
         .collect()
 }
 
-/// True when `group built` acknowledged `version` (as `X.Y.Z` or
-/// `vX.Y.Z`) in `project`. The daemon sees no Git tags. This
-/// acknowledgement is its record that the version tag is published.
-pub fn is_built(conn: &Connection, project: &str, version: &str) -> ApiResult<bool> {
-    let bare = version.strip_prefix('v').unwrap_or(version);
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE project = ?1 AND kind = 'version.built'
-            AND json_extract(payload, '$.version') IN (?2, 'v' || ?2))",
-        rusqlite::params![project, bare],
-        |r| r.get(0),
-    )?)
+/// The versions (bare form) that `group built` acknowledged in `project`:
+/// the closed version groups with a `Built <version>` status. The daemon
+/// sees no Git tags, so this acknowledgement is its record that the
+/// version tag is published. It reads `card_groups` by its
+/// `(project, key)` index, not the event log.
+pub fn built_versions(
+    conn: &Connection,
+    project: &str,
+) -> ApiResult<std::collections::BTreeSet<String>> {
+    let mut q = conn.prepare(
+        "SELECT status FROM card_groups WHERE project = ?1 AND key LIKE 'version:%'
+            AND closed_at IS NOT NULL AND status LIKE 'Built %'",
+    )?;
+    let rows = q
+        .query_map([project], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .iter()
+        .filter_map(|s| s.strip_prefix("Built "))
+        .map(|v| bare(v).to_owned())
+        .collect())
 }
 
 /// Acknowledge a built version. Moves the members, then every other
@@ -295,4 +316,23 @@ pub fn get(conn: &Connection, project: &str, key: &str) -> ApiResult<groups::Gro
         return Err(ApiError::invalid("not a version group"));
     }
     Ok(g)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// TER-608: either form of a version names both label forms.
+    #[test]
+    fn labels_for_matches_both_forms_from_either_form() {
+        let both = vec!["version:1.2.3".to_owned(), "version:v1.2.3".to_owned()];
+        assert_eq!(labels_for("v1.2.3"), both);
+        assert_eq!(labels_for("1.2.3"), both);
+        assert!(labels_for("vnext").is_empty());
+        assert_eq!(labels_for("beta"), vec!["version:beta".to_owned()]);
+        assert_eq!(
+            shipped_label_versions(&["version:v0.36.0".into(), "version:vnext".into()]),
+            vec!["0.36.0".to_owned()]
+        );
+    }
 }

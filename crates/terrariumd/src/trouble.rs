@@ -434,6 +434,7 @@ fn desired(
     card: &Watched,
     now: DateTime<Utc>,
     estimates: &mut ReviewEstimates,
+    built: &mut HashMap<String, BTreeSet<String>>,
 ) -> ApiResult<(BTreeSet<String>, Facts, usage::Totals)> {
     let mut out = BTreeSet::new();
     if card.archived {
@@ -442,10 +443,15 @@ fn desired(
     // TER-608: an accepted card whose version was built (published) should
     // have gone to done with `group built`. Only the lead can fix it.
     if card.column_role.as_deref() == Some("accepted") {
-        for v in crate::store::version_groups::shipped_label_versions(&card.labels) {
-            if crate::store::version_groups::is_built(c, &card.project, &v)? {
+        let versions = crate::store::version_groups::shipped_label_versions(&card.labels);
+        if !versions.is_empty() {
+            // One read of card_groups per project and pass, not per card.
+            if !built.contains_key(&card.project) {
+                let b = crate::store::version_groups::built_versions(c, &card.project)?;
+                built.insert(card.project.clone(), b);
+            }
+            if versions.iter().any(|v| built[&card.project].contains(v)) {
                 out.insert(SHIPPED_ACCEPTED.into());
-                break;
             }
         }
         return Ok((out, Facts::default(), usage::Totals::default()));
@@ -713,8 +719,9 @@ fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
         .collect::<Result<Vec<_>, _>>()?;
     let mut changes = Vec::new();
     let mut estimates = ReviewEstimates::default();
+    let mut built = HashMap::new();
     for card in rows {
-        let (signals, facts, totals) = desired(c, &card, now, &mut estimates)?;
+        let (signals, facts, totals) = desired(c, &card, now, &mut estimates, &mut built)?;
         let old: BTreeSet<String> = active_signals(c, &card.id)?.into_iter().collect();
         if old != signals {
             changes.push(Change {

@@ -684,15 +684,44 @@ async fn passed_eta_still_mails_worker_when_reminders_are_disabled() {
 }
 
 /// TER-608: an accepted card labelled with a version that `group built`
-/// acknowledged gets `shipped_accepted`, with one lead notice. It clears
-/// when the card moves on. A vnext card and an unbuilt version do not.
+/// acknowledged (either label form) gets `shipped_accepted`, with one lead
+/// notice and none to its assigned worker. It clears when the label goes or
+/// the card moves on. A vnext card and an unbuilt version do not signal.
 #[tokio::test]
 async fn shipped_accepted_marks_accepted_cards_of_a_built_version() {
-    let (td, lead, _worker, _card) = setup().await;
+    use terrariumd::actor::Actor;
+    let (td, lead, worker, _card) = setup().await;
     let new =
         |title: &str, label: &str| json!({"title": title, "column": "accepted", "labels": [label]});
+    let member = id(td
+        .post("/api/projects/p/cards", new("member", "version:vnext"))
+        .await
+        .ok());
+    let key = state(&td)
+        .db
+        .write("system", |t| {
+            terrariumd::store::version_groups::cut(t, &Actor::Operator, "p", "test", 1, 240)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    td.post(
+        &format!("/api/projects/p/version-groups/{key}/built"),
+        json!({"version": "v0.36.0"}),
+    )
+    .await
+    .ok();
+    assert_eq!(
+        td.get(&format!("/api/cards/{member}")).await.ok()["column"],
+        "done"
+    );
+    // Cards that reach accepted after the build, so the sweep missed them.
     let shipped = id(td
         .post("/api/projects/p/cards", new("shipped", "version:0.36.0"))
+        .await
+        .ok());
+    let v_form = id(td
+        .post("/api/projects/p/cards", new("v form", "version:v0.36.0"))
         .await
         .ok());
     let unbuilt = id(td
@@ -703,32 +732,38 @@ async fn shipped_accepted_marks_accepted_cards_of_a_built_version() {
         .post("/api/projects/p/cards", new("open", "version:vnext"))
         .await
         .ok());
-    assert_signals(&td, &shipped, json!([])).await;
-    let before = notices(&td, &lead).await;
+    let (c, w) = (shipped.clone(), worker.clone());
     state(&td)
         .db
-        .write("system", |t| {
-            t.emit(
-                terrariumd::events::EventDraft::new(
-                    "version.built",
-                    "Built v0.36.0",
-                    json!({"key": "version:x", "version": "v0.36.0", "members": []}),
-                )
-                .project("p"),
-            )?;
+        .write("system", move |t| {
+            terrariumd::store::board::assign_card(t, &Actor::Operator, &c, Some(&w))?;
             Ok(())
         })
         .await
         .unwrap();
+    let (lead_before, worker_before) = (notices(&td, &lead).await, notices(&td, &worker).await);
     assert_signals(&td, &shipped, json!(["shipped_accepted"])).await;
+    assert_eq!(usage(&td, &v_form).await["signals"], json!(["shipped_accepted"]));
     assert_eq!(usage(&td, &unbuilt).await["signals"], json!([]));
     assert_eq!(usage(&td, &vnext).await["signals"], json!([]));
-    assert_eq!(notices(&td, &lead).await, before + 1);
+    assert_eq!(notices(&td, &lead).await, lead_before + 2);
+    assert_eq!(notices(&td, &worker).await, worker_before);
+
+    let c = shipped.clone();
+    state(&td)
+        .db
+        .write("system", move |t| {
+            t.execute("UPDATE cards SET labels = '[]' WHERE id = ?1", [c])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_signals(&td, &shipped, json!([])).await;
     td.post(
-        &format!("/api/cards/{shipped}/move"),
+        &format!("/api/cards/{v_form}/move"),
         json!({"column": "done"}),
     )
     .await
     .ok();
-    assert_signals(&td, &shipped, json!([])).await;
+    assert_signals(&td, &v_form, json!([])).await;
 }
