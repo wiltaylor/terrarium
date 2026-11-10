@@ -31,6 +31,49 @@ const RESET_TIMEOUT: Duration = Duration::from_secs(180);
 /// Time for the VM's Docker daemon to answer through the tunnel after a reset.
 const PING_DEADLINE: Duration = Duration::from_secs(90);
 
+/// The longest Unix socket path: `sun_path` holds 108 bytes with the NUL.
+const MAX_SOCKET_PATH: usize = 107;
+
+/// The daemon end of the SSH forward (TER-626). It goes in the run dir
+/// when the path fits. A long state dir (a long TMPDIR in tests) can push
+/// `<state>/credentials/.run/<ulid>/docker.sock` past the socket limit, and
+/// SSH then failed with only "tunnel failed". Then the socket goes in a new
+/// 0700 dir under `/tmp`, which the returned guard removes.
+fn forward_socket(dir: &RunDir) -> ApiResult<(PathBuf, Option<tempfile::TempDir>)> {
+    let socket = dir.path().join("docker.sock");
+    if socket.as_os_str().len() <= MAX_SOCKET_PATH {
+        return Ok((socket, None));
+    }
+    let short = tempfile::Builder::new()
+        .prefix("terrarium-d-")
+        .tempdir_in("/tmp")
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "Docker SSH forward socket path {} is over the {MAX_SOCKET_PATH}-byte \
+                 Unix socket limit, and a short dir in /tmp failed: {e}",
+                socket.display()
+            ))
+        })?;
+    let socket = short.path().join("docker.sock");
+    Ok((socket, Some(short)))
+}
+
+/// The target end of the relay: `<work_dir>/.git/terrarium/d-<ulid>`. The
+/// relay binds `docker.sock` in it, so a path over the socket limit fails
+/// before the reset and the SSH tunnel, with a clear error (TER-626).
+fn relay_dir(work_dir: &str) -> ApiResult<String> {
+    let dir = format!("{work_dir}/.git/terrarium/d-{}", ulid::Ulid::new());
+    let socket = format!("{dir}/docker.sock");
+    if socket.len() > MAX_SOCKET_PATH {
+        return Err(ApiError::invalid(format!(
+            "Docker relay socket path {socket} is {} bytes, over the \
+             {MAX_SOCKET_PATH}-byte Unix socket limit: use a shorter job work_dir",
+            socket.len()
+        )));
+    }
+    Ok(dir)
+}
+
 /// META-104 forced command. No recipe code or remote command is involved.
 pub async fn reset(state: &Shared, key: &str, config: &DockerCiDef) -> ApiResult<()> {
     let dir = RunDirs::new(&state.state_dir).run_dir()?;
@@ -137,6 +180,8 @@ pub struct Tunnel {
     relay: mpsc::UnboundedSender<Control>,
     task: tokio::task::JoinHandle<()>,
     _dir: RunDir,
+    /// The short dir of the forward socket, when the run dir is too long.
+    _short_dir: Option<tempfile::TempDir>,
 }
 
 impl Drop for Tunnel {
@@ -174,10 +219,11 @@ pub async fn open(
     timeout: u64,
     config: &DockerCiDef,
 ) -> ApiResult<Tunnel> {
+    let target_dir = relay_dir(work_dir)?;
     let dir = RunDirs::new(&state.state_dir).run_dir()?;
     let keyfile = dir.write_private("identity", key.as_bytes())?;
     let hosts = dir.write_private("known_hosts", config.known_hosts.as_bytes())?;
-    let socket = dir.path().join("docker.sock");
+    let (socket, short_dir) = forward_socket(&dir)?;
     let forward = format!("{}:/var/run/docker.sock", socket.display());
     let mut ssh = tokio::process::Command::new(&state.executor.ssh_bin)
         .args([
@@ -252,7 +298,6 @@ pub async fn open(
         return Err(e);
     }
     info!(destination = %config.destination, "docker ci: tunnel up, Docker answers /_ping");
-    let target_dir = format!("{work_dir}/.git/terrarium/d-{}", ulid::Ulid::new());
     let cmd = RemoteCmd {
         argv: vec![
             "python3".into(),
@@ -276,6 +321,7 @@ pub async fn open(
         relay,
         task,
         _dir: dir,
+        _short_dir: short_dir,
     };
     if !matches!(
         tokio::time::timeout(Duration::from_secs(15), rx).await,
@@ -541,6 +587,41 @@ async fn connection(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forward_socket_stays_under_the_unix_socket_limit() {
+        let base = tempfile::tempdir().unwrap();
+        // A short state dir keeps the socket in the run dir.
+        let run = RunDirs::new(base.path()).run_dir().unwrap();
+        let (socket, short) = forward_socket(&run).unwrap();
+        assert!(short.is_none());
+        assert_eq!(socket, run.path().join("docker.sock"));
+        // A long one (a long TMPDIR) moves it to a private dir in /tmp.
+        let long = base.path().join("x".repeat(80));
+        let run = RunDirs::new(&long).run_dir().unwrap();
+        assert!(run.path().join("docker.sock").as_os_str().len() > MAX_SOCKET_PATH);
+        let (socket, short) = forward_socket(&run).unwrap();
+        let short = short.unwrap();
+        assert!(socket.starts_with("/tmp"));
+        assert!(socket.as_os_str().len() <= MAX_SOCKET_PATH);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(short.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let path = short.path().to_owned();
+        drop(short);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn relay_dir_refuses_a_socket_path_over_the_limit() {
+        let dir = relay_dir("/w/slot-1").unwrap();
+        assert!(dir.starts_with("/w/slot-1/.git/terrarium/d-"));
+        let long = format!("/w/{}", "x".repeat(60));
+        let err = relay_dir(&long).unwrap_err();
+        assert!(err.message.contains("107-byte Unix socket limit"), "{}", err.message);
+        assert!(err.message.contains(&long), "{}", err.message);
+    }
 
     #[test]
     fn forced_reset_has_no_remote_command_and_fails_closed() {
