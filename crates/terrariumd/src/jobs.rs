@@ -82,15 +82,30 @@
 //!   the stop is killed and put back by the next daemon (above). Before an
 //!   update, the job slots alone can drain (TER-614 R4, `{"jobs_only":
 //!   true}`): no job starts, the running ones finish, the agents go on.
-//! - A merge job that failed before its tests (TER-614 R3,
-//!   [`OUTCOME_INFRA`]: a setup error with no tested commit, or a run lost
-//!   past [`MAX_LOST_RERUNS`]) is no test failure: no split, no rerun at
-//!   once, no attempt used. The first such end goes back to the queue for
-//!   one retry after [`INFRA_RETRY`] and while its host agent is offline;
-//!   the second ends the job `infra`, and its cards stay in the merge
-//!   queue. Each failed end keeps its step as the last line of its tail
-//!   (`[failed step: ...]`), and the rerun, split, and infra comments come
-//!   with a comment of the step and the last lines of the output.
+//! - A merge job that failed on its host before its tests (TER-614 R3,
+//!   [`OUTCOME_INFRA`]) is no test failure: no split, no rerun at once, no
+//!   attempt used. Two paths:
+//!   - an `error` end with no tested commit in a step of [`HOST_STEPS`]
+//!     (the clone on the target, the secrets or the Docker tunnel, the
+//!     start of the recipe). The first such end goes back to the queue
+//!     for one retry. The retry waits [`INFRA_RETRY`], and not while its
+//!     host agent is offline; a host agent that comes back online ends the
+//!     wait early. The second such end ends the job `infra`. The retry
+//!     mark and the wait live in memory: after a daemon restart the job
+//!     starts at once and gets its one retry again, so a restart gives at
+//!     most one extra run.
+//!   - a run lost past [`MAX_LOST_RERUNS`] (below) ends `infra` at once,
+//!     with no delayed retry: the lost reruns were its retries.
+//!
+//!   The cards of an `infra` end stay in the merge queue with no job. They
+//!   go in the next batch when a card enters the merge queue or the lead
+//!   queues them. A failure in the daemon (`setup`, `prepare`) stays an
+//!   `error`; a card branch that cannot be fetched or merged leaves the
+//!   merge as a conflict does (the top of `ready`), and the others go on.
+//!   Each failed end keeps its step as the last line of its tail
+//!   (`[failed step: ...]`). An `error` or `infra` end writes a comment
+//!   with the step and the last lines of the output on each card; a red
+//!   end has them in its failure block.
 //! - A host that cannot be reached is not a failure (TER-160). A job whose
 //!   target's host agent is offline is not started: it stays queued. A job
 //!   whose target could not be reached before its recipe started (the host
@@ -1192,22 +1207,42 @@ fn with_failed_step(mut end: JobEnd, step: &str) -> JobEnd {
     end
 }
 
-/// The step that failed, from the tail of a job ([`with_failed_step`]).
-pub fn failed_step(tail: Option<&str>) -> Option<&str> {
-    tail?
-        .lines()
-        .rev()
-        .find_map(|l| l.trim().strip_prefix(FAILED_STEP)?.strip_suffix(']'))
+/// The steps of a job, in order.
+const STEPS: [&str; 6] = [
+    STEP_SETUP,
+    STEP_PREPARE,
+    STEP_RECEIVE,
+    STEP_SECRETS,
+    STEP_RECIPE,
+    STEP_PUSH,
+];
+
+/// The step that failed, from the last line of the tail of a job
+/// ([`with_failed_step`]). Only one of the six step names counts: the
+/// output of a recipe cannot name a step (TER-614 review, minor 6).
+pub fn failed_step(tail: Option<&str>) -> Option<&'static str> {
+    let last = tail?.trim_end().lines().last()?.trim();
+    let name = last.strip_prefix(FAILED_STEP)?.strip_suffix(']')?;
+    STEPS.into_iter().find(|s| *s == name)
 }
 
-/// A merge end that failed before its tests (TER-614 R3): the job could
-/// not run (outcome `error`) and has no tested commit. A failed push
-/// after the tests has one, and stays an error.
+/// The steps whose failure is one of the host or its transport, not of a
+/// card (TER-614 review, major 1): the clone on the target, the secrets
+/// and the Docker tunnel, the start of the recipe. A failure in the
+/// daemon (`setup`, `prepare`) stays an error: a card branch that cannot
+/// be fetched or merged leaves the merge instead ([`Left::unfetched`]).
+const HOST_STEPS: [&str; 3] = [STEP_RECEIVE, STEP_SECRETS, STEP_RECIPE];
+
+/// A merge end that failed on its host before its tests (TER-614 R3):
+/// outcome `error`, no tested commit, and a failed step of
+/// [`HOST_STEPS`]. A failed push after the tests has a commit, and stays
+/// an error.
 fn before_tests(job: &Job, end: &JobEnd) -> bool {
     job.kind == JobKind::Merge
         && !end.passed
         && end.outcome.as_deref() == Some("error")
         && end.head.is_none()
+        && failed_step(end.tail.as_deref()).is_some_and(|s| HOST_STEPS.contains(&s))
 }
 
 /// The merge jobs that failed before their tests and wait for their one
@@ -2050,6 +2085,18 @@ impl Left {
         }
     }
 
+    /// A card branch that the daemon could not fetch (TER-614 review,
+    /// major 1): deleted or rewritten after the accept. It leaves the
+    /// merge as a conflict does: the top of ready, for its worker.
+    fn unfetched(branch: &str, why: &str) -> Self {
+        Left {
+            outcome: OUTCOME_CONFLICT,
+            note: format!(
+                "the branch `{branch}` cannot be fetched (deleted or rewritten after the accept?): {why}"
+            ),
+        }
+    }
+
     fn moved(branch: &str, reviewed: &str, tip: &str) -> Self {
         Left {
             outcome: OUTCOME_MOVED,
@@ -2153,11 +2200,29 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                 .enumerate()
                 .map(|(i, b)| format!("+refs/heads/{b}:refs/remotes/job/card{i}")),
         );
+        // A card branch that is gone (deleted after the accept) fails
+        // the whole fetch (TER-614 review, major 1): then `next` alone,
+        // and each branch on its own. A branch that does not come leaves
+        // the merge with the reason; the others go on.
+        let mut gone: HashMap<usize, String> = HashMap::new();
         if let Err(e) = repo.fetch(&specs) {
-            return failed(format!(
-                "cannot fetch next and {} (does the repo have a next branch?): {e}",
-                branches.join(" ")
-            ));
+            if let Err(e) = repo.fetch(&specs[..1]) {
+                return failed(format!(
+                    "cannot fetch next and {} (does the repo have a next branch?): {e}",
+                    branches.join(" ")
+                ));
+            }
+            for (i, spec) in specs.iter().skip(1).enumerate() {
+                if let Err(one) = repo.fetch(std::slice::from_ref(spec)) {
+                    gone.insert(i, one.to_string());
+                }
+            }
+            if gone.is_empty() {
+                return failed(format!(
+                    "cannot fetch next and {}: {e}",
+                    branches.join(" ")
+                ));
+            }
         }
         let mut cur = match repo.commit_of("refs/remotes/job/next") {
             Ok(Some(c)) => c,
@@ -2172,10 +2237,19 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
         let mut left: HashMap<usize, Left> = HashMap::new();
         let mut merged = 0;
         for (i, b) in branches.iter().enumerate() {
+            // The ref of a branch that did not come may be one of an
+            // older job of this repo: it is not read.
+            if let Some(e) = gone.get(&i) {
+                left.insert(i, Left::unfetched(b, e));
+                continue;
+            }
             let fetched = format!("refs/remotes/job/card{i}");
             let tip = match repo.commit_of(&fetched) {
                 Ok(Some(c)) => c,
-                Ok(None) => return failed(format!("cannot fetch {b}")),
+                Ok(None) => {
+                    left.insert(i, Left::unfetched(b, "the fetch brought no commit"));
+                    continue;
+                }
                 Err(e) => return failed(e.to_string()),
             };
             if let Some(want) = &cards[i].commit {
@@ -2202,7 +2276,12 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                         Left::conflict(format!("the merge failed without a conflict:\n{msg}")),
                     );
                 }
-                Err(e) => return failed(format!("cannot merge {b}: {e}")),
+                Err(e) => {
+                    left.insert(
+                        i,
+                        Left::conflict(format!("the merge of `{b}` failed: {e}")),
+                    );
+                }
             }
         }
         if !job.batch.is_empty() {
@@ -3006,7 +3085,7 @@ pub fn infra_comment(v: &Job, retry: Option<&str>) -> String {
             v.attempt
         ),
         None => format!(
-            "{} The job failed before its tests again: an infra failure, not a test failure. It does not rerun and the batch does not split. The cards stay in the merge queue for the next batch; fix the cause, then queue them again.",
+            "{} The job failed before its tests again: an infra failure, not a test failure. It does not rerun and the batch does not split. The cards stay in the merge queue with no job: they go in the next batch when a card enters the merge queue or the lead queues them (`card merge`), or move them out of the merge queue and back.",
             end_comment(v, "failed")
         ),
     }
@@ -3070,11 +3149,12 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
 /// then the coded card flow (the move, the rerun, or the split).
 fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     emit_verdicts(t, j)?;
-    // The failed step and the output on each card that ran (TER-614 R3),
-    // from the daemon in both flows: the rules quote a template value
-    // onto one line, which would lose the lines of the output.
+    // The failed step and the output on each card (TER-614 R3), from the
+    // daemon in both flows: the rules quote a template value onto one
+    // line, which would lose the lines of the output. Not for red: a red
+    // end has the failure block with the output already (review, minor 5).
     for v in card_views(j) {
-        if matches!(verdict_of(&v), "red" | "error" | "infra") {
+        if matches!(verdict_of(&v), "error" | "infra") {
             output_note(t, &v)?;
         }
     }
@@ -4776,6 +4856,14 @@ mod tests {
         let tail = end.tail.clone().unwrap();
         assert!(tail.ends_with("[failed step: receive]"), "{tail}");
         assert_eq!(failed_step(Some(&tail)), Some("receive"));
+        // Only a known step on the last line counts (review, minor 6).
+        assert_eq!(failed_step(Some("out\n[failed step: evil]")), None);
+        assert_eq!(failed_step(Some("[failed step: recipe]\nmore output")), None);
+        // A failure in the daemon is no host failure (review, major 1).
+        let job = ended(JobKind::Merge, jobs::JobState::Failed, Some("error"));
+        let prepare = with_failed_step(error_end("cannot fetch next"), STEP_PREPARE);
+        assert!(!before_tests(&job, &prepare));
+        assert!(before_tests(&job, &end));
         let pass = with_failed_step(
             JobEnd {
                 passed: true,

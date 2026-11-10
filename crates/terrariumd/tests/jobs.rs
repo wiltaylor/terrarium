@@ -4770,6 +4770,47 @@ async fn a_merge_that_fails_before_its_tests_keeps_its_cards_in_the_queue(flow: 
     assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
+both_flows!(a_deleted_card_branch_leaves_the_batch_and_the_others_merge);
+/// TER-614 review, major 1: a card branch deleted after the accept is a
+/// failure of that card, not of the host. The card leaves the batch to the
+/// top of ready with the reason; the other cards merge in the same job.
+async fn a_deleted_card_branch_leaves_the_batch_and_the_others_merge(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
+    with_merge_queue(&lab).await;
+    let h1 = lab.branch("ter-g1", "next", &[("g1", "1\n"), ("OK", "y\n")]);
+    lab.branch("ter-g2", "next", &[("g2", "2\n"), ("OK", "y\n")]);
+    let h3 = lab.branch("ter-g3", "next", &[("g3", "3\n"), ("OK", "y\n")]);
+    let c1 = lab.card("g1", "ter-g1").await;
+    let c2 = lab.card("g2", "ter-g2").await;
+    let c3 = lab.card("g3", "ter-g3").await;
+    for c in [&c1, &c2, &c3] {
+        accept(&lab, c).await;
+    }
+    git(&lab.work, &["push", "-q", "origin", "--delete", "ter-g2"]);
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let g2 = lab
+        .until_card(&c2, "ready", |c| c["column"] == "ready")
+        .await;
+    let body = g2["body"].as_str().unwrap();
+    assert!(body.contains("cannot be fetched"), "{body}");
+    for c in [&c1, &c3] {
+        lab.until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "no rerun and no split: {jobs:#?}");
+    assert_eq!(jobs[0]["state"], "passed", "{jobs:#?}");
+    for h in [&h1, &h3] {
+        git(&lab.origin, &["merge-base", "--is-ancestor", h, "next"]);
+    }
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
+}
+
 both_flows!(a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects);
 /// TER-160: the host agent of the target is offline when the queue picks
 /// the job. The job stays queued with no attempt used and the card does

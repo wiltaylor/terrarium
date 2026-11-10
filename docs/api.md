@@ -12421,22 +12421,31 @@ one key, the strictest applies until a cap write replaces them.
   starts with `the infrastructure lost the run 4
   times in a row, so this run counts as red: <why>`. A merge job ends
   `infra` instead (below).
-- A merge job that failed before its tests (TER-614) is not a test
-  failure: an end with outcome `error` and no tested commit (`head`), such
-  as a setup or prepare error or a lost host session in the clone step,
-  or a lost run past the cap above. It does not split, does not rerun at
-  once, and uses no attempt. The first such end goes back to the queue
-  (event change `requeued`) and runs once more after 5 minutes, and not
-  while its host agent is offline; each card gets a comment that says so.
-  A second such end of the job ends it with outcome `infra` (verdict
-  `infra`): no rerun, no split, no failure block. Its cards lose the job
-  labels and stay in the merge queue with a comment, for the next batch.
+- A merge job that failed on its host before its tests (TER-614) is not a
+  test failure. It does not split, does not rerun at once, and uses no
+  attempt. Two paths. An end with outcome `error`, no tested commit
+  (`head`), and a failed step `receive`, `secrets`, or `recipe` (the
+  recipe did not start) goes back to the queue (event change `requeued`)
+  and runs once more after 5 minutes, and not while its host agent is
+  offline (a host agent that comes back online ends the wait early); each
+  card gets a comment that says so. A second such end ends the job with
+  outcome `infra` (verdict `infra`). A run lost past the cap above ends
+  `infra` at once, with no delayed retry. An `infra` end has no rerun, no
+  split, and no failure block: its cards lose the job labels and stay in
+  the merge queue with no job, with a comment. They go in the next batch
+  when a card enters the merge queue or the lead queues them. The retry
+  mark lives in memory: a daemon restart gives at most one extra run.
+- A failure in the daemon before the tests (`setup`, `prepare`) stays
+  `error`. A card branch that the daemon cannot fetch (deleted or
+  rewritten after the accept) or merge leaves the merge as a conflict does:
+  the failure block, the top of `ready`, a mail to its worker; the other
+  cards of the batch go on.
 - Each failed end has the step that failed as the last line of its `tail`:
   `[failed step: <step>]`, one of `setup`, `prepare`, `receive`, `secrets`,
-  `recipe`, `push`. Next to a rerun, split, or infra comment, each card
-  gets a comment with the failed step and the last 20 lines of the tail,
-  indented. The daemon writes it in both board flows, after each `red`,
-  `error`, or `infra` end and at the first infra end.
+  `recipe`, `push`. Each card gets a comment with the failed step and the
+  last 20 lines of the tail, indented. The daemon writes it in both board flows, after each `error`
+  or `infra` end and at the first infra end. A `red` end has the output in
+  its failure block.
 
 A batch merge:
 
