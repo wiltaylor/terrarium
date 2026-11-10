@@ -3,6 +3,7 @@
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { describeError } from "../lib/errors";
+import { isSelfHostedKind, PROVIDER_COLORS, providerLabel, providerMark } from "./providerLogos";
 
 /** Shows any thrown value. An ApiError shows its code and `error.details`. */
 export function ErrorBanner(props: { error: unknown; onDismiss?: () => void }) {
@@ -202,20 +203,46 @@ export function useNow(ms = 1000) {
   return now;
 }
 
-const PROVIDER_COLORS: Record<string, string> = {
-  anthropic: "#c96442",
-  openai: "#10a37f",
-  github: "#6e40c9",
-  google: "#4285f4",
-  openrouter: "#6467f2",
-  xai: "#222",
-  groq: "#f55036",
-};
-
-export function ProviderLogo(props: { provider: string }) {
+/**
+ * The provider's own mark (components/providerLogos.ts), with the provider
+ * name as the tooltip and the accessible name. A self-hosted server gets a
+ * server glyph, and a provider with no bundled mark gets the letter tile.
+ * `small` is the inline size, next to text.
+ */
+export function ProviderLogo(props: { provider: string; small?: boolean }) {
+  const mark = () => providerMark(props.provider);
+  const label = () => providerLabel(props.provider);
+  const cls = (extra: string) => `provider-logo${props.small ? " small" : ""} ${extra}`;
   return (
-    <span class="provider-logo" style={{ background: PROVIDER_COLORS[props.provider] ?? "#718096" }} aria-hidden="true">
-      {props.provider.slice(0, 1).toUpperCase()}
-    </span>
+    <Show
+      when={mark()}
+      fallback={
+        <Show
+          when={isSelfHostedKind(props.provider)}
+          fallback={
+            <span class={cls("letter")} style={{ background: PROVIDER_COLORS[props.provider.trim().toLowerCase()] ?? "#718096" }} role="img" aria-label={label()} title={label()}>
+              <span aria-hidden="true">{props.provider.trim().slice(0, 1).toUpperCase() || "?"}</span>
+            </span>
+          }
+        >
+          <span class={cls("glyph")} role="img" aria-label={label()} title={label()}>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2.5" y="2.5" width="11" height="4.5" rx="1" />
+              <rect x="2.5" y="9" width="11" height="4.5" rx="1" />
+              <path d="M5 4.75h.01M5 11.25h.01" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          </span>
+        </Show>
+      }
+    >
+      {(m) => (
+        <span class={cls(m().plate ? "mark plate" : "mark")} role="img" aria-label={label()} title={label()}>
+          <img class="provider-mark-light" src={m().light} alt="" draggable={false} />
+          <Show when={m().dark !== m().light}>
+            <img class="provider-mark-dark" src={m().dark} alt="" draggable={false} />
+          </Show>
+        </span>
+      )}
+    </Show>
   );
 }
