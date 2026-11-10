@@ -2325,10 +2325,7 @@ async fn move_mails_match(flow: &str) {
     if flow == "rules" {
         // The mails come from the rules, not from the move (TER-536): two
         // blocked moves and one move to done, each a run that changed.
-        let runs = td
-            .get("/api/projects/proj/rules/runs?limit=500")
-            .await
-            .ok()["runs"]
+        let runs = td.get("/api/projects/proj/rules/runs?limit=500").await.ok()["runs"]
             .as_array()
             .unwrap()
             .clone();
