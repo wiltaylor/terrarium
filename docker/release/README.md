@@ -7,7 +7,8 @@ directory to `/opt/terrarium/release/`. The updater's default image check
 `/opt/terrarium/release/cosign.pub` (`TERRARIUM_UPDATE_COSIGN_KEY`).
 
 The private key is the Terrarium secret `release-cosign` (fields
-`private_key` and `password`). It never enters this repo, an image, or a
+`private_key`, the encrypted PEM base64-encoded in one line, and
+`password`; made with cosign 3.1.4). It never enters this repo, an image, or a
 log. `just release::publish` signs with it and then verifies its own
 signatures with this `cosign.pub`, so a release with a key that does not
 match this file stops before the GitHub release.

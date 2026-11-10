@@ -1,35 +1,30 @@
 # syntax=docker/dockerfile:1.7
 #
-# The release build container (TER-613, docs/release.md): the image of the
-# release-only build target. `just release::publish` runs in it, as uid 1001
+# The release client container (TER-613, docs/release.md): the image of the
+# target where the release job runs `just release::publish`, as uid 1001
 # (the user of the old GitHub release CI), with:
 #
 #   the toolchain of the gate   rust 1.97.1 with rustfmt and clippy, just, uv, node 22, bubblewrap, git
-#   the image build             rootless BuildKit (buildctl-daemonless.sh), no Docker daemon
-#   the publish                 crane (pull the pushed image by digest), cosign, gh
+#   the image build             the docker CLI with buildx: the build runs on the release VM's
+#                               Docker daemon (TERRARIUM_DOCKER_HOST, the daemon's relay)
+#   the publish                 crane (push the built layout), cosign, gh
 #
 # Every tool is pinned: the base images by digest, the downloads by SHA-256.
 # cosign has the version of the cosign stage of docker/Dockerfile (the
 # updater verifies with it).
 #
 # Build: docker build -f docker/release.Dockerfile -t terrarium-release:<date> docker/
-# (the context needs no file). Run: rootless BuildKit needs these options on
-# the container (https://github.com/moby/buildkit/blob/master/docs/rootless.md):
-#
-#   --security-opt seccomp=unconfined --security-opt apparmor=unconfined
-#   --security-opt systempaths=unconfined
-#
-# No --privileged, no Docker socket. The secrets of the release reach only
-# the process of the release run (`terrarium run -e KEY=@secret:...`): the
-# image holds none.
+# (the context needs no file). The container needs no privilege, no Docker
+# socket of its host, and no secret: the release job passes the secrets
+# into the env of its process only, and this target runs no other job.
 
 ARG RUST_IMAGE=rust:1.97.1-trixie@sha256:b1b3c9c0d921d7fa0a6d1f9ec7e4eab87f8c8ec97644c3d791450f131dec813f
 # harnesses.toml [node] image.
 ARG NODE_IMAGE=node:22.23.4-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6
-ARG BUILDKIT_IMAGE=moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1
+ARG DOCKER_CLI_IMAGE=docker:29.0.3-cli@sha256:200642d6d6e6dbdc0f240d34f0636db56bbb1cc28a39195570f13eaf1c80134c
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.0
 
-FROM ${BUILDKIT_IMAGE} AS buildkit
+FROM ${DOCKER_CLI_IMAGE} AS docker-cli
 FROM ${NODE_IMAGE} AS node
 FROM ${UV_IMAGE} AS uv
 
@@ -60,7 +55,7 @@ RUN set -eu; \
 FROM ${RUST_IMAGE}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        bubblewrap ca-certificates git python3 uidmap util-linux fuse-overlayfs \
+        bubblewrap ca-certificates git python3 util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && rustup component add rustfmt clippy --toolchain 1.97.1
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
@@ -68,14 +63,11 @@ COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 COPY --from=uv /uv /uvx /usr/local/bin/
-COPY --from=buildkit /usr/bin/buildctl /usr/bin/buildkitd /usr/bin/buildctl-daemonless.sh \
-    /usr/bin/buildkit-runc /usr/bin/rootlesskit /usr/local/bin/
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
 COPY --from=tools /out/ /usr/local/bin/
-# uid 1001 with a subordinate id range for the user namespace of rootless BuildKit.
 RUN groupadd -g 1001 release \
     && useradd -m -u 1001 -g 1001 -s /bin/bash release \
-    && echo release:100000:65536 > /etc/subuid \
-    && echo release:100000:65536 > /etc/subgid \
     && mkdir -p /src && chown release:release /src
 USER 1001
 WORKDIR /home/release
@@ -83,5 +75,4 @@ WORKDIR /home/release
 # crates registry goes to the user's own CARGO_HOME.
 ENV CARGO_HOME=/home/release/.cargo \
     PATH=/home/release/.cargo/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
-    RUSTUP_TOOLCHAIN=1.97.1 \
-    BUILDKITD_FLAGS=--oci-worker-no-process-sandbox
+    RUSTUP_TOOLCHAIN=1.97.1

@@ -200,56 +200,68 @@ holds the binary is the item to verify.
 ## The local release build
 
 `just release::publish` runs `scripts/release.py` on a clean checkout of
-the commit to release, in the release build container
-(`docker/release.Dockerfile`: uid 1001, rootless BuildKit, crane, cosign,
-gh, and the toolchain of the gate). It uses the same trailers and version
-rules as the workflow (`scripts/release_version.py`). The steps:
+the commit to release. The release job runs it on the release client target
+(the image of `docker/release.Dockerfile`: uid 1001, the docker CLI with
+buildx, crane, cosign, gh, and the toolchain of the gate). The image build
+runs on the release VM's Docker daemon, which the Terrarium daemon reaches
+through its Docker relay: the recipe gets only
+`TERRARIUM_DOCKER_HOST=unix://<job socket>`, as merge jobs get the Docker CI
+VM ([api.md](api.md), the delivery `docker_ci` settings). The VM gets no
+secret. It uses the same trailers and version rules as the workflow
+(`scripts/release_version.py`). The steps:
 
 1. `version`: the version from the trailers of HEAD. No trailer: no
    release, exit 0.
 2. `check`: a clean checkout, the secrets in the env, the tools on PATH,
-   `docker/release/cosign.pub`, and no tag or release `v<version>` yet.
+   `docker/release/cosign.pub`, and no tag or release `v<version>` yet. It
+   logs the `X-OAuth-Scopes` and `github-authentication-token-expiration`
+   headers of `GET https://api.github.com/user` (never the token), and stops
+   when the token lacks `repo` or `write:packages`.
 3. `gate`: `just ci::validate` as a non-root user (uid 1001; with
    `setpriv` when the script runs as root). Its env has no secret, and
    `RESULTS_DIR` is `release-out/results`. A red gate publishes nothing.
 4. `stamp`: the version into `Cargo.toml` and `Cargo.lock`.
-5. `image`: BuildKit builds the runtime stage of `docker/Dockerfile` for
-   `linux/amd64`, with the OCI labels, an SBOM, and provenance
-   (`mode=max`), and pushes `:<version>` and `:pre` or `:latest`.
-6. `extract`: crane pulls the pushed digest again, and the script takes
-   the host agent and the host helper out of it, with the two checks of
-   "What a release publishes", and writes `SHA256SUMS`.
-7. `sign`: cosign signs the image digest, both binaries, and `SHA256SUMS`
+5. `image`: `docker buildx build` of the runtime stage of
+   `docker/Dockerfile` for `linux/amd64`, with the OCI labels, an SBOM,
+   and provenance (`mode=max`). The export is an OCI layout that comes back
+   to the client (`release-out/image`); the VM pushes nothing.
+6. `extract`: the host agent and the host helper out of that layout, with
+   the two checks of "What a release publishes", and `SHA256SUMS`.
+7. `push`: crane pushes the same layout as `:<version>` (the same bytes, so
+   the digest of the build) and tags `:pre` or `:latest`.
+8. `sign`: cosign signs the image digest, both binaries, and `SHA256SUMS`
    with the release key, and then verifies each signature with
    `docker/release/cosign.pub` of the checkout. A key that does not match
    stops the release here.
-8. `release`: `gh release create v<version> --target <commit>` (the API
+9. `release`: `gh release create v<version> --target <commit>` (the API
    makes the tag), with the binaries, `SHA256SUMS`, and the cosign bundles
    (`<asset>.sigstore.json`).
 
 `release-out/summary.json` records each step: the version, the commit, the
-gate, the digest, the asset hashes, and the release URL. The lead pushes
-`release-out/results` with `terrarium test push`.
+token scopes and expiry, the gate, the digest, the asset hashes, and the
+release URL. The lead pushes `release-out/results` with `terrarium test
+push`.
 
-`just release::dry-run` runs steps 1 to 6 with no secret: the image goes to
-an OCI layout in `release-out/image`, and nothing is pushed, signed, or
-released. `--no-gate` skips the gate in a dry run only.
+`just release::dry-run` runs steps 1 to 6 with no secret: nothing is pushed,
+signed, or released. `--no-gate` skips the gate in a dry run only.
 
 ### Secrets
 
-The secrets are Terrarium secrets. The lead's run passes them into the env
-of the release process only (`terrarium run <target> -e
-GHCR_TOKEN=@secret:release-ghcr ...`), never into a sandbox.
+The secrets are Terrarium secrets, granted to the release job's principal
+(`delivery:terrarium`) with `--level run` and the release client target only.
+That target runs no merge or validate job, so the code of a card cannot
+resolve them. The job passes them into the env of the release process only,
+never into a sandbox or to the VM.
 
-| Env | Secret | Scope | Who gets it |
+| Env | Secret | What it is | Who gets it |
 |---|---|---|---|
-| `GHCR_TOKEN` (`GHCR_USER`, default `wiltaylor`) | `release-ghcr` | a classic PAT with `write:packages` only (GHCR takes no fine-grained PAT) | BuildKit and crane, through a mode-0600 `config.json` in a private temporary directory that the script removes at the end |
-| `GH_TOKEN` | `release-github` | a fine-grained PAT for `wiltaylor/terrarium` only: Contents read and write, Metadata read | `gh` |
-| `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` | `release-cosign` (fields `private_key`, `password`) | the encrypted private key of the release key pair, and its password | `cosign sign` and `cosign sign-blob` only (`--key env://COSIGN_PRIVATE_KEY`: no key file) |
+| `GHCR_TOKEN` (`GHCR_USER`, default `wiltaylor`) and `GH_TOKEN` | `release-github` (field `value`) | one classic token with `repo` and `write:packages` (the operator's choice; it reaches all of the operator's repos) | crane and cosign through a mode-0600 `config.json` in a private temporary directory that the script removes at the end; `gh` and the scope check as `GH_TOKEN` |
+| `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` | `release-cosign` (fields `private_key`, `password`) | the encrypted private key of the release key pair (cosign 3.1.4), base64-encoded in one line, and its password | `cosign sign` and `cosign sign-blob` only. The script decodes the key in memory and passes the PEM in the env (`--key env://COSIGN_PRIVATE_KEY`): no key file |
 
 No secret is on a command line, in the output, in `release-out/`, in the
-build context, or in an image layer: the gate and the image build get an
-env without them (`scripts/test_release.py` checks each of these).
+build context, or in an image layer: the gate, the stamp, and the image
+build get an env without them (`scripts/test_release.py` checks each of
+these).
 
 ### The switch from the workflow to the local build
 

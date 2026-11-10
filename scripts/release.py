@@ -12,33 +12,40 @@ Steps (each one writes its part of <out>/summary.json):
 1. version  scripts/release_version.py: the trailers of HEAD. No trailer:
             no release, exit 0.
 2. check    a clean tree; publish: the secrets in the env, the tools on
-            PATH, docker/release/cosign.pub, and no tag or release
+            PATH, docker/release/cosign.pub, the scopes and the expiry of
+            the GitHub token (the headers only), and no tag or release
             v<version> yet.
 3. gate     `just ci::validate` (or --gate) as a non-root user: as uid
             1001 with setpriv when the script runs as root. The env of the
             gate has no secret. RESULTS_DIR is <out>/results. Red: stop,
             nothing is published.
 4. stamp    the version into Cargo.toml and Cargo.lock.
-5. image    BuildKit (buildctl) builds the runtime stage of
-            docker/Dockerfile for linux/amd64 with the OCI labels, an SBOM
-            and provenance (mode=max). Publish pushes <image>:<version> and
-            :pre or :latest. Dry run writes an OCI layout to <out>/image.
-6. extract  the host agent and the host helper out of the image (publish:
-            the pushed digest, pulled again with crane), with the two
-            checks of the old CI: the SHA-256 is the .sha256 of the image,
-            and `--version` is the release version. Writes SHA256SUMS.
-7. sign     publish: cosign signs the image digest, both binaries and
+5. image    `docker buildx build` of the runtime stage of docker/Dockerfile
+            for linux/amd64, with the OCI labels, an SBOM and provenance
+            (mode=max), on the Docker daemon of TERRARIUM_DOCKER_HOST (the
+            release VM, through the daemon's relay). The export is an OCI
+            layout on this side, <out>/image: the VM gets no secret.
+6. extract  the host agent and the host helper out of that layout, with
+            the two checks of the old CI: the SHA-256 is the .sha256 of the
+            image, and `--version` is the release version. Writes
+            SHA256SUMS.
+7. push     publish: crane pushes the layout as <image>:<version> (the
+            same bytes, so the same digest) and tags :pre or :latest.
+8. sign     publish: cosign signs the image digest, both binaries and
             SHA256SUMS with the release key (env://COSIGN_PRIVATE_KEY, no
             key file), then verifies each signature with
             docker/release/cosign.pub of the checkout.
-8. release  publish: `gh release create v<version> --target <commit>`
+9. release  publish: `gh release create v<version> --target <commit>`
             (the tag comes with the release) with the assets and bundles.
 
 Secrets, only in the env of this process: GHCR_TOKEN (GHCR_USER, default
-wiltaylor), GH_TOKEN, COSIGN_PRIVATE_KEY and COSIGN_PASSWORD. Each command
-gets only the secrets that it needs; the gate and the build get none, the
-registry login is a mode-0600 file in a private temporary directory that
-is removed at the end, and no secret is on a command line or in the output.
+wiltaylor) and GH_TOKEN (both the Terrarium secret release-github, one
+classic token), COSIGN_PRIVATE_KEY (release-cosign.private_key: the PEM,
+or the PEM base64-encoded in one line) and COSIGN_PASSWORD. Each command
+gets only the secrets that it needs: the gate and the build get none,
+crane reads the registry login from a mode-0600 file in a private
+temporary directory that is removed at the end, and no secret is on a
+command line or in the output.
 """
 
 from __future__ import annotations
@@ -77,8 +84,11 @@ SECRETS = ("GHCR_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "COSIGN_PRIVATE_KEY", "COSI
 PASS_ENV = (
     "PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR", "USER",
     "RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN", "CARGO_BUILD_JOBS",
-    "XDG_RUNTIME_DIR", "BUILDKIT_HOST", "BUILDKITD_FLAGS",
+    "XDG_RUNTIME_DIR",
 )
+GITHUB_API = "https://api.github.com"
+# The scopes of a classic token that the release needs (GHCR and the release).
+TOKEN_SCOPES = ("repo", "write:packages")
 
 
 class ReleaseError(Exception):
@@ -95,8 +105,8 @@ class Ctx:
     gate: str
     run_gate: bool
     signing_config: str | None
-    buildctl: str
     environ: dict[str, str]
+    github_api: str = GITHUB_API
     summary: dict = field(default_factory=dict)
     secret_dir: Path | None = None
 
@@ -161,17 +171,60 @@ def step_check(ctx: Ctx, version: str) -> None:
                if not ctx.environ.get(k)]
     if missing:
         raise ReleaseError("publish needs these secrets in the env: " + ", ".join(missing))
-    for tool in (ctx.buildctl, "crane", "cosign", "gh"):
+    for tool in ("docker", "crane", "cosign", "gh"):
         if not shutil.which(tool, path=ctx.environ.get("PATH")):
             raise ReleaseError(f"{tool} is not on PATH")
     if not (ctx.repo_dir / KEY_PATH).is_file():
         raise ReleaseError(f"{KEY_PATH} is missing: the updaters could not verify this release")
+    cosign_key(ctx)
+    token_info(ctx)
     view = subprocess.run(
         ["gh", "release", "view", f"v{version}", "--repo", ctx.gh_repo, "--json", "tagName"],
         cwd=ctx.repo_dir, env=gh_env(ctx), capture_output=True, text=True, check=False,
     )
     if view.returncode == 0:
         raise ReleaseError(f"the release v{version} exists on {ctx.gh_repo}")
+
+
+def cosign_key(ctx: Ctx) -> str:
+    """The PEM of COSIGN_PRIVATE_KEY: as is, or decoded from one line of base64."""
+    raw = ctx.environ.get("COSIGN_PRIVATE_KEY", "").strip()
+    if raw.startswith("-----BEGIN "):
+        return raw + "\n"
+    try:
+        pem = base64.b64decode("".join(raw.split()), validate=True).decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        raise ReleaseError("COSIGN_PRIVATE_KEY is neither a PEM nor base64 of a PEM") from None
+    if not pem.lstrip().startswith("-----BEGIN "):
+        raise ReleaseError("COSIGN_PRIVATE_KEY is base64, but not of a PEM") from None
+    return pem
+
+
+def token_info(ctx: Ctx) -> None:
+    """Log the scopes and the expiry of the GitHub token (headers only, never the token)."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"{ctx.github_api}/user",
+        headers={"Authorization": f"token {ctx.environ['GH_TOKEN']}", "User-Agent": "terrarium-release",
+                 "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            headers = r.headers
+    except urllib.error.HTTPError as e:
+        raise ReleaseError(f"GET {ctx.github_api}/user with the GitHub token: HTTP {e.code}") from None
+    except OSError as e:
+        raise ReleaseError(f"GET {ctx.github_api}/user: {e.__class__.__name__}") from None
+    scopes = [x.strip() for x in (headers.get("X-OAuth-Scopes") or "").split(",") if x.strip()]
+    expiry = headers.get("github-authentication-token-expiration") or "none"
+    ctx.summary["token"] = {"scopes": scopes, "expires": expiry}
+    ctx.save()
+    say(f"GitHub token: scopes {','.join(scopes) or '-'}, expires {expiry}")
+    missing = [x for x in TOKEN_SCOPES if x not in scopes]
+    if missing:
+        raise ReleaseError("the GitHub token lacks the scopes " + ", ".join(missing))
 
 
 # 3 ---------------------------------------------------------------------------
@@ -207,52 +260,76 @@ def step_stamp(ctx: Ctx, version: str) -> None:
 
 
 # 5 ---------------------------------------------------------------------------
-def build_argv(ctx: Ctx, version: str, prerelease: bool, commit: str) -> list[str]:
-    channel = "pre" if prerelease else "latest"
+def docker_env(ctx: Ctx) -> dict[str, str]:
+    """The env of docker: the daemon of TERRARIUM_DOCKER_HOST, and no registry login."""
+    env = ctx.base_env()
+    host = ctx.environ.get("TERRARIUM_DOCKER_HOST") or ctx.environ.get("DOCKER_HOST")
+    if host:
+        env["DOCKER_HOST"] = host
+    for k in ("BUILDX_BUILDER", "DOCKER_CONTEXT"):
+        if ctx.environ.get(k):
+            env[k] = ctx.environ[k]
+    return env
+
+
+def build_argv(ctx: Ctx, version: str, commit: str) -> list[str]:
     source = f"https://github.com/{ctx.gh_repo}"
-    if ctx.publish:
-        output = f'type=image,"name={ctx.image}:{version},{ctx.image}:{channel}",push=true'
-    else:
-        output = f"type=oci,dest={ctx.out / 'image'},tar=false"
-    argv = [
-        ctx.buildctl, "build",
-        "--frontend", "dockerfile.v0",
-        "--local", "context=.",
-        "--local", "dockerfile=docker",
-        "--opt", "filename=Dockerfile",
-        "--opt", "target=runtime",
-        "--opt", f"platform={PLATFORM}",
+    return [
+        "docker", "buildx", "build",
+        "--file", "docker/Dockerfile",
+        "--target", "runtime",
+        "--platform", PLATFORM,
         # `--version` of every binary: <version>+<commit> (crates/terrarium-version).
         # The commit: the stamp leaves a dirty tree.
-        "--opt", f"build-arg:TERRARIUM_GIT_REF={commit}",
-        "--opt", f"build-arg:TERRARIUM_VERSION={version}",
-        "--opt", f"label:org.opencontainers.image.version={version}",
-        "--opt", f"label:org.opencontainers.image.revision={commit}",
-        "--opt", f"label:org.opencontainers.image.source={source}",
-        "--opt", "attest:sbom=",
-        "--opt", "attest:provenance=mode=max",
+        "--build-arg", f"TERRARIUM_GIT_REF={commit}",
+        "--build-arg", f"TERRARIUM_VERSION={version}",
+        "--label", f"org.opencontainers.image.version={version}",
+        "--label", f"org.opencontainers.image.revision={commit}",
+        "--label", f"org.opencontainers.image.source={source}",
+        "--provenance=mode=max",
+        "--sbom=true",
         "--metadata-file", str(ctx.out / "build-metadata.json"),
-        "--output", output,
+        # The export comes back to this side: the VM pushes nothing and gets no login.
+        "--output", f"type=oci,dest={ctx.out / 'image.tar'}",
+        ".",
     ]
-    return argv
 
 
-def step_image(ctx: Ctx, version: str, prerelease: bool, commit: str) -> str:
-    env = ctx.base_env()
-    if ctx.secret_dir:
-        env["DOCKER_CONFIG"] = str(ctx.secret_dir)
-    run(build_argv(ctx, version, prerelease, commit), env, ctx.repo_dir)
+def extract_layout(archive: Path, dest: Path) -> None:
+    """Unpack the OCI layout tar of the build: plain files and dirs inside `dest` only."""
+    dest.mkdir(parents=True)
+    with tarfile.open(archive) as tar:
+        for m in tar:
+            rel = PurePosixPath(m.name)
+            if rel.is_absolute() or ".." in rel.parts:
+                raise ReleaseError(f"the image export has the path {m.name!r}")
+            target = dest.joinpath(*rel.parts) if rel.parts not in ((), (".",)) else dest
+            if m.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif m.isfile():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                src = tar.extractfile(m)
+                assert src is not None
+                with src, target.open("wb") as f:
+                    shutil.copyfileobj(src, f)
+            else:
+                raise ReleaseError(f"the image export has a link or device {m.name!r}")
+
+
+def step_image(ctx: Ctx, version: str, commit: str) -> str:
+    run(build_argv(ctx, version, commit), docker_env(ctx), ctx.repo_dir)
     meta = json.loads((ctx.out / "build-metadata.json").read_text())
     digest = meta.get("containerimage.digest", "")
     if not digest.startswith("sha256:"):
         raise ReleaseError(f"the build metadata has no image digest: {sorted(meta)}")
-    channel = "pre" if prerelease else "latest"
-    ctx.summary["image"] = {
-        "name": ctx.image,
-        "digest": digest,
-        "tags": [f"{ctx.image}:{version}", f"{ctx.image}:{channel}"],
-        "pushed": ctx.publish,
-    }
+    layout = ctx.out / "image"
+    shutil.rmtree(layout, ignore_errors=True)
+    extract_layout(ctx.out / "image.tar", layout)
+    top = json.loads((layout / "index.json").read_text()).get("manifests", [])
+    if [m.get("digest") for m in top] != [digest]:
+        raise ReleaseError(f"the OCI layout holds {[m.get('digest') for m in top]}, the build says {digest}")
+    (ctx.out / "image.tar").unlink()
+    ctx.summary["image"] = {"name": ctx.image, "digest": digest, "pushed": False}
     ctx.save()
     return digest
 
@@ -376,16 +453,8 @@ def image_files(layout: Path, wanted: list[str], platform: str = PLATFORM) -> di
     return {w: out[r] for w, r in real.items()}
 
 
-def step_extract(ctx: Ctx, version: str, digest: str) -> list[Path]:
-    if ctx.publish:
-        layout = ctx.out / "pulled"
-        env = ctx.base_env()
-        if ctx.secret_dir:
-            env["DOCKER_CONFIG"] = str(ctx.secret_dir)
-        run(["crane", "pull", "--format=oci", f"--platform={PLATFORM}",
-             f"{ctx.image}@{digest}", str(layout)], env, ctx.repo_dir)
-    else:
-        layout = ctx.out / "image"
+def step_extract(ctx: Ctx, version: str) -> list[Path]:
+    layout = ctx.out / "image"
     wanted = []
     for b in BINARIES:
         wanted += [f"{DIST}/{b}-x86_64-linux", f"{DIST}/{b}-x86_64-linux.sha256"]
@@ -417,12 +486,32 @@ def step_extract(ctx: Ctx, version: str, digest: str) -> list[Path]:
 
 
 # 7 ---------------------------------------------------------------------------
-def cosign_env(ctx: Ctx, *, key: bool) -> dict[str, str]:
+def crane_env(ctx: Ctx) -> dict[str, str]:
     env = ctx.base_env()
     if ctx.secret_dir:
         env["DOCKER_CONFIG"] = str(ctx.secret_dir)
+    return env
+
+
+def step_push(ctx: Ctx, version: str, prerelease: bool, digest: str) -> None:
+    """Push the layout that the checks read: the registry gets those bytes."""
+    channel = "pre" if prerelease else "latest"
+    ref = f"{ctx.image}:{version}"
+    proc = run(["crane", "push", str(ctx.out / "image"), ref], crane_env(ctx), ctx.repo_dir,
+               stdout=subprocess.PIPE)
+    pushed = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+    if pushed != f"{ctx.image}@{digest}":
+        raise ReleaseError(f"crane pushed {pushed!r}, not {ctx.image}@{digest}")
+    run(["crane", "tag", f"{ctx.image}@{digest}", channel], crane_env(ctx), ctx.repo_dir)
+    ctx.summary["image"].update(pushed=True, tags=[ref, f"{ctx.image}:{channel}"])
+    ctx.save()
+
+
+# 8 ---------------------------------------------------------------------------
+def cosign_env(ctx: Ctx, *, key: bool) -> dict[str, str]:
+    env = crane_env(ctx)
     if key:
-        env["COSIGN_PRIVATE_KEY"] = ctx.environ["COSIGN_PRIVATE_KEY"]
+        env["COSIGN_PRIVATE_KEY"] = cosign_key(ctx)
         env["COSIGN_PASSWORD"] = ctx.environ["COSIGN_PASSWORD"]
     return env
 
@@ -465,7 +554,7 @@ def step_sign(ctx: Ctx, digest: str, files: list[Path]) -> list[Path]:
     return bundles
 
 
-# 8 ---------------------------------------------------------------------------
+# 9 ---------------------------------------------------------------------------
 def gh_env(ctx: Ctx) -> dict[str, str]:
     return ctx.base_env(
         GH_TOKEN=ctx.environ.get("GH_TOKEN", ""), GH_PROMPT_DISABLED="1", GH_NO_UPDATE_NOTIFIER="1"
@@ -506,7 +595,7 @@ def step_release(ctx: Ctx, version: str, prerelease: bool, commit: str, digest: 
 
 # ---------------------------------------------------------------------------
 def registry_login(ctx: Ctx) -> None:
-    """A private DOCKER_CONFIG for buildctl and crane; the token is in no argv."""
+    """A private DOCKER_CONFIG for crane and cosign; the token is in no argv."""
     base = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
     ctx.secret_dir = Path(tempfile.mkdtemp(prefix="terrarium-release-", dir=base))
     ctx.secret_dir.chmod(0o700)
@@ -534,11 +623,11 @@ def release(ctx: Ctx) -> int:
         ctx.summary["gate"] = {"skipped": True}
     step_stamp(ctx, version)
     try:
+        digest = step_image(ctx, version, commit)
+        files = step_extract(ctx, version)
         if ctx.publish:
             registry_login(ctx)
-        digest = step_image(ctx, version, prerelease, commit)
-        files = step_extract(ctx, version, digest)
-        if ctx.publish:
+            step_push(ctx, version, prerelease, digest)
             bundles = step_sign(ctx, digest, files)
             step_release(ctx, version, prerelease, commit, digest, files + bundles)
     finally:
@@ -560,19 +649,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gate", default=DEFAULT_GATE, help="the release gate command")
     ap.add_argument("--no-gate", action="store_true", help="dry run only: skip the gate")
     ap.add_argument("--signing-config", help="tests only: a cosign signing config (no public log)")
+    ap.add_argument("--github-api", default=GITHUB_API, help="tests only: the GitHub API URL")
     a = ap.parse_args(argv)
     publish = a.mode == "publish"
     if publish and a.no_gate:
         ap.error("--no-gate is for the dry run only: a release passes the gate")
-    if publish and a.signing_config and os.environ.get("TERRARIUM_RELEASE_TEST") != "1":
+    testing = os.environ.get("TERRARIUM_RELEASE_TEST") == "1"
+    if publish and a.signing_config and not testing:
         ap.error("--signing-config is for the tests only (TERRARIUM_RELEASE_TEST=1)")
+    if a.github_api != GITHUB_API and not testing:
+        ap.error("--github-api is for the tests only (TERRARIUM_RELEASE_TEST=1)")
     repo_dir = Path(git_toplevel())
     out = Path(a.out)
     out = out if out.is_absolute() else Path.cwd() / out
     ctx = Ctx(
         repo_dir=repo_dir, out=out, publish=publish, image=a.image, gh_repo=a.repo,
         gate=a.gate, run_gate=not a.no_gate, signing_config=a.signing_config,
-        buildctl=os.environ.get("BUILDCTL", "buildctl-daemonless.sh"), environ=dict(os.environ),
+        environ=dict(os.environ), github_api=a.github_api,
     )
     try:
         return release(ctx)

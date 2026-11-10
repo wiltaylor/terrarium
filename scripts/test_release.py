@@ -1,7 +1,8 @@
 """Tests for scripts/release.py, the local release build (TER-613).
 
-The tools of the release (buildctl, crane, cosign, gh, cargo) are fakes on
-PATH that log their argv and the secrets in their env. The image is a
+The tools of the release (docker, crane, cosign, gh, cargo) are fakes on
+PATH that log their argv and the secrets in their env, and a local HTTP
+server stands in for GET /user of the GitHub API. The image is a
 synthetic OCI layout with the host agent and the host helper. The tests
 check the order of the steps, that a red gate or a failed check publishes
 nothing, and where each secret goes. One test runs the real cosign with a
@@ -12,8 +13,10 @@ Run: uv run python -m unittest discover -s scripts -p 'test_*.py'
 
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
+import http.server
 import io
 import json
 import os
@@ -22,6 +25,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import typing
 import unittest
 from pathlib import Path
 
@@ -31,13 +36,37 @@ SCRIPT = HERE / "release.py"
 sys.path.insert(0, str(HERE))
 import release
 
+# release-github is one classic token for GHCR and gh; release-cosign has the
+# PEM base64-encoded in one line.
+TOKEN = "gh-secret-token-1"
+PEM = ("-----BEGIN ENCRYPTED SIGSTORE PRIVATE KEY-----\ncosign-secret-key-body-3\n"
+       "-----END ENCRYPTED SIGSTORE PRIVATE KEY-----\n")
 SECRETS = {
-    "GHCR_TOKEN": "ghcr-secret-value-1",
-    "GH_TOKEN": "gh-secret-value-2",
-    "COSIGN_PRIVATE_KEY": "cosign-secret-key-3",
+    "GHCR_TOKEN": TOKEN,
+    "GH_TOKEN": TOKEN,
+    "COSIGN_PRIVATE_KEY": base64.b64encode(PEM.encode()).decode(),
     "COSIGN_PASSWORD": "cosign-secret-pass-4",
 }
-DIGEST = "sha256:" + "ab" * 32
+LEAKS = (TOKEN, SECRETS["COSIGN_PRIVATE_KEY"], "cosign-secret-key-body-3", "cosign-secret-pass-4")
+
+
+class FakeGitHub(http.server.BaseHTTPRequestHandler):
+    """GET /user: the scope and expiry headers of a classic token."""
+
+    scopes = "repo, write:packages"
+    seen: typing.ClassVar[list[str]] = []
+
+    def do_GET(self):
+        FakeGitHub.seen.append(self.headers.get("Authorization", ""))
+        self.send_response(200 if self.path == "/user" else 404)
+        self.send_header("X-OAuth-Scopes", FakeGitHub.scopes)
+        self.send_header("github-authentication-token-expiration", "2027-02-08 00:00:00 UTC")
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"login": "wiltaylor"}')
+
+    def log_message(self, *args):
+        pass
 
 # One fake for every tool: argv[0]'s name says which. It logs a JSON line.
 # Its settings are in fake.json next to it: release.py passes no FAKE_* env.
@@ -50,7 +79,8 @@ cfg = json.loads((Path(sys.argv[0]).parent / "fake.json").read_text())
 log = cfg["FAKE_LOG"]
 SECRETS = ("GHCR_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 entry = {"tool": tool, "argv": args, "secrets": {k: os.environ[k] for k in SECRETS if k in os.environ},
-         "uid": os.geteuid(), "docker_config": os.environ.get("DOCKER_CONFIG")}
+         "uid": os.geteuid(), "docker_config": os.environ.get("DOCKER_CONFIG"),
+         "docker_host": os.environ.get("DOCKER_HOST")}
 dc = os.environ.get("DOCKER_CONFIG")
 if dc and Path(dc, "config.json").exists():
     entry["config_mode"] = oct(stat.S_IMODE(os.stat(Path(dc, "config.json")).st_mode))
@@ -61,14 +91,19 @@ def opt(name):
     return args[args.index(name) + 1]
 if tool == "gate":
     sys.exit(int(cfg.get("FAKE_GATE_RC", "0")))
-if tool == "buildctl":
-    Path(opt("--metadata-file")).write_text(json.dumps({"containerimage.digest": cfg["FAKE_DIGEST"]}))
-    out = opt("--output")
-    if out.startswith("type=oci"):
-        dest = [p.split("=", 1)[1] for p in out.split(",") if p.startswith("dest=")][0]
-        shutil.copytree(cfg["FAKE_LAYOUT"], dest)
-elif tool == "crane" and args[0] == "pull":
-    shutil.copytree(cfg["FAKE_LAYOUT"], args[-1])
+def layout_digest():
+    return json.loads(Path(cfg["FAKE_LAYOUT"], "index.json").read_text())["manifests"][0]["digest"]
+if tool == "docker":
+    Path(opt("--metadata-file")).write_text(json.dumps(
+        {"containerimage.digest": cfg.get("FAKE_BUILD_DIGEST") or layout_digest()}))
+    dest = [p.split("=", 1)[1] for p in opt("--output").split(",") if p.startswith("dest=")][0]
+    import tarfile
+    with tarfile.open(dest, "w") as tar:
+        for f in sorted(Path(cfg["FAKE_LAYOUT"]).rglob("*")):
+            tar.add(f, arcname=f.relative_to(cfg["FAKE_LAYOUT"]).as_posix(), recursive=False)
+elif tool == "crane" and args[0] == "push":
+    repo = args[2].rsplit(":", 1)[0]
+    print(f"{repo}@{cfg.get('FAKE_PUSH_DIGEST') or layout_digest()}")
 elif tool == "cosign":
     if args[0] == "sign-blob":
         Path(opt("--bundle")).write_text("{}")
@@ -177,7 +212,7 @@ class Release(unittest.TestCase):
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         fake = FAKE.replace("PYTHON", sys.executable)
-        for tool in ("buildctl", "crane", "cosign", "gh", "cargo", "gate"):
+        for tool in ("docker", "crane", "cosign", "gh", "cargo", "gate"):
             p = self.bin / tool
             p.write_text(fake)
             p.chmod(0o755)
@@ -190,18 +225,26 @@ class Release(unittest.TestCase):
         self.layout = self.tmp / "layout"
         make_layout(self.layout, self.VERSION)
         self.out = self.tmp / "out"
+        FakeGitHub.scopes = "repo, write:packages"
+        FakeGitHub.seen = []
+        self.api = http.server.HTTPServer(("127.0.0.1", 0), FakeGitHub)
+        threading.Thread(target=self.api.serve_forever, daemon=True).start()
+        self.addCleanup(self.api.server_close)
+        self.addCleanup(self.api.shutdown)
 
     def run_release(self, mode, *extra, secrets=True, env=None, fake=None):
-        cfg = {"FAKE_LOG": str(self.log), "FAKE_LAYOUT": str(self.layout), "FAKE_DIGEST": DIGEST}
+        cfg = {"FAKE_LOG": str(self.log), "FAKE_LAYOUT": str(self.layout)}
         cfg.update(fake or {})
         (self.bin / "fake.json").write_text(json.dumps(cfg))
-        e = {"PATH": f"{self.bin}:{os.environ['PATH']}", "HOME": str(self.tmp), "BUILDCTL": "buildctl"}
+        e = {"PATH": f"{self.bin}:{os.environ['PATH']}", "HOME": str(self.tmp),
+             "TERRARIUM_RELEASE_TEST": "1", "TERRARIUM_DOCKER_HOST": "unix:///run/job/docker.sock"}
         if secrets:
             e.update(SECRETS)
         e.update(env or {})
         proc = subprocess.run(
             [sys.executable, "-I", str(SCRIPT), mode, "--out", str(self.out),
-             "--gate", str(self.bin / "gate"), *extra],
+             "--gate", str(self.bin / "gate"),
+             "--github-api", f"http://127.0.0.1:{self.api.server_address[1]}", *extra],
             cwd=self.repo, env=e, capture_output=True, text=True, check=False,
         )
         self.proc = proc
@@ -219,41 +262,54 @@ class Release(unittest.TestCase):
     def assert_no_secret_leaks(self):
         """No secret on any argv, in the output, or in a file of <out>."""
         for c in self.calls():
-            for v in SECRETS.values():
+            for v in LEAKS:
                 self.assertNotIn(v, " ".join(c["argv"]), c["tool"])
-        for v in SECRETS.values():
+        for v in LEAKS:
             self.assertNotIn(v, self.proc.stdout + self.proc.stderr)
             for f in self.out.rglob("*"):
                 if f.is_file():
                     self.assertNotIn(v.encode(), f.read_bytes(), str(f))
 
+    def digest(self):
+        return json.loads((self.layout / "index.json").read_text())["manifests"][0]["digest"]
+
     def test_publish_runs_the_steps_in_order_and_signs_everything(self):
         proc = self.run_release("publish")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        digest = self.digest()
+        image = release.DEFAULT_IMAGE
         self.assertEqual(
             self.tools(),
-            [("gh", "release"), ("gate", ""), ("cargo", "update"), ("buildctl", "build"),
-             ("crane", "pull"), ("cosign", "sign"), ("cosign", "verify"),
+            [("gh", "release"), ("gate", ""), ("cargo", "update"), ("docker", "buildx"),
+             ("crane", "push"), ("crane", "tag"), ("cosign", "sign"), ("cosign", "verify"),
              ("cosign", "sign-blob"), ("cosign", "sign-blob"), ("cosign", "sign-blob"),
              ("cosign", "verify-blob"), ("cosign", "verify-blob"), ("cosign", "verify-blob"),
              ("gh", "release")],
         )
         calls = self.calls()
         build = calls[3]["argv"]
-        self.assertIn(f'type=image,"name={release.DEFAULT_IMAGE}:{self.VERSION},'
-                      f'{release.DEFAULT_IMAGE}:latest",push=true', build)
-        for want in ("target=runtime", "platform=linux/amd64", "attest:sbom=",
-                     "attest:provenance=mode=max", f"build-arg:TERRARIUM_VERSION={self.VERSION}",
-                     f"label:org.opencontainers.image.version={self.VERSION}",
-                     "label:org.opencontainers.image.source=https://github.com/wiltaylor/terrarium"):
+        self.assertEqual(build[:2], ["buildx", "build"])
+        self.assertEqual(build[-1], ".")
+        # The build exports to this side and pushes nothing.
+        self.assertIn(f"type=oci,dest={self.out / 'image.tar'}", build)
+        self.assertNotIn("--push", build)
+        for want in ("--target", "runtime", "--platform", "linux/amd64", "--provenance=mode=max", "--sbom=true",
+                     f"TERRARIUM_VERSION={self.VERSION}", f"org.opencontainers.image.version={self.VERSION}",
+                     "org.opencontainers.image.source=https://github.com/wiltaylor/terrarium"):
             self.assertIn(want, build)
         commit = self.summary()["commit"]
-        self.assertIn(f"build-arg:TERRARIUM_GIT_REF={commit}", build)
-        self.assertIn(f"label:org.opencontainers.image.revision={commit}", build)
-        self.assertEqual(calls[4]["argv"][-2], f"{release.DEFAULT_IMAGE}@{DIGEST}")
-        self.assertEqual(calls[5]["argv"][-1], f"{release.DEFAULT_IMAGE}@{DIGEST}")
-        self.assertIn("env://COSIGN_PRIVATE_KEY", calls[5]["argv"])
-        self.assertEqual(calls[6]["argv"][:3], ["verify", "--key", str(self.repo / release.KEY_PATH)])
+        self.assertIn(f"TERRARIUM_GIT_REF={commit}", build)
+        self.assertIn(f"org.opencontainers.image.revision={commit}", build)
+        # The daemon's relay socket becomes DOCKER_HOST of docker only.
+        self.assertEqual(calls[3]["docker_host"], "unix:///run/job/docker.sock")
+        for c in calls:
+            if c["tool"] != "docker":
+                self.assertIsNone(c["docker_host"], c["tool"])
+        self.assertEqual(calls[4]["argv"], ["push", str(self.out / "image"), f"{image}:{self.VERSION}"])
+        self.assertEqual(calls[5]["argv"], ["tag", f"{image}@{digest}", "latest"])
+        self.assertEqual(calls[6]["argv"][-1], f"{image}@{digest}")
+        self.assertIn("env://COSIGN_PRIVATE_KEY", calls[6]["argv"])
+        self.assertEqual(calls[7]["argv"][:3], ["verify", "--key", str(self.repo / release.KEY_PATH)])
         signed = [Path(c["argv"][-1]).name for c in calls if c["argv"][:1] == ["sign-blob"]]
         self.assertEqual(signed, [f"terrarium-host-{self.VERSION}-linux-x86_64",
                                   f"terrarium-host-helper-{self.VERSION}-linux-x86_64", "SHA256SUMS"])
@@ -270,12 +326,15 @@ class Release(unittest.TestCase):
             h, name = line.split("  ")
             self.assertEqual(hashlib.sha256((self.out / "dist" / name).read_bytes()).hexdigest(), h)
         notes = (self.out / "notes.md").read_text()
-        self.assertIn(f"cosign verify --key cosign.pub {release.DEFAULT_IMAGE}@{DIGEST}", notes)
+        self.assertIn(f"cosign verify --key cosign.pub {image}@{digest}", notes)
         s = self.summary()
         self.assertTrue(s["done"])
-        self.assertEqual(s["image"]["digest"], DIGEST)
+        self.assertEqual(s["image"]["digest"], digest)
+        self.assertEqual(s["image"]["tags"], [f"{image}:{self.VERSION}", f"{image}:latest"])
         self.assertTrue(s["gate"]["passed"])
         self.assertEqual(s["release"]["tag"], f"v{self.VERSION}")
+        self.assertEqual(s["token"], {"scopes": ["repo", "write:packages"], "expires": "2027-02-08 00:00:00 UTC"})
+        self.assertIn("GitHub token: scopes repo,write:packages, expires 2027-02-08 00:00:00 UTC", proc.stdout)
         self.assertIn(f'version = "{self.VERSION}"', (self.repo / "Cargo.toml").read_text())
 
     def test_each_secret_goes_only_where_it_is_needed(self):
@@ -288,18 +347,56 @@ class Release(unittest.TestCase):
                 self.assertEqual(got, {"GH_TOKEN"}, c)
             elif c["tool"] == "cosign" and c["argv"][0] in ("sign", "sign-blob"):
                 self.assertEqual(got, key, c)
+                # cosign gets the PEM: the secret holds it base64-encoded.
+                self.assertEqual(c["secrets"]["COSIGN_PRIVATE_KEY"], PEM)
             else:
                 self.assertEqual(got, set(), c)
-        # The registry login: a private 0600 file, seen by the build, crane and cosign, gone after.
-        build = next(c for c in self.calls() if c["tool"] == "buildctl")
-        self.assertEqual(build["config_mode"], "0o600")
-        import base64
-        self.assertEqual(base64.b64decode(build["config_auth"]).decode(), f"wiltaylor:{SECRETS['GHCR_TOKEN']}")
-        self.assertFalse(Path(build["docker_config"]).exists())
-        gate = next(c for c in self.calls() if c["tool"] == "gate")
-        self.assertIsNone(gate["docker_config"])
-        self.assertNotEqual(gate["uid"], 0)
+        # The registry login: a private 0600 file for crane and cosign, gone after. docker has none.
+        push = next(c for c in self.calls() if c["tool"] == "crane")
+        self.assertEqual(push["config_mode"], "0o600")
+        self.assertEqual(base64.b64decode(push["config_auth"]).decode(), f"wiltaylor:{TOKEN}")
+        self.assertFalse(Path(push["docker_config"]).exists())
+        for tool in ("docker", "gate", "cargo"):
+            c = next(c for c in self.calls() if c["tool"] == tool)
+            self.assertIsNone(c["docker_config"], tool)
+        self.assertNotEqual(next(c for c in self.calls() if c["tool"] == "gate")["uid"], 0)
+        # The token goes to the GitHub API, and nowhere else.
+        self.assertEqual(FakeGitHub.seen, [f"token {TOKEN}"])
         self.assert_no_secret_leaks()
+
+    def test_a_token_without_the_scopes_stops_before_the_gate(self):
+        FakeGitHub.scopes = "repo"
+        proc = self.run_release("publish")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("the GitHub token lacks the scopes write:packages", proc.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assert_no_secret_leaks()
+
+    def test_a_key_that_is_neither_pem_nor_base64_stops_it(self):
+        proc = self.run_release("publish", env={"COSIGN_PRIVATE_KEY": "not a key!"})
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("COSIGN_PRIVATE_KEY is neither a PEM nor base64 of a PEM", proc.stderr)
+        self.assertNotIn("not a key!", proc.stdout + proc.stderr)
+        proc = self.run_release("publish", env={"COSIGN_PRIVATE_KEY": base64.b64encode(b"plain").decode()})
+        self.assertIn("base64, but not of a PEM", proc.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_plain_pem_key_works_too(self):
+        proc = self.run_release("publish", env={"COSIGN_PRIVATE_KEY": PEM})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        sign = next(c for c in self.calls() if c["argv"][:1] == ["sign"])
+        self.assertEqual(sign["secrets"]["COSIGN_PRIVATE_KEY"], PEM)
+
+    def test_a_push_of_other_bytes_stops_before_the_signatures(self):
+        proc = self.run_release("publish", fake={"FAKE_PUSH_DIGEST": "sha256:" + "00" * 32})
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("crane pushed", proc.stderr)
+        self.assertEqual(self.tools()[-1], ("crane", "push"))
+
+    def test_a_build_digest_that_is_not_the_layout_stops_it(self):
+        proc = self.run_release("dry-run", secrets=False, fake={"FAKE_BUILD_DIGEST": "sha256:" + "11" * 32})
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("the OCI layout holds", proc.stderr)
 
     def test_a_prerelease_gets_the_pre_tag_and_flag(self):
         git(self.repo, "commit", "-q", "--allow-empty", "-m", "feat: b", "-m", "pre-release: true")
@@ -307,20 +404,23 @@ class Release(unittest.TestCase):
         make_layout(self.layout, "0.6.0-alpha")
         proc = self.run_release("publish")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        build = next(c for c in self.calls() if c["tool"] == "buildctl")["argv"]
-        self.assertIn(f'type=image,"name={release.DEFAULT_IMAGE}:0.6.0-alpha,{release.DEFAULT_IMAGE}:pre",push=true', build)
-        self.assertIn("--prerelease", self.calls()[-1]["argv"])
+        calls = self.calls()
+        self.assertEqual(next(c for c in calls if c["argv"][:1] == ["push"])["argv"][-1],
+                         f"{release.DEFAULT_IMAGE}:0.6.0-alpha")
+        self.assertEqual(next(c for c in calls if c["argv"][:1] == ["tag"])["argv"][-1], "pre")
+        self.assertIn("--prerelease", calls[-1]["argv"])
 
     def test_dry_run_builds_and_extracts_but_publishes_nothing(self):
         proc = self.run_release("dry-run", secrets=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(self.tools(), [("gate", ""), ("cargo", "update"), ("buildctl", "build")])
-        build = self.calls()[2]["argv"]
-        self.assertIn(f"type=oci,dest={self.out / 'image'},tar=false", build)
+        self.assertEqual(self.tools(), [("gate", ""), ("cargo", "update"), ("docker", "buildx")])
         self.assertEqual(len((self.out / "dist/SHA256SUMS").read_text().splitlines()), 2)
+        self.assertTrue((self.out / "image/index.json").is_file())
+        self.assertFalse((self.out / "image.tar").exists())
         s = self.summary()
         self.assertEqual(s["mode"], "dry-run")
         self.assertFalse(s["image"]["pushed"])
+        self.assertEqual(FakeGitHub.seen, [])
 
     def test_dry_run_can_skip_the_gate_but_publish_cannot(self):
         proc = self.run_release("dry-run", "--no-gate", secrets=False)
@@ -400,9 +500,28 @@ class Release(unittest.TestCase):
         self.assertNotIn("create", [c["argv"][1] for c in self.calls() if c["tool"] == "gh"])
 
     def test_the_test_signing_config_is_refused_outside_the_tests(self):
-        proc = self.run_release("publish", "--signing-config", "/x.json")
+        proc = self.run_release("publish", "--signing-config", "/x.json", env={"TERRARIUM_RELEASE_TEST": "0"})
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("--signing-config is for the tests only", proc.stderr)
+        proc = self.run_release("publish", env={"TERRARIUM_RELEASE_TEST": "0"})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("--github-api is for the tests only", proc.stderr)
+        self.assertEqual(self.calls(), [])
+
+
+class ExtractLayout(unittest.TestCase):
+    def test_a_path_out_of_the_layout_or_a_link_is_refused(self):
+        for name, kind in (("../evil", tarfile.REGTYPE), ("/abs", tarfile.REGTYPE), ("blobs/l", tarfile.SYMTYPE)):
+            with tempfile.TemporaryDirectory() as tmp:
+                archive = Path(tmp, "image.tar")
+                with tarfile.open(archive, "w") as tar:
+                    info = tarfile.TarInfo(name)
+                    info.type = kind
+                    info.linkname = "/etc/passwd" if kind == tarfile.SYMTYPE else ""
+                    tar.addfile(info, io.BytesIO(b"") if kind == tarfile.REGTYPE else None)
+                with self.assertRaises(release.ReleaseError, msg=name):
+                    release.extract_layout(archive, Path(tmp, "out"))
+                self.assertFalse(Path(tmp, "evil").exists())
 
 
 class ImageFiles(unittest.TestCase):
@@ -449,9 +568,16 @@ class Pins(unittest.TestCase):
 
     def test_the_base_images_of_the_release_container_are_pinned_by_digest(self):
         build = (REPO / "docker/release.Dockerfile").read_text()
-        for name in ("RUST_IMAGE", "NODE_IMAGE", "BUILDKIT_IMAGE"):
+        for name in ("RUST_IMAGE", "NODE_IMAGE", "DOCKER_CLI_IMAGE"):
             self.assertIn("@sha256:", self.arg(build, name), name)
         self.assertIn("USER 1001", build)
+
+    def test_the_release_public_key_is_in_the_repo(self):
+        # The updater's default check and release.py need it (docker/release/README.md).
+        pem = (REPO / release.KEY_PATH).read_text()
+        self.assertTrue(pem.startswith("-----BEGIN PUBLIC KEY-----\n"), pem[:40])
+        self.assertTrue(pem.endswith("-----END PUBLIC KEY-----\n"))
+        self.assertNotIn("PRIVATE", pem)
 
     def test_the_compose_default_is_the_cosign_check(self):
         compose = (REPO / "compose.yaml").read_text()
@@ -481,10 +607,14 @@ class RealCosign(unittest.TestCase):
             (t / "cosign.key").unlink()
             ctx = release.Ctx(
                 repo_dir=t, out=t / "out", publish=True, image="x", gh_repo="o/r", gate="true",
-                run_gate=False, signing_config=str(sc), buildctl="buildctl",
+                run_gate=False, signing_config=str(sc),
                 environ={"PATH": os.environ["PATH"], "HOME": tmp, "COSIGN_PRIVATE_KEY": private,
                          "COSIGN_PASSWORD": "test-only"},
             )
+            bundles = release.sign_blobs(ctx, [blob])
+            self.assertTrue(bundles[0].is_file())
+            # The secret's form: the PEM base64-encoded in one line.
+            ctx.environ["COSIGN_PRIVATE_KEY"] = base64.b64encode(private.encode()).decode()
             bundles = release.sign_blobs(ctx, [blob])
             self.assertTrue(bundles[0].is_file())
             self.assertNotIn("PRIVATE", bundles[0].read_text())
