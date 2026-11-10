@@ -278,6 +278,19 @@ async fn daemon_main() -> anyhow::Result<()> {
             terrariumd::conflict_hints::pass(&state).await;
         }
     });
+    // The reviewed commits of the cards in the merge queue (TER-553): the
+    // API and the rules record them right after a move; this timer takes
+    // the moves of other paths and the reads that failed.
+    let accepted_state = std::sync::Arc::downgrade(&daemon.state);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let Some(state) = accepted_state.upgrade() else {
+                return;
+            };
+            terrariumd::jobs::record_accepted_heads(&state).await;
+        }
+    });
     // The remote card-branch heads for no_progress (TER-370): its own timer,
     // so slow remotes delay neither conflict hints nor lifecycle work. Each
     // pass is capped and the cursor rotates through the working cards.

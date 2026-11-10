@@ -110,7 +110,7 @@ rule "merge-group-failed" {
   on = ["job.verdict"]
   max_per_hour = 600
   when "data.kind" { eq = "merge" }
-  when "data.verdict" { one_of = ["red", "conflict", "error", "cancelled"] }
+  when "data.verdict" { one_of = ["red", "conflict", "moved", "error", "cancelled"] }
   group_status { key = "{{job.group_key}}" step = "{{group.failed_step}}" state = "failed" }
 }
 
@@ -270,6 +270,20 @@ rule "job-fail-conflict" {
     subject = "{{card.id}}: validation failed"
     body = "{{job.fail_mail}}"
   }
+}
+
+rule "job-moved" {
+  description = "A branch that moved after its review leaves the merge: back to review, no rerun (TER-553)."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "moved" }
+  if_card { not_column = ["@ready", "backlog"] }
+  card_label { remove = ["validation:running", "validation:queued"] }
+  card_move {
+    to = "@review"
+    comment = "{{job.fail_comment}}"
+  }
+  card_assign { who = "none" }
 }
 
 rule "job-fail-red" {
