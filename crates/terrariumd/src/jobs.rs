@@ -1949,8 +1949,7 @@ fn release_fix(repo: &git::JobRepo, job: &Job, release: &str) -> Result<(), Stri
         Ok(false) => return Err(format!("the tested commit {want} is not on next")),
         Err(e) => return Err(e.to_string()),
     }
-    let foreign =
-        brought_from_next(repo, release, &tested, upstream).map_err(|e| e.to_string())?;
+    let foreign = brought_from_next(repo, release, &tested, upstream).map_err(|e| e.to_string())?;
     if !foreign.is_empty() {
         let shown: Vec<&str> = foreign.iter().take(5).map(String::as_str).collect();
         return Err(format!(
@@ -1994,7 +1993,10 @@ fn brought_from_next(
     let Some(before) = repo.commit_of(&format!("{m}^1"))? else {
         return Ok(Vec::new());
     };
-    let had: HashSet<String> = repo.rev_list(&before, release, false)?.into_iter().collect();
+    let had: HashSet<String> = repo
+        .rev_list(&before, release, false)?
+        .into_iter()
+        .collect();
     Ok(repo
         .rev_list(tested, release, false)?
         .into_iter()
