@@ -933,8 +933,11 @@ mod tests {
         let f = tmp.path().join("c.zip");
         std::fs::write(tmp.path().join(format!("{UNVERIFIED_PREFIX}c.zip")), "old").unwrap();
         for n in 2..=SET_ASIDE_NAMES {
-            std::fs::write(tmp.path().join(format!("{UNVERIFIED_PREFIX}c.zip-{n}")), "old")
-                .unwrap();
+            std::fs::write(
+                tmp.path().join(format!("{UNVERIFIED_PREFIX}c.zip-{n}")),
+                "old",
+            )
+            .unwrap();
         }
         std::fs::write(&f, "bad").unwrap();
         let r = set_aside(&f).unwrap();
