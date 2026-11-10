@@ -36,28 +36,38 @@ pub struct Stall<M> {
     mark: M,
     since: std::time::Instant,
     start: std::time::Instant,
+    window: Duration,
+    hard: Duration,
 }
 
 impl<M: PartialEq + std::fmt::Debug> Stall<M> {
     pub fn new(mark: M) -> Self {
+        Self::with_limits(mark, WAIT, HARD_WAIT)
+    }
+
+    /// A wait that fails after `window` without progress, or after `hard`
+    /// in all.
+    pub fn with_limits(mark: M, window: Duration, hard: Duration) -> Self {
         let now = std::time::Instant::now();
         Self {
             mark,
             since: now,
             start: now,
+            window,
+            hard,
         }
     }
 
-    /// True when [`WAIT`] went by since the last progress: read a new mark
-    /// and give it to [`Stall::moved`].
+    /// True when the window went by since the last progress: read a new
+    /// mark and give it to [`Stall::moved`].
     pub fn due(&self) -> bool {
-        self.since.elapsed() >= WAIT
+        self.since.elapsed() >= self.window
     }
 
     /// Takes a new mark. A changed mark is progress and starts a new
     /// window. False: the wait has failed.
     pub fn moved(&mut self, mark: M) -> bool {
-        if mark == self.mark || self.start.elapsed() >= HARD_WAIT {
+        if mark == self.mark || self.start.elapsed() >= self.hard {
             return false;
         }
         self.mark = mark;
@@ -577,21 +587,46 @@ impl TestDaemon {
         self.post("/api/agents", def).await.ok().clone()
     }
 
-    /// Poll until the agent has `status`.
+    /// The newest event `seq` of the whole daemon: what moves while a
+    /// start, a turn, a job or a rule run goes on.
+    pub async fn last_seq(&self) -> i64 {
+        let db = self.daemon.as_ref().unwrap().state.db.clone();
+        db.read(terrariumd::events::last_seq).await.unwrap()
+    }
+
+    /// The progress of agent `agent`: its newest event `seq`, its status,
+    /// and the newest event of the daemon.
+    pub async fn agent_progress(&self, agent: &str) -> (Value, Value, i64) {
+        let newest = self
+            .get(&format!("/api/agents/{agent}/events?order=desc&limit=1"))
+            .await;
+        let status = self.get(&format!("/api/agents/{agent}")).await;
+        (
+            newest.body[0]["seq"].clone(),
+            status.body["status"].clone(),
+            self.last_seq().await,
+        )
+    }
+
+    /// Poll until the agent has `status`. The wait counts only time
+    /// without progress ([`Stall`]): under merge-job load a fake start
+    /// stayed `starting` for over [`WAIT`] while the daemon still moved
+    /// (TER-674).
     pub async fn wait_status(&self, agent: &str, status: &str) {
-        // A deadline, not a count of tries: on a loaded machine each GET is
-        // slow, and a start can take seconds. Only a failing test waits it out.
-        let start = std::time::Instant::now();
+        let mut stall = Stall::new(self.agent_progress(agent).await);
         loop {
             let r = self.get(&format!("/api/agents/{agent}")).await;
             if r.body["status"] == status {
                 return;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "agent {agent} never reached {status}; last {}",
-                r.body["status"]
-            );
+            if stall.due() {
+                let mark = self.agent_progress(agent).await;
+                assert!(
+                    stall.moved(mark),
+                    "agent {agent} never reached {status}; last {} ({stall})",
+                    r.body["status"]
+                );
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }

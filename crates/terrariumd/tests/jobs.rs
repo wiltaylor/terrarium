@@ -27,6 +27,14 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(300);
 
+/// A wait on the queue or a card that fails after [`DEADLINE`] without
+/// progress, or after two of them in all. Under merge-job load (load 39,
+/// IO pressure 40%) a queue that still moved took longer than
+/// [`DEADLINE`] from the start of the wait (TER-674).
+fn stall<M: PartialEq + std::fmt::Debug>(mark: M) -> common::Stall<M> {
+    common::Stall::with_limits(mark, DEADLINE, 2 * DEADLINE)
+}
+
 /// Run the test `$name(flow)` once with each board flow (TER-170): the
 /// tests `$name::code` and `$name::rules`.
 macro_rules! both_flows {
@@ -1075,7 +1083,7 @@ impl Lab {
     /// engine then settles, so the later actions of the run that made `f`
     /// true (an unassign after a move) are there too.
     async fn until_card(&self, id: &str, what: &str, f: impl Fn(&Value) -> bool) -> Value {
-        let start = Instant::now();
+        let mut stall = stall((self.td.last_seq().await, Value::Null));
         loop {
             let c = self.card_of(id).await;
             if f(&c) {
@@ -1085,7 +1093,7 @@ impl Lab {
                 self.settle().await;
                 return self.card_of(id).await;
             }
-            if start.elapsed() >= DEADLINE {
+            if stall.due() && !stall.moved((self.td.last_seq().await, c["updated_at"].clone())) {
                 let runs = self.td.get("/api/projects/p/rules/runs?limit=200").await;
                 let runs: Vec<Value> = runs.body["runs"]
                     .as_array()
@@ -1094,7 +1102,7 @@ impl Lab {
                     .into_iter()
                     .filter(|r| r["state"] != "noop" && r["card"] == id)
                     .collect();
-                panic!("card {id} never got {what}; last {c}\nrule runs: {runs:#?}");
+                panic!("card {id} never got {what} ({stall}); last {c}\nrule runs: {runs:#?}");
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -1159,13 +1167,22 @@ impl Lab {
     }
 
     async fn until_idle(&self) -> Vec<Value> {
-        let start = Instant::now();
+        let mut stall = stall((self.td.last_seq().await, Vec::new()));
         loop {
             let v = self.td.get("/api/projects/p/jobs").await.ok().clone();
             if v["running"] == 0 && v["queued"] == 0 {
                 return v["jobs"].as_array().unwrap().clone();
             }
-            assert!(start.elapsed() < DEADLINE, "the queue never drained: {v}");
+            // The state and the tail length of each job, not `at`: the time
+            // of the answer moves on each poll.
+            if stall.due() {
+                let jobs = v["jobs"].as_array().unwrap().iter();
+                let jobs: Vec<_> = jobs
+                    .map(|j| (j["state"].clone(), j["tail"].as_str().map(str::len)))
+                    .collect();
+                let mark = (self.td.last_seq().await, jobs);
+                assert!(stall.moved(mark), "the queue never drained ({stall}): {v}");
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
