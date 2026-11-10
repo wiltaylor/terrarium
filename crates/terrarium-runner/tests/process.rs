@@ -583,7 +583,10 @@ async fn a_start_that_times_out_kills_the_process() {
     // A kill before the shell wrote its pid leaves no file, and no process.
     if let Ok(pid) = std::fs::read_to_string(&pid_file) {
         let proc_dir = PathBuf::from(format!("/proc/{}", pid.trim()));
-        until("the gated process is killed and reaped", || !proc_dir.exists()).await;
+        until("the gated process is killed and reaped", || {
+            !proc_dir.exists()
+        })
+        .await;
     }
     std::fs::remove_file(&gate).unwrap();
     tokio::time::sleep(ms(500)).await;
