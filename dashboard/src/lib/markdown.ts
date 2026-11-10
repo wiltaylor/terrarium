@@ -46,10 +46,11 @@ const safePart = (s: string): boolean => s.trim() !== "" && s !== "." && s !== "
 
 /**
  * A page target that stays inside `/p/<project>/knowledge/wiki/` (TER-598):
- * a project and page path with no empty, `.`, or `..` part. A text or
+ * a project with no `/`, and a project and page path with no empty, `.`, or
+ * `..` part. A text or
  * `wiki:` link refuses any other page.
  */
-export const safePageTarget = (t: WikiTarget): boolean => t.kind === "page" && safePart(t.project) && t.path.split("/").every(safePart);
+export const safePageTarget = (t: WikiTarget): boolean => t.kind === "page" && safePart(t.project) && !t.project.includes("/") && t.path.split("/").every(safePart);
 
 export function targetHref(t: WikiTarget): string {
   const p = `/p/${encodeURIComponent(t.project)}`;
@@ -87,7 +88,8 @@ const SAFE_URL = /^(https?:|mailto:|\/|#|\.|artifact:|data:image\/(png|gif|jpeg|
 function hasUserInfo(h: string): boolean {
   if (!/^(?:https?:|[\\/]{2})/i.test(h)) return false;
   try {
-    const u = new URL(h, "https://base.invalid/");
+    // Without a base, `https:user@host` parses as on a page with another scheme: with the user.
+    const u = /^https?:/i.test(h) ? new URL(h) : new URL(h, "https://base.invalid/");
     return u.username !== "" || u.password !== "";
   } catch {
     return true;

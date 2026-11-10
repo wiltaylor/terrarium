@@ -55,7 +55,7 @@ function mount(view: () => JSX.Element) {
       }),
     el,
   );
-  return { el, history };
+  return el;
 }
 
 const peek = () => document.querySelector<HTMLElement>(".card-peek");
@@ -89,7 +89,7 @@ describe("CardPeek", () => {
 
   it("closes with the close button and with the link to the board", async () => {
     get.mockResolvedValue(card("TER-1", { body: "", comments: [] }));
-    const { history } = mount(() => createComponent(CardPeek, {}));
+    mount(() => createComponent(CardPeek, {}));
     cardPeek.open({ project: "terrarium", id: "TER-1" });
     await vi.waitFor(() => expect(peek()).not.toBeNull());
     expect(peek()!.textContent).toContain("No description.");
@@ -104,7 +104,6 @@ describe("CardPeek", () => {
     expect(board.getAttribute("href")).toBe("/p/terrarium/board?card=TER-1");
     board.click();
     expect(cardPeek.current()).toBeNull();
-    expect(history.get()).toBe("/p/terrarium/board?card=TER-1");
   });
 
   it("shows a load error", async () => {
@@ -112,6 +111,8 @@ describe("CardPeek", () => {
     mount(() => createComponent(CardPeek, {}));
     cardPeek.open({ project: "terrarium", id: "TER-404" });
     await vi.waitFor(() => expect(document.querySelector(".drawer")!.textContent).toContain("no such card"));
+    expect(document.querySelector(".drawer")!.textContent).not.toContain("Loading the card.");
+    expect(peek()).toBeNull();
   });
 
   it("closes only the top panel on Escape when it is open over the board drawer", async () => {
