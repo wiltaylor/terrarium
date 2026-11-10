@@ -9151,6 +9151,25 @@ Its rules, in order:
 | `card-blocked-mail`, `card-done-mail` | a card move to the blocked column; to `done` | the blocked notice to the operator and the creator; the done notice on each linked thread |
 | `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `accepted` (names, as §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
 
+The move mails of the rules differ from the mails of the coded move
+(TER-536):
+
+- The rules send them after the move, in their own write. A late run
+  names the column of the event (`data.to`), not the column the card is
+  in now. An event without `author` names its actor (`operator`, the
+  agent, else `system`).
+- `card-blocked-mail` and `card-done-mail` set `max_per_hour = 600`: at
+  most 600 runs of each rule in an hour, per project and per card. A
+  later move in that hour sends no mail (a `skipped` run).
+- A move at chain depth 4 (a move by a rule run of a chain of rule runs)
+  starts no run, so it sends no mail (a `skipped` run, loop guard).
+- `card.blocked_mail` and `card.done_mail` only notify: they act on a
+  card held by the GitHub author gate, as the coded move does. Every
+  other verb refuses a held card.
+- With `board_flow = code` the move sends the mails, and the two verbs
+  are a no-op (`noop`), so a `rules.wcl` that uses them sends no second
+  mail.
+
 One change from the coded flow, by the operator's rule of 2026-11-07
 (MEM-84): a red merge group gets a fix card first, and splits in halves
 only after three fix cards. The fix cards of a group are the cards with a
