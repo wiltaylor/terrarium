@@ -5470,7 +5470,10 @@ async fn a_queued_card_without_its_reviewed_commit_is_not_merged() {
     let text = comments(&lab.card_of(&card).await);
     assert_eq!(text.matches("is not recorded").count(), 1, "{text}");
     assert!(text.contains(&expired), "{text}");
-    assert!(text.contains("move the card out of `merge_queue`"), "{text}");
+    assert!(
+        text.contains("move the card out of `merge_queue`"),
+        "{text}"
+    );
     let (_, note, _) = round_of(&lab, &card).await.expect("a round");
     assert_eq!(note.as_deref(), Some(expired.as_str()));
     let r = lab
@@ -5523,7 +5526,11 @@ async fn a_queued_card_without_a_round_is_not_merged() {
         .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
         .await;
     assert_eq!(r.status, 409, "{}", r.body);
-    assert!(r.body.to_string().contains("no reviewed commit"), "{}", r.body);
+    assert!(
+        r.body.to_string().contains("no reviewed commit"),
+        "{}",
+        r.body
+    );
 }
 
 /// TER-580: a rule moves the card into the merge queue (a round with no
@@ -5633,11 +5640,7 @@ async fn a_late_read_of_an_earlier_round_records_nothing() {
         assert_eq!(terrariumd::jobs::record_accepted_heads(&state).await, 0);
     }
     let text = comments(&lab.card_of(&card).await);
-    assert_eq!(
-        text.matches("opened by the upgrade").count(),
-        1,
-        "{text}"
-    );
+    assert_eq!(text.matches("opened by the upgrade").count(), 1, "{text}");
     // Without the mark the same read records: the guards were the cause.
     sql_on(
         &lab,
