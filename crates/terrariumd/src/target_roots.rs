@@ -283,7 +283,9 @@ try:
     fds.append(fd)
     flags = os.O_RDONLY | os.O_NOFOLLOW
     if created:
-        marker = os.open('.terrarium-owner', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        # Group-readable: on a native host the next prepare or the sweep can
+        # run as another pool UID of the shared group (TER-635).
+        marker = os.open('.terrarium-owner', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640, dir_fd=fd)
         with os.fdopen(marker, 'w') as out: out.write(agent)
     marker = os.open('.terrarium-owner', flags, dir_fd=fd)
     with os.fdopen(marker) as inp:
@@ -310,7 +312,7 @@ try:
             os.unlink('.terrarium-owner', dir_fd=fd)
             try: os.rmdir(name, dir_fd=parent)
             except OSError:
-                marker = os.open('.terrarium-owner', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+                marker = os.open('.terrarium-owner', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640, dir_fd=fd)
                 with os.fdopen(marker, 'w') as out: out.write(agent)
                 raise
         print(size)
@@ -1490,6 +1492,37 @@ mod tests {
             other.contains("cannot prepare owned target root under /var/build: owner"),
             "{other}"
         );
+    }
+
+    /// TER-635: on a native host the units run with UMask=0007 under the
+    /// setgid workspace root, and the sessions of one holder can run as
+    /// different pool UIDs of the group terrarium-ws. Prepare must leave
+    /// the project dir and the holder dir setgid with group rwx, and the
+    /// owner marker group-readable, so that any pool UID of the holder
+    /// can write the root and a prepare or sweep as another pool UID can
+    /// check the owner.
+    #[test]
+    fn prepare_under_a_setgid_root_with_umask_0007_leaves_group_access() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("src/terrarium");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o2775)).unwrap();
+        let script = SCRIPT.replace(
+            "os.open('/',",
+            &format!("os.open({:?},", tmp.path().to_str().unwrap()),
+        );
+        let out = Command::new("sh")
+            .args(["-c", "umask 0007 && exec python3 -c \"$0\" \"$@\""])
+            .args([&script, "prepare", "/src/terrarium", "p", "a", "agent-id", "repo/x"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        for dir in ["p", "p/a", "p/a/repo", "p/a/repo/x"] {
+            assert_eq!(mode(&work.join(dir)), 0o2770, "{dir}");
+        }
+        assert_eq!(mode(&work.join("p/a/.terrarium-owner")), 0o640);
     }
 
     #[test]
