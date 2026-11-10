@@ -255,9 +255,10 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_BACKUP_DIR` | `<state>/backups`. The backup zip files ([api.md](api.md) §32). The walk of a backup skips this dir. |
 | `TERRARIUM_BACKUP_SCHEDULE` | `off`. `daily`, `weekly`, or a duration of `1h` or more: the daemon makes a backup one interval after the newest one ([api.md](api.md) §32.4). |
 | `TERRARIUM_BACKUP_FULL_EVERY` | `7d`. A scheduled backup is full when the newest full backup is older than this; else it is a diff. |
-| `TERRARIUM_BACKUP_KEEP` | `4`. The scheduled backup keeps this many full backups and their diffs, and deletes the older ones. |
+| `TERRARIUM_BACKUP_KEEP` | `4`. The scheduled backup keeps this many full backups and their diffs. It deletes the older ones only after a newer full backup is verified. |
 | `TERRARIUM_BACKUP_WORK` | `off`. On: the scheduled backups have the workspaces too. |
-| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | unset. The first line of the file seals each scheduled backup. |
+| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | unset. The first line of the file seals each scheduled backup. It wins over the key secret. |
+| `TERRARIUM_BACKUP_KEY_SECRET` | `backup-key`. The global secret whose `passphrase` (else `value`) field seals each scheduled backup. A scheduled backup with no key fails ([api.md](api.md) §32.4). |
 | `TERRARIUM_SELF_UPDATE` | `notify`. The self-update ([api.md](api.md) §34): `off` (no background check, no mail), `notify` (a check of the GitHub releases every 6 hours and one Inbox mail for each new version), or `auto` (`notify`, and an update through the updater inside a global calendar event of kind `maintenance`, once for each occurrence). A bad value stops the start. |
 | `TERRARIUM_UPDATE_CHANNEL` | `stable`. `pre`: pre-releases too. |
 | `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium`. The GitHub repo of the releases (the daemon), and the identity of the signing workflow (the updater). |
