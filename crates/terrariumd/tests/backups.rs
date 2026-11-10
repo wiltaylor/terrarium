@@ -185,6 +185,28 @@ fn the_offline_commands_round_trip_a_full_and_a_diff() {
     // The backups stayed in place.
     assert!(Path::new(&diff_path).is_file());
 
+    // The restore held the state lock and left the lock file in place.
+    assert!(state.join(terrariumd::STATE_LOCK).is_file());
+
+    // A restore refuses while a daemon on another socket holds the state
+    // lock.
+    {
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(state.join(terrariumd::STATE_LOCK))
+            .unwrap();
+        let _held =
+            nix::fcntl::Flock::lock(f, nix::fcntl::FlockArg::LockExclusiveNonblock).unwrap();
+        let out = terrariumd(d, &state, &["backup", "restore", &diff_path]);
+        assert!(!out.status.success());
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("is locked") && err.contains("stop it first"),
+            "{err}"
+        );
+    }
+
     // A restore refuses while a daemon answers on the socket.
     let sock = d.join("no-daemon.sock");
     let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
