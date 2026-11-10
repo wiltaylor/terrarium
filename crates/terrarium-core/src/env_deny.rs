@@ -8,8 +8,9 @@
 
 /// Env var names that a grant cannot set (docs/api.md §5.2, "The name
 /// rule"): the loader and the C library, the shell, the sandbox and the
-/// daemon, the locale and the terminal, the proxy and CA vars, and the
-/// vars that a harness adapter or an account sets.
+/// daemon, the locale and the terminal, the proxy and CA vars, the
+/// OpenSSL, Kerberos and D-Bus vars, and the vars that a harness adapter
+/// or an account sets.
 pub const DENIED_ENV: &[&str] = &[
     // The sandbox, the daemon, the session.
     "PATH",
@@ -140,6 +141,14 @@ pub const DENIED_ENV_PREFIXES: &[&str] = &[
     "LUA_",
     // CA files.
     "SSL_CERT_",
+    // Libraries that ssh and the credential helpers load: the OpenSSL
+    // config, providers and engines (`OPENSSL_CONF`, `OPENSSL_MODULES`,
+    // `OPENSSL_ENGINES`), the Kerberos config and plugin modules of GSSAPI
+    // (`KRB5_CONFIG`, `KRB5CCNAME`), and the D-Bus bus of the secretservice
+    // helper (`DBUS_SESSION_BUS_ADDRESS`). TER-541.
+    "OPENSSL_",
+    "KRB5",
+    "DBUS_",
     // The harnesses and their accounts.
     "ANTHROPIC_",
     "CLAUDE_",
