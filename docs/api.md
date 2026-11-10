@@ -9248,11 +9248,23 @@ or name) and a `review` column:
 |---|---|---|
 | `merge-queue-move` | a new merge job (`card merge`, `POST /api/merges`, or the batch rule) | each card to `@merge_queue` (a card there already stays) |
 | `merge-queue-cancel` | a cancelled merge verdict | the card from `@merge_queue` back to `@review` |
-| `merge-queue-batch` | a card moved to the `merge_queue` role column, and its timer | one batch merge of the cards that wait in `@merge_queue`, in board order: `limit = 8`, `min_cards = 8`, `max_wait_minutes = 30` (8 cards wait, or 30 minutes after the first one) |
+| `merge-queue-batch` | a card moved to the `merge_queue` role column, and its timer | one batch merge of the cards that wait in `@merge_queue`, in board order, when the merge lane is free: `limit = 8`, `min_cards = 4`, `max_wait_minutes = 30` (4 cards wait, or 30 minutes after the first one) |
 
 The pass (`@accepted`), the red result (the top of `@ready`), and the
 labels and comments stay with the flow of the project. Change the three
 numbers of `merge-queue-batch` to change the batch.
+
+The merge lane (TER-644): a `job_queue` batch is a no-op while a merge
+job of the project is queued or running, with the job in `lane` of the
+run detail, so the cards wait and the next batch takes them all. The
+engine checks each batch rule with `min_cards` and `max_wait_minutes`
+about every 10 seconds: when the lane is free and `min_cards` cards wait,
+or the first one came `max_wait_minutes` ago, it writes a `rule.timer`
+event that runs the rule. While the lane is busy it writes no timer and
+keeps the wait, so 1 to 3 cards go soon after the lane is free once they
+waited 30 minutes. A project trigger on the end of a merge job (for
+example a schedule that mails the lead) can stay as a notice; the batch
+does not need it.
 
 A switch back from `rules` to `code` drops the pack at the next pass of
 the engine. A job that ended under `rules` but whose events the engine

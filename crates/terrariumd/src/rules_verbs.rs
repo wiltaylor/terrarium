@@ -887,7 +887,9 @@ pub fn batch_goes(
 /// `limit`. A card that is held or has an open job is left out. With
 /// `min_cards` the job waits for that many cards, or (with
 /// `max_wait_minutes`) until the first card waited that long; until then
-/// the verb is a no-op that says when the batch goes.
+/// the verb is a no-op that says when the batch goes. While a merge job
+/// of the project is queued or running (the merge lane is busy), the verb
+/// is a no-op too (TER-644).
 fn queue_batch(
     t: &mut Tx<'_>,
     actor: &Actor,
@@ -907,6 +909,16 @@ fn queue_batch(
         return Ok(noop(json!({
             "column": from, "left_out": left_out,
             "reason": format!("no card to merge in {from}"),
+        })));
+    }
+    // One merge at a time per project: while a merge job holds the lane,
+    // the cards wait and the batch grows. The timer checks again when
+    // the lane is free (TER-644).
+    if let Some(job) = jobs::open_merge(t, &project)? {
+        return Ok(noop(json!({
+            "column": from, "waiting": pick.waiting, "left_out": left_out,
+            "lane": job,
+            "reason": format!("the merge lane is busy: job {job}; the batch waits for its end"),
         })));
     }
     if let Err((reason, due)) = batch_goes(
