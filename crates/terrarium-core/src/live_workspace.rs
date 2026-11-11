@@ -490,16 +490,23 @@ impl Journal {
                 (_, Kind::Revoke) => Reply::PathRevokedVerified,
                 _ => Reply::Applied,
             };
-            divergent |= *id != r.operation || r.host != self.host || r.target != self.target
-                || r.runtime != self.runtime || !r.valid()
+            divergent |= *id != r.operation
+                || r.host != self.host
+                || r.target != self.target
+                || r.runtime != self.runtime
+                || !r.valid()
                 || r.hash().ok() != Some(i.envelope.original_hash)
-                || i.phase != Phase::Committed || i.result != Some(expected_result)
+                || i.phase != Phase::Committed
+                || i.result != Some(expected_result)
                 || (i.envelope.delivery == Delivery::Superseded && r.kind != Kind::Grant);
             revisions.push(r.revision);
         }
         revisions.sort_unstable();
         divergent |= revisions.len() as u64 != self.last_contiguous_revision
-            || revisions.iter().enumerate().any(|(n, &r)| r != n as u64 + 1);
+            || revisions
+                .iter()
+                .enumerate()
+                .any(|(n, &r)| r != n as u64 + 1);
         if self.state_version != STATE_VERSION
             || divergent
             || self.operations.values().any(|i| i.result.is_none())

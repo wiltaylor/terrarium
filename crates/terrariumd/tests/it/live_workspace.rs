@@ -153,11 +153,37 @@ fn operation_original_is_immutable_and_delivery_is_separate() {
     assert!(c.execute("INSERT INTO live_workspace_operations SELECT 'other', registration_id, revision, kind, original_request, original_hash, delivery, phase, result FROM live_workspace_operations WHERE operation_id = 'op'", []).is_err());
     assert!(c.execute("UPDATE live_workspace_operations SET phase = 'daemon_committed', result = X'01' WHERE operation_id = 'op'", []).is_err());
     c.execute("UPDATE live_workspace_operations SET phase = 'helper_committed', result = X'01' WHERE operation_id = 'op'", []).unwrap();
-    c.execute("UPDATE live_workspace_operations SET phase = 'daemon_committed' WHERE operation_id = 'op'", []).unwrap();
-    assert!(c.execute("UPDATE live_workspace_operations SET phase = 'intent' WHERE operation_id = 'op'", []).is_err());
-    assert!(c.execute("UPDATE live_workspace_operations SET result = X'02' WHERE operation_id = 'op'", []).is_err());
-    assert!(c.execute("UPDATE live_workspace_targets SET allocated_revision = 2 WHERE registration_id = 'r1'", []).is_err());
-    c.execute("UPDATE live_workspace_targets SET allocated_revision = 1 WHERE registration_id = 'r1'", []).unwrap();
+    c.execute(
+        "UPDATE live_workspace_operations SET phase = 'daemon_committed' WHERE operation_id = 'op'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        c.execute(
+            "UPDATE live_workspace_operations SET phase = 'intent' WHERE operation_id = 'op'",
+            []
+        )
+        .is_err()
+    );
+    assert!(
+        c.execute(
+            "UPDATE live_workspace_operations SET result = X'02' WHERE operation_id = 'op'",
+            []
+        )
+        .is_err()
+    );
+    assert!(
+        c.execute(
+            "UPDATE live_workspace_targets SET allocated_revision = 2 WHERE registration_id = 'r1'",
+            []
+        )
+        .is_err()
+    );
+    c.execute(
+        "UPDATE live_workspace_targets SET allocated_revision = 1 WHERE registration_id = 'r1'",
+        [],
+    )
+    .unwrap();
     c.execute("UPDATE live_workspace_targets SET last_contiguous_revision = 1 WHERE registration_id = 'r1'", []).unwrap();
     assert!(c.execute("UPDATE live_workspace_targets SET last_contiguous_revision = 0 WHERE registration_id = 'r1'", []).is_err());
 }

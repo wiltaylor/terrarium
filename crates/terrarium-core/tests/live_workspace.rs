@@ -4,7 +4,10 @@ use ulid::Ulid;
 fn envelope(revision: u64, kind: Kind) -> Envelope {
     let request = Request {
         version: PROTOCOL_VERSION,
-        provenance: Provenance { daemon_instance: Ulid::from(100), caller: Caller::LocalOperator },
+        provenance: Provenance {
+            daemon_instance: Ulid::from(100),
+            caller: Caller::LocalOperator,
+        },
         operation: OperationId(Ulid::from(revision as u128)),
         host: Ulid::from(1),
         target: "test-target".into(),
@@ -265,7 +268,11 @@ fn capability_is_not_activation_and_versions_fail_closed() {
 #[test]
 fn daemon_ack_and_runtime_commit_are_distinct_durable_boundaries() {
     let e = envelope(1, Kind::Grant);
-    let mut op = DaemonOperation { envelope: e.clone(), phase: DaemonPhase::Intent, helper_result: None };
+    let mut op = DaemonOperation {
+        envelope: e.clone(),
+        phase: DaemonPhase::Intent,
+        helper_result: None,
+    };
     assert_eq!(op.commit_runtime(), Err(Reply::Failed));
     // Lost acknowledgement: resend exactly the saved intent, not a new revision.
     let saved = serde_json::to_vec(&op).unwrap();
@@ -276,7 +283,10 @@ fn daemon_ack_and_runtime_commit_are_distinct_durable_boundaries() {
     restored.commit_runtime().unwrap();
     restored.acknowledge(&e, Reply::Applied).unwrap();
     assert_eq!(restored.phase, DaemonPhase::RuntimeCommitted);
-    assert_eq!(op.acknowledge(&e, Reply::PathRevokedVerified), Err(Reply::Conflict));
+    assert_eq!(
+        op.acknowledge(&e, Reply::PathRevokedVerified),
+        Err(Reply::Conflict)
+    );
     assert_eq!(op.phase, DaemonPhase::Quarantined);
 }
 
