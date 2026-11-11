@@ -132,14 +132,12 @@ def rerun(failed: list[tuple[str, str, rerun_tests.Outcomes]], root: str, first_
     step = "test-unprivileged"
     first = rerun_tests.Outcomes()
     for _, _, seen in failed:
-        first.started += seen.started
-        first.finished += seen.finished
-        first.failed.update(seen.failed)
-    why = rerun_tests.why_not(first)
-    if why is None:
-        why = next((w for _, _, seen in failed if (w := rerun_tests.why_not(seen))), None)
+        first.add(seen)
+    # Each binary on its own too: its end must be explained by its own results.
+    why = next((w for _, _, seen in failed if (w := rerun_tests.why_not(seen))), None)
+    why = why or rerun_tests.why_not(first)
     if why:
-        print(f"rerun: {step}: no rerun: {why}", flush=True)
+        rerun_tests.refuse(step, first, why)
         return False
     names = sorted(first.failed)
     print(f"rerun: {step}: {len(names)} failed tests run once more as uid {UID}:"
@@ -156,12 +154,14 @@ def rerun(failed: list[tuple[str, str, rerun_tests.Outcomes]], root: str, first_
             print(f"unprivileged tests: uid {UID}: rerun: {exe}", flush=True)
             child = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, text=True,
                                    encoding="utf-8", errors="replace", check=False)
+            one = rerun_tests.Outcomes()
             for line in child.stdout.splitlines(keepends=True):
                 print(line, end="", flush=True)
-                again.feed(line)
+                one.feed(line)
                 if out:
                     out.write(line)
-            again.done()
+            one.ended(child.returncode)
+            again.add(one.done())
             worst = worst or child.returncode
     finally:
         if out:
@@ -232,6 +232,7 @@ def run() -> int:
                         report.write(line)
                 log.close()
                 if code:
+                    seen.ended(code)
                     failed.append(exe)
                     outcomes.append((exe, bins[n][1], seen.done()))
         running = []

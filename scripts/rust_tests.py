@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
 
 import rerun_tests
 
@@ -21,10 +22,19 @@ def reported(cmd: list[str], results: str, env: dict[str, str], filename: str = 
 
 def teed(cmd: list[str], env: dict[str, str] | None, out=None,
          outcomes: rerun_tests.Outcomes | None = None) -> int:
-    """Run `cmd`, print its stdout as it comes, and copy it to `out` and `outcomes`."""
+    """Run `cmd`, print its stdout as it comes, and copy it to `out` and `outcomes`.
+
+    With `outcomes`, cargo's stderr goes through too (printed to stderr as
+    it comes): it names each test run and each failure (TER-683).
+    """
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8",
-                          errors="replace", env=env) as child:
+                          errors="replace", env=env,
+                          stderr=subprocess.PIPE if outcomes is not None else None) as child:
         assert child.stdout is not None
+        errors = None
+        if outcomes is not None:
+            errors = threading.Thread(target=cargo_stderr, args=(child.stderr, outcomes))
+            errors.start()
         for line in child.stdout:
             if out is not None:
                 out.write(line)
@@ -32,7 +42,16 @@ def teed(cmd: list[str], env: dict[str, str] | None, out=None,
             if outcomes is not None:
                 outcomes.feed(line)
             print(line, end="", flush=True)
-        return child.wait()
+        code = child.wait()
+        if errors is not None:
+            errors.join()
+        return code
+
+
+def cargo_stderr(stream, outcomes: rerun_tests.Outcomes) -> None:
+    for line in stream:
+        print(line, end="", file=sys.stderr, flush=True)
+        outcomes.cargo(line)
 
 
 def junit_source() -> Path:
@@ -108,10 +127,10 @@ def run(args: list[str]) -> int:
 
 def rerun_failed(cmd: list[str], results: str | None, first: rerun_tests.Outcomes,
                  code: int) -> int:
-    """Run the failed tests of a merge job once more (TER-683, rerun_tests.py)."""
+    """Run the failed tests once more (TER-683, rerun_tests.py)."""
     why = rerun_tests.why_not(first)
     if why:
-        print(f"rerun: test: no rerun: {why}", flush=True)
+        rerun_tests.refuse("test", first, why)
         return code
     names = sorted(first.failed)
     print(f"rerun: test: {len(names)} failed tests run once more: {', '.join(names)}", flush=True)

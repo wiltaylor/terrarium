@@ -2552,7 +2552,6 @@ async fn steps(
             )),
             head: None,
             batch,
-            reruns: Vec::new(),
         });
     }
     let r = result_line(&c.stdout);
@@ -2669,9 +2668,6 @@ async fn steps(
     } else {
         String::new()
     };
-    // TER-683: the tests that the recipe ran once more go to the job
-    // record, and a short line to the end of the tail, not the raw lines.
-    let (reruns, excerpt) = take_reruns(&excerpt);
     let log_location = format!(
         "Full log on target {}: {}",
         delivery.target.as_deref().unwrap_or("-"),
@@ -2687,9 +2683,6 @@ async fn steps(
     );
     if let Some(b) = &batch {
         tail.push_str(&format!("\n[{}]", batch_summary(b)));
-    }
-    if !reruns.is_empty() {
-        tail.push_str(&format!("\n[{}]", rerun_summary(&reruns)));
     }
     if let Some(why) = lost {
         let _ = x.recipe_lost.set(why);
@@ -2707,7 +2700,6 @@ async fn steps(
         tail: Some(tail),
         head: Some(head.clone()),
         batch: batch.clone(),
-        reruns,
     };
     if !ok || job.kind != JobKind::Merge {
         return Ok(result);
@@ -2929,149 +2921,12 @@ fn log_excerpt(log: &str, patterns: Option<&[String]>) -> String {
     };
     format!(
         r#"log={log}
-reruns=$(grep -a -F -e {marker} -- "$log" | tail -n {RERUN_MAX})
-if [ -n "$reruns" ]; then printf '%s\n' "$reruns"; fi
 {grep}
 printf '\nOutput tail (last 1200 bytes):\n'
 tail -c 1200 -- "$log"
 "#,
         log = sh_quote(log),
-        marker = sh_quote(RERUN_MARKER),
     )
-}
-
-/// The start of the line of the job log that names one test that the
-/// recipe ran once more (TER-683, `scripts/rerun_tests.py`), JSON after it.
-pub const RERUN_MARKER: &str = "[terrarium rerun] ";
-/// The most rerun tests that a job keeps.
-const RERUN_MAX: usize = 20;
-/// The most bytes of a test name and of a failure tail that a rerun keeps.
-const RERUN_NAME_MAX: usize = 300;
-const RERUN_TAIL_MAX: usize = 1500;
-
-/// The rerun lines of a job log excerpt, parsed and bounded, and the
-/// excerpt without them. A later line of the same step and test wins. The
-/// lines come from the recipe: untrusted, so each field is checked and cut.
-fn take_reruns(excerpt: &str) -> (Vec<jobs::Rerun>, String) {
-    let mut reruns: Vec<jobs::Rerun> = Vec::new();
-    let mut rest = String::with_capacity(excerpt.len());
-    for line in excerpt.lines() {
-        let Some(json) = line.strip_prefix(RERUN_MARKER) else {
-            rest.push_str(line);
-            rest.push('\n');
-            continue;
-        };
-        let Some(r) = serde_json::from_str::<jobs::Rerun>(json)
-            .ok()
-            .and_then(checked_rerun)
-        else {
-            continue;
-        };
-        reruns.retain(|x| (x.step.as_str(), x.test.as_str()) != (r.step.as_str(), r.test.as_str()));
-        if reruns.len() < RERUN_MAX {
-            reruns.push(r);
-        }
-    }
-    (reruns, rest)
-}
-
-fn checked_rerun(mut r: jobs::Rerun) -> Option<jobs::Rerun> {
-    let printable = |s: &str, keep_lines: bool| -> String {
-        s.chars()
-            .filter(|c| !c.is_control() || (keep_lines && matches!(c, '\n' | '\t')))
-            .collect()
-    };
-    r.test = printable(r.test.trim(), false);
-    if r.test.is_empty()
-        || r.test.len() > RERUN_NAME_MAX
-        || !matches!(r.step.as_str(), "test" | "test-unprivileged")
-        || r.first != "failed"
-        || !matches!(r.rerun.as_str(), "ok" | "failed" | "missing")
-    {
-        return None;
-    }
-    let tail = printable(&r.tail, true);
-    let mut start = tail.len().saturating_sub(RERUN_TAIL_MAX);
-    while !tail.is_char_boundary(start) {
-        start += 1;
-    }
-    r.tail = tail[start..].to_owned();
-    Some(r)
-}
-
-/// One line for the tail: each rerun test with both results.
-fn rerun_summary(reruns: &[jobs::Rerun]) -> String {
-    let each: Vec<String> = reruns
-        .iter()
-        .map(|r| format!("{} {}: {}, then {}", r.step, r.test, r.first, r.rerun))
-        .collect();
-    format!("rerun once: {}", each.join("; "))
-}
-
-/// The label of the open flaky-test card of `test` (TER-683): a hash, so
-/// any test name fits a label.
-pub fn flaky_label(test: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let d = Sha256::digest(test.as_bytes());
-    let hex: String = d.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    format!("flaky-test:{hex}")
-}
-
-/// The flaky-test cards of a green merge job (TER-683): each test that
-/// failed and then passed on its rerun gets a card in backlog, or a
-/// comment on the open card of that test.
-fn file_flaky(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
-    if j.kind != JobKind::Merge || j.state != jobs::JobState::Passed {
-        return Ok(());
-    }
-    for r in j.reruns.iter().filter(|r| r.flaky()) {
-        let label = flaky_label(&r.test);
-        let tail: String = r.tail.lines().map(|l| format!("    {l}\n")).collect();
-        let note = format!(
-            "Job queue: the test `{}` failed in merge job {} (step {}, repo {}, attempt {}, tested {}) \
-             and passed when it ran once more, so the job stayed green.\nThe first failure (end of its output):\n\n{tail}",
-            r.test,
-            j.id,
-            r.step,
-            j.repo,
-            j.attempt,
-            j.head.as_deref().unwrap_or("-"),
-        );
-        if let Some(open) = board::find_open_by_label(t, &j.project, &label)? {
-            comment(t, &open, &note)?;
-            continue;
-        }
-        let body = format!(
-            "{note}\nMake the test reliable, or find what it races with. Each later merge job \
-             where it flakes adds a comment here while this card is open."
-        );
-        let mut title = format!("Flaky test: {}", r.test);
-        if title.len() > 200 {
-            let mut end = 200;
-            while !title.is_char_boundary(end) {
-                end -= 1;
-            }
-            title.truncate(end);
-        }
-        board::create_card(
-            t,
-            &Actor::Operator,
-            &j.project,
-            board::NewCard {
-                title: Some(title),
-                body: Some(body),
-                labels: vec![
-                    "flaky".into(),
-                    label,
-                    "version:vnext".into(),
-                    "type:small".into(),
-                ],
-                repo: Some(j.repo.clone()),
-                ..board::NewCard::default()
-            },
-        )?;
-    }
-    Ok(())
 }
 
 /// The env of the recipe (TER-100, docs/api.md 35.2): the job kind and
@@ -3434,9 +3289,6 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
 /// then the coded card flow (the move, the rerun, or the split).
 fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     emit_verdicts(t, j)?;
-    // TER-683: a test that passed on its rerun files its flaky card, from
-    // the daemon in both flows.
-    file_flaky(t, j)?;
     // The failed step and the output on each card (TER-614 R3), from the
     // daemon in both flows: the rules quote a template value onto one
     // line, which would lose the lines of the output. Not for red: a red
@@ -4106,58 +3958,6 @@ mod tests {
         assert!(block.contains("panicked at test.rs:1:2"));
         assert!(block.contains("expected value"));
         assert!(block.find("expected value").unwrap() < block.find("Output tail").unwrap());
-    }
-
-    /// TER-683: the rerun lines leave the excerpt for the job record; bad
-    /// lines are dropped, a later line of a test wins, and text is cut.
-    #[test]
-    fn rerun_lines_are_parsed_checked_and_taken_out() {
-        let long = "y".repeat(5000);
-        let excerpt = format!(
-            "Failure lines:\n\
-             [terrarium rerun] {{\"step\":\"test\",\"test\":\"a::b\",\"first\":\"failed\",\"rerun\":\"failed\"}}\n\
-             test a::b ... FAILED\n\
-             [terrarium rerun] {{\"step\":\"test\",\"test\":\"a::b\",\"first\":\"failed\",\"rerun\":\"ok\",\"tail\":\"{long}\\u001b\"}}\n\
-             [terrarium rerun] {{\"step\":\"deploy\",\"test\":\"x\",\"first\":\"failed\",\"rerun\":\"ok\"}}\n\
-             [terrarium rerun] {{\"step\":\"test\",\"test\":\"cut\n"
-        );
-        let (reruns, rest) = take_reruns(&excerpt);
-        assert_eq!(rest, "Failure lines:\ntest a::b ... FAILED\n");
-        assert_eq!(reruns.len(), 1, "{reruns:?}");
-        assert_eq!(reruns[0].test, "a::b");
-        assert!(reruns[0].flaky());
-        assert_eq!(reruns[0].tail.len(), RERUN_TAIL_MAX);
-        assert!(!reruns[0].tail.contains('\u{1b}'));
-        assert_eq!(
-            rerun_summary(&reruns),
-            "rerun once: test a::b: failed, then ok"
-        );
-        assert_ne!(flaky_label("a::b"), flaky_label("a::c"));
-        assert!(flaky_label("a::b").starts_with("flaky-test:"));
-    }
-
-    /// The log excerpt has the rerun lines of the log first, also on a pass.
-    #[test]
-    fn the_log_excerpt_keeps_the_rerun_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("job.log");
-        std::fs::write(
-            &log,
-            "build\n[terrarium rerun] {\"test\":\"t\"}\nrerun: test: done\n",
-        )
-        .unwrap();
-        let out = std::process::Command::new("sh")
-            .args([
-                "-c",
-                &log_excerpt(log.to_str().unwrap(), Some(&[] as &[String])),
-            ])
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            text.starts_with("[terrarium rerun] {\"test\":\"t\"}\n"),
-            "{text}"
-        );
     }
 
     #[test]
@@ -5473,7 +5273,6 @@ mod tests {
             planned_secs: None,
             slot: None,
             onto: None,
-            reruns: Vec::new(),
         }
     }
 
@@ -5639,7 +5438,6 @@ mod tests {
                     tail: Some("red".into()),
                     head: None,
                     batch: Some(cards),
-                    reruns: Vec::new(),
                 };
                 let j = jobs::finish(t, &j.id, &end)?.unwrap();
                 on_end(t, &j)?;
