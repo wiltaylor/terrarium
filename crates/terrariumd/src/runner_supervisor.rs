@@ -1678,6 +1678,19 @@ impl RunnerSupervisor {
         let entry = self.entry(agent.harness)?;
         let sub = check_subscription(agent, view.subscription.as_ref())?;
         let def = sub.as_ref().map(sub_def);
+        // Runs for every spawn and restart, before any harness starts. The
+        // adapter receives its normal definition, then these checked launch
+        // values override its endpoint and any inherited proxy bypass list.
+        let litellm_env = if let Some(d) = def.as_ref().filter(|d| d.provider == "litellm") {
+            let settings = d.selfhosted.as_ref().ok_or_else(|| {
+                SupervisorError::NotReady("LiteLLM subscription has no base URL".into())
+            })?;
+            crate::probes::litellm::harness_env(&settings.base_url)
+                .await
+                .map_err(|e| SupervisorError::NotReady(format!("LiteLLM launch refused: {e}")))?
+        } else {
+            Vec::new()
+        };
         if agent.harness == HarnessId::Pi
             && let Some(reason) = def
                 .as_ref()
@@ -2029,6 +2042,7 @@ impl RunnerSupervisor {
         // `.gitconfig`, and the host name gives no mail domain.
         // The instance bot identity deliberately overrides GIT_AUTHOR_* and
         // GIT_COMMITTER_* supplied by the harness or secret environment.
+        spec.env.extend(litellm_env);
         crate::git_identity::Identity::from_env().env(&mut spec.env);
         spec.env.insert(
             "TERRARIUM_GIT_TRAILERS_FILE".into(),

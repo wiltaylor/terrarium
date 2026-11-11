@@ -497,7 +497,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
         </label>
       </Show>
       <Show when={provider() === "litellm" && baseUrl().trim().toLowerCase().startsWith("http://")}>
-        <p class="muted small">HTTP requires a private literal IP address. Public and link-local addresses and hostnames require HTTPS. On HTTP, your key and prompts are not encrypted on that network.</p>
+        <p class="muted small">HTTP requires every resolved address to be private. Each launch uses a checked IP, not the hostname, and bypasses environment proxies. Virtual hosts that require the original Host name need HTTPS. Your key and prompts are not encrypted on that network. Harness redirects are not restricted by Terrarium.</p>
       </Show>
       <Show when={!["bedrock", "gcp", "foundry"].includes(provider())}><label>
         Models (comma separated, optional)

@@ -59,6 +59,34 @@ fn private_ip(ip: std::net::IpAddr) -> bool {
     )
 }
 
+/// Resolve for one harness launch. The harness must never resolve an HTTP
+/// name itself. A virtual host that needs the original Host must use HTTPS.
+pub async fn harness_env(base: &str) -> Result<Vec<(String, String)>, String> {
+    harness_env_with_resolver(base, None).await
+}
+
+async fn harness_env_with_resolver(
+    base: &str,
+    resolver: Option<crate::webhooks::net::Resolver>,
+) -> Result<Vec<(String, String)>, String> {
+    let base = base.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let Some(addr) = checked_address(&base, resolver)? else {
+            return Ok(Vec::new());
+        };
+        let mut url = reqwest::Url::parse(&base).map_err(|_| "invalid LiteLLM URL")?;
+        url.set_ip_host(addr.ip()).map_err(|_| "invalid LiteLLM host")?;
+        let ip = addr.ip().to_string();
+        Ok(vec![
+            ("ANTHROPIC_BASE_URL".into(), url.to_string()),
+            ("NO_PROXY".into(), ip.clone()),
+            ("no_proxy".into(), ip),
+        ])
+    })
+    .await
+    .map_err(|_| "cannot resolve LiteLLM launch address".to_owned())?
+}
+
 pub struct LiteLlmKeySpend {
     url: String,
 }
@@ -325,6 +353,24 @@ mod tests {
                 .unwrap(),
             "10.0.0.1:8000".parse().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn harness_pins_each_launch_and_bypasses_proxies() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        let resolver: crate::webhooks::net::Resolver = std::sync::Arc::new(move |_, _| {
+            let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            vec![if n == 0 { "10.0.0.2" } else { "8.8.8.8" }.parse().unwrap()]
+        });
+        let env = harness_env_with_resolver("http://private.invalid:8000/prefix", Some(resolver.clone())).await.unwrap();
+        assert_eq!(env[0], ("ANTHROPIC_BASE_URL".into(), "http://10.0.0.2:8000/prefix".into()));
+        assert_eq!(env[1], ("NO_PROXY".into(), "10.0.0.2".into()));
+        assert_eq!(env[2], ("no_proxy".into(), "10.0.0.2".into()));
+        assert!(harness_env_with_resolver("http://private.invalid:8000/prefix", Some(resolver)).await.unwrap_err().contains("private network"));
+        let env = harness_env("http://[::1]:8000/prefix").await.unwrap();
+        assert_eq!(env[0].1, "http://[::1]:8000/prefix");
+        assert!(harness_env("https://private.invalid").await.unwrap().is_empty());
     }
     #[test]
     fn budget_and_reset() {
