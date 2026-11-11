@@ -3172,7 +3172,13 @@ async fn a_used_up_cloud_budget_mails_without_holding_turns() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|m| { m["body"].as_str().unwrap().contains("100%") })
+            .any(|m| {
+                m["subject"] == "Quota: aws budget window is used up"
+                    && m["body"]
+                        .as_str()
+                        .unwrap()
+                        .contains("The agents keep their turns.")
+            })
     );
     let win = td.get("/api/subscriptions/aws").await.ok().clone();
     let budget = win["windows"]
