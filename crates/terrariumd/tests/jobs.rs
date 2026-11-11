@@ -1150,6 +1150,7 @@ impl Lab {
             &["checkout", "-q", "-B", name, &format!("origin/{base}")],
         );
         for (f, text) in files {
+            std::fs::create_dir_all(self.work.join(f).parent().unwrap()).unwrap();
             std::fs::write(self.work.join(f), text).unwrap();
         }
         git(&self.work, &["add", "-A"]);
