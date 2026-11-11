@@ -952,25 +952,7 @@ pub async fn observe_remote_heads_from(state: &Shared, cursor: &mut String) {
             return;
         }
     };
-    let deadline = tokio::time::Instant::now() + OBSERVE_PASS_CAP;
-    let mut seen = Vec::new();
-    for card in cards {
-        if tokio::time::Instant::now() >= deadline {
-            tracing::warn!("card branch watch: pass cap reached at {}", card.id);
-            break;
-        }
-        let Ok(read) = tokio::time::timeout_at(deadline, remote_head(state, &card)).await else {
-            tracing::warn!(
-                "card branch watch: pass cap reached while reading {}",
-                card.id
-            );
-            break;
-        };
-        cursor.clone_from(&card.id);
-        if let Some(head) = read {
-            seen.push((card, head, crate::db::now()));
-        }
-    }
+    let seen = read_remote_heads(cards, cursor, async |card| remote_head(state, card).await).await;
     if seen.is_empty() {
         return;
     }
@@ -986,6 +968,33 @@ pub async fn observe_remote_heads_from(state: &Shared, cursor: &mut String) {
     {
         tracing::warn!("card branch observation failed: {e}");
     }
+}
+
+async fn read_remote_heads(
+    cards: Vec<BranchCard>,
+    cursor: &mut String,
+    read_head: impl for<'a> AsyncFn(&'a BranchCard) -> Option<Option<String>>,
+) -> Vec<(BranchCard, Option<String>, String)> {
+    let deadline = tokio::time::Instant::now() + OBSERVE_PASS_CAP;
+    let mut seen = Vec::new();
+    for card in cards {
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!("card branch watch: pass cap reached at {}", card.id);
+            break;
+        }
+        let Ok(read) = tokio::time::timeout_at(deadline, read_head(&card)).await else {
+            tracing::warn!(
+                "card branch watch: pass cap reached while reading {}",
+                card.id
+            );
+            break;
+        };
+        cursor.clone_from(&card.id);
+        if let Some(head) = read {
+            seen.push((card, head, crate::db::now()));
+        }
+    }
+    seen
 }
 
 pub async fn pass(state: &Shared) {
@@ -1383,6 +1392,10 @@ mod tests {
     fn branch_observation_queries_are_indexed_and_bounded() {
         let mut c = Connection::open_in_memory().unwrap();
         crate::db::migrate(&mut c).unwrap();
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'board_columns_name_watch'", [], |r| r.get::<_, i64>(0)).unwrap(),
+            0
+        );
         let plan = |sql: &str, args: usize| -> Vec<String> {
             let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             let args = vec!["x"; args];
@@ -1428,6 +1441,28 @@ mod tests {
             );
         }
         assert!(BRANCH_CARDS_SQL.contains("LIMIT ?3") && BRANCH_PAGE <= 64);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pass_cap_keeps_cursor_before_interrupted_read() {
+        let cards = || (1..=3).map(|n| BranchCard {
+            id: format!("P-{n}"), project: "p".into(), repo: "r".into(), branch: "b".into(),
+        }).collect();
+        let mut cursor = String::new();
+        let seen = read_remote_heads(cards(), &mut cursor, async |card| {
+            if card.id == "P-2" {
+                tokio::time::sleep(OBSERVE_PASS_CAP * 2).await;
+            }
+            Some(Some("head".into()))
+        }).await;
+        assert_eq!(cursor, "P-1");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0.id, "P-1");
+        let remaining = cards().into_iter().filter(|c| c.id > cursor).collect();
+        let seen = read_remote_heads(remaining, &mut cursor, async |_| Some(None)).await;
+        assert_eq!(seen[0].0.id, "P-2");
+        assert_eq!(seen.len(), 2);
+        assert_eq!(cursor, "P-3");
     }
 
     #[test]
