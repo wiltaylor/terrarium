@@ -163,7 +163,11 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
                     return Ok(None);
                 }
                 let target = targets::get(c, &target)?.def;
-                if target.project.as_ref().is_some_and(|p| p != &expected_project) {
+                if target
+                    .project
+                    .as_ref()
+                    .is_some_and(|p| p != &expected_project)
+                {
                     return Ok(None);
                 }
                 Ok(Some(target))
