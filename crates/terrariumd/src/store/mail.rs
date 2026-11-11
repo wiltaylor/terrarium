@@ -565,6 +565,20 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
         ))?,
         other => other.clone(),
     };
+    // The one delivery point of every message (TER-61 review round 5, F9):
+    // a write of a link request delivers nothing to an agent that holds
+    // sysadmin, whatever route it came through. The error fails the whole
+    // transaction, so the question, thread, or reply change rolls back.
+    if t.link.is_some()
+        && let Address::Agent { id, .. } = &recipient
+        && agents::get(t, id).is_ok_and(|v| v.agent.roles.contains(&terrarium_core::Role::Sysadmin))
+    {
+        return Err(ApiError::new(
+            crate::error::Code::LinkForbidden,
+            "a link key may not deliver a message to an agent that holds sysadmin \
+             (docs/api.md §36.4)",
+        ));
+    }
     // The loop guard: agent mail past the limit types no pointer.
     let limit = mail_loop_limit();
     let held_reason = if matches!(

@@ -1765,6 +1765,24 @@ code; the lead's security review is still to do.
   `403 link_forbidden`. Tests: `a_link_cannot_grant_or_drive_sysadmin`,
   `a_link_cannot_mail_a_sysadmin_agent`,
   `a_link_cannot_reach_a_sysadmin_by_inbox_reply_or_resume_note`.
+- **One delivery guard for every message** (review round 5, F9; lead
+  decision). Rounds 3 to 5 each found one more route that mailed link text
+  to a sysadmin (inbox reply, resume note, question answer, notice ack,
+  retract reason, to-thread, thread message and respond). So the check is
+  now where every message is written, `store::mail::send`: when the write
+  has a link provenance (`Tx::link`, taken in `Db::write` from the request's
+  task-local `links::CALLER`, or from an actor label `link:<id>`), a
+  recipient that holds `sysadmin` fails the whole transaction with
+  `link_forbidden`. A task that the request spawns with `links::spawn` keeps
+  the provenance (the schedule runs use it). The per-route checks stay as a
+  first line. Tests:
+  `a_link_cannot_reach_a_sysadmin_through_questions_or_threads`,
+  `the_link_provenance_survives_into_a_spawned_task`. The guard also refuses
+  daemon notices that a link's own action would send to a sysadmin, so such
+  an action fails as a whole; that is on purpose (a notice can quote link
+  text). Work that runs later in a task of its own (an event reaction, the
+  card dispatcher) has no link provenance; that is the indirect residual
+  below.
 - **No executable automation from a link** (review round 3, F6). A schedule
   or a board rule runs later as `system`, as its owner, or as the project
   inbox, in a task without the link's provenance, so its turn and mail

@@ -53,6 +53,24 @@ pub fn current_label() -> Option<String> {
     CALLER.try_with(|c| format!("link:{}", c.id)).ok()
 }
 
+/// The link ID when the current task serves a link request.
+pub fn current_link_id() -> Option<String> {
+    CALLER.try_with(|c| c.id.clone()).ok()
+}
+
+/// `tokio::spawn` that keeps the link of the current request in the new
+/// task (TER-61 review round 5, F9), so its writes keep the link's limits.
+pub fn spawn<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match CALLER.try_with(Clone::clone) {
+        Ok(c) => tokio::spawn(CALLER.scope(c, fut)),
+        Err(_) => tokio::spawn(fut),
+    }
+}
+
 /// Whether the current task serves a link request.
 pub fn is_link_call() -> bool {
     CALLER.try_with(|_| ()).is_ok()

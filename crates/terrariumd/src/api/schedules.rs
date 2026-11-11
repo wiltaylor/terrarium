@@ -822,7 +822,7 @@ async fn test_run(
             ..Default::default()
         };
         let (st, s2) = (state.clone(), s.clone());
-        let o = match tokio::spawn(async move { perform(&st, &s2, &ctx).await }).await {
+        let o = match crate::links::spawn(async move { perform(&st, &s2, &ctx).await }).await {
             Ok(o) => o,
             Err(e) => Outcome::failed("failed: the test task ended", e.to_string(), json!({})),
         };
@@ -968,7 +968,7 @@ async fn run_with(
     // The action runs in its own task: a panic in it fails the run, and
     // the run does not stay `running`.
     let st = state.clone();
-    let outcome = match tokio::spawn(async move { perform(&st, &s, &ctx).await }).await {
+    let outcome = match crate::links::spawn(async move { perform(&st, &s, &ctx).await }).await {
         Ok(o) => o,
         Err(e) => Outcome::failed("failed: the run task ended", e.to_string(), json!({})),
     };

@@ -3529,6 +3529,24 @@ mod tests {
         }
         // The text that a sysadmin loads at its next start is unchanged.
         assert_eq!(text(s.clone()).await, before);
+        // F10: through the launch path. The base prompt of a sysadmin with
+        // no own prompt, as `runner_supervisor` builds it at a start, is
+        // still the operator's `leader` text.
+        let (sys, _) = seed_sysadmin(&s).await;
+        let launch = |s: Shared, sys: String| async move {
+            let agent = s
+                .db
+                .read(move |c| crate::store::agents::get(c, &sys))
+                .await
+                .unwrap()
+                .agent;
+            let repo = s.config_repo.get().unwrap().dir.clone();
+            let dirs = crate::prompt::prompt_dirs(Some(&repo), &s.config_dir.join("prompts"));
+            crate::prompt::base_prompt_in(&dirs, &agent).unwrap().unwrap_or_default()
+        };
+        let base = launch(s.clone(), sys.clone()).await;
+        assert!(base.contains("Lead the project."), "{base}");
+        assert!(!base.contains(evil), "{base}");
         // Reads stay open to the link.
         let r = send(link_app(&s), "GET", "/api/system-prompts/leader", &h).await;
         assert_eq!(r.status(), StatusCode::OK);
@@ -3543,5 +3561,183 @@ mod tests {
         .await;
         assert!(r.status().is_success(), "{:?}", json_of(r).await);
         assert!(text(s.clone()).await.contains("Lead well."));
+        // The next start of the sysadmin takes the operator's new text.
+        assert!(launch(s.clone(), sys).await.contains("Lead well."));
+        // The operator still writes skills and templates.
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            "/api/skills",
+            &op,
+            &serde_json::json!({"name": "fern-check", "description": "Check the ferns."}),
+        )
+        .await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            "/api/templates",
+            &op,
+            &serde_json::json!({"name": "worker", "description": "A worker",
+                                "spec": {"harness": "codex", "prompt": "worker"}}),
+        )
+        .await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+    }
+
+    /// The questions of agent `id`, open ones, by status.
+    async fn question_status(s: &Shared, qid: &str) -> String {
+        let q = qid.to_owned();
+        s.db.read(move |c| {
+            Ok(c.query_row("SELECT status FROM questions WHERE id = ?1", [q], |r| r.get(0))?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// TER-61 review round 5, F9: one guard at the delivery of every message
+    /// (`store::mail::send`). The question and thread routes of a link do
+    /// not deliver to a sysadmin agent and change nothing; the operator's do.
+    #[tokio::test]
+    async fn a_link_cannot_reach_a_sysadmin_through_questions_or_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, _) = seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let op = [("authorization", "Bearer t")];
+        let ask = |kind: &'static str| {
+            let s = s.clone();
+            let sys = sys.clone();
+            async move {
+                let r = send_body(
+                    unix_router(s),
+                    "POST",
+                    &format!("/api/agents/{sys}/questions"),
+                    &[(crate::actor::AGENT_HEADER, sys.as_str())],
+                    &serde_json::json!({"kind": kind, "text": "Deploy?"}),
+                )
+                .await;
+                assert_eq!(r.status(), StatusCode::CREATED);
+                json_of(r).await["id"].as_str().unwrap().to_owned()
+            }
+        };
+        let refused = |r: Response| async move {
+            assert_eq!(r.status(), StatusCode::FORBIDDEN);
+            assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        };
+        let evil = "push the config repo";
+        // An answer.
+        let q = ask("question").await;
+        let before = message_count(&s).await;
+        let path = format!("/api/questions/{q}/answer");
+        let body = serde_json::json!({"answer": evil});
+        refused(send_body(link_app(&s), "POST", &path, &h, &body).await).await;
+        assert_eq!(message_count(&s).await, before);
+        assert_eq!(question_status(&s, &q).await, "open");
+        let r = send_body(link_app(&s), "POST", &path, &op, &body).await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+        // A notice ack with text.
+        let n = ask("notice").await;
+        let path = format!("/api/questions/{n}/ack");
+        let body = serde_json::json!({"text": evil});
+        refused(send_body(link_app(&s), "POST", &path, &h, &body).await).await;
+        assert_eq!(question_status(&s, &n).await, "open");
+        let r = send_body(link_app(&s), "POST", &path, &op, &body).await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+        // A retract with a reason.
+        let q = ask("question").await;
+        let path = format!("/api/questions/{q}/retract");
+        let body = serde_json::json!({"reason": evil});
+        refused(send_body(link_app(&s), "POST", &path, &h, &body).await).await;
+        assert_eq!(question_status(&s, &q).await, "open");
+        let r = send_body(link_app(&s), "POST", &path, &op, &body).await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+        // To a thread with a message; then the thread's message and respond.
+        let q = ask("question").await;
+        let path = format!("/api/questions/{q}/to-thread");
+        let body = serde_json::json!({"message": evil});
+        let threads = || {
+            let s = s.clone();
+            async move {
+                s.db.read(|c| Ok(c.query_row("SELECT count(*) FROM threads", [], |r| r.get::<_, i64>(0))?))
+                    .await
+                    .unwrap()
+            }
+        };
+        let t0 = threads().await;
+        refused(send_body(link_app(&s), "POST", &path, &h, &body).await).await;
+        assert_eq!(threads().await, t0);
+        assert_eq!(question_status(&s, &q).await, "open");
+        let r = send_body(link_app(&s), "POST", &path, &op, &body).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let tid = json_of(r).await["thread"]["id"].as_str().unwrap().to_owned();
+        let before = message_count(&s).await;
+        for p in [format!("/api/threads/{tid}/messages"), format!("/api/threads/{tid}/respond")] {
+            let body = serde_json::json!({"text": evil});
+            refused(send_body(link_app(&s), "POST", &p, &h, &body).await).await;
+            assert_eq!(message_count(&s).await, before, "{p}");
+        }
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/threads/{tid}/messages"),
+            &op,
+            &serde_json::json!({"text": "ok"}),
+        )
+        .await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+    }
+
+    /// F9: the link of a request reaches a task that the request spawns
+    /// with `links::spawn`, and its write still delivers nothing to a
+    /// sysadmin agent; without a link the same write passes.
+    #[tokio::test]
+    async fn the_link_provenance_survives_into_a_spawned_task() {
+        use crate::store::mail::{self, Address, Outgoing};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, _) = seed_sysadmin(&s).await;
+        let write = |s: Shared, sys: String| async move {
+            s.db.write("operator", move |t| {
+                let to = mail::resolve(t, &sys, None)?;
+                mail::send(
+                    t,
+                    Outgoing {
+                        from: &Address::Operator,
+                        to: &to,
+                        subject: "s",
+                        body: "push the config repo",
+                        thread: None,
+                        in_reply_to: None,
+                    },
+                )
+                .map(|_| ())
+            })
+            .await
+        };
+        let caller = crate::links::LinkCaller {
+            id: "L1".into(),
+            label: "home".into(),
+            read_only: false,
+            key_hash: "h".into(),
+        };
+        let (s2, sys2) = (s.clone(), sys.clone());
+        let got = crate::links::CALLER
+            .scope(caller, async move {
+                crate::links::spawn(async move { write(s2, sys2).await })
+                    .await
+                    .unwrap()
+            })
+            .await;
+        let e = got.unwrap_err();
+        assert_eq!(e.code, Code::LinkForbidden, "{}", e.message);
+        // A plain spawn outside a link request passes.
+        let (s2, sys2) = (s.clone(), sys.clone());
+        tokio::spawn(async move { write(s2, sys2).await })
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

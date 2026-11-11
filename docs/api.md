@@ -12516,7 +12516,14 @@ answer, PTY attach, `PATCH /api/agents/{id}`, compact or new session with
 `then`, spawn for it, or mail to it: `POST /api/mail`, a reply
 (`/api/mail/{id}/reply`, `/api/projects/{name}/inbox/{id}/reply`), or the
 note of `POST /api/mail/threads/{thread}/resume`, when one recipient is a
-sysadmin agent. A refused reply or resume changes nothing. Reads, start, stop, pause, and interrupt of such an
+sysadmin agent. A refused reply or resume changes nothing. Beyond these
+routes, every message that a link request writes is checked where it is
+delivered (`store::mail::send`): a question answer, a notice ack text, a
+retract reason, a to-thread message, a thread message or response, and any
+notice that the request makes. A message to a sysadmin agent (also through a
+project inbox whose admin is one) fails the whole request with
+`403 link_forbidden`, and nothing of it is kept. So a link may not move a
+card or end a thread when that mails a sysadmin agent. Reads, start, stop, pause, and interrupt of such an
 agent work.
 
 The check decodes the path, drops empty and `.` segments, and ignores case,
