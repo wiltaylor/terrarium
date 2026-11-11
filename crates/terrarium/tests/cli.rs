@@ -998,11 +998,22 @@ fn checkbox_bundle_cli_rejects_non_array_options_without_posting() {
             {"text": "Other", "multi_select": true, "options": []}
         ]}})
     });
-    for options in [json!("A"), json!(null), json!(false), json!(1), json!({"A": true})] {
+    for options in [
+        json!("A"),
+        json!(null),
+        json!(false),
+        json!(1),
+        json!({"A": true}),
+    ] {
         let answers_path = dir.join("answers.json");
         std::fs::write(&answers_path, json!([{"options": options}, {}]).to_string()).unwrap();
-        let o = bin().env("TERRARIUM_AGENT", "01AGENT").env("TERRARIUM_SOCKET", &socket)
-            .args(["admin", "question", "answer", "B1", "--answers-file"]).arg(&answers_path).output().unwrap();
+        let o = bin()
+            .env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .args(["admin", "question", "answer", "B1", "--answers-file"])
+            .arg(&answers_path)
+            .output()
+            .unwrap();
         assert!(!o.status.success());
         assert!(text(&o.stderr).contains("options must be an array"));
     }

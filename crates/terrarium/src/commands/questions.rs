@@ -622,8 +622,14 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
             if let Some(f) = answers_file {
                 let given = json_list(ctx, f, "answers", "items")?;
                 for (i, entry) in given.iter().enumerate() {
-                    if entry.get("options").is_some_and(|options| !options.is_array()) {
-                        return Err(CliError::usage(format!("item {}: options must be an array", i + 1)));
+                    if entry
+                        .get("options")
+                        .is_some_and(|options| !options.is_array())
+                    {
+                        return Err(CliError::usage(format!(
+                            "item {}: options must be an array",
+                            i + 1
+                        )));
                     }
                 }
                 let q = ctx.api.get(&path(id), vec![]).await?;

@@ -13,14 +13,31 @@ use terrariumd::waits::Tuning;
 #[tokio::test]
 async fn stale_revision_checkbox_answers_are_rejected_without_changing_the_answer() {
     let World { td, lead, .. } = setup().await;
-    let q = ask(&td, &lead, json!({"text": "Choose any", "multi_select": true, "options": ["A", "B"]})).await;
+    let q = ask(
+        &td,
+        &lead,
+        json!({"text": "Choose any", "multi_select": true, "options": ["A", "B"]}),
+    )
+    .await;
     let path = format!("/api/questions/{}", id(&q));
-    let updated = td.patch_as(&lead, &path, json!({"options": ["B", "A"]})).await;
+    let updated = td
+        .patch_as(&lead, &path, json!({"options": ["B", "A"]}))
+        .await;
     assert_eq!(updated.ok()["revision"], 2);
-    let stale = td.post(&format!("{path}/answer"), json!({"options": [0], "revision": 1})).await;
+    let stale = td
+        .post(
+            &format!("{path}/answer"),
+            json!({"options": [0], "revision": 1}),
+        )
+        .await;
     stale.err(409, "conflict");
     assert_eq!(td.get(&path).await.ok()["status"], "open");
-    let result = td.post(&format!("{path}/answer"), json!({"options": [1], "revision": 2})).await;
+    let result = td
+        .post(
+            &format!("{path}/answer"),
+            json!({"options": [1], "revision": 2}),
+        )
+        .await;
     assert_eq!(result.ok()["answer_options"], json!([1]));
 }
 
