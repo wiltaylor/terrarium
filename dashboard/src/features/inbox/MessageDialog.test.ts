@@ -6,6 +6,7 @@
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import { createMockApi } from "../../api/mock";
 import type { Thread } from "../../api/types";
 
@@ -62,7 +63,7 @@ describe("MessageDialog", () => {
     setValue("select[aria-label=Agent]", who, "change");
     setValue("textarea[aria-label='Message text']", "Please rebase on main.\nThe release is out.");
     (document.querySelector("form[aria-label=Message]") as HTMLFormElement).requestSubmit();
-    await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
     const m = sent.mock.calls[0]![0];
     expect(open).toHaveBeenCalledWith({ report_to: who, topic: "Please rebase on main.", text: "Please rebase on main.\nThe release is out." });
     expect(m.report_to).toBe(target.id);

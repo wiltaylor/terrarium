@@ -1283,6 +1283,40 @@ async fn a_parked_agent_holds_its_place_until_it_stops() {
     assert_eq!(r.status, 201, "{}", r.body);
 }
 
+/// TER-685: the wake of an unpark that finds another wake on the way (one
+/// that read the agent while it was parked, and refuses it) wakes again
+/// when that one ends. Before, the agent stayed stopped with its return
+/// turn ('never reached idle; last stopped').
+#[tokio::test]
+async fn an_unpark_wake_behind_a_refused_wake_wakes_again() {
+    let (td, lead) = setup().await;
+    let s = state(&td);
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    let agent_id: AgentId = eph.parse().unwrap();
+    td.wait_task_done(&eph).await;
+    mv(&td, &c, "review", None).await;
+    parked(&td, &eph).await;
+    // The wake on the way read the park.
+    let hold = terrariumd::lifecycle::WakeGuard::take(&s.lifecycle, agent_id).unwrap();
+    let turn = format!("[System:card {c}] unpark behind a wake");
+    assert_eq!(
+        terrariumd::bound::unpark(&s, &eph, Some(turn.clone()), "test race")
+            .await
+            .unwrap(),
+        terrariumd::bound::Unparked::Woken
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(agent(&td, &eph).await["status"], "stopped");
+    // The wake on the way ends without a start.
+    drop(hold);
+    until("the resumed return turn", || async {
+        td.sup.prompts(agent_id).contains(&turn)
+    })
+    .await;
+    td.wait_status(&eph, "idle").await;
+}
+
 /// TER-111 (R2-3): an unpark that queues behind an older one runs the
 /// queue at once when the owner has room, not at the next spawn tick.
 #[tokio::test]

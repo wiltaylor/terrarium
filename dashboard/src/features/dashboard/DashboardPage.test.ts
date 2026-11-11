@@ -3,6 +3,7 @@ import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import { createMockApi } from "../../api/mock";
 import type { AgentEvent } from "../../api/types";
 
@@ -25,10 +26,10 @@ it("loads accuracy once and does not reload it with monitor results", async () =
     get children() { return createComponent(Route, { path: "/p/:project/dashboard", component: DashboardPage }); },
   }), host);
   try {
-    await vi.waitFor(() => expect(host.textContent).toContain("ETA accuracy"));
+    await waitFor(() => expect(host.textContent).toContain("ETA accuracy"));
     expect(accuracy).toHaveBeenCalledExactlyOnceWith("terrarium");
     listeners.forEach(fn => fn({ kind: "monitor.result", project: "terrarium", data: {} } as AgentEvent));
-    await vi.waitFor(() => expect(dashboard).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(dashboard).toHaveBeenCalledTimes(2));
     expect(accuracy).toHaveBeenCalledTimes(1);
   } finally {
     dispose(); host.remove(); vi.restoreAllMocks();

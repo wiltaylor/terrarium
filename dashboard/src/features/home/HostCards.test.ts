@@ -9,6 +9,7 @@ import { resolve } from "node:path";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import type { Host, HostMetricsSample } from "../../api/types";
 
 const LONG = "/usr/lib/linux-tools/6.18.54.1-microsoft-standard-WSL2";
@@ -55,7 +56,7 @@ function rule(css: string, selector: string): string {
 describe("host cards", () => {
   it("shows a long mount path in one cell that ends in an ellipsis, with the full path in the tooltip", async () => {
     const el = mount(() => createComponent(HostCards, { now: Date.now() }));
-    await vi.waitFor(() => expect(el.querySelector(".fs-list")).not.toBeNull());
+    await waitFor(() => expect(el.querySelector(".fs-list")).not.toBeNull());
     const meters = [...el.querySelectorAll<HTMLElement>(".fs-list .meter")];
     expect(meters).toHaveLength(2);
     const long = meters.find((m) => m.textContent?.includes(LONG))!;
@@ -68,7 +69,7 @@ describe("host cards", () => {
 
   it("shows why an offline host is offline", async () => {
     const el = mount(() => createComponent(HostCards, { now: Date.now() }));
-    await vi.waitFor(() => expect(el.querySelector(".offline-reason")).not.toBeNull());
+    await waitFor(() => expect(el.querySelector(".offline-reason")).not.toBeNull());
     expect(el.querySelector(".offline-reason")!.textContent).toBe(gone.offline_reason);
   });
 
@@ -89,7 +90,7 @@ describe("host cards", () => {
 describe("Hosts page", () => {
   it("shows the offline reason under the status of an offline host only", async () => {
     const el = mount(() => createComponent(HostsPage, {}));
-    await vi.waitFor(() => expect(el.querySelector('[aria-label="Why gone is offline"]')).not.toBeNull());
+    await waitFor(() => expect(el.querySelector('[aria-label="Why gone is offline"]')).not.toBeNull());
     expect(el.querySelector('[aria-label="Why gone is offline"]')!.textContent).toBe(gone.offline_reason);
     expect(el.querySelector('[aria-label="Why wsl is offline"]')).toBeNull();
   });

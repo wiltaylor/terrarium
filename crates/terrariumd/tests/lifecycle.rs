@@ -795,6 +795,14 @@ async fn manual_compaction_rights_and_states() {
     // Not idle: a compaction runs. The next request waits for its end.
     td.sup.set_compact(aid(&w), FakeCompact::Silent);
     td.post_empty(&path).await.ok();
+    // The third compaction can answer `queued`: the task of the second
+    // one can still hold the agent after the `idle`, and the lifecycle
+    // then runs it. Under load the next request came first and found the
+    // agent at rest (TER-685). Wait until the compaction runs.
+    until("the third compaction runs", || async {
+        td.sup.compactions(aid(&w)) == 3
+    })
+    .await;
     let r = td.post_empty(&path).await;
     assert_eq!(r.ok()["reset"]["state"], "queued", "{}", r.body);
     assert_eq!(td.sup.compactions(aid(&w)), 3, "not interrupted");
