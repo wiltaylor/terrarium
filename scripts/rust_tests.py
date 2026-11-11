@@ -127,7 +127,15 @@ def run(args: list[str]) -> int:
 
 def rerun_failed(cmd: list[str], results: str | None, first: rerun_tests.Outcomes,
                  code: int) -> int:
-    """Run the failed tests once more (TER-683, rerun_tests.py)."""
+    """Run the failed tests once more (TER-683, rerun_tests.py).
+
+    Only cargo's own test-failure status (101) may lead to a rerun: a signal
+    (a negative status) or any other status stays red, whatever the output.
+    """
+    if code != rerun_tests.LIBTEST_FAILED:
+        what = f"signal {-code}" if code < 0 else f"exit code {code}"
+        rerun_tests.refuse("test", first, f"cargo itself ended with {what}, not 101")
+        return code
     why = rerun_tests.why_not(first)
     if why:
         rerun_tests.refuse("test", first, why)

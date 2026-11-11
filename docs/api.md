@@ -12709,7 +12709,8 @@ part in it: it reads nothing of it from the job log, and files no card.
 - No rerun, the step fails at once, unless every failure is a failed test.
   The script counts each test run that cargo starts (`Running`,
   `Doc-tests` on its stderr) or that it starts itself (uid 1001), and each
-  end: a build error or any other cargo `error` line, a test run that ended
+  end: cargo itself ending with a status other than 101 (a signal or any
+  other code), a build error or any other cargo `error` line, a test run that ended
   with a signal or an exit code other than 101, a run that has no test
   result (a crash or a panic before `running`), a failed run with no failed
   test result, a failed doctest, or more than 5 failed tests in the step.

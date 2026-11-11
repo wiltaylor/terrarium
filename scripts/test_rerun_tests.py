@@ -235,6 +235,17 @@ class CargoStep(unittest.TestCase):
         self.assertIn("without a result", step["reason"])
         self.assertEqual([(t["name"], t["rerun"]) for t in step["tests"]], [("a", None)])
 
+    def test_cargo_killed_or_odd_status_stays_red(self):
+        # Valid failed-test output and cargo stderr, but cargo itself ends
+        # with a signal (-9) or a status other than 101: no rerun, red.
+        for status, want in ((-9, "signal 9"), (1, "exit code 1"), (102, "exit code 102")):
+            code, calls, out, report = self.run_with([(PLAIN_FAIL, cargo(2, ["a"]), status)])
+            self.assertEqual((code, len(calls)), (status, 1), status)
+            self.assertIn(f"no rerun: cargo itself ended with {want}, not 101", out)
+            [step] = report["steps"]
+            self.assertEqual(step["outcome"], "no_rerun")
+            self.assertEqual([t["rerun"] for t in step["tests"]], [None])
+
     def test_more_than_n_failures_get_no_rerun(self):
         code, calls, out, _ = self.run_with([
             (plain(failed=[f"t{i}" for i in range(6)]), cargo(1, ["a"]), 101)])
