@@ -241,7 +241,7 @@ async fn link_approval_fixtures(
             waits::NewWatch {
                 watcher: "operator".into(),
                 agent: dev.clone(),
-                on: vec!["idle".into()],
+                on: vec![terrarium_core::AgentStatus::Idle],
                 once: false,
                 debounce: true,
             },
