@@ -1552,8 +1552,7 @@ async fn rerun_lost(state: &Shared, job: Job, why: String, red: Option<JobEnd>, 
     hold(&job.id, why.clone(), None);
     // As in [`recover_lost`]: the kill goes to the current delivery
     // target, and a job that ran on another host gets no confirmed kill.
-    let (project, ran_on, kind, slot) =
-        (job.project.clone(), job.host.clone(), job.kind, job.slot);
+    let (project, ran_on, kind, slot) = (job.project.clone(), job.host.clone(), job.kind, job.slot);
     let found = state
         .db
         .read(move |c| {
