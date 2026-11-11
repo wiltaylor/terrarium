@@ -4379,3 +4379,15 @@ p.warn { color: var(--warn); margin: 0; }
   margin: 0;
   font-size: 0.95rem;
 }
+/* Instance identity stays visible above every remote page and dialog. */
+.remote-banner {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: #211631;
+  color: #fff;
+  border-bottom: 6px solid #7356b8;
+  padding: 12px 20px;
+}
+.remote-banner a { color: #fff; margin-left: 20px; text-decoration: underline; }
+.remote-tree { padding-left: 12px; border-left: 2px solid #7356b8; }

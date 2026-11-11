@@ -151,8 +151,8 @@ function purifier(): Purifier {
 }
 
 /** Sanitize to a fragment. Appending a fragment avoids a second HTML parse (mXSS). */
-export function sanitizeToFragment(html: string): DocumentFragment {
-  return purifier().sanitize(html, { ...PURIFY_CONFIG, RETURN_DOM_FRAGMENT: true });
+export function sanitizeToFragment(html: string, blockImages = false): DocumentFragment {
+  return purifier().sanitize(html, { ...PURIFY_CONFIG, FORBID_ATTR: [...PURIFY_CONFIG.FORBID_ATTR!, ...(blockImages ? ["src"] : [])], RETURN_DOM_FRAGMENT: true });
 }
 
 /** Sanitize to a string. For tests and for places that only compare output. */
@@ -161,6 +161,8 @@ export function sanitizeHtml(html: string): string {
 }
 
 /** The only sink for untrusted HTML: replace the children of `el` with the sanitized markup. */
-export function setSafeHtml(el: Element, html: string): void {
-  el.replaceChildren(sanitizeToFragment(html));
+export function setSafeHtml(el: Element, html: string, options?: { blockImages?: boolean; transform?: (fragment: DocumentFragment) => void }): void {
+  const fragment = sanitizeToFragment(html, options?.blockImages);
+  options?.transform?.(fragment);
+  el.replaceChildren(fragment);
 }

@@ -23,7 +23,7 @@ export function A(props: ComponentProps<typeof RouterLink>) {
 export function Navigate(props: ComponentProps<typeof RouterNavigate>) {
   const instance = useInstance();
   const target = props.href;
-  return <RouterNavigate {...props} href={typeof target === "function" ? (args) => instance.href(target(args)) : instance.href(target)} />;
+  return <RouterNavigate {...props} href={typeof target === "function" ? (args) => instance.href(target({ ...args, location: { ...args.location, pathname: instance.path(args.location.pathname) } })) : instance.href(target)} />;
 }
 
 export function useNavigate(): ReturnType<typeof routerNavigate> {

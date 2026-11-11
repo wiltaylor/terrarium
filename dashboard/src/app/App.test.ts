@@ -13,7 +13,7 @@ const { stub } = vi.hoisted(() => ({ stub: (label: string) => () => label }));
 vi.mock("../api", () => ({ isMock: false }));
 // The project shell reads the tab counts (TER-154): no agent, no count.
 vi.mock("../stores", async () => { const { instanceTestStores } = await import("../test/instance"); return instanceTestStores(({
-  auth: { mode: () => "operator" },
+  auth: { mode: () => "operator", token: () => null, csrf: () => null },
   agents: { inProject: () => [] },
   api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) } },
   events: { on: () => () => {} },
@@ -67,6 +67,7 @@ afterEach(() => {
   dispose = undefined;
   document.body.replaceChildren();
   window.history.replaceState({}, "", "/");
+  vi.unstubAllGlobals();
 });
 
 function mount(path: string) {
@@ -82,6 +83,36 @@ function activeProjectTab(root: HTMLElement) {
 }
 
 describe("App project routes", () => {
+  it("mounts a remote page with its identity and keeps index redirects remote", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ name: "lab", url: "https://lab.example", status: "version_skew", read_only: true })));
+    vi.stubGlobal("fetch", fetch);
+    const root = mount("/remote/lab/p/demo");
+    await waitFor(() => expect(root.textContent).toContain("Cards page"));
+    expect(window.location.pathname).toBe("/remote/lab/p/demo/board");
+    expect(root.textContent).toContain("Remote: lab");
+    expect(root.textContent).toContain("Version differs from home");
+    expect(document.title).toBe("[lab] Terrarium");
+    expect(activeProjectTab(root)).toEqual(["Board"]);
+    const board = root.querySelector('nav[aria-label="Project"] a');
+    expect(board?.getAttribute("href")).toMatch(/^\/remote\/lab\//);
+    expect(fetch).toHaveBeenCalledWith("/api/remotes/lab", expect.anything());
+  });
+
+  it("does not mount home content when the remote does not exist", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response('{"error":"remote not found"}', { status: 404 })));
+    const root = mount("/remote/missing/p/demo/board");
+    await waitFor(() => expect(root.textContent).toContain("remote not found"));
+    expect(root.textContent).not.toContain("Cards page");
+  });
+
+  it("keeps remote project names, queries and hashes on legacy redirects", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ name: "lab", url: "https://lab.example", status: "online" }))));
+    const root = mount("/remote/lab/p/my%20app/board/tests/R1?filter=failed#result");
+    await waitFor(() => expect(root.textContent).toContain("Test run page"));
+    expect(window.location.pathname).toBe("/remote/lab/p/my%20app/tests/R1");
+    expect(window.location.search).toBe("?filter=failed");
+    expect(window.location.hash).toBe("#result");
+  });
   it("opens Board at the project index in the real route tree", async () => {
     const root = mount("/p/my%20app");
     await waitFor(() => expect(root.textContent).toContain("Cards page"));

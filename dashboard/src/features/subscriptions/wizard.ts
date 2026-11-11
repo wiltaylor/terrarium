@@ -187,20 +187,22 @@ export const KEY_HELP: Record<string, string> = {
 export const takesPlan = (provider: string): boolean => provider in KEY_PLANS;
 
 /** The body of `POST /api/subscriptions/{name}/api-key` from the form fields. */
-export function apiKeyBody(f: { provider: string; key: string; plan?: string; baseUrl?: string; models?: string; keyId?: string; region?: string; projectId?: string; resource?: string; cloudModels?: Record<string, string> }): ApiKeyInput {
+export function apiKeyBody(f: { provider: string; key: string; plan?: string; baseUrl?: string; models?: string; keyId?: string; region?: string; projectId?: string; resource?: string; cloudModels?: Record<string, string>; budgetUsd?: string }): ApiKeyInput {
+  const budget = f.budgetUsd?.trim() ? Number(f.budgetUsd) : undefined;
+  if (budget !== undefined && (!Number.isInteger(budget) || budget < 1 || budget > 4294967295)) throw new Error("Monthly budget must be a whole USD amount from 1 to 4294967295");
   if (f.provider === "foundry") return {
     provider: "foundry", key: f.key,
-    cloud: { ...(f.baseUrl?.trim() ? { base_url: f.baseUrl.trim() } : { resource: f.resource?.trim() }), models: Object.fromEntries(Object.entries(f.cloudModels ?? {}).filter(([, v]) => v.trim()).map(([k, v]) => [k, v.trim()])) },
+    cloud: { ...(budget !== undefined ? { budget_usd: budget } : {}), ...(f.baseUrl?.trim() ? { base_url: f.baseUrl.trim() } : { resource: f.resource?.trim() }), models: Object.fromEntries(Object.entries(f.cloudModels ?? {}).filter(([, v]) => v.trim()).map(([k, v]) => [k, v.trim()])) },
     test_connection: !f.baseUrl?.trim(),
   };
   if (f.provider === "gcp") return {
     provider: "gcp", key: f.key,
-    cloud: { region: f.region?.trim() || "us-east5", project_id: f.projectId?.trim(), models: Object.fromEntries(Object.entries(f.cloudModels ?? {}).filter(([, v]) => v.trim()).map(([k, v]) => [k, v.trim()])) },
+    cloud: { ...(budget !== undefined ? { budget_usd: budget } : {}), region: f.region?.trim() || "us-east5", project_id: f.projectId?.trim(), models: Object.fromEntries(Object.entries(f.cloudModels ?? {}).filter(([, v]) => v.trim()).map(([k, v]) => [k, v.trim()])) },
     test_connection: true,
   };
   if (f.provider === "bedrock") return {
     provider: "bedrock", key: f.key, key_id: f.keyId?.trim(),
-    cloud: { region: f.region?.trim() || "us-east-1", models: Object.fromEntries(Object.entries(f.cloudModels ?? {}).filter(([, v]) => v.trim()).map(([k, v]) => [k, v.trim()])) },
+    cloud: { ...(budget !== undefined ? { budget_usd: budget } : {}), region: f.region?.trim() || "us-east-1", models: Object.fromEntries(Object.entries(f.cloudModels ?? {}).filter(([, v]) => v.trim()).map(([k, v]) => [k, v.trim()])) },
     test_connection: true,
   };
   const models = (f.models ?? "").split(",").map((m) => m.trim()).filter(Boolean);

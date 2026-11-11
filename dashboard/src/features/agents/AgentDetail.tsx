@@ -63,7 +63,7 @@ function RemovedAgent(props: { project?: string }) {
 export const RUNNING: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 
 export default function AgentDetail() {
-  const { api, agents, leases: holds, events, quota } = useInstance();
+  const { key: instanceKey, api, agents, leases: holds, events, quota } = useInstance();
   const params = useParams<{ id: string }>();
   const navigate = useNavigate();
   const id = () => decodeURIComponent(params.id);
@@ -265,7 +265,7 @@ export default function AgentDetail() {
                 aria-label="Turn text"
               />
               <button class="primary" type="submit">
-                Send turn
+                {instanceKey === "local" ? "Send turn" : `Send to worker on ${instanceKey.slice(7)}`}
               </button>
             </form>
             <QuotaLine agent={a()} />
@@ -287,7 +287,7 @@ export default function AgentDetail() {
                 <Terminal
                   connect={() => api.agents.pty(a().id)}
                   available={running()}
-                  title={`${a().name} · ${a().harness}`}
+                  title={`${a().name} · ${a().harness}${instanceKey === "local" ? "" : ` · Remote: ${instanceKey.slice(7)}`}`}
                   keys={(keys) => api.agents.keys(a().id, keys)}
                 />
               </Match>
