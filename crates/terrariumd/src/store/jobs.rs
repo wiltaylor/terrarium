@@ -52,6 +52,9 @@ pub enum JobKind {
     Validate,
     Merge,
     E2e,
+    /// A release (TER-623): the release recipe on the release client
+    /// target, on a commit of `main`, with the release secrets in its env.
+    Release,
 }
 
 impl JobKind {
@@ -60,6 +63,7 @@ impl JobKind {
             Self::Validate => "validate",
             Self::Merge => "merge",
             Self::E2e => "e2e",
+            Self::Release => "release",
         }
     }
 
@@ -68,6 +72,7 @@ impl JobKind {
             "validate" => Some(Self::Validate),
             "merge" => Some(Self::Merge),
             "e2e" => Some(Self::E2e),
+            "release" => Some(Self::Release),
             _ => None,
         }
     }
@@ -216,6 +221,13 @@ pub fn check_onto(onto: &str) -> ApiResult<()> {
 /// The slot of the merge lane (TER-159, TER-190): one merge at a time per
 /// project, in a work tree of its own, apart from the validate slots.
 pub const MERGE_SLOT: i64 = 0;
+
+/// The slot of the release lane (TER-623): one release at a time per
+/// project, on the release target, apart from the other lanes.
+pub const RELEASE_SLOT: i64 = -1;
+
+/// The branch of a release job: the release merge commit is on `main`.
+pub const RELEASE_BRANCH: &str = "main";
 
 /// A card of a batch merge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -503,12 +515,12 @@ pub fn failed_step(tail: &str) -> Option<String> {
 
 /// The pass rate of the jobs of `project` created at or after `since`
 /// (RFC 3339, UTC, as `created_at` is stored).
-pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStats> {
-    let mut st = conn.prepare(
-        "SELECT kind, state, attempt, outcome, parent,
+const STATS_SQL: &str = "SELECT kind, state, attempt, outcome, parent,
                 CASE WHEN state = 'failed' THEN tail END
-         FROM jobs WHERE project = ?1 AND created_at >= ?2",
-    )?;
+         FROM jobs WHERE project = ?1 AND created_at >= ?2";
+
+pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStats> {
+    let mut st = conn.prepare(STATS_SQL)?;
     let rows = st
         .query_map(params![project, since], |r| {
             Ok((
@@ -580,6 +592,8 @@ pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStat
         s.first_attempt.add(passed);
         match JobKind::parse(&kind) {
             Some(JobKind::Merge) => s.merge.add(passed),
+            // A release is no test of a card (TER-623).
+            Some(JobKind::Release) => {}
             _ => s.validate.add(passed),
         }
     }
@@ -996,6 +1010,9 @@ pub struct QueueOf {
     pub slots: usize,
     /// The host key of the project's delivery target.
     pub host: String,
+    /// The host key of the project's release target (TER-623), when it
+    /// has one.
+    pub release_host: Option<String>,
 }
 
 /// The queued jobs that may start now, with the host each one takes a
@@ -1027,6 +1044,8 @@ pub fn pick(
     let mut validating: HashMap<String, usize> = HashMap::new();
     // The projects where no more merge may start in this pick.
     let mut merging: HashSet<String> = HashSet::new();
+    // The projects where no more release may start in this pick.
+    let mut releasing: HashSet<String> = HashSet::new();
     // The validate slots that are held, per project.
     let mut held: HashMap<String, HashSet<i64>> = HashMap::new();
     for j in running {
@@ -1040,6 +1059,9 @@ pub fn pick(
         match j.kind {
             JobKind::Merge | JobKind::E2e => {
                 merging.insert(j.project.clone());
+            }
+            JobKind::Release => {
+                releasing.insert(j.project.clone());
             }
             JobKind::Validate => {
                 *validating.entry(j.project.clone()).or_default() += 1;
@@ -1056,16 +1078,31 @@ pub fn pick(
         };
         // Both kinds own the project's Docker VM and must never overlap.
         let merge = matches!(j.kind, JobKind::Merge | JobKind::E2e);
+        let release = j.kind == JobKind::Release;
         if merge && !merging.insert(j.project.clone()) {
             // A merge of the project runs, or an older one comes first,
             // whether it starts now or not.
             continue;
         }
-        let used = on_host.get(&q.host).copied().unwrap_or(0);
-        if caps.get(&q.host).is_some_and(|cap| used >= *cap) {
+        // A release runs on the release target: with none, it waits.
+        let host = if release {
+            match &q.release_host {
+                Some(h) => h.clone(),
+                None => continue,
+            }
+        } else {
+            q.host.clone()
+        };
+        if release && !releasing.insert(j.project.clone()) {
             continue;
         }
-        if merge {
+        let used = on_host.get(&host).copied().unwrap_or(0);
+        if caps.get(&host).is_some_and(|cap| used >= *cap) {
+            continue;
+        }
+        if release {
+            j.slot = Some(RELEASE_SLOT);
+        } else if merge {
             j.slot = Some(MERGE_SLOT);
         } else {
             let busy = validating.get(&j.project).copied().unwrap_or(0);
@@ -1080,8 +1117,8 @@ pub fn pick(
             j.slot = Some(free);
             *validating.entry(j.project.clone()).or_default() += 1;
         }
-        *on_host.entry(q.host.clone()).or_default() += 1;
-        out.push((j, q.host.clone()));
+        *on_host.entry(host.clone()).or_default() += 1;
+        out.push((j, host));
     }
     out
 }
@@ -1135,11 +1172,13 @@ pub fn startable(
             continue;
         }
         let host = host_of(conn, &def);
+        let release_host = def.release_view().map(|v| host_of(conn, &v));
         queues.insert(
             p.to_owned(),
             QueueOf {
                 slots: def.slots(),
                 host,
+                release_host,
             },
         );
         defs.insert(p.to_owned(), def);
@@ -1151,10 +1190,20 @@ pub fn startable(
     Ok(pick(queued, &running, &queues, &caps)
         .into_iter()
         .filter_map(|(j, h)| {
-            let def = defs.get(&j.project)?.clone();
+            let def = job_delivery(defs.get(&j.project)?, j.kind)?;
             Some((j, h, def))
         })
         .collect())
+}
+
+/// The config that a job of `kind` runs with: the project's, or for a
+/// release its [`DeliveryDef::release_view`] (TER-623). `None`: a release
+/// with no release target.
+pub fn job_delivery(def: &DeliveryDef, kind: JobKind) -> Option<DeliveryDef> {
+    match kind {
+        JobKind::Release => def.release_view(),
+        JobKind::Validate | JobKind::Merge => Some(def.clone()),
+    }
 }
 
 /// The host key of the delivery target of `def`. A target that is gone
@@ -1877,12 +1926,234 @@ pub fn delivery(conn: &Connection, project: &str) -> ApiResult<DeliveryDef> {
     }
 }
 
+/// The project whose `release_target` is `target` (TER-623), if any. Such
+/// a target runs release jobs only: no agent may use it, list it in a
+/// policy, or hold a lease or a reservation on it ([`release_only`]).
+pub fn release_target_of(conn: &Connection, target: &str) -> ApiResult<Option<String>> {
+    let mut st = conn.prepare("SELECT project FROM project_delivery ORDER BY project")?;
+    let names = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for p in names {
+        if delivery(conn, &p)?.release_target() == Some(target) {
+            return Ok(Some(p));
+        }
+    }
+    Ok(conn
+        .query_row(
+            "SELECT project FROM release_targets WHERE target = ?1 ORDER BY added_at LIMIT 1",
+            [target],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// A protected release target (TER-623, review-ter-623-r3 finding 2): a
+/// target that was a `release_target`, with its machine then. It stays
+/// protected after a switch or a clear, until the operator retires it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseTarget {
+    pub target: String,
+    /// The machine at the set ([`machine_key`]); empty for a row that came
+    /// with the migration.
+    pub machine: String,
+    pub project: String,
+    pub added_by: String,
+    pub added_at: String,
+}
+
+/// The protected release targets, by target and time.
+pub fn release_targets(conn: &Connection) -> ApiResult<Vec<ReleaseTarget>> {
+    let mut st = conn.prepare(
+        "SELECT target, machine, project, added_by, added_at FROM release_targets
+         ORDER BY target, added_at",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok(ReleaseTarget {
+                target: r.get(0)?,
+                machine: r.get(1)?,
+                project: r.get(2)?,
+                added_by: r.get(3)?,
+                added_at: r.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Add the release target of `def` of `project` and its machine now to the
+/// protected list ([`ReleaseTarget`]). A known pair stays as it is.
+fn protect_release_target(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResult<()> {
+    let Some(r) = def.release_target() else {
+        return Ok(());
+    };
+    let machine = machine_of(t, r);
+    let n = t.execute(
+        "INSERT OR IGNORE INTO release_targets (target, machine, project, added_by, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![r, machine, project, t.actor, now()],
+    )?;
+    if n > 0 {
+        t.audit(
+            "release_target.protect",
+            r,
+            Some(project),
+            json!({"machine": machine}),
+        )?;
+    }
+    Ok(())
+}
+
+/// Retire the protection of release target `target` (the operator only,
+/// the caller checks): every row of it goes, audited. Refused while a
+/// project has it as its `release_target`.
+pub fn retire_release_target(t: &mut Tx<'_>, target: &str) -> ApiResult<Vec<ReleaseTarget>> {
+    let mut st = t.prepare("SELECT project FROM project_delivery ORDER BY project")?;
+    let names = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(st);
+    for p in names {
+        if delivery(t, &p)?.release_target() == Some(target) {
+            return Err(ApiError::conflict(format!(
+                "target `{target}` is the release target of project `{p}`: switch or clear it first"
+            )));
+        }
+    }
+    let rows: Vec<ReleaseTarget> = release_targets(t)?
+        .into_iter()
+        .filter(|r| r.target == target)
+        .collect();
+    if rows.is_empty() {
+        return Err(ApiError::not_found(format!(
+            "target `{target}` is no protected release target"
+        )));
+    }
+    t.execute("DELETE FROM release_targets WHERE target = ?1", [target])?;
+    t.audit("release_target.retire", target, None, json!({"rows": rows}))?;
+    Ok(rows)
+}
+
+/// The refusal of `what` on the release target `target` of `project`
+/// (TER-623): only the release job and the operator use it.
+pub fn release_only(target: &str, project: &str, what: &str) -> ApiError {
+    ApiError::forbidden(format!(
+        "{what}: target `{target}` is a release target of project `{project}`, and a \
+         release target runs release jobs only (TER-623): no agent may exec, shell, copy, \
+         lease, reserve, run a tool on, define or list it in policy.targets; only the \
+         operator uses it"
+    ))
+}
+
+/// The machine of a target definition (TER-623, review-ter-623 F2 and r2
+/// finding 3): its host agent (by ID), or its ssh host and port, so a
+/// second target name for the same machine compares equal. Else its name.
+pub fn machine_key(conn: &Connection, def: &TargetDef) -> String {
+    if let Some(h) = def.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        let id = hosts::find(conn, h)
+            .ok()
+            .flatten()
+            .map_or_else(|| h.to_owned(), |x| x.id);
+        return format!("host:{id}");
+    }
+    if let Some(a) = def
+        .address
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        return format!("ssh:{}:{}", address_key(a), def.port.unwrap_or(22));
+    }
+    format!("name:{}", def.name)
+}
+
+/// [`machine_key`] of the target named `name`; a target that is gone keeps
+/// its name.
+pub fn machine_of(conn: &Connection, name: &str) -> String {
+    match targets::find(conn, name) {
+        Ok(Some(row)) => machine_key(conn, &row.def),
+        _ => format!("name:{name}"),
+    }
+}
+
+/// The release target that `def` is, or that is on the machine of `def`,
+/// with its project (TER-623): `(project, release target)`.
+pub fn release_match(conn: &Connection, def: &TargetDef) -> ApiResult<Option<(String, String)>> {
+    let mut st = conn.prepare("SELECT project FROM project_delivery ORDER BY project")?;
+    let names = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = machine_key(conn, def);
+    for p in names {
+        if let Some(r) = delivery(conn, &p)?.release_target()
+            && (r == def.name || machine_of(conn, r) == key)
+        {
+            return Ok(Some((p, r.to_owned())));
+        }
+    }
+    // The protected list (review-ter-623-r3 finding 2): a target that was a
+    // release target, its machine then, and its machine now.
+    for r in release_targets(conn)? {
+        if r.target == def.name
+            || (!r.machine.is_empty() && r.machine == key)
+            || machine_of(conn, &r.target) == key
+        {
+            return Ok(Some((r.project, r.target)));
+        }
+    }
+    Ok(None)
+}
+
+/// The operator-only rule of a target write (review-ter-623-r2 findings 2
+/// and 3, r3 finding 1): only the operator (`operator`) defines, changes or
+/// deletes a release target, a protected one, or a target on the machine
+/// of one. The target API and the fleet apply check the definition before
+/// and after the write.
+pub fn check_release_write(
+    conn: &Connection,
+    operator: bool,
+    def: &TargetDef,
+    what: &str,
+) -> ApiResult<()> {
+    if operator {
+        return Ok(());
+    }
+    match release_match(conn, def)? {
+        Some((p, r)) => Err(release_only(&r, &p, &format!("{what} `{}`", def.name))),
+        None => Ok(()),
+    }
+}
+
+/// [`release_only`] when `target` is a release target or on the machine of
+/// one (review-ter-623-r2 finding 3).
+pub fn check_not_release_target(conn: &Connection, target: &str, what: &str) -> ApiResult<()> {
+    let found = match targets::find(conn, target)? {
+        Some(row) => release_match(conn, &row.def)?,
+        None => release_target_of(conn, target)?.map(|p| (p, target.to_owned())),
+    };
+    match found {
+        Some((p, r)) if r == target => Err(release_only(target, &p, what)),
+        Some((p, r)) => Err(release_only(
+            target,
+            &p,
+            &format!("{what} (it is on the machine of the release target `{r}`)"),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Set the queue config of a project.
 pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResult<DeliveryDef> {
     if let Some(r) = &def.recipe
         && r.contains('\0')
     {
         return Err(ApiError::invalid("`recipe` holds a NUL byte"));
+    }
+    if let Some(r) = &def.release_recipe
+        && r.contains('\0')
+    {
+        return Err(ApiError::invalid("`release_recipe` holds a NUL byte"));
     }
     if let Some(w) = &def.work_dir
         && (!w.starts_with('/')
@@ -1911,6 +2182,7 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
         Some(project),
         json!({"old": old, "new": def}),
     )?;
+    protect_release_target(t, project, def)?;
     delivery(t, project)
 }
 
@@ -2143,10 +2415,49 @@ mod tests {
                     QueueOf {
                         slots: *slots,
                         host: (*host).to_owned(),
+                        release_host: None,
                     },
                 )
             })
             .collect()
+    }
+
+    /// TER-623: a release runs on the host of the release target, in its
+    /// own lane of one per project, beside the merge and validate jobs. A
+    /// project with no release target keeps its releases queued.
+    #[test]
+    fn a_release_has_its_own_lane_on_the_release_host() {
+        let mut q = queues(&[("a", 1, "build"), ("b", 1, "build")]);
+        q.get_mut("a").unwrap().release_host = Some("client".into());
+        let queued = vec![
+            job("1", "a", JobKind::Release, "app", "t1"),
+            job("2", "a", JobKind::Release, "app", "t2"),
+            job("3", "a", JobKind::Merge, "app", "t3"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+            job("5", "b", JobKind::Release, "app", "t5"),
+        ];
+        let p = pick(queued.clone(), &[], &q, &HashMap::new());
+        assert_eq!(ids(&p), ["1", "3", "4"]);
+        let got: Vec<(&str, &str, Option<i64>)> = p
+            .iter()
+            .map(|(j, h)| (j.id.as_str(), h.as_str(), j.slot))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("1", "client", Some(RELEASE_SLOT)),
+                ("3", "build", Some(MERGE_SLOT)),
+                ("4", "build", Some(1)),
+            ]
+        );
+        // A running release holds the lane, and the cap of the release
+        // host counts it.
+        let run = [running(
+            job("0", "a", JobKind::Release, "app", "t0"),
+            "client",
+        )];
+        let caps = HashMap::from([("client".to_owned(), 1)]);
+        assert_eq!(ids(&pick(queued, &run, &q, &caps)), ["3", "4"]);
     }
 
     fn ids(picked: &[(Job, String)]) -> Vec<&str> {
@@ -2625,6 +2936,33 @@ mod tests {
             "     Running tests/card_sessions.rs\n[exit code None, signal Some(9), timeout]\n";
         assert_eq!(failed_step(killed).as_deref(), Some("timeout"));
         assert_eq!(failed_step("ok"), None);
+    }
+
+    #[test]
+    fn stats_uses_a_project_time_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        conn.execute_batch(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+             INSERT INTO jobs (id, project, card, kind, repo, branch, state, created_by, created_at)
+             SELECT 'job-' || x, 'p', 'C', 'validate', 'r', 'b', 'passed', 't',
+                    CASE WHEN x<9990 THEN '2026-10-01' ELSE '2026-11-01' END FROM n;
+             ANALYZE;",
+        )
+        .unwrap();
+        let plan: String = conn
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {STATS_SQL}"),
+                params!["p", "2026-11-01"],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("jobs_project_created_at"), "{plan}");
+        assert!(
+            plan.contains("created_at>?") && !plan.contains("SCAN"),
+            "{plan}"
+        );
+        assert_eq!(stats(&conn, "p", "2026-11-01").unwrap().jobs, 11);
     }
 
     #[test]

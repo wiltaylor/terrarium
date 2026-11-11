@@ -73,7 +73,8 @@ POST /api/cards/TER-<header>/e2e
 
 The daemon pins the remote branch head and runs
 `TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py` on that tree. The job
-shares the merge lane, so it cannot reset the Docker VM under a merge job.
+shares the merge lane. Only e2e jobs receive the Docker relay. Merge and
+validate jobs cannot request a reset or tunnel, whatever their recipe sets.
 It does not merge or push a branch, move the header or change membership.
 It records the job and tested commit on the group's `version branch e2e`
 step, marking it done only on success, failed on failure or cancellation.
@@ -292,6 +293,46 @@ push`.
 
 `just release::dry-run` runs steps 1 to 6 with no secret: nothing is pushed,
 signed, or released. `--no-gate` skips the gate in a dry run only.
+
+### The release job
+
+The daemon runs the release as a job of kind `release` (TER-623,
+[api.md §35.6](api.md)). The setup, once, by the operator or meta/lead:
+
+1. Define the release client (META-119) as a global ssh target (the
+   operator), user `release`, with its pinned host key. Install the
+   release tools system-wide (the job's `PATH` has no dir under the
+   release user's home). Once it is the release
+   target, the daemon refuses every agent on it (exec, shell, copy,
+   policy entries, leases, reservations); only the operator and the
+   release job use it. Each release runs in a new HOME that goes after
+   it.
+2. Grant `release-github`, `release-cosign`, and `docker-release-vm` to
+   `delivery:terrarium` with `--level run --target <release client>`, and
+   to nobody else.
+3. Set the delivery config (the operator only: the release fields are
+   the operator's):
+
+   ```sh
+   terrarium project delivery set --release-target <release client> \
+     --release-secret GHCR_TOKEN=@secret:release-github \
+     --release-secret GH_TOKEN=@secret:release-github \
+     --release-secret COSIGN_PRIVATE_KEY=@secret:release-cosign.private_key \
+     --release-secret COSIGN_PASSWORD=@secret:release-cosign.password \
+     --docker-release-destination root@10.3.0.2 --docker-release-port 2251 \
+     --docker-release-known-hosts '<the pinned known_hosts line>' \
+     --docker-release-key @secret:docker-release-vm
+   ```
+
+   The daemon refuses a release target that is the job target of any
+   project.
+
+The lead's release step, after the release merge onto `main`:
+`terrarium job release <version card>` (the head of `main`, or
+`--commit <sha>` to make sure it is that commit). The job clones the
+commit into a new tree on the client, opens the relay to the release VM,
+and runs `just release::publish` with the secrets in its env. The end comes
+as a comment on the card. A lost run does not run again by itself.
 
 ### Secrets
 

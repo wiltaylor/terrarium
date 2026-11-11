@@ -910,6 +910,42 @@ pub struct DeliveryDef {
     /// The most time a job may run, in seconds. Default 3600.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// The release client target of release jobs (TER-623): the only
+    /// target where `release_secrets` resolve. It runs release jobs only:
+    /// it must not be the `target` of a job queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_target: Option<String>,
+    /// The release command, run with `sh -c` in the root of a clean
+    /// checkout of the release commit on `main`. Default
+    /// [`DeliveryDef::DEFAULT_RELEASE_RECIPE`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_recipe: Option<String>,
+    /// The secrets of the release recipe's env (TER-623), by env name:
+    /// `@secret:<name>[.<field>]` references, resolved only for a release
+    /// job on `release_target`, through a `delivery:<project>` run grant
+    /// that names that target. Never for a merge or validate job.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub release_secrets: BTreeMap<String, String>,
+    /// The Docker endpoint of release jobs (TER-623): the release VM,
+    /// reached through the daemon's relay. The recipe gets only
+    /// `TERRARIUM_DOCKER_HOST`; the key stays in the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_release: Option<DockerReleaseDef>,
+}
+
+/// The release VM of release jobs (TER-623). No reset endpoint: the VM
+/// keeps its build cache between releases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerReleaseDef {
+    /// SSH destination, for example root@host. No SSH options are accepted.
+    pub destination: String,
+    pub port: u16,
+    /// OpenSSH known_hosts line for destination and port.
+    pub known_hosts: String,
+    /// The SSH key of the VM: an `@secret:<name>[.<field>]` reference
+    /// that the daemon resolves and uses itself, never recipe env.
+    pub key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -953,6 +989,42 @@ impl DeliveryDef {
         self.timeout_secs
             .unwrap_or(Self::DEFAULT_TIMEOUT_SECS)
             .max(1)
+    }
+
+    /// The default release command (docs/release.md).
+    pub const DEFAULT_RELEASE_RECIPE: &'static str = "just release::publish";
+
+    /// The release target, when one is set.
+    pub fn release_target(&self) -> Option<&str> {
+        self.release_target.as_deref().filter(|t| !t.is_empty())
+    }
+
+    /// The config that a release job runs with (TER-623): the release
+    /// target and recipe in place of `target` and `recipe`, one slot, and
+    /// no merge secrets, Docker CI endpoint, or `next` repos. `None`
+    /// without a release target.
+    pub fn release_view(&self) -> Option<DeliveryDef> {
+        let target = self.release_target()?.to_owned();
+        let recipe = self
+            .release_recipe
+            .clone()
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or_else(|| Self::DEFAULT_RELEASE_RECIPE.to_owned());
+        Some(DeliveryDef {
+            docker_ci: None,
+            merge_secrets: BTreeMap::new(),
+            failure_patterns: self.failure_patterns.clone(),
+            target: Some(target),
+            recipe: Some(recipe),
+            slots: Some(1),
+            next_repos: Vec::new(),
+            work_dir: self.work_dir.clone(),
+            timeout_secs: self.timeout_secs,
+            release_target: self.release_target.clone(),
+            release_recipe: self.release_recipe.clone(),
+            release_secrets: self.release_secrets.clone(),
+            docker_release: self.docker_release.clone(),
+        })
     }
 }
 

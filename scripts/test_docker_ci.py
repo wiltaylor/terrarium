@@ -21,10 +21,11 @@ class DockerGateTests(unittest.TestCase):
             self.assertFalse(docker_ci.passed_exactly(output, name))
 
     def test_worker_cannot_enter_gate(self):
-        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "validate", "TERRARIUM_DOCKER_CI": "1", "TERRARIUM_DOCKER_HOST": "unix:///tmp/job/docker.sock"}):
-            with patch.object(docker_ci, "gate") as gate:
-                self.assertEqual(docker_ci.main(), 1)
-                gate.assert_not_called()
+        for kind in ("validate", "merge", "release"):
+            with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": kind, "TERRARIUM_DOCKER_CI": "1", "TERRARIUM_DOCKER_HOST": "unix:///tmp/job/docker.sock"}):
+                with patch.object(docker_ci, "gate") as gate:
+                    self.assertEqual(docker_ci.main(), 1)
+                    gate.assert_not_called()
 
     def test_release_e2e_enters_gate_without_credentials(self):
         endpoint = "unix:///tmp/job/docker.sock"
@@ -114,7 +115,7 @@ class DockerGateTests(unittest.TestCase):
 
     def test_enabled_gate_gets_only_unix_endpoint_and_isolated_client_config(self):
         endpoint = "unix:///tmp/job/docker.sock"
-        env = {"TERRARIUM_JOB_KIND": "merge", "TERRARIUM_DOCKER_CI": "1",
+        env = {"TERRARIUM_JOB_KIND": "e2e", "TERRARIUM_DOCKER_CI": "1",
                "TERRARIUM_DOCKER_HOST": endpoint, "DOCKER_HOST": "unix:///inherited.sock",
                "DOCKER_CONTEXT": "wrong-daemon", "SSH_AUTH_SOCK": "/not-forwarded"}
         def gate(child):

@@ -3451,6 +3451,25 @@ mod tests {
     }
 
     #[test]
+    fn e2e_migration_preserves_release_history_and_all_job_kinds() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        let before: Vec<_> = NAMED_MIGRATIONS.iter().copied()
+            .filter(|(name, _)| *name != "ter-719-job-e2e.sql").collect();
+        migrate_named(&mut conn, &before).unwrap();
+        for kind in ["validate", "merge", "release"] {
+            conn.execute("INSERT INTO jobs (id, project, card, kind, repo, branch, created_by, created_at) VALUES (?1, 'p', 'C1', ?1, 'app', 'main', 'operator', 'old')", [kind]).unwrap();
+        }
+        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        let old: String = conn.query_row("SELECT kind FROM jobs WHERE id = 'release'", [], |r| r.get(0)).unwrap();
+        assert_eq!(old, "release");
+        for kind in ["release", "e2e"] {
+            conn.execute("INSERT INTO jobs (id, project, card, kind, repo, branch, created_by, created_at) VALUES ('new-' || ?1, 'p', 'C1', ?1, 'app', 'main', 'operator', 'new')", [kind]).unwrap();
+        }
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+    }
+
+    #[test]
     fn agent_rpc_answer_age_counts_old_rows_from_the_upgrade() {
         const AGE: &str = "ter-555-agent-rpc-answers-age.sql";
         let mut conn = Connection::open_in_memory().unwrap();
