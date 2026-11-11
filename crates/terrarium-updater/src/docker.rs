@@ -1183,10 +1183,14 @@ mod tests {
                     header.push(stream.read_u8().await.unwrap());
                 }
                 let header = String::from_utf8(header).unwrap();
-                let len = header.lines().find_map(|line| {
-                    let (key, value) = line.split_once(':')?;
-                    key.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
-                }).unwrap_or(0);
+                let len = header
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
                 let mut body = vec![0; len];
                 stream.read_exact(&mut body).await.unwrap();
                 let response = match step {
@@ -1208,8 +1212,14 @@ mod tests {
                 stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
             }
         });
-        let docker = Docker { socket, target: None };
-        let out = tokio::time::timeout(Duration::from_secs(5), docker.exec("daemon", argv)).await.unwrap().unwrap();
+        let docker = Docker {
+            socket,
+            target: None,
+        };
+        let out = tokio::time::timeout(Duration::from_secs(5), docker.exec("daemon", argv))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(out.code, 0);
         let value: Value = serde_json::from_str(&out.stdout).unwrap();
         assert_eq!(value["jobs"], json!(["job-123"]));

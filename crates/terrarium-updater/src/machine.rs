@@ -406,13 +406,25 @@ impl Updater {
         }
     }
 
-    /// End the drain of the old daemon after an early failure.
+    /// End both drains after health or an early failure.
     async fn resume(&self, cur: &Container) {
-        let r = self.exec_ok(&cur.id, resume_argv()).await;
         let idx = self.begin_step("resume");
-        match r {
-            Ok(_) => self.end_step(idx, StepState::Ok, "the daemon takes new turns again"),
-            Err(e) => self.end_step(idx, StepState::Failed, e),
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            self.exec_ok(&cur.id, resume_argv()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => self.end_step(
+                idx,
+                StepState::Ok,
+                "the daemon takes new turns and jobs again",
+            ),
+            _ => {
+                let warning = "cannot resume turns and jobs (values hidden)";
+                tracing::warn!("{warning}");
+                self.end_step(idx, StepState::Failed, warning);
+            }
         }
     }
 
