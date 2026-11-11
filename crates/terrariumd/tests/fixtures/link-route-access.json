@@ -2886,6 +2886,9 @@
       "actor.is_operator(),",
       "actor.is_operator(),"
     ],
+    "github_issues.rs": [
+      "returnimport_verified(t,&Actor::Operator,project,&repo.name,&target,issue);"
+    ],
     "harness_auto_update.rs": [
       "to:&Address::Operator,"
     ],
