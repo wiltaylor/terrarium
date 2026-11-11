@@ -3623,7 +3623,7 @@ async fn kept_queued_turn(td: &Td) -> String {
     let q = td.get(&format!("/api/agents/{id}/queued")).await;
     let items = q["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "the turn shows once: {q}");
-    assert_eq!(items[0]["source"], "hold", "{q}");
+    assert_eq!(items[0]["source"], "store", "{q}");
 
     td.post(&format!("/api/agents/{id}/stop"), None).await;
     td.wait_status(&id, "stopped").await;
@@ -3724,7 +3724,7 @@ async fn held_queued_turn(td: &Td) -> (String, i64) {
     let q = td.get(&format!("/api/agents/{id}/queued")).await;
     let items = q["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "the turn shows once: {q}");
-    assert_eq!(items[0]["source"], "store", "{q}");
+    assert_eq!(items[0]["source"], "hold", "{q}");
     let row = items[0]["id"].as_i64().unwrap();
     (id, row)
 }
