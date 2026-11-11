@@ -2,10 +2,10 @@
 //! Run a module with: cargo test -p terrariumd --test it board::
 
 mod board_summary_growth;
-mod host_restart;
 #[path = "../common/mod.rs"]
 mod common;
 mod exedev;
+mod host_restart;
 mod remotes;
 mod ter221_latency;
 #[path = "../trouble.rs"]

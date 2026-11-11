@@ -455,7 +455,8 @@ impl HostRegistry {
     /// Close without goodbye so host children remain available for resume.
     pub fn shutdown(&self) {
         let entries = self.lock();
-        self.stopped.store(true, std::sync::atomic::Ordering::Release);
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
         for entry in entries.values() {
             if let Some(conn) = &entry.conn {
                 let _ = conn.tx.send(Outgoing::Close(None));
