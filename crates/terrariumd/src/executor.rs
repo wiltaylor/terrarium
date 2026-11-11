@@ -5123,6 +5123,11 @@ fi
 if [ -n "${TERRARIUM_COMMIT_HOOK:-}" ] && [ "$action" != not_updated ]; then
   [ ! -L "$dest/.git" ] && [ ! -L "$dest/.git/hooks" ] || exit 2
   mkdir -p "$dest/.git/hooks"
+  hook="$dest/.git/hooks/prepare-commit-msg"
+  if [ -e "$hook" ] && ! grep -q '^# terrarium managed provenance hook$' "$hook"; then
+    [ ! -e "$hook.repo" ] && [ ! -L "$hook.repo" ] || exit 2
+    mv "$hook" "$hook.repo"
+  fi
   hook_tmp=$(mktemp "$dest/.git/hooks/.terrarium-commit.XXXXXX")
   printf '%s' "$TERRARIUM_COMMIT_HOOK" > "$hook_tmp"
   chmod 755 "$hook_tmp"
@@ -5577,6 +5582,46 @@ mod tests {
     /// S9 (secret manager review, 2026-10-29): the agent can write the
     /// repo config on the target. A planted `core.fsmonitor` or hook must
     /// not run while the token is in the env of the checkout script.
+    #[test]
+    fn target_checkout_chains_existing_hook_on_repeated_updates() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        let dest = tmp.path().join("dest");
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let out = Command::new("git").current_dir(dir).args(args)
+                .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+                .output().unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        std::fs::create_dir(&origin).unwrap();
+        git(&origin, &["init", "-q"]);
+        git(&origin, &["commit", "--allow-empty", "-m", "one"]);
+        git(tmp.path(), &["clone", origin.to_str().unwrap(), dest.to_str().unwrap()]);
+        let hook = dest.join(".git/hooks/prepare-commit-msg");
+        std::fs::write(&hook, "#!/bin/sh\nprintf '\\nRepo-Note: yes\\n' >> \"$1\"\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let p = crate::git_identity::Provenance {
+            identity: crate::git_identity::Identity::from_env(),
+            trailers: "Terrarium-Agent: test/worker\n".into(),
+        };
+        for _ in 0..2 {
+            let c = checkout_cmd(origin.to_str().unwrap(), dest.to_str().unwrap(), None, None, None).unwrap();
+            let out = Command::new(&c.argv[0]).args(&c.argv[1..]).envs(c.env)
+                .env("TERRARIUM_COMMIT_HOOK", p.hook())
+                .env("TERRARIUM_COMMIT_NAME", &p.identity.name)
+                .env("TERRARIUM_COMMIT_EMAIL", &p.identity.email).output().unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+        git(&dest, &["commit", "--allow-empty", "-m", "two"]);
+        let message = git(&dest, &["show", "-s", "--format=%B"]);
+        assert_eq!(message.matches("Repo-Note: yes").count(), 1);
+        assert!(message.contains("Terrarium-Agent: test/worker"));
+    }
+
     #[test]
     fn checkout_script_ignores_a_planted_repo_config() {
         use std::os::unix::fs::PermissionsExt;

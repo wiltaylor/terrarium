@@ -82,7 +82,7 @@ impl Provenance {
     /// No eval or sourced data. Values are arguments to interpret-trailers.
     pub fn hook(&self) -> String {
         format!(
-            "#!/bin/sh\nset -eu\nrepo_hook=$(dirname \"$0\")/prepare-commit-msg.repo\nif [ -x \"$repo_hook\" ]; then \"$repo_hook\" \"$@\"; fi\n\
+            "#!/bin/sh\n# terrarium managed provenance hook\nset -eu\nrepo_hook=$(dirname \"$0\")/prepare-commit-msg.repo\nif [ -x \"$repo_hook\" ]; then \"$repo_hook\" \"$@\"; fi\n\
              trailers=${{TERRARIUM_GIT_TRAILERS-}}\n\
              if [ -n \"${{TERRARIUM_GIT_TRAILERS_FILE-}}\" ] && [ -r \"$TERRARIUM_GIT_TRAILERS_FILE\" ]; then\n\
                trailers=$(cat -- \"$TERRARIUM_GIT_TRAILERS_FILE\")\n\
@@ -96,7 +96,43 @@ impl Provenance {
     }
 }
 
-/// Refresh the sandbox's session data after the store records a session event.
+/// Refresh independently of the supervisor event pump, in stored event order.
+pub fn spawn_refresh(state: Shared) -> tokio::task::JoinHandle<()> {
+    let mut rx = state.db.hub().subscribe();
+    tokio::spawn(async move {
+        loop {
+            let ev = match rx.recv().await {
+                Ok(ev) => ev,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("git provenance listener missed {n} events");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            };
+            if !matches!(ev.kind.as_str(), "card" | "status" | "session_started") {
+                continue;
+            }
+            let mut ids = vec![];
+            if let Some(id) = ev.agent_id {
+                ids.push(id);
+            }
+            if ev.kind == "card"
+                && let Some(id) = ev.data["previous"].as_str()
+                && id != "operator"
+                && !ids.iter().any(|v| v == id)
+            {
+                ids.push(id.to_owned());
+            }
+            for id in ids {
+                if let Err(e) = refresh(&state, &id).await {
+                    tracing::warn!(agent = %id, "cannot refresh git provenance: {e}");
+                }
+            }
+        }
+    })
+}
+
+/// Refresh the sandbox's current session and card data.
 pub async fn refresh(state: &Shared, id: &str) -> ApiResult<()> {
     let p = provenance(state, id).await?;
     let id = id.to_owned();
