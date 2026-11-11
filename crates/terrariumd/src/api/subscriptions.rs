@@ -20,6 +20,9 @@ use crate::policy;
 use crate::probes::{self, ProbeOutcome};
 use crate::store::projects::SOURCE_API;
 use crate::store::subscriptions::{self as subs, QuotaSample, Subscription};
+
+#[cfg(test)]
+mod vertex;
 use crate::store::usage as ustore;
 use terrarium_core::selfhosted::{self, Api, SelfHosted};
 

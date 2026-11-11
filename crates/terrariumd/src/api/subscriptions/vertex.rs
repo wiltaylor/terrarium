@@ -1,9 +1,9 @@
 //! Bounded Vertex check. Credentials go only to Google's canonical hosts.
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey};
+use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey, traits::PublicKeyParts};
 use serde::Deserialize;
 use serde_json::json;
-use signature::{SignatureEncoding, Signer};
+use signature::{SignatureEncoding, RandomizedSigner};
 use terrarium_core::cloud::CloudSettings;
 
 use crate::error::{ApiError, ApiResult};
@@ -29,8 +29,14 @@ fn assertion(key: &str) -> ApiResult<String> {
     if account.kind != "service_account" || account.client_email.is_empty() {
         return Err(failure("Use a service-account JSON key."));
     }
+    if account.private_key.len() > 8192 {
+        return Err(failure("The service-account private key is too large."));
+    }
     let private = RsaPrivateKey::from_pkcs8_pem(&account.private_key)
         .map_err(|_| failure("The service-account private key is not a valid RSA PEM key."))?;
+    if !(2048..=4096).contains(&private.n().bits()) {
+        return Err(failure("Use a 2048 to 4096 bit service-account RSA key."));
+    }
     let now = chrono::Utc::now().timestamp();
     let claims = json!({
         "iss": account.client_email,
@@ -41,7 +47,8 @@ fn assertion(key: &str) -> ApiResult<String> {
     });
     let unsigned = format!("{}.{}", URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#), URL_SAFE_NO_PAD.encode(claims.to_string()));
     let signing = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(private);
-    let signature = signing.sign(unsigned.as_bytes());
+    let signature = signing.try_sign_with_rng(&mut rand::rng(), unsigned.as_bytes())
+        .map_err(|_| failure("Cannot sign with this service-account key."))?;
     Ok(format!("{unsigned}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes())))
 }
 
@@ -114,6 +121,30 @@ async fn invoke(jwt: &str, token_url: &str, url: &str) -> ApiResult<()> {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn service_account_jwt_has_valid_signature_and_fixed_google_audience() {
+        use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+        use signature::Verifier;
+        let private = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        let public = private.to_public_key();
+        let account = json!({
+            "type": "service_account", "client_email": "test@example.invalid",
+            "private_key": private.to_pkcs8_pem(LineEnding::LF).unwrap().as_str(),
+            "token_uri": "https://attacker.invalid/token",
+        });
+        let jwt = assertion(&account.to_string()).unwrap();
+        let parts: Vec<_> = jwt.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        let claims: serde_json::Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+        assert_eq!(claims["aud"], TOKEN_URL);
+        assert_eq!(claims["iss"], "test@example.invalid");
+        assert_eq!(claims["scope"], "https://www.googleapis.com/auth/cloud-platform");
+        assert_eq!(claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(), 300);
+        let sig = rsa::pkcs1v15::Signature::try_from(URL_SAFE_NO_PAD.decode(parts[2]).unwrap().as_slice()).unwrap();
+        rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(public)
+            .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig).unwrap();
+    }
 
     #[test]
     fn canonical_hosts_and_path_components_only() {
