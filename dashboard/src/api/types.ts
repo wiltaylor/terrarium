@@ -1930,7 +1930,8 @@ export interface CardWaitSummary {
 }
 
 export type CardSummary = Omit<Card, "body" | "comments" | "links" | "wait"> & {
-  wait?: CardWaitSummary | null;
+  /** Board reads are compact. The board store also merges full card mutation responses. */
+  wait?: CardWaitSummary | CardWait | null;
   comment_count?: number;
   last_comment_at?: string | null;
 };

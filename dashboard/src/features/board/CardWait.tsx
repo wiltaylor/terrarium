@@ -2,10 +2,18 @@ import { For, Show } from "solid-js";
 import type { CardWait, CardWaitSummary } from "../../api/types";
 import { TextMarkdown } from "../../components/TextMarkdown";
 
-export function WaitChip(props: { wait?: CardWaitSummary | null }) {
+export function WaitChip(props: { wait?: CardWaitSummary | CardWait | null }) {
+  const state = (): CardWaitSummary | null => {
+    const wait = props.wait;
+    if (!wait) return null;
+    return "dependencies" in wait ? {
+      mode: wait.mode, met: !!wait.met_at,
+      deps_met: wait.dependencies.filter((d) => d.met).length, deps_total: wait.dependencies.length,
+    } : wait;
+  };
   return <Show when={props.wait}>
-    <span class={`chip${props.wait?.met ? "" : " warn"}`} title={props.wait?.met ? "Wait completed (latched)" : "Waiting for card conditions"}>
-      {props.wait?.met ? "wait met" : `waits ${props.wait?.mode === "any" ? "any" : "all"}: ${props.wait?.deps_met}/${props.wait?.deps_total}`}
+    <span class={`chip${state()?.met ? "" : " warn"}`} title={state()?.met ? "Wait completed (latched)" : "Waiting for card conditions"}>
+      {state()?.met ? "wait met" : `waits ${state()?.mode === "any" ? "any" : "all"}: ${state()?.deps_met}/${state()?.deps_total}`}
     </span>
   </Show>;
 }
