@@ -2,18 +2,13 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::common::TestDaemon;
-use rusqlite::{ffi, params};
+use rusqlite::params;
 use serde_json::json;
-use std::cell::Cell;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use terrariumd::store::{Page, board};
-
-unsafe extern "C" fn progress(data: *mut std::ffi::c_void) -> std::ffi::c_int {
-    // SAFETY: the synchronous query below keeps this Cell alive until the
-    // callback is removed. This private connection stays on the same thread.
-    let steps = unsafe { &*data.cast::<Cell<u64>>() };
-    steps.set(steps.get() + 100);
-    0
-}
 
 #[tokio::test]
 async fn board_summary_sqlite_work_grows_near_linearly() {
@@ -46,20 +41,17 @@ async fn board_summary_sqlite_work_grows_near_linearly() {
             [],
         )
         .unwrap();
-        let steps = Cell::new(0_u64);
-        // SAFETY: no await or connection sharing occurs while the callback is
-        // installed, and steps outlives its removal, even on a query error.
-        unsafe {
-            ffi::sqlite3_progress_handler(
-                conn.handle(),
-                100,
-                Some(progress),
-                (&steps as *const Cell<u64>).cast_mut().cast(),
-            );
-        }
+        let steps = Arc::new(AtomicU64::new(0));
+        let counter = steps.clone();
+        conn.progress_handler(
+            1000,
+            Some(move || {
+                counter.fetch_add(1000, Ordering::Relaxed);
+                false
+            }),
+        );
         let result = board::board_summary(&conn, "proj", false, &Page::default());
-        // SAFETY: remove the callback before steps goes out of scope.
-        unsafe { ffi::sqlite3_progress_handler(conn.handle(), 0, None, std::ptr::null_mut()) };
+        conn.progress_handler(0, None::<fn() -> bool>);
         let summary = result.unwrap();
         let cards = summary["cards"].as_array().unwrap();
         assert_eq!(cards.len(), count / 3);
@@ -67,8 +59,11 @@ async fn board_summary_sqlite_work_grows_near_linearly() {
         assert_eq!(card["blocked_by"], json!(["TER-6"]));
         assert_eq!(card["depends_on"], json!(["TER-1", "TER-6"]));
         assert_eq!(card["comment_count"], 10);
-        println!("board count={count}: {} VM instructions", steps.get());
-        measured.push(steps.get());
+        println!(
+            "board count={count}: {} VM instructions",
+            steps.load(Ordering::Relaxed)
+        );
+        measured.push(steps.load(Ordering::Relaxed));
     }
     assert!(measured[0] > 0);
     // 10x the data gets 15x the work, allowing sorting and fixed overhead,
