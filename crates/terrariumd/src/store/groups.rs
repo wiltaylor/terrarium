@@ -727,10 +727,19 @@ mod tests {
     fn merge_job_ended_looks_up_the_primary_key() {
         let mut c = Connection::open_in_memory().unwrap();
         crate::db::migrate(&mut c).unwrap();
-        let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {MERGE_JOB_ENDED_SQL}")).unwrap();
-        let plan = q.query_map(params!["job-id", "p"], |r| r.get::<_, String>(3)).unwrap()
-            .collect::<Result<Vec<_>, _>>().unwrap();
-        assert!(plan.iter().any(|s| s.contains("SEARCH jobs USING INDEX sqlite_autoindex_jobs_1 (id=?)")), "{plan:?}");
+        let mut q = c
+            .prepare(&format!("EXPLAIN QUERY PLAN {MERGE_JOB_ENDED_SQL}"))
+            .unwrap();
+        let plan = q
+            .query_map(params!["job-id", "p"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|s| s.contains("SEARCH jobs USING INDEX sqlite_autoindex_jobs_1 (id=?)")),
+            "{plan:?}"
+        );
         assert!(plan.iter().all(|s| !s.starts_with("SCAN jobs")), "{plan:?}");
     }
 }
