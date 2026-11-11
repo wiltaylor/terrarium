@@ -27,6 +27,51 @@ fn state(td: &TestDaemon) -> Shared {
 const SOURCE: &str = "source:test/ping";
 
 #[tokio::test]
+async fn group_completion_anchor_survives_a_column_rename() {
+    use terrariumd::store::{board, groups};
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let member = new_card(&td, "p", json!({"title":"member", "column":"review"})).await;
+    state(&td)
+        .db
+        .write("system", move |t| {
+            groups::open(
+                t,
+                groups::Open {
+                    project: "p",
+                    rule: "test",
+                    key: "batch",
+                    title: "Batch",
+                    column: "review",
+                    done_when: "review",
+                    eta: None,
+                    close_after: None,
+                },
+            )?;
+            let g = groups::by_key(t, "p", "batch")?.unwrap();
+            groups::add(t, &g, &member)?;
+            assert_eq!(groups::get(t, &g.id)?.done, 1);
+            let specs = board::get_board(t, "p")?
+                .columns
+                .into_iter()
+                .map(|c| {
+                    serde_json::from_value::<board::ColumnSpec>(if c.name == "review" {
+                        json!({"name":"qa", "rename_from":"review"})
+                    } else {
+                        json!({"name": c.name})
+                    })
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            board::set_columns(t, &Actor::Operator, "p", &specs)?;
+            assert_eq!(groups::get(t, &g.id)?.done, 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn group_step_eta_uses_project_history_and_records_real_duration() {
     use terrariumd::store::groups;
     let td = TestDaemon::start().await;
@@ -1343,6 +1388,10 @@ async fn default_merge_group_cancelled_batch_abandons_header() {
         .unwrap();
     verdict(&td, &cancelled, &a, "cancelled").await;
     settle(&td).await;
+    assert_eq!(
+        card(&td, &gid).await["group"]["steps"][0]["state"],
+        "failed"
+    );
     assert_eq!(card(&td, &gid).await["archived"], true);
     assert!(card(&td, &a).await.get("group").is_none());
     assert_eq!(card(&td, &a).await["column"], "review");
@@ -1399,6 +1448,40 @@ async fn default_merge_group_returned_members_leave_and_last_abandons() {
     let runs = runs_of(&td, "p", "merge-group-returned").await;
     assert_eq!(runs.len(), 3, "{runs:?}");
     assert!(runs.iter().all(|r| r["state"] == "done"), "{runs:?}");
+}
+
+#[tokio::test]
+async fn merge_group_sweep_releases_archived_repairs_and_stranded_queue_cards() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app", "labels":["merge-fix:test"]}),
+    )
+    .await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let members = (a.clone(), b.clone());
+    state(&td).db.write("test", move |t| {
+        t.execute("UPDATE jobs SET state = 'failed' WHERE id = ?1", [job.id])?;
+        t.execute("UPDATE cards SET column_id = (SELECT id FROM board_columns WHERE project = 'p' AND role = 'merge_queue') WHERE id = ?1", [members.0])?;
+        t.execute("UPDATE cards SET archived = 1 WHERE id = ?1", [members.1])?;
+        terrariumd::store::groups::expire(t)?;
+        terrariumd::store::groups::expire(t)
+    }).await.unwrap();
+    assert!(card(&td, &a).await.get("group").is_none());
+    assert_eq!(card(&td, &gid).await["group"]["total"], 0);
 }
 
 #[tokio::test]
@@ -1623,6 +1706,43 @@ async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
     settle(&td).await;
     let runs = runs_of(&td, "p", "merge-pass").await;
     assert!(runs.iter().all(|r| r["state"] != "failed"), "{runs:?}");
+}
+
+#[tokio::test]
+async fn merge_job_step_falls_back_to_passed_project_jobs() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let job = store_job(&td, JobKind::Merge, &[&a]).await;
+    settle(&td).await;
+    let id = job.id;
+    let member = a.clone();
+    state(&td)
+        .db
+        .write("test", move |t| {
+            t.execute(
+                "UPDATE jobs SET state = 'passed', created_at = '2026-11-08T10:00:00Z',
+            started_at = '2026-11-08T10:00:30Z', ended_at = '2026-11-08T10:01:30Z' WHERE id = ?1",
+                [id],
+            )?;
+            let g = terrariumd::store::groups::for_card(t, &member)?.unwrap();
+            assert_eq!(
+                g.steps
+                    .iter()
+                    .find(|s| s.name == "merge job")
+                    .unwrap()
+                    .estimated_secs,
+                Some(60)
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

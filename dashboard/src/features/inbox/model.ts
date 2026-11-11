@@ -69,6 +69,30 @@ export const byInboxOrder = (a: InboxItem, b: InboxItem): number =>
 
 export const sortItems = (items: InboxItem[]): InboxItem[] => items.slice().sort(byInboxOrder);
 
+/** Group open card questions at their highest-ranked item's position. */
+export type InboxGroup = { id: string; card?: string; items: InboxItem[] };
+export function groupCardQuestions(items: InboxItem[]): InboxGroup[] {
+  const groups: InboxGroup[] = [];
+  const cards = new Map<string, InboxGroup>();
+  for (const item of items) {
+    const q = item.question;
+    const card = item.open && q && (q.kind === "question" || q.kind === "bundle") ? q.card : undefined;
+    if (!card) {
+      groups.push({ id: `item:${item.id}`, items: [item] });
+      continue;
+    }
+    const key = JSON.stringify([item.project, card]);
+    let group = cards.get(key);
+    if (!group) {
+      group = { id: `card:${key}`, card, items: [] };
+      cards.set(key, group);
+      groups.push(group);
+    }
+    group.items.push(item);
+  }
+  return groups;
+}
+
 /** Does the item show under the tabs? */
 export function matchesTabs(i: InboxItem, tab: InboxTab, status: InboxStatusTab, project = ""): boolean {
   if (project && i.project !== project) return false;
