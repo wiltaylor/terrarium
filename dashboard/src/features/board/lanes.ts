@@ -36,7 +36,7 @@ export function buildLanes(cards: readonly Card[], grouped: boolean): Lane[] {
     ? [...new Set(cards.filter((m) => c.group!.members.includes(m.id)).flatMap((m) => cardVersions(m.labels)))]
     : cardVersions(c.labels);
   const lanes: Lane[] = boardVersions(cards).map((v) => ({ key: versionLabel(v), version: v, cards: cards.filter((c) => versions(c).includes(v)) }));
-  lanes.push({ key: NO_VERSION_LANE, cards: cards.filter((c) => versions(c).length === 0 || (c.kind === "group" && cards.some((m) => c.group?.members.includes(m.id) && cardVersions(m.labels).length === 0))) }));
+  lanes.push({ key: NO_VERSION_LANE, cards: cards.filter((c) => versions(c).length === 0 || (c.kind === "group" && cards.some((m) => c.group?.members.includes(m.id) && cardVersions(m.labels).length === 0))) });
   return lanes;
 }
 
