@@ -16,7 +16,9 @@ vi.mock("../../stores", () => ({
 }));
 vi.mock("./ActiveCards", () => ({ ActiveCards: () => null }));
 vi.mock("./BlockedCards", () => ({ BlockedCards: () => null }));
-vi.mock("./HostCards", () => ({ HostCards: () => null }));
+vi.mock("./HostCards", () => ({ HostCards: () => createComponent(() => {
+  const section = document.createElement("section"); section.setAttribute("aria-label", "Hosts"); return section;
+}, {}) }));
 const { Home } = await import("./Home");
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ""; vi.clearAllMocks(); });
@@ -33,6 +35,13 @@ function mount() {
   const el = document.createElement("div"); document.body.append(el);
   dispose = render(() => createComponent(Home, {}), el);
 }
+it("puts subscriptions first, status next, hosts between, and the board last", async () => {
+  mount(); await settle();
+  expect([...document.querySelectorAll("section[aria-label]")].map(s => s.getAttribute("aria-label"))).toEqual([
+    "Usage", "System status", "Hosts", "Work board", "In progress", "Review", "Accepted", "Blocked",
+  ]);
+  expect(document.body.textContent).not.toContain("Needs attention");
+});
 it("asks from Home with the default agent", async () => {
   const a = api.world.agents.find((a) => !a.ephemeral && a.roles.includes("project_admin"))!;
   await api.account.setPreferences({ default_agent: `${a.project}/${a.name}` });
