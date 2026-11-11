@@ -1217,6 +1217,8 @@ async fn tls_leaf_pin_is_checked_on_every_http_sse_and_ws_connection_before_key(
         url: format!("https://{addr}/"),
         instance_id: "id".into(),
         pin_sha256: Some(certificate.fingerprint),
+        artifact_origin: None,
+        artifact_pin_sha256: None,
         ca_pem: None,
         label: "lab".into(),
         read_only: false,

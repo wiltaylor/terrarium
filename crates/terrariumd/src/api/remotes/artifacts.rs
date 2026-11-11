@@ -18,6 +18,78 @@ use crate::error::{ApiError, ApiResult};
 
 const MAX: usize = 32 * 1024 * 1024;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Repin {
+    origin: String,
+    pin_sha256: String,
+}
+
+// Explicit operator confirmation, never TOFU. The authenticated API must still
+// identify the linked instance and declare this destination before we probe it.
+pub(super) async fn repin(
+    State(s): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    super::ApiJson(b): super::ApiJson<Repin>,
+) -> ApiResult<StatusCode> {
+    operator(&actor)?;
+    let mut r = load(&s, name).await?;
+    let c = net::client(&r, &own_ports(&s)).await?;
+    let h = net::request_headers(
+        &HeaderMap::new(),
+        &key(&s, &r).await?,
+        &s.links.instance_id(&s.state_dir)?,
+    )?;
+    let instance = net::instance(&c, &r, &h).await?;
+    let u = net::check_url(&b.origin)?;
+    if u.scheme() != "https" || b.pin_sha256.len() != 64
+        || !b.pin_sha256.bytes().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(ApiError::invalid("an HTTPS origin and SHA-256 leaf pin are required"));
+    }
+    let mode = destination_policy(&r.url, instance.artifact_origin.as_deref(), &u)?;
+    let origin = format!("{}/", u.origin().ascii_serialization());
+    let mut probe = r.clone();
+    probe.url = origin.clone();
+    probe.pin_sha256 = Some(b.pin_sha256.clone());
+    probe.ca_pem = None;
+    // No remote key, cookies or operator headers go to the artifact origin.
+    net::client_with_policy(&probe, &own_ports(&s), mode).await?
+        .get(&origin).timeout(net::PLAIN).send().await
+        .map_err(net::connection_error)?;
+    r.artifact_origin = Some(origin);
+    r.artifact_pin_sha256 = Some(b.pin_sha256);
+    s.db.write(actor.label(), move |t| {
+        t.execute(
+            "UPDATE remotes SET artifact_origin=?2,artifact_pin_sha256=?3 WHERE id=?1",
+            rusqlite::params![r.id, r.artifact_origin, r.artifact_pin_sha256],
+        )?;
+        t.audit("remote.artifact_repin", &r.name, None,
+            serde_json::json!({"origin": r.artifact_origin, "pin_sha256": r.artifact_pin_sha256}))
+    }).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn artifact_transport(r: &crate::store::remotes::Remote, u: &url::Url)
+    -> ApiResult<crate::store::remotes::Remote>
+{
+    let mut origin = r.clone();
+    origin.url = format!("{}/", u.origin().ascii_serialization());
+    let api = net::check_url(&r.url)?;
+    if u.scheme() == "https" && api.origin() != u.origin() {
+        if r.artifact_origin.as_deref() != Some(origin.url.as_str()) {
+            return Err(denied());
+        }
+        origin.pin_sha256 = r.artifact_pin_sha256.clone();
+        origin.ca_pem = None;
+    }
+    if u.scheme() == "https" && origin.pin_sha256.is_none() {
+        return Err(denied());
+    }
+    Ok(origin)
+}
+
 #[derive(Serialize, Deserialize)]
 struct Capability {
     remote: String,
@@ -225,12 +297,7 @@ async fn serve(
     }
     let _permit = limits.acquire(false)?;
     let u = target(&cap.target, &path)?;
-    let mut origin = r.clone();
-    origin.url = format!("{}/", u.origin().ascii_serialization());
-    // A separate TLS origin must prove possession of the linked remote's leaf.
-    if u.scheme() == "https" && origin.pin_sha256.is_none() {
-        return Err(denied());
-    }
+    let origin = artifact_transport(&r, &u)?;
     let mode = destination_policy(&r.url, cap.artifact_origin.as_deref(), &u)?;
     let c = net::client_with_policy(&origin, &own_ports(&s), mode).await?;
     // Deliberately no cookies, Authorization, link key or incoming headers.
