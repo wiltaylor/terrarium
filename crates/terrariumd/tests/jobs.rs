@@ -1590,16 +1590,31 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
     lab.settle().await;
     assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
     if flow == "rules" {
-        let g = lab
-            .td
-            .daemon
-            .as_ref()
-            .unwrap()
-            .state
-            .db
-            .read(move |c| Ok(terrariumd::store::groups::by_key(c, "p", &group_key)?.unwrap()))
-            .await
-            .unwrap();
+        // The accepted card move can precede the recipe boundary's group
+        // writes. Wait for that step to finish, not for the card or job row.
+        let deadline = Instant::now() + DEADLINE;
+        let g = loop {
+            let key = group_key.clone();
+            let g = lab
+                .td
+                .daemon
+                .as_ref()
+                .unwrap()
+                .state
+                .db
+                .read(move |c| Ok(terrariumd::store::groups::by_key(c, "p", &key)?.unwrap()))
+                .await
+                .unwrap();
+            let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
+            if recipe.state == "done" {
+                break g;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "e2e recipe boundary did not finish: {recipe:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
         let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
         assert!(
             recipe.started_at.is_some(),
