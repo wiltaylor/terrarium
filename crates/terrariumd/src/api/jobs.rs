@@ -679,11 +679,10 @@ async fn validate(
                     &card.id,
                     &validating,
                     None,
-                    Some(&note),
+                    None,
                 )?;
-            } else {
-                board::add_comment(t, &Actor::Operator, &card.id, &note)?;
             }
+            board::system_comment(t, &card.id, &note, None)?;
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
             Ok((job, (place, room)))
@@ -753,11 +752,11 @@ async fn merge(
                     ..CardPatch::default()
                 };
                 board::update_card(t, &Actor::Operator, &card.id, patch)?;
-                board::add_comment(
+                board::system_comment(
                     t,
-                    &Actor::Operator,
                     &card.id,
                     &rt::queue_comment(&job, &card.id),
+                    None,
                 )?;
             }
             let place = jobs::place(t, &job)?;
@@ -983,11 +982,11 @@ async fn merge_batch(
                     ..CardPatch::default()
                 };
                 board::update_card(t, &Actor::Operator, &c.card, patch)?;
-                board::add_comment(
+                board::system_comment(
                     t,
-                    &Actor::Operator,
                     &c.card,
                     &rt::queue_comment(&job, &c.card),
+                    None,
                 )?;
             }
             let place = jobs::place(t, &job)?;
