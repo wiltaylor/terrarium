@@ -108,7 +108,7 @@ pub(super) async fn mint(
     }))
 }
 
-pub(super) fn serving_routes() -> Router<Shared> {
+pub(crate) fn serving_routes() -> Router<Shared> {
     Router::new()
         .route("/ra/{cap}/{exp}/{sig}/", get(root))
         .route("/ra/{cap}/{exp}/{sig}/{*path}", get(asset))
