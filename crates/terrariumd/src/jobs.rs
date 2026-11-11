@@ -3841,17 +3841,13 @@ fn logged_recipe(recipe: String, log: &str) -> String {
         r#"log={log}
 mkdir -p -- "$(dirname -- "$log")" || exit 125
 [ ! -L "$log" ] || exit 125
-command -v flock >/dev/null 2>&1 || exit 125
+command -v flock >/dev/null 2>&1 || {{ echo "no flock on the target: retained log cannot be locked"; exit 125; }}
 (umask 077 && : >> "$log") || exit 125
 exec 9>>"$log" || exit 125
 flock -n 9 || exit 125
 : > "$log" || exit 125
 lock=${{TERRARIUM_SLOT_LOCK:-}}
 if [ -z "$lock" ]; then
-  exec sh -c {recipe} > "$log" 2>&1
-fi
-if ! command -v flock >/dev/null 2>&1; then
-  echo "no flock on the target: slot not locked"
   exec sh -c {recipe} > "$log" 2>&1
 fi
 exec 8>>"$lock" || {{ echo "cannot open the slot lock $lock"; exit 125; }}
@@ -5879,10 +5875,10 @@ mod tests {
         assert!(free, "a child of the recipe holds the slot lock");
     }
 
-    /// TER-448 review 3: without `flock` on the target the recipe runs
-    /// unlocked, and the step says so in one line.
+    /// Retained logs require a writer lock. Without flock, fail closed
+    /// before starting the recipe rather than create an unprotected log.
     #[test]
-    fn without_flock_the_recipe_says_the_slot_is_not_locked() {
+    fn without_flock_the_recipe_refuses_an_unprotected_log() {
         let tmp = tempfile::tempdir().unwrap();
         // A PATH with the tools of the wrapper, but no flock.
         let bin = tmp.path().join("bin");
@@ -5910,13 +5906,13 @@ mod tests {
             .env("TERRARIUM_SLOT_LOCK", &lock)
             .output()
             .unwrap();
-        assert!(out.status.success(), "the wrapper failed: {}", shown(&out));
+        assert_eq!(out.status.code(), Some(125), "{}", shown(&out));
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(
-            text.contains("no flock on the target: slot not locked"),
+            text.contains("no flock on the target: retained log cannot be locked"),
             "{text}"
         );
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "ran\n");
+        assert!(!log.exists(), "no recipe output or unlocked log is created");
     }
 
     #[test]

@@ -12912,6 +12912,9 @@ The CLI sets these with `project delivery set --log-retention-secs N
 bytes respectively. Age is fixed when an attempt is first recorded. Changing
 the byte budget affects the next cleanup pass.
 
+`flock` is required on job targets. Without it a recipe fails before starting,
+with a retained-log lock diagnostic, rather than write an unprotected log.
+
 Automatic cleanup visits one indexed project/page per minute. Each page has
 at most 32 ledger rows. Oldest recorded attempts are removed when their age
 expires or the completed-log byte budget is exceeded. Queued/running jobs and
