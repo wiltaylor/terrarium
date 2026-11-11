@@ -60,6 +60,10 @@ fn link_inventory_sources(
 }
 
 fn link_registration_expressions(source: &str) -> Vec<String> {
+    assert!(
+        !source.contains(".route_service("),
+        "classify service routes before adding a new registration form"
+    );
     let mut result = Vec::new();
     let mut rest = source;
     // Capture the whole registration, including its method chain and handler

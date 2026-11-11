@@ -21,6 +21,20 @@ paths remain closed to links. Backup lists and operator spawn details are
 not read exceptions. Infrastructure reads must not be added just because the
 paired remote can render them.
 
+Tool-run and GitHub-hold approvals also check the transaction's retained
+link provenance, not just the operator address. A link cannot take the
+operator-only no-grant tool execution path, change a held card through an
+operator exemption, or manage an operator watch.
+
+The reviewed test inventory is `tests/fixtures/link-route-access.json` in
+the daemon crate. The completeness test compares every production router
+registration, including method chains and handlers, and the direct operator
+comparisons and shared gates. New registrations or gates require an access
+classification and HTTP cases for exclusive or conditional operator actions.
+The HTTP walk consumes that inventory, including real tool-run and hold
+questions, verifies denied approvals change no state, and then verifies that
+the ordinary operator can answer them.
+
 Read-only review before Terrarium runs with real subscriptions. Date: 2026-10-24.
 Reviewer: pre-flight security pass.
 

@@ -2401,8 +2401,16 @@
     {
       "source": "api/tools.rs",
       "registration": "\"/tools/{name}/run\",post(run)",
-      "access": "other",
-      "cases": []
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/tools/missing/run",
+          "body": {
+            "argv": []
+          }
+        }
+      ]
     },
     {
       "source": "api/tools.rs",
@@ -2996,7 +3004,8 @@
       "to:&Address::Operator,"
     ],
     "thread_agent.rs": [
-      "crate::actor::Actor::Operator"
+      "crate::actor::Actor::Operator",
+      "from:&Address::Operator,"
     ],
     "thread_close.rs": [
       "to:&Address::Operator,"
@@ -3004,7 +3013,9 @@
     "tool_run.rs": [
       "(Some(r),Actor::Operator)=>r,",
       "Actor::Operator=>(None,None),",
-      "Actor::Operator=>terrarium_core::redact::View::All,"
+      "Actor::Operator=>terrarium_core::redact::View::All,",
+      "crate::policy::operator_only(actor,\"runningatoolwithoutanagentgrant\")?;",
+      "ifmatches!(actor,Actor::Operator){"
     ],
     "usage_limit.rs": [
       "to:&Address::Operator,"
