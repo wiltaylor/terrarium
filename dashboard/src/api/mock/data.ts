@@ -362,12 +362,12 @@ export function seed(now: number = Date.now()): MockWorld {
       labels: ["api"], depends_on: ["TER-12"], blocked_by: ["TER-12"],
       wait: {
         dependencies: [
-          { card: "TER-10", target: "done", title: "Scaffold the Cargo workspace", column: "done", met: true },
-          { card: "TER-12", target: "review", title: "PTY resize follows the browser", column: "in_progress", met: false },
-          { hidden: true, met: false },
+          { card: "TER-10", target: "done", met: true, hidden: false },
+          { card: "TER-12", target: "review", met: false, hidden: false },
+          { card: null, hidden: true, met: false },
         ],
         mode: "all", action: { move_to: "ready", comment: "Dependencies ready. Review the **WIP limits**.", wake: true },
-        met_at: null, generation: 1, wake_recipient: "terrarium/lead",
+        met_at: null, generation: "mock-wait-1", wake_recipient: "terrarium/lead",
       },
     }),
     card("TER-15", "terrarium", "blocked", "Codex adapter: resume by session id", {

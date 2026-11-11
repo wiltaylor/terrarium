@@ -1322,7 +1322,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       cards: w.cards
         .filter((c) => c.project === name && !c.archived)
         .sort((a, b) => (order.get(a.column) ?? 99) - (order.get(b.column) ?? 99) || a.position - b.position)
-        .map(view),
+        .map(view)
+        .map((c) => ({ ...c, wait: c.wait ? {
+          mode: c.wait.mode, met: !!c.wait.met_at,
+          deps_met: c.wait.dependencies.filter((d) => d.met).length,
+          deps_total: c.wait.dependencies.length,
+        } : null })),
     };
   };
   const reindex = (proj: string, column: string) =>

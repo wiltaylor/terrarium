@@ -1768,11 +1768,11 @@ export interface CardFileUploaded extends CardFile {
 
 /** Reader-filtered wait state supplied by the daemon, never inferred from the board. */
 export interface CardWait {
-  dependencies: { card?: string; target?: string; met: boolean; hidden?: boolean; title?: string; column?: string; project?: string }[];
+  dependencies: { card: string | null; target?: string; met: boolean; hidden: boolean }[];
   mode: "all" | "any";
   action: { move_to?: string | null; comment?: string | null; wake: boolean };
   met_at?: string | null;
-  generation?: number;
+  generation?: string;
   wake_recipient?: string | null;
 }
 
@@ -1922,7 +1922,15 @@ export interface ActiveCard extends Card {
 }
 
 /** List-only card. Fetch cards.get(id) before displaying or editing details. */
-export type CardSummary = Omit<Card, "body" | "comments" | "links"> & {
+export interface CardWaitSummary {
+  mode: "all" | "any";
+  met: boolean;
+  deps_met: number;
+  deps_total: number;
+}
+
+export type CardSummary = Omit<Card, "body" | "comments" | "links" | "wait"> & {
+  wait?: CardWaitSummary | null;
   comment_count?: number;
   last_comment_at?: string | null;
 };

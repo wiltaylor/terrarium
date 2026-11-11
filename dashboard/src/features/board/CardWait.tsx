@@ -1,11 +1,11 @@
 import { For, Show } from "solid-js";
-import type { CardWait } from "../../api/types";
+import type { CardWait, CardWaitSummary } from "../../api/types";
 import { TextMarkdown } from "../../components/TextMarkdown";
 
-export function WaitChip(props: { wait?: CardWait | null }) {
-  return <Show when={props.wait?.dependencies.length}>
-    <span class={`chip${props.wait?.met_at ? "" : " warn"}`} title={props.wait?.met_at ? "Wait completed (latched)" : "Waiting for card conditions"}>
-      {props.wait?.met_at ? "wait met" : `waits ${props.wait?.mode === "any" ? "any" : "all"}: ${props.wait?.dependencies.length}`}
+export function WaitChip(props: { wait?: CardWaitSummary | null }) {
+  return <Show when={props.wait}>
+    <span class={`chip${props.wait?.met ? "" : " warn"}`} title={props.wait?.met ? "Wait completed (latched)" : "Waiting for card conditions"}>
+      {props.wait?.met ? "wait met" : `waits ${props.wait?.mode === "any" ? "any" : "all"}: ${props.wait?.deps_met}/${props.wait?.deps_total}`}
     </span>
   </Show>;
 }
@@ -19,8 +19,8 @@ export function CardWaitDetails(props: { wait?: CardWait | null; project: string
     <ul><For each={wait().dependencies}>{(dep) => <li>
       <span class={`chip${dep.met ? "" : " warn"}`}>{dep.met ? "met" : "not met"}</span>{" "}
       <Show when={!dep.hidden} fallback={<span>hidden</span>}>
-        <TextMarkdown text={`${dep.card ?? "Unknown card"}${dep.title ? `: ${dep.title}` : ""}`} project={props.project} />
-        <span>Target: {dep.target ?? "done"}{dep.column ? ` · current: ${dep.column}` : ""}</span>
+        <TextMarkdown text={dep.card ?? "Unknown card"} project={props.project} />
+        <span>Target: {dep.target ?? "done"}</span>
       </Show>
     </li>}</For></ul>
     <dl class="kv">
