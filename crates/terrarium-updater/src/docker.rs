@@ -838,8 +838,17 @@ impl Engine for Docker {
         Box::pin(async move {
             let c = self.inspect(id).await?;
             let reference = c["Config"]["Image"].as_str().unwrap_or_default();
-            let (config, service) = self.compose_config(&c, reference).await?;
-            let t = stop_timeout(&c, &config, &service)?;
+            let resolved = match self.compose_config(&c, reference).await {
+                Ok((config, service)) => stop_timeout(&c, &config, &service),
+                Err(error) => Err(error),
+            };
+            let t = resolved.unwrap_or_else(|_| {
+                tracing::warn!("cannot resolve Compose stop grace period (values hidden); using default");
+                c["Config"]["StopTimeout"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .max(DEFAULT_STOP_TIMEOUT)
+            });
             self.ok(
                 Method::POST,
                 &format!("/containers/{}/stop?t={t}", enc(id)),
@@ -1092,6 +1101,52 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn missing_deployment_mounts_do_not_block_stop() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (old, expected) in [(40, 650), (900, 900)] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).await.unwrap();
+                        request.push(byte[0]);
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let stopping = request.starts_with("POST ");
+                    if stopping {
+                        assert!(request.starts_with(&format!(
+                            "POST /containers/daemon/stop?t={expected} HTTP/1.1\r\n"
+                        )));
+                    }
+                    let body = if request.starts_with("GET /containers/daemon/json ") {
+                        json!({"Config": {"StopTimeout": old, "Image": "old:1"}})
+                    } else {
+                        json!({})
+                    }
+                    .to_string();
+                    stream.write_all(format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ).as_bytes()).await.unwrap();
+                    if stopping {
+                        break;
+                    }
+                }
+            });
+            let docker = Docker { socket, target: None };
+            tokio::time::timeout(Duration::from_secs(5), docker.stop("daemon"))
+                .await.unwrap().unwrap();
+            server.await.unwrap();
+        }
     }
 
     #[test]
