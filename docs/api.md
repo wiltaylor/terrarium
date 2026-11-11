@@ -3339,6 +3339,8 @@ Cards:
   card, or unlinks it with `"card": null`. The revision stays, so an answer
   in progress stays valid. The asking leader changes the card of an open
   question only. The operator and a sysadmin change it at each status.
+  A question or bundle without an Inbox thread cannot be unlinked, at any
+  priority or status (`422 invalid`). A full update enforces the same rule.
 - A change of the card writes the audit row `question.update` with
   `changed: ["card"]`, `card`, and `previous_card`, and an `updated`
   event with `previous_card_id` (the old card), so that the old card

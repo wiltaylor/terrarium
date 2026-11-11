@@ -40,6 +40,7 @@ it("shows the card's question and answers it with the same control as the Inbox"
     },
   }), el);
   await vi.waitFor(() => expect(el.textContent).toContain(q.text));
+  expect([...el.querySelectorAll("button")].some((b) => b.textContent?.trim() === "Unlink")).toBe(false);
   expect(api.questions.list).toHaveBeenCalledWith({ card: "P-1", status: "all" });
   const input = el.querySelector("textarea")!;
   input.value = "Proceed";

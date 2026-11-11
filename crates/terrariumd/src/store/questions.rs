@@ -394,6 +394,15 @@ pub fn list_inbox(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
 }
 
 fn list_with_limit(conn: &Connection, f: &Filter, limit: i64) -> ApiResult<Vec<Question>> {
+    let (sql, args) = list_query(f, limit);
+    let mut st = conn.prepare(&sql)?;
+    let rows = st
+        .query_map(rusqlite::params_from_iter(args), row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows.into_iter().map(|q| named(conn, q)).collect())
+}
+
+fn list_query(f: &Filter, limit: i64) -> (String, Vec<String>) {
     let mut sql = String::from("SELECT * FROM questions WHERE 1 = 1");
     let mut args: Vec<String> = Vec::new();
     if let Some(a) = &f.agent {
@@ -438,11 +447,7 @@ fn list_with_limit(conn: &Connection, f: &Filter, limit: i64) -> ApiResult<Vec<Q
                    coalesce(answered_at, updated_at) DESC, id
           LIMIT {limit}"
     ));
-    let mut st = conn.prepare(&sql)?;
-    let rows = st
-        .query_map(rusqlite::params_from_iter(args), row)?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows.into_iter().map(|q| named(conn, q)).collect())
+    (sql, args)
 }
 
 /// The number of open questions of `agent`.
@@ -752,14 +757,7 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
         Some(th) => Some(crate::store::threads::check_ask(t, th, &n.agent)?.id),
         None => None,
     };
-    if matches!(n.kind, QuestionKind::Question | QuestionKind::Bundle)
-        && card.is_none()
-        && in_thread.is_none()
-    {
-        return Err(ApiError::invalid(
-            "question ask and bundle require --card, or ask inside an Inbox thread with thread ask",
-        ));
-    }
+    check_work_context(n.kind, card.as_deref(), in_thread.as_deref())?;
     let (text, options, context) = redact_fields(t, text, options, context);
     let items = redact_items(t, items);
     let open = list(
@@ -1002,6 +1000,7 @@ pub fn set_card(
         return Err(not_open(&q, "a change of the card"));
     }
     let card = check_card(t, &q.project, card)?;
+    check_work_context(q.kind, card.as_deref(), q.thread.as_deref())?;
     if q.status == QuestionStatus::Open {
         check_update_context(t, &q, card.as_deref(), q.priority)?;
     }
@@ -1032,6 +1031,7 @@ fn check_update_context(
     card: Option<&str>,
     priority: Priority,
 ) -> ApiResult<()> {
+    check_work_context(q.kind, card, q.thread.as_deref())?;
     if q.kind == QuestionKind::Notice && card.is_none() && !priority.at_least_urgent() {
         // reply_to is recorded on creation, not mutable through an update.
         let has_reply: bool = t.query_row(
@@ -1067,6 +1067,19 @@ fn check_update_context(
             ))
             .with_details(json!({"question": other.id})));
         }
+    }
+    Ok(())
+}
+
+/// A decision keeps its work context when edited, not only when asked.
+fn check_work_context(kind: QuestionKind, card: Option<&str>, thread: Option<&str>) -> ApiResult<()> {
+    if matches!(kind, QuestionKind::Question | QuestionKind::Bundle)
+        && card.is_none()
+        && thread.is_none()
+    {
+        return Err(ApiError::invalid(
+            "question ask and bundle require --card, or ask inside an Inbox thread with thread ask",
+        ));
     }
     Ok(())
 }
@@ -2256,6 +2269,22 @@ pub fn recap(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_question_lookup_uses_index_without_sorting_history() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        let (sql, args) = list_query(&Filter {
+            card: Some("P-1".into()),
+            ..Filter::default()
+        }, 200);
+        let plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+            .query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(3)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap().join("\n");
+        assert!(plan.contains("SEARCH questions USING INDEX questions_card_order"), "{plan}");
+        assert!(!plan.contains("SCAN questions"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
 
     #[test]
     fn short_keeps_the_first_line() {

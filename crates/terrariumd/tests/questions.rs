@@ -130,6 +130,30 @@ async fn questions_require_work_context_and_save_answers_on_the_card() {
 }
 
 #[tokio::test]
+async fn question_and_bundle_updates_cannot_remove_their_only_context() {
+    let World { td, lead, sys, .. } = setup().await;
+    for kind in ["question", "bundle"] {
+        for priority in ["normal", "urgent", "critical"] {
+            let mut body = json!({"kind": kind, "text": format!("{kind} {priority}?"), "priority": priority});
+            if kind == "bundle" {
+                body["items"] = json!([{"text": "First?"}, {"text": "Second?"}]);
+            }
+            let q = ask(&td, &lead, body).await;
+            let path = format!("/api/questions/{}", id(&q));
+            for patch in [json!({"card": null}), json!({"card": null, "text": "Changed?", "priority": priority})] {
+                td.patch_as(&lead, &path, patch).await.err(422, "invalid");
+            }
+            td.patch(&path, json!({"card": null})).await.err(422, "invalid");
+            td.patch_as(&sys, &path, json!({"card": null})).await.err(422, "invalid");
+            let unchanged = td.get(&path).await;
+            assert_eq!(unchanged.body["card"], q["card"]);
+            assert_eq!(unchanged.body["revision"], q["revision"]);
+            assert_eq!(unchanged.body["text"], q["text"]);
+        }
+    }
+}
+
+#[tokio::test]
 async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
     let World { td, lead, sys, .. } = setup().await;
     let path = format!("/api/agents/{lead}/questions");
@@ -1269,8 +1293,8 @@ async fn a_question_is_linked_to_a_card_and_unlinked() {
         404
     );
 
-    // A closed question: the leader may not unlink it; the operator and a
-    // sysadmin may.
+    // A closed question: the leader cannot change its card. The operator
+    // and a sysadmin may relink it, but cannot remove its only context.
     td.post(&format!("{path}/answer"), json!({"answer": "yes"}))
         .await
         .ok();
@@ -1279,9 +1303,8 @@ async fn a_question_is_linked_to_a_card_and_unlinked() {
         .err(409, "conflict");
     let v = td.patch_as(&sys, &path, json!({"card": c1})).await;
     assert_eq!(v.ok()["card"], c1.as_str());
-    let v = td.patch(&path, json!({"card": null})).await;
-    assert_eq!(v.ok()["card"], Value::Null);
-    assert!(of(&c1).await.iter().all(|q| *q != qid));
+    td.patch(&path, json!({"card": null})).await.err(422, "invalid");
+    assert!(of(&c1).await.contains(&qid));
 
     // The `question` event names the new card and the old one.
     let ev = td.get("/api/events?kind=question&limit=100").await;
@@ -1294,8 +1317,8 @@ async fn a_question_is_linked_to_a_card_and_unlinked() {
         .unwrap()
         .clone();
     assert_eq!(last["data"]["change"], "updated");
-    assert_eq!(last["data"]["previous_card_id"], c1.as_str());
-    assert!(last["data"].get("card_id").is_none());
+    assert_eq!(last["data"]["previous_card_id"], c2.as_str());
+    assert_eq!(last["data"]["card_id"], c1.as_str());
     // The audit log has each change of the card.
     let audit = td.get("/api/audit?action=question.update&limit=50").await;
     let cards = audit
@@ -1305,7 +1328,7 @@ async fn a_question_is_linked_to_a_card_and_unlinked() {
         .iter()
         .filter(|a| a["detail"]["changed"] == json!(["card"]))
         .count();
-    assert_eq!(cards, 4, "{}", audit.body);
+    assert_eq!(cards, 3, "{}", audit.body);
 }
 
 /// `GET /api/projects/{name}/counts` (TER-154): the blocked cards and the
