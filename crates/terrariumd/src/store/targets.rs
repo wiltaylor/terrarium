@@ -192,9 +192,9 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
     if let Some(base) = &def.work_root {
         crate::target_roots::check_base(base)?;
     }
-    if def.sync_workspace && !matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
+    if def.sync_workspace {
         return Err(ApiError::invalid(
-            "sync_workspace requires an ssh or exedev target",
+            "sync_workspace is not supported: disable it and check out repositories under the target work_root",
         ));
     }
     if let Some(p) = &def.project {
@@ -607,6 +607,7 @@ pub fn update_with_live_limits(
 ) -> ApiResult<TargetRow> {
     let (def, admin) = prepare_update(t, &t.actor, name, patch, live)?;
     let current = get(t, name)?;
+    invalidate_root_plan(t, &current.def, Some(&def))?;
     if def.kind == TargetKind::Docker
         && !def.ephemeral
         && def.container.is_none()
@@ -785,8 +786,21 @@ pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<TargetRow> {
     let current = get(t, name)?;
     refuse_file(&current)?;
     super::reservations::guard_identity(t, "target", name)?;
+    invalidate_root_plan(t, &current.def, None)?;
     t.execute("DELETE FROM targets WHERE name = ?1", [name])?;
     Ok(current)
+}
+
+/// Drop only this target's plans. The remote directories remain untouched.
+fn invalidate_root_plan(t: &mut Tx<'_>, old: &TargetDef, new: Option<&TargetDef>) -> ApiResult<()> {
+    if let Some(new) = new
+        && crate::target_roots::same_location(&serde_json::to_string(old)?, new)
+    {
+        return Ok(());
+    }
+    t.execute("DELETE FROM agent_target_roots WHERE target=?1", [&old.name])?;
+    t.execute("DELETE FROM agent_target_root_warnings WHERE target=?1", [&old.name])?;
+    Ok(())
 }
 
 fn guard_reserved_update(conn: &Connection, old: &TargetDef, new: &TargetDef) -> ApiResult<()> {
@@ -880,6 +894,7 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[TargetDef]) -> ApiResult<(Changes, Vec
                     errors.push(format!("targets/{}.toml: {}", def.name, e.message));
                     continue;
                 }
+                invalidate_root_plan(t, &r.def, Some(def))?;
                 t.execute(
                     "UPDATE targets SET project = ?2, kind = ?3, def = ?4, source = 'file',
                                         updated_at = ?5, credential_admin = 1
@@ -907,6 +922,8 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[TargetDef]) -> ApiResult<(Changes, Vec
             errors.push(format!("targets/{name}.toml: {}", e.message));
             continue;
         }
+        let current = get(t, &name)?;
+        invalidate_root_plan(t, &current.def, None)?;
         t.execute("DELETE FROM targets WHERE name = ?1", [&name])?;
         changes.removed.push(name);
     }
@@ -1132,6 +1149,54 @@ mod tests {
         let mut d: TargetDef = toml::from_str(text).unwrap();
         d.name = name.into();
         d
+    }
+
+    #[tokio::test]
+    async fn root_plans_follow_target_identity_and_removal() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        db.write("operator", |t| {
+            let a = def("kind='ssh'\naddress='u@h'\nwork_root='/old'", "a");
+            create(t, &a)?;
+            create(t, &def("kind='ssh'\naddress='u@other'", "b"))?;
+            let seed = |t: &mut Tx<'_>, target: &str| -> ApiResult<()> {
+                t.execute("INSERT INTO agent_target_roots (agent,project,name,target,definition,base) VALUES ('holder','p','holder',?1,'{}','/fallback')", [target])?;
+                t.execute("INSERT INTO agent_target_root_warnings (agent,target) VALUES ('holder',?1)", [target])?;
+                Ok(())
+            };
+            let count = |t: &Tx<'_>, target: &str| -> i64 {
+                t.query_row("SELECT count(*) FROM agent_target_roots WHERE target=?1", [target], |r| r.get(0)).unwrap()
+            };
+            seed(t, "a")?;
+            seed(t, "b")?;
+            update(t, "a", &json!({"keep":true}))?;
+            assert_eq!(count(t, "a"), 1);
+            update(t, "a", &json!({"work_root":"/new"}))?;
+            assert_eq!(count(t, "a"), 0);
+            assert_eq!(count(t, "b"), 1);
+            let warnings: i64 = t.query_row("SELECT count(*) FROM agent_target_root_warnings WHERE target='a'", [], |r| r.get(0))?;
+            assert_eq!(warnings, 0);
+            seed(t, "a")?;
+            update(t, "a", &json!({"address":"u@new"}))?;
+            assert_eq!(count(t, "a"), 0);
+            seed(t, "a")?;
+            delete(t, "a")?;
+            create(t, &a)?;
+            assert_eq!(count(t, "a"), 0);
+            seed(t, "a")?;
+            let mut changed = a.clone();
+            changed.work_root = Some("/file-root".into());
+            sync_files(t, &[changed.clone()])?;
+            assert_eq!(count(t, "a"), 0);
+            seed(t, "a")?;
+            sync_files(t, &[changed])?;
+            assert_eq!(count(t, "a"), 1);
+            sync_files(t, &[])?;
+            assert_eq!(count(t, "a"), 0);
+            assert_eq!(count(t, "b"), 1);
+            Ok(())
+        }).await.unwrap();
     }
 
     #[test]
