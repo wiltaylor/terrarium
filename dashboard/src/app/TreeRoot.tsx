@@ -3,24 +3,12 @@
 // group of child rows. TreeNode is the Bookmarks node: the same, but its row
 // is not a link.
 
-import { A } from "@solidjs/router";
+import { A } from "../instance/navigation";
 import { Show, type JSX } from "solid-js";
 import type { createRovingTree } from "./treeNav";
-import { createExpandedStore } from "./treeModel";
 
 /** The `data-key` of a tree root row. */
 export const ROOT_KEY = "root";
-
-/** The open set of the sidebar tree: the Projects root, folders, and Bookmarks. */
-export const expanded = createExpandedStore(
-  (() => {
-    try {
-      return typeof localStorage === "undefined" ? null : localStorage;
-    } catch {
-      return null;
-    }
-  })(),
-);
 
 /** The drop handlers of a row, and whether a drag is over it now. */
 export interface DropTarget {

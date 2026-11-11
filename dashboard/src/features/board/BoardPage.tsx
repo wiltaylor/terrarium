@@ -1,4 +1,6 @@
-import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
+import { useInstance } from "../../instance";
+import { useParams, useSearchParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";
@@ -26,7 +28,7 @@ import { buildLanes, columnIndex, laneCells, laneMoveLabels, laneStateKey, readL
 import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_QUERY } from "./phone";
 import { boardVersions, matchesVersion, NO_VERSION } from "./versionLabels";
 import { cardAgentName } from "./cardAgent";
-import { agents, api, events } from "../../stores";
+
 import { boardView, doneToggleHref } from "./done";
 import { BOARD_RELOAD_MS, createDebounce, DONE_RELOAD_MS, eventTouchesCard, RELOAD_MAX_WAIT_MS } from "./liveReload";
 
@@ -35,6 +37,7 @@ export function DoneCardsPage() {
 }
 
 export function BoardPage(props: { done?: boolean }) {
+  const { api, events, agents } = useInstance();
   const navigate = useNavigate();
   const params = useParams<{ project: string }>();
   const [search, setSearch] = useSearchParams<{ card?: string; version?: string; group?: string; col?: string }>();
@@ -85,7 +88,8 @@ export function BoardPage(props: { done?: boolean }) {
   // `version:<name>` (`none`: the cards with no version label); `?group=version` shows a lane for each version
   // label. Both are in the URL, so a reload and a link keep them. An old `?rows=` in the URL has no effect.
   // localStorage keeps the collapsed lanes of each project.
-  const storage = (): Storage | undefined => (typeof localStorage === "undefined" ? undefined : localStorage);
+  const instanceStorage = useInstance().storage;
+  const storage = () => instanceStorage;
   const [laneState, setLaneState] = createSignal(readLaneState(null));
   createEffect(on(() => params.project, (p) => setLaneState(readLaneState(storage()?.getItem(laneStateKey(p)) ?? null))));
   const saveLaneState = (next: ReturnType<typeof readLaneState>) => {
@@ -495,6 +499,7 @@ function KCard(props: {
   onDragStart: (e: DragEvent) => void;
   onDragEnd: () => void;
 }) {
+  const { agents } = useInstance();
   const owner = () => (props.card.assignee ? agents.byId(props.card.assignee) : undefined);
   // The one state chip (TER-158): the open job, the review column, or the live status of the assignee.
   const state = () => cardState(props.card, owner()?.status);
@@ -746,6 +751,7 @@ function CardDrawer(props: {
   onSaved: (c: Card) => void;
   onArchived: () => void;
 }) {
+  const { api, agents } = useInstance();
   const [comment, setComment] = createSignal("");
   const [error, setError] = createSignal<unknown>(null);
   const [editing, setEditing] = createSignal(false);

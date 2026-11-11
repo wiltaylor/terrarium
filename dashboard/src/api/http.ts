@@ -240,10 +240,10 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
 
     wsUrl(path: string, query: Query = {}): string {
       const q = buildQuery(query);
-      if (base) return `${base.replace(/^http/, "ws")}${path}${q}`;
+      if (/^https?:\/\//.test(base)) return `${base.replace(/^http/, "ws")}${path}${q}`;
       const loc = opts.location ?? window.location;
       const proto = loc.protocol === "https:" ? "wss:" : "ws:";
-      return `${proto}//${loc.host}${path}${q}`;
+      return `${proto}//${loc.host}${base}${path}${q}`;
     },
 
     openSocket(url: string): AuthSocket {

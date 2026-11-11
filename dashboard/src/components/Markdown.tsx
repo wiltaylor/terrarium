@@ -3,7 +3,7 @@
 // placeholders. The HTML goes
 // through DOMPurify (lib/sanitize) on its way into the DOM.
 
-import { useNavigate } from "@solidjs/router";
+import { useNavigate } from "../instance/navigation";
 import { createEffect, onCleanup } from "solid-js";
 import { render } from "solid-js/web";
 import { setSafeHtml } from "../lib/sanitize";

@@ -1,10 +1,11 @@
+import { useInstance } from "../../instance";
 // The agent fields that an agent and a template share: harness,
 // subscription, model, prompt, system prompt (persona and text in one selector), skills, restart, idle stop, auto compact, roles, and policy. No name and no
 // project: the agent form and the template form add those.
 
 import { createResource, createSignal, For, Show } from "solid-js";
 import { GRANTABLE_ROLES, HARNESSES, roleLabel, RESTART_POLICIES, type Harness, type RestartPolicy, type Role } from "../../api/types";
-import { api, subscriptions } from "../../stores";
+
 import { compactMaxAgeProblem, idleStopProblem, type AgentFormValues, type CompactSwitch } from "./form";
 import { SystemPromptSelect } from "./SystemPromptSelect";
 import { prunePool, reconcileSubscription } from "./subscription";
@@ -16,6 +17,7 @@ let idleStopDefault: Promise<string | undefined> | undefined;
 
 /** The global idle stop, such as `10m` or `off`. Undefined until the health answers, or when it does not say. */
 export function useGlobalIdleStop(): () => string | undefined {
+  const { api } = useInstance();
   idleStopDefault ??= api
     .health()
     .then((h) => h.idle_stop)
@@ -29,6 +31,7 @@ let compactDefaults: Promise<{ on_idle?: boolean; max_age?: string; harnesses?: 
 
 /** The global auto compact settings. Empty until the health answers, or when it does not say. */
 export function useCompactDefaults(): () => { on_idle?: boolean; max_age?: string; harnesses?: string[] } {
+  const { api } = useInstance();
   compactDefaults ??= api
     .health()
     .then((h) => ({ on_idle: h.compact_on_idle, max_age: h.compact_max_age, harnesses: h.compact_harnesses }))
@@ -112,6 +115,7 @@ export function AgentFields(props: {
   /** Under the roles when they are hidden. */
   rolesNote?: string;
 }) {
+  const { api, subscriptions } = useInstance();
   const v = () => props.value;
   const set = <K extends keyof AgentFormValues>(k: K, value: AgentFormValues[K]) => props.onChange({ ...v(), [k]: value });
   // A global template has no project: it may name the global targets only.

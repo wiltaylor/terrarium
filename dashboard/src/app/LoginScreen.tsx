@@ -1,3 +1,4 @@
+import { useInstance } from "../instance";
 // The login screen. It posts the operator password once to
 // `POST /api/session`, or, on "Use the token instead", the bearer token. The
 // daemon answers with an `HttpOnly` cookie; the page keeps only the CSRF
@@ -6,10 +7,11 @@
 
 import { createSignal, onCleanup, Show } from "solid-js";
 import { mockPassword, mockToken } from "../api";
-import { auth, signInPassword, signInWithToken } from "../stores";
+
 import { loginError, type LoginProblem } from "../stores/auth";
 
 export function LoginScreen(props: { overlay?: boolean }) {
+  const { signInWithToken, signInPassword, auth } = useInstance();
   const [useToken, setUseToken] = createSignal(false);
   const [value, setValue] = createSignal("");
   const [busy, setBusy] = createSignal(false);

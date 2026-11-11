@@ -1,10 +1,11 @@
+import { useInstance } from "../../instance";
 // One question or notice of a leader to the operator. A question has the
 // answer form; a notice has Acknowledge with an optional reply. The text and
 // the options are the agent's words: they go into the page as text nodes
 // only. The context is Markdown, and goes through the DOMPurify sink
 // (SafeHtml) only.
 
-import { A, useNavigate } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createSignal, For, type JSX, on, Show } from "solid-js";
 import type { Question } from "../../api/types";
 import { LinkText, openCardLink, readerCardKeys } from "../../components/LinkText";
@@ -12,7 +13,7 @@ import { SafeHtml } from "../../components/SafeHtml";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api } from "../../stores";
+
 import { ackText, answerBody, canOpenInThread, cardHref, chosenLabel, mailThreadHref, statusChip, THREAD_MOVE_MESSAGE_MAX } from "./questions";
 import { threadHref } from "./threads";
 
@@ -27,6 +28,8 @@ import { threadHref } from "./threads";
  * and opens it. "Show mail" opens the mail thread of the question.
  */
 export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; inThread?: boolean; actions?: JSX.Element; prefill?: { text: string }; onChange: (q: Question) => void }) {
+  const instanceCardPeek = useInstance().cardPeek;
+  const { api } = useInstance();
   const navigate = useNavigate();
   const q = () => props.question;
   const notice = () => q().kind === "notice";
@@ -126,7 +129,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
         <LinkText text={q().text} project={q().project} />
       </p>
 
-      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={openCardLink} />}</Show>
+      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={(e) => openCardLink(e, instanceCardPeek)} />}</Show>
 
       <Show when={!props.inThread && q().thread}>
         {(t) => (

@@ -9,7 +9,7 @@ import { createMockApi } from "../../api/mock";
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const listeners = new Set<(e: import("../../api/types").AgentEvent) => void>();
 const onEvent = (e: import("../../api/types").AgentEvent) => listeners.forEach(fn => fn(e));
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api,
   events: { on: (fn: typeof onEvent) => { listeners.add(fn); return () => listeners.delete(fn); } },
   inbox: { refresh: async () => {} },
@@ -17,7 +17,7 @@ vi.mock("../../stores", () => ({
   // The card body and comments link card keys (TER-571).
   projects: { projects: () => [] },
   cardPeek: { open: () => {}, close: () => {} },
-}));
+})); });
 const { BoardPage, DoneCardsPage } = await import("./BoardPage");
 const { loadBoards } = await import("../inbox/TrackedCards");
 let dispose: (() => void) | undefined;

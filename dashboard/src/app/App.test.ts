@@ -12,12 +12,12 @@ const { stub } = vi.hoisted(() => ({ stub: (label: string) => () => label }));
 
 vi.mock("../api", () => ({ isMock: false }));
 // The project shell reads the tab counts (TER-154): no agent, no count.
-vi.mock("../stores", () => ({
+vi.mock("../stores", async () => { const { instanceTestStores } = await import("../test/instance"); return instanceTestStores(({
   auth: { mode: () => "operator" },
   agents: { inProject: () => [] },
   api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) } },
   events: { on: () => () => {} },
-}));
+})); });
 vi.mock("./Layout", () => ({ Layout: (props: { children?: unknown }) => props.children }));
 vi.mock("./LoginScreen", () => ({ LoginScreen: stub("Login") }));
 vi.mock("../features/home/Home", () => ({ Home: stub("Home page") }));

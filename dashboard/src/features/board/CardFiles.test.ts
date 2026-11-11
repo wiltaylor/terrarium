@@ -14,10 +14,10 @@ const upload = vi.fn();
 const get = vi.fn();
 const remove = vi.fn();
 const versions = vi.fn();
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api: { cardFiles: { list, upload, get, remove, versions } },
   events: { on: () => () => {} },
-}));
+})); });
 
 const { CardFiles } = await import("./CardFiles");
 

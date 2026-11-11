@@ -1,5 +1,6 @@
+import { useInstance } from "../../instance";
 import { createResource, For, Show } from "solid-js";
-import { api } from "../../stores";
+
 import { size } from "./hosts";
 
 export function reservationProgress(start: number | null, until: number | null, now: number): number {
@@ -10,6 +11,7 @@ export function reservationProgress(start: number | null, until: number | null, 
 /** Poll with the host card clock. No cached grant is shown as current after
  * a failed refresh, and unsupported host agents make no resource requests. */
 export function HostReservations(props: { host: string; supported: boolean; now: number }) {
+  const { api } = useInstance();
   const [data] = createResource(
     () => props.supported ? `${props.host}:${Math.floor(props.now / 10_000)}` : false,
     async () => ({ capacity: await api.hosts.capacity(props.host), rows: await api.hosts.reservations(props.host) }),

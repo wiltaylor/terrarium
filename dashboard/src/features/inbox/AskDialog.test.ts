@@ -11,10 +11,10 @@ const ask = vi.fn();
 const openRequest = vi.fn(async () => ({ id: "R1" }));
 const cancelWatch = vi.fn();
 const preferences = vi.fn(async () => ({ default_agent: null as string | null }));
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api: { account: { preferences }, threads: { open: openRequest }, inbox: { ask, cancelWatch, ackMail: vi.fn() } },
   agents: { state: { agents: [{ id: "A2", project: "demo", name: "w2", roles: ["project_admin"] }, { id: "A1", project: "demo", name: "w1", roles: ["project_admin"] }, { id: "E1", project: "demo", name: "tmp", roles: [], ephemeral: true }] } },
-}));
+})); });
 vi.mock("@solidjs/router", () => ({ A: (p: { href: string; children?: unknown }) => p.children }));
 
 const { AskDialog } = await import("./AskDialog");

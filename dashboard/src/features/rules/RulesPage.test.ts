@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMockApi } from "../../api/mock";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
-vi.mock("../../stores", () => ({ api }));
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({ api })); });
 vi.mock("@solidjs/router", () => ({ useParams: () => ({ project: "terrarium" }) }));
 
 const { default: RulesPage } = await import("./RulesPage");
