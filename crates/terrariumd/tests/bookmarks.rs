@@ -30,6 +30,14 @@ async fn edits_keep_order_and_reject_duplicate_or_missing_source() {
         .err(422, "invalid");
     }
     assert_eq!(td.get("/api/bookmarks").await.ok(), &expected);
+    let audit = td.get("/api/audit?action=bookmark.edit").await;
+    let edits = audit.ok().as_array().unwrap();
+    assert_eq!(edits.len(), 1, "Rejected edits must not be audited");
+    assert_eq!(edits[0]["target"], "https://new.test/");
+    assert_eq!(edits[0]["detail"]["previous_href"], "https://first.test/");
+    assert_eq!(edits[0]["detail"]["href"], "https://new.test/");
+    let audit = td.get("/api/audit?action=bookmark.add").await;
+    assert_eq!(audit.ok().as_array().unwrap().len(), 2);
     td.boot(None, None).await;
     assert_eq!(td.get("/api/bookmarks").await.ok(), &expected);
 }
