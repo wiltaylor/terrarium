@@ -13307,6 +13307,25 @@ with TLS in front of it, as for `terrarium --url https://... login`.
 
 ### 36.2 Link rows and pairing
 
+Remote artifact previews use `POST /api/remotes/{name}/artifacts/{id}/url`
+with an operator session. The home returns a signed `/ra/...` capability on
+its artifact origin, valid for at most 120 seconds and invalidated by logout
+or password changes. Fetches send no home cookies, tokens, or link keys.
+Targets must use the API's scheme and either its origin or the artifact
+origin declared by `GET /api/system/instance` (`artifact_origin`). Redirects
+are refused, responses are limited to 32 MiB and supported MIME types, and
+served content has a sandbox CSP. Download/Open links stay on the home.
+
+The remote artifact origin must present the linked API's pinned leaf
+certificate. An independent certificate or missing HTTPS leaf pin fails
+closed: remote artifacts do not load. Separate artifact-origin pins are
+not supported yet. Private destinations are allowed only for a remote
+linked with a private IP literal or `localhost`. DNS-named remotes have a
+public-only artifact policy, independent of `TERRARIUM_WEBHOOK_PRIVATE`.
+Each artifact connection resolves once, checks the IP address, and pins
+the connection to that checked address. Private DNS labs must link using
+their private IP literal to opt into private artifact destinations.
+
 Only the operator manages links (`403 forbidden` for an agent). A link key
 calls none of these routes except `DELETE /api/links/self` (§36.4).
 

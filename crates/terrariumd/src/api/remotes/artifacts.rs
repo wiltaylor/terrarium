@@ -24,6 +24,7 @@ struct Capability {
     remote_id: String,
     instance: String,
     target: String,
+    artifact_origin: Option<String>,
     sid: String,
     jti: String,
     pv: u64,
@@ -60,7 +61,7 @@ pub(super) async fn mint(
         &key(&s, &r).await?,
         &s.links.instance_id(&s.state_dir)?,
     )?;
-    net::instance(&c, &r, &h).await?;
+    let instance = net::instance(&c, &r, &h).await?;
     let response = c
         .post(format!("{}api/artifacts/{id}/url", r.url))
         .headers(h)
@@ -83,6 +84,7 @@ pub(super) async fn mint(
     let base = url::Url::parse(&r.url).map_err(|_| net::unreachable())?;
     let target = base.join(&minted.url).map_err(|_| net::unreachable())?;
     check_target(&target)?;
+    destination_policy(&r.url, instance.artifact_origin.as_deref(), &target)?;
     let exp =
         (Utc::now().timestamp() + 120)
             .min(minted.exp)
@@ -95,6 +97,7 @@ pub(super) async fn mint(
         remote_id: r.id,
         instance: r.instance_id,
         target: target.to_string(),
+        artifact_origin: instance.artifact_origin,
         sid: session.claims.sid,
         jti: session.claims.jti,
         pv: session.claims.pv,
@@ -228,7 +231,8 @@ async fn serve(
     if u.scheme() == "https" && origin.pin_sha256.is_none() {
         return Err(denied());
     }
-    let c = net::client(&origin, &own_ports(&s)).await?;
+    let mode = destination_policy(&r.url, cap.artifact_origin.as_deref(), &u)?;
+    let c = net::client_with_policy(&origin, &own_ports(&s), mode).await?;
     // Deliberately no cookies, Authorization, link key or incoming headers.
     let response = c
         .get(u)
@@ -297,10 +301,54 @@ fn allowed_type(raw: &str) -> bool {
     )
 }
 
+/// The stored API URL is the operator's boundary. Only a literal private API
+/// address opts this remote into private destinations. A DNS name must never
+/// gain that right merely because its answer changed after linking.
+fn destination_policy(
+    remote: &str,
+    declared: Option<&str>,
+    target: &url::Url,
+) -> ApiResult<crate::webhooks::net::PrivateMode> {
+    use crate::webhooks::net::{PrivateMode, private_reason};
+    let api = net::check_url(remote)?;
+    if api.scheme() != target.scheme() {
+        return Err(denied());
+    }
+    let declared = declared.filter(|s| !s.is_empty())
+        .map(net::check_url).transpose()?;
+    if api.origin() != target.origin()
+        && declared.as_ref().is_none_or(|d| d.origin() != target.origin()) {
+        return Err(denied());
+    }
+    let private = match api.host() {
+        Some(url::Host::Ipv4(ip)) => private_reason(ip.into()).is_some(),
+        Some(url::Host::Ipv6(ip)) => private_reason(ip.into()).is_some(),
+        // localhost explicitly names loopback, unlike arbitrary DNS names.
+        Some(url::Host::Domain("localhost")) => true,
+        _ => false,
+    };
+    Ok(if private { PrivateMode::Allow } else { PrivateMode::Deny })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn destination_boundary_and_rebinding_policy_are_explicit() {
+        use crate::webhooks::net::{self, PrivateMode};
+        let api = "https://public.example/";
+        let downgrade = url::Url::parse("http://public.example/a/U1").unwrap();
+        assert!(destination_policy(api, None, &downgrade).is_err());
+        let other = url::Url::parse("https://other.example/a/U1").unwrap();
+        assert!(destination_policy(api, None, &other).is_err());
+        let mode = destination_policy(api, Some("https://other.example/"), &other).unwrap();
+        assert_eq!(mode, PrivateMode::Deny);
+        let resolver: net::Resolver = std::sync::Arc::new(|_, _| vec!["127.0.0.1".parse().unwrap()]);
+        assert!(net::resolve(&other, mode, &[], Some(resolver)).await.is_err());
+        let private = url::Url::parse("https://10.0.0.2/a/U1").unwrap();
+        assert_eq!(destination_policy("https://10.0.0.2/", None, &private).unwrap(), PrivateMode::Allow);
+    }
     #[test]
     fn suffix_cannot_escape_one_artifact() {
         let base = "https://example.test/a/U1/_s/123/sig/";

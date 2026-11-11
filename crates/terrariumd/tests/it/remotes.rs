@@ -134,6 +134,49 @@ async fn artifact_capability_serves_without_credentials_and_ends_on_logout() {
 }
 
 #[tokio::test]
+async fn artifact_public_remote_cannot_fetch_loopback_even_with_a_signed_capability() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let mut home = TestDaemon::start().await;
+    home.boot(Some("127.0.0.1:0"), Some("test-home-operator")).await;
+    let remote = remote().await;
+    let row = link(&home, &remote, false).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let seen = connections.clone();
+    let probe = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            seen.fetch_add(1, Ordering::SeqCst);
+            drop(socket);
+        }
+    });
+    let db = rusqlite::Connection::open(home.state.join("terrarium.db")).unwrap();
+    db.execute("UPDATE remotes SET url='https://public.example/',pin_sha256=NULL WHERE name='lab'", []).unwrap();
+    let ctx = terrariumd::store::artifacts::context(&home.state, &home.config).unwrap();
+    let base = format!("http://{}", home.daemon.as_ref().unwrap().tcp_addr.unwrap());
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    // Make a valid home capability as if a malicious public remote had returned
+    // this target. No-pin HTTP used to bypass the artifact TLS guard entirely.
+    for scheme in ["http", "https"] {
+        if scheme == "https" {
+            db.execute("UPDATE remotes SET pin_sha256=?1 WHERE name='lab'", ["00".repeat(32)]).unwrap();
+        }
+        let exp = chrono::Utc::now().timestamp() + 120;
+        let cap = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({
+            "remote":"lab", "remote_id":row["id"], "instance":row["instance_id"],
+            "target":format!("{scheme}://{addr}/a/probe"),
+            "artifact_origin":format!("{scheme}://{addr}/"),
+            "sid":"test-session", "jti":"test-token", "pv":0
+        })).unwrap());
+        let sig = ctx.sign(&format!("remote-artifact.v1.{cap}"), exp);
+        let response = client.get(format!("{base}/ra/{cap}/{exp}/{sig}/")).send().await.unwrap();
+        assert!(!response.status().is_success(), "{scheme}");
+        assert_eq!(connections.load(Ordering::SeqCst), 0, "{scheme}");
+    }
+    probe.abort();
+}
+
+#[tokio::test]
 async fn browser_admission_is_retained_until_socket_close_and_has_retry_after() {
     let home = TestDaemon::start().await;
     let remote = remote().await;

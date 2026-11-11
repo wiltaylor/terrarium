@@ -1,4 +1,3 @@
-import { InstanceAnchor } from "../instance/navigation";
 import { useInstance } from "../instance";
 // Preview for one artifact (§15.2, docs/api.md §12). The viewer mints a
 // short-lived signed URL (`POST /api/artifacts/{id}/url`) and loads the
@@ -75,9 +74,9 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
               {(u) => (
                 <>
                   {" · "}
-                  <InstanceAnchor href={u()} download={props.artifact.name} target="_blank" rel="noopener noreferrer">
+                  <a href={u()} download={props.artifact.name} target="_blank" rel="noopener noreferrer">
                     {props.artifact.kind === "bundle" ? "Open" : "Download"}
-                  </InstanceAnchor>
+                  </a>
                 </>
               )}
             </Show>
@@ -109,9 +108,9 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
             <Match when={kind() === "pdf"}>
               {/* No <object>: the CSP has object-src 'none'. Some browsers do not draw a PDF in a sandboxed frame; the link opens it. */}
               <iframe class="artifact-frame" src={u()} sandbox="allow-scripts" referrerPolicy="no-referrer" title={props.artifact.name} style={{ "min-height": "420px" }} />
-              <InstanceAnchor class="small" href={u()} target="_blank" rel="noopener noreferrer">
+              <a class="small" href={u()} target="_blank" rel="noopener noreferrer">
                 Open {props.artifact.name} in a new tab
-              </InstanceAnchor>
+              </a>
             </Match>
             <Match when={kind() === "html"}>
               <iframe class="artifact-frame" src={u()} sandbox="allow-scripts" referrerPolicy="no-referrer" title={props.artifact.name} />
@@ -125,9 +124,9 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
             <Match when={kind() === "download"}>
               <div class="empty">
                 No preview for {props.artifact.content_type}.{" "}
-                <InstanceAnchor href={u()} download={props.artifact.name}>
+                <a href={u()} download={props.artifact.name}>
                   Download
-                </InstanceAnchor>
+                </a>
               </div>
             </Match>
           </Switch>
