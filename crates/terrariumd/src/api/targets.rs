@@ -224,7 +224,7 @@ pub struct TargetView {
     pub recreate_note: Option<&'static str>,
     /// The target name. Targets have no other ID.
     pub id: String,
-    #[serde(flatten)]
+    #[serde(flatten, serialize_with = "serialize_target_definition")]
     pub def: TargetDef,
     /// `global` or `project`.
     pub scope: &'static str,
@@ -259,6 +259,16 @@ pub struct TargetView {
     /// limits"). Absent when the target has no `limits`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limits_info: Option<LimitsInfo>,
+}
+
+// Definitions omit false for config files. API views expose the value explicitly.
+fn serialize_target_definition<S: serde::Serializer>(
+    def: &TargetDef,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut value = serde_json::to_value(def).map_err(serde::ser::Error::custom)?;
+    value["sync_workspace"] = def.sync_workspace.into();
+    value.serialize(serializer)
 }
 
 /// The `limits_info` of a target view.
