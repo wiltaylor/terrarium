@@ -3621,7 +3621,7 @@ mod tests {
                     "POST",
                     &format!("/api/agents/{sys}/questions"),
                     &[(crate::actor::AGENT_HEADER, sys.as_str())],
-                    &serde_json::json!({"kind": kind, "text": "Deploy?"}),
+                    &serde_json::json!({"kind": kind, "text": "Deploy?", "urgent": kind == "notice"}),
                 )
                 .await;
                 let st = r.status();
