@@ -1267,9 +1267,9 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
     },
 
     home: {
-      cards: (q) => get("/home/cards", { ...q }),
-      monitors: (q) => get("/home/monitors", { ...q }),
-      pipelines: (q) => get("/home/pipelines", { ...q }),
+      cards: (q) => get("/api/home/cards", { ...q }),
+      monitors: (q) => get("/api/home/monitors", { ...q }),
+      pipelines: (q) => get("/api/home/pipelines", { ...q }),
     },
     cards: {
       list: (project, q = {}) => page(`${p(project)}/cards`, { ...q }),
