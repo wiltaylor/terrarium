@@ -1166,6 +1166,66 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn jobs_drain_cli_and_json_survive_the_docker_socket() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let argv = crate::machine::drain_jobs_argv(Duration::from_secs(12));
+        let expected = argv.clone();
+        let server = tokio::spawn(async move {
+            for step in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    header.push(stream.read_u8().await.unwrap());
+                }
+                let header = String::from_utf8(header).unwrap();
+                let len = header
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0; len];
+                stream.read_exact(&mut body).await.unwrap();
+                let response = match step {
+                    0 => {
+                        assert!(header.starts_with("POST /containers/daemon/exec "));
+                        let body: Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(body["Cmd"], json!(expected));
+                        r#"{"Id":"exec1"}"#
+                    }
+                    1 => {
+                        assert!(header.starts_with("POST /exec/exec1/start "));
+                        r#"{"jobs":["job-123"],"timed_out":true}"#
+                    }
+                    _ => {
+                        assert!(header.starts_with("GET /exec/exec1/json "));
+                        r#"{"ExitCode":0}"#
+                    }
+                };
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let docker = Docker {
+            socket,
+            target: None,
+        };
+        let out = tokio::time::timeout(Duration::from_secs(5), docker.exec("daemon", argv))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.code, 0);
+        let value: Value = serde_json::from_str(&out.stdout).unwrap();
+        assert_eq!(value["jobs"], json!(["job-123"]));
+        server.await.unwrap();
+    }
+
     #[test]
     fn compose_keeps_home_and_path_but_not_service_environment() {
         let cmd = compose_command();

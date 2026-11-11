@@ -376,6 +376,8 @@ async fn link_credentials_do_not_bypass_public_routes() {
         "/favicon.svg",
         "/agents/dashboard",
         "/missing.js",
+        "/ra/cap/123/sig/",
+        "/ra/cap/123/sig/index.html",
         artifact_path,
     ] {
         let anonymous = send(app(), "GET", path, &[]).await;
@@ -464,4 +466,15 @@ async fn link_hidden_methods_in_helpers_are_not_registered() {
         StatusCode::OK
     );
     assert_eq!(called.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn link_remote_artifact_registrations_keep_their_access_classes() {
+    let (_, registry) = routes_with_registry(state(), true, false);
+    assert_eq!(registry.access(&axum::http::Method::POST, "/api/remotes/remote/artifacts/ART-1/url"), Some(link_registry::Access::OperatorOnly));
+    for path in ["/ra/cap/123/sig/", "/ra/cap/123/sig/index.html"] {
+        for method in [axum::http::Method::GET, axum::http::Method::HEAD] {
+            assert_eq!(registry.access(&method, path), Some(link_registry::Access::PublicDenied));
+        }
+    }
 }

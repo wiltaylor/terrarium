@@ -1,4 +1,5 @@
 //! Operator-only home proxy. The browser never receives a link key.
+pub(super) mod artifacts;
 mod event_feed;
 use std::sync::Arc;
 use std::time::Instant;
@@ -65,6 +66,11 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
                 axum::http::Method::POST,
                 super::link_registry::Access::OperatorOnly,
             )],
+        )
+        .route(
+            "/remotes/{name}/artifacts/{id}/url",
+            post(artifacts::mint),
+            &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)],
         )
         .route(
             "/remotes/{name}/proxy/{*rest}",

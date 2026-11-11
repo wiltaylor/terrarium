@@ -94,6 +94,7 @@ pub(super) fn registered_serving_routes(state: &Shared) -> super::link_registry:
     use super::link_registry::{Access, RegisteredRouter};
     use axum::http::Method;
     RegisteredRouter::new()
+        .merge(super::remotes::artifacts::serving_routes())
         .route(
             "/a/{id}",
             get(serve_root),

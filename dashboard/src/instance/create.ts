@@ -51,6 +51,10 @@ export function createInstance(options: {
     getToken: auth.token,
     getCsrf: auth.csrf,
   })));
+  if (name !== undefined && !options.api) {
+    const home = createHttpTransport({ getToken: auth.token, getCsrf: auth.csrf });
+    api.artifacts.url = (id) => home.request("POST", `/api/remotes/${name}/artifacts/${encodeURIComponent(id)}/url`);
+  }
   return createRoot((dispose) => {
     const bookmarks = createBookmarksStore(storage, window.location.origin, api.bookmarks);
     const events = createEventsStore(api, { ready: () => auth.mode() === "session" || auth.mode() === "bearer" });

@@ -24,6 +24,300 @@ use tokio_tungstenite::tungstenite::Message;
 const ANTHROPIC: &str = "https://api.anthropic.com/api/oauth/usage";
 const OPENAI: &str = "https://chatgpt.com/backend-api/wham/usage";
 
+/// Manual, credential-free live proof. Start fixtures/litellm/live.py on the
+/// leased scratch VM and set TER798_CONNECTION to its private connection.json.
+/// Build on build2. If build2 cannot reach scratch, the lead may approve
+/// running only this binary in a scratch container on the fixture network.
+/// Never use a real provider or Docker CI, or install a toolchain on scratch.
+/// The daemon has the usual test supervisor. The fixture runs real Claude
+/// Code with the production subscription env, not a fake harness script.
+#[tokio::test]
+#[ignore = "requires the card-owned LiteLLM/Postgres/Claude scratch fixture"]
+async fn litellm_live_claude_and_fallback_mail_only() {
+    use std::io::Write;
+
+    let connection: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("TER798_CONNECTION").expect("private connection file"))
+            .unwrap(),
+    )
+    .unwrap();
+    let base = connection["base_url"].as_str().unwrap();
+    let key = connection["key"].as_str().unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(
+            reqwest::Certificate::from_pem(connection["certificate"].as_str().unwrap().as_bytes())
+                .unwrap(),
+        )
+        .timeout(Duration::from_secs(150))
+        .build()
+        .unwrap();
+    let info = client
+        .get(format!("{base}/key/info"))
+        .bearer_auth(key)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let info: Value = serde_json::from_slice(&info).unwrap();
+    assert_eq!(info["info"]["max_budget"], 100.0);
+    assert!(info["info"]["budget_reset_at"].is_string());
+
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "live-lite", "provider": "litellm", "harnesses": ["claude"],
+               "selfhosted": {"api": "anthropic", "base_url": base,
+                              "models": ["claude-sonnet-4-5"], "budget_usd": 100}}),
+    )
+    .await
+    .ok();
+    let created = td
+        .post(
+            "/api/subscriptions/live-lite/api-key",
+            json!({"provider": "litellm", "key": key, "base_url": base,
+                   "models": ["claude-sonnet-4-5"]}),
+        )
+        .await;
+    created.ok();
+    assert!(!created.body.to_string().contains(key));
+    // Production probe uses public roots. The private fixture CA is trusted
+    // only by this fixture client and Claude, so this exercises real failure.
+    let probe = td.post_empty("/api/subscriptions/live-lite/probe").await;
+    assert_eq!(probe.ok()["probe_status"], "failed");
+    assert!(
+        probe.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("no spend from LiteLLM")
+    );
+    assert_eq!(probe.body["windows"], json!([]));
+    td.project("live").await;
+    let agent = td
+        .agent(
+            "live",
+            "worker",
+            json!({"harness": "claude", "subscription": "live-lite"}),
+        )
+        .await;
+    let id = agent["id"].as_str().unwrap();
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let sub = state
+        .db
+        .read(|c| terrariumd::store::subscriptions::get(c, "live-lite"))
+        .await
+        .unwrap();
+    let mut vars: std::collections::BTreeMap<String, String> = sub
+        .selfhosted
+        .as_ref()
+        .unwrap()
+        .claude_env(None)
+        .into_iter()
+        .collect();
+    vars.extend(terrariumd::login_session::credential_env_for(
+        &td.state, &sub,
+    ));
+    vars.retain(|k, _| k == "ANTHROPIC_BASE_URL" || k == "ANTHROPIC_AUTH_TOKEN");
+    let launched = client
+        .post(format!("{base}/_fixture/run"))
+        .bearer_auth(connection["control"].as_str().unwrap())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_vec(&vars).unwrap())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let launched: Value = serde_json::from_slice(&launched).unwrap();
+    assert_eq!(
+        launched["exit_code"], 0,
+        "Claude fixture failed, output suppressed"
+    );
+    assert_eq!(launched["result"]["is_error"], false);
+    assert!(
+        launched["result"]["result"]
+            .as_str()
+            .unwrap()
+            .contains("TER798_MOCK_OK")
+    );
+    let cost = launched["result"]["total_cost_usd"].as_f64().unwrap();
+    // LiteLLM's mock may report zero tokens and therefore a zero CLI cost.
+    assert!(cost.is_finite() && (0.0..80.0).contains(&cost));
+    let session = launched["result"]["session_id"].as_str().unwrap();
+    let file = claude_project_dir(&td.state, id).join(format!("{session}.jsonl"));
+    std::fs::write(&file, launched["transcript"].as_str().unwrap()).unwrap();
+    // Normalize the real CLI's returned total for versions whose on-disk
+    // transcript does not yet include cost-state records.
+    let mut transcript = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    writeln!(
+        transcript,
+        "{}",
+        json!({"type": "cost-state", "sessionId": session,
+               "totalCostUSD": cost,
+               "modelUsage": launched["result"]["modelUsage"].as_object().cloned().unwrap_or_default()})
+    )
+    .unwrap();
+    emit(
+        td,
+        &agent,
+        "turn_start",
+        json!({"prompt": "live mock proof"}),
+    )
+    .await;
+    emit(
+        td,
+        &agent,
+        "session_started",
+        json!({"harness_session": session,
+        "transcript_path": format!("/home/agent/.claude/projects/-home-agent-work/{session}.jsonl"),
+        "source": "startup"}),
+    )
+    .await;
+    wait_for("real Claude cost in fallback", || async {
+        td.get("/api/subscriptions/live-lite").await.body["fallback_spend_usd"].as_f64()
+            == Some(cost)
+    })
+    .await;
+    // Controlled transcript totals, NOT billed provider spend. This runs the
+    // actual collector, monthly accounting, notice deduplication and policy.
+    for (total, mails) in [(80.0, 1), (90.0, 2), (100.0, 3), (100.0, 3)] {
+        writeln!(
+            transcript,
+            "{}",
+            json!({"type": "cost-state", "sessionId": session,
+                   "totalCostUSD": total,
+                   "modelUsage": {"claude-sonnet-4-5": {"costUSD": total}}})
+        )
+        .unwrap();
+        emit(td, &agent, "turn_end", json!({})).await;
+        wait_for("controlled fallback total", || async {
+            td.get("/api/subscriptions/live-lite").await.body["fallback_spend_usd"].as_f64()
+                == Some(total)
+        })
+        .await;
+        terrariumd::cloud_budget::check(&state, "live-lite")
+            .await
+            .unwrap();
+        terrariumd::quota_policy::evaluate_subscription(&state, "live-lite")
+            .await
+            .unwrap();
+        let count: i64 = state
+            .db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM messages WHERE subject LIKE '%live-lite%'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, mails);
+        assert!(
+            state
+                .db
+                .read(terrariumd::store::usage::holds)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let shown = td.get("/api/subscriptions/live-lite").await;
+        assert_eq!(shown.ok()["windows"][0]["window"], "budget");
+        assert_eq!(shown.body["windows"][0]["used_pct"], total);
+        assert_eq!(shown.body["login_status"], "api_key");
+    }
+    for path in ["/api/subscriptions", "/api/events", "/api/audit"] {
+        assert!(!td.get(path).await.body.to_string().contains(key));
+    }
+    println!(
+        "Live LiteLLM/Postgres virtual key, {} via mock model, real CLI cost {cost} USD; controlled 80/90/100 totals: 3 mails, no holds",
+        launched["version"].as_str().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn litellm_settings_patch_keeps_default_probe() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.post(
+        "/api/subscriptions/lite-edit/api-key",
+        json!({"provider": "litellm", "key": "E2E-lite-edit",
+            "base_url": "https://proxy.example.com"}),
+    )
+    .await
+    .ok();
+    let r = td
+        .patch(
+            "/api/subscriptions/lite-edit",
+            json!({"selfhosted": {"budget_usd": 100}}),
+        )
+        .await;
+    assert_eq!(r.ok()["selfhosted"]["budget_usd"], 100);
+    assert_eq!(r.body["probe"], "litellm-key-spend");
+    let r = td
+        .patch(
+            "/api/subscriptions/lite-edit",
+            json!({"selfhosted": {"base_url": "https://new-proxy.example.com"}}),
+        )
+        .await;
+    assert_eq!(
+        r.ok()["selfhosted"]["base_url"],
+        "https://new-proxy.example.com"
+    );
+    assert_eq!(r.body["selfhosted"]["budget_usd"], 100);
+    assert_eq!(r.body["probe"], "litellm-key-spend");
+    let r = td.get("/api/subscriptions/lite-edit").await;
+    assert_eq!(r.ok()["probe"], "litellm-key-spend");
+
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "generic-edit", "provider": "selfhosted",
+            "selfhosted": {"base_url": "http://gpu/v1"}}),
+    )
+    .await
+    .ok();
+    // Exercise the store guard with a legacy row carrying a probe. PATCH
+    // does not accept a probe field in its request body.
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("system", |t| {
+            t.execute(
+                "UPDATE subscriptions SET probe = 'litellm-key-spend' WHERE name = 'generic-edit'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    td.patch(
+        "/api/subscriptions/generic-edit",
+        json!({"selfhosted": {"max_concurrent": 4}}),
+    )
+    .await
+    .err(422, "invalid");
+    // The LiteLLM exception must not allow the probe on generic definitions either.
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "generic-probe", "provider": "selfhosted",
+            "probe": "litellm-key-spend", "selfhosted": {"base_url": "http://gpu/v1"}}),
+    )
+    .await
+    .err(422, "invalid");
+}
+
 #[tokio::test]
 async fn litellm_is_claude_only_and_keeps_the_key_private() {
     let env = boot(|_| {}, |_, _| {}).await;

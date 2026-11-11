@@ -92,8 +92,14 @@ pub fn this_instance(state: &Shared) -> ApiResult<Instance> {
 
 /// `GET /api/system/instance`: `{id, name, version}`. Every caller may
 /// read it; the home checks the ID at pairing and on each new stream.
-async fn instance(State(state): State<Shared>) -> ApiResult<Json<Instance>> {
-    Ok(Json(this_instance(&state)?))
+async fn instance(
+    State(state): State<Shared>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<Json<Value>> {
+    let mut value = serde_json::to_value(this_instance(&state)?)
+        .map_err(|_| ApiError::internal("cannot encode instance"))?;
+    value["artifact_origin"] = json!(super::artifacts::artifact_origin(&state, &headers));
+    Ok(Json(value))
 }
 
 fn no_store(mut resp: Response) -> Response {
