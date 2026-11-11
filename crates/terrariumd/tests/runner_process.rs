@@ -1017,6 +1017,122 @@ async fn hot_swap_probation(rollback: bool) {
     }
 }
 
+/// R7: compose the real runner/CLI tunnel, native host run recovery, and
+/// deferred runner upgrade. Only the harness and daemon replacement are
+/// fakes: no production daemon or container is touched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hot_swap_mid_turn_preserves_wait_and_target_run() {
+    let mut td = Td::start().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let (listener, addr) = terrariumd::hosts::serve(state.clone(), "127.0.0.1:0")
+        .await
+        .unwrap();
+    let host_info = td.post("/api/hosts", Some(json!({"name":"lab1"}))).await;
+    let mut opts = terrarium_host::ClientOptions::new(
+        format!("ws://{addr}/hosts/connect"),
+        host_info["token"].as_str().unwrap(),
+        "lab1",
+    );
+    opts.capabilities.shell = Some("/bin/sh".into());
+    opts.backoff_min = Duration::from_millis(50);
+    opts.backoff_max = Duration::from_millis(200);
+    opts.paths = terrarium_host::HostPaths {
+        work_dir: td.dir.path().join("work"),
+        instances_dir: td.dir.path().join("instances"),
+        repos_dir: td.dir.path().join("repos"),
+    };
+    let host = tokio::spawn(terrarium_host::Client::new(opts).run());
+    timeout(WAIT, async {
+        while td.get("/api/hosts/lab1").await["online"] != true
+            || state.executor.resource_pending("lab1")
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    td.post("/api/targets", Some(json!({"name":"box", "kind":"host", "host":"lab1"}))).await;
+    let bob = td.agent("bob", json!({"policy":{"targets":["box"]}})).await;
+    td.post(&format!("/api/agents/{bob}/start"), None).await;
+    td.wait_status(&bob, "idle").await;
+    td.post(&format!("/api/agents/{bob}/send"), Some(json!({"text":"/hold"}))).await;
+    td.wait_status(&bob, "working").await;
+    let old_pid = td.runner_pid(&bob).unwrap();
+    let mark = last_seq(&td, &bob).await;
+    let sock = td.run_dir().join(format!("agents/{bob}.sock"));
+    let cli = |args: Vec<String>| {
+        let sock = sock.clone();
+        async move {
+            let out = tokio::process::Command::new(cli_bin())
+                .env_clear()
+                .env("TERRARIUM_AGENT", "bob")
+                .env("TERRARIUM_SOCKET", sock)
+                .args(["-p", "demo", "--json"])
+                .args(args)
+                .kill_on_drop(true)
+                .output().await.unwrap();
+            assert!(out.status.success(), "CLI: {}", String::from_utf8_lossy(&out.stderr));
+            serde_json::from_slice::<Value>(&out.stdout).unwrap()
+        }
+    };
+    let wait = cli(vec!["wait".into(), "time".into(), "--for".into(), "1h".into()]).await;
+    let gate = td.dir.path().join("finish-run");
+    let started = td.dir.path().join("run-started");
+    let script = format!(
+        "echo before; touch '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; echo after",
+        started.display(), gate.display()
+    );
+    let run = cli(vec!["run".into(), "box".into(), "--name".into(), "proof".into(),
+        "--".into(), "sh".into(), "-c".into(), script]).await;
+    let wid = wait["id"].as_str().unwrap();
+    let rid = run["wait"]["id"].as_str().unwrap();
+    timeout(WAIT, async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    for id in [wid, rid] {
+        assert_eq!(td.get(&format!("/api/waits/{id}")).await["state"], "open");
+    }
+
+    terrariumd::agent_rpc::drain(&state, Duration::from_secs(2)).await.unwrap();
+    let held = tokio::spawn(cli(vec!["whoami".into()]));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!held.is_finished(), "CLI waits rather than reporting a tunnel error");
+    listener.abort();
+    td.shutdown();
+    td.upgrade = Upgrade { version: Some("0.0.0+0000000".into()), limit: Some(3), runner: None };
+    td.boot().await;
+    let (listener, _) = terrariumd::hosts::serve(
+        td.daemon.as_ref().unwrap().state.clone(), &addr.to_string()
+    ).await.unwrap();
+    timeout(WAIT, held).await.unwrap().unwrap();
+    td.wait_events(&bob, "system", |events| events.iter().any(|e|
+        e["data"]["message"].as_str().is_some_and(|m| m.starts_with("restart_scheduled (reason upgrade)"))
+    )).await;
+    assert_eq!(td.runner_pid(&bob), Some(old_pid), "still in the original turn");
+    assert_eq!(td.events(&bob, "session_started").await.len(), 1);
+    for id in [wid, rid] {
+        assert_eq!(td.get(&format!("/api/waits/{id}")).await["state"], "open");
+    }
+    td.post(&format!("/api/agents/{bob}/send"), Some(json!({"text":"go", "raw":true}))).await;
+    restarted_after_turn(&td, &bob, mark, 2, old_pid).await;
+    assert!(td.events(&bob, "error").await.is_empty());
+    std::fs::write(&gate, "").unwrap();
+    let resolved = timeout(WAIT, async {
+        loop {
+            let w = td.get(&format!("/api/waits/{rid}")).await;
+            if w["state"] == "resolved" { break w; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(resolved["result"]["exit_code"], 0);
+    assert_eq!(resolved["result"]["stdout_tail"], "before\nafter\n");
+    assert_eq!(td.get(&format!("/api/waits/{wid}")).await["state"], "open");
+    td.post(&format!("/api/agents/{bob}/stop"), None).await;
+    td.wait_status(&bob, "stopped").await;
+    host.abort();
+    listener.abort();
+}
+
 /// A runner command that waits while the file `gate` exists, then runs
 /// the real runner: a relaunch holds there.
 fn gated_runner(dir: &Path, gate: &Path) -> PathBuf {
