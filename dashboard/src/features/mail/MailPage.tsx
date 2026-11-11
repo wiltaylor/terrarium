@@ -330,7 +330,7 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
           }
         }}
       >
-        <PostEditor label="Reply" text={text()} project={props.project ?? ""}>
+        <PostEditor label="Reply" text={text()} project={props.project ?? ""} textBody>
         <textarea ref={replyInput}
           placeholder={toInbox() ? `Reply on the thread as project:${props.project}` : "Reply on the thread, to every participant"}
           value={text()}
