@@ -2867,18 +2867,31 @@ mod tests {
                 "INSERT INTO jobs (id, project, card, kind, repo, branch, state, host,
                                    created_by, created_at)
                  VALUES ('old', 'a', 'C', 'validate', 'app', 'b', 'running',
-                         'recover.invalid', 't', 't')", [],
+                         'recover.invalid', 't', 't')",
+                [],
             )?;
-            pin_hosts(t, vec![("recover.invalid".into(), "recover.invalid".into())])?;
+            pin_hosts(
+                t,
+                vec![("recover.invalid".into(), "recover.invalid".into())],
+            )?;
             pin_hosts(t, vec![("recover.invalid".into(), "192.0.2.10".into())])?;
             let run = super::running(t)?;
             assert_eq!(run[0].host.as_deref(), Some("192.0.2.10"));
             let q = queues(&[("a", 4, "192.0.2.10"), ("b", 4, "192.0.2.10")]);
             let caps = HashMap::from([("192.0.2.10".to_owned(), 1)]);
-            assert!(pick(vec![job("new", "b", JobKind::Validate, "r", "b")],
-                &run, &q, &caps).is_empty());
+            assert!(
+                pick(
+                    vec![job("new", "b", JobKind::Validate, "r", "b")],
+                    &run,
+                    &q,
+                    &caps
+                )
+                .is_empty()
+            );
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

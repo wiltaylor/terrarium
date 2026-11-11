@@ -518,10 +518,10 @@ async fn update(
         crate::reservations::update_docker_defaults(&state, &latest.def).await?;
     }
     let r = r?;
-    if r.def.host.is_none() {
-        if let Err(error) = crate::jobs::prepare_hosts(&state.db, r.def.address.clone()).await {
-            tracing::warn!(target = %r.def.name, %error, "target update stored but host pin preparation failed");
-        }
+    if r.def.host.is_none()
+        && let Err(error) = crate::jobs::prepare_hosts(&state.db, r.def.address.clone()).await
+    {
+        tracing::warn!(target = %r.def.name, %error, "target update stored but host pin preparation failed");
     }
     Ok(Json(
         with_credential(&state, view(&state, &actor, r, &[])).await?,
