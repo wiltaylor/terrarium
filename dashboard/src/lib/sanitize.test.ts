@@ -8,6 +8,22 @@ const ctx = { project: "terrarium", pages: new Set(["index"]) };
 const tags = new Set<string>(ALLOWED_TAGS);
 const attrs = new Set<string>(ALLOWED_ATTR);
 
+it("keeps syntax colors through the sanitizer and leaves unknown languages as text", () => {
+  const root = document.createElement("div");
+  setSafeHtml(root, renderWiki('```rust\nfn main() { println!("<script>"); }\n```', ctx));
+  expect(root.querySelector(".hljs-keyword")?.textContent).toBe("fn");
+  expect(root.querySelector("code")?.textContent).toBe('fn main() { println!("<script>"); }');
+  setSafeHtml(root, renderWiki('```unknown\n<img src=x onerror=alert(1)>\n```', ctx));
+  expect(root.querySelector("code")?.textContent).toBe("<img src=x onerror=alert(1)>");
+  expect(root.querySelector("img")).toBeNull();
+});
+
+it("keeps hostile code inert when a registered grammar highlights it", () => {
+  for (const payload of XSS_PAYLOADS) {
+    expectInert(renderWiki(`\`\`\`html\n${payload.src}\n\`\`\``, ctx));
+  }
+});
+
 /** Fail with a reason when anything in `root` could run script or leave the page. */
 function inertProblems(root: ParentNode): string[] {
   const out: string[] = [];

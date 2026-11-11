@@ -1,6 +1,19 @@
 {
   "routes": [
     {
+      "source": "api/read_positions.rs",
+      "registration": "\"/read-positions/{kind}/{item}\",post(visit)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/read-positions/thread/x",
+          "body": { "through": "2026-01-01T00:00:00Z" },
+          "allowed": false
+        }
+      ]
+    },
+    {
       "source": "api/agents.rs",
       "registration": "\"/agents\",get(list).post(create)",
       "access": "other",
@@ -1592,6 +1605,19 @@
     },
     {
       "source": "api/remotes.rs",
+      "registration": "\"/remotes/{name}/artifact-repin\",post(artifacts::repin)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/remotes/x/artifact-repin",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/remotes.rs",
       "registration": "\"/remotes/{name}/pair\",post(repair)",
       "access": "operator-only",
       "cases": [
@@ -2786,6 +2812,9 @@
       "if!actor.is_operator()&&!mail::is_participant(t,th,from)?{",
       "policy::operator_only(&actor,\"releasingheldmail\")?;",
       "policy::operator_only(&actor,\"resumingapausedthread\")?;"
+    ],
+    "api/read_positions.rs": [
+      "policy::operator_only(&actor,\"readpositions\")?;"
     ],
     "api/pins.rs": [
       "policy::operator_only(&actor,\"pinnedconversations\")?;",

@@ -26,6 +26,7 @@ pub fn routes() -> Router<Shared> {
         .route("/remotes", get(list).post(add))
         .route("/remotes/{name}", get(show).delete(remove))
         .route("/remotes/{name}/repin", post(repin))
+        .route("/remotes/{name}/artifact-repin", post(artifacts::repin))
         .route("/remotes/{name}/pair", post(repair))
         .route("/remotes/{name}/artifacts/{id}/url", post(artifacts::mint))
         .route("/remotes/{name}/proxy/{*rest}", any(proxy))
@@ -188,6 +189,8 @@ async fn add(
         url,
         instance_id: b.instance_id,
         pin_sha256: b.pin_sha256,
+        artifact_origin: None,
+        artifact_pin_sha256: None,
         ca_pem: b.ca_pem,
         label,
         read_only: false,

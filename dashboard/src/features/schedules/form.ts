@@ -14,7 +14,7 @@ import type { Api } from "../../api/client";
 import { ApiError } from "../../api/http";
 import type { Agent, AgentVerb, CardOp, CatchUp, NewSchedule, Project, Schedule, ScheduleAction, ScheduleActionType, ScheduleSpec, ScheduleSpecKind, Target } from "../../api/types";
 import { previewCron } from "../../lib/cron";
-import { commandLine, DAY_START_WEEKDAYS, parseEvery, splitCommand } from "../../lib/schedule";
+import { commandLine, DAY_START_WEEKDAYS, parseDaemonEvery, parseEvery, splitCommand } from "../../lib/schedule";
 import { buildTriggerSpec, ciFailurePreset, emptyRow, emptyTriggerFields, isTriggerAction, triggerFieldsFromSpec, type MatchRow, type TriggerFields } from "./trigger";
 import { buildWebhookAction, emptyHeaderRow, emptyWebhookFields, webhookFieldsFromAction, type HeaderRow, type WebhookFields } from "./webhook";
 
@@ -320,7 +320,7 @@ function buildDayStartSpec(f: ScheduleForm): Built<ScheduleSpec> {
   if (notAfter && !HHMM.test(notAfter)) return { error: "Not after is a time as HH:MM.", field: "notAfter" };
   if (notBefore && notAfter && notAfter < notBefore) return { error: "Not after is before not before.", field: "notAfter" };
   if (delay) {
-    const sec = parseEvery(delay);
+    const sec = parseDaemonEvery(delay);
     if (sec === null) return { error: "The delay is a duration such as 5m or 1h30m.", field: "delay" };
     if (sec > MAX_DAY_START_DELAY_SECS) return { error: "The delay is at most 12h.", field: "delay" };
   }

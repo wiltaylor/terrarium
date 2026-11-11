@@ -341,6 +341,7 @@ struct Row {
     kind: String,
     sealed: Vec<u8>,
     remote: bool,
+    host_resume: bool,
 }
 
 fn sealed_rows(conn: &Connection) -> ApiResult<Vec<Row>> {
@@ -356,6 +357,7 @@ fn sealed_rows(conn: &Connection) -> ApiResult<Vec<Row>> {
                 kind: r.get(3)?,
                 sealed: r.get(4)?,
                 remote: false,
+                host_resume: false,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -370,6 +372,23 @@ fn sealed_rows(conn: &Connection) -> ApiResult<Vec<Row>> {
                     name: String::new(),
                     kind: String::new(),
                     remote: true,
+                    host_resume: false,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+    );
+    let mut hosts = conn.prepare("SELECT id,sealed FROM host_resume ORDER BY id")?;
+    rows.extend(
+        hosts
+            .query_map([], |r| {
+                Ok(Row {
+                    id: r.get(0)?,
+                    sealed: r.get(1)?,
+                    scope: String::new(),
+                    name: String::new(),
+                    kind: String::new(),
+                    remote: false,
+                    host_resume: true,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?,
@@ -378,7 +397,9 @@ fn sealed_rows(conn: &Connection) -> ApiResult<Vec<Row>> {
 }
 
 fn row_aad(r: &Row) -> Vec<u8> {
-    if r.remote {
+    if r.host_resume {
+        crate::hosts::resume_aad(&r.id)
+    } else if r.remote {
         crate::store::remotes::aad(&r.id)
     } else {
         crypto::aad(&r.id, &r.scope, &r.name, &r.kind)
@@ -437,7 +458,9 @@ pub fn rotate_key(conn: &mut Connection, state_dir: &Path) -> anyhow::Result<usi
                 .seal(&plain, &aad)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             tx.execute(
-                if r.remote {
+                if r.host_resume {
+                    "UPDATE host_resume SET sealed = ?2 WHERE id = ?1"
+                } else if r.remote {
                     "UPDATE remotes SET sealed = ?2 WHERE id = ?1"
                 } else {
                     "UPDATE secrets SET sealed = ?2 WHERE id = ?1"

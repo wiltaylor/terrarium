@@ -12,6 +12,7 @@ import { DbEmbed } from "./DbEmbed";
 import { useInstance } from "../instance";
 import { scopeRemoteHtml } from "../instance/html";
 import { openCardLink } from "./LinkText";
+import { mountCodeCopy } from "../lib/codeCopy";
 
 /** `project`: the project of the page. A `db` block queries the DB of this project only. */
 export function Markdown(props: { html: string; artifacts?: Record<string, ArtifactLike>; project?: string }) {
@@ -24,6 +25,7 @@ export function Markdown(props: { html: string; artifacts?: Record<string, Artif
     setSafeHtml(el, props.html, instance.key === "local" ? undefined : { blockImages: true, transform: (fragment) => scopeRemoteHtml(fragment, instance) });
     disposers.forEach((d) => d());
     disposers = [];
+    mountCodeCopy(el);
     el.querySelectorAll<HTMLElement>(".artifact-embed").forEach((slot) => {
       const id = slot.dataset.artifact ?? "";
       const a = props.artifacts?.[id];

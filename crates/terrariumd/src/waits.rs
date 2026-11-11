@@ -217,7 +217,7 @@ pub fn spawn(state: &Shared) -> Vec<JoinHandle<()>> {
 }
 
 /// The open process waits whose exec session the executor does not have:
-/// after a daemon restart, all of them. Each fails with `lost`.
+/// fail with `lost`. Restored native sessions get a fresh output reader.
 async fn reconcile_runs(state: &Shared) -> ApiResult<()> {
     let open = state
         .db
@@ -242,6 +242,8 @@ async fn reconcile_runs(state: &Shared) -> ApiResult<()> {
                     )
                 })
                 .await?;
+        } else if let Some(session) = w.session().and_then(|s| state.executor.find(s)) {
+            spawn_run_reader(state, w.id, w.agent, session);
         }
     }
     Ok(())

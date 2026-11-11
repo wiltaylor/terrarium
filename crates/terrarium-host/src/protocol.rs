@@ -44,7 +44,7 @@ pub const METRICS_INTERVAL_SECS: u64 = 10;
 pub type SessionId = u32;
 
 /// The stream that a data frame belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum StreamTag {
     /// Daemon to host: bytes for the process's stdin.

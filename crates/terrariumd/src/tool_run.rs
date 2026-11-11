@@ -215,6 +215,7 @@ pub async fn run(
         .map(|(env, _, v)| (env.clone(), v.to_string()))
         .collect();
     let cmd = RemoteCmd {
+        resume_key: None,
         argv: def
             .command
             .iter()
