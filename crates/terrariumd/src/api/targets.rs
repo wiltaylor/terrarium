@@ -76,6 +76,26 @@ pub fn routes() -> Router<Shared> {
             axum::routing::patch(extend).delete(revoke),
         )
         .route("/agents/{id}/leases", get(leases_of_agent))
+        .route("/exedev/sweep", post(exedev_sweep))
+}
+
+/// `POST /api/exedev/sweep`: run the exe.dev sweep now (TER-294). The
+/// operator only. The answer lists the removed VMs and the errors.
+async fn exedev_sweep(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Value>> {
+    if !actor.is_operator() {
+        return Err(ApiError::forbidden(
+            "only the operator runs the exe.dev sweep",
+        ));
+    }
+    let out = crate::exedev::sweep(&state).await?;
+    let detail = out.clone();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit("exedev.sweep", "exedev", None, detail)
+        })
+        .await?;
+    Ok(Json(out))
 }
 
 /// A target with its state, as the API shows it.
@@ -211,7 +231,7 @@ pub async fn my_leases(state: &Shared, actor: &Actor) -> ApiResult<Vec<LeaseRow>
 
 pub fn view(state: &Shared, actor: &Actor, r: TargetRow, mine: &[LeaseRow]) -> TargetView {
     let host_online = match r.def.kind {
-        TargetKind::Ssh => None,
+        TargetKind::Ssh | TargetKind::Exedev => None,
         _ => Some(
             r.def
                 .host
@@ -532,8 +552,8 @@ async fn verb_target(state: &Shared, actor: &Actor, name: String) -> ApiResult<T
     Ok(r)
 }
 
-/// `POST /api/targets/{name}/test`: one login to an `ssh` target with its
-/// key (PLAN §16b.6a, `crate::target_test`). The rights of a lifecycle
+/// `POST /api/targets/{name}/test`: one login to an `ssh` target (or the
+/// VM of an `exedev` target) with its key (PLAN §16b.6a, `crate::target_test`). The rights of a lifecycle
 /// verb: an actor that may use the target, or one that may define it.
 async fn test(
     State(state): State<Shared>,
@@ -750,8 +770,9 @@ async fn exec(
         shell: b.shell,
         agent: b.agent,
 
-        // `start_exec` sets it from the caller.
+        // `start_exec` sets these from the caller.
         holder: None,
+        operator: false,
     };
     let s = executor::start_exec(&state, &actor, &name, cmd).await?;
     Ok(opened(&s))

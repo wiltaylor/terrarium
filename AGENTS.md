@@ -43,6 +43,15 @@ It runs, in this order, the same parts as the GitHub CI `check` job
 1. `ci::fmt-check`: `cargo fmt --all --check`
 2. `ci::lint`: clippy over the workspace, warnings fail
 3. `ci::test`: `cargo test --workspace --no-fail-fast`
+   In a merge job (`TERRARIUM_JOB_KIND=merge`) it is followed by
+   `ci::test-unprivileged`: the built terrarium-host test binaries and the
+   terrariumd lib and `it` test binaries run again as uid 1001, the user of
+   the release CI, each with a private HOME and the shared /tmp (TER-579,
+   TER-611). The terrariumd lib and `it` binaries run alone, the others at
+   most 2 at a time.
+   The merge host needs a passwd entry for uid 1001 (OpenSSH tests need one):
+   `useradd -u 1001 -M -s /usr/sbin/nologin terrarium-ci`. Without it the
+   step fails before it runs a test.
 4. `ci::scripts-test`: the Python tests under `scripts/`
 5. `ci::dashboard-check`: `npm run check`, then the dashboard unit tests (`npm run test -- --run`) in `dashboard/`
 
@@ -56,8 +65,10 @@ The switch controls only the recipe gate. Whenever merge secrets are configured,
 the daemon resets the VM and opens the tunnel, even if the recipe gate is off.
 The daemon consumes the configured `DOCKER_CI_KEY` and
 `DOCKER_CI_RESET_KEY` references
-from a `delivery:terrarium` run grant. The recipe receives only `DOCKER_HOST`
-for a job-scoped Unix socket, never a key or SSH agent. It runs
+from a `delivery:terrarium` run grant. The recipe receives only
+`TERRARIUM_DOCKER_HOST` for a job-scoped Unix socket, never a key or SSH
+agent; `scripts/docker_ci.py` sets `DOCKER_HOST` from it only when the gate
+is on, and removes both when it is off. It runs
 the full suite with the pinned remote Docker daemon, then explicitly runs
 the ignored lifecycle/workspace and reservation/release tests. A missing
 Docker backend, skipped test, or empty selection fails the gate. Workers
@@ -105,6 +116,16 @@ Validate the pushed commit, not your working tree:
    ```
 
 5. Push the results with `terrarium test push <file> --card <card-id>`.
+
+Do not run `git fetch`, `git pull` or `git ls-remote` against `origin` on the
+target. A plain exec has no repo key and no repo host keys there (no
+`~/.ssh`), so ssh to `git@github.com` fails with `Host key verification
+failed`. Only `terrarium repo checkout` reaches the remote: the daemon gives
+that one run the host keys (`TERRARIUM_GIT_KNOWN_HOSTS`) and the credential.
+A new clone has `origin/next` as of the clone, which is what the
+`merge-base` above needs. An update of an existing path fetches only the
+branch, so `origin/next` there stays old. For a newer `next`, check out to a
+new path.
 
 ### Load and reruns
 

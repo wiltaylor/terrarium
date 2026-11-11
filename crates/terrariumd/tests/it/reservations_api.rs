@@ -69,6 +69,17 @@ async fn setup_docker(
     tokio::task::JoinHandle<()>,
     tokio::task::JoinHandle<()>,
 ) {
+    setup_opts(live, None).await
+}
+
+async fn setup_opts(
+    live: bool,
+    native_gpu: Option<terrarium_core::protocol::NativeGpuCapability>,
+) -> (
+    TestDaemon,
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let td = TestDaemon::start().await;
     td.project("p").await;
     td.agent("p", "lead", json!({"roles":["project_admin"]}))
@@ -123,8 +134,49 @@ async fn setup_docker(
             controllers: vec!["cpu".into(), "memory".into(), "io".into(), "cpuset".into()],
             ..Default::default()
         }),
+        native_gpu,
         ..Default::default()
     };
+    if options
+        .capabilities
+        .native_gpu
+        .as_ref()
+        .is_some_and(|n| n.enforced)
+    {
+        // An enforced helper: a fake that answers `hello` with the session
+        // right, and a fake shim that records each helper request (apply,
+        // stop) and says ok.
+        let socket = td.dir.path().join("native-helper.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            use terrarium_host::native;
+            while let Ok((mut s, _)) = listener.accept().await {
+                let _ = native::read_frame(&mut s).await;
+                let reply = native::Reply::Hello {
+                    version: native::PROTOCOL_VERSION,
+                    rights: vec![native::Right::Session],
+                };
+                let _ = native::write_frame(
+                    &mut s,
+                    native::Kind::Reply,
+                    &serde_json::to_vec(&reply).unwrap(),
+                )
+                .await;
+            }
+        });
+        let shim = td.dir.path().join("native-shim");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${}\" >> '{}/native.calls'\n",
+                terrarium_host::native::REQUEST_ENV,
+                td.dir.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        options.native = Some(terrarium_host::native::NativeOptions { socket, shim });
+    }
     if live {
         options.docker_bin = "docker".into();
         // The Docker daemon may be remote. Local /proc is not its CPU
@@ -142,7 +194,9 @@ async fn setup_docker(
         });
     }
     let client = tokio::spawn(Client::new(options).run());
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // A precondition, not a timing check: under load the link and the
+    // admission of a new host agent took over 10 s (TER-674).
+    tokio::time::timeout(crate::common::WAIT, async {
         while !state.executor.hosts.is_online("h")
             || (!live && state.executor.resource_pending("h"))
         {
@@ -401,6 +455,19 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
         capacity.ok()["used"]["gpus"][0]["claim"]["uuid"],
         "GPU-abcd"
     );
+    // A worker of the project sees the reservation; the lead of another
+    // project sees the claim only (TER-558).
+    let own = td.get_as("p/worker", "/api/hosts/h/capacity").await;
+    assert_eq!(own.ok()["used"]["gpus"][0]["reservation"], id);
+    assert!(own.body["used"]["gpus"][0].get("holder").is_some());
+    td.agent("other", "lead", json!({"roles":["project_admin"]}))
+        .await;
+    let foreign = td.get_as("other/lead", "/api/hosts/h/capacity").await;
+    let gpu = &foreign.ok()["used"]["gpus"][0];
+    assert_eq!(gpu["claim"]["uuid"], "GPU-abcd");
+    assert!(gpu.get("reservation").is_none(), "{gpu}");
+    assert!(gpu.get("holder").is_none(), "{gpu}");
+    assert!(!foreign.body.to_string().contains(id), "{}", foreign.body);
     let mut def = state
         .db
         .read(|c| Ok(terrariumd::store::targets::get(c, "p-box")?.def))
@@ -524,6 +591,229 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
 }
 
 #[tokio::test]
+async fn native_exclusive_gpu_needs_enforced_helper_support() {
+    let body =
+        json!({"target":"p-native","gpus":[{"uuid":"GPU-abcd","exclusive":true}],"until":"30m"});
+    let native = json!({"name":"p-native","kind":"host","host":"h","project":"p"});
+    // A helper that does not answer: refused, with its reason.
+    let (td, server, client) = setup_opts(
+        false,
+        Some(terrarium_core::protocol::NativeGpuCapability {
+            enforced: false,
+            version: 1,
+            reason: Some("cannot reach the helper".into()),
+        }),
+    )
+    .await;
+    td.post("/api/targets", native.clone()).await.ok();
+    let refused = td.post("/api/hosts/h/reservations", body.clone()).await;
+    assert_eq!(refused.status.as_u16(), 409, "{}", refused.body);
+    let text = refused.body.to_string();
+    assert!(text.contains("enforced native GPU support"), "{text}");
+    assert!(text.contains("cannot reach the helper"), "{text}");
+    client.abort();
+    server.abort();
+
+    // An enforced helper passes the native boundary check.
+    let (td, server, client) = setup_opts(
+        false,
+        Some(terrarium_core::protocol::NativeGpuCapability {
+            enforced: true,
+            version: 1,
+            reason: None,
+        }),
+    )
+    .await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    td.post("/api/targets", native).await.ok();
+    let resp = td.post("/api/hosts/h/reservations", body).await;
+    assert!(resp.status.is_success(), "{}: {}", resp.status, resp.body);
+    // The holder's limits went to the helper, not to the user manager.
+    let calls = std::fs::read_to_string(td.dir.path().join("native.calls")).unwrap_or_default();
+    assert!(calls.contains("\"apply\""), "{calls}");
+    assert!(
+        !resp.body.to_string().contains("native GPU support")
+            && !resp.body.to_string().contains("exclusive GPU needs"),
+        "{}",
+        resp.body
+    );
+    // The holder's commands carry the lease and the exclusive GPU; any other
+    // command on a native host target gets the native path with no GPU.
+    use terrariumd::store::reservations as r;
+    let id = state
+        .db
+        .write("test", |tx| {
+            // Clear whatever the API grant left on the host.
+            for row in r::list(tx, "h")? {
+                match row.state {
+                    r::State::Queued => {
+                        r::cancel(tx, &row.id)?;
+                    }
+                    r::State::Starting | r::State::Active => {
+                        r::end(tx, &row.id, false)?;
+                        r::finish_end(tx, &row.id)?;
+                    }
+                    r::State::Ending => {
+                        r::finish_end(tx, &row.id)?;
+                    }
+                    _ => {}
+                }
+            }
+            let record = r::request(
+                tx,
+                r::Request {
+                    gpus: vec![terrarium_core::resources::GpuClaim {
+                        uuid: "GPU-abcd".into(),
+                        vram_bytes: 0,
+                        exclusive: true,
+                    }],
+                    host: "h".into(),
+                    project: "p".into(),
+                    holder: r::Holder::Target("p-native".into()),
+                    target: "p-native".into(),
+                    amounts: Default::default(),
+                    exclusive: false,
+                    reason: "test".into(),
+                    duration_ms: 1_800_000,
+                    queue_ms: None,
+                },
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+            r::activate(tx, &record.id)?;
+            Ok(record.id)
+        })
+        .await
+        .unwrap();
+    let def = state
+        .db
+        .read(|c| Ok(terrariumd::store::targets::get(c, "p-native")?.def))
+        .await
+        .unwrap();
+    let caps = state.executor.hosts.capabilities("h");
+    let l = terrariumd::reservations::exec_budget(&state, &def, Some("p/worker"))
+        .unwrap()
+        .unwrap();
+    let grant = l.native_gpu.clone().unwrap();
+    assert_eq!(grant.lease.as_deref(), Some(id.as_str()));
+    assert_eq!(grant.exclusive, ["GPU-abcd"]);
+    assert_eq!(l.reservation.as_ref().unwrap().gpu_devices, ["GPU-abcd"]);
+    use terrariumd::executor::native_gpu_limits;
+    let l = native_gpu_limits(&def, caps.as_ref(), Some("p/worker"), false, Some(l))
+        .unwrap()
+        .unwrap();
+    assert_eq!(l.native_gpu.unwrap().lease.as_deref(), Some(id.as_str()));
+    let mut other = def.clone();
+    other.name = "p-other".into();
+    // The operator (no holder, set from the actor) is the holder `operator`.
+    let bare = native_gpu_limits(&other, caps.as_ref(), None, true, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(bare.native_gpu, Some(Default::default()));
+    assert_eq!(bare.holder, "operator");
+    assert!(bare.reservation.is_none());
+    // No holder and not the operator: refused, never the operator's scope.
+    let e = native_gpu_limits(&other, caps.as_ref(), None, false, None).unwrap_err();
+    assert!(e.to_string().contains("has no holder"), "{e}");
+    // A project service keeps its own holder.
+    let svc = terrarium_host::native::service_holder("p", "schedules");
+    let s = native_gpu_limits(&other, caps.as_ref(), Some(&svc), false, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(s.holder, "p/@schedules");
+    // Without the capability the grant is dropped (and no holder is needed).
+    assert!(
+        native_gpu_limits(&other, None, None, false, None)
+            .unwrap()
+            .is_none()
+    );
+    client.abort();
+    server.abort();
+}
+
+/// An exclusive GPU reservation of a native target, written to the store.
+async fn native_exclusive(state: &terrariumd::api::Shared) -> String {
+    use terrariumd::store::reservations as r;
+    state
+        .db
+        .write("test", |tx| {
+            let record = r::request(
+                tx,
+                r::Request {
+                    gpus: vec![terrarium_core::resources::GpuClaim {
+                        uuid: "GPU-abcd".into(),
+                        vram_bytes: 0,
+                        exclusive: true,
+                    }],
+                    host: "h".into(),
+                    project: "p".into(),
+                    holder: r::Holder::Target("p-native".into()),
+                    target: "p-native".into(),
+                    amounts: Default::default(),
+                    exclusive: false,
+                    reason: "test".into(),
+                    duration_ms: 1_800_000,
+                    queue_ms: None,
+                },
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+            r::activate(tx, &record.id)?;
+            Ok(record.id)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn lost_native_enforcement_refuses_host_commands_while_an_exclusive_gpu_is_reserved() {
+    // The reservation became active while the helper answered; now the host
+    // agent reconnected without enforcement.
+    let (td, server, client) = setup_opts(
+        false,
+        Some(terrarium_core::protocol::NativeGpuCapability {
+            enforced: false,
+            version: 1,
+            reason: Some("cannot reach the helper".into()),
+        }),
+    )
+    .await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    for name in ["p-native", "p-other"] {
+        td.post(
+            "/api/targets",
+            json!({"name":name,"kind":"host","host":"h","project":"p"}),
+        )
+        .await
+        .ok();
+    }
+    let def = |name: &'static str| {
+        let state = state.clone();
+        async move {
+            state
+                .db
+                .read(move |c| Ok(terrariumd::store::targets::get(c, name)?.def))
+                .await
+                .unwrap()
+        }
+    };
+    // No exclusive reservation yet: host commands run as before.
+    assert!(terrariumd::reservations::exec_budget(&state, &def("p-other").await, None).is_ok());
+    let id = native_exclusive(&state).await;
+    for name in ["p-native", "p-other"] {
+        let e = terrariumd::reservations::exec_budget(&state, &def(name).await, Some("p/worker"))
+            .unwrap_err();
+        assert!(e.message.contains(&id), "{}", e.message);
+        assert!(
+            e.message.contains("cannot reach the helper"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("refused until it does"), "{}", e.message);
+    }
+    client.abort();
+    server.abort();
+}
+
+#[tokio::test]
 async fn host_reservation_refusal_names_existing_agent_sessions() {
     let (td, server, client) = setup().await;
     td.post(
@@ -574,8 +864,15 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
     let (td, server, client) = setup().await;
     let state = td.daemon.as_ref().unwrap().state.clone();
     let directory = td.dir.path();
+    // TER-526: the held pull must not outlive the test. The guard kills
+    // it, so its gate can be longer than the test: with a 120 s gate the
+    // pull ended under merge-job load before the checks of the held `Up`
+    // below (TER-674).
+    let fixtures = crate::common::FixtureGuard::new(directory);
     std::fs::write(directory.join("reservation-docker"), format!(
-        "#!/bin/sh\ncase $1 in\ninspect) echo '[]'; echo 'Error: No such object' >&2; exit 1;;\nrun) touch '{0}/pull-entered'; while [ ! -f '{0}/pull-release' ]; do sleep 0.05; done;;\nupdate) exit 0;;\nesac\n", directory.display()
+        "#!/bin/sh\ncase $1 in\ninspect) echo '[]'; echo 'Error: No such object' >&2; exit 1;;\nrun) touch '{0}/pull-entered'; {1};;\nupdate) exit 0;;\nesac\n",
+        directory.display(),
+        crate::common::gate_wait(&directory.join("pull-release"), Duration::from_secs(900))
     )).unwrap();
     let (server_b, address) = terrariumd::hosts::serve(state.clone(), "127.0.0.1:0")
         .await
@@ -592,7 +889,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         .into_owned();
     options.capabilities = state.executor.hosts.capabilities("h").unwrap();
     let client_b = tokio::spawn(Client::new(options).run());
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(crate::common::WAIT, async {
         while !state.executor.hosts.is_online("other-host")
             || state.executor.resource_pending("other-host")
         {
@@ -627,7 +924,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(crate::common::WAIT, async {
         while !directory.join("pull-entered").exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -716,6 +1013,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         td.get(&format!("/api/reservations/{id}")).await.ok()["state"],
         "active"
     );
+    fixtures.assert_none_left().await;
     client.abort();
     server.abort();
     client_b.abort();

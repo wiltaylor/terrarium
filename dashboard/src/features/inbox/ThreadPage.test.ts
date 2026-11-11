@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Inbox threads in the dashboard (TER-94, docs/api.md §6.13), with the mock
-// API: the Threads tab (open threads first, waiting-on-you marked), the New
+// API: the Threads screen (TER-466: a forum table, open threads first, waiting-on-you marked), the New
 // thread dialog, and the chat page: reply, answer an inline question, send
 // the response, and close with the confirmation.
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
@@ -21,6 +21,7 @@ vi.mock("../../stores", () => ({
 
 const { default: InboxPage } = await import("./InboxPage");
 const { default: ThreadPage } = await import("./ThreadPage");
+const { default: ThreadsPage } = await import("./ThreadsPage");
 
 let dispose: (() => void) | undefined;
 afterEach(() => {
@@ -41,7 +42,11 @@ function mount(url: string) {
       createComponent(MemoryRouter, {
         history,
         get children() {
-          return [createComponent(Route, { path: "/inbox/threads/:id", component: ThreadPage }), createComponent(Route, { path: "/inbox", component: InboxPage })];
+          return [
+            createComponent(Route, { path: "/threads/:id", component: ThreadPage }),
+            createComponent(Route, { path: "/threads", component: ThreadsPage }),
+            createComponent(Route, { path: "/inbox", component: InboxPage }),
+          ];
         },
       }),
     el,
@@ -55,24 +60,37 @@ const setValue = (sel: string, value: string, ev = "input", root: ParentNode = d
   e.value = value;
   e.dispatchEvent(new Event(ev, { bubbles: true }));
 };
+/** The rows of the Threads table. */
+const rows = (el: ParentNode) => [...el.querySelectorAll<HTMLElement>("tbody[aria-label^='Thread ']")];
+/** The status icon of a row, and its tooltip. */
+const icon = (r: HTMLElement) => r.querySelector<HTMLElement>("[data-testid=thread-status]")!;
 const status = (el: HTMLElement) => el.querySelector("[aria-label='Thread details'] [data-testid=thread-status]")?.textContent?.trim();
 
-describe("the Threads tab of the Inbox", () => {
-  it("lists the open threads, the one that waits on you first and marked; Done lists the closed ones", async () => {
-    let { el } = mount("/inbox?tab=thread");
-    await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Thread ']").length).toBe(2));
-    const rows = [...el.querySelectorAll("article[aria-label^='Thread ']")];
-    expect(rows[0]!.classList.contains("waits")).toBe(true);
-    expect(rows[0]!.querySelector("[data-testid=thread-status]")!.textContent).toBe("waiting on you");
-    expect(rows[0]!.textContent).toContain("2 open questions");
-    expect(rows[1]!.querySelector("[data-testid=thread-status]")!.textContent).toBe("waiting on the agent");
-    expect(rows[0]!.querySelector("a")!.getAttribute("href")).toMatch(/^\/inbox\/threads\//);
-    ({ el } = mount("/inbox?tab=thread&status=done"));
+describe("the Threads screen (TER-466)", () => {
+  it("lists the open threads in a table, the one that waits on you first with the person icon; Archived lists the closed ones", async () => {
+    let { el } = mount("/threads");
+    await waitFor(() => expect(rows(el).length).toBe(2));
+    const [first, second] = rows(el);
+    expect(first!.classList.contains("waits")).toBe(true);
+    expect(icon(first!).dataset.icon).toBe("you");
+    expect(icon(first!).getAttribute("title")).toBe("Waiting on you: 2 open questions");
+    expect(icon(first!).querySelector("svg")).not.toBeNull();
+    // The columns: icon, topic (with scope, agent, report-to), messages, open questions, cards, last activity.
+    expect([...el.querySelectorAll("thead th")].map((th) => th.textContent?.trim())).toEqual(["Status", "Topic", "Messages", "Open questions", "Cards", "Last activity"]);
+    expect(first!.querySelector("td[data-label='Open questions']")!.textContent).toBe("2");
+    expect(first!.querySelector(".thread-meta")!.textContent).toContain("reports to");
+    expect(icon(second!).dataset.icon).toBe("agent");
+    expect(icon(second!).getAttribute("title")).toBe("Waiting on the agent");
+    expect(first!.querySelector("a")!.getAttribute("href")).toMatch(/^\/threads\//);
+    ({ el } = mount("/threads?status=archived"));
     await waitFor(() => expect(el.textContent).toContain("Rename the runner crate"));
-    expect(el.querySelectorAll("article[aria-label^='Thread ']").length).toBe(1);
-    // The All tab shows the waiting thread as an Inbox item, not its questions.
+    expect(rows(el).length).toBe(1);
+    expect(icon(rows(el)[0]!).dataset.icon).toBe("closed");
+    expect([...el.querySelectorAll("[role=tab][aria-selected=true]")].map((t) => t.textContent?.trim())).toEqual(["Archived"]);
+    // The Inbox shows neither the thread nor its questions.
     ({ el } = mount("/inbox"));
-    await waitFor(() => expect(el.textContent).toContain("Split the event store by project?"));
+    await waitFor(() => expect(el.textContent).not.toContain("Loading"));
+    expect(el.textContent).not.toContain("Split the event store by project?");
     expect(el.textContent).not.toContain("Keep the audit rows when we prune?");
   });
 
@@ -80,18 +98,33 @@ describe("the Threads tab of the Inbox", () => {
     // A global thread (the mock has no lead of `meta`, so it cannot open one).
     const seeded = api.world.threads!.find((t) => t.status === "waiting_agent")!;
     api.world.threads!.push({ ...seeded, id: "01JBTHRDGLOBAL0000000000001", topic: "A global question", scope: "global", messages: [] });
-    let { el } = mount("/inbox?tab=thread&project=webshop");
+    let { el } = mount("/threads?project=webshop");
     await waitFor(() => expect(el.textContent).toContain("Checkout retries"));
-    expect(el.querySelectorAll("article[aria-label^='Thread ']").length).toBe(1);
+    expect(rows(el).length).toBe(1);
     expect(el.textContent).not.toContain("A global question");
     expect(el.textContent).not.toContain("Split the event store by project?");
-    ({ el } = mount("/inbox?tab=thread"));
+    ({ el } = mount("/threads"));
     await waitFor(() => expect(el.textContent).toContain("A global question"));
     api.world.threads!.splice(api.world.threads!.findIndex((t) => t.id === "01JBTHRDGLOBAL0000000000001"), 1);
   });
 
+  it("lists a tracking thread under Open with the tracking icon", async () => {
+    const t = api.world.threads!.find((x) => x.topic === "Checkout retries")!;
+    const old = t.status;
+    t.status = "tracking";
+    try {
+      const { el } = mount("/threads");
+      await waitFor(() => expect(rows(el).find((r) => r.textContent?.includes("Checkout retries"))).toBeTruthy());
+      const r = rows(el).find((x) => x.textContent?.includes("Checkout retries"))!;
+      expect(icon(r).dataset.icon).toBe("tracking");
+      expect(r.classList.contains("waits")).toBe(false);
+    } finally {
+      t.status = old;
+    }
+  });
+
   it("opens a thread from the New thread dialog and shows its chat page", async () => {
-    const { el, history } = mount("/inbox?tab=thread");
+    const { el, history } = mount("/threads");
     await waitFor(() => expect(button("New thread")).toBeTruthy());
     button("New thread")!.click();
     await waitFor(() => expect(document.querySelector("form[aria-label='New thread']")).not.toBeNull());
@@ -102,7 +135,7 @@ describe("the Threads tab of the Inbox", () => {
     setValue("input[aria-label=Topic]", "Move the runner to a crate of its own?");
     setValue("textarea[aria-label='First message']", "What would **break**?");
     button("Open the thread")!.click();
-    await waitFor(() => expect(history.get()).toMatch(/^\/inbox\/threads\//));
+    await waitFor(() => expect(history.get()).toMatch(/^\/threads\//));
     await waitFor(() => expect(el.querySelector("h1")?.textContent).toBe("Move the runner to a crate of its own?"));
     expect(status(el)).toBe("waiting on the agent");
     expect(el.querySelector("[aria-label=Conversation] strong")!.textContent).toBe("You");
@@ -115,7 +148,7 @@ describe("the chat page of a thread", () => {
   it("replies, answers the inline questions, sends the response, and closes with the confirmation", async () => {
     const t = (await api.threads.list())[0]!;
     expect(t.status).toBe("waiting_operator");
-    const { el } = mount(`/inbox/threads/${t.id}`);
+    const { el } = mount(`/threads/${t.id}`);
     await waitFor(() => expect(el.querySelector("h1")?.textContent).toBe(t.topic));
     expect(status(el)).toBe("waiting on you");
     // The questions are inline, after the messages.
@@ -179,14 +212,14 @@ describe("the chat page of a thread", () => {
     const t = await api.threads.open({ topic: "Agent ended", scope: "terrarium", agent: "terrarium/lead" });
     const stored = api.world.threads!.find((th) => th.id === t.id)!;
     stored.agent_end_outcome = "failed";
-    const { el } = mount(`/inbox/threads/${t.id}`);
+    const { el } = mount(`/threads/${t.id}`);
     await waitFor(() => expect(el.textContent).toContain("agent ended: failed. Nobody will answer in this thread."));
   });
 
   it("says that a close retracts the open questions", async () => {
     const t = await api.threads.open({ topic: "One question", scope: "terrarium", agent: "terrarium/lead" });
     api.sim.threadAsk(t.id, { text: "Yes or no?", options: ["Yes", "No"] });
-    const { el } = mount(`/inbox/threads/${t.id}`);
+    const { el } = mount(`/threads/${t.id}`);
     await waitFor(() => expect(el.querySelector("article[aria-label^='Question ']")).not.toBeNull());
     button("Close the thread")!.click();
     await waitFor(() => expect(document.querySelector("[data-testid=close-retracts]")?.textContent).toContain("1 open question is retracted"));
@@ -198,7 +231,7 @@ describe("the chat page of a thread", () => {
   it("drops a javascript: Markdown link in a message", async () => {
     const t = await api.threads.open({ topic: "Links", scope: "terrarium", agent: "terrarium/lead" });
     api.sim.threadPost(t.id, "See [the plan](javascript:alert(1)) and [the board](https://example.com/b).");
-    const { el } = mount(`/inbox/threads/${t.id}`);
+    const { el } = mount(`/threads/${t.id}`);
     await waitFor(() => expect(el.querySelector("[aria-label=Conversation]")?.textContent).toContain("the plan"));
     const hrefs = [...el.querySelectorAll("[aria-label=Conversation] a")].map((a) => a.getAttribute("href") ?? "");
     expect(hrefs).toContain("https://example.com/b");
@@ -207,7 +240,7 @@ describe("the chat page of a thread", () => {
 
   it("reads the thread again when a write gets a 409, also without events", async () => {
     const t = await api.threads.open({ topic: "Closed elsewhere", scope: "terrarium", agent: "terrarium/lead" });
-    const { el } = mount(`/inbox/threads/${t.id}`);
+    const { el } = mount(`/threads/${t.id}`);
     await waitFor(() => expect(el.querySelector("h1")?.textContent).toBe("Closed elsewhere"));
     await api.threads.close(t.id, { summary: "Closed by the CLI." });
     setValue("textarea[aria-label='Message text']", "Still there?");
@@ -218,23 +251,23 @@ describe("the chat page of a thread", () => {
   });
 
   it("shows a missing thread", async () => {
-    const { el } = mount("/inbox/threads/01JBNOPE");
+    const { el } = mount("/threads/01JBNOPE");
     await waitFor(() => expect(el.textContent).toContain("No such thread."));
   });
 });
 
 describe("the agent's close proposal (TER-114)", () => {
   const proposal = (root: ParentNode = document) => root.querySelector("section[aria-label='Close proposal']") as HTMLElement | null;
-  const row = (el: HTMLElement, topic: string) => [...el.querySelectorAll("article[aria-label^='Thread ']")].find((r) => r.textContent?.includes(topic)) as HTMLElement | undefined;
+  const row = (el: HTMLElement, topic: string) => rows(el).find((r) => r.textContent?.includes(topic));
 
   it("shows the proposal on the thread page; Decline is a message, and the thread stays open", async () => {
     const t = await api.threads.open({ topic: "Proposal declined", scope: "terrarium", agent: "terrarium/lead", text: "Go." });
-    const { el } = mount(`/inbox/threads/${t.id}`);
+    const { el } = mount(`/threads/${t.id}`);
     await waitFor(() => expect(el.querySelector("h1")?.textContent).toBe("Proposal declined"));
     expect(proposal(el)).toBeNull();
     api.sim.threadPropose(t.id, { summary: "TER-99 has the plan.\n<img src=x onerror=\"window.__xss=2\">", links: [{ kind: "card", ref: "TER-99" }, { kind: "url", ref: "https://example.com/p" }, { kind: "url", ref: "javascript:alert(1)" }] });
     // The events are off in this test: mount the page again to read the proposal.
-    mount(`/inbox/threads/${t.id}`);
+    mount(`/threads/${t.id}`);
     await waitFor(() => expect(proposal()).not.toBeNull());
     const p = proposal()!;
     expect(status(document.body)).toBe("close proposed");
@@ -262,7 +295,7 @@ describe("the agent's close proposal (TER-114)", () => {
     const t = await api.threads.open({ topic: "Proposal confirmed", scope: "terrarium", agent: "terrarium/lead", text: "Go." });
     api.sim.threadAsk(t.id, { text: "Anything more?", options: ["Yes", "No"] });
     api.sim.threadPropose(t.id, { summary: "All in TER-100.", links: [{ kind: "card", ref: "TER-100" }] });
-    const { el } = mount(`/inbox/threads/${t.id}`);
+    const { el } = mount(`/threads/${t.id}`);
     await waitFor(() => expect(proposal(el)).not.toBeNull());
     expect(proposal(el)!.querySelector("[data-testid=proposal-retracts]")!.textContent).toBe("A confirm retracts 1 open question.");
     button("Confirm", proposal(el)!)!.click();
@@ -281,11 +314,12 @@ describe("the agent's close proposal (TER-114)", () => {
     const b = await api.threads.open({ topic: "Row decline", scope: "terrarium", agent: "terrarium/lead", text: "Go." });
     api.sim.threadPropose(a.id, { summary: "Row A is done." });
     api.sim.threadPropose(b.id, { summary: "Row B is done.", links: [{ kind: "wiki", ref: "plan" }] });
-    let { el } = mount("/inbox?tab=thread");
+    let { el } = mount("/threads");
     await waitFor(() => expect(row(el, "Row confirm")).toBeTruthy());
     const ra = row(el, "Row confirm")!;
     expect(ra.classList.contains("waits")).toBe(true);
-    expect(ra.querySelector("[data-testid=thread-status]")!.textContent).toBe("close proposed");
+    expect(icon(ra).dataset.icon).toBe("you");
+    expect(icon(ra).getAttribute("title")).toBe("Waiting on you: a close proposal");
     expect(proposal(ra)!.textContent).toContain("Row A is done.");
     expect(proposal(row(el, "Row decline")!)!.textContent).toContain("plan");
 
@@ -298,12 +332,39 @@ describe("the agent's close proposal (TER-114)", () => {
     setValue("textarea[aria-label='Decline text']", "Link the card too.", "input", rb);
     button("Send and decline", rb)!.click();
     await waitFor(() => expect(row(el, "Row decline")?.querySelector("section[aria-label='Close proposal']")).toBeNull());
-    expect(row(el, "Row decline")!.querySelector("[data-testid=thread-status]")!.textContent).toBe("waiting on the agent");
+    expect(icon(row(el, "Row decline")!).dataset.icon).toBe("agent");
     expect((await api.threads.get(b.id)).close_proposal).toBeNull();
 
-    // The confirmed thread is on the Done tab.
-    ({ el } = mount("/inbox?tab=thread&status=done"));
+    // The confirmed thread is under Archived.
+    ({ el } = mount("/threads?status=archived"));
     await waitFor(() => expect(el.textContent).toContain("Row confirm"));
+  });
+
+  it("counts a question moved into the thread (in_thread) in both close warnings (TER-495)", async () => {
+    const q = (await api.questions.ofAgent("terrarium/lead")).find((x) => x.kind === "question" && x.status === "open" && !x.thread)!;
+    const { thread: t } = await api.questions.toThread(q.id);
+    api.sim.threadPropose(t.id, { summary: "Settled in the thread." });
+    const { el } = mount(`/threads/${t.id}`);
+    await waitFor(() => expect(proposal(el)).not.toBeNull());
+    expect(proposal(el)!.querySelector("[data-testid=proposal-retracts]")!.textContent).toBe("A confirm retracts 1 open question.");
+    button("Close the thread")!.click();
+    await waitFor(() => expect(document.querySelector("[data-testid=close-retracts]")?.textContent).toContain("1 open question is retracted"));
+    button("Yes, close the thread")!.click();
+    await waitFor(() => expect(status(el)).toBe("closed"));
+    expect((await api.questions.get(q.id)).status).toBe("retracted");
+  });
+
+  it("shows the question that opened the thread, with no Open in thread (GitHub #32)", async () => {
+    // Any agent: the TER-495 test above moved the open question of terrarium/lead already.
+    const q = api.world.questions!.find((x) => x.kind !== "bundle" && x.status === "open" && !x.thread)!;
+    const { thread: t } = await api.questions.toThread(q.id);
+    expect(t.from_question).toBe(q.id);
+    const { el } = mount(`/threads/${t.id}`);
+    const sel = `article[aria-label$=' ${q.id}']`;
+    await waitFor(() => expect(el.querySelector(sel)).not.toBeNull());
+    const card = el.querySelector(sel)!;
+    expect([...card.querySelectorAll("a, button")].some((x) => x.textContent?.trim() === "Open in thread")).toBe(false);
+    expect([...card.querySelectorAll("a")].some((x) => x.textContent?.trim() === "Show mail")).toBe(true);
   });
 });
 
@@ -324,7 +385,7 @@ describe("the linked cards of a thread (TER-147)", () => {
   };
 
   it("shows a mini kanban, one row per project with its own board columns, folded while the thread does not track", async () => {
-    const { el } = mount(`/inbox/threads/${linked().id}`);
+    const { el } = mount(`/threads/${linked().id}`);
     await waitFor(() => expect(tile(el, "WEB-4")).not.toBeNull());
     const p = panel(el)!;
     expect(p.open).toBe(false);
@@ -360,7 +421,7 @@ describe("the linked cards of a thread (TER-147)", () => {
 
   it("is open at the top while the thread tracks", async () => {
     await withStatus("tracking", async () => {
-      const { el } = mount(`/inbox/threads/${linked().id}`);
+      const { el } = mount(`/threads/${linked().id}`);
       await waitFor(() => expect(tile(el, "WEB-4")).not.toBeNull());
       const p = panel(el)!;
       expect(p.open).toBe(true);
@@ -373,15 +434,15 @@ describe("the linked cards of a thread (TER-147)", () => {
 
   it("shows no panel on a thread with no linked card", async () => {
     const t = api.world.threads!.find((x) => x.topic === "Split the event store by project?")!;
-    const { el } = mount(`/inbox/threads/${t.id}`);
+    const { el } = mount(`/threads/${t.id}`);
     await waitFor(() => expect(el.querySelector("h1")?.textContent).toBe(t.topic));
     expect(panel(el)).toBeNull();
   });
 
   it("shows the n/m chip in the Threads list, read live from the boards", async () => {
-    const rowOf = (el: HTMLElement, topic: string) => [...el.querySelectorAll<HTMLElement>("article[aria-label^='Thread ']")].find((r) => r.textContent?.includes(topic));
+    const rowOf = (el: HTMLElement, topic: string) => rows(el).find((r) => r.textContent?.includes(topic));
     await withStatus("tracking", async () => {
-      let { el } = mount("/inbox?tab=thread&status=tracking");
+      let { el } = mount("/threads");
       await waitFor(() => expect(rowOf(el, "Checkout retries")?.querySelector("[data-testid=thread-progress]")?.textContent).toBe("2/3"));
       const chip = rowOf(el, "Checkout retries")!.querySelector("[data-testid=thread-progress]")!;
       expect(chip.getAttribute("title")).toBe("2 of 3 linked cards are in review or later");
@@ -392,7 +453,7 @@ describe("the linked cards of a thread (TER-147)", () => {
       const old = web4.column;
       web4.column = "review";
       try {
-        ({ el } = mount("/inbox?tab=thread&status=tracking"));
+        ({ el } = mount("/threads"));
         await waitFor(() => expect(rowOf(el, "Checkout retries")?.querySelector("[data-testid=thread-progress]")?.textContent).toBe("3/3"));
         expect(rowOf(el, "Checkout retries")!.querySelector("[data-testid=thread-progress]")!.classList.contains("ok")).toBe(true);
       } finally {
@@ -401,7 +462,7 @@ describe("the linked cards of a thread (TER-147)", () => {
     });
     // A thread with no linked card has no chip.
     await api.threads.open({ topic: "No cards here", scope: "terrarium", agent: "terrarium/lead", text: "Go." });
-    const { el } = mount("/inbox?tab=thread");
+    const { el } = mount("/threads");
     await waitFor(() => expect(rowOf(el, "No cards here")).toBeTruthy());
     expect(rowOf(el, "No cards here")!.querySelector("[data-testid=thread-progress]")).toBeNull();
   });

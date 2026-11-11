@@ -113,7 +113,7 @@ pub trait Registry: Send + Sync {
 
 /// The signature or provenance check of an image.
 pub trait Verifier: Send + Sync {
-    /// `gh`, `cosign`, `command`, or `off`.
+    /// `cosign`, `gh`, `cosign-keyless`, `command`, or `off`.
     fn mode(&self) -> String;
     /// Check `reference` (`<repo>@sha256:...`). `Ok` has one line about
     /// the check. Only called when the mode is not `off`.

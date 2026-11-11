@@ -1,4 +1,4 @@
-// The Rules tab of the board screen (docs/api.md §19.12, TER-171): the pure
+// The Rules tab of the project (docs/api.md §19.12, TER-171): the pure
 // parts, so the tests need no DOM.
 
 import type { BoardFlow, EffectiveRule, RuleChange, RuleFinding, RuleRun, RuleToggle } from "../../api/types";

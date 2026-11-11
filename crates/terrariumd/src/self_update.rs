@@ -23,6 +23,12 @@
 //!   the job queue starts, and the running jobs go on (`crate::jobs`). The drain
 //!   lives in memory: the new daemon starts without it, and
 //!   `POST /api/system/update/resume` ends it.
+//! - **Drain of the jobs** (TER-614 R4). Before an update, the updater or
+//!   the operator drains the job slots only (`POST
+//!   /api/system/update/drain` with `{"jobs_only": true}`): no job of the
+//!   job queue starts, the running jobs finish, and the agents go on. The
+//!   queued jobs wait. It lives in memory as the drain does, and the
+//!   resume ends it too.
 //! - **Results.** The background task reads the history of the updater
 //!   and mails each result once (`self_update_state`).
 
@@ -261,6 +267,8 @@ pub struct Runtime {
     cfg: Mutex<Config>,
     cache: Mutex<Cache>,
     drain: Mutex<Option<Drain>>,
+    /// The drain of the job slots only (TER-614 R4).
+    jobs_drain: Mutex<Option<Drain>>,
     /// Held while the releases are fetched.
     fetching: tokio::sync::Mutex<()>,
 }
@@ -285,6 +293,16 @@ impl Runtime {
 
     pub fn drain_state(&self) -> Option<Drain> {
         lock(&self.drain).clone()
+    }
+
+    /// True while no job of the job queue may start: the daemon drains,
+    /// or its job slots drain (TER-614 R4).
+    pub fn jobs_draining(&self) -> bool {
+        self.draining() || lock(&self.jobs_drain).is_some()
+    }
+
+    pub fn jobs_drain_state(&self) -> Option<Drain> {
+        lock(&self.jobs_drain).clone()
     }
 
     /// Set the releases (the tests; a fetch).
@@ -617,6 +635,9 @@ pub struct DrainInfo {
     /// The jobs of the job queue whose run has not ended yet (TER-123):
     /// no job starts during the drain, and these go on.
     pub jobs: Vec<String>,
+    /// The drain of the job slots only (TER-614 R4): no job starts, the
+    /// agents go on. `None` when it is off.
+    pub jobs_drain: Option<Drain>,
 }
 
 /// The agents that run a turn or start now.
@@ -642,6 +663,7 @@ pub async fn drain_info(state: &Shared) -> DrainInfo {
         by: d.map(|d| d.by),
         busy: busy_agents(state).await,
         jobs: crate::jobs::busy_jobs(state).await,
+        jobs_drain: state.self_update.jobs_drain_state(),
     }
 }
 
@@ -744,8 +766,23 @@ pub fn start_drain(state: &Shared, by: &str) {
     tracing::info!(by, "the daemon drains: no new turns");
 }
 
-/// End the drain: the work that waited goes out.
+/// Start the drain of the job slots (TER-614 R4): no job of the job
+/// queue starts, and the running ones finish. Agents go on.
+pub fn start_jobs_drain(state: &Shared, by: &str) {
+    let mut d = lock(&state.self_update.jobs_drain);
+    if d.is_none() {
+        *d = Some(Drain {
+            since: Utc::now(),
+            by: by.to_owned(),
+        });
+    }
+    tracing::info!(by, "the job slots drain: no new jobs");
+}
+
+/// End the drain, and the drain of the job slots: the work that waited
+/// goes out.
 pub async fn end_drain(state: &Shared) {
+    lock(&state.self_update.jobs_drain).take();
     let was = lock(&state.self_update.drain).take();
     let parked = state.usage.streams.set_closed(false);
     if was.is_some() {

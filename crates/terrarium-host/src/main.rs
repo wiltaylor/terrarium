@@ -66,6 +66,17 @@ enum Cmd {
         #[arg(long)]
         probe: bool,
     },
+    /// Run one request of the native GPU helper (TER-345). The host agent
+    /// starts it; the request is in TERRARIUM_NATIVE_REQUEST.
+    #[command(hide = true)]
+    Native {
+        /// The helper socket.
+        #[arg(long, default_value = terrarium_host::native::DEFAULT_SOCKET)]
+        socket: PathBuf,
+        /// For a stop: also stop the holder's slice of the user manager.
+        #[arg(long)]
+        user_slice: bool,
+    },
     /// Read a token from stdin and write it to PATH with mode 0600.
     TokenFile {
         /// Where to write the token, for example /etc/terrarium-host/token.
@@ -194,6 +205,9 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
     let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
     let paths = cfg.paths();
     caps.no_workspaces = !terrarium_host::workspace::available(&paths.work_dir);
+    if cfg.native_gpu.enabled {
+        caps.native_gpu = Some(terrarium_host::native::capability(&cfg.native_gpu.socket).await);
+    }
     let transport = cfg.daemon_url.as_ref().map(|_| cfg.transport());
     let (tls_mode, tls_error) = match &transport {
         Some(Ok(t)) => (Some(t.mode.clone()), None),
@@ -378,6 +392,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
              targets on it start without /work mounts"
         );
     }
+    let mut opts_native = None;
     let url = transport.url.clone();
     tracing::info!(%url, %name, tls = %transport.mode.describe(), docker = caps.docker.present, vmlab = caps.vmlab.present, desktop_display = caps.display.enabled, "starting");
     if caps.display.enabled {
@@ -404,7 +419,26 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
              in clear text, and anyone on the path can replay the token; use wss://"
         );
     }
+    if cfg.native_gpu.enabled {
+        let binary = std::env::current_exe().context("native_gpu needs the path of this binary")?;
+        let cap = terrarium_host::native::capability(&cfg.native_gpu.socket).await;
+        if cap.enforced {
+            tracing::info!(socket = %cfg.native_gpu.socket.display(), "native GPU enforcement: the helper answers");
+        } else {
+            tracing::warn!(
+                socket = %cfg.native_gpu.socket.display(),
+                reason = cap.reason.as_deref().unwrap_or(""),
+                "native GPU enforcement: off; the daemon refuses native exclusive GPU reservations here"
+            );
+        }
+        caps.native_gpu = Some(cap);
+        opts_native = Some(terrarium_host::native::NativeOptions {
+            socket: cfg.native_gpu.socket.clone(),
+            shim: binary,
+        });
+    }
     let mut opts = ClientOptions::new(url, token, name);
+    opts.native = opts_native;
     opts.capabilities = caps;
     opts.max_sessions = cfg.max_sessions;
     opts.buffer_limit = cfg.buffer_limit_bytes;
@@ -414,6 +448,23 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     opts.vmlab_bin = cfg.vmlab_bin.clone();
     opts.git_bin = cfg.git_bin.clone();
     opts.paths = cfg.paths();
+    // Env files that a crash left behind hold command env values. Check
+    // the dir once here, so a bad one is one clear error at the start.
+    let env_dir = &opts.env_dir;
+    match terrarium_host::session::private_dir(env_dir).and_then(|()| {
+        terrarium_host::session::remove_private_files(
+            env_dir,
+            terrarium_host::docker::ENV_FILE_PREFIX,
+        )
+    }) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(n, dir = %env_dir.display(), "removed leftover docker env files"),
+        Err(e) => tracing::error!(
+            error = %e,
+            dir = %env_dir.display(),
+            "the docker env dir is not usable: docker verbs with env will fail"
+        ),
+    }
     opts.max_running_targets = cfg.max_running_targets;
     tracing::info!(work_dir = %opts.paths.work_dir.display(), instances_dir = %opts.paths.instances_dir.display(), repos_dir = %opts.paths.repos_dir.display(), "workspace and lab paths");
     opts.tls = transport.tls.clone();
@@ -458,6 +509,17 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::TokenFile { path }) => return write_token_file(path),
         Some(Cmd::Cert { names, out, force }) => return write_cert(names, out, *force),
         Some(Cmd::Fingerprint { cert }) => return fingerprint(cert),
+        Some(Cmd::Native { socket, user_slice }) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("start the runtime")?;
+            let code = rt.block_on(terrarium_host::native::shim(socket, *user_slice));
+            // The stdin reader is a blocking read on the terminal that
+            // never ends by itself: do not wait for it.
+            rt.shutdown_background();
+            std::process::exit(code);
+        }
         _ => {}
     }
     let cfg = load_config(&args)?;
@@ -472,6 +534,7 @@ fn main() -> anyhow::Result<()> {
             Cmd::TokenFile { .. }
             | Cmd::Cert { .. }
             | Cmd::Fingerprint { .. }
+            | Cmd::Native { .. }
             | Cmd::RdpForget { .. },
         ) => Ok(()),
     }

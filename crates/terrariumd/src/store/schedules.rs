@@ -16,7 +16,7 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, SecondsFormat, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -258,6 +258,45 @@ pub fn validate_spec(spec: &ScheduleSpec, now: DateTime<Utc>) -> ApiResult<()> {
         )?,
         // A project action: nothing to check.
         ScheduleSpec::Manual {} => {}
+        ScheduleSpec::DayStart {
+            tz,
+            not_before,
+            not_after,
+            delay,
+            weekdays,
+        } => {
+            parse_tz(tz).map_err(|e| field_error("spec.tz", e))?;
+            let nb = not_before
+                .as_deref()
+                .map(parse_hhmm)
+                .transpose()
+                .map_err(|e| field_error("spec.not_before", e))?;
+            let na = not_after
+                .as_deref()
+                .map(parse_hhmm)
+                .transpose()
+                .map_err(|e| field_error("spec.not_after", e))?;
+            if let (Some(b), Some(a)) = (nb, na)
+                && b > a
+            {
+                return Err(field_error(
+                    "spec.not_after",
+                    "`not_after` is before `not_before`",
+                ));
+            }
+            if let Some(d) = delay {
+                let secs = parse_every(d).map_err(|e| field_error("spec.delay", e))?;
+                if secs > MAX_DAY_START_DELAY {
+                    return Err(field_error(
+                        "spec.delay",
+                        format!("`{d}` is over the longest delay, 12h"),
+                    ));
+                }
+            }
+            for w in weekdays {
+                parse_weekday(w).map_err(|e| field_error("spec.weekdays", e))?;
+            }
+        }
     }
     Ok(())
 }
@@ -431,7 +470,263 @@ pub fn next_after_min(
         ScheduleSpec::On { .. } => Ok(None),
         // A project action has no time: a person starts each run.
         ScheduleSpec::Manual {} => Ok(None),
+        // A start-of-day schedule has no time of its own: a detected
+        // start plans its run ([`arm_day_start`]).
+        ScheduleSpec::DayStart { .. } => Ok(None),
     }
+}
+
+// ------------------------------------------------------ the start of a day
+
+/// The longest `delay` of a `day_start` spec, in seconds (12 hours).
+pub const MAX_DAY_START_DELAY: i64 = 12 * 3600;
+/// A run planned on one day for a time after midnight still runs on the
+/// next day when the daemon is up at that time, within this many seconds.
+/// A plan that the machine slept past is dropped.
+pub const DAY_START_GRACE_SECS: i64 = 60;
+/// The most `day_start` schedules that one pass reads.
+pub const DAY_START_BATCH: usize = 1000;
+
+/// Parse a local time as `HH:MM`.
+pub fn parse_hhmm(s: &str) -> Result<NaiveTime, String> {
+    NaiveTime::parse_from_str(s.trim(), "%H:%M")
+        .map_err(|_| format!("`{s}` is not a time as HH:MM"))
+}
+
+/// Parse a day of the week: `mon` to `sun`, or the full name.
+pub fn parse_weekday(s: &str) -> Result<chrono::Weekday, String> {
+    use chrono::Weekday::*;
+    Ok(match s.trim().to_ascii_lowercase().as_str() {
+        "mon" | "monday" => Mon,
+        "tue" | "tuesday" => Tue,
+        "wed" | "wednesday" => Wed,
+        "thu" | "thursday" => Thu,
+        "fri" | "friday" => Fri,
+        "sat" | "saturday" => Sat,
+        "sun" | "sunday" => Sun,
+        _ => {
+            return Err(format!(
+                "`{s}` is not a day: use mon, tue, wed, thu, fri, sat, or sun"
+            ));
+        }
+    })
+}
+
+/// What started the day for a `day_start` schedule: the detected start
+/// that plans its run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartCause {
+    /// The daemon started.
+    DaemonStart,
+    /// The timer ran again after a gap (the machine slept).
+    Resume,
+    /// The host agent of the action's target came back online.
+    HostReconnect,
+    /// The day changed while the daemon was up.
+    DayChange,
+}
+
+impl StartCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DaemonStart => "daemon_start",
+            Self::Resume => "resume",
+            Self::HostReconnect => "host_reconnect",
+            Self::DayChange => "day_change",
+        }
+    }
+}
+
+/// Which instant of a local time that a clock change shows twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repeat {
+    /// The first: `not_before` opens the window as early as it can.
+    First,
+    /// The second: `not_after` closes the window as late as it can.
+    Last,
+}
+
+/// The time of `t` on `day` in `zone`. A time in the gap of a clock
+/// change (spring forward) moves on by one hour; a time that the clock
+/// shows twice (fall back) is the first or the last instant.
+fn local_at(zone: chrono_tz::Tz, day: NaiveDate, t: NaiveTime, repeat: Repeat) -> DateTime<Utc> {
+    let naive = day.and_time(t);
+    let pick = |r: chrono::LocalResult<DateTime<chrono_tz::Tz>>| match repeat {
+        Repeat::First => r.earliest(),
+        Repeat::Last => r.latest(),
+    };
+    pick(zone.from_local_datetime(&naive))
+        .or_else(|| pick(zone.from_local_datetime(&(naive + chrono::Duration::hours(1)))))
+        .map_or_else(|| naive.and_utc(), |x| x.with_timezone(&Utc))
+}
+
+/// The day of `at` in the zone of a `day_start` spec, as `YYYY-MM-DD`.
+pub fn day_start_day(spec: &ScheduleSpec, at: DateTime<Utc>) -> ApiResult<Option<NaiveDate>> {
+    let ScheduleSpec::DayStart { tz, .. } = spec else {
+        return Ok(None);
+    };
+    let zone = parse_tz(tz).map_err(|e| field_error("spec.tz", e))?;
+    Ok(Some(at.with_timezone(&zone).date_naive()))
+}
+
+/// The run of a `day_start` spec for a start at `now`: its time (`now`
+/// plus `delay`, and not before `not_before`) and its local day. `None`:
+/// no run for this start: the day ran already (`done`), the day is not in
+/// `weekdays`, the run would be after `not_after`, or the spec is of
+/// another kind.
+pub fn day_start_plan(
+    spec: &ScheduleSpec,
+    done: Option<&str>,
+    now: DateTime<Utc>,
+) -> ApiResult<Option<(DateTime<Utc>, NaiveDate)>> {
+    let ScheduleSpec::DayStart {
+        tz,
+        not_before,
+        not_after,
+        delay,
+        weekdays,
+    } = spec
+    else {
+        return Ok(None);
+    };
+    let zone = parse_tz(tz).map_err(|e| field_error("spec.tz", e))?;
+    let local = now.with_timezone(&zone);
+    let day = local.date_naive();
+    if done
+        .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        .is_some_and(|d| d >= day)
+    {
+        return Ok(None);
+    }
+    if !weekdays.is_empty()
+        && !weekdays
+            .iter()
+            .any(|w| parse_weekday(w).is_ok_and(|d| d == local.weekday()))
+    {
+        return Ok(None);
+    }
+    let secs = match delay {
+        Some(d) => parse_every(d).map_err(|e| field_error("spec.delay", e))?,
+        None => 0,
+    };
+    let mut at = now + chrono::Duration::seconds(secs);
+    if let Some(nb) = not_before {
+        let t = parse_hhmm(nb).map_err(|e| field_error("spec.not_before", e))?;
+        at = at.max(local_at(zone, day, t, Repeat::First));
+    }
+    if let Some(na) = not_after {
+        let t = parse_hhmm(na).map_err(|e| field_error("spec.not_after", e))?;
+        if at > local_at(zone, day, t, Repeat::Last) {
+            return Ok(None);
+        }
+    }
+    Ok(Some((at, day)))
+}
+
+/// The enabled `day_start` schedules, at most [`DAY_START_BATCH`]. The
+/// index `schedules_spec_kind` serves the read. A full batch means that
+/// some schedules were not read: the caller logs a warning.
+pub fn day_starts(conn: &Connection) -> ApiResult<Vec<Schedule>> {
+    let limit = DAY_START_BATCH as i64;
+    query(
+        conn,
+        "SELECT * FROM schedules WHERE json_extract(spec, '$.kind') = 'day_start'
+           AND enabled = 1 ORDER BY id LIMIT ?1",
+        &[&limit],
+    )
+}
+
+/// The detected start of a planned run: its cause and time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectedStart {
+    /// `daemon_start`, `resume`, `host_reconnect`, or `day_change`.
+    pub cause: String,
+    pub at: String,
+}
+
+/// Plan the run of a `day_start` schedule for a start at `now`: set its
+/// `next_run_at` and its detected start. Returns the run time, or `None`
+/// when this start plans no run ([`day_start_plan`]).
+pub fn arm_day_start(
+    t: &mut Tx<'_>,
+    s: &Schedule,
+    cause: StartCause,
+    now: DateTime<Utc>,
+) -> ApiResult<Option<String>> {
+    let Some((at, _)) = day_start_plan(&s.spec, s.day_start_done.as_deref(), now)? else {
+        return Ok(None);
+    };
+    let start = DetectedStart {
+        cause: cause.as_str().into(),
+        at: stamp(now),
+    };
+    let at = stamp(at);
+    t.execute(
+        "UPDATE schedules SET next_run_at = ?2, day_start_last = ?3 WHERE id = ?1",
+        params![s.id, at, serde_json::to_string(&start)?],
+    )?;
+    Ok(Some(at))
+}
+
+/// Is the planned run of `s` still good at `now`? The day of a plan is
+/// the day of its detected start. A plan for an earlier day still runs at
+/// its time after midnight (a late start with a delay), but a plan that
+/// the machine slept past (more than [`DAY_START_GRACE_SECS`] late) on a
+/// later day is dropped, and so is a plan past `not_after` of its day.
+pub fn day_start_armed_valid(s: &Schedule, now: DateTime<Utc>) -> ApiResult<bool> {
+    let ScheduleSpec::DayStart { tz, not_after, .. } = &s.spec else {
+        return Ok(false);
+    };
+    let zone = parse_tz(tz).map_err(|e| field_error("spec.tz", e))?;
+    let today = now.with_timezone(&zone).date_naive();
+    let planned = s
+        .day_start_last
+        .as_ref()
+        .and_then(|d| parse_time(&d.at))
+        .map(|at| at.with_timezone(&zone).date_naive());
+    let (Some(planned), Some(next)) = (planned, s.next_run_at.as_deref().and_then(parse_time))
+    else {
+        return Ok(false);
+    };
+    if planned < today && now > next + chrono::Duration::seconds(DAY_START_GRACE_SECS) {
+        return Ok(false);
+    }
+    if let Some(na) = not_after {
+        let t = parse_hhmm(na).map_err(|e| field_error("spec.not_after", e))?;
+        if now > local_at(zone, planned, t, Repeat::Last) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Drop the planned run of a `day_start` schedule. The write checks the
+/// spec kind: an API write that changed the spec to another kind since the
+/// pass read it keeps the `next_run_at` that it set.
+pub fn disarm_day_start(t: &Tx<'_>, id: &str) -> ApiResult<()> {
+    t.execute(
+        "UPDATE schedules SET next_run_at = NULL
+          WHERE id = ?1 AND json_extract(spec, '$.kind') = 'day_start'",
+        [id],
+    )?;
+    Ok(())
+}
+
+/// Record that the day of the detected start of `s` ran: no other start
+/// on that day plans a run.
+pub fn mark_day_started(t: &Tx<'_>, s: &Schedule, now: DateTime<Utc>) -> ApiResult<()> {
+    let at = s
+        .day_start_last
+        .as_ref()
+        .and_then(|d| parse_time(&d.at))
+        .unwrap_or(now);
+    if let Some(day) = day_start_day(&s.spec, at)? {
+        t.execute(
+            "UPDATE schedules SET day_start_done = ?2 WHERE id = ?1",
+            params![s.id, day.to_string()],
+        )?;
+    }
+    Ok(())
 }
 
 // --------------------------------------------------------------- the rows
@@ -481,6 +776,13 @@ pub struct Schedule {
     /// it).
     #[serde(skip_serializing_if = "is_zero")]
     pub webhook_failures: i64,
+    /// A `day_start` schedule: the local day (`YYYY-MM-DD`) of its last
+    /// run. A start on that day plans no run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub day_start_done: Option<String>,
+    /// A `day_start` schedule: the last detected start that planned a run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub day_start_last: Option<DetectedStart>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(skip)]
@@ -544,6 +846,10 @@ fn row(r: &Row<'_>) -> rusqlite::Result<(Schedule, String, String, Option<String
         consecutive_skips: r.get("skips")?,
         disabled_reason: r.get("disabled_reason")?,
         webhook_failures: r.get("webhook_failures")?,
+        day_start_done: r.get("day_start_done")?,
+        day_start_last: r
+            .get::<_, Option<String>>("day_start_last")?
+            .and_then(|d| serde_json::from_str(&d).ok()),
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
         anchor_at: r.get("anchor_at")?,
@@ -1307,6 +1613,9 @@ pub struct Run {
     /// That event's `kind` and `summary`, while the log has it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event: Option<RunEvent>,
+    /// A `day_start` run: the detected start that planned it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub day_start: Option<DetectedStart>,
 }
 
 /// The event of a trigger run, on the run.
@@ -1349,6 +1658,9 @@ fn run_row(r: &Row<'_>) -> rusqlite::Result<Run> {
         actor: r.get("actor")?,
         event_seq,
         event,
+        day_start: r
+            .get::<_, Option<String>>("day_start")?
+            .and_then(|d| serde_json::from_str(&d).ok()),
     })
 }
 
@@ -1462,10 +1774,16 @@ pub fn begin_run(
         let r = insert_skipped(t, &s, trigger, actor, event_seq, "still running", None, now)?;
         return Ok(Begin::Overlap(r));
     }
+    // A start-of-day run keeps the detected start that planned it.
+    let day_start = match (&s.day_start_last, trigger) {
+        (Some(d), "day_start") => Some(serde_json::to_string(d)?),
+        _ => None,
+    };
     t.execute(
-        "INSERT INTO schedule_runs (id, schedule, trigger, status, started_at, actor, event_seq)
-         VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
-        params![run_id, id, trigger, at, actor, event_seq],
+        "INSERT INTO schedule_runs (id, schedule, trigger, status, started_at, actor, event_seq,
+                                    day_start)
+         VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7)",
+        params![run_id, id, trigger, at, actor, event_seq, day_start],
     )?;
     let r = get_run(t, &run_id)?;
     emit(t, "run_started", &s, Some(&r))?;
@@ -2006,5 +2324,96 @@ mod tests {
         );
         // A zone with a fixed offset stays valid.
         let _ = chrono_tz::UTC.with_ymd_and_hms(2026, 1, 1, 0, 0, 0);
+    }
+
+    fn day_start(tz: &str, nb: Option<&str>, na: Option<&str>, weekdays: &[&str]) -> ScheduleSpec {
+        ScheduleSpec::DayStart {
+            tz: tz.into(),
+            not_before: nb.map(Into::into),
+            not_after: na.map(Into::into),
+            delay: None,
+            weekdays: weekdays.iter().map(|d| (*d).into()).collect(),
+        }
+    }
+
+    /// The run time and the day of a start at `now`, as text.
+    fn plan(spec: &ScheduleSpec, done: Option<&str>, now: &str) -> Option<(String, String)> {
+        day_start_plan(spec, done, utc(now))
+            .unwrap()
+            .map(|(at, day)| (stamp(at), day.to_string()))
+    }
+
+    #[test]
+    fn day_start_windows_across_clock_changes() {
+        // Sydney springs forward on 2026-10-04 at 02:00 (to 03:00, +11).
+        // A `not_before` in the gap moves on by one hour: 03:30 AEDT.
+        let s = day_start("Australia/Sydney", Some("02:30"), None, &[]);
+        assert_eq!(
+            plan(&s, None, "2026-10-03T14:30:00Z"),
+            Some(("2026-10-03T16:30:00.000Z".into(), "2026-10-04".into()))
+        );
+        // Sydney falls back on 2027-04-04 at 03:00 (to 02:00, +10): 02:30
+        // comes twice. `not_before` takes the first (AEDT), `not_after`
+        // the last (AEST).
+        let s = day_start("Australia/Sydney", Some("02:30"), None, &[]);
+        assert_eq!(
+            plan(&s, None, "2027-04-03T14:00:00Z"),
+            Some(("2027-04-03T15:30:00.000Z".into(), "2027-04-04".into()))
+        );
+        let s = day_start("Australia/Sydney", None, Some("02:30"), &[]);
+        assert!(plan(&s, None, "2027-04-03T16:20:00Z").is_some());
+        assert!(plan(&s, None, "2027-04-03T16:40:00Z").is_none());
+        // New York springs forward on 2027-03-14 at 02:00 (to 03:00,
+        // -4): a `not_after` of 02:30 is 03:30 EDT.
+        let s = day_start("America/New_York", None, Some("02:30"), &[]);
+        assert!(plan(&s, None, "2027-03-14T07:20:00Z").is_some());
+        assert!(plan(&s, None, "2027-03-14T07:40:00Z").is_none());
+        // New York falls back on 2027-11-07 at 02:00 (to 01:00, -5). A
+        // window 01:00-01:30 opens at 01:00 EDT and closes at 01:30 EST.
+        let s = day_start("America/New_York", Some("01:00"), Some("01:30"), &[]);
+        assert_eq!(
+            plan(&s, None, "2027-11-07T04:00:00Z"),
+            Some(("2027-11-07T05:00:00.000Z".into(), "2027-11-07".into()))
+        );
+        assert_eq!(
+            plan(&s, None, "2027-11-07T06:15:00Z"),
+            Some(("2027-11-07T06:15:00.000Z".into(), "2027-11-07".into()))
+        );
+        assert!(plan(&s, None, "2027-11-07T06:40:00Z").is_none());
+    }
+
+    #[test]
+    fn day_start_days_and_the_done_day_are_in_the_zone() {
+        // 2026-11-09 is a Monday. In Sydney (+11) the day turns at 13:00
+        // UTC; in New York (-5) at 05:00 UTC.
+        let syd = day_start("Australia/Sydney", None, None, &[]);
+        assert_eq!(
+            plan(&syd, None, "2026-11-09T12:59:00Z").unwrap().1,
+            "2026-11-09"
+        );
+        assert_eq!(
+            plan(&syd, None, "2026-11-09T13:01:00Z").unwrap().1,
+            "2026-11-10"
+        );
+        let ny = day_start("America/New_York", None, None, &[]);
+        assert_eq!(
+            plan(&ny, None, "2026-11-10T04:59:00Z").unwrap().1,
+            "2026-11-09"
+        );
+        assert_eq!(
+            plan(&ny, None, "2026-11-10T05:01:00Z").unwrap().1,
+            "2026-11-10"
+        );
+        // The done day blocks its day and every day before it.
+        assert!(plan(&syd, Some("2026-11-09"), "2026-11-09T12:59:00Z").is_none());
+        assert!(plan(&syd, Some("2026-11-10"), "2026-11-09T12:59:00Z").is_none());
+        assert!(plan(&syd, Some("2026-11-09"), "2026-11-09T13:01:00Z").is_some());
+        assert!(plan(&ny, Some("2026-11-09"), "2026-11-10T04:59:00Z").is_none());
+        assert!(plan(&ny, Some("2026-11-09"), "2026-11-10T05:01:00Z").is_some());
+        // The weekdays are those of the zone: Tuesday starts in Sydney
+        // while it is Monday in UTC.
+        let tue = day_start("Australia/Sydney", None, None, &["tue"]);
+        assert!(plan(&tue, None, "2026-11-09T12:59:00Z").is_none());
+        assert!(plan(&tue, None, "2026-11-09T13:01:00Z").is_some());
     }
 }

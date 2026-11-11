@@ -15,6 +15,11 @@
 //! - A var of a secret grant (`vars`) that the env holds already loses:
 //!   the harness and its account set it.
 //!
+//! - A credential file (`credential_files`: the service-account JSON of a
+//!   GCP subscription) is written with mode 0600 to a directory of the
+//!   agent ([`credential_dir`], mode 0700), and its var
+//!   (`GOOGLE_APPLICATION_CREDENTIALS`) gets the path, over the env.
+//!
 //! When the daemon does not answer: with `--require-credentials` (the
 //! harness has credentials to get), the command tries again a few times,
 //! then exits with [`EXEC_ENV_NO_CREDENTIALS`] and does not start the
@@ -24,6 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -51,6 +57,9 @@ struct EnvVars {
     grants: BTreeMap<String, Zeroizing<String>>,
     /// The harness credentials: always set.
     credentials: BTreeMap<String, Zeroizing<String>>,
+    /// The credential files: var to content. Written 0600; the var gets
+    /// the path and is always set.
+    files: BTreeMap<String, Zeroizing<String>>,
 }
 
 /// Ask for the vars, then exec `argv`. The answer is an exit code only
@@ -100,10 +109,27 @@ pub async fn exec(ctx: &Ctx, require_credentials: bool, argv: &[String]) -> i32 
         }
         None => EnvVars::default(),
     };
+    let paths = match write_files(&credential_dir(), &vars.files) {
+        Ok(p) => p,
+        Err(e) if require_credentials => {
+            eprintln!(
+                "terrarium exec-env: cannot write the harness credential files: {e}; \
+                 {program} does not start (exit {EXEC_ENV_NO_CREDENTIALS})"
+            );
+            return EXEC_ENV_NO_CREDENTIALS;
+        }
+        Err(e) => {
+            eprintln!("terrarium exec-env: cannot write the credential files: {e}");
+            Vec::new()
+        }
+    };
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
     for (k, v) in to_set(&vars, |k| std::env::var_os(k).is_some()) {
         cmd.env(k, v);
+    }
+    for (k, path) in &paths {
+        cmd.env(k, path);
     }
     let err = cmd.exec();
     eprintln!("terrarium exec-env: cannot start {program}: {err}");
@@ -130,7 +156,75 @@ fn parse(v: &Value) -> EnvVars {
     EnvVars {
         grants: read("vars"),
         credentials: read("credentials"),
+        files: read("credential_files"),
     }
+}
+
+/// The directory of the credential files: `TERRARIUM_CREDENTIAL_DIR` when
+/// the daemon sets it (sandbox mode `none`: a private dir of the daemon's
+/// runtime dir, removed when the harness exits), else
+/// `$HOME/.terrarium/credentials/<agent>` (the sandbox home is a tmpfs, so
+/// the files go with the sandbox).
+fn credential_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("TERRARIUM_CREDENTIAL_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(d);
+    }
+    let agent: String = std::env::var("TERRARIUM_AGENT")
+        .unwrap_or_default()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    let agent = if agent.is_empty() {
+        "agent".to_owned()
+    } else {
+        agent
+    };
+    std::env::var_os("HOME")
+        .map_or_else(std::env::temp_dir, PathBuf::from)
+        .join(".terrarium")
+        .join("credentials")
+        .join(agent)
+}
+
+/// Write each credential file to `dir` (mode 0700) with mode 0600,
+/// through a temp file and a rename. Returns the var and the path of each.
+/// An error never has the content.
+fn write_files(
+    dir: &Path,
+    files: &BTreeMap<String, Zeroizing<String>>,
+) -> std::io::Result<Vec<(String, PathBuf)>> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    std::fs::create_dir_all(dir)?;
+    // The dir and its parent: no other user lists or reads them.
+    for d in [dir, dir.parent().unwrap_or(dir)] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let mut out = Vec::new();
+    for (var, content) in files {
+        let path = dir.join(format!("{}.json", var.to_ascii_lowercase()));
+        let tmp = dir.join(format!(
+            ".{}.{}.tmp",
+            var.to_ascii_lowercase(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&tmp);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &path)?;
+        out.push((var.clone(), path));
+    }
+    Ok(out)
 }
 
 fn usable(name: &str) -> bool {
@@ -171,6 +265,41 @@ mod tests {
         let set = to_set(&vars, |k| k == "GH_TOKEN");
         assert_eq!(set, [("DB_URL", "pg://x")]);
         assert!(parse(&json!({})).grants.is_empty());
+    }
+
+    /// A credential file is written 0600 and its var points to it; the
+    /// content is in no var.
+    #[test]
+    fn credential_files_are_0600_and_the_var_has_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let v = json!({
+            "credentials": {"CLAUDE_CODE_USE_VERTEX": "1"},
+            "credential_files": {"GOOGLE_APPLICATION_CREDENTIALS": "{\"type\":\"service_account\"}",
+                                 "bad name": "x"}
+        });
+        let vars = parse(&v);
+        assert_eq!(
+            vars.files.keys().collect::<Vec<_>>(),
+            ["GOOGLE_APPLICATION_CREDENTIALS"]
+        );
+        let set = to_set(&vars, |_| false);
+        assert!(set.iter().all(|(_, v)| !v.contains("service_account")));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("creds");
+        let paths = write_files(&dir, &vars.files).unwrap();
+        assert_eq!(paths.len(), 1);
+        let (var, path) = &paths[0];
+        assert_eq!(var, "GOOGLE_APPLICATION_CREDENTIALS");
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "{\"type\":\"service_account\"}"
+        );
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(path), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+        // A second start writes the file again.
+        assert_eq!(write_files(&dir, &vars.files).unwrap()[0].1, *path);
+        assert!(write_files(&dir, &BTreeMap::new()).unwrap().is_empty());
     }
 
     /// A credential var wins over the env and over a grant of the same

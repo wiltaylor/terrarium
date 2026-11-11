@@ -10,6 +10,13 @@
 //! (`crate::pipelines::tick`) runs with it. The calendar notice tick
 //! (`crate::calendar::tick`) runs with the schedule tick.
 //!
+//! The start-of-day schedules (spec `day_start`, GitHub #29) are on the
+//! same timer. [`day_start_pass`] plans their run at each detected start:
+//! the daemon start, a resume (a gap in the timer above [`RESUME_GAP`]),
+//! the reconnect of the host agent of an `exec` target, or a change of day
+//! while the daemon is up. The stored day of the last run keeps it to one
+//! run per day, whatever the starts.
+//!
 //! The trigger engine (PLAN §12c) is in the same task. It reads the event
 //! log from `trigger_cursor`, not only the live hub: a new event on the
 //! hub only wakes it, and [`trigger_pass`] reads the rows after the
@@ -18,7 +25,7 @@
 //! event from before the start: a trigger with `catch_up = skip` ignores
 //! the events up to it, one with `once` runs them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -30,7 +37,7 @@ use tracing::{info, warn};
 use crate::api::Shared;
 use crate::error::ApiResult;
 use crate::events::{self, EventFilter, StoredEvent};
-use crate::store::schedules::{self, Decision, Run};
+use crate::store::schedules::{self, Decision, Run, Schedule, StartCause};
 use terrarium_core::schedule::CatchUp;
 
 /// The period of the timer.
@@ -60,6 +67,9 @@ pub async fn tick(state: &Shared, now: DateTime<Utc>) -> Vec<Started> {
             let due = schedules::due(t, now)?;
             for s in &due {
                 schedules::advance(t, &s.id, now)?;
+                if s.spec.is_day_start() {
+                    schedules::mark_day_started(t, s, now)?;
+                }
             }
             Ok(due)
         })
@@ -69,7 +79,12 @@ pub async fn tick(state: &Shared, now: DateTime<Utc>) -> Vec<Started> {
             .into_iter()
             .map(|s| {
                 let by = s.run_label();
-                start(state, s.id, "cron", by)
+                let trigger = if s.spec.is_day_start() {
+                    "day_start"
+                } else {
+                    "cron"
+                };
+                start(state, s.id, trigger, by)
             })
             .collect(),
         Err(e) => {
@@ -82,7 +97,9 @@ pub async fn tick(state: &Shared, now: DateTime<Utc>) -> Vec<Started> {
 /// At a daemon start: fail the runs left `running`, then, for each
 /// enabled schedule whose next run passed more than one tick ago (a run
 /// missed while the daemon was down), compute the next run from `now`.
-/// With `catch_up = once`, start one run with the trigger `catch_up`.
+/// With `catch_up = once`, start one run with the trigger `catch_up`. A
+/// `day_start` schedule has no catch-up: its planned run is dropped, and
+/// the daemon-start [`day_start_pass`] plans the run of the day again.
 pub async fn startup(state: &Shared, now: DateTime<Utc>) -> Vec<Started> {
     let before = now - chrono::Duration::from_std(TICK).unwrap_or_default();
     let missed = state
@@ -102,7 +119,7 @@ pub async fn startup(state: &Shared, now: DateTime<Utc>) -> Vec<Started> {
     match missed {
         Ok(missed) => missed
             .into_iter()
-            .filter(|s| s.catch_up == CatchUp::Once)
+            .filter(|s| s.catch_up == CatchUp::Once && !s.spec.is_day_start())
             .map(|s| {
                 let by = s.run_label();
                 start(state, s.id, "catch_up", by)
@@ -113,6 +130,165 @@ pub async fn startup(state: &Shared, now: DateTime<Utc>) -> Vec<Started> {
             Vec::new()
         }
     }
+}
+
+// ------------------------------------------------- the start of the day
+
+/// A gap between two ticks above it is a resume: the machine slept, or
+/// the daemon was stopped (`SIGSTOP`).
+pub const RESUME_GAP: Duration = Duration::from_secs(60);
+
+/// What the timer keeps between two [`day_start_pass`]es: the time of
+/// the last pass, and the `day_start` schedules that wait for the host
+/// agent of their target.
+#[derive(Debug, Default)]
+pub struct DayStartWatch {
+    last: Option<DateTime<Utc>>,
+    waiting: HashSet<String>,
+}
+
+impl DayStartWatch {
+    /// The start that a tick at `now` detects: a resume after a gap above
+    /// [`RESUME_GAP`], else a change of day.
+    pub fn tick_cause(&self, now: DateTime<Utc>) -> StartCause {
+        let gap = chrono::Duration::from_std(RESUME_GAP).unwrap_or_default();
+        match self.last {
+            Some(prev) if now - prev > gap => StartCause::Resume,
+            _ => StartCause::DayChange,
+        }
+    }
+}
+
+/// Can the action of `s` run now? An `exec` needs its target, and the
+/// host agent of a host target online. An unknown target, or a failed
+/// lookup, is not reachable. Other actions can always run.
+pub fn reachable(
+    state: &Shared,
+) -> impl Fn(&rusqlite::Connection, &Schedule) -> bool + Send + 'static {
+    let state = state.clone();
+    move |conn, s| {
+        let terrarium_core::schedule::ScheduleAction::Exec { target, .. } = &s.action else {
+            return true;
+        };
+        match crate::store::targets::find(conn, target) {
+            Ok(Some(row)) => row
+                .def
+                .host
+                .as_deref()
+                .is_none_or(|h| state.executor.hosts.is_online(h)),
+            _ => false,
+        }
+    }
+}
+
+/// One change of a [`day_start_pass`].
+enum DayStartChange {
+    /// Drop the planned run.
+    Disarm(String),
+    /// Plan the run of the day, for this start.
+    Arm(String, StartCause),
+}
+
+/// Plan the runs of the `day_start` schedules for a start at `now`. A
+/// planned run that is no longer good (see
+/// [`schedules::day_start_armed_valid`], or its target is offline) is
+/// dropped. A schedule with no planned run gets one when its day did not
+/// run yet: the cause is `cause`, or `host_reconnect` when it waited for
+/// its host agent. A tick then starts the run when it is due.
+///
+/// It reads first, and takes the write lock only when a plan changes, so
+/// a tick with nothing to do writes nothing. Returns the planned IDs.
+pub async fn day_start_pass<R>(
+    state: &Shared,
+    now: DateTime<Utc>,
+    cause: StartCause,
+    watch: &mut DayStartWatch,
+    reachable: R,
+) -> Vec<String>
+where
+    R: Fn(&rusqlite::Connection, &Schedule) -> bool + Send + 'static,
+{
+    watch.last = Some(now);
+    let mut waiting = std::mem::take(&mut watch.waiting);
+    let read = state
+        .db
+        .read(move |c| {
+            let mut changes = Vec::new();
+            let mut still = HashSet::new();
+            let batch = schedules::day_starts(c)?;
+            if batch.len() >= schedules::DAY_START_BATCH {
+                warn!(
+                    "the start-of-day pass read a full batch of {} day_start schedules: \
+                     the schedules after it are not planned",
+                    schedules::DAY_START_BATCH
+                );
+            }
+            for s in batch {
+                let up = reachable(c, &s);
+                if s.next_run_at.is_some() {
+                    if up && schedules::day_start_armed_valid(&s, now)? {
+                        continue;
+                    }
+                    changes.push(DayStartChange::Disarm(s.id.clone()));
+                }
+                if !up {
+                    still.insert(s.id.clone());
+                    continue;
+                }
+                let cause = if waiting.remove(&s.id) {
+                    StartCause::HostReconnect
+                } else {
+                    cause
+                };
+                if schedules::day_start_plan(&s.spec, s.day_start_done.as_deref(), now)?.is_some() {
+                    changes.push(DayStartChange::Arm(s.id.clone(), cause));
+                }
+            }
+            Ok((changes, still))
+        })
+        .await;
+    let changes = match read {
+        Ok((changes, still)) => {
+            watch.waiting = still;
+            changes
+        }
+        Err(e) => {
+            warn!("the start-of-day pass cannot read the schedules: {e}");
+            return Vec::new();
+        }
+    };
+    if changes.is_empty() {
+        return Vec::new();
+    }
+    let r = state
+        .db
+        .write("system", move |t| {
+            let mut armed = Vec::new();
+            for change in changes {
+                match change {
+                    DayStartChange::Disarm(id) => schedules::disarm_day_start(t, &id)?,
+                    DayStartChange::Arm(id, cause) => {
+                        // Read again under the lock: an API write may have
+                        // changed the schedule since the read.
+                        let Ok(s) = schedules::get(t, &id) else {
+                            continue;
+                        };
+                        if !s.enabled || !s.spec.is_day_start() || s.next_run_at.is_some() {
+                            continue;
+                        }
+                        if schedules::arm_day_start(t, &s, cause, now)?.is_some() {
+                            armed.push(id);
+                        }
+                    }
+                }
+            }
+            Ok(armed)
+        })
+        .await;
+    r.unwrap_or_else(|e| {
+        warn!("the start-of-day pass failed: {e}");
+        Vec::new()
+    })
 }
 
 // ------------------------------------------------------ the trigger engine
@@ -272,6 +448,15 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
     let mut rx = state.db.hub().subscribe();
     tokio::spawn(async move {
         drop(startup(&state, Utc::now()).await);
+        let mut watch = DayStartWatch::default();
+        day_start_pass(
+            &state,
+            Utc::now(),
+            StartCause::DaemonStart,
+            &mut watch,
+            reachable(&state),
+        )
+        .await;
         let boundary = trigger_startup(&state, point, Utc::now()).await;
         drain_triggers(&state, boundary).await;
         let mut next_tick = tokio::time::Instant::now() + TICK;
@@ -290,7 +475,10 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                 }
                 () = tokio::time::sleep_until(next_tick) => {
                     ticks += 1;
-                    drop(tick(&state, Utc::now()).await);
+                    let now = Utc::now();
+                    let cause = watch.tick_cause(now);
+                    day_start_pass(&state, now, cause, &mut watch, reachable(&state)).await;
+                    drop(tick(&state, now).await);
                     // The calendar notices (docs/api.md §33.5) on the same timer.
                     crate::calendar::tick(&state, Utc::now()).await;
                     next_tick = tokio::time::Instant::now() + TICK;

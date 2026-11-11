@@ -4,7 +4,6 @@
 // keep a list in the same order after a local change, and give the tabs and
 // the badge.
 
-import type { ThreadsViewId } from "./threads";
 import type { AgentEvent, InboxCounts, InboxItem, InboxKind, InboxStatus, InboxWatch, Message, Question, QuestionPriority } from "../../api/types";
 
 /** The kind tabs of the Inbox page. `all` sends no `kind`. */
@@ -14,9 +13,11 @@ export const INBOX_TABS = [
   { id: "notice", label: "Notices" },
   { id: "mail", label: "Mail to you" },
   { id: "system", label: "System" },
-  { id: "thread", label: "Threads" },
 ] as const;
-/** A kind tab. `watch` is no tab (the Asked status tab lists the waiting asks), but an older link may name it. */
+/**
+ * A kind tab. `watch` is no tab (the Asked status tab lists the waiting asks), but an older link may name it.
+ * The threads have their own screen (TER-466): `?tab=thread` redirects to `/threads` (nav.ts `inboxRedirect`).
+ */
 export type InboxTab = (typeof INBOX_TABS)[number]["id"] | "watch";
 
 /**
@@ -27,27 +28,19 @@ export type InboxTab = (typeof INBOX_TABS)[number]["id"] | "watch";
  */
 export const STATUS_TABS = [
   { id: "open", label: "Open" },
-  { id: "tracking", label: "Tracking" },
   { id: "done", label: "Done" },
   { id: "asked", label: "Asked" },
 ] as const;
 export type InboxStatusTab = (typeof STATUS_TABS)[number]["id"];
 
-/** The status tabs of a kind tab: Tracking (TER-145, the threads whose agent tracks handed-off work) only on the Threads tab. */
-export const statusTabsFor = (tab: string | undefined) => STATUS_TABS.filter((t) => t.id !== "tracking" || tab === "thread");
-
-/** The list of the Threads tab under a status tab: Open, Tracking, or Done (Asked shows no thread list). */
-export const threadsViewOf = (s: InboxStatusTab): ThreadsViewId => (s === "tracking" ? "tracking" : s === "done" ? "done" : "open");
-
-/** The status tab of `?status=`, and of an older `?tab=watch` link (the Asked kind tab of 0.1.0). Tracking only with the Threads tab. */
+/** The status tab of `?status=`, and of an older `?tab=watch` link (the Asked kind tab of 0.1.0). */
 export function statusTabOf(status: string | undefined, tab: string | undefined): InboxStatusTab {
-  if (status === "tracking" && tab === "thread") return "tracking";
   if (status === "done") return "done";
   if (status === "asked" || tab === "watch") return "asked";
   return "open";
 }
 
-export const EMPTY_COUNTS: InboxCounts = { open: 0, urgent: 0, critical: 0, question: 0, notice: 0, mail: 0, system: 0, watch: 0, thread: 0 };
+export const EMPTY_COUNTS: InboxCounts = { open: 0, urgent: 0, critical: 0, question: 0, notice: 0, mail: 0, system: 0, watch: 0, thread: 0, thread_urgent: 0, thread_critical: 0 };
 
 /** The query of a tab pair, for `GET /api/inbox`. */
 export function inboxQuery(tab: InboxTab, status: InboxStatusTab, project: string): { status: InboxStatus; kind?: InboxKind; project?: string } {
@@ -55,8 +48,6 @@ export function inboxQuery(tab: InboxTab, status: InboxStatusTab, project: strin
   // Asked: the open watches, whatever the kind tab. The daemon's `open`
   // includes them; Open filters them out (`matchesTabs`).
   if (status === "asked") return { status: "open", kind: "watch", ...p };
-  // Tracking is a tab of the thread list (`GET /api/threads`); as Inbox items these threads are not open.
-  if (status === "tracking") return { status: "done", kind: "thread", ...p };
   return { status, ...(tab === "all" ? {} : { kind: tab }), ...p };
 }
 
@@ -97,10 +88,14 @@ export function putItem(list: InboxItem[], item: InboxItem, keep: (i: InboxItem)
   return sortItems(keep(item) ? [item, ...rest] : rest);
 }
 
-/** The counts of a list of items, as `GET /api/inbox/counts` gives them for the open items. `open` leaves out the watches: they wait for an agent. */
+/**
+ * The counts of a list of items, as `GET /api/inbox/counts` gives them for the open items. `open`, `urgent`, and
+ * `critical` leave out the watches (they wait for an agent) and the threads (the Threads badge counts them, TER-466).
+ */
 export function countItems(items: InboxItem[]): InboxCounts {
   const all = items.filter((i) => i.open);
-  const open = all.filter((i) => i.kind !== "watch");
+  const open = all.filter((i) => i.kind !== "watch" && i.kind !== "thread");
+  const threads = all.filter((i) => i.kind === "thread");
   const n = (k: InboxKind) => all.filter((i) => i.kind === k).length;
   return {
     open: open.length,
@@ -111,14 +106,16 @@ export function countItems(items: InboxItem[]): InboxCounts {
     mail: n("mail"),
     system: n("system"),
     watch: n("watch"),
-    thread: n("thread"),
+    thread: threads.length,
+    thread_urgent: threads.filter((i) => i.urgent).length,
+    thread_critical: threads.filter(isCritical).length,
   };
 }
 
 /** The nav badge: no badge when nothing is open; red when one item is urgent or critical, else the info style. */
 export function badge(c: InboxCounts): { n: number; cls: string; title: string } | null {
   if (c.open <= 0) return null;
-  const parts = (["question", "notice", "mail", "system", "thread"] as const).filter((k) => (c[k] ?? 0) > 0).map((k) => `${c[k]} ${KIND_LABELS[k]}`);
+  const parts = (["question", "notice", "mail", "system"] as const).filter((k) => (c[k] ?? 0) > 0).map((k) => `${c[k]} ${KIND_LABELS[k]}`);
   return {
     n: c.open,
     cls: c.urgent > 0 || (c.critical ?? 0) > 0 ? "nav-count" : "nav-count info",

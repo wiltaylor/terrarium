@@ -84,6 +84,26 @@ services:
       # duration or off. Each compaction is one model call.
       TERRARIUM_COMPACT_ON_IDLE: ${TERRARIUM_COMPACT_ON_IDLE:-off}
       TERRARIUM_COMPACT_MAX_AGE: ${TERRARIUM_COMPACT_MAX_AGE:-off}
+      # The card reminder of an agent that sets none (docs/api.md §6.2): on or off.
+      TERRARIUM_CARD_REMINDER: ${TERRARIUM_CARD_REMINDER:-on}
+      # Days that the session archive of a removed agent stays. Empty: the
+      # trash days. 0 keeps it forever.
+      TERRARIUM_SESSION_ARCHIVE_DAYS: ${TERRARIUM_SESSION_ARCHIVE_DAYS:-}
+      # Plan accounts (PLAN §16.3) and the question guard (PLAN §8.4): on or off.
+      TERRARIUM_AUTO_SWAP: ${TERRARIUM_AUTO_SWAP:-on}
+      TERRARIUM_QUESTION_GUARD: ${TERRARIUM_QUESTION_GUARD:-on}
+      # The wait timeouts (PLAN §12d): the default and the longest.
+      TERRARIUM_WAIT_DEFAULT_TIMEOUT: ${TERRARIUM_WAIT_DEFAULT_TIMEOUT:-24h}
+      TERRARIUM_WAIT_MAX_TIMEOUT: ${TERRARIUM_WAIT_MAX_TIMEOUT:-7d}
+      # The most rules and schedules of one project.
+      TERRARIUM_MAX_RULES_PER_PROJECT: ${TERRARIUM_MAX_RULES_PER_PROJECT:-50}
+      TERRARIUM_MAX_SCHEDULES_PER_PROJECT: ${TERRARIUM_MAX_SCHEDULES_PER_PROJECT:-20}
+      # The most monitor runs and pipeline polls at once in the daemon.
+      TERRARIUM_MONITOR_PARALLEL: ${TERRARIUM_MONITOR_PARALLEL:-8}
+      TERRARIUM_PIPELINE_PARALLEL: ${TERRARIUM_PIPELINE_PARALLEL:-4}
+      # The research helpers of one card at once, and of one project in a day.
+      TERRARIUM_RESEARCH_HELPERS_PER_CARD: ${TERRARIUM_RESEARCH_HELPERS_PER_CARD:-2}
+      TERRARIUM_RESEARCH_HELPERS_PER_DAY: ${TERRARIUM_RESEARCH_HELPERS_PER_DAY:-20}
       TERRARIUM_HOST_TLS_CERT: ${TERRARIUM_HOST_TLS_CERT:-}
       TERRARIUM_HOST_TLS_KEY: ${TERRARIUM_HOST_TLS_KEY:-}
       # The harness auto-update check: daily, off, or a duration (6h). A
@@ -100,6 +120,7 @@ services:
       TERRARIUM_BACKUP_KEEP: ${TERRARIUM_BACKUP_KEEP:-4}
       TERRARIUM_BACKUP_WORK: ${TERRARIUM_BACKUP_WORK:-off}
       TERRARIUM_BACKUP_PASSPHRASE_FILE: ${TERRARIUM_BACKUP_PASSPHRASE_FILE:-}
+      TERRARIUM_BACKUP_KEY_SECRET: ${TERRARIUM_BACKUP_KEY_SECRET:-backup-key}
       # The config repo auto-sync (PLAN §8.3): off, pull, or sync, every interval.
       TERRARIUM_CONFIG_SYNC: ${TERRARIUM_CONFIG_SYNC:-off}
       TERRARIUM_CONFIG_SYNC_INTERVAL: ${TERRARIUM_CONFIG_SYNC_INTERVAL:-15m}
@@ -110,6 +131,8 @@ services:
       TERRARIUM_SELF_UPDATE: ${TERRARIUM_SELF_UPDATE:-notify}
       TERRARIUM_UPDATE_CHANNEL: ${TERRARIUM_UPDATE_CHANNEL:-stable}
       TERRARIUM_UPDATE_REPO: ${TERRARIUM_UPDATE_REPO:-wiltaylor/terrarium}
+      # The releases API URL. Empty: the GitHub releases of TERRARIUM_UPDATE_REPO.
+      TERRARIUM_UPDATE_RELEASES_URL: ${TERRARIUM_UPDATE_RELEASES_URL:-}
       # Seconds: the updater waits this long for the daemon to drain, and
       # the daemon caps a graceful agent RPC drain with it (docs/api.md §34).
       TERRARIUM_UPDATE_DRAIN_WAIT: ${TERRARIUM_UPDATE_DRAIN_WAIT:-600}
@@ -166,10 +189,12 @@ services:
     group_add: ["${TERRARIUM_DOCKER_GID:-0}"]
     environment:
       RUST_LOG: ${RUST_LOG:-info}
-      # The image check of a release: gh (the default: the build provenance
-      # attestation of the release workflow), cosign, off, or
-      # command:<shell command> (docs/api.md §34.4).
-      TERRARIUM_UPDATE_VERIFY: ${TERRARIUM_UPDATE_VERIFY:-gh}
+      # The image check of a release: cosign (the default: the release key,
+      # docker/release/cosign.pub in the image), gh (the build provenance of
+      # the GitHub workflow, the releases up to TER-613), cosign-keyless, off,
+      # or command:<shell command> (docs/api.md §34.4, docs/release.md).
+      TERRARIUM_UPDATE_VERIFY: ${TERRARIUM_UPDATE_VERIFY:-cosign}
+      TERRARIUM_UPDATE_COSIGN_KEY: ${TERRARIUM_UPDATE_COSIGN_KEY:-/opt/terrarium/release/cosign.pub}
       TERRARIUM_UPDATE_WORKFLOW: ${TERRARIUM_UPDATE_WORKFLOW:-.github/workflows/ci.yml}
       TERRARIUM_UPDATE_IMAGE: ${TERRARIUM_UPDATE_IMAGE:-ghcr.io/wiltaylor/terrarium}
       TERRARIUM_UPDATE_REPO: ${TERRARIUM_UPDATE_REPO:-wiltaylor/terrarium}

@@ -80,6 +80,9 @@ signature.workspace = true
 rand.workspace = true
 # The lock of the password file (`flock`) and the owner check (`geteuid`).
 nix.workspace = true
+# The script step of the board rules (TER-173, `rule_script`): it runs in
+# a child process of the daemon, with rlimits (`nix` feature `resource`).
+wscript.workspace = true
 # A unique temp file for the password file write.
 tempfile.workspace = true
 tar.workspace = true
@@ -98,6 +101,10 @@ chrono-tz.workspace = true
 # The TLS host listener (TERRARIUM_HOST_TLS_CERT, docs/host-protocol.md).
 rustls.workspace = true
 tokio-rustls.workspace = true
+
+# The rule script child (TER-545): a seccomp filter after its rlimits.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler.workspace = true
 
 [dev-dependencies]
 # The integration tests use the fake supervisor.

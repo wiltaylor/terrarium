@@ -930,9 +930,10 @@ export interface WaitEventData {
 
 /**
  * `question`: open → answered | retracted. `notice` (no options): open →
- * acknowledged | retracted.
+ * acknowledged | retracted. `in_thread`: the operator moved it into an Inbox
+ * thread with its agent (GitHub #30); it settles there as an open one.
  */
-export type QuestionStatus = "open" | "answered" | "acknowledged" | "retracted";
+export type QuestionStatus = "open" | "in_thread" | "answered" | "acknowledged" | "retracted";
 /** `critical`: the operator must act now; the dashboard shows a banner on every page and flashes its tab. */
 export type QuestionPriority = "normal" | "urgent" | "critical";
 /**
@@ -985,7 +986,7 @@ export interface Question {
   /** `operator` or `agent:<ulid>`. */
   retracted_by?: string | null;
   thread_id: string;
-  /** The Inbox thread that the question was asked in (docs/api.md §6.13). Absent on the others. */
+  /** The Inbox thread that the question was asked in, or moved into (docs/api.md §6.13). Absent on the others. */
   thread?: string;
   created_at: string;
   updated_at: string;
@@ -1478,6 +1479,14 @@ export interface InboxQuery {
   project?: string;
 }
 
+/** `GET /api/projects/{name}/counts` (TER-154): the counts of the project tabs. */
+export interface ProjectCounts {
+  /** The cards in the `blocked` role columns, archived ones excluded. */
+  blocked_cards: number;
+  /** The open questions, bundles, and tool run approvals of the project, also those in a thread. `null` for a reader who may not list them. */
+  questions: { open: number; urgent: number; critical: number } | null;
+}
+
 /** `GET /api/inbox/counts`: the open items. `urgent` counts the open urgent and critical items; `critical` only the critical ones. */
 export interface InboxCounts {
   open: number;
@@ -1490,8 +1499,12 @@ export interface InboxCounts {
   system: number;
   /** The open watches. Not in `open`: a watch waits for an agent. Absent on an older daemon. */
   watch?: number;
-  /** The open Inbox threads. Absent on an older daemon. */
+  /** The open Inbox threads: the Threads badge. Not in `open`, `urgent`, or `critical` (TER-466). Absent on an older daemon. */
   thread?: number;
+  /** The open threads with an urgent or critical open question. Absent on an older daemon. */
+  thread_urgent?: number;
+  /** The open threads with a critical open question. Absent on an older daemon. */
+  thread_critical?: number;
 }
 
 /** `POST /api/inbox/mail/{id}/ack`: the acknowledged message, and the replies (one for each participant). */
@@ -1577,6 +1590,8 @@ export interface Thread {
   status: ThreadStatus;
   /** When the agent moved the thread into tracking (TER-145); set while it tracks. An older daemon sends none. */
   tracking_at?: string | null;
+  /** The question or notice that the operator moved into this thread (GitHub #30). */
+  from_question?: string;
   /** The linked cards whose project the reader may read, the oldest link first (TER-146); also in a list (TER-147). An older daemon sends none. */
   cards?: ThreadCard[];
   messages?: ThreadMessage[];
@@ -2637,7 +2652,8 @@ export interface UsageMe {
 // Coded to the daemon's `api/hosts.rs` and `api/targets.rs`, which are new
 // and not yet in docs/api.md. The mock serves the same shapes.
 
-export type TargetKind = "host" | "ssh" | "docker" | "vmlab" | "vnc" | "rdp" | "desktop";
+/** `exedev`: a VM on exe.dev per holder, reached over ssh (TER-294). The create dialog does not offer it. */
+export type TargetKind = "host" | "ssh" | "docker" | "vmlab" | "vnc" | "rdp" | "desktop" | "exedev";
 /** docs/api.md §17.10: the display server of a `docker` or `desktop` target. */
 export type DisplayProtocol = "x11" | "wayland" | "auto";
 /** docs/api.md §17.2: what the last lifecycle verb saw. */
@@ -3245,9 +3261,35 @@ export interface PasswordChange {
  * zone, default `UTC`). `interval`: a duration such as `15m`, `1h`, or
  * `1h30m`. `at`: once, at an RFC 3339 time. `manual`: a project action
  * (TER-53, docs/api.md §19.10): no time and no event; a button runs it.
+ * `day_start`: one run per day in `tz`, at the first start of the day
+ * (TER-450, docs/api.md §19.3 "Start of day").
  */
-export type ScheduleSpec = { kind: "cron"; expr: string; tz: string } | { kind: "interval"; every: string } | { kind: "at"; at: string } | TriggerSpec | ManualSpec;
+export type ScheduleSpec = { kind: "cron"; expr: string; tz: string } | { kind: "interval"; every: string } | { kind: "at"; at: string } | DayStartSpec | TriggerSpec | ManualSpec;
 export type ScheduleSpecKind = ScheduleSpec["kind"];
+/**
+ * Start of day: the daemon plans one run per calendar day in `tz` at the
+ * first detected start of the day, plus `delay`, and not before
+ * `not_before` (`HH:MM`). A start after `not_after` plans no run that day.
+ * Empty or absent `weekdays`: every day.
+ */
+export interface DayStartSpec {
+  kind: "day_start";
+  /** Default `UTC`. */
+  tz?: string;
+  not_before?: string;
+  not_after?: string;
+  /** A duration as for `interval`, at most `12h`. */
+  delay?: string;
+  /** `mon` to `sun` (the daemon also takes the full names). */
+  weekdays?: string[];
+}
+/** What the daemon saw as the start of the day. */
+export type DayStartCause = "daemon_start" | "resume" | "host_reconnect" | "day_change";
+/** A detected start: `day_start_last` of a schedule and `day_start` of a run. */
+export interface DayStartMark {
+  cause: DayStartCause | string;
+  at: string;
+}
 /** The spec of a project action. */
 export interface ManualSpec {
   kind: "manual";
@@ -3449,8 +3491,12 @@ export interface Schedule {
   owner?: ItemOwner;
   /** The actor the runs of an actor-owned schedule act as; the daemon checks its rights at each run. */
   run_as: string;
-  /** Null when disabled, when a one-shot `at` schedule has run, and always for a trigger and a project action. */
+  /** Null when disabled, when a one-shot `at` schedule has run, always for a trigger and a project action, and for a `day_start` schedule while no start planned its run. */
   next_run_at: string | null;
+  /** A `day_start` schedule: the local day (`YYYY-MM-DD`, in its `tz`) of its last run. Absent before the first run. */
+  day_start_done?: string;
+  /** A `day_start` schedule: the last detected start that planned a run. Absent before the first plan. */
+  day_start_last?: DayStartMark;
   last_run: ScheduleLastRun | null;
   runs_count: number;
   /** `api`, `file`, or `fleet:<name>`. A `file` schedule changes only in its file (`409 file_managed`). */
@@ -3487,8 +3533,8 @@ export interface ScheduleQuery {
   kind?: "time" | "trigger" | "action";
 }
 
-/** `cron` is the timer (each time spec); `event` is a trigger run. */
-export type RunTrigger = "cron" | "manual" | "catch_up" | "event";
+/** `cron` is the timer (each time spec); `event` is a trigger run; `day_start` the planned run of a `day_start` schedule. */
+export type RunTrigger = "cron" | "manual" | "catch_up" | "event" | "day_start";
 
 /** The event that started a trigger run, while the log has it. */
 export interface RunEvent {
@@ -3521,6 +3567,8 @@ export interface ScheduleRun {
   event_seq?: number | null;
   /** That event, while the log has it. Absent for the other runs. */
   event?: RunEvent;
+  /** A `day_start` run: the detected start that planned it. Absent for the other runs. */
+  day_start?: DayStartMark;
 }
 
 export type ScheduleChange = "created" | "updated" | "deleted" | "enabled" | "disabled" | "run_started" | "run_finished";
@@ -4128,7 +4176,7 @@ export interface TestRunSummary {
   created_by: string;
   created_by_name: string;
   created_at: string;
-  /** The dashboard page: `/p/<project>/board/tests/<id>`. */
+  /** The dashboard page: `/p/<project>/tests/<id>`. Old links to `/p/<project>/board/tests/<id>` redirect there. */
   url: string;
 }
 

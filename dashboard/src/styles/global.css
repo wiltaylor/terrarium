@@ -783,6 +783,10 @@ a.project-name {
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
+/* The count of a project tab (TER-154). The words are in a .sr-only span. */
+.project-tabs .nav-count {
+  margin-left: 6px;
+}
 /* A phone: tabs of 40px or more, for a finger. */
 @media (max-width: 760px) {
   .tabs a,
@@ -879,6 +883,54 @@ a.project-name {
   font-size: 0.8rem;
   color: #fff;
   flex: none;
+}
+/* TER-642: a bundled vendor mark (components/providerLogos.ts) on a quiet plate. */
+.provider-logo.small {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  vertical-align: -4px;
+  display: inline-grid;
+}
+.provider-logo.mark,
+.provider-logo.glyph {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 3px;
+  box-sizing: border-box;
+}
+.provider-logo.small.mark,
+.provider-logo.small.glyph {
+  padding: 1px;
+}
+.provider-logo.mark.plate {
+  background: #fff;
+}
+.provider-logo img,
+.provider-logo svg {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.provider-logo .provider-mark-dark {
+  display: none;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .provider-logo .provider-mark-light:has(+ .provider-mark-dark) {
+    display: none;
+  }
+  :root:not([data-theme="light"]) .provider-logo .provider-mark-dark {
+    display: block;
+  }
+}
+:root[data-theme="dark"] .provider-logo .provider-mark-light:has(+ .provider-mark-dark) {
+  display: none;
+}
+:root[data-theme="dark"] .provider-logo .provider-mark-dark {
+  display: block;
 }
 .meter {
   display: grid;
@@ -1051,6 +1103,16 @@ button.link-button {
   overflow: hidden;
   text-overflow: ellipsis;
   vertical-align: bottom;
+}
+/* The project line of the agent page (TER-153): a link back to the Agents tab, then the project tabs. */
+.agent-project {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+.agent-project > a {
+  justify-self: start;
+  overflow-wrap: anywhere;
 }
 /* The template chooser of "New agent": a card button for each template, and a dashed Custom card. */
 .tpl-choices {
@@ -2075,16 +2137,77 @@ a.chip.card-link:hover {
   border-color: var(--danger);
   border-width: 2px;
 }
-/* Inbox threads (docs/api.md §6.13): a row that waits on the operator, and the chat page. */
-.thread-row.waits {
-  border-left: 3px solid var(--warn);
+/* The Threads screen (TER-466): a forum table. A thread is a tbody: its row, and the close proposal under it. */
+.threads-table th.num,
+.threads-table td.num {
+  text-align: right;
+  white-space: nowrap;
 }
-/* The groups of the Open thread list: waiting on you, in progress (GitHub #28). */
-.thread-group {
-  margin: 0;
-  font-size: 0.85rem;
-  font-weight: 600;
+.threads-table .threads-icon {
+  width: 28px;
+  padding-right: 0;
+}
+.thread-tr.waits > tr:first-child > td:first-child {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+.thread-tr > tr.thread-proposal > td {
+  border-bottom: 1px solid var(--border);
+}
+.thread-tr > tr:has(+ tr.thread-proposal) > td {
+  border-bottom: none;
+}
+.thread-icon {
+  display: inline-flex;
   color: var(--muted);
+}
+.thread-icon.you {
+  color: var(--warn);
+}
+.thread-icon.agent {
+  color: var(--info);
+}
+.thread-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+/* A phone: the columns fold under the topic, each with its label. */
+@media (max-width: 760px) {
+  .threads-table thead {
+    display: none;
+  }
+  .threads-table tr {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr);
+    column-gap: 6px;
+    border-bottom: 1px solid var(--border);
+    padding: 6px 0;
+  }
+  .threads-table td {
+    border-bottom: none;
+    padding: 2px 4px;
+  }
+  .threads-table td.threads-icon {
+    grid-row: span 5;
+  }
+  .threads-table td[data-label] {
+    grid-column: 2;
+    text-align: left;
+  }
+  .threads-table td[data-label]::before {
+    content: attr(data-label) ": ";
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .threads-table td[data-label]:empty {
+    display: none;
+  }
+  .thread-tr > tr.thread-proposal > td:first-child {
+    display: none;
+  }
+  .thread-tr > tr.thread-proposal > td {
+    grid-column: 1 / -1;
+  }
 }
 .thread-msg {
   max-width: 85%;

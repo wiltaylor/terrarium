@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +44,108 @@ pub struct ExecPlan {
     /// limits, [`crate::limits::wrap`]). A kill of the session kills the
     /// scope too.
     pub scope: Option<String>,
+    /// A private file that the program reads (a `docker --env-file`). The
+    /// session holds it until the process exits, then it is removed.
+    pub private_file: Option<PrivateFile>,
+}
+
+/// A file with mode 0600 in a private dir (mode 0700), removed when the
+/// last clone is dropped. It carries values that must not show in `ps` or
+/// reach the env of the program itself. A crash of the host agent can leave
+/// one behind: [`remove_private_files`] at the next start deletes it.
+#[derive(Debug, Clone)]
+pub struct PrivateFile(Arc<tempfile::TempPath>);
+
+impl PrivateFile {
+    /// Write `data` to a new file `<prefix><random>` in `dir`. The dir is
+    /// checked with [`private_dir`] first.
+    pub fn new(dir: &Path, prefix: &str, data: &[u8]) -> std::io::Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        private_dir(dir)?;
+        let mut f = tempfile::Builder::new()
+            .prefix(prefix)
+            .permissions(std::fs::Permissions::from_mode(0o600))
+            .tempfile_in(dir)?;
+        f.write_all(data)?;
+        f.flush()?;
+        Ok(Self(Arc::new(f.into_temp_path())))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl PartialEq for PrivateFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.path() == other.path()
+    }
+}
+
+impl Eq for PrivateFile {}
+
+/// Create `dir` (and its parents, each with mode 0700) and make sure that
+/// it is private: `dir` must be a real dir (not a symlink) of this user, and
+/// its parent a real dir of this user or a sticky dir of root (like `/tmp`,
+/// where no other user can rename or delete `dir`). `dir` gets mode 0700.
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let euid = nix::unistd::geteuid().as_raw();
+    for (d, is_parent) in [(Some(dir), false), (dir.parent(), true)] {
+        let Some(d) = d else { continue };
+        let m = std::fs::symlink_metadata(d)?;
+        if !owned_ok(m.file_type().is_dir(), m.uid(), m.mode(), euid, is_parent) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is not a dir of this user (uid {euid}); refusing it for private files",
+                    d.display()
+                ),
+            ));
+        }
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// The ownership rule of [`private_dir`] for one dir: a real dir of `euid`,
+/// or for the parent also a sticky (`S_ISVTX`) dir of root.
+fn owned_ok(is_dir: bool, uid: u32, mode: u32, euid: u32, is_parent: bool) -> bool {
+    is_dir && (uid == euid || (is_parent && uid == 0 && mode & 0o1000 != 0))
+}
+
+/// Delete the files in `dir` whose name starts with `prefix`: the private
+/// files that a crashed host agent left behind. Run it at the start, before
+/// any session. It does not recurse and follows no symlink. A file that it
+/// cannot delete is logged, and it goes on. Returns how many it deleted. A
+/// missing dir is no error. Two host agents on one data dir would delete
+/// each other's live files: run one per user.
+pub fn remove_private_files(dir: &Path, prefix: &str) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut n = 0;
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(prefix)
+            || !entry.file_type().is_ok_and(|t| t.is_file())
+        {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => n += 1,
+            Err(e) => tracing::warn!(
+                path = %entry.path().display(),
+                error = %e,
+                "cannot delete a leftover private file"
+            ),
+        }
+    }
+    Ok(n)
 }
 
 /// Input for a running session.
@@ -84,10 +186,44 @@ pub enum SpawnError {
     },
     #[error("cannot start {program} in a pty: {message}")]
     Pty { program: String, message: String },
+    /// The working directory is missing or unusable. A spawn reports a
+    /// failed `chdir` with the program name (ENOENT reads as a missing
+    /// binary), so it is checked first (TER-639).
+    #[error("working directory {}", cwd_problem(.path, .source))]
+    Cwd {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn cwd_problem(path: &Path, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => format!("{} does not exist", path.display()),
+        std::io::ErrorKind::NotADirectory => format!("{} is not a directory", path.display()),
+        _ => format!("{}: {e}", path.display()),
+    }
+}
+
+/// The working directory of `plan`, if it has one, is a directory.
+fn check_cwd(plan: &ExecPlan) -> Result<(), SpawnError> {
+    let Some(path) = &plan.cwd else {
+        return Ok(());
+    };
+    let err = |source| SpawnError::Cwd {
+        path: path.clone(),
+        source,
+    };
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => Ok(()),
+        Ok(_) => Err(err(std::io::Error::from(std::io::ErrorKind::NotADirectory))),
+        Err(e) => Err(err(e)),
+    }
 }
 
 /// Start the plan. Output goes to `outbox`.
 pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
+    check_cwd(&plan)?;
     if plan.pty.is_some() {
         spawn_pty(plan, outbox)
     } else {
@@ -135,6 +271,27 @@ fn kill_all(pid: Option<u32>, scope: Option<&str>) {
     signal_group(pid, Signal::SIGKILL);
     if let Some(scope) = scope {
         crate::limits::kill_scope(scope);
+    }
+}
+
+/// Kills the process group of a session when the session task drops
+/// before the process exits (TER-526): a runtime that shuts down, as in a
+/// host agent that stops or a test that ends early, leaves no child of
+/// the session. `kill_on_drop` alone kills only the group leader, and the
+/// children of a recipe kept running with its open fds. The guard sends no
+/// scope kill: that needs a runtime, and a drop can run without one.
+struct GroupGuard(Option<u32>);
+
+impl GroupGuard {
+    /// The process exited: its group id may be reused, so do not kill it.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        signal_group(self.0, Signal::SIGKILL);
     }
 }
 
@@ -204,7 +361,11 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
 
     let timeout = plan.timeout;
     let scope = plan.scope.clone();
+    let private_file = plan.private_file;
+    let mut group = GroupGuard(pid);
     let done = tokio::spawn(async move {
+        // Removed when the task ends, after the process has exited.
+        let _private_file = private_file;
         let scope = scope.as_deref();
         let mut stdin_tx = Some(stdin_tx);
         let mut forced: Option<ExitReason> = None;
@@ -245,6 +406,7 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
                 }
             }
         };
+        group.disarm();
         drop(stdin_tx);
         stdin_task.abort();
         drain(pumps).await;
@@ -405,7 +567,11 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
 
     let timeout = plan.timeout;
     let scope = plan.scope.clone();
+    let private_file = plan.private_file;
+    let mut group = GroupGuard(pid);
     let done = tokio::spawn(async move {
+        // Removed when the task ends, after the process has exited.
+        let _private_file = private_file;
         let scope = scope.as_deref();
         let mut forced: Option<ExitReason> = None;
         let timer = deadline(timeout);
@@ -446,6 +612,7 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
                 }
             }
         };
+        group.disarm();
         drop(stdin_tx);
         writer_task.abort();
         let mut reader_task = reader_task;
@@ -578,6 +745,34 @@ mod tests {
         assert_eq!(err, b"err\n");
     }
 
+    /// TER-639: a missing working directory is named, not the program
+    /// (a failed chdir reads as "cannot start <program>: No such file").
+    #[tokio::test]
+    async fn a_missing_working_directory_is_named_not_the_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone");
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        for pty in [None, Some(PtySize::default())] {
+            let ob = Arc::new(Outbox::new(1, 1 << 20));
+            let mut p = plan("true", &[]);
+            p.pty = pty;
+            p.cwd = Some(missing.clone());
+            let e = spawn(p.clone(), ob.clone()).err().unwrap().to_string();
+            assert_eq!(
+                e,
+                format!("working directory {} does not exist", missing.display())
+            );
+            assert!(!e.contains("cannot start"), "{e}");
+            p.cwd = Some(file.clone());
+            let e = spawn(p, ob).err().unwrap().to_string();
+            assert_eq!(
+                e,
+                format!("working directory {} is not a directory", file.display())
+            );
+        }
+    }
+
     #[tokio::test]
     async fn stdin_reaches_the_process() {
         let ob = Arc::new(Outbox::new(1, 1 << 20));
@@ -603,6 +798,108 @@ mod tests {
         assert_eq!(info.reason, ExitReason::Timeout);
         assert_eq!(info.signal, Some(9));
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// TER-526: a runtime that shuts down while a session runs (a test
+    /// that ends early) kills the whole process group, not only the
+    /// leader: no background child of the session stays.
+    #[test]
+    fn a_dropped_session_kills_its_process_group() {
+        let pidfile = std::env::temp_dir().join(format!(
+            "terrarium-host-ter526-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&pidfile);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let script = format!("sleep 300 & echo $! > '{}'; wait", pidfile.display());
+        let (run, child) = rt.block_on(async {
+            let run = spawn(
+                plan("sh", &["-c", &script]),
+                Arc::new(Outbox::new(1, 1 << 20)),
+            )
+            .unwrap();
+            let started = std::time::Instant::now();
+            loop {
+                let text = std::fs::read_to_string(&pidfile).unwrap_or_default();
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    break (run, pid);
+                }
+                assert!(started.elapsed() < Duration::from_secs(30), "no child pid");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        drop(rt);
+        let _ = std::fs::remove_file(&pidfile);
+        // TER-590: under load a killed child can take seconds to reach
+        // the zombie state, so a SIGKILL that landed counts as killed.
+        let killed = || child_killed(child);
+        let started = std::time::Instant::now();
+        while !killed() && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left = (!killed()).then(|| child_state(child));
+        if left.is_some() {
+            let _ = nix::sys::signal::kill(Pid::from_raw(child), Signal::SIGKILL);
+        }
+        drop(run);
+        if let Some(state) = left {
+            panic!("the background child {child} outlived the session: {state}");
+        }
+    }
+
+    /// The child is gone, a zombie, exiting, or has a SIGKILL pending.
+    fn child_killed(pid: i32) -> bool {
+        if nix::sys::signal::kill(Pid::from_raw(pid), None).is_err() {
+            return true;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return true;
+        };
+        // After the comm: state, ppid, pgrp, session, tty_nr, tpgid, flags.
+        let fields: Vec<&str> = stat
+            .rsplit_once(')')
+            .map(|(_, r)| r.split_whitespace().collect())
+            .unwrap_or_default();
+        const PF_EXITING: u64 = 0x4;
+        let state_dead = fields
+            .first()
+            .is_some_and(|s| matches!(*s, "Z" | "X" | "x"));
+        let exiting = fields
+            .get(6)
+            .and_then(|f| f.parse::<u64>().ok())
+            .is_some_and(|f| f & PF_EXITING != 0);
+        state_dead || exiting || sigkill_pending(pid)
+    }
+
+    /// SIGKILL is in the thread or the shared pending set of the process.
+    fn sigkill_pending(pid: i32) -> bool {
+        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            return false;
+        };
+        const SIGKILL_BIT: u64 = 1 << (9 - 1);
+        status.lines().any(|line| {
+            ["SigPnd:", "ShdPnd:"].iter().any(|key| {
+                line.strip_prefix(key)
+                    .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
+                    .is_some_and(|mask| mask & SIGKILL_BIT != 0)
+            })
+        })
+    }
+
+    /// The stat line and pending signals of a process, for a failure.
+    fn child_state(pid: i32) -> String {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        let pending: Vec<&str> = status
+            .lines()
+            .filter(|l| l.starts_with("SigPnd:") || l.starts_with("ShdPnd:"))
+            .collect();
+        let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan")).unwrap_or_default();
+        format!("stat={} {} wchan={wchan}", stat.trim(), pending.join(" "))
     }
 
     #[tokio::test]
@@ -650,6 +947,41 @@ mod tests {
         assert_eq!(info.code, Some(4));
         let out = String::from_utf8_lossy(&collect(&mut rx, StreamTag::Stdout)).to_string();
         assert!(out.contains("33 101"), "pty output: {out:?}");
+    }
+
+    #[test]
+    fn a_sticky_root_parent_is_accepted_and_other_owners_are_refused() {
+        use super::owned_ok;
+        // The dir itself: only a real dir of this user.
+        assert!(owned_ok(true, 1001, 0o700, 1001, false));
+        assert!(!owned_ok(true, 0, 0o1777, 1001, false));
+        assert!(!owned_ok(false, 1001, 0o700, 1001, false));
+        // The parent: this user, or a sticky dir of root (/tmp).
+        assert!(owned_ok(true, 1001, 0o755, 1001, true));
+        assert!(owned_ok(true, 0, 0o1777, 1001, true));
+        assert!(!owned_ok(true, 0, 0o777, 1001, true));
+        assert!(!owned_ok(true, 1002, 0o1777, 1001, true));
+        assert!(!owned_ok(false, 0, 0o1777, 1001, true));
+    }
+
+    #[test]
+    fn a_private_dir_in_the_temp_dir_is_accepted() {
+        // /tmp (root, sticky) as the parent, as a user other than root.
+        let tmp = std::path::Path::new("/tmp");
+        let sticky_root = std::fs::symlink_metadata(tmp).is_ok_and(|m| {
+            use std::os::unix::fs::MetadataExt;
+            m.is_dir() && m.uid() == 0 && m.mode() & 0o1000 != 0
+        });
+        if !sticky_root {
+            return;
+        }
+        let dir = tmp.join(format!(
+            "terrarium-host-test-private-{}",
+            std::process::id()
+        ));
+        let res = super::private_dir(&dir);
+        let _ = std::fs::remove_dir(&dir);
+        res.unwrap();
     }
 
     #[test]

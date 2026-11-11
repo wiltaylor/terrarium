@@ -1,7 +1,7 @@
 import { A, useNavigate } from "@solidjs/router";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { isLocalOnly, Sparkline, UsageTile } from "../../components/UsageTile";
-import { Empty, ErrorBanner, Modal, PageHead, Tabs, useNow } from "../../components/ui";
+import { Empty, ErrorBanner, Modal, PageHead, ProviderLogo, Tabs, useNow } from "../../components/ui";
 import type { Subscription, UsageGroup, UsagePoint } from "../../api/types";
 import { ago, compact, subscriptionTitle } from "../../lib/format";
 import { api, events, projects, subscriptions } from "../../stores";
@@ -195,7 +195,9 @@ function UsageDetail(props: { sub: Subscription; onClose: () => void }) {
       </section>
       <dl class="kv">
         <dt>Provider</dt>
-        <dd>{props.sub.provider}</dd>
+        <dd>
+          <ProviderLogo provider={props.sub.provider} small /> {props.sub.provider}
+        </dd>
         <dt>Probe</dt>
         <dd>
           {props.sub.probe ?? "none"} · {props.sub.probe_status}

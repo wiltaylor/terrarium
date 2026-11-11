@@ -196,7 +196,7 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
             let body = push_body(path, name.as_deref(), links.next())?;
             let mut a = ctx
                 .api
-                .post(&format!("{}/artifacts", project_path(&p)), Some(body))
+                .post_upload(&format!("{}/artifacts", project_path(&p)), body)
                 .await?;
             let key = a["key"]
                 .as_str()

@@ -456,6 +456,163 @@ async fn research_card_starts_its_clock_and_signals_without_working_entry() {
     assert_eq!(notices(&td, &lead).await, 1);
 }
 
+/// A local remote with one commit on `card`, a repo on project `p`, the
+/// card on that repo (`branch` NULL: the lowercase card id), and 100 seconds
+/// of working time. Returns the remote and a git runner on it.
+async fn branch_watch(
+    td: &TestDaemon,
+    lead: &str,
+    worker: &str,
+    card: &str,
+    branch: Option<&str>,
+    threshold: u64,
+) -> (tempfile::TempDir, impl Fn(&[&str]) + use<>) {
+    let remote = tempfile::tempdir().unwrap();
+    let path = remote.path().to_owned();
+    let git = move |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-b", "card"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    git(&["commit", "--allow-empty", "-m", "base"]);
+    td.post(
+        "/api/projects/p/repos",
+        json!({"name": "app", "url": remote.path().to_str().unwrap()}),
+    )
+    .await
+    .ok();
+    td.put_as(
+        lead,
+        "/api/projects/p/trouble",
+        json!({"no_progress_seconds": threshold}),
+    )
+    .await
+    .ok();
+    let (c, w, b) = (
+        card.to_owned(),
+        worker.to_owned(),
+        branch.map(str::to_owned),
+    );
+    state(td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE cards SET repo = 'app', branch = ?2 WHERE id = ?1",
+                rusqlite::params![c, b],
+            )?;
+            let base = chrono::Utc::now() - chrono::Duration::seconds(100);
+            t.execute(
+                "UPDATE events SET at = ?2 WHERE card = ?1",
+                rusqlite::params![c, base.to_rfc3339()],
+            )?;
+            let e = t.emit(
+                terrariumd::events::EventDraft::new(
+                    "status",
+                    "working",
+                    json!({"status": "working"}),
+                )
+                .project("p")
+                .agent(&w, "worker"),
+            )?;
+            t.execute(
+                "UPDATE events SET at = ?2 WHERE seq = ?1",
+                rusqlite::params![e.seq, base.to_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    (remote, git)
+}
+
+async fn sql(td: &TestDaemon, statement: &'static str, card: &str) {
+    let card = card.to_owned();
+    state(td)
+        .db
+        .write("system", move |t| {
+            t.execute(statement, [card])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn remote_head_change_resolves_no_progress_after_a_lead_only_notice() {
+    let (td, lead, worker, card) = setup().await;
+    // The card has worked 100 s. A threshold of 60 s keeps the last read
+    // fresh under load, which a 1 s threshold and a sleep did not.
+    let (_remote, git) = branch_watch(&td, &lead, &worker, &card, Some("card"), 60).await;
+    terrariumd::trouble::observe_remote_heads(&state(&td)).await;
+    assert_signals(&td, &card, json!([])).await;
+    // The head was first seen at the start of the card, not after 100 s.
+    sql(
+        &td,
+        "UPDATE card_branch_heads SET working_seconds = 0 WHERE card = ?1",
+        &card,
+    )
+    .await;
+    // The same head only refreshes the last successful read: it keeps the
+    // interval from the first sighting.
+    terrariumd::trouble::observe_remote_heads(&state(&td)).await;
+    assert_signals(&td, &card, json!(["no_progress"])).await;
+    assert_eq!(notices(&td, &lead).await, 1);
+    assert_eq!(notices(&td, &worker).await, 0);
+    assert_eq!(
+        td.get("/api/projects/p/board?view=summary").await.ok()["cards"][0]["trouble"],
+        json!(["no_progress"])
+    );
+    // A direct remote commit, with no repo.push audit row, is new progress.
+    git(&["commit", "--allow-empty", "-m", "direct push"]);
+    terrariumd::trouble::observe_remote_heads(&state(&td)).await;
+    assert_signals(&td, &card, json!([])).await;
+    terrariumd::trouble::pass(&state(&td)).await;
+    assert_eq!(notices(&td, &lead).await, 1);
+}
+
+#[tokio::test]
+async fn unpushed_branch_counts_from_the_claim_and_stale_or_old_rows_do_not_signal() {
+    let (td, lead, worker, card) = setup().await;
+    // No branch on the card: the watch reads the lowercase card id, which the
+    // remote does not have yet.
+    let (_remote, git) = branch_watch(&td, &lead, &worker, &card, None, 60).await;
+    terrariumd::trouble::observe_remote_heads(&state(&td)).await;
+    assert_signals(&td, &card, json!(["no_progress"])).await;
+    assert_eq!(notices(&td, &lead).await, 1);
+    assert_eq!(notices(&td, &worker).await, 0);
+    // An observation older than the threshold is no evidence.
+    sql(
+        &td,
+        "UPDATE card_branch_heads SET checked_at = '2000-01-01T00:00:00Z' WHERE card = ?1",
+        &card,
+    )
+    .await;
+    assert_signals(&td, &card, json!([])).await;
+    terrariumd::trouble::observe_remote_heads(&state(&td)).await;
+    assert_signals(&td, &card, json!(["no_progress"])).await;
+    // A row for another branch of the card is ignored until it is read again.
+    sql(&td, "UPDATE cards SET branch = 'card' WHERE id = ?1", &card).await;
+    assert_signals(&td, &card, json!([])).await;
+    sql(&td, "UPDATE cards SET branch = NULL WHERE id = ?1", &card).await;
+    assert_signals(&td, &card, json!(["no_progress"])).await;
+    // The first push of the card branch is progress.
+    git(&["branch", &card.to_lowercase()]);
+    terrariumd::trouble::observe_remote_heads(&state(&td)).await;
+    assert_signals(&td, &card, json!([])).await;
+    assert_eq!(notices(&td, &lead).await, 1);
+}
+
 #[tokio::test]
 async fn passed_eta_has_one_worker_reminder_and_only_a_lead_trouble_mail() {
     use std::time::{Duration, Instant};
@@ -532,4 +689,92 @@ async fn passed_eta_still_mails_worker_when_reminders_are_disabled() {
     assert_signals(&td, &card, json!(["eta_overdue"])).await;
     assert_eq!(notices(&td, &worker).await, 1);
     assert_eq!(notices(&td, &lead).await, 1);
+}
+
+/// TER-608: an accepted card labelled with a version that `group built`
+/// acknowledged (either label form) gets `shipped_accepted`, with one lead
+/// notice and none to its assigned worker. It clears when the label goes or
+/// the card moves on. A vnext card and an unbuilt version do not signal.
+#[tokio::test]
+async fn shipped_accepted_marks_accepted_cards_of_a_built_version() {
+    use terrariumd::actor::Actor;
+    let (td, lead, worker, _card) = setup().await;
+    let new =
+        |title: &str, label: &str| json!({"title": title, "column": "accepted", "labels": [label]});
+    let member = id(td
+        .post("/api/projects/p/cards", new("member", "version:vnext"))
+        .await
+        .ok());
+    let key = state(&td)
+        .db
+        .write("system", |t| {
+            terrariumd::store::version_groups::cut(t, &Actor::Operator, "p", "test", 1, 240)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    td.post(
+        &format!("/api/projects/p/version-groups/{key}/built"),
+        json!({"version": "v0.36.0"}),
+    )
+    .await
+    .ok();
+    assert_eq!(
+        td.get(&format!("/api/cards/{member}")).await.ok()["column"],
+        "done"
+    );
+    // Cards that reach accepted after the build, so the sweep missed them.
+    let shipped = id(td
+        .post("/api/projects/p/cards", new("shipped", "version:0.36.0"))
+        .await
+        .ok());
+    let v_form = id(td
+        .post("/api/projects/p/cards", new("v form", "version:v0.36.0"))
+        .await
+        .ok());
+    let unbuilt = id(td
+        .post("/api/projects/p/cards", new("unbuilt", "version:0.37.0"))
+        .await
+        .ok());
+    let vnext = id(td
+        .post("/api/projects/p/cards", new("open", "version:vnext"))
+        .await
+        .ok());
+    let (c, w) = (shipped.clone(), worker.clone());
+    state(&td)
+        .db
+        .write("system", move |t| {
+            terrariumd::store::board::assign_card(t, &Actor::Operator, &c, Some(&w))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (lead_before, worker_before) = (notices(&td, &lead).await, notices(&td, &worker).await);
+    assert_signals(&td, &shipped, json!(["shipped_accepted"])).await;
+    assert_eq!(
+        usage(&td, &v_form).await["signals"],
+        json!(["shipped_accepted"])
+    );
+    assert_eq!(usage(&td, &unbuilt).await["signals"], json!([]));
+    assert_eq!(usage(&td, &vnext).await["signals"], json!([]));
+    assert_eq!(notices(&td, &lead).await, lead_before + 2);
+    assert_eq!(notices(&td, &worker).await, worker_before);
+
+    let c = shipped.clone();
+    state(&td)
+        .db
+        .write("system", move |t| {
+            t.execute("UPDATE cards SET labels = '[]' WHERE id = ?1", [c])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_signals(&td, &shipped, json!([])).await;
+    td.post(
+        &format!("/api/cards/{v_form}/move"),
+        json!({"column": "done"}),
+    )
+    .await
+    .ok();
+    assert_signals(&td, &v_form, json!([])).await;
 }

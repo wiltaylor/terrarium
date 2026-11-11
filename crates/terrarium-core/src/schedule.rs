@@ -53,6 +53,30 @@ pub enum ScheduleSpec {
     /// person presses its button (`POST /api/schedules/{id}/run`). An empty
     /// struct, so an unknown field is an error, as for the other kinds.
     Manual {},
+    /// A start-of-day schedule (GitHub #29): one run per calendar day in
+    /// `tz`, at the first start of the day. A start is a daemon start, a
+    /// resume from sleep (a gap in the timer), the reconnect of the host
+    /// agent of an `exec` target, or the change of day while the daemon is
+    /// up. A day that ran does not run again.
+    #[serde(rename = "day_start")]
+    DayStart {
+        /// `UTC` or an IANA zone: the zone of the day, the window, and
+        /// the weekdays.
+        #[serde(default = "utc")]
+        tz: String,
+        /// `HH:MM`: a start before it runs at this time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_before: Option<String>,
+        /// `HH:MM`: a start after it does not run that day.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_after: Option<String>,
+        /// A duration after the start, as `5m`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delay: Option<String>,
+        /// `mon` to `sun`. Empty: every day.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        weekdays: Vec<String>,
+    },
 }
 
 /// The default `max_per_hour` of a trigger.
@@ -67,9 +91,10 @@ fn utc() -> String {
 }
 
 impl ScheduleSpec {
-    /// `cron`, `interval`, `at`, `on`, or `manual`.
+    /// `cron`, `interval`, `at`, `on`, `manual`, or `day_start`.
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::DayStart { .. } => "day_start",
             Self::Cron { .. } => "cron",
             Self::Interval { .. } => "interval",
             Self::At { .. } => "at",
@@ -81,6 +106,11 @@ impl ScheduleSpec {
     /// Is it a project action (`manual`): run only on demand?
     pub fn is_manual(&self) -> bool {
         matches!(self, Self::Manual {})
+    }
+
+    /// Is it a start-of-day schedule (`day_start`)?
+    pub fn is_day_start(&self) -> bool {
+        matches!(self, Self::DayStart { .. })
     }
 
     /// Is it a trigger (`on`)?
@@ -521,6 +551,48 @@ action = { type = "exec", target = "box", cmd = ["./deploy.sh"] }
         assert!(
             serde_json::from_value::<ScheduleSpec>(
                 serde_json::json!({"kind": "manual", "at": "x"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_day_start_spec_in_json_and_toml() {
+        let s: ScheduleSpec = serde_json::from_value(serde_json::json!(
+            {"kind": "day_start", "not_before": "07:30", "weekdays": ["mon", "fri"]}
+        ))
+        .unwrap();
+        assert!(s.is_day_start() && !s.is_trigger() && !s.is_manual());
+        assert_eq!(s.kind(), "day_start");
+        assert_eq!(
+            s,
+            ScheduleSpec::DayStart {
+                tz: "UTC".into(),
+                not_before: Some("07:30".into()),
+                not_after: None,
+                delay: None,
+                weekdays: vec!["mon".into(), "fri".into()],
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::json!({"kind": "day_start", "tz": "UTC", "not_before": "07:30",
+                               "weekdays": ["mon", "fri"]})
+        );
+        let d: ScheduleDef = toml::from_str(
+            r#"
+name = "morning"
+spec = { kind = "day_start", tz = "Australia/Brisbane", delay = "5m" }
+action = { type = "exec", target = "laptop", cmd = ["./sync.sh"] }
+"#,
+        )
+        .unwrap();
+        assert!(d.spec.is_day_start());
+        let back: ScheduleDef = toml::from_str(&toml::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back, d);
+        assert!(
+            serde_json::from_value::<ScheduleSpec>(
+                serde_json::json!({"kind": "day_start", "after": "other"})
             )
             .is_err()
         );

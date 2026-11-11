@@ -750,3 +750,389 @@ async fn artifact_origin_and_cors() {
     let r = oneshot(dash(), &path, &[("host", "t.lan:8081"), ("origin", "null")]).await;
     assert!(r.headers.get("access-control-allow-origin").is_none());
 }
+
+fn blob_names(td: &TestDaemon) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(td.state.join("artifacts"))
+        .map(|rd| {
+            rd.map(|e| e.unwrap().file_name().into_string().unwrap())
+                .filter(|n| n.len() >= 64 && n != "url.key")
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// TER-554: an upload refused for its name, the quota, or a bad attach
+/// leaves no blob on disk.
+#[tokio::test]
+async fn refused_uploads_leave_no_blob() {
+    let td = setup_with(|c| {
+        write(
+            c,
+            "daemon.toml",
+            "[artifacts]\nmax_file_bytes = 1000\nproject_quota_bytes = 2500\n",
+        )
+    })
+    .await;
+    let a = upload(&td, "proj/w1", "a", &[b'a'; 1000]).await;
+    upload(&td, "proj/w1", "b", &[b'b'; 1000]).await;
+    let before = blob_names(&td);
+    assert_eq!(before.len(), 2, "{before:?}");
+    // Over the quota.
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "c", "data_base64": b64(&[b'c'; 600])}),
+    )
+    .await
+    .err(413, "too_large");
+    // A bad name.
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "x/y", "data_base64": b64(b"small")}),
+    )
+    .await
+    .err(422, "invalid");
+    // The row fails after the blob is written: a card that does not exist.
+    let r = upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "d", "data_base64": b64(b"attach fails"),
+               "attach": {"kind": "card", "ref": "TER-999"}}),
+    )
+    .await;
+    assert!(r.status.is_client_error(), "{:?}", r.body);
+    assert_eq!(blob_names(&td), before);
+    // A refused upload of bytes another artifact uses keeps that blob.
+    let r = upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "a2", "data_base64": b64(&[b'a'; 1000]),
+               "attach": {"kind": "card", "ref": "TER-999"}}),
+    )
+    .await;
+    assert!(r.status.is_client_error(), "{:?}", r.body);
+    assert_eq!(blob_names(&td), before);
+    assert!(before.contains(&a["sha256"].as_str().unwrap().to_owned()));
+}
+
+/// TER-554: the orphan sweep removes the blobs, bundles and old temp
+/// entries that no row owns, and keeps the rest. The daemon runs it at
+/// start.
+#[tokio::test]
+async fn orphan_sweep_removes_unowned_blobs() {
+    let mut td = setup().await;
+    let a = upload(&td, "proj/w1", "a.txt", b"owned").await;
+    let owned = a["sha256"].as_str().unwrap().to_owned();
+    let dir = td.state.join("artifacts");
+    let orphan = "1".repeat(64);
+    let bundle = format!("{}.bundle", "2".repeat(64));
+    let old_tmp = format!("{}.tmp-01OLD", "3".repeat(64));
+    let new_tmp = format!("{}.tmp-01NEW", "4".repeat(64));
+    std::fs::write(dir.join(&orphan), b"orphan").unwrap();
+    std::fs::create_dir_all(dir.join(&bundle)).unwrap();
+    std::fs::write(dir.join(&bundle).join("index.html"), b"<p>").unwrap();
+    let f = std::fs::File::create(dir.join(&old_tmp)).unwrap();
+    f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200))
+        .unwrap();
+    drop(f);
+    std::fs::write(dir.join(&new_tmp), b"in flight").unwrap();
+    std::fs::write(dir.join("notes"), b"not ours").unwrap();
+
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let n = terrariumd::api::sweep_orphans(&state).await.unwrap();
+    assert_eq!(n, 3);
+    assert!(dir.join(&owned).is_file());
+    assert!(!dir.join(&orphan).exists());
+    assert!(!dir.join(&bundle).exists());
+    assert!(!dir.join(&old_tmp).exists());
+    assert!(dir.join(&new_tmp).exists());
+    assert!(dir.join("notes").exists());
+
+    // At start.
+    std::fs::write(dir.join(&orphan), b"orphan").unwrap();
+    td.boot(None, None).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while dir.join(&orphan).exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the start-up sweep did not remove the orphan"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(dir.join(&owned).is_file());
+}
+
+/// TER-554: a delete removes its blob under the digest lock, so it waits
+/// while an upload of the same bytes holds the lock.
+#[tokio::test]
+async fn delete_waits_for_the_digest_lock() {
+    let td = setup().await;
+    let a = upload(&td, "proj/w1", "a.txt", b"locked bytes").await;
+    let sha = a["sha256"].as_str().unwrap().to_owned();
+    let path = td.state.join("artifacts").join(&sha);
+    let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
+    let lock = ctx.digest_lock(&sha);
+    let guard = lock.clone().lock_owned().await;
+    let (r, ()) = tokio::join!(
+        td.req(
+            Method::DELETE,
+            "/api/artifacts/ART-1",
+            None,
+            Some("proj/w1")
+        ),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(path.is_file(), "the delete removed the blob under the lock");
+            drop(guard);
+        }
+    );
+    assert_eq!(r.status.as_u16(), 204);
+    assert!(!path.exists());
+}
+
+/// TER-583: the name and quota pre-check uses the size of the redacted
+/// bytes. The raw upload does not fit the quota, the redacted one does.
+#[tokio::test]
+async fn upload_precheck_uses_the_redacted_size() {
+    const SECRET: &str = "ghp_REDACTme0123456789";
+    let td = setup_with(|c| {
+        write(
+            c,
+            "daemon.toml",
+            "[artifacts]\nmax_file_bytes = 4000\nproject_quota_bytes = 1000\n",
+        )
+    })
+    .await;
+    td.post(
+        "/api/secrets",
+        json!({"name": "gh", "kind": "token", "fields": {"value": SECRET}}),
+    )
+    .await
+    .ok();
+    let raw = format!("{SECRET}\n").repeat(50);
+    assert!(raw.len() > 1000);
+    let a = upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "leak.txt", "content_type": "text/plain",
+               "data_base64": b64(raw.as_bytes())}),
+    )
+    .await
+    .ok()
+    .clone();
+    let sha = a["sha256"].as_str().unwrap();
+    let stored = std::fs::read(td.state.join("artifacts").join(sha)).unwrap();
+    assert!(!String::from_utf8_lossy(&stored).contains(SECRET));
+    assert!(stored.len() < 1000, "{}", stored.len());
+    assert_eq!(a["size"].as_u64().unwrap(), stored.len() as u64, "{a}");
+    // The redacted size counts against the quota: an upload that fits only
+    // next to nothing is refused now.
+    let rest = 1000 - stored.len() + 1;
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "other.bin", "data_base64": b64(&vec![0u8; rest])}),
+    )
+    .await
+    .err(413, "too_large");
+}
+
+/// TER-583: the orphan sweep takes the digest lock of each entry, so it
+/// waits while an upload of those bytes holds the stripe.
+#[tokio::test]
+async fn sweep_waits_while_an_upload_holds_the_stripe() {
+    let td = setup().await;
+    let dir = td.state.join("artifacts");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A blob an upload has written but not yet committed a row for.
+    let sha = "5".repeat(64);
+    let path = dir.join(&sha);
+    std::fs::write(&path, b"in flight").unwrap();
+    let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
+    let guard = ctx.digest_lock(&sha).lock_owned().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let (n, ()) = tokio::join!(terrariumd::api::sweep_orphans(&state), async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(path.is_file(), "the sweep removed the blob under the lock");
+        drop(guard);
+    });
+    // No row was committed: after the lock is free the sweep removes it.
+    assert_eq!(n.unwrap(), 1);
+    assert!(!path.exists());
+}
+
+/// TER-583: the upload task owns the digest lock, so an upload whose client
+/// goes away while it waits for the lock still commits its row.
+#[tokio::test]
+async fn upload_finishes_after_the_client_goes_away() {
+    let td = setup().await;
+    let data = b"bytes of a dropped client".to_vec();
+    let sha = terrariumd::store::artifacts::sha256_hex(&data);
+    let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
+    let guard = ctx.digest_lock(&sha).lock_owned().await;
+    let body =
+        serde_json::to_vec(&json!({"name": "dropped.bin", "data_base64": b64(&data)})).unwrap();
+    let r = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        raw(
+            &td,
+            Method::POST,
+            "/api/projects/proj/artifacts",
+            Some("application/json"),
+            body,
+            Some("proj/w1"),
+        ),
+    )
+    .await;
+    assert!(r.is_err(), "the upload did not wait for the lock");
+    drop(guard);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let list = td
+            .req(
+                Method::GET,
+                "/api/projects/proj/artifacts",
+                None,
+                Some("proj/w1"),
+            )
+            .await;
+        let list = list.ok().to_string();
+        if list.contains("dropped.bin") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the upload of a dropped client left no row: {list}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(td.state.join("artifacts").join(&sha).is_file());
+}
+
+async fn wait_for_free_permits(ctx: &terrariumd::store::artifacts::ArtifactCtx, n: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while ctx.free_upload_permits() != n {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "free upload permits: {}, want {n}",
+            ctx.free_upload_permits()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// TER-605: detached upload tasks hold the upload permits, also after
+/// their clients went away. One more upload is refused with `429` and
+/// `Retry-After`, and the permits are free again when the tasks end.
+#[tokio::test]
+async fn uploads_past_the_limit_are_refused_and_permits_come_back() {
+    use terrariumd::store::artifacts::MAX_CONCURRENT_UPLOADS;
+    let td = setup().await;
+    let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
+    assert_eq!(ctx.free_upload_permits(), MAX_CONCURRENT_UPLOADS);
+    let data = b"bytes of many dropped clients".to_vec();
+    let sha = terrariumd::store::artifacts::sha256_hex(&data);
+    let guard = ctx.digest_lock(&sha).lock_owned().await;
+    // Each client sends, then goes away while its task waits for the lock.
+    for i in 0..MAX_CONCURRENT_UPLOADS {
+        let body = serde_json::to_vec(
+            &json!({"name": format!("dropped-{i}.bin"), "data_base64": b64(&data)}),
+        )
+        .unwrap();
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            raw(
+                &td,
+                Method::POST,
+                "/api/projects/proj/artifacts",
+                Some("application/json"),
+                body,
+                Some("proj/w1"),
+            ),
+        )
+        .await;
+        assert!(r.is_err(), "upload {i} did not wait for the lock");
+    }
+    wait_for_free_permits(&ctx, 0).await;
+    let body =
+        serde_json::to_vec(&json!({"name": "one-more.bin", "data_base64": b64(b"other")})).unwrap();
+    let r = raw(
+        &td,
+        Method::POST,
+        "/api/projects/proj/artifacts",
+        Some("application/json"),
+        body,
+        Some("proj/w1"),
+    )
+    .await;
+    assert_eq!(r.status.as_u16(), 429);
+    assert_eq!(header(&r, "retry-after"), "2");
+    let v: Value = serde_json::from_slice(&r.body).unwrap();
+    assert_eq!(v["error"]["code"], "rate_limited", "{v}");
+    assert_eq!(v["error"]["details"]["retry_after"], 2, "{v}");
+    assert_eq!(
+        v["error"]["details"]["max_concurrent_uploads"], MAX_CONCURRENT_UPLOADS,
+        "{v}"
+    );
+    // The detached tasks finish their rows and give their permits back.
+    drop(guard);
+    wait_for_free_permits(&ctx, MAX_CONCURRENT_UPLOADS).await;
+    let list = td
+        .req(
+            Method::GET,
+            "/api/projects/proj/artifacts",
+            None,
+            Some("proj/w1"),
+        )
+        .await;
+    let list = list.ok().to_string();
+    for i in 0..MAX_CONCURRENT_UPLOADS {
+        assert!(list.contains(&format!("dropped-{i}.bin")), "{list}");
+    }
+    assert!(!list.contains("one-more.bin"), "{list}");
+    upload(&td, "proj/w1", "after.bin", b"other").await;
+    assert_eq!(ctx.free_upload_permits(), MAX_CONCURRENT_UPLOADS);
+}
+
+/// TER-605: an upload that fails, at the parse or at the row, gives its
+/// permit back.
+#[tokio::test]
+async fn failed_uploads_release_their_permit() {
+    use terrariumd::store::artifacts::MAX_CONCURRENT_UPLOADS;
+    let td = setup_with(|c| {
+        write(
+            c,
+            "daemon.toml",
+            "[artifacts]\nmax_file_bytes = 100\nproject_quota_bytes = 1000\n",
+        )
+    })
+    .await;
+    let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "big.bin", "data_base64": b64(&[0u8; 200])}),
+    )
+    .await
+    .err(413, "too_large");
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "bad.bin", "data_base64": "!!"}),
+    )
+    .await
+    .err(400, "bad_request");
+    // The row fails in the store task: a card that does not exist.
+    let r = upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "d", "data_base64": b64(b"attach fails"),
+               "attach": {"kind": "card", "ref": "TER-999"}}),
+    )
+    .await;
+    assert!(r.status.is_client_error(), "{:?}", r.body);
+    assert_eq!(ctx.free_upload_permits(), MAX_CONCURRENT_UPLOADS);
+}

@@ -191,158 +191,10 @@ pub(crate) fn label_of(conn: &Connection, key: &str) -> ApiResult<String> {
     Ok(key.to_owned())
 }
 
-/// Env var names that a grant cannot set (docs/api.md §5.2, "The name
-/// rule"): the loader and the C library, the shell, the sandbox and the
-/// daemon, the locale and the terminal, the proxy and CA vars, and the
-/// vars that a harness adapter or an account sets.
-const DENIED_ENV: &[&str] = &[
-    // The sandbox, the daemon, the session.
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "TERM",
-    "TERMINFO",
-    "TERMINFO_DIRS",
-    "TERMCAP",
-    "LANG",
-    "LANGUAGE",
-    "TZ",
-    "TZDIR",
-    "PWD",
-    "OLDPWD",
-    "DISPLAY",
-    "MAIL",
-    "MAILPATH",
-    // The loader and the C library.
-    "GCONV_PATH",
-    "GLIBC_TUNABLES",
-    "LOCPATH",
-    "NLSPATH",
-    "HOSTALIASES",
-    "RES_OPTIONS",
-    "LOCALDOMAIN",
-    "TMPDIR",
-    // The shell.
-    "IFS",
-    "ENV",
-    "SHELLOPTS",
-    "BASHOPTS",
-    "PS1",
-    "PS2",
-    "PS4",
-    "PROMPT_COMMAND",
-    "CDPATH",
-    "GLOBIGNORE",
-    "HISTFILE",
-    "INPUTRC",
-    "POSIXLY_CORRECT",
-    // Programs that other programs start.
-    "EDITOR",
-    "VISUAL",
-    "PAGER",
-    "MANPAGER",
-    "LESSOPEN",
-    "LESSCLOSE",
-    "BROWSER",
-    // Language runtimes.
-    "PERLLIB",
-    "CLASSPATH",
-    "JDK_JAVA_OPTIONS",
-    "GOFLAGS",
-    "GOPATH",
-    "GOROOT",
-    "GOPROXY",
-    "GOENV",
-    "GOTOOLCHAIN",
-    "GOINSECURE",
-    "GOPRIVATE",
-    "GONOSUMDB",
-    "GONOPROXY",
-    "VIRTUAL_ENV",
-    "TCLLIBPATH",
-    "PHPRC",
-    // Proxies and CA files.
-    "NO_PROXY",
-    "CURL_CA_BUNDLE",
-    "CURL_HOME",
-    "REQUESTS_CA_BUNDLE",
-    "SSLKEYLOGFILE",
-    "WGETRC",
-    "GNUPGHOME",
-    // The harness adapters and the accounts.
-    "IS_SANDBOX",
-    "ENABLE_CLAUDEAI_MCP_SERVERS",
-    "GEMINI_API_KEY",
-    "OPENROUTER_API_KEY",
-    "XAI_API_KEY",
-    "GROQ_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "MISTRAL_API_KEY",
-    "ZAI_API_KEY",
-    "KIMI_API_KEY",
-    "MOONSHOT_API_KEY",
-];
-
-/// Prefixes of the env var names that a grant cannot set.
-const DENIED_ENV_PREFIXES: &[&str] = &[
-    // The loader, the C library, the shell, the locale.
-    "LD_",
-    "MALLOC_",
-    "BASH_",
-    "LC_",
-    // git: the config, the dirs, the ssh command, the identity.
-    "GIT_",
-    // The sandbox and the daemon.
-    "TERRARIUM_",
-    "XDG_",
-    "SSH_",
-    "WAYLAND_",
-    // Language runtimes and package managers.
-    "NODE_",
-    "NPM_CONFIG_",
-    "YARN_",
-    "BUN_",
-    "DENO_",
-    "PYTHON",
-    "PIP_",
-    "UV_",
-    "CONDA_",
-    "PERL5",
-    "RUBY",
-    "GEM_",
-    "BUNDLE_",
-    "JAVA_",
-    "DOTNET_",
-    "COREHOST_",
-    "CGO_",
-    "CARGO_",
-    "RUSTC",
-    "RUSTDOC",
-    "RUSTFLAGS",
-    "RUSTUP_",
-    "LUA_",
-    // CA files.
-    "SSL_CERT_",
-    // The harnesses and their accounts.
-    "ANTHROPIC_",
-    "CLAUDE_",
-    "OPENAI_",
-    "CODEX_",
-    "COPILOT_",
-    "PI_",
-    "DISABLE_",
-];
-
-/// Suffixes of the env var names that a grant cannot set: the proxies
-/// (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`).
-const DENIED_ENV_SUFFIXES: &[&str] = &["_PROXY"];
-
 /// Check an env var name of a grant (docs/api.md §5.2, "The name rule"):
 /// it matches `^[A-Z][A-Z0-9_]{0,127}$`, and it is not in the deny set
-/// ([`DENIED_ENV`], [`DENIED_ENV_PREFIXES`], [`DENIED_ENV_SUFFIXES`], and
-/// the harness home vars). The daemon checks each final name (also each
+/// ([`terrarium_core::env_deny`]: the names, the prefixes, the suffixes,
+/// and the harness home vars). The daemon checks each final name (also each
 /// `<ENV>_<FIELD>` of a `generic` secret) when it writes a grant, when a
 /// config import writes one, and again at each launch.
 pub fn check_env_name(name: &str) -> ApiResult<()> {
@@ -356,17 +208,10 @@ pub fn check_env_name(name: &str) -> ApiResult<()> {
              letters, digits, or `_` (at most 128)"
         )));
     }
-    let home_env = terrarium_core::HarnessId::ALL
-        .iter()
-        .any(|h| h.home_env() == name);
-    if DENIED_ENV.contains(&name)
-        || home_env
-        || DENIED_ENV_PREFIXES.iter().any(|p| name.starts_with(p))
-        || DENIED_ENV_SUFFIXES.iter().any(|p| name.ends_with(p))
-    {
+    if terrarium_core::env_deny::denied(name) {
         return Err(ApiError::invalid(format!(
             "`{name}` is an env var that the sandbox, the loader, a shell, a language runtime, \
-             a proxy, or a harness reads or sets; choose another name"
+             a proxy, a library that ssh loads, or a harness reads or sets; choose another name"
         )));
     }
     Ok(())
@@ -1043,6 +888,49 @@ pub(crate) mod tests {
     pub(crate) const AGENT: &str = "01K8AGENT0000000000000000A";
     pub(crate) const OTHER: &str = "01K8AGENT0000000000000000B";
 
+    /// TER-490: the host agent refuses a multi-line docker env value for
+    /// each name that a grant cannot set, from the same list
+    /// ([`terrarium_core::env_deny`]), plus its own names. The exact names
+    /// that the daemon sends multi-line values under
+    /// ([`terrarium_host::docker::CLI_ALLOWED_ENV`]) are the one exception
+    /// (TER-541; the SSH key of a checkout comes on one line, TER-577): a grant cannot set them, and the fallback lets them
+    /// through. Any other `TERRARIUM_*` name is refused.
+    #[test]
+    fn the_host_agent_refuses_every_name_that_a_grant_refuses() {
+        use terrarium_core::env_deny::{DENIED_ENV, DENIED_ENV_PREFIXES, DENIED_ENV_SUFFIXES};
+        use terrarium_host::docker::{CLI_ALLOWED_ENV, steers_the_cli};
+        let mut names: Vec<String> = DENIED_ENV.iter().map(|n| n.to_string()).collect();
+        names.extend(DENIED_ENV_PREFIXES.iter().map(|p| format!("{p}X")));
+        names.extend(DENIED_ENV_SUFFIXES.iter().map(|p| format!("X{p}")));
+        names.extend(
+            terrarium_core::HarnessId::ALL
+                .iter()
+                .map(|h| h.home_env().to_owned()),
+        );
+        names.extend(
+            [
+                "OPENSSL_CONF",
+                "OPENSSL_MODULES",
+                "OPENSSL_ENGINES",
+                "KRB5_CONFIG",
+                "KRB5CCNAME",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "TERRARIUM_GIT_TRAILERS_FILE",
+            ]
+            .map(String::from),
+        );
+        for n in &names {
+            assert!(check_env_name(n).is_err(), "{n}");
+            assert!(steers_the_cli(n), "{n}");
+        }
+        for n in CLI_ALLOWED_ENV {
+            assert!(check_env_name(n).is_err(), "{n}");
+            assert!(!steers_the_cli(n), "{n}");
+        }
+        assert!(check_env_name("DEPLOY_KEY").is_ok());
+        assert!(!steers_the_cli("DEPLOY_KEY"));
+    }
+
     pub(crate) fn db() -> Connection {
         let c = crate::secrets::tests::db();
         c.execute(
@@ -1454,13 +1342,16 @@ pub(crate) mod tests {
         assert_eq!(e.code, crate::error::Code::Invalid, "{}", e.message);
         // Grant rows that an older daemon or a config import wrote: the
         // launch refuses each final name with a warning, and does not fail.
-        for (name, fields, env) in [
-            ("x", ["preload", "library_path"], "LD"),
-            ("y", ["socket", "agent"], "TERRARIUM"),
-            ("z", ["config_count", "config_key_0"], "GIT"),
-            ("w", ["env", "y"], "BASH"),
-            ("v", ["preload", "x"], "PYTHON"),
-        ] {
+        // A one-field secret sets the base name itself: `KRB5CCNAME` (TER-577).
+        let rows: [(&str, &[&str], &str); 6] = [
+            ("x", &["preload", "library_path"], "LD"),
+            ("y", &["socket", "agent"], "TERRARIUM"),
+            ("z", &["config_count", "config_key_0"], "GIT"),
+            ("w", &["env", "y"], "BASH"),
+            ("v", &["preload", "x"], "PYTHON"),
+            ("u", &["ccname"], "KRB5CCNAME"),
+        ];
+        for (name, fields, env) in rows {
             let values: Map<String, Value> = fields
                 .iter()
                 .map(|f| ((*f).to_owned(), json!("v1")))
@@ -1493,6 +1384,7 @@ pub(crate) mod tests {
             "GIT_CONFIG_COUNT",
             "BASH_ENV",
             "PYTHON_PRELOAD",
+            "KRB5CCNAME",
         ] {
             assert!(
                 l.warnings.iter().any(|w| w.contains(n)),

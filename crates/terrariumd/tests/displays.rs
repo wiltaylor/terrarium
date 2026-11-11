@@ -93,6 +93,7 @@ impl Lab {
             no_workspaces: false,
             capacity: None,
             reservations: false,
+            native_gpu: None,
         };
         o.display.enabled = desktop;
         o.docker_bin = self.bins.path().join("docker").display().to_string();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionWords, commandLine, cronWords, everyWords, guardWords, matchesWords, nextRunWords, parseEvery, shortAddress, specWords, splitCommand } from "./schedule";
+import { actionWords, commandLine, cronWords, dayStartMarkWords, everyWords, guardWords, matchesWords, nextRunWords, parseEvery, shortAddress, specWords, splitCommand } from "./schedule";
 
 describe("specWords: interval", () => {
   it("reads the duration forms", () => {
@@ -144,5 +144,26 @@ describe("a trigger in words", () => {
   it("the card action", () => {
     expect(actionWords({ type: "card", op: "open", key: "ci:{{event.data.repo}}", title: "CI failed" }, "p")).toBe("card open ci:{{event.data.repo}}: CI failed");
     expect(actionWords({ type: "card", op: "close", key: "ci" }, "p")).toBe("card close ci");
+  });
+});
+
+describe("day_start in words (TER-458)", () => {
+  it("the spec", () => {
+    expect(specWords({ kind: "day_start" })).toBe("first start of the day, UTC");
+    expect(specWords({ kind: "day_start", tz: "Australia/Brisbane", not_before: "07:30", weekdays: ["mon", "Friday"], delay: "5m" })).toBe("first start of the day, Mon, Fri, not before 07:30, 5 min after the start, Australia/Brisbane");
+    expect(specWords({ kind: "day_start", tz: "UTC", not_before: "07:00", not_after: "18:00", delay: "1h" })).toBe("first start of the day, between 07:00 and 18:00, 1 h after the start, UTC");
+    expect(specWords({ kind: "day_start", tz: "UTC", not_after: "10:00", weekdays: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] })).toBe("first start of the day, not after 10:00, UTC");
+  });
+  it("the next start while no run is planned, and a planned run", () => {
+    const s = { enabled: true, next_run_at: null, spec: { kind: "day_start" as const }, last_run: null };
+    expect(nextRunWords(s)).toBe("at the next start");
+    expect(nextRunWords({ ...s, day_start_done: "2026-11-09" })).toBe("at the first start after 2026-11-09");
+    expect(nextRunWords({ ...s, next_run_at: "2026-11-10T07:30:00Z" }, Date.parse("2026-11-10T07:00:00Z"))).toBe("in 30m");
+    expect(nextRunWords({ ...s, enabled: false })).toBe("disabled");
+  });
+  it("the detected start of a run", () => {
+    expect(dayStartMarkWords({ cause: "resume", at: "2026-11-10T07:31:00Z" })).toBe("resume from sleep at 2026-11-10 07:31 UTC");
+    expect(dayStartMarkWords({ cause: "host_reconnect", at: "2026-11-10T07:31:00Z" })).toBe("host agent reconnect at 2026-11-10 07:31 UTC");
+    expect(dayStartMarkWords({ cause: "new_cause", at: "x" })).toBe("new cause at x");
   });
 });

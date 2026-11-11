@@ -540,11 +540,16 @@ pub async fn wake_with_work(state: &Shared, only: Option<AgentId>, cause: &'stat
 }
 
 /// Give the queued turns of a running agent to the supervisor, in order,
-/// and delete them. A turn that the supervisor refuses stays, with the
-/// turns after it. Each turn goes under the agent's turn lock
-/// ([`Lifecycle::turn_lock`]): a turn that was removed meanwhile is
+/// and delete the row of each turn that went out. A turn that the
+/// supervisor refuses stays, with the turns after it. Each turn goes
+/// under the agent's turn lock ([`Lifecycle::turn_lock`]): a turn that was removed meanwhile is
 /// skipped, and the row of a turn goes only after the supervisor took it,
-/// so a later turn cannot pass it (TER-25).
+/// so a later turn cannot pass it (TER-25). A turn that the supervisor
+/// keeps for later ([`Supervisor::send_queued_turn`]) keeps its row: the
+/// supervisor deletes it when it types the turn, and a daemon restart
+/// before then delivers it again (TER-542).
+///
+/// [`Supervisor::send_queued_turn`]: crate::supervisor::Supervisor::send_queued_turn
 async fn deliver_turns(state: &Shared, id: AgentId) {
     let key = id.to_string();
     let turns = match state.db.read(move |c| agents::queued_turns(c, &key)).await {
@@ -570,15 +575,20 @@ async fn deliver_turns(state: &Shared, id: AgentId) {
                 return;
             }
         }
-        if let Err(e) = state.supervisor.send_turn(id, t.text).await {
-            debug!(agent = %id, "a queued turn waits: {e}");
-            break;
+        match state.supervisor.send_queued_turn(id, turn, t.text).await {
+            Ok(false) => {}
+            Ok(true) => continue,
+            Err(e) => {
+                debug!(agent = %id, "a queued turn waits: {e}");
+                break;
+            }
         }
+        // Only this row: a row before it may wait in the supervisor.
         let key = id.to_string();
         if let Err(e) = state
             .db
             .write("system", move |tx| {
-                agents::forget_queued_turns(tx, &key, turn)
+                agents::remove_queued_turn(tx, &key, turn).map(|_| ())
             })
             .await
         {

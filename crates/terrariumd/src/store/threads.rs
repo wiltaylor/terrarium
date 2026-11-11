@@ -225,6 +225,12 @@ pub struct Thread {
     /// Optional ops monitor, as `project:name`.
     #[serde(default)]
     pub monitor: Option<String>,
+    /// The question or notice that the operator moved into this thread
+    /// (GitHub #30, [`questions::to_thread`]). Its agent is not bound to
+    /// the thread, so each message and response of the operator also goes
+    /// to it as mail ([`mail_agent`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_question: Option<String>,
 }
 
 /// Why a thread closed.
@@ -334,6 +340,7 @@ fn row_named(r: &Row<'_>, mut name: impl FnMut(&str) -> String) -> rusqlite::Res
         reminded_at: r.get("reminded_at")?,
         tracking_at: r.get("tracking_at")?,
         monitor: r.get("monitor")?,
+        from_question: r.get("from_question")?,
     })
 }
 
@@ -799,9 +806,13 @@ fn questions_of(conn: &Connection, thread: &str) -> ApiResult<Vec<Question>> {
     ids.iter().map(|id| questions::get(conn, id)).collect()
 }
 
+/// The unsettled questions of `thread`: `open`, and `in_thread` (a
+/// question that the operator moved into this thread, TER-469). Both keep
+/// the thread on the operator: the agent sets no other status until they
+/// are settled (TER-495).
 fn open_questions(conn: &Connection, thread: &str) -> ApiResult<i64> {
     Ok(conn.query_row(
-        "SELECT count(*) FROM questions WHERE thread = ?1 AND status = 'open'",
+        "SELECT count(*) FROM questions WHERE thread = ?1 AND status IN ('open', 'in_thread')",
         [thread],
         |r| r.get(0),
     )?)
@@ -819,6 +830,8 @@ pub fn inbox_urgency(conn: &Connection) -> ApiResult<HashMap<String, (bool, bool
 }
 
 /// Inbox badge counts need neither thread bodies nor per-thread name/summary queries.
+/// A pending close proposal waits on the operator whatever the status
+/// (the same rule as the Inbox thread item).
 pub fn inbox_counts(conn: &Connection, project: Option<&str>) -> ApiResult<(usize, usize, usize)> {
     Ok(conn.query_row(
         "SELECT count(*), coalesce(sum(q.urgent > 0), 0), coalesce(sum(q.critical > 0), 0)
@@ -828,7 +841,8 @@ pub fn inbox_counts(conn: &Connection, project: Option<&str>) -> ApiResult<(usiz
                            sum(priority = 'critical') AS critical
                     FROM questions WHERE status = 'open' AND thread IS NOT NULL
                     GROUP BY thread) q ON q.thread = t.id
-         WHERE t.status != 'closed' AND (t.status = 'waiting_operator' OR q.open > 0)
+         WHERE t.status != 'closed'
+           AND (t.status = 'waiting_operator' OR t.close_proposal IS NOT NULL OR q.open > 0)
            AND (?1 IS NULL OR (t.scope != 'global' AND t.scope = ?1))",
         [project],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -1189,6 +1203,9 @@ pub fn post(
     }
     let th = get(t, &th.id)?;
     emit_with(t, &th, "message", json!({"message": msg, "author": author}))?;
+    if author == "operator" {
+        mail_agent(t, &th, "message", &text)?;
+    }
     if want == Some(ThreadStatus::Tracking) {
         return track(t, id, author);
     }
@@ -1224,11 +1241,32 @@ fn no_open_question(t: &Tx<'_>, id: &str, want: ThreadStatus) -> ApiResult<()> {
     Ok(())
 }
 
-/// The attached agent `by` sets the status of thread `id` without a
-/// message (GitHub #28, `thread status`): `tracking` as [`track`], or
+/// An `open` question of thread `id` refuses the operator's `want`
+/// (`409`). An `in_thread` question does not: the operator moved it into
+/// the thread (TER-514).
+fn operator_no_open_question(t: &Tx<'_>, id: &str, want: ThreadStatus) -> ApiResult<()> {
+    let open: i64 = t.query_row(
+        "SELECT count(*) FROM questions WHERE thread = ?1 AND status = 'open'",
+        [id],
+        |r| r.get(0),
+    )?;
+    if open > 0 {
+        return Err(ApiError::conflict(format!(
+            "thread {id} has {open} open question(s) in the Inbox: answer them first; then set {}",
+            want.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// The attached agent or the operator `by` sets the status of thread
+/// `id` without a message (GitHub #28, `thread status`, TER-456):
+/// `tracking` as [`track`], or
 /// `waiting_agent`: the agent works on, and the thread does not wait on
 /// the operator (no Inbox badge, no reminder, no stale close). An open
-/// question refuses it (`409`); a close proposal is withdrawn.
+/// question refuses it (`409`); a close proposal is withdrawn. The
+/// operator's `waiting_agent` passes an `in_thread` question: the operator
+/// moved it into this thread and decides when the agent works on (TER-514).
 pub fn set_by_agent(t: &mut Tx<'_>, id: &str, by: &str, status: ThreadStatus) -> ApiResult<Thread> {
     agent_status(status)?;
     if status == ThreadStatus::Tracking {
@@ -1236,7 +1274,11 @@ pub fn set_by_agent(t: &mut Tx<'_>, id: &str, by: &str, status: ThreadStatus) ->
     }
     let th = get_bare(t, id)?;
     not_closed(&th, "a status change")?;
-    no_open_question(t, &th.id, status)?;
+    if by == "operator" {
+        operator_no_open_question(t, &th.id, status)?;
+    } else {
+        no_open_question(t, &th.id, status)?;
+    }
     let at = now();
     t.execute(
         "UPDATE threads SET status = ?2, updated_at = ?3, close_proposal = NULL WHERE id = ?1",
@@ -1304,7 +1346,8 @@ pub fn agent_ended(t: &mut Tx<'_>, id: &str, agent: &str, outcome: &str) -> ApiR
     )?;
     let open: Vec<String> = {
         let mut st = t.prepare(
-            "SELECT id FROM questions WHERE thread = ?1 AND agent = ?2 AND status = 'open'",
+            "SELECT id FROM questions WHERE thread = ?1 AND agent = ?2
+               AND status IN ('open', 'in_thread')",
         )?;
         st.query_map(params![id, agent], |r| r.get(0))?
             .collect::<Result<Vec<_>, _>>()?
@@ -1381,8 +1424,60 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
     if th.agent_end_outcome.is_some() {
         return close_after_agent_end(t, th);
     }
+    mail_agent(t, &th, "response", &text)?;
     flush_pending_wakes(t, id)?;
     Ok(th)
+}
+
+/// The mail of an operator `message` or `response` in thread `th` to its
+/// attached agent, when the thread was opened from a question
+/// (`from_question`, GitHub #30): that agent is not bound to the thread,
+/// so no `[Thread:<id>]` turn reaches it. The mail goes from the operator
+/// on the mail thread of the question, and wakes the agent as all mail
+/// does. Any other thread: nothing.
+fn mail_agent(t: &mut Tx<'_>, th: &Thread, kind: &str, text: &str) -> ApiResult<()> {
+    let (Some(qid), Some(agent)) = (th.from_question.as_deref(), th.agent.as_deref()) else {
+        return Ok(());
+    };
+    let Ok(q) = questions::get(t, qid) else {
+        return Ok(());
+    };
+    let Ok(to) = super::mail::resolve(t, agent, None) else {
+        return Ok(());
+    };
+    let what = if kind == "response" {
+        "sent the overall response"
+    } else {
+        "wrote"
+    };
+    let mut body = format!(
+        "The operator {what} in the Inbox thread {} (from your {} {}):\n\n",
+        th.id,
+        q.noun(),
+        q.id
+    );
+    for line in text.lines() {
+        body.push_str("> ");
+        body.push_str(line);
+        body.push('\n');
+    }
+    body.push_str(&format!(
+        "\nRead the thread with `terrarium thread show {id}` and reply there with \
+         `terrarium thread post {id} -m \"...\"`, not by mail.\n",
+        id = th.id
+    ));
+    super::mail::send(
+        t,
+        super::mail::Outgoing {
+            from: &super::mail::Address::Operator,
+            to: &to,
+            subject: &format!("Thread: {}", questions::short(&th.topic, 60)),
+            body: &body,
+            thread: Some(&q.thread_id),
+            in_reply_to: None,
+        },
+    )?;
+    Ok(())
 }
 
 /// The attached agent `by` moves thread `id` into tracking after its
@@ -1600,7 +1695,7 @@ fn close_as(
     let (summary, checked) = checked_handoff(t, summary, links)?;
     let open: Vec<String> = {
         let mut st = t.prepare(
-            "SELECT id FROM questions WHERE thread = ?1 AND status = 'open'
+            "SELECT id FROM questions WHERE thread = ?1 AND status IN ('open', 'in_thread')
              ORDER BY created_at, id",
         )?;
         st.query_map([&th.id], |r| r.get(0))?

@@ -33,6 +33,12 @@
 //! one is a hand edit. The token patterns, `url-userinfo`, and the
 //! file names have no such marker.
 //!
+//! A line with a backslash is also scanned in its decoded view
+//! ([`decoded_line`], TER-459): the TOML and JSON string escapes
+//! decoded, and a TOML line-ending backslash joined with the next line.
+//! So an escape (`gh\u0070_...`) cannot hide a token. Every rule runs on
+//! that view, and no run of it gets the export exemption below.
+//!
 //! The daemon writes the export of the config repo, so no marker can
 //! stay on its lines (issue #27). Instead, only the runs inside the
 //! quoted value of a repo field of the export fleet files that holds no
@@ -487,6 +493,111 @@ fn exempt_export_value_span(
     has_allow_shape(&line[span.clone()]).then_some(span)
 }
 
+/// The decoded view of line `i` of `lines` (TER-459), or `None` when the
+/// line holds no backslash. The scan works on raw text, so an escape in a
+/// TOML basic string or a JSON string (`gh\u0070_...` for `ghp_...`)
+/// would hide a token from the patterns. This view decodes the escapes of
+/// both formats: `\b \t \n \f \r \e \" \\ \/`, `\xHH`, `\uXXXX` (with a
+/// JSON surrogate pair), and `\UXXXXXXXX`. A line that ends in an odd
+/// number of backslashes before trailing whitespace (the line-ending
+/// backslash of a TOML multi-line basic string) joins the next line
+/// without its leading whitespace, as TOML reads it. An unknown or cut escape stays as written. The view is
+/// for matching only: it does not need to be valid TOML or JSON, and it
+/// never leaves the scan.
+fn decoded_line(lines: &[&str], i: usize) -> Option<String> {
+    let first = lines.get(i)?;
+    if !first.contains('\\') {
+        return None;
+    }
+    let mut joined = String::new();
+    let mut j = i;
+    let mut part: &str = first;
+    loop {
+        let t = part.trim_end();
+        let trailing = t.len() - t.trim_end_matches('\\').len();
+        if trailing % 2 == 1 && j + 1 < lines.len() {
+            joined.push_str(&t[..t.len() - 1]);
+            j += 1;
+            part = lines[j].trim_start();
+        } else {
+            joined.push_str(part);
+            break;
+        }
+    }
+    Some(decode_escapes(&joined))
+}
+
+/// Decode the TOML and JSON string escapes of `s` (see [`decoded_line`]).
+fn decode_escapes(s: &str) -> String {
+    let hex = |h: &str| -> Option<u32> {
+        if h.bytes().all(|b| b.is_ascii_hexdigit()) {
+            u32::from_str_radix(h, 16).ok()
+        } else {
+            None
+        }
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find('\\') {
+        out.push_str(&rest[..at]);
+        let esc = &rest[at + 1..];
+        let mut chars = esc.chars();
+        let (decoded, used): (Option<char>, usize) = match chars.next() {
+            Some('b') => (Some('\u{8}'), 1),
+            Some('t') => (Some('\t'), 1),
+            Some('n') => (Some('\n'), 1),
+            Some('f') => (Some('\u{c}'), 1),
+            Some('r') => (Some('\r'), 1),
+            Some('e') => (Some('\u{1b}'), 1),
+            Some(c @ ('"' | '\\' | '/')) => (Some(c), 1),
+            Some(k @ ('x' | 'u' | 'U')) => {
+                let n = match k {
+                    'x' => 2,
+                    'u' => 4,
+                    _ => 8,
+                };
+                match esc.get(1..1 + n).and_then(hex) {
+                    // A JSON surrogate pair: `😀`.
+                    Some(hi @ 0xD800..=0xDBFF) if k == 'u' => {
+                        let lo = esc
+                            .get(5..7)
+                            .filter(|p| *p == "\\u")
+                            .and_then(|_| esc.get(7..11))
+                            .and_then(hex)
+                            .filter(|lo| (0xDC00..=0xDFFF).contains(lo));
+                        match lo {
+                            Some(lo) => (
+                                char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)),
+                                11,
+                            ),
+                            None => (Some(char::REPLACEMENT_CHARACTER), 5),
+                        }
+                    }
+                    Some(v) => (
+                        Some(char::from_u32(v).unwrap_or(char::REPLACEMENT_CHARACTER)),
+                        1 + n,
+                    ),
+                    None => (None, 0),
+                }
+            }
+            _ => (None, 0),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &esc[used..];
+            }
+            None => {
+                // An unknown or cut escape stays as written.
+                out.push('\\');
+                rest = esc;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Is `name` (the last part of a path) a file that holds credentials?
 pub fn is_credential_file(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -549,7 +660,11 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
     let mut header: Option<String> = None;
     let mut open: Option<char> = None;
     let mut before_string: Option<String> = None;
-    for (i, line) in text.lines().enumerate() {
+    let lines: Vec<&str> = text.lines().collect();
+    for (i, line) in lines.iter().copied().enumerate() {
+        // TER-459: the rules also run on the decoded view of a line with
+        // an escape, so a TOML or JSON escape cannot hide a token.
+        let decoded = decoded_line(&lines, i);
         let next = multiline_open_after(line, open);
         if open.is_none() && next.is_some() {
             // The line opens one: the table above it is back after the
@@ -574,7 +689,7 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
             }
         };
         for p in patterns() {
-            if p.re.is_match(line) {
+            if p.re.is_match(line) || decoded.as_deref().is_some_and(|d| p.re.is_match(d)) {
                 hit(p.rule);
             }
         }
@@ -599,6 +714,7 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
         {
             hit("url-userinfo");
         }
+        // Only a marker in the raw line counts: an escape cannot write one.
         let marked = line.contains(ALLOW_MARKER);
         if let Some(re) = key_value() {
             for c in re.captures_iter(line) {
@@ -623,8 +739,59 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
                 }
             }
         }
+        if let Some(d) = decoded.as_deref() {
+            scan_decoded_soft(path, header.as_deref(), candidate.is_some(), marked, d, &mut hit);
+        }
     }
     out
+}
+
+/// The soft rules on the decoded view `d` of a line (TER-459): the
+/// `credential-key` and `high-entropy` rules, and `url-userinfo` when the
+/// raw or the decoded line is a repo `url` line of the export (a
+/// candidate, [`export_repo_value_span`], whatever its shape). No run
+/// of the decoded view gets the export exemption: the daemon writes no
+/// escape into a repo value, so one there is a hand edit. The marker of
+/// the raw line (`marked`) skips `credential-key` and `high-entropy`, as
+/// on the raw line, but not `high-entropy` on a candidate line nor
+/// `url-userinfo`.
+fn scan_decoded_soft(
+    path: &str,
+    header: Option<&str>,
+    raw_candidate: bool,
+    marked: bool,
+    d: &str,
+    hit: &mut dyn FnMut(&str),
+) {
+    if !marked && let Some(re) = key_value() {
+        for c in re.captures_iter(d) {
+            if let Some(v) = c.get(1)
+                && v.as_str().len() >= KEY_VALUE_MIN_LEN
+                && !is_reference(v.as_str())
+            {
+                hit("credential-key");
+            }
+        }
+    }
+    let candidate = raw_candidate || export_repo_value_span(path, header, d).is_some();
+    if candidate
+        && let Some(re) = url_userinfo()
+        && re.is_match(d)
+    {
+        hit("url-userinfo");
+    }
+    if (!marked || candidate)
+        && let Some(re) = long_runs()
+    {
+        for m in re.find_iter(d) {
+            if m.as_str().len() >= ENTROPY_MIN_LEN
+                && shannon_entropy(m.as_str()) > ENTROPY_THRESHOLD
+                && !is_word_path(m.as_str())
+            {
+                hit("high-entropy");
+            }
+        }
+    }
 }
 
 /// Scan what the next commit of the git repo at `repo` takes: each staged
@@ -1124,6 +1291,17 @@ mod tests {
             "[[projects.repos]]\nurl = \"https://bot:password123@git.example/o/r.git\" # {ALLOW_MARKER}\n"
         );
         assert_eq!(rules(export, &text), ["url-userinfo"].map(str::to_owned));
+        // The same with an escaped `@` (TER-459 decodes it): the marker
+        // does not skip `url-userinfo` on the decoded view.
+        let text = format!(
+            "[[projects.repos]]\nurl = \"https://bot:password123\\u0040git.example/o/r.git\" # {ALLOW_MARKER}\n"
+        );
+        assert_eq!(rules(export, &text), ["url-userinfo"].map(str::to_owned));
+        // In a user file the marker still skips the decoded soft rules.
+        let text = format!(
+            "note = \"Zx8Qp2Lm7Vt4\\u0041Rn9Ks1Wd6Hy3Fj5Bc0GaUe\" # {ALLOW_MARKER}\n"
+        );
+        assert!(rules("fleets/prod.fleet.toml", &text).is_empty(), "{text}");
         // A value out of the allow shape with a token in it hits, marker
         // or not.
         let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
@@ -1240,5 +1418,164 @@ url = "https://github.com/wiltaylor-daf/ExampleReportingService.git"
         let shown = format!("{found:?} {}", found[0]);
         assert!(!shown.contains(&secret[8..]), "{shown}");
         assert_eq!(found[0].to_string(), "prompts/a.md:2: anthropic-key");
+    }
+
+    /// TER-459: the TOML and JSON escapes decode, and an unknown or cut
+    /// escape stays as written.
+    #[test]
+    fn decode_escapes_reads_toml_and_json_escapes() {
+        let cases = [
+            (r"gh\u0070_x", "ghp_x"),
+            (r"gh\U00000070_x", "ghp_x"),
+            (r"gh\x70_x", "ghp_x"),
+            (r#"a\/b\\c\"d"#, "a/b\\c\"d"),
+            (r"\b\t\n\f\r\e", "\u{8}\t\n\u{c}\r\u{1b}"),
+            (r"\uD83D\uDE00", "\u{1F600}"),
+            (r"\uD83Dx", "\u{FFFD}x"),
+            (r"\q \u12 \x4 end\", r"\q \u12 \x4 end\"),
+            (r"\u00e9\u0041", "\u{e9}A"),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(decode_escapes(raw), want, "{raw}");
+        }
+        // A real secret written in plain text still decodes to itself.
+        let token = format!("ghp_{}", "FAKEfake0123456789".repeat(2));
+        assert_eq!(
+            decode_escapes(&format!(r"x\n{token}")),
+            format!("x\n{token}")
+        );
+    }
+
+    /// TER-459: a TOML or JSON escape inside a token does not hide it, in
+    /// any file. Each case writes one character of a `ghp_` token (or of
+    /// another token) as an escape. The allow marker does not skip it.
+    #[test]
+    fn escaped_tokens_hit_in_any_file() {
+        let body = "FAKEfake0123456789".repeat(2);
+        let gh = "github-token".to_owned();
+        // A real secret in plain text still blocks.
+        assert!(rules("prompts/a.md", &format!("ghp_{body}\n")).contains(&gh));
+        for (path, line) in [
+            ("prompts/a.md", format!(r"gh\u0070_{body}")),
+            ("fleet.toml", format!(r#"note = "gh\u0070_{body}""#)),
+            ("fleet.toml", format!(r#"note = "gh\U00000070_{body}""#)),
+            ("fleet.toml", format!(r#"note = "ghp\u005f{body}""#)),
+            (
+                "fleet.toml",
+                format!(r#"note = "ghp_{}\u0041{}""#, &body[..4], &body[4..]),
+            ),
+            (
+                "harness/pi/models.json",
+                format!(r#""k": "gh\u0070_{body}""#),
+            ),
+            (
+                "harness/pi/models.json",
+                format!(r#""k": "\u0067\u0068\u0070\u005f{body}""#),
+            ),
+            (
+                "export/projects/p1.fleet.toml",
+                format!("[[projects.repos]]\ncredential = \"gh\\u0070_{body}\""),
+            ),
+            (
+                "fleet.toml",
+                format!(r#"note = "gh\u0070_{body}" # {ALLOW_MARKER}"#),
+            ),
+        ] {
+            let found = rules(path, &format!("{line}\n"));
+            assert!(found.contains(&gh), "{path}: {line}: {found:?}");
+        }
+        // The other token patterns read the decoded view too.
+        let key = format!(r#"k = "sk-ant\u002dapi03-{body}""#);
+        assert!(rules("fleet.toml", &key).contains(&"anthropic-key".to_owned()));
+        let pk = r#"k = "-----BEGIN\u0020PRIVATE KEY-----""#;
+        assert!(rules("fleet.toml", pk).contains(&"private-key".to_owned()));
+    }
+
+    /// TER-459: a token split by the line-ending backslash of a TOML
+    /// multi-line basic string hits on the line where it starts.
+    #[test]
+    fn a_token_split_by_a_line_ending_backslash_hits() {
+        let body = "FAKEfake0123456789".repeat(2);
+        let text = format!(
+            "note = \"\"\"\nghp_{}\\  \n    {}\"\"\"\n",
+            &body[..8],
+            &body[8..]
+        );
+        let found = scan("fleet.toml", text.as_bytes());
+        assert!(
+            found
+                .iter()
+                .any(|f| f.rule == "github-token" && f.line == 2),
+            "{found:?}"
+        );
+        // A real secret on one line still blocks on its line.
+        let plain = scan("fleet.toml", format!("a\nghp_{body}\n").as_bytes());
+        assert!(
+            plain
+                .iter()
+                .any(|f| f.rule == "github-token" && f.line == 2)
+        );
+        // An even count of backslashes is an escaped backslash: no join.
+        let even = format!(
+            "note = \"\"\"ghp_{}\\\\\n{}\"\"\"\n",
+            &body[..8],
+            &body[8..]
+        );
+        assert!(!rules("fleet.toml", &even).contains(&"github-token".to_owned()));
+    }
+
+    /// TER-459: a credential in the user part of an exempt repo URL,
+    /// written with escapes, still hits, and an escape gives a token in
+    /// a repo value no exemption.
+    #[test]
+    fn an_escaped_url_credential_in_an_export_repo_hits() {
+        let export = "export/projects/p1.fleet.toml";
+        let userinfo = "url-userinfo".to_owned();
+        let at = |line: &str| rules(export, &format!("[[projects.repos]]\n{line}\n"));
+        // A real credential in plain text still blocks.
+        assert!(at(r#"url = "https://bot:password123@git.example/o/r.git""#).contains(&userinfo));
+        for line in [
+            r#"url = "https://bot:password123\u0040git.example/o/r.git""#,
+            r#"url = "https:\/\/bot:password123@git.example/o/r.git""#,
+            r#"url = "https\u003a//bot:password123@git.example/o/r.git""#,
+            r#""u\u0072l" = "https://bot:password123@git.example/o/r.git""#,
+            r#"url = "https://bot\u003apassword123@git.example/o/r.git""#,
+        ] {
+            assert!(at(line).contains(&userinfo), "{line}: {:?}", at(line));
+        }
+        // A high-entropy run with an escape in a repo URL is not exempt.
+        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+        let line = format!(
+            r#"url = "https://git.example/o/{}\u0041{}""#,
+            &random[..10],
+            &random[10..]
+        );
+        assert!(
+            at(&line).contains(&"high-entropy".to_owned()),
+            "{:?}",
+            at(&line)
+        );
+    }
+
+    /// TER-459: a backslash in plain text (a Windows path, a Markdown
+    /// escape, a short escaped string) takes no hit, and a real secret
+    /// on such a line still does.
+    #[test]
+    fn plain_backslashes_take_no_hit() {
+        for line in [
+            r"Copy it to C:\Users\name\AppData\Local\Terrarium\cache.",
+            r"Use \_ and \* in Markdown, and a\nb in a string.",
+            r#"prompt = "Line one.\nLine two.\n\tIndented \"quote\".""#,
+            r#""path": "C:\\Program Files\\Terrarium\\bin""#,
+        ] {
+            assert!(
+                rules("prompts/a.md", line).is_empty(),
+                "{line}: {:?}",
+                rules("prompts/a.md", line)
+            );
+        }
+        let token = format!("ghp_{}", "FAKEfake0123456789".repeat(2));
+        let line = format!(r"C:\Users\name {token}");
+        assert!(rules("prompts/a.md", &line).contains(&"github-token".to_owned()));
     }
 }

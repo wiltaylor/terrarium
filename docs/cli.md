@@ -161,6 +161,7 @@ terrarium project repo-add <url> [--name n] [--branch b] [--credential key] [--p
 terrarium repo ls
 terrarium repo add <url> ...                  the same as project repo-add
 terrarium repo checkout <repo> [--target T] [--branch b] [--path p] [--depth n] [--agent a]
+terrarium repo rm <repo>                      project_admin; no confirm prompt
 ```
 
 `repo checkout` takes a repo name or ID. It clones or updates the repo in
@@ -1125,7 +1126,7 @@ command prints the counts and the dashboard link of the run, for example:
 
 ```
 pushed 01JB7… unit (junit, cargo-nextest): 120 passed, 2 failed, 1 errored, 3 skipped in 5.3s
-dashboard: /p/demo/board/tests/01JB7…
+dashboard: /p/demo/tests/01JB7…
 ```
 
 `test push` exits with 0 also when tests fail: it uploads, it does not
@@ -2151,6 +2152,7 @@ terrarium admin target new <name> --kind host|ssh|docker|vmlab [--host h] [--add
                           [--cpu cores] [--memory size] [--swap size] [--pids n] [--io-weight n]
 terrarium admin target edit <name> [--lab-path dir] [--lab-ref ref] [--machine m] [--image i] [--host h]
                           [--ephemeral | --permanent] [--keep | --no-keep] [--snapshot-before-task true|false]
+                          [--work-root path | --clear-work-root]
                           [--cpu cores] [--memory size] [--swap size] [--pids n] [--io-weight n] [--no-limits]
 terrarium admin target ls                      agent mode: the project's and the global targets
 terrarium admin target rm <name>
@@ -2272,7 +2274,7 @@ the agents of its own project; a global target needs sysadmin.
 | Command | Request | Text output |
 |---|---|---|
 | `admin target grant <t> <a>` | `POST /api/targets/{t}/leases` `{"agent", "until"?, "exclusive"?, "reason"?}` | `granted <t> to <project/name> until <time or revoked>`, with ` (exclusive)`. A line `warning: the target did not come up: ...` when the grant could not bring an ephemeral target up; then exit 1, unless `--no-lifecycle-check`. |
-| `admin target edit <t> ...` | `PATCH /api/targets/{t}` with the fields of the flags given: `lab_path`, `lab_ref`, `machine`, `image`, `host`, `ephemeral`, `keep`, `snapshot_before_task`, and `limits` (an object of the limit flags given, merged into the current limits; `null` for `--no-limits`) | `changed target <t>: <fields>` |
+| `admin target edit <t> ...` | `PATCH /api/targets/{t}` with the fields of the flags given: `lab_path`, `lab_ref`, `machine`, `image`, `host`, `ephemeral`, `keep`, `snapshot_before_task`, `work_root` (`null` for `--clear-work-root`), and `limits` (an object of the limit flags given, merged into the current limits; `null` for `--no-limits`) | `changed target <t>: <fields>` |
 | `admin target revoke <t> <a>` | `DELETE /api/targets/{t}/leases/{a}` | `revoked the lease of <project/name> on <t>` |
 | `admin target extend <t> <a> --until u` | `PATCH /api/targets/{t}/leases/{a}` `{"until"}` (`none` sends `null`) | `the lease of <project/name> on <t> lasts until <time or revoked>` |
 | `admin target leases <t> [--all]` | `GET /api/targets/{t}/leases[?all=true]` | A table: `TARGET`, `AGENT`, `STATE`, `EXCLUSIVE`, `EXPIRES`, `GRANTED BY`, `REASON`. `EXCLUSIVE` and `EXPIRES` are as in `targets ls`: `yes` or `no`, and the RFC 3339 end or `until revoked` (no end). With `--all`, an ended lease shows `revoked` or `expired` in `EXPIRES`. |

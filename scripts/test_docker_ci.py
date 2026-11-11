@@ -45,6 +45,24 @@ class DockerGateTests(unittest.TestCase):
                 agent.assert_not_called()
                 gate.assert_not_called()
 
+    def test_gate_off_ignores_docker_endpoints(self):
+        # TER-477: with merge secrets set the daemon provides an endpoint even
+        # when the gate is off; the suite must not see it.
+        for switch in (None, "0"):
+            env = {"TERRARIUM_JOB_KIND": "merge", "DOCKER_HOST": "unix:///tmp/x/docker.sock",
+                   "TERRARIUM_DOCKER_HOST": "unix:///tmp/job/docker.sock", "KEEP": "1"}
+            if switch is not None:
+                env["TERRARIUM_DOCKER_CI"] = switch
+            with patch.dict(os.environ, env, clear=True), \
+                 patch.object(subprocess, "call", return_value=0) as validate, \
+                 patch.object(docker_ci, "gate") as gate:
+                self.assertEqual(docker_ci.main(), 0)
+                child = validate.call_args.kwargs["env"]
+                self.assertNotIn("DOCKER_HOST", child)
+                self.assertNotIn("TERRARIUM_DOCKER_HOST", child)
+                self.assertEqual(child["KEEP"], "1")
+                gate.assert_not_called()
+
     def test_live_tests_fail_when_cargo_selects_nothing_or_ignores_test(self):
         for output in ("", json.dumps({"type": "test", "name": docker_ci.LIVE_TESTS[0], "event": "ignored"})):
             with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output)):
@@ -61,22 +79,51 @@ class DockerGateTests(unittest.TestCase):
         self.assertEqual(len(calls), len(docker_ci.LIVE_TESTS))
         self.assertTrue(all("--ignored" in cmd for cmd in calls))
 
+    def test_gate_keeps_docker_env_out_of_the_suite(self):
+        # TER-518: the suite's own test daemons and recipes must not see the
+        # outer merge job's gate switch or socket; only `docker info` and the
+        # live tests get DOCKER_HOST.
+        endpoint = "unix:///tmp/job/docker.sock"
+        env = {"TERRARIUM_JOB_KIND": "merge", "TERRARIUM_DOCKER_CI": "1",
+               "TERRARIUM_DOCKER_HOST": endpoint, "DOCKER_HOST": endpoint,
+               "DOCKER_CONFIG": "/tmp/config", "KEEP": "1"}
+        with patch.object(subprocess, "run") as info, \
+             patch.object(subprocess, "call", return_value=0) as validate, \
+             patch.object(docker_ci, "live_tests", return_value=0) as live:
+            self.assertEqual(docker_ci.gate(dict(env)), 0)
+        self.assertEqual(info.call_args.kwargs["env"]["DOCKER_HOST"], endpoint)
+        validate.assert_called_once()
+        self.assertEqual(validate.call_args.args[0], ["just", "ci::validate"])
+        suite = validate.call_args.kwargs["env"]
+        for name in ("TERRARIUM_DOCKER_CI", "TERRARIUM_DOCKER_HOST", "DOCKER_HOST", "DOCKER_CONFIG"):
+            self.assertNotIn(name, suite)
+        self.assertEqual(suite["KEEP"], "1")
+        self.assertEqual(suite["TERRARIUM_JOB_KIND"], "merge")
+        self.assertEqual(live.call_args.args[0]["DOCKER_HOST"], endpoint)
+
     def test_enabled_gate_gets_only_unix_endpoint_and_isolated_client_config(self):
         endpoint = "unix:///tmp/job/docker.sock"
         env = {"TERRARIUM_JOB_KIND": "merge", "TERRARIUM_DOCKER_CI": "1",
-               "DOCKER_HOST": endpoint, "DOCKER_CONTEXT": "wrong-daemon",
-               "SSH_AUTH_SOCK": "/not-forwarded"}
+               "TERRARIUM_DOCKER_HOST": endpoint, "DOCKER_HOST": "unix:///inherited.sock",
+               "DOCKER_CONTEXT": "wrong-daemon", "SSH_AUTH_SOCK": "/not-forwarded"}
         def gate(child):
             self.assertEqual(child["DOCKER_HOST"], endpoint)
+            self.assertNotIn("TERRARIUM_DOCKER_HOST", child)
             self.assertNotIn("DOCKER_CONTEXT", child)
             self.assertNotIn("SSH_AUTH_SOCK", child)
             self.assertIn("DOCKER_CONFIG", child)
             return 0
         with patch.dict(os.environ, env, clear=True), patch.object(docker_ci, "gate", side_effect=gate):
             self.assertEqual(docker_ci.main(), 0)
-        env["DOCKER_HOST"] = "ssh://untrusted"
+        env["TERRARIUM_DOCKER_HOST"] = "ssh://untrusted"
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(docker_ci.main(), 1)
+        # An inherited DOCKER_HOST alone is not the daemon's job endpoint.
+        del env["TERRARIUM_DOCKER_HOST"]
+        env["DOCKER_HOST"] = endpoint
+        with patch.dict(os.environ, env, clear=True), patch.object(docker_ci, "gate") as gate:
+            self.assertEqual(docker_ci.main(), 1)
+            gate.assert_not_called()
 
 
 if __name__ == "__main__":

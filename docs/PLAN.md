@@ -2422,7 +2422,7 @@ tool wrote, and the operator reads each test case in the dashboard.
   the operator decide.
 - **Surfaces.** The API (docs/api.md §29), `terrarium test push | ls |
   show | compare | link | unlink | rm` (docs/cli.md), the Tests tab of
-  the Board screen (`/p/<project>/board/tests`), and the event
+  the project (`/p/<project>/tests`), and the event
   `test_run`.
 
 The packaged skill `terrarium-tests` (`defaults/skills/terrarium-tests/`)

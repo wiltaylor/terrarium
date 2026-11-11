@@ -900,9 +900,9 @@ impl RunCtx {
     }
 }
 
-/// Run schedule `id` once. `trigger` is `cron`, `manual`, or `catch_up`;
-/// `by` labels the run's events and audit row (the `run_as` for a timed
-/// run, the caller for a run-now). A run while another run of the
+/// Run schedule `id` once. `trigger` is `cron`, `manual`, `catch_up`, or
+/// `day_start`; `by` labels the run's events and audit row (the `run_as`
+/// for a timed run, the caller for a run-now). A run while another run of the
 /// schedule is still running is `skipped`. Returns the run when it ends.
 pub async fn run_schedule(
     state: &Shared,
@@ -1042,6 +1042,15 @@ fn render_action(s: &Schedule, event: Option<&EventView<'_>>) -> ScheduleAction 
 
 /// Check the rights of the owner again (the `run_as` actor, or the
 /// project's or the system's), then do the action.
+/// The holder of a project- or system-owned schedule's commands: the
+/// project service holder `<project>/@schedules`. On a host with native GPU
+/// enforcement its exec gets the project's workspace scope (a cwd in the
+/// project, never another project's). A system-owned schedule is in the
+/// `global` project's scope.
+fn owned_holder(project: Option<&str>) -> String {
+    terrarium_host::native::service_holder(project.unwrap_or("global"), "schedules")
+}
+
 async fn perform(state: &Shared, s: &Schedule, ctx: &RunCtx) -> Outcome {
     // A project- or system-owned schedule acts with the operator's paths
     // after the owner's check below; its writes show the schedule.
@@ -1053,10 +1062,7 @@ async fn perform(state: &Shared, s: &Schedule, ctx: &RunCtx) -> Outcome {
             (Owner::Project, Some(p)) => Address::Project(p.clone()),
             _ => Address::System,
         });
-        c.holder = Some(format!(
-            "{}/schedules",
-            s.project.as_deref().unwrap_or("global")
-        ));
+        c.holder = Some(owned_holder(s.project.as_deref()));
         owned_ctx = c;
         &owned_ctx
     } else {
@@ -1398,14 +1404,69 @@ async fn wait_ready(state: &Shared, agent: AgentId, end: tokio::time::Instant) -
     false
 }
 
+/// Why [`wake_until_ready`] could not start the agent for its queued turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NotStarted {
+    NotReady,
+    Paused,
+    Parked,
+    Error,
+    Draining,
+    Held,
+    Disabled,
+    Gone,
+    Failed(String),
+}
+
+impl NotStarted {
+    /// The reason, for the run and the mail.
+    fn why(&self) -> String {
+        match self {
+            Self::NotReady => "it did not become ready".into(),
+            Self::Paused => "it is paused".into(),
+            Self::Parked => "it is a parked bound agent".into(),
+            Self::Error => "it is in error".into(),
+            Self::Draining => "the daemon drains for a self-update".into(),
+            Self::Held => "a quota or budget hold lasts".into(),
+            Self::Disabled => "its subscription is disabled".into(),
+            Self::Gone => "it no longer exists".into(),
+            Self::Failed(e) => e.clone(),
+        }
+    }
+
+    /// What the owner can do about it (TER-231): the fix of this reason,
+    /// not always `agent start`.
+    fn hint(&self, who: &str) -> String {
+        match self {
+            Self::NotReady => {
+                format!("For a time-critical turn, start it now (`terrarium agent start {who}`).")
+            }
+            Self::Paused => format!("The unpause delivers it (`terrarium agent unpause {who}`)."),
+            Self::Parked => "It goes in when the bound object of the agent comes back \
+                 and the agent unparks."
+                .into(),
+            Self::Error | Self::Failed(_) => {
+                format!("Fix the error, then start the agent (`terrarium agent start {who}`).")
+            }
+            Self::Draining => {
+                "It goes in when the new daemon wakes the agent: no action is needed.".into()
+            }
+            Self::Held => "It goes in when the hold ends (`terrarium usage`).".into(),
+            Self::Disabled => "Enabling the subscription delivers it \
+                 (`terrarium admin subscription enable <subscription>`)."
+                .into(),
+            Self::Gone => "Change the agent of the schedule or delete the schedule.".into(),
+        }
+    }
+}
+
 /// Wake an agent that has a queued turn until it is ready for it: at most
 /// [`WAKE_TRIES`] wakes in [`READY_WAIT`]. The wake gives it the queued
 /// turn. `Err` says why it does not start; the turn then stays queued for
 /// the agent's next wake.
-async fn wake_until_ready(state: &Shared, agent: AgentId) -> Result<(), String> {
+async fn wake_until_ready(state: &Shared, agent: AgentId) -> Result<(), NotStarted> {
     use crate::lifecycle::Woke;
     let end = tokio::time::Instant::now() + READY_WAIT;
-    let mut why = String::from("it did not become ready");
     for n in 0..WAKE_TRIES {
         if n > 0 {
             if tokio::time::Instant::now() + WAKE_PAUSE >= end {
@@ -1424,31 +1485,31 @@ async fn wake_until_ready(state: &Shared, agent: AgentId) -> Result<(), String> 
         } else {
             crate::lifecycle::wake(state, agent, "schedule").await
         };
-        why = match woke {
+        match woke {
             Woke::Started | Woke::Running | Woke::Busy => {
                 if wait_ready(state, agent, end).await {
                     return Ok(());
                 }
-                "it did not become ready".into()
             }
             // These last longer than a retry: the turn waits for them.
-            Woke::Paused => return Err("it is paused".into()),
-            Woke::Parked => return Err("it is a parked bound agent".into()),
-            Woke::Error => return Err("it is in error".into()),
-            Woke::Draining => return Err("the daemon drains for a self-update".into()),
-            Woke::Held => return Err("a quota or budget hold lasts".into()),
-            Woke::Disabled => return Err("its subscription is disabled".into()),
-            Woke::Gone => return Err("it no longer exists".into()),
-            Woke::Failed(e) => return Err(e),
-        };
+            Woke::Paused => return Err(NotStarted::Paused),
+            Woke::Parked => return Err(NotStarted::Parked),
+            Woke::Error => return Err(NotStarted::Error),
+            Woke::Draining => return Err(NotStarted::Draining),
+            Woke::Held => return Err(NotStarted::Held),
+            Woke::Disabled => return Err(NotStarted::Disabled),
+            Woke::Gone => return Err(NotStarted::Gone),
+            Woke::Failed(e) => return Err(NotStarted::Failed(e)),
+        }
     }
-    Err(why)
+    Err(NotStarted::NotReady)
 }
 
 /// Mail the owner of schedule `s` that its turn did not reach `who`: the
 /// `run_as` actor, the project inbox, or the operator for a system-owned
-/// schedule (TER-210: never a silent skip).
-async fn tell_owner(state: &Shared, s: &Schedule, who: &str, why: &str) {
+/// schedule (TER-210: never a silent skip). The mail says what fixes the
+/// reason (TER-231).
+async fn tell_owner(state: &Shared, s: &Schedule, who: &str, why: &NotStarted) {
     let (key, sid, run_as, owner, project) = (
         s.key(),
         s.id.clone(),
@@ -1456,7 +1517,16 @@ async fn tell_owner(state: &Shared, s: &Schedule, who: &str, why: &str) {
         s.owner,
         s.project.clone(),
     );
-    let (who, why) = (who.to_owned(), why.to_owned());
+    let queue = if *why == NotStarted::Gone {
+        String::from("The turn is not delivered.")
+    } else {
+        format!("The turn waits in the queue of {who} and goes in at its next wake.")
+    };
+    let body = format!(
+        "Schedule {key} ({sid}) could not start {who} for its turn: {}. {queue} {}",
+        why.why(),
+        why.hint(who)
+    );
     let label = schedules::run_label(&s.id);
     let sent = state
         .db
@@ -1476,11 +1546,7 @@ async fn tell_owner(state: &Shared, s: &Schedule, who: &str, why: &str) {
                     from: &Address::System,
                     to: &to,
                     subject: &format!("Schedule {key}: turn not delivered"),
-                    body: &format!(
-                        "Schedule {key} ({sid}) could not start {who} for its turn: {why}. \
-                         The turn waits in the queue of {who} and goes in at its next wake. \
-                         For a time-critical turn, act now (`terrarium agent start`)."
-                    ),
+                    body: &body,
                     thread: None,
                     in_reply_to: None,
                 },
@@ -1556,8 +1622,9 @@ async fn turn(
             json!({"agent": who, "started": true, "delivery": "queued",
                    "status_before": before}),
         ),
-        Err(why) => {
-            tell_owner(state, s, who, &why).await;
+        Err(not) => {
+            tell_owner(state, s, who, &not).await;
+            let why = not.why();
             Outcome::failed(
                 format!("failed: {who} did not start ({why}); the turn waits in its queue"),
                 format!("agent {who} did not start for the turn: {why}"),
@@ -1733,6 +1800,22 @@ async fn probe(state: &Shared, name: &str) -> Outcome {
 mod tests {
     use super::*;
 
+    /// An owned schedule runs as a project service, so the native helper
+    /// gives its exec the project's workspace (a cwd in the project) and
+    /// no agent can take its holder.
+    #[test]
+    fn an_owned_schedule_runs_as_a_project_service() {
+        assert_eq!(owned_holder(Some("terra")), "terra/@schedules");
+        assert_eq!(owned_holder(None), "global/@schedules");
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::create_dir_all(root.join("terra/slot-1")).unwrap();
+        assert_eq!(
+            terrarium_host::native::holder_workspace(&root, &owned_holder(Some("terra"))).unwrap(),
+            Some(root.join("terra"))
+        );
+    }
+
     fn trigger(action: ScheduleAction) -> Schedule {
         Schedule {
             id: "01MA0V7N6Q1Y3K2P4R5S6T7U8V".into(),
@@ -1753,6 +1836,8 @@ mod tests {
             consecutive_skips: 0,
             disabled_reason: None,
             webhook_failures: 0,
+            day_start_done: None,
+            day_start_last: None,
             created_at: String::new(),
             updated_at: String::new(),
             anchor_at: String::new(),

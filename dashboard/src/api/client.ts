@@ -109,6 +109,7 @@ import type {
   InboxAsk,
   InboxAskBody,
   InboxCounts,
+  ProjectCounts,
   InboxWatch,
   Tool,
   ToolGrant,
@@ -291,6 +292,8 @@ export interface Api {
     /** Sends `?confirm=true`. The daemon refuses a project with agents or a file project. */
     remove(name: string): Promise<void>;
     agents(name: string): Promise<Agent[]>;
+    /** `GET /api/projects/{name}/counts`: the blocked cards and the open questions, for the project tabs. */
+    counts(name: string): Promise<ProjectCounts>;
     targets(name: string): Promise<Target[]>;
     /** The global targets granted to the project for its project-owned monitors and schedules (docs/api.md §30.7). */
     targetGrants(name: string): Promise<TargetGrant[]>;
@@ -414,6 +417,8 @@ export interface Api {
     retract(id: string, reason?: string): Promise<Question>;
     /** `POST /api/questions/{id}/ack`: acknowledge a notice, with an optional reply. 409 for a question. */
     ack(id: string, text?: string): Promise<Question>;
+    /** `POST /api/questions/{id}/to-thread`: move an open question or notice into a new Inbox thread with its agent (GitHub #30). 409 for a bundle. */
+    toThread(id: string, message?: string): Promise<{ question: Question; thread: Thread }>;
     /** `PATCH /api/questions/{id}` with only `card`: link to a card of the question's project, or unlink with `null`. Any status; the revision stays. 422 for a card of another project or an unknown card. */
     setCard(id: string, card: string | null): Promise<Question>;
   };
@@ -1143,6 +1148,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       update: (name, body) => patch(p(name), body),
       remove: (name) => del(p(name), { confirm: true }),
       agents: (name) => all(`${p(name)}/agents`),
+      counts: (name) => get(`${p(name)}/counts`),
       targets: async (name) => (await all<Target>(`${p(name)}/targets`)).map(withScope),
       targetGrants: (name) => get(`${p(name)}/target-grants`),
       repos: (name) => all(`${p(name)}/repos`),
@@ -1232,6 +1238,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       answer: (id, body) => post(`/api/questions/${seg(id)}/answer`, body),
       retract: (id, reason) => post(`/api/questions/${seg(id)}/retract`, reason ? { reason } : {}),
       ack: (id, text) => post(`/api/questions/${seg(id)}/ack`, text ? { text } : {}),
+      toThread: (id, message) => post(`/api/questions/${seg(id)}/to-thread`, message ? { message } : {}),
       setCard: (id, card) => patch(`/api/questions/${seg(id)}`, { card }),
     },
 

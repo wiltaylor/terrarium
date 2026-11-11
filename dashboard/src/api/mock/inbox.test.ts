@@ -23,8 +23,10 @@ describe("the inbox in the mock", () => {
   it("lists the open items, urgent first, then the newest, with the daemon's fields", async () => {
     const api = mock();
     const open = await api.inbox.list();
-    // With the Inbox thread that waits for the operator (./threads.ts).
-    expect(open.length).toBe(9);
+    // Without the Inbox thread that waits for the operator (./threads.ts): only `kind=thread` lists it (TER-466).
+    expect(open.length).toBe(8);
+    expect(open.some((i) => i.kind === "thread")).toBe(false);
+    expect((await api.inbox.list({ kind: "thread" })).map((i) => i.kind)).toEqual(["thread"]);
     expect(open[0]).toMatchObject({ kind: "question", urgent: true, open: true });
     expect(open.slice(1).map((i) => i.at)).toEqual(open.slice(1).map((i) => i.at).sort().reverse());
     for (const i of open) {
@@ -53,9 +55,10 @@ describe("the inbox in the mock", () => {
     expect((await api.inbox.list({ project: "webshop" })).map((i) => i.id)).toEqual(["question:01JBQUES000000000000000002"]);
     const done = await api.inbox.list({ status: "done" });
     expect(done.every((i) => !i.open && i.kind !== "system")).toBe(true);
-    // The Inbox threads that do not wait for the operator: one waits for its agent, one is closed.
-    expect(done.map((i) => i.kind).sort()).toEqual(["mail", "notice", "question", "question", "thread", "thread"]);
-    expect((await api.inbox.list({ status: "all" })).length).toBe(15);
+    // No Inbox thread: only `kind=thread` lists them (TER-466); there, one waits for its agent and one is closed.
+    expect(done.map((i) => i.kind).sort()).toEqual(["mail", "notice", "question", "question"]);
+    expect((await api.inbox.list({ status: "done", kind: "thread" })).map((i) => i.kind)).toEqual(["thread", "thread"]);
+    expect((await api.inbox.list({ status: "all" })).length).toBe(12);
     // The Questions tab holds the bundle too.
     expect((await api.inbox.list({ kind: "question" })).map((i) => i.question!.kind).sort()).toEqual(["bundle", "question", "question"]);
     await expect(api.inbox.list({ status: "nope" as "open" })).rejects.toMatchObject({ status: 422 });
@@ -64,9 +67,9 @@ describe("the inbox in the mock", () => {
   it("counts the open items by kind, for a project too", async () => {
     const api = mock();
     // The bundle counts once, as a question.
-    // The questions of a thread count in its thread item, not as questions.
-    expect(await api.inbox.counts()).toEqual({ open: 9, urgent: 1, critical: 0, question: 3, notice: 1, mail: 3, system: 1, watch: 0, thread: 1 });
-    expect(await api.inbox.counts("webshop")).toEqual({ open: 1, urgent: 0, critical: 0, question: 1, notice: 0, mail: 0, system: 0, watch: 0, thread: 0 });
+    // The questions of a thread count in its thread item, not as questions; the threads count for the Threads badge, not in `open` (TER-466).
+    expect(await api.inbox.counts()).toEqual({ open: 8, urgent: 1, critical: 0, question: 3, notice: 1, mail: 3, system: 1, watch: 0, thread: 1, thread_urgent: 0, thread_critical: 0 });
+    expect(await api.inbox.counts("webshop")).toEqual({ open: 1, urgent: 0, critical: 0, question: 1, notice: 0, mail: 0, system: 0, watch: 0, thread: 0, thread_urgent: 0, thread_critical: 0 });
   });
 
   it("acknowledges mail to the operator, with an optional reply on the thread", async () => {
@@ -153,14 +156,14 @@ describe("the inbox in the mock", () => {
     const store = createInboxStore(api, { on: (fn) => api.events.stream({ since: api.world.seq }).subscribe(fn) }, { debounceMs: 0 });
     await store.refresh();
     expect(store.loaded()).toBe(true);
-    expect(store.counts()).toMatchObject({ open: 9, urgent: 1 });
-    expect(store.open()).toHaveLength(9);
+    expect(store.counts()).toMatchObject({ open: 8, urgent: 1, thread: 1 });
+    expect(store.open()).toHaveLength(8);
     await wait();
     await api.questions.answer(store.open()[0]!.question!.id, { answer: "yes" });
-    await waitFor(() => expect(store.counts()).toMatchObject({ open: 8, urgent: 0, question: 2 }));
+    await waitFor(() => expect(store.counts()).toMatchObject({ open: 7, urgent: 0, question: 2 }));
     await api.inbox.ackMail(fakeUlid("msg", 13));
-    await waitFor(() => expect(store.counts()).toMatchObject({ open: 7, mail: 2 }));
-    expect(store.open()).toHaveLength(7);
+    await waitFor(() => expect(store.counts()).toMatchObject({ open: 6, mail: 2 }));
+    expect(store.open()).toHaveLength(6);
   });
 
   it("shows a critical notice first, counts it, and drops the banner after the acknowledgement", async () => {
@@ -180,6 +183,33 @@ describe("the inbox in the mock", () => {
     await api.questions.ack(notice.id);
     await waitFor(() => expect(store.counts()).toMatchObject({ critical: 0 }));
     expect(criticalBanner(store.open())).toBeNull();
+  });
+
+  it("shows a critical question inside a thread in the queue and the banner, and drops it after the answer (TER-488)", async () => {
+    const api = mock();
+    const calls: unknown[] = [];
+    const spy = { ...api, inbox: { ...api.inbox, list: (q?: Parameters<typeof api.inbox.list>[0]) => (calls.push(q), api.inbox.list(q)) } };
+    const store = createInboxStore(spy, { on: (fn) => api.events.stream({ since: api.world.seq }).subscribe(fn) }, { debounceMs: 0 });
+    await store.refresh();
+    expect(criticalBanner(store.open())).toBeNull();
+    // No critical thread: no read of the thread items.
+    expect(calls).toEqual([{ status: "open" }]);
+    // The agent of a thread asks a critical question.
+    const q = api.world.questions!.find((x) => x.thread && x.status === "open")!;
+    q.priority = "critical";
+    await store.refresh();
+    expect(store.counts()).toMatchObject({ critical: 0, thread_critical: 1 });
+    expect(calls.at(-1)).toEqual({ status: "open", kind: "thread" });
+    const item = store.open()[0]!;
+    expect(item).toMatchObject({ kind: "thread", critical: true });
+    expect(store.open().filter((i) => i.kind === "thread")).toHaveLength(1);
+    const b = criticalBanner(store.open())!;
+    expect(b).toMatchObject({ more: 0, text: item.thread!.topic, href: `/threads/${encodeURIComponent(item.thread!.id)}` });
+    await wait();
+    await api.questions.answer(q.id, { answer: "yes" });
+    await waitFor(() => expect(store.counts()).toMatchObject({ thread_critical: 0 }));
+    expect(criticalBanner(store.open())).toBeNull();
+    expect(store.open().some((i) => i.kind === "thread")).toBe(false);
   });
 
   it("asks an agent: one mail on a new thread, an open watch that the badge does not count, and the answer closes it", async () => {

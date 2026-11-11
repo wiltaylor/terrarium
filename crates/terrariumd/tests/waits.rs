@@ -1142,7 +1142,8 @@ case "$1" in
   inspect) echo '[{"Id":"abc","Name":"/terrarium-dbox","State":{"Status":"running"}}]' ;;
   run) echo abc ;;
   exec) shift
-    while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w|-e|-u) shift 2 ;; *) break ;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w|-e|-u) shift 2 ;;
+      --env-file) while IFS= read -r l; do export "$l"; done < "$2"; shift 2 ;; *) break ;; esac; done
     shift
     ( exec setsid "$@" ) &
     wait $! ;;

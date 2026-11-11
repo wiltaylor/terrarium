@@ -10,7 +10,13 @@ import { MOVED_ROUTES, movedTo, PROJECT_TABS } from "./nav";
 const { stub } = vi.hoisted(() => ({ stub: (label: string) => () => label }));
 
 vi.mock("../api", () => ({ isMock: false }));
-vi.mock("../stores", () => ({ auth: { mode: () => "operator" } }));
+// The project shell reads the tab counts (TER-154): no agent, no count.
+vi.mock("../stores", () => ({
+  auth: { mode: () => "operator" },
+  agents: { inProject: () => [] },
+  api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) } },
+  events: { on: () => () => {} },
+}));
 vi.mock("./Layout", () => ({ Layout: (props: { children?: unknown }) => props.children }));
 vi.mock("./LoginScreen", () => ({ LoginScreen: stub("Login") }));
 vi.mock("../features/home/Home", () => ({ Home: stub("Home page") }));
@@ -86,6 +92,9 @@ describe("App project routes", () => {
   it("opens every project tab and its real child route", async () => {
     const cases = [
       ["/p/my%20app/board", "Cards page"],
+      ["/p/my%20app/tests", "Tests page"],
+      ["/p/my%20app/schedules", "Schedules page"],
+      ["/p/my%20app/rules", "Rules page"],
       ["/p/my%20app/dashboard", "Dashboard page"],
       ["/p/my%20app/agents", "Agents page"],
       ["/p/my%20app/repos", "Repos page"],
@@ -108,7 +117,6 @@ describe("App project routes", () => {
 
   it("keeps the nested tab rows encoded and active on deep paths", async () => {
     const cases = [
-      ["/p/my%20app/board/tests/1", "Test run page", "Board", "Tests", "/p/my%20app/board/tests"],
       ["/p/my%20app/knowledge/wiki/a/b", "Wiki page", "Knowledge", "Wiki", "/p/my%20app/knowledge/wiki"],
       ["/p/my%20app/logs/mail", "Mail page", "Logs", "Mail", "/p/my%20app/logs/mail"],
       ["/p/my%20app/settings/secrets", "Secrets page", "Settings", "Secrets", "/p/my%20app/settings/secrets"],
@@ -120,6 +128,27 @@ describe("App project routes", () => {
       expect(links.find((a) => a.textContent === tab)?.getAttribute("href")).toBe(href);
       expect(links.filter((a) => a.classList.contains("active")).map((a) => a.textContent)).toEqual([tab]);
       expect(root.querySelector("h2")?.textContent).toBe(`${label} · my app`);
+      dispose?.();
+      document.body.replaceChildren();
+    }
+  });
+
+  it("shows one tab row on the board and its former tabs (TER-507)", async () => {
+    const cases = [
+      ["/p/my%20app/board", "Cards page", "Board"],
+      ["/p/my%20app/board/done", "Done cards page", "Board"],
+      ["/p/my%20app/board/artifacts/ART-2", "Artifacts page", "Board"],
+      ["/p/my%20app/tests/1", "Test run page", "Tests"],
+      ["/p/my%20app/schedules", "Schedules page", "Schedules"],
+      ["/p/my%20app/rules", "Rules page", "Rules"],
+    ] as const;
+    for (const [path, page, tab] of cases) {
+      const root = mount(path);
+      await vi.waitFor(() => expect(root.textContent).toContain(page));
+      expect(root.querySelectorAll("nav.tabs"), path).toHaveLength(1);
+      expect(root.querySelector('nav[aria-label="Board"]'), path).toBeNull();
+      expect(activeProjectTab(root), path).toEqual([tab]);
+      expect(Array.from(root.querySelectorAll("nav.tabs a")).map((a) => a.textContent)).not.toContain("Artifacts");
       dispose?.();
       document.body.replaceChildren();
     }
@@ -141,7 +170,8 @@ describe("App project routes", () => {
     const root = mount("/p/a%zz/board");
     await vi.waitFor(() => expect(root.textContent).toContain("Cards page"));
     expect(root.querySelector("h1")?.textContent).toBe("a%zz");
-    expect(root.querySelector("h2")?.textContent).toBe("Board · a%zz");
+    // The board has no screen title of its own (TER-507): the project title is the only one.
+    expect(root.querySelector("h2")).toBeNull();
     expect(window.location.pathname).toBe("/p/a%25zz/board");
     expect(root.textContent).not.toContain("Page not found.");
   });

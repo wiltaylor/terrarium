@@ -61,6 +61,6 @@ it("opens New thread from Home with the shared dialog", async () => {
   input("textarea", "First message");
   button("Open the thread").click(); await settle();
   expect(open).toHaveBeenCalledWith({ scope: "terrarium", agent: "terrarium/lead", topic: "A new topic", text: "First message" });
-  expect(navigate).toHaveBeenCalledWith(expect.stringContaining("/inbox/threads/"));
+  expect(navigate).toHaveBeenCalledWith(expect.stringContaining("/threads/"));
   expect(document.querySelector("form[aria-label='New thread']")).toBeNull();
 });

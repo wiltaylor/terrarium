@@ -1,7 +1,7 @@
-// Inbox threads (docs/api.md §6.13): pure helpers for the Threads view of the
-// Inbox and the chat page of one thread. No Solid imports.
+// Inbox threads (docs/api.md §6.13): pure helpers for the Threads screen
+// (TER-466) and the chat page of one thread. No Solid imports.
 
-import type { NewThread, Question, Thread, ThreadClose, ThreadHandoff, ThreadLink, ThreadLinkKind, ThreadMessage, ThreadQuery } from "../../api/types";
+import type { InboxCounts, NewThread, Question, Thread, ThreadClose, ThreadHandoff, ThreadLink, ThreadLinkKind, ThreadMessage, ThreadQuery } from "../../api/types";
 
 /** The limits of the daemon (store/threads.rs). Texts count bytes; the topic and a link count characters. */
 export const THREAD_TOPIC_MAX = 200;
@@ -12,17 +12,34 @@ export const THREAD_LINKS_MAX = 50;
 export const THREAD_REF_MAX = 500;
 export const THREAD_LINK_KINDS: readonly ThreadLinkKind[] = ["card", "mail", "wiki", "memory", "url", "other"];
 
-/** The chat page of a thread. */
-export const threadHref = (id: string) => `/inbox/threads/${encodeURIComponent(id)}`;
+/** The chat page of a thread (TER-466: on the Threads screen; `/inbox/threads/:id` redirects here). */
+export const threadHref = (id: string) => `/threads/${encodeURIComponent(id)}`;
 
 /** The open questions of a thread: the `questions` of a full thread, else `open_questions` of a list row. */
 export const openQuestionCount = (t: Pick<Thread, "questions" | "open_questions">): number => (t.questions ? t.questions.filter((q) => q.status === "open").length : (t.open_questions ?? 0));
 
-/** Does the thread wait for the operator? It is `waiting_operator`, or it is not closed and has an open question (as the Inbox item). */
-export const waitsOnYou = (t: Pick<Thread, "status" | "questions" | "open_questions">): boolean => t.status === "waiting_operator" || (t.status !== "closed" && openQuestionCount(t) > 0);
+/** The questions that a close retracts: `open` and `in_thread` (moved into this thread from the Inbox, TER-469). Full thread only, else as {@link openQuestionCount}. */
+export const retractedOnClose = (t: Pick<Thread, "questions" | "open_questions">): number => (t.questions ? t.questions.filter((q) => q.status === "open" || q.status === "in_thread").length : (t.open_questions ?? 0));
 
 /** The agent's close proposal that waits for the operator (TER-95), or `null`: none, or the thread is closed. */
 export const pendingProposal = (t: Pick<Thread, "status" | "close_proposal">): ThreadHandoff | null => (t.status === "closed" ? null : (t.close_proposal ?? null));
+
+/**
+ * Why the thread waits for the operator, or `null` when it does not (TER-488: the one predicate of
+ * {@link waitsOnYou} and {@link threadIcon}). An open thread waits on you with a close proposal, an
+ * open question, or the status `waiting_operator`; a closed thread never does.
+ */
+export function waitReason(t: Pick<Thread, "status" | "questions" | "open_questions" | "close_proposal">): string | null {
+  if (t.status === "closed") return null;
+  if (pendingProposal(t)) return "a close proposal";
+  const n = openQuestionCount(t);
+  if (n > 0) return n === 1 ? "an open question" : `${n} open questions`;
+  if (t.status === "waiting_operator") return "your turn";
+  return null;
+}
+
+/** Does the thread wait for the operator? See {@link waitReason}. */
+export const waitsOnYou = (t: Pick<Thread, "status" | "questions" | "open_questions" | "close_proposal">): boolean => waitReason(t) !== null;
 
 /** The status chip of a thread. */
 export function threadChip(t: Pick<Thread, "status" | "questions" | "open_questions" | "close_proposal">): { label: string; chip: string } {
@@ -34,17 +51,48 @@ export function threadChip(t: Pick<Thread, "status" | "questions" | "open_questi
 }
 
 /**
- * The lists of the Threads tab (TER-145): Open has the threads that are not
- * closed and do not track, Tracking the ones whose agent tracks handed-off
- * work (parked, no stale close), Done the closed ones.
+ * The filters of the Threads screen (TER-466): Open has every thread that is
+ * not closed, the tracking ones too; Archived has the closed ones.
  */
-export type ThreadsViewId = "open" | "tracking" | "done";
+export type ThreadsViewId = "open" | "archived";
 
-/** The `status` of `GET /api/threads` for a list. */
-export const threadListStatus = (v: ThreadsViewId): NonNullable<ThreadQuery["status"]> => (v === "done" ? "closed" : v);
+/** The filter of `?status=`: `archived`, else Open. */
+export const threadsViewOf = (status: string | undefined): ThreadsViewId => (status === "archived" ? "archived" : "open");
 
-/** Does the thread show in the list? The daemon's `open` has the tracking threads too: they show under Tracking only. */
-export const inThreadsView = (v: ThreadsViewId, t: Pick<Thread, "status">): boolean => (v === "open" ? t.status !== "tracking" && t.status !== "closed" : v === "tracking" ? t.status === "tracking" : t.status === "closed");
+/** The `status` of `GET /api/threads` for a filter. */
+export const threadListStatus = (v: ThreadsViewId): NonNullable<ThreadQuery["status"]> => (v === "archived" ? "closed" : "open");
+
+/** Does the thread show under the filter? */
+export const inThreadsView = (v: ThreadsViewId, t: Pick<Thread, "status">): boolean => (v === "archived" ? t.status === "closed" : t.status !== "closed");
+
+/** The status icon of a row (TER-466): a person waits on you, a robot on the agent, tracking for handed-off work, an archive box when closed. */
+export type ThreadIconId = "you" | "agent" | "tracking" | "closed";
+
+/** The icon of a thread and its tooltip. The tooltip of the person says why the thread waits on you. */
+export function threadIcon(t: Pick<Thread, "status" | "questions" | "open_questions" | "close_proposal">): { icon: ThreadIconId; label: string } {
+  if (t.status === "closed") return { icon: "closed", label: "Closed" };
+  const why = waitReason(t);
+  if (why) return { icon: "you", label: `Waiting on you: ${why}` };
+  if (t.status === "tracking") return { icon: "tracking", label: "Tracking: the work is handed off" };
+  return { icon: "agent", label: "Waiting on the agent" };
+}
+
+/**
+ * The Threads badge of the sidebar (TER-466): `thread` of the counts, red when
+ * one of those threads is urgent or critical, else the info style. No badge
+ * when no thread waits on you.
+ */
+export function threadsBadge(c: Pick<InboxCounts, "thread" | "thread_urgent" | "thread_critical">): { n: number; cls: string; title: string } | null {
+  const n = c.thread ?? 0;
+  if (n <= 0) return null;
+  const urgent = c.thread_urgent ?? 0;
+  const critical = c.thread_critical ?? 0;
+  return {
+    n,
+    cls: urgent > 0 || critical > 0 ? "nav-count" : "nav-count info",
+    title: `${n} ${n === 1 ? "thread waits" : "threads wait"} on you${critical ? `. ${critical} critical` : ""}${urgent ? `. ${urgent} urgent` : ""}`,
+  };
+}
 
 /** The newest activity of a thread: `last_at` of a list row, else the newest message or change. */
 export const lastActivity = (t: Pick<Thread, "last_at" | "updated_at" | "messages">): string => t.last_at ?? [t.updated_at, ...(t.messages ?? []).map((m) => m.at)].sort().at(-1)!;
@@ -54,18 +102,6 @@ export const byThreadOrder = (a: Thread, b: Thread): number =>
   Number(waitsOnYou(b)) - Number(waitsOnYou(a)) || lastActivity(b).localeCompare(lastActivity(a)) || b.id.localeCompare(a.id);
 
 export const sortThreads = (ts: Thread[]): Thread[] => ts.slice().sort(byThreadOrder);
-
-/** A group of the Open list (GitHub #28): the threads that wait on the operator, then the work in progress (the agent works or tracks). */
-export type ThreadGroup = { id: "you" | "progress"; label: string; threads: Thread[] };
-
-/** The groups of the Open list, in order and without empty groups: a thread that waits on the agent is work in progress, not waiting on you. */
-export function threadGroups(ts: Thread[]): ThreadGroup[] {
-  const groups: ThreadGroup[] = [
-    { id: "you", label: "Waiting on you", threads: ts.filter((t) => waitsOnYou(t)) },
-    { id: "progress", label: "In progress", threads: ts.filter((t) => !waitsOnYou(t)) },
-  ];
-  return groups.filter((g) => g.threads.length > 0);
-}
 
 /** The scope as the page shows it. */
 export const scopeLabel = (scope: string): string => (scope === "global" ? "global" : `project ${scope}`);

@@ -9,13 +9,13 @@ import { LoginScreen } from "./LoginScreen";
 import { Home } from "../features/home/Home";
 import { AgentsPage } from "../features/agents/AgentsPage";
 import { BoardPage, DoneCardsPage } from "../features/board/BoardPage";
-import BoardScreen from "../features/board/BoardScreen";
 
 const AgentDetail = lazy(() => import("../features/agents/AgentDetail"));
 const SubscriptionsPage = lazy(() => import("../features/subscriptions/SubscriptionsPage"));
 const MailPage = lazy(() => import("../features/mail/MailPage"));
 const InboxPage = lazy(() => import("../features/inbox/InboxPage"));
 const ThreadPage = lazy(() => import("../features/inbox/ThreadPage"));
+const ThreadsPage = lazy(() => import("../features/inbox/ThreadsPage"));
 const MemoryPage = lazy(() => import("../features/memory/MemoryPage"));
 const WikiPage = lazy(() => import("../features/wiki/WikiPage"));
 const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
@@ -95,7 +95,9 @@ export function App() {
         <Route path="/agents/:id" component={AgentDetail} />
         <Route path="/sessions/:id" component={SessionPage} />
         <Route path="/inbox" component={InboxPage} />
-        <Route path="/inbox/threads/:id" component={ThreadPage} />
+        {/* The Threads screen (TER-466); `/inbox/threads/:id` redirects to `/threads/:id` (nav.ts MOVED_ROUTES). */}
+        <Route path="/threads" component={ThreadsPage} />
+        <Route path="/threads/:id" component={ThreadPage} />
         <Route path="/schedules" component={SchedulesPage} />
         {/* The logs screen: a tab bar over one route per tab (nav.ts LOGS_TABS). /logs redirects to the first tab. */}
         <Route path="/logs" component={LogsPage}>
@@ -124,16 +126,16 @@ export function App() {
           <Route path="/pipelines" component={PipelinesPage} />
           <Route path="/calendar" component={CalendarPage} />
           <Route path="/agents" component={AgentsPage} />
-          {/* The board screen: the tabs Cards, Artifacts, Tests, Schedules, and Rules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it filters and groups the cards by version label (?version=<name>&group=version). */}
-          <Route path="/board" component={BoardScreen}>
-            <Route path="/" component={BoardPage} />
-            <Route path="/done" component={DoneCardsPage} />
-            <Route path="/artifacts/:id?" component={ArtifactsPage} />
-            <Route path="/tests" component={TestRunsPage} />
-            <Route path="/tests/:id" component={TestRunPage} />
-            <Route path="/schedules" component={SchedulesPage} />
-            <Route path="/rules" component={RulesPage} />
-          </Route>
+          {/* The board: one route with no tab row of its own (TER-507). It filters and groups the cards by version label (?version=<name>&group=version). */}
+          <Route path="/board" component={BoardPage} />
+          <Route path="/board/done" component={DoneCardsPage} />
+          {/* The Artifacts page has no tab (TER-507); old links to it still open it. */}
+          <Route path="/board/artifacts/:id?" component={ArtifactsPage} />
+          {/* Former board tabs, now project tabs (nav.ts PROJECT_TABS); the old /board/<tab> paths redirect (MOVED_ROUTES). */}
+          <Route path="/tests" component={TestRunsPage} />
+          <Route path="/tests/:id" component={TestRunPage} />
+          <Route path="/schedules" component={SchedulesPage} />
+          <Route path="/rules" component={RulesPage} />
           {/* The repos of the project, and the browser of one repo (its trees: main and each agent checkout). */}
           <Route path="/repos" component={ReposPage} />
           <Route path="/repos/:repo" component={RepoPage} />

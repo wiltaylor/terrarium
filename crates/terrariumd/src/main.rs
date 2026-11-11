@@ -18,8 +18,19 @@ use terrariumd::{DaemonConfig, start_with_usage};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+fn main() -> anyhow::Result<()> {
+    // A script child of the board rules (TER-173): no runtime, no logs,
+    // no settings. It sets its own limits and runs one script.
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(terrariumd::rule_script::CHILD_ARG))
+    {
+        std::process::exit(terrariumd::rule_script::child_main());
+    }
+    daemon_main()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn daemon_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -265,6 +276,33 @@ async fn main() -> anyhow::Result<()> {
                 return;
             };
             terrariumd::conflict_hints::pass(&state).await;
+        }
+    });
+    // The reviewed commits of the cards in the merge queue (TER-553): the
+    // API and the rules record them right after a move; this timer takes
+    // the moves of other paths and the reads that failed.
+    let accepted_state = std::sync::Arc::downgrade(&daemon.state);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let Some(state) = accepted_state.upgrade() else {
+                return;
+            };
+            terrariumd::jobs::record_accepted_heads(&state).await;
+        }
+    });
+    // The remote card-branch heads for no_progress (TER-370): its own timer,
+    // so slow remotes delay neither conflict hints nor lifecycle work. Each
+    // pass is capped and the cursor rotates through the working cards.
+    let heads_state = std::sync::Arc::downgrade(&daemon.state);
+    tokio::spawn(async move {
+        let mut cursor = String::new();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let Some(state) = heads_state.upgrade() else {
+                return;
+            };
+            terrariumd::trouble::observe_remote_heads_from(&state, &mut cursor).await;
         }
     });
     // The self-update (TERRARIUM_SELF_UPDATE, docs/api.md §34): the
@@ -827,6 +865,59 @@ fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Resul
                 ),
             );
         }
+        BackupCommand::Drill {
+            file,
+            base,
+            into,
+            keep,
+            passphrase,
+            json,
+        } => {
+            let scratch = into.clone().unwrap_or_else(|| {
+                default_dir.join(format!("{}{}", backup::DRILL_PREFIX, ulid::Ulid::new()))
+            });
+            // Checked here too: the cleanup below deletes the dir, so it
+            // must not hold anything of its own.
+            backup::check_drill_dir(&scratch)?;
+            let r = with_passphrase(passphrase, |p| {
+                let r = backup::drill(file, base.as_deref(), p.as_deref(), &scratch);
+                if r.is_err() && !*keep {
+                    let _ = std::fs::remove_dir_all(&scratch);
+                }
+                r
+            });
+            if !*keep {
+                let _ = std::fs::remove_dir_all(&scratch);
+            }
+            let r = r?;
+            let left = if *keep {
+                format!(
+                    "; the restored tree is in {} (it holds the secrets: delete it)",
+                    r.dir.display()
+                )
+            } else {
+                String::new()
+            };
+            print(
+                *json,
+                &serde_json::to_value(&r)?,
+                format!(
+                    "drill passed: {} backup {} restored into a scratch dir: {} entries, {} files, \
+                     database integrity {}, schema version {}{}{left}",
+                    r.kind,
+                    r.id,
+                    r.entries,
+                    r.files,
+                    r.integrity,
+                    r.db_user_version,
+                    if r.secrets_key {
+                        ", secrets.key present"
+                    } else {
+                        ""
+                    }
+                ),
+            );
+        }
         BackupCommand::Restore {
             file,
             base,
@@ -840,6 +931,12 @@ fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Resul
                     settings.socket.display()
                 );
             }
+            // A daemon on another socket holds the state lock: refuse, and
+            // hold the lock so that no daemon starts during the restore.
+            std::fs::create_dir_all(&settings.state_dir)
+                .with_context(|| format!("cannot create {}", settings.state_dir.display()))?;
+            let _state_lock = terrariumd::lock_state_dir(&settings.state_dir)
+                .context("a daemon may use this state dir: stop it first, then restore")?;
             let roots = Roots {
                 state: settings.state_dir.clone(),
                 config: Some(settings.config_repo.clone()),
@@ -853,7 +950,12 @@ fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Resul
                         base: base.clone(),
                         passphrase: p,
                         skip_work: *skip_work,
-                        keep: vec![default_dir.clone(), file.clone()],
+                        // The held lock file stays in place.
+                        keep: vec![
+                            default_dir.clone(),
+                            file.clone(),
+                            settings.state_dir.join(terrariumd::STATE_LOCK),
+                        ],
                     },
                 )
             })?;

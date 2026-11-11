@@ -1,8 +1,19 @@
 // The sidebar items and the routes that moved. Pure, so tests can read them.
 
-/** The project shell tabs, in order. The first path segment selects the tab. */
+/**
+ * The project shell tabs, in order: the one tab row of a project. The first
+ * path segment selects the tab. The board has no tab row of its own (TER-507):
+ * its former tabs Tests, Schedules, and Rules are project tabs, and the
+ * Artifacts tab is gone.
+ */
 export const PROJECT_TABS = [
   { path: "board", label: "Board" },
+  // The test runs of the project (docs/api.md, test runs); `tests/:id` is the page of one run.
+  { path: "tests", label: "Tests" },
+  // The schedules and triggers of the project; the page keeps its own `?tab=triggers` sub-tab.
+  { path: "schedules", label: "Schedules" },
+  // The board rules of the project (docs/api.md §19.12): the rules that run, the lint, the runs, and the switch to rules.
+  { path: "rules", label: "Rules" },
   { path: "dashboard", label: "Dashboard" },
   { path: "agents", label: "Agents" },
   { path: "repos", label: "Repos" },
@@ -11,22 +22,6 @@ export const PROJECT_TABS = [
   { path: "calendar", label: "Calendar" },
   { path: "logs", label: "Logs" },
   { path: "settings", label: "Settings" },
-] as const;
-
-/**
- * The tabs of the board screen, in order. Each is a route under
- * /p/:project/board. The Cards tab has the empty path: it is the board at
- * /p/:project/board, so a `?card=` link opens the card drawer.
- */
-export const BOARD_TABS = [
-  { path: "", label: "Cards" },
-  { path: "artifacts", label: "Artifacts" },
-  // The test runs of the project (docs/api.md, test runs); `tests/:id` is the page of one run.
-  { path: "tests", label: "Tests" },
-  // The schedules and triggers of the project; the page keeps its own `?tab=triggers` sub-tab.
-  { path: "schedules", label: "Schedules" },
-  // The board rules of the project (docs/api.md §19.12): the rules that run, the lint, the runs, and the switch to rules.
-  { path: "rules", label: "Rules" },
 ] as const;
 
 /** The tabs of the knowledge screen, in order. Each is a route under /p/:project/knowledge. */
@@ -60,6 +55,8 @@ export const TOP_ITEMS = [
   { href: "/", label: "Home", end: true },
   // Everything that waits for the operator; the badge counts the open items.
   { href: "/inbox", label: "Inbox" },
+  // The Inbox threads (TER-466): a forum table; the badge counts the threads that wait on you.
+  { href: "/threads", label: "Threads" },
   // The logs screen (LOGS_TABS): mail, events, and audit. Active on every /logs/... tab.
   { href: "/logs", label: "Logs" },
   { href: "/schedules", label: "Schedules" },
@@ -137,18 +134,21 @@ export const PROJECT_LOGS_TABS = [
  *   `/p/:project/settings` opens the first tab. The Repos panel left the
  *   General tab for the Repos item of the project (/p/:project/repos); the
  *   General tab keeps its path.
- * - The project Artifacts page is a tab of the board screen (BOARD_TABS).
+ * - The project Artifacts page was a tab of the board screen. The tab is
+ *   gone (TER-507); the page stays at /p/:project/board/artifacts/:id? with
+ *   no tab, so an old link still opens it.
  * - Version objects are gone (TER-58): a version is the card label
  *   `version:<name>`, and the Cards tab filters and groups by it
  *   (`?version=<name>&group=version`). Old mail and bookmarks can have
  *   `/p/<project>/versions/<id>` or a path of the old Versions tab, so
  *   these paths redirect in one hop to the board. The old version ID
  *   names no label, so it does not go along.
- * - The project Schedules page is a tab of the board screen (BOARD_TABS).
- * - The Tests tab of the board shows the test runs. A short link
- *   `/p/<project>/tests[/<id>]` goes to the tab.
- *   A schedule link of an old mail or a bookmark has the old path with a
- *   query (`?open=...&tab=triggers`), so the old path stays as a redirect.
+ * - Tests, Schedules, and Rules were tabs of the board screen
+ *   (/p/:project/board/<tab>). They are project tabs now (TER-507), at
+ *   /p/:project/tests[/:id], /p/:project/schedules, and /p/:project/rules.
+ *   The daemon, old mail, and bookmarks link the board paths, and a schedule
+ *   link has a query (`?open=...&tab=triggers`), so the board paths stay as
+ *   redirects.
  * - The project Wiki and Memory pages are tabs of the knowledge screen
  *   (KNOWLEDGE_TABS). The wiki redirect keeps the page path (`*path`).
  *   `/p/:project/knowledge` opens the Wiki tab.
@@ -156,6 +156,9 @@ export const PROJECT_LOGS_TABS = [
  *   settings screen. A bookmark can have an old path, and a link can have a
  *   query (`/targets?project=...`), so the old paths stay as redirects. The
  *   skill redirect keeps the skill name.
+ * - The Inbox threads have their own Threads screen (TER-466): a thread
+ *   opens at `/threads/:id`. The Threads tab of the Inbox is gone: see
+ *   {@link inboxRedirect}.
  */
 export const MOVED_ROUTES = [
   { path: "/p/:project/spend", to: "/" },
@@ -181,9 +184,10 @@ export const MOVED_ROUTES = [
   { path: "/p/:project/board/versions/:id", to: "/p/:project/board" },
   { path: "/p/:project/artifacts", to: "/p/:project/board/artifacts" },
   { path: "/p/:project/artifacts/:id", to: "/p/:project/board/artifacts/:id" },
-  { path: "/p/:project/schedules", to: "/p/:project/board/schedules" },
-  { path: "/p/:project/tests", to: "/p/:project/board/tests" },
-  { path: "/p/:project/tests/:id", to: "/p/:project/board/tests/:id" },
+  { path: "/p/:project/board/schedules", to: "/p/:project/schedules" },
+  { path: "/p/:project/board/rules", to: "/p/:project/rules" },
+  { path: "/p/:project/board/tests", to: "/p/:project/tests" },
+  { path: "/p/:project/board/tests/:id", to: "/p/:project/tests/:id" },
   { path: "/p/:project/wiki/*path", to: "/p/:project/knowledge/wiki/*path" },
   { path: "/p/:project/memory", to: "/p/:project/knowledge/memory" },
   { path: "/p/:project/knowledge", to: "/p/:project/knowledge/wiki" },
@@ -192,6 +196,7 @@ export const MOVED_ROUTES = [
   { path: "/skills", to: "/settings/skills" },
   { path: "/skills/:name", to: "/settings/skills/:name" },
   { path: "/targets", to: "/settings/targets" },
+  { path: "/inbox/threads/:id", to: "/threads/:id" },
 ] as const;
 
 /**
@@ -230,4 +235,21 @@ export function movedTo(pathname: string): string | undefined {
     );
   }
   return undefined;
+}
+
+/**
+ * The Threads tab of the Inbox moved to the Threads screen (TER-466): the
+ * `/threads` target of an Inbox query with `tab=thread`, else undefined. The
+ * project filter goes along. The old Done tab is the Archived filter; the old
+ * Tracking tab is in Open.
+ */
+export function inboxRedirect(search: string): string | undefined {
+  const q = new URLSearchParams(search.replace(/^\?/, ""));
+  if (q.get("tab") !== "thread") return undefined;
+  const next = new URLSearchParams();
+  if (q.get("status") === "done") next.set("status", "archived");
+  const project = q.get("project");
+  if (project) next.set("project", project);
+  const rest = next.toString();
+  return rest ? `/threads?${rest}` : "/threads";
 }

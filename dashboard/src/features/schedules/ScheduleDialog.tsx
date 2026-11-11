@@ -8,7 +8,7 @@ import { createMemo, createResource, For, Index, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { AgentVerb, CardOp, CatchUp, Schedule, ScheduleActionType, ScheduleSpecKind } from "../../api/types";
 import { agents, api, projects, subscriptions } from "../../stores";
-import { everyWords, parseEvery, utcText, WEEKDAYS } from "../../lib/schedule";
+import { DAY_START_WEEKDAYS, everyWords, parseEvery, utcText, WEEKDAYS } from "../../lib/schedule";
 import { actionTypesFor, agentOptions, CRON_PRESETS, createScheduleDialog, GLOBAL, targetOptions, timeZones, type CronPreset, type ScheduleOutcome } from "./form";
 import { fieldKit } from "./fields";
 import { TemplateHelp, TriggerSpecFields } from "./TriggerFields";
@@ -18,6 +18,7 @@ const SPEC_KINDS: readonly { id: ScheduleSpecKind; label: string }[] = [
   { id: "cron", label: "Cron" },
   { id: "interval", label: "Interval" },
   { id: "at", label: "Once, at a time" },
+  { id: "day_start", label: "Start of day: once a day, at the first start" },
   { id: "manual", label: "On demand: a button runs it (project action)" },
 ];
 
@@ -214,6 +215,50 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
           </div>
         </Show>
 
+        <Show when={f().specKind === "day_start"}>
+          {/* TER-458: one run per day in the zone, at the first start (daemon start, resume, host agent reconnect, day change). */}
+          <fieldset class="stack" aria-label="Start of day">
+            <legend class="small">Start of day</legend>
+            <div class="form-grid">
+              {field("notBefore", "Not before (HH:MM)", <input type="time" aria-label="Not before" value={f().notBefore} onInput={(e) => dlg.set("notBefore", e.currentTarget.value)} />, () => "A start before it runs at this time")}
+              {field("notAfter", "Not after (HH:MM)", <input type="time" aria-label="Not after" value={f().notAfter} onInput={(e) => dlg.set("notAfter", e.currentTarget.value)} />, () => "A start after it plans no run that day")}
+              {text("delay", "Delay after the start", "5m", () => {
+                const s = f().delay.trim() ? parseEvery(f().delay) : null;
+                return s === null ? "Empty, or a duration up to 12h: 5m, 1h30m" : `${everyWords(s)} after the start`;
+              })}
+              {field(
+                "tz",
+                "Time zone",
+                <>
+                  <input aria-label="Time zone" list="schedule-tz-day" value={f().tz} onInput={(e) => dlg.set("tz", e.currentTarget.value)} />
+                  <datalist id="schedule-tz-day">
+                    <Index each={zones}>{(z) => <option value={z()} />}</Index>
+                  </datalist>
+                </>,
+              )}
+            </div>
+            {field(
+              "weekdays",
+              "Days (none: every day)",
+              <span class="row small" style={{ "flex-wrap": "wrap", gap: "8px" }}>
+                <For each={DAY_START_WEEKDAYS}>
+                  {(d) => (
+                    <label class="row small">
+                      <input
+                        type="checkbox"
+                        aria-label={`On ${d}`}
+                        checked={f().weekdays.includes(d)}
+                        onChange={(e) => dlg.set("weekdays", e.currentTarget.checked ? [...f().weekdays.filter((x) => x !== d), d] : f().weekdays.filter((x) => x !== d))}
+                      />
+                      {d[0]!.toUpperCase() + d.slice(1)}
+                    </label>
+                  )}
+                </For>
+              </span>,
+            )}
+          </fieldset>
+        </Show>
+
         <div class="form-grid">
           {field(
             "actionType",
@@ -322,12 +367,13 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
           {field("text", "Text of the turn", <textarea rows={3} value={f().text} onInput={(e) => dlg.set("text", e.currentTarget.value)} />)}
           <label class="row small">
             <input type="checkbox" checked={f().startIfStopped} onChange={(e) => dlg.set("startIfStopped", e.currentTarget.checked)} />
-            start the agent when it is stopped
+            start the agent first, then type the turn (also ends a usage-limit hold; without it a stopped agent wakes for the queued turn)
           </label>
         </Show>
 
         <div class="row" style={{ "flex-wrap": "wrap", gap: "12px" }}>
-          <label class="row small">
+          {/* catch_up does not apply to a day_start schedule (docs/api.md §19). */}
+          <label class="row small" hidden={f().specKind === "day_start"}>
             {trigger ? "Events while the daemon was down" : "Missed runs"}
             <select aria-label="Catch up" value={f().catchUp} onChange={(e) => dlg.set("catchUp", e.currentTarget.value as CatchUp)}>
               <option value="skip" selected={f().catchUp === "skip"}>

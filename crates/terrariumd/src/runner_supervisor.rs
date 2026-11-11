@@ -47,8 +47,10 @@
 //!   made the change. Per project, one batch goes out in each
 //!   `lead_nudge_interval` (10 s); the changes in between go out together.
 //! - A quota hold ([`Supervisor::hold_turns`]) shows an idle agent as
-//!   `blocked` with the reason and the reset time. Operator turns, push
-//!   pointers, and the recap turn wait. The release types the waiting turns
+//!   `blocked` with the reason and the reset time. Each turn of
+//!   [`Supervisor::send_turn`] (the operator `/send`, the card reminder,
+//!   the prompt after a compaction), the store turns, push pointers, and
+//!   the recap turn wait. The release types the waiting turns
 //!   in order, then the pending pointer.
 //! - A compaction ([`Supervisor::compact`], PLAN §18 "Auto compact") types
 //!   the compact command of the harness into an idle agent and shows it
@@ -213,7 +215,21 @@ pub struct RunnerSupervisorConfig {
     /// reads the user settings of its harness from
     /// `<repo>/harness/<harness>/`. `None`: no user settings.
     pub config_repo: Option<PathBuf>,
+    /// The build that runner processes should run: a recovered runner of
+    /// another build (`terrarium_version::is_stale`) restarts with resume
+    /// after its turn. A version with no git ref turns this off.
+    pub version: String,
+    /// The most agents that restart for an upgrade at one time
+    /// ([`DEFAULT_UPGRADE_LIMIT`]).
+    pub upgrade_limit: usize,
 }
+
+/// The default of [`RunnerSupervisorConfig::upgrade_limit`].
+pub const DEFAULT_UPGRADE_LIMIT: usize = 3;
+
+/// How long an upgrade waits for the runner status to follow a rest that
+/// the events show.
+const UPGRADE_STATUS_LAG: Duration = Duration::from_secs(5);
 
 /// The default of [`RunnerSupervisorConfig::lead_nudge_interval`].
 pub const DEFAULT_LEAD_NUDGE_INTERVAL: Duration = Duration::from_secs(10);
@@ -241,6 +257,8 @@ impl RunnerSupervisorConfig {
             mode: RunnerMode::InProcess,
             lead_nudge_interval: DEFAULT_LEAD_NUDGE_INTERVAL,
             config_repo: None,
+            version: terrarium_version::FULL.to_owned(),
+            upgrade_limit: DEFAULT_UPGRADE_LIMIT,
         }
     }
 
@@ -327,6 +345,26 @@ pub fn not_ready(harness: HarnessId) -> SupervisorError {
     SupervisorError::NotReady(format!(
         "the {harness} adapter is not registered in this daemon"
     ))
+}
+
+/// The env var that names the dir of the credential files for `terrarium
+/// exec-env` (TER-630). A path, no secret.
+pub const CREDENTIAL_DIR_ENV: &str = "TERRARIUM_CREDENTIAL_DIR";
+
+/// The dir of the credential files of agent `id` in sandbox mode `none`:
+/// `<runtime>/credentials/<id>`.
+pub fn credential_dir(runtime_dir: &std::path::Path, id: AgentId) -> std::path::PathBuf {
+    runtime_dir.join("credentials").join(id.to_string())
+}
+
+/// Remove the credential files of agent `id` ([`credential_dir`]).
+fn remove_credential_dir(runtime_dir: &std::path::Path, id: AgentId) {
+    let dir = credential_dir(runtime_dir, id);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => debug!(agent = %id, "removed the credential files"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!(agent = %id, "cannot remove {}: {e}", dir.display()),
+    }
 }
 
 /// The definition of a stored subscription, as the adapters take it.
@@ -971,6 +1009,11 @@ struct Slot {
     /// which can lag behind the events; the push decision follows the
     /// events.
     seen: AgentStatus,
+    /// The event seq of the last rest event (`idle` or `waiting`) that the
+    /// forward task passed on in this launch. A delivery outcome and the
+    /// events of a runner process come on different channels: the seq
+    /// tells whether the delivered turn already ended (TER-547).
+    rest_seq: Option<u64>,
     /// A recap turn to type at the first idle after a failed resume (or a
     /// new session after a prompt change, for an agent with questions).
     recap: Option<String>,
@@ -994,6 +1037,16 @@ struct Slot {
     /// A swap waits for the end of the turn: then the agent restarts with
     /// resume on `agent.subscription`.
     swap_pending: bool,
+    /// The runner process runs another build than the daemon: the agent
+    /// restarts with resume when it is out of a turn (`restart_scheduled`,
+    /// reason `upgrade`).
+    upgrade_pending: bool,
+    /// A task waits for the end of the hot swap and for a free upgrade
+    /// slot ([`RunnerSupervisor::upgrade_after_turn`]).
+    upgrade_waiting: bool,
+    /// The upgrade slot of the restart that runs: it frees when the new
+    /// runner is in, or when the agent ends.
+    upgrade_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     /// The compaction that runs ([`Supervisor::compact`]). A drop of its
     /// sender (an exit, a new launch) ends the wait of the caller.
     compacting: Option<Compacting>,
@@ -1003,6 +1056,18 @@ struct Slot {
     /// The status reason of the next start, for a new session that an
     /// actor requested ([`Supervisor::new_session`]).
     start_reason: Option<String>,
+}
+
+/// The slot fields that [`RunnerSupervisor::prepare_new_session`] sets,
+/// as they were before: a new session whose kill failed puts them back.
+struct NewSessionUndo {
+    resume: Option<HarnessSessionId>,
+    session: Option<HarnessSessionId>,
+    start_reason: Option<String>,
+    recap: Option<String>,
+    /// The plan put a `then` turn first in `turns`.
+    then: bool,
+    reset_gate: bool,
 }
 
 /// A compaction that runs: its number, and where its end goes.
@@ -1032,6 +1097,34 @@ impl Slot {
             && self.compacting.is_none()
     }
 
+    /// A restart for an account swap may start now (TER-524): the runner
+    /// rests (`idle` or `waiting`, not `blocked`), no restart or stop is on
+    /// its way, and no turn, pointer or compaction is on its way into the
+    /// harness. Queued work (turns, a recap, pointer items) does not hold
+    /// the swap back: once the caller sets `restart_requested` under the
+    /// same lock, that work waits for the new launch on the new account.
+    /// Unlike [`Slot::can_idle_stop`] it does not read the runner's own
+    /// status stream: that can lag behind the events, and a swap that waits
+    /// needs the next rest event or the end of a failed delivery
+    /// ([`RunnerSupervisor::finish_turn_delivery`]) to fire.
+    fn can_swap_restart(&self) -> bool {
+        !self.stop_requested
+            && !self.restart_requested
+            && self.runner.is_some()
+            && self.seen.is_resting()
+            && self.turns_in_flight == 0
+            && !self.pointer_busy
+            && self.compacting.is_none()
+    }
+
+    /// The turn that started at event seq `started` (a delivery outcome,
+    /// [`terrarium_runner::Delivery::wait_started`]) has ended: the forward
+    /// task passed on a rest event after it, and the runner still rests.
+    /// With no seq it cannot tell, and the next rest event decides.
+    fn turn_ended(&self, started: Option<u64>) -> bool {
+        self.seen.is_resting() && started.is_some_and(|s| self.rest_seq.is_some_and(|r| r > s))
+    }
+
     fn new(agent: Agent) -> Self {
         Self {
             agent,
@@ -1048,6 +1141,7 @@ impl Slot {
             session: None,
             reached_idle: false,
             seen: AgentStatus::Starting,
+            rest_seq: None,
             recap: None,
             pointer: Pointer::default(),
             pointer_busy: false,
@@ -1057,6 +1151,9 @@ impl Slot {
             account: None,
             bound: Vec::new(),
             swap_pending: false,
+            upgrade_pending: false,
+            upgrade_waiting: false,
+            upgrade_permit: None,
             compacting: None,
             reset_gate: false,
             start_reason: None,
@@ -1067,6 +1164,12 @@ impl Slot {
         self.runner.is_some() || self.phase == Phase::Restarting
     }
 
+    /// Set the slot down. An upgrade slot that it holds frees.
+    fn down(&mut self, status: AgentStatus) {
+        self.phase = Phase::Down(status);
+        self.upgrade_permit = None;
+    }
+
     /// Not down: it runs, launches, or waits for a restart. Pointer items
     /// for it go into its pointer, which goes out at its next idle.
     fn up(&self) -> bool {
@@ -1074,12 +1177,16 @@ impl Slot {
     }
 }
 
-/// A quota hold and the operator turns that wait for its end. It lives
+/// A quota hold and the turns that wait for its end. It lives
 /// outside the slot, so a hold on an agent that does not run applies when
-/// it starts, and survives a restart of the harness.
+/// it starts, and survives a restart of the harness. A store turn
+/// (`PendingTurn::queued`) keeps its `queued_turns` row while it waits
+/// here, so a daemon restart during the hold delivers it again (TER-562).
+/// A plain turn of any [`Supervisor::send_turn`] caller gets a row
+/// first, and waits here as a store turn (TER-586).
 struct Held {
     hold: TurnHold,
-    waiting: Vec<String>,
+    waiting: Vec<crate::supervisor::PendingTurn>,
 }
 
 /// The number of the next compaction ([`Compacting::token`]).
@@ -1173,6 +1280,8 @@ struct Inner {
     /// True after the shutdown: the forward and attach tasks end, and drop
     /// their runner handles, so the control connections close.
     stop_tx: watch::Sender<bool>,
+    /// The upgrade slots ([`RunnerSupervisorConfig::upgrade_limit`]).
+    upgrades: Arc<tokio::sync::Semaphore>,
 }
 
 /// Runs each agent in a runner (see [`RunnerMode`]). Cheap to clone.
@@ -1231,6 +1340,14 @@ fn check_subscription(
     {
         return Err(SupervisorError::NotReady(why));
     }
+    // A cloud subscription takes only a model of its map or an alias
+    // (`terrarium_core::cloud::model_refusal`): say it at the start, not
+    // at the first turn's cloud API error.
+    if let Some(SubscriptionCheck::Found(s)) = sub
+        && let Some(why) = crate::store::subscriptions::model_refusal(s, agent.model.as_deref())
+    {
+        return Err(SupervisorError::NotReady(why));
+    }
     // A disabled subscription starts no agent (PLAN §16): a running agent
     // goes on, but no start, wake, or relaunch.
     if let Some(SubscriptionCheck::Found(s)) = sub
@@ -1275,6 +1392,7 @@ fn check_subscription(
 impl RunnerSupervisor {
     pub fn new(cfg: RunnerSupervisorConfig) -> Self {
         let (tx, _) = broadcast::channel(4096);
+        let upgrades = Arc::new(tokio::sync::Semaphore::new(cfg.upgrade_limit.max(1)));
         Self {
             inner: Arc::new(Inner {
                 #[cfg(test)]
@@ -1292,6 +1410,7 @@ impl RunnerSupervisor {
                 ssh_agents: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
                 stop_tx: watch::Sender::new(false),
+                upgrades,
             }),
         }
     }
@@ -1325,11 +1444,21 @@ impl RunnerSupervisor {
         lock(&self.inner.holds).get(&agent).map(|h| h.hold.clone())
     }
 
-    /// The operator turns that wait for the end of a quota hold. For tests.
+    /// The `queued_turns` rows of the store turns that the slot of
+    /// `agent` keeps for later ([`Supervisor::send_queued_turn`]). For
+    /// tests.
+    pub fn kept_queued_turns(&self, agent: AgentId) -> Vec<i64> {
+        lock(&self.inner.slots)
+            .get(&agent)
+            .map(|s| s.turns.iter().filter_map(|t| t.queued).collect())
+            .unwrap_or_default()
+    }
+
+    /// The turns that wait for the end of a quota hold. For tests.
     pub fn waiting_turns(&self, agent: AgentId) -> Vec<String> {
         lock(&self.inner.holds)
             .get(&agent)
-            .map(|h| h.waiting.clone())
+            .map(|h| h.waiting.iter().map(|t| t.text.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -1869,6 +1998,18 @@ impl RunnerSupervisor {
             );
             layout.exec_env = true;
             layout.exec_env_credentials = true;
+            // Sandbox mode `none` (development and tests): the credential
+            // files (the GCP JSON) go to a private dir of the runtime dir,
+            // which `on_exit` removes. The bwrap sandbox writes them to
+            // its tmpfs home.
+            if cfg.sandbox.mode == SandboxMode::None {
+                spec.env.insert(
+                    CREDENTIAL_DIR_ENV.to_owned(),
+                    credential_dir(&cfg.runtime_dir, agent.id)
+                        .display()
+                        .to_string(),
+                );
+            }
         }
         let (secret_vars, mut secret_warnings) =
             secret_env(&mut spec.env, &credential_vars, &view.secrets);
@@ -1931,6 +2072,48 @@ impl RunnerSupervisor {
         slot.reset_gate = false;
     }
 
+    /// The kill of a requested restart failed and the harness runs on:
+    /// clear the request (and the set-up of a new session), so that the
+    /// work that waited for the relaunch goes out to this harness.
+    ///
+    /// Only for `r`, the handle whose kill failed, while the slot still
+    /// holds it and it has no exit status: a harness that died during the
+    /// kill takes the requested relaunch on its exit, and a runner that
+    /// a later start installed keeps its own set-up.
+    fn restart_not_on_its_way(
+        &self,
+        id: AgentId,
+        r: &Arc<dyn RunnerHandle>,
+        undo: Option<NewSessionUndo>,
+    ) {
+        use futures_util::FutureExt as _;
+        {
+            let mut slots = lock(&self.inner.slots);
+            let Some(slot) = slots
+                .get_mut(&id)
+                .filter(|s| s.runner.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, r)))
+            else {
+                return;
+            };
+            if r.wait().now_or_never().is_some() {
+                return;
+            }
+            slot.restart_requested = false;
+            if let Some(u) = undo {
+                slot.resume = u.resume;
+                slot.session = u.session;
+                slot.start_reason = u.start_reason;
+                slot.recap = u.recap;
+                slot.reset_gate = u.reset_gate;
+                if u.then && !slot.turns.is_empty() {
+                    slot.turns.remove(0);
+                }
+            }
+        }
+        warn!(agent = %id, "the restart did not happen; the harness runs on");
+        self.deliver_pending(id);
+    }
+
     /// [`Supervisor::start`], and for a new session the set-up of
     /// [`RunnerSupervisor::prepare_new_session`] after the claim.
     async fn start_with(
@@ -1987,11 +2170,16 @@ impl RunnerSupervisor {
     /// exit keys gets them, and a kill only when it has not exited in
     /// time. Else a kill now. With an exit-key pause, the final CR goes
     /// after the pause.
+    ///
+    /// `restart`: the end is for a new session, with the set-up to put
+    /// back when the kill fails ([`RunnerSupervisor::restart_not_on_its_way`]),
+    /// also for the kill after the exit keys.
     async fn exit_gracefully(
         &self,
         agent: AgentId,
         r: Arc<dyn RunnerHandle>,
         harness: HarnessId,
+        restart: Option<NewSessionUndo>,
     ) -> Result<(), SupervisorError> {
         let (writes, pause) = self
             .entry(harness)
@@ -2008,6 +2196,7 @@ impl RunnerSupervisor {
             && r.status() == AgentStatus::Idle
             && r.write(&first).await.is_ok()
         {
+            let me = self.clone();
             tokio::spawn(async move {
                 for w in writes {
                     tokio::time::sleep(pause).await;
@@ -2017,12 +2206,23 @@ impl RunnerSupervisor {
                 }
                 if tokio::time::timeout(GRACEFUL_STOP, r.wait()).await.is_err() {
                     debug!(agent = %agent, "the harness did not exit on its exit keys; killing it");
-                    let _ = r.kill().await;
+                    if let Err(e) = r.kill().await {
+                        debug!(agent = %agent, "cannot kill the harness: {e}");
+                        if let Some(undo) = restart {
+                            me.restart_not_on_its_way(agent, &r, Some(undo));
+                        }
+                    }
                 }
             });
             return Ok(());
         }
-        r.kill().await.map_err(other)
+        let killed = r.kill().await.map_err(other);
+        if killed.is_err()
+            && let Some(undo) = restart
+        {
+            self.restart_not_on_its_way(agent, &r, Some(undo));
+        }
+        killed
     }
 
     fn launch(&self, id: AgentId, epoch: u64) -> BoxFuture<'_, Result<(), SupervisorError>> {
@@ -2175,6 +2375,9 @@ impl RunnerSupervisor {
                     slot.account = accounts.account.clone();
                     slot.bound = accounts.bound.clone();
                     slot.swap_pending = false;
+                    // The new runner is this build: the upgrade is done.
+                    // Its slot frees after the `starting` status below.
+                    slot.upgrade_pending = false;
                     for m in view.queued {
                         slot.pointer.add_mail(m);
                     }
@@ -2198,6 +2401,12 @@ impl RunnerSupervisor {
         };
         info!(agent = %id, name = %agent.name, %reason, "agent started");
         self.emit_status(id, AgentStatus::Starting, reason);
+        // The upgrade of this launch is in: the next one may restart.
+        let permit = lock(&self.inner.slots)
+            .get_mut(&id)
+            .filter(|s| s.epoch == epoch)
+            .and_then(|s| s.upgrade_permit.take());
+        drop(permit);
         if let Some(message) = account_warning {
             warn!(agent = %id, "{message}");
             self.emit(id, SupervisorEventKind::Harness(Event::Warning { message }));
@@ -2253,20 +2462,30 @@ impl RunnerSupervisor {
             .unwrap_or_default()
     }
 
-    /// The account swap that waited for the end of a turn: restart with
-    /// resume on the new account. True when it restarts.
-    fn take_pending_swap(&self, id: AgentId, epoch: u64) -> bool {
+    /// The restart that waited for the end of a turn: an account swap
+    /// restarts with resume on the new account at once (true), an upgrade
+    /// when the hot swap is in and an upgrade slot is free.
+    fn take_pending_restart(&self, id: AgentId, epoch: u64) -> bool {
         let agent = {
             let mut slots = lock(&self.inner.slots);
-            match slots
-                .get_mut(&id)
-                .filter(|s| s.epoch == epoch && s.swap_pending)
-            {
-                Some(slot) => {
+            match slots.get_mut(&id).filter(|s| s.epoch == epoch) {
+                // Out of a turn only: a runner `blocked` is in a turn (a
+                // question on screen, a stalled tool call). The check and the
+                // claim of the restart are under one lock: from here, no
+                // turn, recap or pointer goes out (`restart_requested`).
+                Some(slot) if slot.swap_pending && slot.can_swap_restart() => {
                     slot.swap_pending = false;
+                    slot.restart_requested = true;
                     slot.agent.clone()
                 }
-                None => return false,
+                Some(slot) if slot.upgrade_pending && !slot.upgrade_waiting => {
+                    slot.upgrade_waiting = true;
+                    drop(slots);
+                    let me = self.clone();
+                    tokio::spawn(async move { me.upgrade_after_turn(id, epoch).await });
+                    return false;
+                }
+                _ => return false,
             }
         };
         info!(
@@ -2281,6 +2500,101 @@ impl RunnerSupervisor {
             }
         });
         true
+    }
+
+    /// Restart an agent whose runner is another build (`restart_scheduled`,
+    /// reason `upgrade`): after the hot swap is committed, with one of the
+    /// [`RunnerSupervisorConfig::upgrade_limit`] slots, and only while the
+    /// agent is still out of a turn. A turn that started meanwhile keeps the
+    /// upgrade pending for its end.
+    async fn upgrade_after_turn(self, id: AgentId, epoch: u64) {
+        // With no daemon state (a unit test), no hot swap gate applies.
+        let ready = match self.state() {
+            Some(state) => state.agent_calls.wait_until_ready().await,
+            None => Ok(()),
+        };
+        let permit = match ready {
+            Ok(()) => self.inner.upgrades.clone().acquire_owned().await.ok(),
+            Err(e) => {
+                debug!(agent = %id, "no upgrade restart: {e}");
+                None
+            }
+        };
+        let Some(permit) = permit else {
+            if let Some(slot) = lock(&self.inner.slots)
+                .get_mut(&id)
+                .filter(|s| s.epoch == epoch)
+            {
+                slot.upgrade_waiting = false;
+            }
+            return;
+        };
+        // The runner reports its status on a stream of its own, which can
+        // lag behind the events: an agent that the events show at rest
+        // gets a short time for the runner status to follow.
+        let mut lagged = false;
+        let runner = loop {
+            // The check and the claim of the restart are under one lock:
+            // from here, no turn, recap or pointer goes out
+            // (`restart_requested`).
+            let behind = {
+                let mut slots = lock(&self.inner.slots);
+                let Some(slot) = slots.get_mut(&id).filter(|s| s.epoch == epoch) else {
+                    return;
+                };
+                let Some(runner) = slot.runner.clone() else {
+                    slot.upgrade_waiting = false;
+                    return;
+                };
+                // Out of a turn: the runner rests (`idle` or `waiting`),
+                // with no work on its way. A runner `blocked` is in a turn
+                // (a question on screen, a stalled tool call).
+                if slot.upgrade_pending && slot.can_idle_stop() && !slot.restart_requested {
+                    slot.upgrade_waiting = false;
+                    slot.upgrade_pending = false;
+                    slot.upgrade_permit = Some(permit);
+                    slot.restart_requested = true;
+                    slot.resume = slot.agent.session.clone().or(slot.session.clone());
+                    break runner;
+                }
+                let behind =
+                    slot.upgrade_pending && slot.seen.is_resting() && !runner.status().is_resting();
+                if lagged || !behind {
+                    slot.upgrade_waiting = false;
+                    return;
+                }
+                runner
+            };
+            lagged = true;
+            let mut status = behind.watch_status();
+            let rests = async {
+                while !status.borrow_and_update().is_resting() {
+                    if status.changed().await.is_err() {
+                        break;
+                    }
+                }
+            };
+            let _ = tokio::time::timeout(UPGRADE_STATUS_LAG, rests).await;
+        };
+        info!(
+            agent = %id,
+            version = %self.inner.cfg.version,
+            "upgrade: the agent is out of its turn; restarting with resume on the new runner"
+        );
+        let _ = runner.set_stopped_by(StoppedBy::Policy).await;
+        if let Err(e) = runner.kill().await {
+            warn!(agent = %id, "the restart for the upgrade failed: {e}");
+            if let Some(slot) = lock(&self.inner.slots)
+                .get_mut(&id)
+                .filter(|s| s.epoch == epoch)
+            {
+                // The next end of a turn tries again.
+                slot.restart_requested = false;
+                slot.upgrade_permit = None;
+                slot.upgrade_pending = true;
+            }
+            self.deliver_pending(id);
+        }
     }
 
     /// Write [`HARNESS_VERSION_FILE`] for the launch of `id`.
@@ -2487,6 +2801,9 @@ impl RunnerSupervisor {
                     .filter(|s| s.epoch == epoch)
                 {
                     slot.seen = *to;
+                    if to.is_resting() && rec.seq.is_some() {
+                        slot.rest_seq = slot.rest_seq.max(rec.seq);
+                    }
                 }
                 match to {
                     AgentStatus::Working => self.stream_busy(id),
@@ -2506,13 +2823,11 @@ impl RunnerSupervisor {
                 ..
             }
         );
-        // Not in a turn: a swap that waited can restart the harness now.
+        // Not in a turn: a swap that waited can restart the harness now. A
+        // runner `blocked` is still in its turn.
         let settled = matches!(
             rec.event,
-            Event::StatusChanged {
-                to: AgentStatus::Idle | AgentStatus::Waiting | AgentStatus::Blocked,
-                ..
-            }
+            Event::StatusChanged { to, .. } if to.is_resting()
         );
         match self.held(id) {
             // A held agent is `blocked`, not `idle`.
@@ -2526,7 +2841,7 @@ impl RunnerSupervisor {
             ),
             _ => self.emit_seq(id, SupervisorEventKind::Harness(rec.event), rec.seq),
         }
-        if settled && self.take_pending_swap(id, epoch) {
+        if settled && self.take_pending_restart(id, epoch) {
             return exit;
         }
         if idle {
@@ -2721,7 +3036,13 @@ impl RunnerSupervisor {
             let Some(slot) = slots.get_mut(&id) else {
                 return;
             };
-            if slot.stop_requested || slot.compacting.is_some() || slot.reset_gate {
+            // A restart that is on its way: the work waits for the next
+            // launch.
+            if slot.stop_requested
+                || slot.restart_requested
+                || slot.compacting.is_some()
+                || slot.reset_gate
+            {
                 return;
             }
             let Some(runner) = slot.runner.clone() else {
@@ -2772,30 +3093,213 @@ impl RunnerSupervisor {
                 }
                 None => None,
             };
-            let deliveries: Vec<_> = turns
-                .into_iter()
-                .map(|turn| runner.type_turn(turn.text))
-                .collect();
-            if let Some(delivery) = recap
-                && let Err(e) = delivery.wait().await
-            {
-                warn!(agent = %id, "the recap turn was not delivered: {e}");
+            let mut deliveries = Vec::with_capacity(turns.len());
+            for turn in turns {
+                if let Some(row) = turn.queued
+                    && !me.take_queued_row(id, row).await
+                {
+                    continue;
+                }
+                deliveries.push(runner.type_turn(turn.text));
             }
-            for delivery in deliveries {
-                if let Err(e) = delivery.wait().await {
-                    debug!(agent = %id, "a turn was not delivered: {e}");
+            // Each kept row was gone: nothing goes in, so no turn runs and
+            // no rest event frees the stream (TER-562 F1).
+            let typed_nothing = recap.is_none() && deliveries.is_empty();
+            // The seq at the start of the last delivered turn: the runner
+            // types them in order, so its end is the end of them all.
+            let mut started: Option<Option<u64>> = None;
+            if let Some(delivery) = recap {
+                match delivery.wait_started().await {
+                    Ok(seq) => started = Some(seq),
+                    Err(e) => warn!(agent = %id, "the recap turn was not delivered: {e}"),
                 }
             }
-            me.finish_turn_delivery(id, epoch);
+            for delivery in deliveries {
+                match delivery.wait_started().await {
+                    Ok(seq) => started = Some(seq),
+                    Err(e) => debug!(agent = %id, "a turn was not delivered: {e}"),
+                }
+            }
+            me.finish_turn_delivery(id, epoch, started);
+            if typed_nothing {
+                // With no work left this frees the stream; a pointer that
+                // waits goes out.
+                me.deliver_pending(id);
+            }
         });
     }
 
-    fn finish_turn_delivery(&self, id: AgentId, epoch: u64) {
-        if let Some(slot) = lock(&self.inner.slots)
+    /// Type `turn` into the harness of `agent`, or keep it in the slot
+    /// for later (before the first idle of the launch, during a restart, a
+    /// compaction, or the reset gate, with no free stream). `Ok(true)`:
+    /// the slot keeps a store turn (`turn.queued`), and its row stays until
+    /// [`Self::deliver_pending`] types it (TER-542). A store turn that the
+    /// slot or the quota hold keeps already is not kept twice. A quota hold
+    /// keeps the turn as the slot does: `Ok(true)` for a store turn, whose
+    /// row stays until the turn is typed after the hold (TER-562).
+    async fn send_pending(
+        &self,
+        agent: AgentId,
+        turn: crate::supervisor::PendingTurn,
+    ) -> Result<bool, SupervisorError> {
+        let runner = self
+            .runner(agent)
+            .ok_or(SupervisorError::NotRunning(agent))?;
+        let kept = turn.queued.is_some();
+        if let Some(row) = turn.queued
+            && lock(&self.inner.slots)
+                .get(&agent)
+                .is_some_and(|s| s.turns.iter().any(|t| t.queued == Some(row)))
+        {
+            return Ok(true);
+        }
+        if let Some(h) = lock(&self.inner.holds).get_mut(&agent) {
+            if turn.queued.is_some() && h.waiting.iter().any(|t| t.queued == turn.queued) {
+                return Ok(true);
+            }
+            info!(agent = %agent, "a quota hold lasts; the turn waits");
+            h.waiting.push(turn);
+            return Ok(kept);
+        }
+        // Before the first idle of the launch: the turn goes after the
+        // recap turn. During a compaction: after its end.
+        let epoch = {
+            let mut slots = lock(&self.inner.slots);
+            let slot = slots
+                .get_mut(&agent)
+                .ok_or(SupervisorError::NotRunning(agent))?;
+            if slot.stop_requested {
+                // The API persists NotRunning turns for the next wake.
+                return Err(SupervisorError::NotRunning(agent));
+            }
+            if !slot.reached_idle
+                || slot.restart_requested
+                || slot.compacting.is_some()
+                || slot.reset_gate
+            {
+                slot.turns.push(turn);
+                return Ok(kept);
+            }
+            // The stream limit (`crate::stream_limit`): with no free
+            // stream the turn waits in the slot, and goes out when the
+            // agent gets one.
+            let sub = slot.agent.subscription.clone();
+            if !self.stream_take(agent, sub.as_deref()) {
+                slot.turns.push(turn);
+                return Ok(kept);
+            }
+            slot.turns_in_flight += 1;
+            slot.epoch
+        };
+        let delivery = runner.type_turn(turn.text);
+        let me = self.clone();
+        tokio::spawn(async move {
+            let started = match delivery.wait_started().await {
+                Ok(seq) => Some(seq),
+                Err(e) => {
+                    debug!(agent = %agent, "a turn was not delivered: {e}");
+                    None
+                }
+            };
+            me.finish_turn_delivery(agent, epoch, started);
+        });
+        Ok(false)
+    }
+
+    /// Delete the store row `row` of a kept turn of `id` right before the
+    /// turn is typed (TER-542), under the turn lock of the agent
+    /// ([`crate::lifecycle::Lifecycle::turn_lock`]). `false`: the row is
+    /// gone (an operator removed it, or a wake typed it), and the turn does
+    /// not go out. With no daemon state, or when the store fails, the turn
+    /// goes out. A failed delete keeps the row, so the next wake (or a
+    /// daemon restart) types the turn a second time: a turn can go in
+    /// twice, never be lost (TER-562 F4).
+    async fn take_queued_row(&self, id: AgentId, row: i64) -> bool {
+        let Some(state) = self.state() else {
+            return true;
+        };
+        let lock = state.lifecycle.turn_lock(id);
+        let _held = lock.lock().await;
+        let key = id.to_string();
+        match state
+            .db
+            .write("system", move |t| {
+                crate::store::agents::remove_queued_turn(t, &key, row)
+            })
+            .await
+        {
+            Ok(removed) => removed.is_some(),
+            Err(e) => {
+                warn!(agent = %id, "cannot delete a delivered queued turn: {e}");
+                true
+            }
+        }
+    }
+
+    /// Write `text` as a `queued_turns` row of `agent` when a quota hold
+    /// lasts and the agent runs (TER-586). `None`: no hold, no daemon
+    /// state, or the write failed; the turn then waits in memory only, as
+    /// before.
+    async fn store_held_turn(&self, agent: AgentId, text: &str) -> Option<i64> {
+        self.held(agent)?;
+        self.runner(agent)?;
+        let state = self.state()?;
+        let (key, text) = (agent.to_string(), text.to_owned());
+        match state
+            .db
+            .write("system", move |t| {
+                crate::store::agents::queue_turn_row(t, &key, &text)
+            })
+            .await
+        {
+            Ok(row) => Some(row),
+            Err(e) => {
+                warn!(agent = %agent, "cannot keep a held turn in the store: {e}");
+                None
+            }
+        }
+    }
+
+    /// Delete the row of [`Self::store_held_turn`] when the turn did not
+    /// stay in the hold.
+    async fn forget_held_turn(&self, agent: AgentId, row: i64) {
+        let Some(state) = self.state() else {
+            return;
+        };
+        let key = agent.to_string();
+        if let Err(e) = state
+            .db
+            .write("system", move |t| {
+                crate::store::agents::remove_queued_turn(t, &key, row).map(|_| ())
+            })
+            .await
+        {
+            warn!(agent = %agent, "cannot delete a held turn row: {e}");
+        }
+    }
+
+    /// The end of a turn delivery. `started`: at least one turn went in,
+    /// with the event seq at the start of the last one (`Some(None)`: no
+    /// seq).
+    fn finish_turn_delivery(&self, id: AgentId, epoch: u64, started: Option<Option<u64>>) {
+        let swap = lock(&self.inner.slots)
             .get_mut(&id)
             .filter(|s| s.epoch == epoch)
-        {
-            slot.turns_in_flight -= 1;
+            .is_some_and(|slot| {
+                slot.turns_in_flight -= 1;
+                slot.swap_pending && started.is_none_or(|seq| slot.turn_ended(seq))
+            });
+        // A swap that waited for this delivery (TER-524). A failed delivery
+        // runs no turn, so no rest event comes: check the swap now. A
+        // delivered turn is in the harness, though `seen` can still read
+        // `idle` (a local runner resolves the delivery before it reports
+        // `working`): the swap fires at the rest event after that turn. A
+        // runner process sends the outcome on another channel than its
+        // events, so that rest event can come first; it then held the swap
+        // back (turn in flight), and the seq order shows that the turn has
+        // ended (TER-547).
+        if swap {
+            self.take_pending_restart(id, epoch);
         }
     }
 
@@ -2870,6 +3374,11 @@ impl RunnerSupervisor {
     }
 
     async fn on_exit(&self, id: AgentId, epoch: u64, status: ExitStatus) {
+        // The credential files of sandbox mode `none` go with the harness;
+        // a relaunch writes them again.
+        if self.inner.cfg.sandbox.mode == SandboxMode::None {
+            remove_credential_dir(&self.inner.cfg.runtime_dir, id);
+        }
         if self.inner.shutting_down.load(Ordering::SeqCst) {
             return;
         }
@@ -2916,6 +3425,8 @@ impl RunnerSupervisor {
                 slot.restart_requested = false;
                 let reason = if slot.start_reason.is_some() {
                     "new session"
+                } else if slot.upgrade_permit.is_some() {
+                    "upgrade"
                 } else {
                     "restart"
                 };
@@ -2985,7 +3496,7 @@ impl RunnerSupervisor {
             slot.local = None;
             match &next {
                 Next::Done(s, _) => {
-                    slot.phase = Phase::Down(*s);
+                    slot.down(*s);
                     ended_agent = Some(slot.agent.clone());
                 }
                 Next::Relaunch { .. } => slot.phase = Phase::Restarting,
@@ -3023,7 +3534,7 @@ impl RunnerSupervisor {
                     if let Err(e) = me.launch(id, epoch).await {
                         warn!(agent = %id, "restart failed: {e}");
                         let agent = lock(&me.inner.slots).get_mut(&id).map(|slot| {
-                            slot.phase = Phase::Down(AgentStatus::Error);
+                            slot.down(AgentStatus::Error);
                             slot.agent.clone()
                         });
                         me.emit_status(id, AgentStatus::Error, format!("restart failed: {e}"));
@@ -3091,8 +3602,12 @@ impl RunnerSupervisor {
         slot.stop_requested = false;
         slot.idle_stop_warned = false;
         slot.turns_in_flight = 0;
+        slot.rest_seq = None;
         slot.restart_requested = false;
         slot.restarts.clear();
+        slot.upgrade_pending = false;
+        slot.upgrade_waiting = false;
+        slot.upgrade_permit = None;
         slot.resume = resume;
         slot.session = None;
         slot.recap = None;
@@ -3123,7 +3638,7 @@ impl RunnerSupervisor {
         if let Some(slot) = lock(&self.inner.slots).get_mut(&id)
             && slot.epoch == epoch
         {
-            slot.phase = Phase::Down(status);
+            slot.down(status);
         }
     }
 
@@ -3285,6 +3800,7 @@ impl RunnerSupervisor {
                 return;
             };
             if slot.stop_requested
+                || slot.restart_requested
                 || slot.pointer_busy
                 || slot.pointer.is_empty()
                 || slot.recap.is_some()
@@ -3318,18 +3834,24 @@ impl RunnerSupervisor {
             let pointer = me.still_current(id, pointer).await;
             if pointer.is_empty() {
                 me.forget_stored(id, stored, upto).await;
-                if let Some(slot) = lock(&me.inner.slots).get_mut(&id) {
+                let resting = lock(&me.inner.slots).get_mut(&id).map(|slot| {
                     slot.pointer_busy = false;
-                }
+                    (slot.epoch, slot.seen.is_resting())
+                });
                 // Items that came in meanwhile go out now.
                 me.maybe_push(id);
+                // No turn came of it, so no status change: a restart that
+                // waited for the end of the delivery goes now.
+                if let Some((epoch, true)) = resting {
+                    me.take_pending_restart(id, epoch);
+                }
                 return;
             }
             let pointer = me.fill_mail(id, pointer).await;
             let text = pointer.text();
             me.log_delivery(id, &text).await;
             let delivery = runner.type_turn(text);
-            let result = delivery.wait().await;
+            let result = delivery.wait_started().await;
             #[cfg(test)]
             {
                 let pause = lock(&me.inner.pointer_delivery_pause).take();
@@ -3339,7 +3861,7 @@ impl RunnerSupervisor {
                 }
             }
             match &result {
-                Ok(()) => {
+                Ok(_) => {
                     let (read, delivered) = pointer.message_ids();
                     me.mark_read_in_turn(id, read).await;
                     me.mark_delivered(delivered).await;
@@ -3347,16 +3869,27 @@ impl RunnerSupervisor {
                 }
                 Err(e) => debug!(agent = %id, "the push pointer was not delivered: {e}"),
             }
-            {
+            let swap = {
                 let mut slots = lock(&me.inner.slots);
-                if let Some(slot) = slots.get_mut(&id) {
+                slots.get_mut(&id).and_then(|slot| {
                     slot.pointer_busy = false;
                     if result.is_err() {
                         // Keep the items for the next idle.
                         let newer = std::mem::replace(&mut slot.pointer, pointer);
                         slot.pointer.merge(newer);
                     }
-                }
+                    // A swap that the busy pointer held back (TER-547): a
+                    // failed delivery runs no turn, and a turn whose rest
+                    // event already passed sends no other.
+                    let ended = match &result {
+                        Ok(seq) => slot.turn_ended(*seq),
+                        Err(_) => slot.seen.is_resting(),
+                    };
+                    (slot.swap_pending && ended).then_some(slot.epoch)
+                })
+            };
+            if let Some(epoch) = swap {
+                me.take_pending_restart(id, epoch);
             }
             // Items that came in meanwhile go out now, if the turn of this
             // pointer already ended. Its idle may have come before this
@@ -4096,7 +4629,7 @@ impl RunnerSupervisor {
                     Some(r) => (Some(r), def),
                     None => {
                         slot.epoch += 1;
-                        slot.phase = Phase::Down(AgentStatus::Stopped);
+                        slot.down(AgentStatus::Stopped);
                         (None, def)
                     }
                 }
@@ -4159,7 +4692,7 @@ impl RunnerSupervisor {
             if let Err(e) = r.set_stopped_by(by).await {
                 debug!(agent = %agent, "cannot record the stop reason: {e}");
             }
-            self.exit_gracefully(agent, r, harness).await
+            self.exit_gracefully(agent, r, harness, None).await
         })
     }
 }
@@ -4188,6 +4721,7 @@ impl Supervisor for RunnerSupervisor {
                                 id: t.id,
                                 text: t.text,
                                 source: "runner",
+                                queued: None,
                             })
                             .collect()
                     }
@@ -4201,8 +4735,9 @@ impl Supervisor for RunnerSupervisor {
             }
             // Read the upstream queue last so a handoff cannot appear twice.
             // As with dispatch itself, an item may leave between snapshots.
+            // A kept store turn shows as its store row (TER-542).
             if let Some(slot) = lock(&self.inner.slots).get(&agent) {
-                turns.extend(slot.turns.clone());
+                turns.extend(slot.turns.iter().filter(|t| t.queued.is_none()).cloned());
             }
             Ok(crate::supervisor::PendingTurns {
                 items: turns,
@@ -4309,10 +4844,18 @@ impl Supervisor for RunnerSupervisor {
                                 "the agent stops now; it starts no new session".into(),
                             ));
                         }
+                        let undo = NewSessionUndo {
+                            resume: slot.resume.clone(),
+                            session: slot.session.clone(),
+                            start_reason: slot.start_reason.clone(),
+                            recap: slot.recap.clone(),
+                            then: plan.then.is_some(),
+                            reset_gate: slot.reset_gate,
+                        };
                         slot.restart_requested = true;
                         slot.agent = agent.clone();
                         Self::prepare_new_session(slot, plan.clone());
-                        Some((slot.runner.clone(), slot.agent.harness))
+                        Some((slot.runner.clone(), slot.agent.harness, undo))
                     }
                     Some(slot) if slot.live() => {
                         return Err(SupervisorError::NotReady(
@@ -4323,12 +4866,12 @@ impl Supervisor for RunnerSupervisor {
                 }
             };
             match live {
-                Some((Some(r), harness)) => {
+                Some((Some(r), harness, undo)) => {
                     info!(agent = %id, reason = %plan.reason, "ending the session for a new one");
                     if let Err(e) = r.set_stopped_by(StoppedBy::Policy).await {
                         debug!(agent = %id, "cannot record the stop reason: {e}");
                     }
-                    self.exit_gracefully(id, r, harness).await
+                    self.exit_gracefully(id, r, harness, Some(undo)).await
                 }
                 _ => self.start_with(agent, None, Some(plan)).await,
             }
@@ -4356,7 +4899,7 @@ impl Supervisor for RunnerSupervisor {
                         return;
                     }
                     slot.epoch += 1;
-                    slot.phase = Phase::Down(AgentStatus::Stopped);
+                    slot.down(AgentStatus::Stopped);
                 }
             }
             // A runner process that no slot holds (for example one that an
@@ -4398,7 +4941,11 @@ impl Supervisor for RunnerSupervisor {
             match runner {
                 Some(r) => {
                     let _ = r.set_stopped_by(StoppedBy::Policy).await;
-                    r.kill().await.map_err(other)
+                    let killed = r.kill().await.map_err(other);
+                    if killed.is_err() {
+                        self.restart_not_on_its_way(id, &r, None);
+                    }
+                    killed
                 }
                 None => {
                     let resume = agent.session.clone();
@@ -4414,56 +4961,50 @@ impl Supervisor for RunnerSupervisor {
         text: String,
     ) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(async move {
-            let runner = self
-                .runner(agent)
-                .ok_or(SupervisorError::NotRunning(agent))?;
-            if let Some(h) = lock(&self.inner.holds).get_mut(&agent) {
-                info!(agent = %agent, "a quota hold lasts; the turn waits");
-                h.waiting.push(text);
-                return Ok(());
-            }
-            // Before the first idle of the launch: the turn goes after the
-            // recap turn. During a compaction: after its end.
-            let epoch = {
-                let mut slots = lock(&self.inner.slots);
-                let slot = slots
-                    .get_mut(&agent)
-                    .ok_or(SupervisorError::NotRunning(agent))?;
-                if slot.stop_requested {
-                    // The API persists NotRunning turns for the next wake.
-                    return Err(SupervisorError::NotRunning(agent));
-                }
-                if let Some(slot) = slots
-                    .get_mut(&agent)
-                    .filter(|s| !s.reached_idle || s.compacting.is_some() || s.reset_gate)
-                {
-                    slot.turns.push(text.into());
-                    return Ok(());
-                }
-                // The stream limit (`crate::stream_limit`): with no free
-                // stream the turn waits in the slot, and goes out when the
-                // agent gets one.
-                if let Some(slot) = slots.get_mut(&agent) {
-                    let sub = slot.agent.subscription.clone();
-                    if !self.stream_take(agent, sub.as_deref()) {
-                        slot.turns.push(text.into());
-                        return Ok(());
-                    }
-                    slot.turns_in_flight += 1;
-                    slot.epoch
-                } else {
-                    return Err(SupervisorError::NotRunning(agent));
-                }
+            // A quota hold: the turn goes in the store first and waits as a
+            // store turn, so a daemon restart, or the end of the hold while
+            // the agent does not run, does not lose it (TER-586). The row
+            // write, the hand-over, and the delete of the row go under the
+            // turn lock of the agent, as in `lifecycle::deliver_turns`: a
+            // wake that reads the new row waits, and then finds it gone or
+            // kept, so the turn does not go in twice (TER-601). No caller
+            // of `send_turn` holds that lock, and `send_pending` does not
+            // wait for it.
+            let lock = self
+                .held(agent)
+                .and_then(|_| self.state())
+                .map(|state| state.lifecycle.turn_lock(agent));
+            let _held = match &lock {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
             };
-            let delivery = runner.type_turn(text);
-            let me = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = delivery.wait().await {
-                    debug!(agent = %agent, "a turn was not delivered: {e}");
+            let Some(row) = self.store_held_turn(agent, &text).await else {
+                return self.send_pending(agent, text.into()).await.map(|_| ());
+            };
+            let mut turn = crate::supervisor::PendingTurn::from(text);
+            turn.queued = Some(row);
+            match self.send_pending(agent, turn).await {
+                Ok(true) => Ok(()),
+                // The hold ended meanwhile, and the turn went in. On an
+                // error the caller keeps the turn itself.
+                result => {
+                    self.forget_held_turn(agent, row).await;
+                    result.map(|_| ())
                 }
-                me.finish_turn_delivery(agent, epoch);
-            });
-            Ok(())
+            }
+        })
+    }
+
+    fn send_queued_turn(
+        &self,
+        agent: AgentId,
+        row: i64,
+        text: String,
+    ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+        Box::pin(async move {
+            let mut turn = crate::supervisor::PendingTurn::from(text);
+            turn.queued = Some(row);
+            self.send_pending(agent, turn).await
         })
     }
 
@@ -4786,6 +5327,7 @@ impl Supervisor for RunnerSupervisor {
                     || slot.pointer_busy
                     || waiting
                     || slot.swap_pending
+                    || slot.upgrade_pending
                 {
                     return Err(SupervisorError::NotReady(format!(
                         "the agent is not idle ({status}); it compacts only at rest"
@@ -4865,33 +5407,35 @@ impl Supervisor for RunnerSupervisor {
     ) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(async move {
             let Some(hold) = hold else {
-                let (held, runner) = {
+                let (turns, dropped, runner) = {
                     let mut slots = lock(&self.inner.slots);
                     let Some(held) = lock(&self.inner.holds).remove(&agent) else {
                         return Ok(());
                     };
+                    let turns = held.waiting.len();
                     let runner = slots.get(&agent).and_then(|s| s.runner.clone());
-                    if let Some(slot) = slots.get_mut(&agent).filter(|_| runner.is_some()) {
-                        slot.turns.extend(
-                            held.waiting
-                                .iter()
-                                .cloned()
-                                .map(crate::supervisor::PendingTurn::from),
-                        );
-                    }
-                    (held, runner)
+                    let dropped = match slots.get_mut(&agent).filter(|_| runner.is_some()) {
+                        Some(slot) => {
+                            slot.turns.extend(held.waiting);
+                            0
+                        }
+                        // A store turn keeps its row: the next wake
+                        // delivers it (TER-562).
+                        None => held.waiting.iter().filter(|t| t.queued.is_none()).count(),
+                    };
+                    (turns, dropped, runner)
                 };
                 let Some(runner) = runner else {
-                    if !held.waiting.is_empty() {
+                    if dropped > 0 {
                         warn!(
                             agent = %agent,
-                            turns = held.waiting.len(),
+                            turns = dropped,
                             "the quota hold ended, but the agent does not run; its waiting turns are dropped"
                         );
                     }
                     return Ok(());
                 };
-                info!(agent = %agent, turns = held.waiting.len(), "the quota hold ended");
+                info!(agent = %agent, turns, "the quota hold ended");
                 if runner.status() == AgentStatus::Idle {
                     self.emit_status(agent, AgentStatus::Idle, "quota hold ended");
                 }
@@ -5009,6 +5553,8 @@ impl Supervisor for RunnerSupervisor {
                     return Err(e);
                 }
             };
+            let runner_version = remote.hello().version.clone();
+            let upgrade = terrarium_version::is_stale(&runner_version, &cfg.version);
             self.adopt(id, epoch, remote, Some(events_since));
             let version = self.recorded_version(id, agent.harness);
             let launched = self.recorded_accounts(id);
@@ -5020,18 +5566,36 @@ impl Supervisor for RunnerSupervisor {
                     launched.account.is_some() && launched.account != agent.subscription;
                 slot.account = launched.account;
                 slot.bound = launched.bound;
-                slot.swap_pending
-                    && matches!(
-                        slot.seen,
-                        AgentStatus::Idle | AgentStatus::Waiting | AgentStatus::Blocked
-                    )
+                // A runner of another build (after a hot swap): it
+                // restarts with resume when the turn ends (R4).
+                slot.upgrade_pending = upgrade;
+                // Out of a turn: a runner `blocked` is in one.
+                (slot.swap_pending || slot.upgrade_pending) && slot.seen.is_resting()
             } else {
                 false
             };
+            if upgrade {
+                info!(
+                    agent = %id,
+                    runner = %runner_version,
+                    daemon = %cfg.version,
+                    "restart_scheduled (upgrade): the runner is another build"
+                );
+                self.emit(
+                    id,
+                    SupervisorEventKind::Harness(Event::System {
+                        message: format!(
+                            "restart_scheduled (reason upgrade): the runner runs {runner_version} \
+                             and the daemon {}; the agent restarts with resume when its turn ends",
+                            cfg.version
+                        ),
+                    }),
+                );
+            }
             if settled {
                 let epoch = lock(&self.inner.slots).get(&id).map(|s| s.epoch);
                 if let Some(e) = epoch {
-                    self.take_pending_swap(id, e);
+                    self.take_pending_restart(id, e);
                 }
             }
             Ok(Recovery::Attached)
@@ -5071,14 +5635,17 @@ impl Supervisor for RunnerSupervisor {
                             Plan::Live
                         } else {
                             slot.agent = agent.clone();
-                            let busy =
-                                matches!(slot.seen, AgentStatus::Working | AgentStatus::Starting)
-                                    || slot.runner.is_none();
-                            if busy {
+                            // In a turn unless the runner rests with no work
+                            // on its way: a runner `blocked` has a question
+                            // on screen or a stalled tool call in its turn.
+                            // The claim of the restart is under the same
+                            // lock as the check (`restart_requested`).
+                            if slot.can_swap_restart() {
+                                slot.restart_requested = true;
+                                Plan::Now
+                            } else {
                                 slot.swap_pending = true;
                                 Plan::Later
-                            } else {
-                                Plan::Now
                             }
                         }
                     }
@@ -5293,6 +5860,11 @@ mod tests {
         claimed: AtomicBool,
         typed: Mutex<Vec<String>>,
         typed_ready: tokio::sync::Notify,
+        /// `type_turn` gives a failed delivery.
+        deliver_fails: bool,
+        /// `type_turn` gives a delivery whose turn started at this seq.
+        deliver_seq: Option<u64>,
+        kills: AtomicU64,
     }
 
     impl RunnerHandle for ClaimRunner {
@@ -5366,7 +5938,8 @@ mod tests {
             panic!("unused")
         }
         fn kill(&self) -> BoxFuture<'_, terrarium_runner::Result<()>> {
-            panic!("unused")
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
         }
         fn wait(&self) -> BoxFuture<'_, terrarium_runner::ExitStatus> {
             panic!("unused")
@@ -5375,7 +5948,13 @@ mod tests {
             assert!(!self.claimed.load(Ordering::SeqCst));
             lock(&self.typed).push(text);
             self.typed_ready.notify_one();
-            terrarium_runner::test_support::delivered_turn()
+            if self.deliver_fails {
+                terrarium_runner::test_support::failed_turn()
+            } else if let Some(seq) = self.deliver_seq {
+                terrarium_runner::test_support::delivered_turn_at(seq)
+            } else {
+                terrarium_runner::test_support::delivered_turn()
+            }
         }
         fn claim_idle_stop(&self) -> BoxFuture<'_, terrarium_runner::Result<bool>> {
             Box::pin(async move {
@@ -5395,6 +5974,600 @@ mod tests {
                 Ok(())
             })
         }
+    }
+
+    /// TER-524: a swap that waits for a turn delivery. A failed delivery
+    /// runs no turn and sends no rest event, so its end restarts the
+    /// harness. A delivered turn is in the harness while `seen` still reads
+    /// `idle` (the runner resolves the delivery before it reports
+    /// `working`): its end does not restart; the rest event after the turn
+    /// does.
+    #[tokio::test]
+    async fn a_waiting_swap_restarts_after_a_failed_delivery() {
+        swap_after_delivery(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_waiting_swap_does_not_restart_after_a_delivered_turn() {
+        swap_after_delivery(false).await;
+    }
+
+    async fn swap_after_delivery(fails: bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        ));
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude",
+            "workspace": "/w", "subscription": "max-y"
+        }))
+        .unwrap();
+        let id = agent.id;
+        let runner = Arc::new(ClaimRunner {
+            id,
+            pending_error: None,
+            entered: tokio::sync::Notify::new(),
+            reply: tokio::sync::Notify::new(),
+            lost: false,
+            claimed: AtomicBool::new(false),
+            typed: Mutex::default(),
+            typed_ready: tokio::sync::Notify::new(),
+            deliver_fails: fails,
+            deliver_seq: None,
+            kills: AtomicU64::new(0),
+        });
+        let mut slot = Slot::new(agent);
+        slot.runner = Some(runner.clone());
+        slot.phase = Phase::Running;
+        slot.seen = AgentStatus::Idle;
+        slot.reached_idle = true;
+        // A swap that came while the turn was on its way (Plan::Later).
+        slot.swap_pending = true;
+        lock(&sup.inner.slots).insert(id, slot);
+        sup.send_turn(id, "the turn".into()).await.unwrap();
+        let start = Instant::now();
+        loop {
+            let in_flight = lock(&sup.inner.slots)[&id].turns_in_flight;
+            if in_flight == 0 && (!fails || runner.kills.load(Ordering::SeqCst) > 0) {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "fails {fails}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The restart (when it comes) runs in a task of its own.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(lock(&runner.typed).len(), 1);
+        let slots = lock(&sup.inner.slots);
+        let slot = &slots[&id];
+        if fails {
+            assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
+            assert!(slot.restart_requested);
+            assert!(!slot.swap_pending);
+        } else {
+            assert_eq!(runner.kills.load(Ordering::SeqCst), 0, "the turn runs");
+            assert!(!slot.restart_requested);
+            assert!(slot.swap_pending, "the swap waits for the rest event");
+        }
+    }
+
+    /// TER-547: the end of a delivered turn and a swap that waits. A
+    /// runner process sends the delivery outcome on another channel than
+    /// its events, so the rest event of a short turn can come first. The
+    /// seq at the start of the turn orders them: a rest event after it
+    /// ended the turn, and the swap restarts at the delivery end. A rest
+    /// event at or before it (a local runner, M4) or no seq waits for the
+    /// next rest event.
+    #[tokio::test]
+    async fn a_waiting_swap_restarts_when_the_rest_event_came_first() {
+        assert!(swap_at_delivery_end(Some(7), Some(5)).await);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_swap_waits_when_the_rest_event_is_before_the_turn() {
+        assert!(!swap_at_delivery_end(Some(5), Some(5)).await);
+        assert!(!swap_at_delivery_end(Some(4), Some(5)).await);
+        assert!(!swap_at_delivery_end(None, Some(5)).await);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_swap_waits_with_no_delivery_seq() {
+        assert!(!swap_at_delivery_end(Some(7), None).await);
+    }
+
+    /// Run `finish_turn_delivery` for a turn that started at `started`,
+    /// with the last rest event at `rest`. True: the swap restarted.
+    async fn swap_at_delivery_end(rest: Option<u64>, started: Option<u64>) -> bool {
+        let tmp = tempfile::tempdir().unwrap();
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        ));
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude",
+            "workspace": "/w", "subscription": "max-y"
+        }))
+        .unwrap();
+        let id = agent.id;
+        let runner = Arc::new(ClaimRunner {
+            id,
+            pending_error: None,
+            entered: tokio::sync::Notify::new(),
+            reply: tokio::sync::Notify::new(),
+            lost: false,
+            claimed: AtomicBool::new(false),
+            typed: Mutex::default(),
+            typed_ready: tokio::sync::Notify::new(),
+            deliver_fails: false,
+            deliver_seq: None,
+            kills: AtomicU64::new(0),
+        });
+        let mut slot = Slot::new(agent);
+        slot.runner = Some(runner.clone());
+        slot.phase = Phase::Running;
+        slot.seen = AgentStatus::Idle;
+        slot.rest_seq = rest;
+        slot.reached_idle = true;
+        slot.swap_pending = true;
+        slot.turns_in_flight = 1;
+        let epoch = slot.epoch;
+        lock(&sup.inner.slots).insert(id, slot);
+        sup.finish_turn_delivery(id, epoch, Some(started));
+        let slots = lock(&sup.inner.slots);
+        let slot = &slots[&id];
+        assert_eq!(slot.turns_in_flight, 0);
+        assert_eq!(slot.restart_requested, !slot.swap_pending);
+        slot.restart_requested
+    }
+
+    /// A supervisor with one running, idle agent on a [`ClaimRunner`]
+    /// whose deliveries start at `deliver_seq`.
+    fn claim_runner_sup(
+        tmp: &Path,
+        deliver_seq: Option<u64>,
+    ) -> (RunnerSupervisor, Arc<ClaimRunner>, AgentId) {
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            tmp.join("state"),
+            tmp.join("run"),
+            tmp.join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        ));
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude",
+            "workspace": "/w", "subscription": "max-y"
+        }))
+        .unwrap();
+        let id = agent.id;
+        let runner = Arc::new(ClaimRunner {
+            id,
+            pending_error: None,
+            entered: tokio::sync::Notify::new(),
+            reply: tokio::sync::Notify::new(),
+            lost: false,
+            claimed: AtomicBool::new(false),
+            typed: Mutex::default(),
+            typed_ready: tokio::sync::Notify::new(),
+            deliver_fails: false,
+            deliver_seq,
+            kills: AtomicU64::new(0),
+        });
+        let mut slot = Slot::new(agent);
+        slot.runner = Some(runner.clone());
+        slot.phase = Phase::Running;
+        slot.seen = AgentStatus::Idle;
+        slot.reached_idle = true;
+        lock(&sup.inner.slots).insert(id, slot);
+        (sup, runner, id)
+    }
+
+    /// TER-591: the swap check at the end of a pointer delivery
+    /// (TER-547). The pointer turn starts at seq 5. While the delivery
+    /// still owns the slot, the rest event of that turn passes (`rest`):
+    /// it cannot restart then (`pointer_busy`), so the delivery end must.
+    /// A rest event at or before the start waits for the next rest event.
+    #[tokio::test]
+    async fn a_waiting_swap_restarts_at_the_pointer_delivery_end() {
+        assert!(swap_at_pointer_delivery_end(Some(7)).await);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_swap_waits_at_the_pointer_delivery_end_before_the_rest_event() {
+        assert!(!swap_at_pointer_delivery_end(Some(5)).await);
+        assert!(!swap_at_pointer_delivery_end(None).await);
+    }
+
+    /// Deliver a pointer whose turn starts at seq 5, with the last rest
+    /// event at `rest` when the delivery ends. True: the swap restarted.
+    async fn swap_at_pointer_delivery_end(rest: Option<u64>) -> bool {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, runner, id) = claim_runner_sup(tmp.path(), Some(5));
+        lock(&sup.inner.slots).get_mut(&id).unwrap().swap_pending = true;
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        *lock(&sup.inner.pointer_delivery_pause) = Some(PointerDeliveryPause {
+            reached: reached_tx,
+            resume: resume_rx,
+        });
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new("m1".into(), "p/b".into(), "T1".into()))
+        });
+        tokio::time::timeout(Duration::from_secs(5), reached_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let mut slots = lock(&sup.inner.slots);
+            let slot = slots.get_mut(&id).unwrap();
+            assert!(slot.pointer_busy);
+            assert!(!slot.can_swap_restart(), "the busy pointer holds the swap");
+            slot.rest_seq = rest;
+        }
+        resume_tx.send(()).unwrap();
+        let start = Instant::now();
+        while lock(&sup.inner.slots)[&id].pointer_busy {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The restart (when it comes) runs in a task of its own.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(lock(&runner.typed).len(), 1);
+        let slots = lock(&sup.inner.slots);
+        let slot = &slots[&id];
+        assert_eq!(slot.restart_requested, !slot.swap_pending);
+        slot.restart_requested
+    }
+
+    /// TER-591: the forward task records the seq of each rest event that
+    /// it passes on (`pass_on`), keeps the highest, and ignores a status
+    /// that is not a rest and a rest event with no seq.
+    #[tokio::test]
+    async fn pass_on_records_the_rest_seq() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, _runner, id) = claim_runner_sup(tmp.path(), None);
+        let epoch = lock(&sup.inner.slots)[&id].epoch;
+        let status = |from, to, seq| {
+            let mut rec = EventRecord::now(
+                id,
+                Event::StatusChanged {
+                    from,
+                    to,
+                    reason: None,
+                },
+            );
+            rec.seq = seq;
+            rec
+        };
+        let rest_seq = || lock(&sup.inner.slots)[&id].rest_seq;
+        assert_eq!(rest_seq(), None);
+        sup.pass_on(
+            id,
+            epoch,
+            status(AgentStatus::Idle, AgentStatus::Working, Some(3)),
+        );
+        assert_eq!(rest_seq(), None, "working is no rest");
+        sup.pass_on(
+            id,
+            epoch,
+            status(AgentStatus::Working, AgentStatus::Waiting, Some(9)),
+        );
+        assert_eq!(rest_seq(), Some(9));
+        sup.pass_on(
+            id,
+            epoch,
+            status(AgentStatus::Waiting, AgentStatus::Working, Some(10)),
+        );
+        assert_eq!(rest_seq(), Some(9));
+        sup.pass_on(
+            id,
+            epoch,
+            status(AgentStatus::Working, AgentStatus::Waiting, None),
+        );
+        assert_eq!(rest_seq(), Some(9), "a rest event with no seq");
+        sup.pass_on(
+            id,
+            epoch,
+            status(AgentStatus::Working, AgentStatus::Waiting, Some(4)),
+        );
+        assert_eq!(rest_seq(), Some(9), "the highest seq stays");
+        sup.pass_on(
+            id,
+            epoch,
+            status(AgentStatus::Working, AgentStatus::Waiting, Some(12)),
+        );
+        assert_eq!(rest_seq(), Some(12));
+    }
+
+    /// TER-591: a launch starts with no rest seq: the seq of a rest event
+    /// in the last launch does not end a turn of the new one.
+    #[test]
+    fn a_launch_resets_the_rest_seq() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        ));
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude",
+            "workspace": "/w"
+        }))
+        .unwrap();
+        let id = agent.id;
+        let mut slot = Slot::new(agent.clone());
+        slot.rest_seq = Some(9);
+        lock(&sup.inner.slots).insert(id, slot);
+        let epoch = sup.claim(&agent, None).unwrap();
+        let slots = lock(&sup.inner.slots);
+        assert_eq!(slots[&id].epoch, epoch);
+        assert_eq!(slots[&id].rest_seq, None);
+    }
+
+    /// A harness whose kill fails (TER-530). `write_ok`: the exit keys go
+    /// out (the graceful path). `exited`: the handle has its exit status.
+    struct KillErrRunner {
+        id: AgentId,
+        write_ok: bool,
+        exited: bool,
+        kills: std::sync::atomic::AtomicUsize,
+        typed: Mutex<Vec<String>>,
+        typed_ready: tokio::sync::Notify,
+    }
+
+    impl KillErrRunner {
+        fn new(id: AgentId, write_ok: bool, exited: bool) -> Arc<Self> {
+            Arc::new(Self {
+                id,
+                write_ok,
+                exited,
+                kills: std::sync::atomic::AtomicUsize::new(0),
+                typed: Mutex::default(),
+                typed_ready: tokio::sync::Notify::new(),
+            })
+        }
+    }
+
+    impl RunnerHandle for KillErrRunner {
+        fn agent(&self) -> AgentId {
+            self.id
+        }
+        fn socket_path(&self) -> &Path {
+            Path::new("unused")
+        }
+        fn events_path(&self) -> &Path {
+            Path::new("unused")
+        }
+        fn status(&self) -> AgentStatus {
+            AgentStatus::Idle
+        }
+        fn watch_status(&self) -> watch::Receiver<AgentStatus> {
+            watch::channel(AgentStatus::Idle).1
+        }
+        fn subscribe_events(&self) -> broadcast::Receiver<terrarium_core::EventRecord> {
+            broadcast::channel(1).1
+        }
+        fn screen(
+            &self,
+        ) -> BoxFuture<'_, terrarium_runner::Result<terrarium_runner::ScreenSnapshot>> {
+            panic!("unused")
+        }
+        fn attach(
+            &self,
+        ) -> BoxFuture<
+            '_,
+            terrarium_runner::Result<(
+                terrarium_runner::ScreenSnapshot,
+                terrarium_runner::AttachStream,
+            )>,
+        > {
+            panic!("unused")
+        }
+        fn write<'a>(&'a self, _: &'a [u8]) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            let ok = self.write_ok;
+            Box::pin(async move {
+                if ok {
+                    Ok(())
+                } else {
+                    Err(terrarium_runner::RunnerError::Disconnected)
+                }
+            })
+        }
+        fn write_person<'a>(&'a self, _: &'a [u8]) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn resize(&self, _: u16, _: u16) -> BoxFuture<'_, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn answer<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a terrarium_core::Answer,
+        ) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn answer_keys<'a>(&'a self, _: &'a str) -> BoxFuture<'a, terrarium_runner::Result<()>> {
+            panic!("unused")
+        }
+        fn interrupt(&self) -> BoxFuture<'_, terrarium_runner::Result<bool>> {
+            panic!("unused")
+        }
+        fn kill(&self) -> BoxFuture<'_, terrarium_runner::Result<()>> {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(terrarium_runner::RunnerError::Disconnected) })
+        }
+        fn wait(&self) -> BoxFuture<'_, terrarium_runner::ExitStatus> {
+            let exited = self.exited;
+            Box::pin(async move {
+                if !exited {
+                    std::future::pending::<()>().await;
+                }
+                terrarium_runner::ExitStatus {
+                    code: 0,
+                    signal: None,
+                }
+            })
+        }
+        fn type_turn(&self, text: String) -> terrarium_runner::Delivery {
+            lock(&self.typed).push(text);
+            self.typed_ready.notify_one();
+            terrarium_runner::test_support::delivered_turn()
+        }
+    }
+
+    /// A supervisor with the real adapters, and an idle slot that runs
+    /// `runner` with an old session, a status reason, and one queued turn.
+    fn kill_err_supervisor(
+        tmp: &Path,
+        make: impl FnOnce(AgentId) -> Arc<KillErrRunner>,
+    ) -> (RunnerSupervisor, Agent, Arc<KillErrRunner>) {
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            tmp.join("state"),
+            tmp.join("run"),
+            tmp.join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        ));
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
+        }))
+        .unwrap();
+        let runner = make(agent.id);
+        let mut slot = Slot::new(agent.clone());
+        slot.runner = Some(runner.clone());
+        slot.phase = Phase::Running;
+        slot.seen = AgentStatus::Idle;
+        slot.reached_idle = true;
+        slot.resume = Some(HarnessSessionId("old".into()));
+        slot.session = Some(HarnessSessionId("old".into()));
+        slot.start_reason = Some("before".into());
+        slot.turns.push(String::from("queued").into());
+        lock(&sup.inner.slots).insert(agent.id, slot);
+        (sup, agent, runner)
+    }
+
+    fn kill_err_plan() -> NewSessionPlan {
+        NewSessionPlan {
+            reason: "new session: requested by test".into(),
+            recap: Some("recap".into()),
+            then: Some("then".into()),
+        }
+    }
+
+    fn assert_set_up_undone(sup: &RunnerSupervisor, id: AgentId) {
+        let slots = lock(&sup.inner.slots);
+        let slot = &slots[&id];
+        assert!(!slot.restart_requested);
+        assert_eq!(slot.resume, Some(HarnessSessionId("old".into())));
+        assert_eq!(slot.session, Some(HarnessSessionId("old".into())));
+        assert_eq!(slot.start_reason.as_deref(), Some("before"));
+        assert_eq!(slot.recap, None);
+        assert!(slot.turns.is_empty(), "the queued turn went out");
+    }
+
+    async fn typed_once(runner: &KillErrRunner, within: Duration) -> Vec<String> {
+        tokio::time::timeout(within, runner.typed_ready.notified())
+            .await
+            .expect("a turn is typed");
+        // Let a second turn, if any, be typed too.
+        tokio::task::yield_now().await;
+        lock(&runner.typed).clone()
+    }
+
+    /// TER-530: the kill of a new session fails and the harness runs on:
+    /// the set-up of the new session is undone, and only the queued turn
+    /// goes out, to this harness.
+    #[tokio::test]
+    async fn new_session_kill_error_undoes_the_set_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, agent, runner) =
+            kill_err_supervisor(tmp.path(), |id| KillErrRunner::new(id, false, false));
+        let id = agent.id;
+        assert!(sup.new_session(agent, kill_err_plan()).await.is_err());
+        assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
+        assert_set_up_undone(&sup, id);
+        let typed = typed_once(&runner, Duration::from_secs(5)).await;
+        assert_eq!(typed, ["queued"]);
+    }
+
+    /// TER-530: the harness died during the kill: the request stays, so
+    /// that its exit takes the relaunch, with the new-session set-up.
+    #[tokio::test]
+    async fn new_session_kill_error_of_an_exited_harness_keeps_the_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, agent, runner) =
+            kill_err_supervisor(tmp.path(), |id| KillErrRunner::new(id, false, true));
+        let id = agent.id;
+        assert!(sup.new_session(agent, kill_err_plan()).await.is_err());
+        let slots = lock(&sup.inner.slots);
+        let slot = &slots[&id];
+        assert!(slot.restart_requested);
+        assert_eq!(slot.resume, None);
+        assert_eq!(slot.session, None);
+        assert_eq!(slot.recap.as_deref(), Some("recap"));
+        assert_eq!(
+            slot.turns.len(),
+            2,
+            "the then turn and the queued turn wait"
+        );
+        assert!(lock(&runner.typed).is_empty());
+    }
+
+    /// TER-530: a kill error of an old handle does not undo the set-up of
+    /// the runner that the slot holds now.
+    #[tokio::test]
+    async fn kill_error_of_another_handle_leaves_the_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, agent, runner) =
+            kill_err_supervisor(tmp.path(), |id| KillErrRunner::new(id, false, false));
+        let id = agent.id;
+        lock(&sup.inner.slots)
+            .get_mut(&id)
+            .unwrap()
+            .restart_requested = true;
+        let old: Arc<dyn RunnerHandle> = KillErrRunner::new(id, false, false);
+        sup.restart_not_on_its_way(
+            id,
+            &old,
+            Some(NewSessionUndo {
+                resume: None,
+                session: None,
+                start_reason: None,
+                recap: None,
+                then: true,
+                reset_gate: false,
+            }),
+        );
+        let slots = lock(&sup.inner.slots);
+        let slot = &slots[&id];
+        assert!(slot.restart_requested);
+        assert_eq!(slot.session, Some(HarnessSessionId("old".into())));
+        assert_eq!(slot.turns.len(), 1);
+        assert!(lock(&runner.typed).is_empty());
+    }
+
+    /// TER-530: the exit keys went out, the harness did not exit, and the
+    /// kill after `GRACEFUL_STOP` fails: the set-up is undone and the held
+    /// turn goes out.
+    #[tokio::test]
+    async fn new_session_kill_error_after_exit_keys_releases_deliveries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, agent, runner) =
+            kill_err_supervisor(tmp.path(), |id| KillErrRunner::new(id, true, false));
+        let id = agent.id;
+        sup.new_session(agent, kill_err_plan()).await.unwrap();
+        assert!(lock(&sup.inner.slots)[&id].restart_requested);
+        let typed = typed_once(&runner, GRACEFUL_STOP + Duration::from_secs(10)).await;
+        assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(typed, ["queued"]);
+        assert_set_up_undone(&sup, id);
     }
 
     #[tokio::test]
@@ -5421,6 +6594,9 @@ mod tests {
                 claimed: AtomicBool::new(false),
                 typed: Mutex::default(),
                 typed_ready: tokio::sync::Notify::new(),
+                deliver_fails: false,
+                deliver_seq: None,
+                kills: AtomicU64::new(0),
             });
             let mut slot = Slot::new(agent);
             slot.runner = Some(runner);
@@ -5509,6 +6685,9 @@ mod tests {
                 claimed: AtomicBool::new(false),
                 typed: Mutex::default(),
                 typed_ready: tokio::sync::Notify::new(),
+                deliver_fails: false,
+                deliver_seq: None,
+                kills: AtomicU64::new(0),
             });
             let mut slot = Slot::new(agent);
             slot.runner = Some(runner.clone());
@@ -5553,6 +6732,133 @@ mod tests {
             assert_eq!(lock(&runner.typed)[1], "queued turn");
             assert!(!runner.claimed.load(Ordering::SeqCst));
         }
+    }
+
+    /// TER-262 M4: a pointer delivery that starts while the upgrade waits
+    /// for a slot keeps the upgrade pending: the harness is not killed
+    /// under the turn of the pointer, also when the runner rests again.
+    #[tokio::test]
+    async fn a_pointer_during_the_upgrade_wait_keeps_the_upgrade_pending() {
+        struct PointerAdapter;
+        impl Adapter for PointerAdapter {
+            fn id(&self) -> HarnessId {
+                HarnessId::Claude
+            }
+            fn detect_version(&self) -> terrarium_core::Result<semver::Version> {
+                Ok(semver::Version::new(1, 0, 0))
+            }
+            fn launch(&self, _: &Agent, _: Option<&HarnessSessionId>) -> LaunchSpec {
+                unreachable!("the test supplies the launch spec")
+            }
+            fn hook_event(&self, hook: &terrarium_core::HookPayload) -> Vec<Event> {
+                match hook.hook.as_str() {
+                    "UserPromptSubmit" => vec![Event::TurnStart {
+                        prompt: hook.str_field("prompt").map(str::to_owned),
+                    }],
+                    "Stop" => vec![Event::TurnEnd],
+                    _ => vec![],
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = RunnerSupervisorConfig::new(
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        );
+        let adapter = Arc::new(PointerAdapter);
+        let sup = RunnerSupervisor::new(cfg);
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p",
+            "harness": "claude", "workspace": tmp.path()
+        }))
+        .unwrap();
+        let id = agent.id;
+        let mut rc = RunnerConfig::new(id, &sup.inner.cfg.state_dir, &sup.inner.cfg.runtime_dir);
+        rc.ready_detector = Some(Arc::new(terrarium_runner::DefaultReadyDetector {
+            quiet: Duration::from_millis(100),
+            pattern: None,
+        }));
+        let spec = LaunchSpec::new("python3", tmp.path()).arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../terrarium-runner/tests/fake_tui/fake_tui.py")
+                .display()
+                .to_string(),
+        );
+        let runner = Runner::spawn(rc, adapter, spec, sup.rpc_handler())
+            .await
+            .unwrap();
+        struct StopRunner(Runner);
+        impl Drop for StopRunner {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+            }
+        }
+        let _stop = StopRunner(runner.clone());
+        let status = runner.watch_status();
+        let wait_idle = |mut status: watch::Receiver<AgentStatus>| async move {
+            tokio::time::timeout(Duration::from_secs(45), async {
+                while *status.borrow_and_update() != AgentStatus::Idle {
+                    status.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+        };
+        wait_idle(status.clone()).await;
+        let mut slot = Slot::new(agent);
+        slot.runner = Some(Arc::new(runner.clone()));
+        slot.phase = Phase::Running;
+        slot.seen = AgentStatus::Idle;
+        slot.reached_idle = true;
+        slot.upgrade_pending = true;
+        slot.upgrade_waiting = true;
+        lock(&sup.inner.slots).insert(id, slot);
+        // Every upgrade slot is taken: the upgrade waits.
+        let limit = u32::try_from(sup.inner.cfg.upgrade_limit).unwrap();
+        let held = sup
+            .inner
+            .upgrades
+            .clone()
+            .acquire_many_owned(limit)
+            .await
+            .unwrap();
+        let waiter = tokio::spawn(sup.clone().upgrade_after_turn(id, 0));
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        *lock(&sup.inner.pointer_delivery_pause) = Some(PointerDeliveryPause {
+            reached: reached_tx,
+            resume: resume_rx,
+        });
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new("m1".into(), "p/b".into(), "T1".into()))
+        });
+        tokio::time::timeout(Duration::from_secs(45), reached_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // The pointer turn ended and the runner rests, but the delivery
+        // still owns the slot. Now a slot frees.
+        wait_idle(status.clone()).await;
+        assert!(lock(&sup.inner.slots)[&id].pointer_busy);
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(45), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let slots = lock(&sup.inner.slots);
+            let slot = &slots[&id];
+            assert!(slot.upgrade_pending, "the upgrade waits for the next rest");
+            assert!(!slot.restart_requested);
+            assert!(slot.upgrade_permit.is_none());
+        }
+        assert_eq!(runner.status(), AgentStatus::Idle, "the harness runs on");
+        resume_tx.send(()).unwrap();
+        runner.kill().unwrap();
+        runner.wait().await;
     }
 
     /// TER-213: idle arrives while the completed delivery still owns busy.

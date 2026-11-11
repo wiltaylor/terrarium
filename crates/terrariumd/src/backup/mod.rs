@@ -31,7 +31,7 @@
 //! old content of each root to `<root>/.terrarium-pre-restore-<time>/`
 //! and the new content into place. The daemon must be stopped
 //! (`terrariumd backup restore` refuses while a daemon answers on the
-//! socket).
+//! socket or holds the state lock, and holds that lock while it runs).
 
 pub mod schedule;
 pub mod seal;
@@ -87,6 +87,7 @@ passphrase can read all of them. Keep it as you keep the server itself.
 backup.json says whether a passphrase seals the files (\"encryption\").
 Restore with:   terrariumd backup restore <this file>
 Check with:     terrariumd backup verify <this file>
+Drill with:     terrariumd backup drill <this file>  (a restore into a scratch dir)
 ";
 
 /// A full or a diff backup.
@@ -489,6 +490,9 @@ pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
     // Reconstructible image payloads, not application data. In particular do
     // not copy every retained daemon binary into every pre-upgrade backup.
     skip.insert(state_c.join("releases"));
+    // The one-shot helper files of live git and ssh runs (askpass
+    // scripts, keys): never data, and secrets in the clear.
+    skip.insert(crate::secrets::RunDirs::base(&state_c));
     for f in ["", "-wal", "-shm", "-journal"] {
         skip.insert(state_c.join(format!("{DB_FILE}{f}")));
     }
@@ -964,7 +968,10 @@ fn source_of<'a>(
     }
 }
 
-/// Each path is `<known root>/<relative path>` with no `..`.
+/// Each path is `<known root>/<relative path>` in plain form (no empty,
+/// `.`, or `..` part), no path is in the manifest twice, and no path is
+/// below a symlink entry: the restore would write through the link, out of
+/// the root.
 fn check_paths(m: &Manifest) -> anyhow::Result<()> {
     for e in &m.entries {
         let (root, rel) = split(&e.path)?;
@@ -972,11 +979,40 @@ fn check_paths(m: &Manifest) -> anyhow::Result<()> {
             bail!("unknown root in {}", e.path);
         }
         let ok = !rel.is_empty()
+            && rel.split('/').all(|s| !matches!(s, "" | "." | ".."))
             && Path::new(rel)
                 .components()
                 .all(|c| matches!(c, Component::Normal(_)));
         if !ok {
             bail!("bad path in the manifest: {}", e.path);
+        }
+    }
+    // One entry per path: a second entry on the same path could act
+    // through the first (a dir entry on a symlink entry sets the mode of
+    // the link target).
+    let mut seen: HashSet<&str> = HashSet::new();
+    for e in &m.entries {
+        if !seen.insert(e.path.as_str()) {
+            bail!("bad manifest: the path {} is in it twice", e.path);
+        }
+    }
+    // The paths are in plain form, so a string prefix is a path prefix.
+    let links: HashSet<&str> = m
+        .entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::Symlink)
+        .map(|e| e.path.as_str())
+        .collect();
+    for e in &m.entries {
+        let mut at = e.path.as_str();
+        while let Some((parent, _)) = at.rsplit_once('/') {
+            if links.contains(parent) {
+                bail!(
+                    "bad path in the manifest: {} is below the symlink {parent}",
+                    e.path
+                );
+            }
+            at = parent;
         }
     }
     Ok(())
@@ -1174,12 +1210,27 @@ pub fn restore(path: &Path, roots: &Roots, opts: &RestoreOptions) -> anyhow::Res
 
 /// Delete the old backups in `dir`: keep the newest `keep_full` full
 /// backups and the diffs of them. Answers the deleted names.
-pub fn prune(dir: &Path, keep_full: usize) -> anyhow::Result<Vec<String>> {
+///
+/// `verified_full` is the ID of a full backup that a verify just passed.
+/// It must be the newest full backup in `dir`: nothing is deleted before
+/// a newer full backup is known to be good (docs/api.md §32.4).
+pub fn prune(dir: &Path, keep_full: usize, verified_full: &str) -> anyhow::Result<Vec<String>> {
     let all = list(dir)?;
     let fulls: Vec<&Listed> = all
         .iter()
         .filter(|l| l.header.as_ref().is_some_and(|h| h.kind == Kind::Full))
         .collect();
+    let newest = fulls
+        .last()
+        .and_then(|l| l.header.as_ref())
+        .map(|h| h.id.as_str());
+    if newest != Some(verified_full) {
+        bail!(
+            "no prune: the verified full backup {verified_full} is not the newest full backup in {}",
+            dir.display()
+        );
+    }
+    let keep_full = keep_full.max(1);
     if fulls.len() <= keep_full {
         return Ok(Vec::new());
     }
@@ -1198,6 +1249,148 @@ pub fn prune(dir: &Path, keep_full: usize) -> anyhow::Result<Vec<String>> {
         }
     }
     Ok(removed)
+}
+
+/// The prefix of a drill dir in the backup dir. The walk of a backup
+/// skips the backup dir, and [`list`] skips names with a dot.
+pub const DRILL_PREFIX: &str = ".drill-";
+
+/// Refuse a drill dir that is not empty: the drill writes into it, and
+/// the caller deletes it. Only an absent dir or an empty dir passes. A
+/// dir that cannot be read (permission denied, not a dir) is refused: it
+/// may hold files of its own. A symlink is refused: the restore would
+/// write the secrets into its target, and the cleanup removes only the
+/// link.
+pub fn check_drill_dir(dir: &Path) -> anyhow::Result<()> {
+    if fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!("the drill dir {} is a symlink", dir.display());
+    }
+    match fs::read_dir(dir) {
+        Ok(mut d) => {
+            if d.next().is_some() {
+                bail!("the drill dir {} is not empty", dir.display());
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => bail!("cannot read the drill dir {}: {e}", dir.display()),
+    }
+}
+
+/// The result of [`drill`].
+#[derive(Debug, Clone, Serialize)]
+pub struct Drilled {
+    pub id: String,
+    pub kind: Kind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    pub entries: usize,
+    /// The restored files whose size matched the manifest after the swap.
+    pub files: usize,
+    /// The scratch dir with the roots `state`, `config`, `work`.
+    pub dir: PathBuf,
+    /// `PRAGMA user_version` of the restored database, the same as the
+    /// header.
+    pub db_user_version: i64,
+    /// `PRAGMA integrity_check` of the restored database: `ok`.
+    pub integrity: String,
+    /// The restored state root has `secrets.key`.
+    pub secrets_key: bool,
+}
+
+/// The restore drill (docs/api.md §32.3): restore `path` (and the base of
+/// a diff) into the empty scratch dir `scratch` (`state`, `config`, and
+/// `work` in it), then check the result: each file of the manifest is in
+/// place with its size, the database opens with the schema version of the
+/// header and passes `PRAGMA integrity_check`, and `secrets.key` is back
+/// when the backup had it. The live data does not change. The caller
+/// deletes `scratch`: it holds the secrets in plain form.
+pub fn drill(
+    path: &Path,
+    base: Option<&Path>,
+    passphrase: Option<&str>,
+    scratch: &Path,
+) -> anyhow::Result<Drilled> {
+    check_drill_dir(scratch)?;
+    fs::create_dir_all(scratch).with_context(|| format!("cannot create {}", scratch.display()))?;
+    fs::set_permissions(scratch, fs::Permissions::from_mode(0o700))?;
+    let header = read_header(path)?;
+    let roots = Roots {
+        state: scratch.join("state"),
+        config: Some(scratch.join("config")),
+        work: Some(scratch.join("work")),
+    };
+    let r = restore(
+        path,
+        &roots,
+        &RestoreOptions {
+            base: base.map(Path::to_path_buf),
+            passphrase: passphrase.map(str::to_owned),
+            skip_work: false,
+            keep: Vec::new(),
+        },
+    )?;
+    // The manifest again, for the check of the tree after the swap.
+    let m = Archive::open(path, passphrase)?.manifest()?;
+    let mut files = 0;
+    let mut had_key = false;
+    for e in &m.entries {
+        let (root, rel) = split(&e.path)?;
+        let Some(dir) = roots.dir(root) else { continue };
+        let p = dir.join(rel);
+        let meta = fs::symlink_metadata(&p)
+            .with_context(|| format!("the drill: {} is not restored", e.path))?;
+        match e.kind {
+            EntryKind::File => {
+                if !meta.is_file() || meta.len() != e.size {
+                    bail!("the drill: {} does not match the manifest", e.path);
+                }
+                files += 1;
+                had_key |= e.path == "state/secrets.key";
+            }
+            EntryKind::Dir if !meta.is_dir() => {
+                bail!("the drill: {} is not a dir", e.path)
+            }
+            EntryKind::Symlink if !meta.file_type().is_symlink() => {
+                bail!("the drill: {} is not a symlink", e.path)
+            }
+            _ => {}
+        }
+    }
+    let db = roots.state.join(DB_FILE);
+    let c = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("the drill: cannot open {}", db.display()))?;
+    let integrity: String = c
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .context("the drill: the integrity check of the database failed")?;
+    if integrity != "ok" {
+        bail!("the drill: the restored database is damaged: {integrity}");
+    }
+    let user_version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if user_version != header.db_user_version {
+        bail!(
+            "the drill: the restored database has schema version {user_version}, the header {}",
+            header.db_user_version
+        );
+    }
+    let secrets_key = roots.state.join("secrets.key").is_file();
+    if had_key && !secrets_key {
+        bail!("the drill: secrets.key is not restored");
+    }
+    Ok(Drilled {
+        id: r.id,
+        kind: r.kind,
+        base: r.base,
+        entries: r.entries,
+        files,
+        dir: scratch.to_path_buf(),
+        db_user_version: user_version,
+        integrity,
+        secrets_key,
+    })
 }
 
 #[cfg(test)]

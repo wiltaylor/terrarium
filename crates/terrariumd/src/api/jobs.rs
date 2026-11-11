@@ -36,6 +36,8 @@
 //!   operator, TER-105): the addresses of a host agent, so an SSH target
 //!   on one of them counts on the host agent's cap.
 
+use std::collections::HashMap;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -52,7 +54,7 @@ use crate::jobs as rt;
 use crate::policy;
 use crate::store::board::{self, Card, CardPatch};
 use crate::store::jobs::{self, Job, JobKind, JobState, NewJob};
-use crate::store::{github_gate, hosts, projects, repos};
+use crate::store::{accepted_heads, github_gate, hosts, projects, repos};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -418,6 +420,11 @@ struct MergeBody {
     /// The planned duration, as for a validate.
     #[serde(default)]
     eta: Option<String>,
+    /// The branch that the merge goes onto (TER-607): `next` (the
+    /// default), or a release branch `release/X.Y.Z` of a frozen
+    /// version, for a release-blocker fix.
+    #[serde(default)]
+    onto: Option<String>,
 }
 
 /// The planned duration of a body's `eta`: `None` without one.
@@ -693,7 +700,19 @@ async fn merge(
     ApiJson(b): ApiJson<MergeBody>,
 ) -> ApiResult<Response> {
     let planned_secs = planned(b.eta.as_deref())?;
+    if let Some(o) = &b.onto {
+        jobs::check_onto(o)?;
+    }
     rt::prepare_hosts(&state.db, None).await?;
+    let commits = merge_commits(
+        &state,
+        &actor,
+        vec![id.clone()],
+        b.repo.clone(),
+        b.branch.clone(),
+        b.onto.clone(),
+    )
+    .await?;
     let job = state
         .db
         .write(actor.label(), move |t| {
@@ -712,7 +731,8 @@ async fn merge(
                 )));
             }
             let branch = branch_of(&card, b.branch)?;
-            let job = jobs::create(
+            let commit = merge_commit(&commits, &card.id, &branch)?;
+            let job = jobs::create_onto(
                 t,
                 NewJob {
                     project: card.project.clone(),
@@ -720,11 +740,12 @@ async fn merge(
                     kind: JobKind::Merge,
                     repo: repo.clone(),
                     branch: branch.clone(),
-                    commit: None,
+                    commit: Some(commit),
                     by_agent: rt::by_agent_of(&card.labels),
                     batch: Vec::new(),
                     planned_secs,
                 },
+                b.onto.as_deref(),
             )?;
             if rt::code_flow(t, &card.project)? {
                 let patch = CardPatch {
@@ -749,6 +770,102 @@ async fn merge(
     Ok(queued_answer(job.0, job.1, job.2, job.3))
 }
 
+/// The commit that a merge takes for each of the cards `ids`, with its
+/// branch, by card ID (TER-553): the reviewed commit that the merge queue
+/// recorded at the accept, else the head of the branch on its remote now.
+/// A card in the merge queue without a reviewed commit for the branch
+/// gets a 409 (TER-580): a round not recorded yet, a commit of another
+/// branch (a `branch` override, or a branch changed after the accept), or
+/// no round (a column given the role while it held cards). The head now
+/// could be a push after the review. The fallback is for cards outside
+/// the queue. The merge then takes that
+/// commit, never a later push. Read before the write of the job: the head
+/// is a `git ls-remote`.
+///
+/// With `onto` a release branch (TER-607), the commit is the one that the
+/// card's newest passed merge onto `next` took, never the head of the
+/// branch: a card without one gets a 409.
+async fn merge_commits(
+    state: &Shared,
+    actor: &Actor,
+    ids: Vec<String>,
+    repo: Option<String>,
+    branch: Option<String>,
+    onto: Option<String>,
+) -> ApiResult<HashMap<String, (String, String)>> {
+    let release = onto.filter(|o| o != jobs::NEXT);
+    let a = actor.clone();
+    let places = state
+        .db
+        .read(move |c| {
+            let mut out = Vec::new();
+            for id in &ids {
+                let card = board::get_card(c, &board::normalise_id(id))?;
+                // The checks of the write, in its order: a held or archived
+                // card gets that error, not one of its repo.
+                policy::admin_project(&a, &card.project, "queueing a merge onto next")?;
+                not_held(&card)?;
+                if card.archived {
+                    return Err(ApiError::conflict(format!("card {} is archived", card.id)));
+                }
+                enabled(&jobs::delivery(c, &card.project)?, &card.project)?;
+                let r = repo_of(c, &card, repo.clone())?;
+                let b = branch_of(&card, branch.clone())?;
+                if let Some(rel) = &release {
+                    let Some(tested) = jobs::passed_next_commit(c, &card.id, &b)? else {
+                        return Err(ApiError::conflict(format!(
+                            "card {} has no passed merge of branch `{b}` onto next: \
+                             merge it onto next first, then onto `{rel}`",
+                            card.id
+                        )));
+                    };
+                    out.push((card.id, card.project, r, b, Some(tested)));
+                    continue;
+                }
+                let recorded = accepted_heads::commit_for(c, &card.id, &b)?;
+                if recorded.is_none()
+                    && accepted_heads::is_queue(&card.column, card.column_role.as_deref())
+                {
+                    let why = accepted_heads::missing_reason(c, &card.id, &b)?;
+                    return Err(ApiError::conflict(format!("card {}: {why}", card.id)));
+                }
+                out.push((card.id, card.project, r, b, recorded));
+            }
+            Ok(out)
+        })
+        .await?;
+    let mut map = HashMap::new();
+    for (card, project, repo, branch, recorded) in places {
+        let commit = match recorded {
+            Some(c) => c,
+            None => match rt::remote_head(state, &project, &repo, &branch).await? {
+                Some(h) => h,
+                None => {
+                    return Err(ApiError::conflict(format!(
+                        "branch `{branch}` of card {card} is not on the remote of `{repo}`: push it first"
+                    )));
+                }
+            },
+        };
+        map.insert(card, (branch, commit));
+    }
+    Ok(map)
+}
+
+/// The commit of `card` from [`merge_commits`], for `branch`.
+fn merge_commit(
+    commits: &HashMap<String, (String, String)>,
+    card: &str,
+    branch: &str,
+) -> ApiResult<String> {
+    match commits.get(card) {
+        Some((b, c)) if b == branch => Ok(c.clone()),
+        _ => Err(ApiError::conflict(format!(
+            "card {card} changed while the merge was queued: queue it again"
+        ))),
+    }
+}
+
 /// One merge job for several cards (TER-112): merged onto `next` in the
 /// given order, validated once, pushed when green. All cards are of one
 /// project and one repo; each branch is the card's (or its ID in lower
@@ -764,6 +881,8 @@ async fn merge_batch(
         ));
     }
     let planned_secs = planned(b.eta.as_deref())?;
+    let commits =
+        merge_commits(&state, &actor, b.cards.clone(), b.repo.clone(), None, None).await?;
     let job = state
         .db
         .write(actor.label(), move |t| {
@@ -791,6 +910,20 @@ async fn merge_batch(
                 }
                 cards.push(card);
             }
+            // A release-blocker fix merges alone (TER-607).
+            if cards.len() > 1
+                && let Some(c) = cards.iter().find(|c| {
+                    c.labels
+                        .iter()
+                        .any(|l| l == crate::rules_verbs::RELEASE_BLOCKER)
+                })
+            {
+                return Err(ApiError::conflict(format!(
+                    "card {} has the label `{}`: it merges alone, as a batch of one",
+                    c.id,
+                    crate::rules_verbs::RELEASE_BLOCKER
+                )));
+            }
             let project = cards[0].project.clone();
             let def = jobs::delivery(t, &project)?;
             enabled(&def, &project)?;
@@ -807,10 +940,13 @@ async fn merge_batch(
                     }
                     _ => repo = Some(r),
                 }
+                let branch = branch_of(card, None)?;
+                let commit = merge_commit(&commits, &card.id, &branch)?;
                 batch.push(jobs::BatchCard {
                     card: card.id.clone(),
-                    branch: branch_of(card, None)?,
+                    branch,
                     by_agent: rt::by_agent_of(&card.labels),
+                    commit: Some(commit),
                     outcome: None,
                     note: None,
                 });
@@ -830,7 +966,7 @@ async fn merge_batch(
                     kind: JobKind::Merge,
                     repo: repo.clone(),
                     branch: first.branch.clone(),
-                    commit: None,
+                    commit: first.commit.clone(),
                     by_agent: first.by_agent.clone(),
                     batch: if batch.len() > 1 {
                         batch.clone()

@@ -38,7 +38,7 @@ pub fn has_display(def: &TargetDef) -> bool {
         TargetKind::Vnc | TargetKind::Rdp | TargetKind::Desktop => true,
         TargetKind::Docker => def.display.is_some(),
         TargetKind::Vmlab => def.machine.is_some(),
-        TargetKind::Host | TargetKind::Ssh => false,
+        TargetKind::Host | TargetKind::Ssh | TargetKind::Exedev => false,
     }
 }
 
@@ -293,7 +293,9 @@ pub fn display_target(state: &Shared, def: &TargetDef) -> ApiResult<DisplayTarge
                 password,
             }
         }
-        TargetKind::Host | TargetKind::Ssh => return Err(no_display(def)),
+        TargetKind::Host | TargetKind::Ssh | TargetKind::Exedev => {
+            return Err(no_display(def));
+        }
     })
 }
 

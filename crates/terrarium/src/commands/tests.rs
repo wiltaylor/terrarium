@@ -4141,6 +4141,39 @@ async fn target_edit_patches_only_the_flags_given() {
         )],
     )
     .await;
+    let out = ok(
+        true,
+        &[
+            "admin",
+            "target",
+            "edit",
+            "terra-dev",
+            "--work-root",
+            "/home/build/work",
+        ],
+        vec![(200, json!({"name": "terra-dev"}))],
+        vec![(
+            Patch,
+            "/api/targets/terra-dev",
+            vec![],
+            Some(json!({"work_root": "/home/build/work"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "changed target terra-dev: work_root\n");
+    // `null` removes the field in the merge patch.
+    ok(
+        true,
+        &["admin", "target", "edit", "terra-dev", "--clear-work-root"],
+        vec![(200, json!({"name": "terra-dev"}))],
+        vec![(
+            Patch,
+            "/api/targets/terra-dev",
+            vec![],
+            Some(json!({"work_root": null})),
+        )],
+    )
+    .await;
     let r = exec(
         true,
         &["admin", "target", "edit", "terra-dev"],
@@ -4153,6 +4186,15 @@ async fn target_edit_patches_only_the_flags_given() {
     for bad in [
         vec!["admin", "target", "edit", "t", "--keep", "--no-keep"],
         vec!["admin", "target", "edit", "t", "--ephemeral", "--permanent"],
+        vec![
+            "admin",
+            "target",
+            "edit",
+            "t",
+            "--work-root",
+            "/w",
+            "--clear-work-root",
+        ],
     ] {
         assert!(Cli::try_parse_from(std::iter::once("terrarium").chain(bad)).is_err());
     }
@@ -4677,6 +4719,106 @@ async fn admin_harness_update_prints_npm_output_on_failure_and_the_old_agents() 
         out.contains("codex: removed the unused version(s) 0.163.0"),
         "{out}"
     );
+}
+
+/// `schedule new --day-start` (GitHub #29): the flags make the spec, and
+/// `show` and `runs` give the next start and the detected start.
+#[tokio::test]
+async fn schedule_day_start_flags_show_and_runs() {
+    let sched = json!({"id": "01DAY", "name": "morning", "project": "terra", "enabled": true,
+        "spec": {"kind": "day_start", "tz": "Australia/Brisbane", "not_before": "07:00",
+                 "not_after": "11:00", "delay": "5m", "weekdays": ["mon", "fri"]},
+        "action": {"type": "exec", "target": "laptop", "cmd": ["./sync.sh"]},
+        "catch_up": "skip", "run_as": "operator", "created_by": "operator", "source": "api",
+        "next_run_at": null, "runs_count": 1, "day_start_done": "2026-11-09",
+        "day_start_last": {"cause": "resume", "at": "2026-11-09T07:42:00.000Z"}});
+    let out = ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "morning",
+            "--day-start",
+            "--tz",
+            "Australia/Brisbane",
+            "--not-before",
+            "07:00",
+            "--not-after",
+            "11:00",
+            "--delay",
+            "5m",
+            "--weekdays",
+            "mon,fri",
+            "--exec",
+            "laptop",
+            "--",
+            "./sync.sh",
+        ],
+        vec![(201, sched.clone())],
+        vec![(
+            Post,
+            "/api/schedules",
+            vec![],
+            Some(json!({"name": "morning", "project": "terra",
+                "spec": {"kind": "day_start", "tz": "Australia/Brisbane", "not_before": "07:00",
+                         "not_after": "11:00", "delay": "5m", "weekdays": ["mon", "fri"]},
+                "action": {"type": "exec", "target": "laptop", "cmd": ["./sync.sh"]}})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("next run at the first start after 2026-11-09"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["schedule", "show", "terra/morning"],
+        vec![(200, sched.clone())],
+        vec![req(Get, "/api/schedules/terra%2Fmorning")],
+    )
+    .await;
+    assert!(
+        out.contains("when:      start of day (Australia/Brisbane) 07:00-11:00 +5m on mon,fri"),
+        "{out}"
+    );
+    assert!(
+        out.contains("next run:  at the first start after 2026-11-09"),
+        "{out}"
+    );
+    assert!(
+        out.contains("last start: resume at 2026-11-09 07:42"),
+        "{out}"
+    );
+    let run = json!({"id": "01RUN", "schedule": "01DAY", "trigger": "day_start",
+        "status": "ok", "started_at": "2026-11-09T07:47:00.000Z", "summary": "exit 0",
+        "actor": "operator", "event_seq": null,
+        "day_start": {"cause": "resume", "at": "2026-11-09T07:42:00.000Z"}});
+    let out = ok(
+        false,
+        &["schedule", "runs", "terra/morning"],
+        vec![(200, json!([run]))],
+        vec![(
+            Get,
+            "/api/schedules/terra%2Fmorning/runs",
+            vec![("limit", "20")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("day_start"), "{out}");
+    assert!(out.contains("resume 2026-11-09 07:42"), "{out}");
+    // --tz without --cron or --day-start is a usage error, and nothing is
+    // sent.
+    let args = &[
+        "-p", "terra", "schedule", "new", "x", "--every", "1h", "--tz", "UTC", "--mail", "lead",
+    ][..];
+    let r = exec(false, args, vec![], None).await;
+    let e = r.result.unwrap_err();
+    assert_eq!(exit_code_of(&e), exit::USAGE);
+    assert!(e.to_string().contains("--tz goes with"), "{e}");
+    assert!(r.reqs.is_empty());
 }
 
 /// `schedule` (docs/api.md §19): every command, both modes.
@@ -8808,7 +8950,7 @@ async fn test_runs() {
         "status": "failed", "duration_ms": 5321,
         "counts": {"passed": 120, "failed": 2, "errored": 1, "skipped": 0, "total": 123},
         "cards": ["TER-1"], "labels": ["version:1.0.0"], "notes": [],
-        "url": "/p/terra/board/tests/01RUN"
+        "url": "/p/terra/tests/01RUN"
     });
     let args = [
         "test",
@@ -8856,7 +8998,7 @@ async fn test_runs() {
         r.out
     );
     assert!(
-        r.out.contains("dashboard: /p/terra/board/tests/01RUN"),
+        r.out.contains("dashboard: /p/terra/tests/01RUN"),
         "{}",
         r.out
     );
@@ -10944,4 +11086,102 @@ async fn rules_stored_parse_problems_are_printed_and_check_fails() {
             );
         }
     }
+}
+
+/// Run `args` as an agent against `mock`: the result and the output.
+async fn exec_on(args: &[&str], mock: &MockTransport) -> (anyhow::Result<()>, String) {
+    let cli = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+        .unwrap_or_else(|e| panic!("{args:?}: {e}"));
+    let env = Some(AgentEnv {
+        agent: ME.into(),
+        socket: "/nonexistent.sock".into(),
+    });
+    let mut ctx = Ctx::for_test(Arc::new(mock.clone()), env).with_identity(json!({
+        "agent": ME, "name": "worker", "project": "terra",
+        "harness": "pi", "status": "idle", "roles": []
+    }));
+    ctx.json = cli.json;
+    let result = super::run(&ctx, &cli.command).await;
+    (result, ctx.out.captured())
+}
+
+/// TER-661: an upload that gets `429` (all upload slots of the daemon are
+/// busy, TER-605) is tried again after `Retry-After`, at most 5 tries.
+#[tokio::test]
+async fn uploads_retry_a_429_after_retry_after() {
+    let dir = std::env::temp_dir().join(format!("terrarium-retry-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("report.txt");
+    std::fs::write(&file, "ok").unwrap();
+    let path = file.to_string_lossy().into_owned();
+    let busy = |after: u64| {
+        json!({"error": {"code": "rate_limited", "message": "too many uploads in progress",
+            "details": {"retry_after": after, "max_concurrent_uploads": 8}}})
+    };
+    let pushed = json!({"id": "ART-1", "name": "report.txt", "kind": "file", "url": "http://a/1"});
+
+    // A 429 with `Retry-After: 0`, then 201: two identical requests, success.
+    let m = MockTransport::new();
+    m.reply_with(429, &[("retry-after", "0")], busy(0))
+        .reply(201, pushed.clone());
+    let (r, out) = exec_on(&["artifact", "push", &path], &m).await;
+    r.unwrap();
+    let reqs = m.requests();
+    assert_eq!(reqs.len(), 2);
+    for q in &reqs {
+        assert_eq!(q.method, Post);
+        assert_eq!(q.path, "/api/projects/terra/artifacts");
+    }
+    assert_eq!(reqs[0].body, reqs[1].body);
+    assert!(out.contains("pushed ART-1"), "{out}");
+
+    // Five 429s: it gives up after the fifth try with a clear message.
+    let m = MockTransport::new();
+    for _ in 0..5 {
+        m.reply_with(429, &[("retry-after", "0")], busy(0));
+    }
+    m.reply(201, pushed.clone());
+    let (r, _) = exec_on(&["artifact", "push", &path], &m).await;
+    let e = r.unwrap_err();
+    assert_eq!(m.requests().len(), 5);
+    assert_eq!(exit_code_of(&e), exit::SERVER);
+    let se = e.downcast_ref::<ServerError>().unwrap();
+    assert_eq!(se.status, 429);
+    assert_eq!(se.code, "rate_limited");
+    assert!(e.to_string().contains("gave up after 5 tries"), "{e}");
+
+    // Another error is not tried again.
+    let m = MockTransport::new();
+    m.reply(
+        413,
+        json!({"error": {"code": "too_large", "message": "over quota"}}),
+    )
+    .reply(201, pushed.clone());
+    let (r, _) = exec_on(&["artifact", "push", &path], &m).await;
+    assert!(r.is_err());
+    assert_eq!(m.requests().len(), 1);
+
+    // `test push` retries too; without the header, `details.retry_after`
+    // gives the wait.
+    let xml = dir.join("junit.xml");
+    std::fs::write(
+        &xml,
+        r#"<testsuite name="s" tests="1"><testcase name="a"/></testsuite>"#,
+    )
+    .unwrap();
+    let xml_path = xml.to_string_lossy().into_owned();
+    let m = MockTransport::new();
+    m.reply(429, busy(0)).reply(
+        201,
+        json!({"id": "01RUN", "name": "junit", "status": "passed",
+            "counts": {"passed": 1, "failed": 0, "errored": 0, "skipped": 0, "total": 1},
+            "url": "/tests/01RUN"}),
+    );
+    let (r, _) = exec_on(&["test", "push", &xml_path, "--format", "junit"], &m).await;
+    r.unwrap();
+    let reqs = m.requests();
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(reqs[1].path, "/api/projects/terra/test-runs");
+    assert_eq!(reqs[0].body, reqs[1].body);
+    std::fs::remove_dir_all(&dir).ok();
 }

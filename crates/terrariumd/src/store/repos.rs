@@ -274,6 +274,159 @@ pub fn resolve(conn: &Connection, key: &str, context: Option<&str>) -> ApiResult
     found.ok_or_else(|| ApiError::not_found(format!("no repo `{key}`")))
 }
 
+/// The most open bound agents of a project that [`remove`] checks for a
+/// checkout. More than this refuses the delete (TER-394: a bounded check
+/// that fails closed).
+pub const REMOVE_BOUND_CAP: i64 = 200;
+
+/// `owner/name` of a forge URL, lower case, for the match against a
+/// `github` pipeline (`git@github.com:o/r.git`, `https://github.com/o/r`).
+fn forge_slug(url: &str) -> Option<String> {
+    let mut parts = url
+        .trim_end_matches('/')
+        .rsplit(['/', ':'])
+        .filter(|s| !s.is_empty());
+    let name = parts.next()?.trim_end_matches(".git");
+    let owner = parts.next()?;
+    Some(format!("{owner}/{name}").to_ascii_lowercase())
+}
+
+/// The workspaces of the open bound agents of `project` (TER-74), at most
+/// [`REMOVE_BOUND_CAP`] + 1 rows (one more shows the cap is hit). Reads the
+/// partial index `spawns_bound_open`.
+pub fn bound_workspaces(
+    conn: &Connection,
+    project: &str,
+) -> ApiResult<Vec<(String, std::path::PathBuf)>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.name, a.workspace FROM spawns s JOIN agents a ON a.id = s.id
+         WHERE s.finished_at IS NULL AND s.bound_kind IS NOT NULL AND s.project = ?1
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![project, REMOVE_BOUND_CAP + 1], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                std::path::PathBuf::from(r.get::<_, String>(1)?),
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The bound agents among `bound` whose workspace has a git checkout at
+/// the repo's `path`. A checkout at another `--path` is not seen. Errors
+/// when `bound` is over [`REMOVE_BOUND_CAP`].
+pub fn bound_checkouts(
+    repo: &Repo,
+    bound: &[(String, std::path::PathBuf)],
+) -> ApiResult<Vec<String>> {
+    if bound.len() as i64 > REMOVE_BOUND_CAP {
+        return Err(ApiError::conflict(format!(
+            "project `{}` has more than {REMOVE_BOUND_CAP} open bound agents; \
+             cannot check their checkouts of `{}`: try again when fewer run",
+            repo.project, repo.name
+        )));
+    }
+    Ok(bound
+        .iter()
+        .filter(|(_, ws)| std::fs::symlink_metadata(ws.join(&repo.path).join(".git")).is_ok())
+        .map(|(name, _)| name.clone())
+        .collect())
+}
+
+/// Delete the registration of `repo` (`DELETE /api/repos/{id}`, TER-658).
+/// The clones in workspaces and on targets stay. Refused (`409`) while a
+/// queued or running job, the delivery `next_repos`, a `github` pipeline
+/// of the same `owner/name`, or a bound agent's checkout (`checked_out`,
+/// from [`bound_checkouts`]) uses it. A repo of a project file is
+/// `file_managed`. Each check reads an index or a capped set. Audited as
+/// `repo.delete`, and a `repo.delete` event.
+pub fn remove(t: &mut Tx<'_>, id: &str, checked_out: &[String]) -> ApiResult<Repo> {
+    let repo = find(t, id)?.ok_or_else(|| ApiError::not_found(format!("no repo `{id}`")))?;
+    let key = format!("{}/{}", repo.project, repo.name);
+    if repo.source == projects::SOURCE_FILE {
+        return Err(ApiError::new(
+            crate::error::Code::FileManaged,
+            format!(
+                "repo `{key}` is declared in projects/{}.toml; remove it there, then POST /api/reload",
+                repo.project
+            ),
+        ));
+    }
+    let mut uses: Vec<String> = Vec::new();
+    // jobs_project_state (project, state, created_at).
+    let mut stmt = t.prepare(
+        "SELECT card, kind, state FROM jobs
+         WHERE project = ?1 AND state IN ('queued', 'running') AND repo = ?2 LIMIT 5",
+    )?;
+    let jobs = stmt
+        .query_map(params![repo.project, repo.name], |r| {
+            Ok(format!(
+                "{} {} job of {}",
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(0)?
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    uses.extend(jobs);
+    if crate::store::jobs::delivery(t, &repo.project)?
+        .next_repos
+        .contains(&repo.name)
+    {
+        uses.push("the delivery config (`next_repos`)".to_owned());
+    }
+    // At most `pipelines::MAX_PER_PROJECT` rows, by UNIQUE (project, name).
+    if let Some(slug) = forge_slug(&repo.url) {
+        let mut stmt = t.prepare(
+            "SELECT name, json_extract(def, '$.source.repo') FROM pipelines
+             WHERE project = ?1 AND adapter = 'github'",
+        )?;
+        let pipes = stmt
+            .query_map([&repo.project], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        uses.extend(
+            pipes
+                .into_iter()
+                .filter(|(_, r)| r.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(&slug)))
+                .map(|(n, _)| format!("pipeline `{n}`")),
+        );
+    }
+    uses.extend(
+        checked_out
+            .iter()
+            .map(|a| format!("the checkout of bound agent `{a}`")),
+    );
+    if !uses.is_empty() {
+        return Err(ApiError::conflict(format!(
+            "repo `{key}` is in use: {}; remove those first",
+            uses.join(", ")
+        ))
+        .with_details(json!({"uses": uses})));
+    }
+    t.execute("DELETE FROM repos WHERE id = ?1", [&repo.id])?;
+    t.audit(
+        "repo.delete",
+        &key,
+        Some(&repo.project),
+        json!({"id": repo.id, "url": repo.url, "source": repo.source}),
+    )?;
+    t.emit(
+        crate::events::EventDraft::new(
+            "repo.delete",
+            format!("repo {key} removed (the clones stay)"),
+            json!({"repo": repo.name, "repo_id": repo.id, "url": repo.url}),
+        )
+        .project(repo.project.clone()),
+    )?;
+    Ok(repo)
+}
+
 /// Every repo of a project, by name.
 /// Each repo of each project.
 pub fn all(conn: &Connection) -> ApiResult<Vec<Repo>> {

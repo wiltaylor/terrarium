@@ -254,6 +254,10 @@ pub struct PendingTurn {
     pub id: String,
     pub text: String,
     pub source: &'static str,
+    /// The `queued_turns` row of a store turn that the supervisor keeps
+    /// ([`Supervisor::send_queued_turn`]). The row stays until the turn is
+    /// typed, so the store lists it, not this queue.
+    pub queued: Option<i64>,
 }
 
 impl From<String> for PendingTurn {
@@ -262,6 +266,7 @@ impl From<String> for PendingTurn {
             id: AgentId::new().to_string(),
             text,
             source: "supervisor",
+            queued: None,
         }
     }
 }
@@ -326,6 +331,23 @@ pub trait Supervisor: Send + Sync + 'static {
     /// Type `text` into the harness as one turn.
     fn send_turn(&self, agent: AgentId, text: String)
     -> BoxFuture<'_, Result<(), SupervisorError>>;
+    /// [`Supervisor::send_turn`] for the store turn `row` of `agent`
+    /// (`queued_turns`, TER-542). `Ok(true)`: the supervisor keeps the turn
+    /// for later (before the first idle of a launch, for example) and
+    /// deletes the row itself when it types the turn. The row stays until
+    /// then, so a daemon restart delivers the turn again. A second call for
+    /// a row that the supervisor keeps does nothing. `Ok(false)`: the turn
+    /// went out, and the caller deletes the row. The default sends the
+    /// turn and returns `false`.
+    fn send_queued_turn(
+        &self,
+        agent: AgentId,
+        row: i64,
+        text: String,
+    ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+        let _ = row;
+        Box::pin(async move { self.send_turn(agent, text).await.map(|()| false) })
+    }
     /// `agent` got a stream of its self-hosted subscription
     /// (`crate::stream_limit`): type the work that waited for it. The
     /// default does nothing.
@@ -638,6 +660,9 @@ mod fake {
         /// The reset gate ([`Supervisor::reset_gate`]): no early turn and
         /// no mail pointer goes out while it is closed.
         gated: bool,
+        /// The next starts that end in `stopped` before the agent is ready
+        /// ([`InMemorySupervisor::stop_after_starts`]).
+        failed_starts: usize,
         /// How the next compactions end.
         compact: FakeCompact,
         /// The compactions that started. For tests.
@@ -787,6 +812,21 @@ mod fake {
             };
             self.set_status(agent, AgentStatus::Starting, reason);
             self.later(agent, epoch, move |me| {
+                let failed = {
+                    let mut inner = me.lock();
+                    match inner.agents.get_mut(&agent) {
+                        Some(a) if a.failed_starts > 0 => {
+                            a.failed_starts -= 1;
+                            a.epoch += 1;
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if failed {
+                    me.set_status(agent, AgentStatus::Stopped, Some("exited"));
+                    return;
+                }
                 let session =
                     resume.unwrap_or_else(|| HarnessSessionId(format!("fake-{}", AgentId::new())));
                 me.emit(
@@ -827,6 +867,13 @@ mod fake {
             {
                 a.early.insert(0, text);
             }
+        }
+
+        /// Make the next `n` starts of `agent` end in `stopped` instead of
+        /// `idle`, as a harness that exits at its start does. Its early
+        /// turns stay for the next start. For tests (TER-231).
+        pub fn stop_after_starts(&self, agent: AgentId, n: usize) {
+            self.lock().agents.entry(agent).or_default().failed_starts = n;
         }
 
         /// The text of each turn that started, in order. For tests.

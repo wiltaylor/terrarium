@@ -1045,6 +1045,10 @@ pub enum TargetKind {
     /// The desktop of the host agent's own machine: display only, and only
     /// when the host agent's config opts in (`[display] enabled = true`).
     Desktop,
+    /// An exe.dev VM that the daemon makes on `up` and removes on `down`
+    /// (TER-294). Commands go over ssh; the lifecycle goes through the
+    /// exe.dev HTTPS API. Always ephemeral. See [`ExedevSettings`].
+    Exedev,
 }
 
 impl TargetKind {
@@ -1144,6 +1148,73 @@ pub struct TargetDef {
     /// `docker` target the container has one budget for all holders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<crate::limits::TargetLimits>,
+    /// `exedev`: the VM settings (`[exedev]`). Default: [`ExedevSettings`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exedev: Option<ExedevSettings>,
+}
+
+/// The `[exedev]` table of an `exedev` target (TER-294). Each `up` makes a
+/// new exe.dev VM with these settings; `down` removes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExedevSettings {
+    /// The name of the exe.dev API token secret (`POST /exec`): it needs
+    /// `new`, `ls` and `rm`.
+    #[serde(default = "ExedevSettings::default_api_token")]
+    pub api_token: String,
+    /// vCPUs of the VM (`new --cpu`).
+    #[serde(default = "ExedevSettings::default_cpu")]
+    pub cpu: u32,
+    /// Memory of the VM in GiB (`new --memory=<n>GB`). At most 2 per vCPU.
+    #[serde(default = "ExedevSettings::default_memory_gb")]
+    pub memory_gb: u32,
+    /// The tag of each VM. The ssh key of the target must be scoped to it.
+    #[serde(default = "ExedevSettings::default_tag")]
+    pub tag: String,
+    /// The ssh user on the VM.
+    #[serde(default = "ExedevSettings::default_user")]
+    pub user: String,
+    /// The life of a VM in seconds. The sweep removes a VM past it. At most
+    /// 8 hours.
+    #[serde(default = "ExedevSettings::default_max_life_secs")]
+    pub max_life_secs: u64,
+}
+
+impl ExedevSettings {
+    /// The longest life of a VM: 8 hours (operator, E4).
+    pub const MAX_LIFE_SECS: u64 = 8 * 3600;
+
+    fn default_api_token() -> String {
+        "exedev-api-token".into()
+    }
+    fn default_cpu() -> u32 {
+        2
+    }
+    fn default_memory_gb() -> u32 {
+        4
+    }
+    fn default_tag() -> String {
+        "terrarium-dev-ssh".into()
+    }
+    fn default_user() -> String {
+        "exedev".into()
+    }
+    fn default_max_life_secs() -> u64 {
+        Self::MAX_LIFE_SECS
+    }
+}
+
+impl Default for ExedevSettings {
+    fn default() -> Self {
+        Self {
+            api_token: Self::default_api_token(),
+            cpu: Self::default_cpu(),
+            memory_gb: Self::default_memory_gb(),
+            tag: Self::default_tag(),
+            user: Self::default_user(),
+            max_life_secs: Self::default_max_life_secs(),
+        }
+    }
 }
 
 /// A subscription definition, `subscriptions/<name>.toml`. See PLAN §16.
@@ -1167,6 +1238,11 @@ pub struct SubscriptionDef {
     /// [`crate::selfhosted`]). `None` for every other provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selfhosted: Option<crate::selfhosted::SelfHosted>,
+    /// The settings of a cloud subscription (`[cloud]`, providers
+    /// `bedrock`, `gcp`, and `foundry`; [`crate::cloud`]). `None` for
+    /// every other provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<crate::cloud::CloudSettings>,
 }
 
 fn default_alert_at() -> u8 {

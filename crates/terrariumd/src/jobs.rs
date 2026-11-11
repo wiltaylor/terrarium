@@ -28,6 +28,11 @@
 //!      file it does not track but `target/` is removed. The tree stays
 //!      for the next job of the slot, so builds reuse `target/`. With a
 //!      base, the tree also gets the file of the changed paths (TER-100).
+//!      The receive step and the recipe hold an exclusive `flock` on
+//!      `<slot>.lock`, and the recipe checks the head again under it, so
+//!      a second daemon on the same work dir (the default depends only on
+//!      the project name) fails with a clear error instead of replacing
+//!      the slot's tree of the running job (TER-448).
 //!      Then the recipe (`sh -c <recipe>` in the tree) runs: the repo's
 //!      code, with no credential and no remote. Its env names the job
 //!      kind, the slot, and, when `next` gives a base, the file of the
@@ -74,7 +79,33 @@
 //! - A deploy drains the daemon first (`POST /api/system/update/drain`):
 //!   while it drains, no job starts, and the running ones go on. The drain
 //!   lists them ([`busy_jobs`]) and waits for them; one that still runs at
-//!   the stop is killed and put back by the next daemon (above).
+//!   the stop is killed and put back by the next daemon (above). Before an
+//!   update, the job slots alone can drain (TER-614 R4, `{"jobs_only":
+//!   true}`): no job starts, the running ones finish, the agents go on.
+//! - A merge job that failed on its host before its tests (TER-614 R3,
+//!   [`OUTCOME_INFRA`]) is no test failure: no split, no rerun at once, no
+//!   attempt used. Two paths:
+//!   - an `error` end with no tested commit in a step of [`HOST_STEPS`]
+//!     (the clone on the target, the secrets or the Docker tunnel, the
+//!     start of the recipe). The first such end goes back to the queue
+//!     for one retry. The retry waits [`INFRA_RETRY`], and not while its
+//!     host agent is offline; a host agent that comes back online ends the
+//!     wait early. The second such end ends the job `infra`. The retry
+//!     mark and the wait live in memory: after a daemon restart the job
+//!     starts at once and gets its one retry again, so a restart gives at
+//!     most one extra run.
+//!   - a run lost past [`MAX_LOST_RERUNS`] (below) ends `infra` at once,
+//!     with no delayed retry: the lost reruns were its retries.
+//!
+//!   The cards of an `infra` end stay in the merge queue with no job. They
+//!   go in the next batch when a card enters the merge queue or the lead
+//!   queues them. A failure in the daemon (`setup`, `prepare`) stays an
+//!   `error`; a card branch that cannot be fetched or merged leaves the
+//!   merge as a conflict does (the top of `ready`), and the others go on.
+//!   Each failed end keeps its step as the last line of its tail
+//!   (`[failed step: ...]`). An `error` or `infra` end writes a comment
+//!   with the step and the last lines of the output on each card; a red
+//!   end has them in its failure block.
 //! - A host that cannot be reached is not a failure (TER-160). A job whose
 //!   target's host agent is offline is not started: it stays queued. A job
 //!   whose target could not be reached before its recipe started (the host
@@ -92,7 +123,10 @@
 //!   the target broke, is lost. Its processes on the target get the kill
 //!   of a lost run ([`end_lost`], with the slot wipe when the kill is not
 //!   confirmed), and the same job goes back to the queue with its attempt
-//!   and its place ([`jobs::requeue_infra`]): a batch reruns whole. An
+//!   and its place ([`jobs::requeue_infra`]): a batch reruns whole. It
+//!   goes back only once the lost run let go of its slot lock
+//!   ([`wait_slot_free`], TER-676); past [`LOST_SLOT_WAIT_SECS`] it ends
+//!   instead, with the lock in its tail. An
 //!   error end that a rerun gets again ([`FIXED_ERRORS`]) is red, and after
 //!   [`MAX_LOST_RERUNS`] lost runs in a row the next one is red.
 //! - Each end and each cancel emits one `job.verdict` event per card
@@ -166,6 +200,24 @@ pub const LONG_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How long a job whose ssh target could not be reached waits before the
 /// next try (TER-160).
 pub const RETRY: Duration = Duration::from_secs(60);
+/// The outcome of a merge job that failed before its tests (TER-614 R3):
+/// a setup error with no tested commit, or a run that the infrastructure
+/// lost past [`MAX_LOST_RERUNS`]. Its batch does not split, it does not
+/// rerun at once, and its cards stay in the merge queue.
+pub const OUTCOME_INFRA: &str = "infra";
+/// How long a merge job that failed before its tests waits before its
+/// one retry (TER-614 R3), by default. The host must be back too.
+pub const INFRA_RETRY: Duration = Duration::from_secs(5 * 60);
+/// The steps of a job, for the `[failed step: ...]` line of a failed
+/// end (TER-614 R3).
+const STEP_SETUP: &str = "setup";
+const STEP_PREPARE: &str = "prepare";
+const STEP_RECEIVE: &str = "receive";
+const STEP_SECRETS: &str = "secrets";
+const STEP_RECIPE: &str = "recipe";
+const STEP_PUSH: &str = "push";
+/// The lines of the job output in a card comment of a failed job.
+const COMMENT_TAIL_LINES: usize = 20;
 /// The size of one stdin chunk of a step (the bundle of a job).
 const STDIN_CHUNK: usize = 64 * 1024;
 /// The dir of the daemon's job repos, in the state dir (TER-103).
@@ -177,17 +229,31 @@ pub struct Runtime {
     /// ([`recover_lost`]). A job that starts before that counts as lost and
     /// goes back to the queue (TER-211).
     recovered: tokio::sync::watch::Sender<bool>,
+    /// True while [`record_accepted_heads`] does nothing (TER-580): a test
+    /// holds the background read to see what the API pre-read recorded.
+    accepted_hold: std::sync::atomic::AtomicBool,
 }
 
 impl Default for Runtime {
     fn default() -> Self {
         Self {
             recovered: tokio::sync::watch::Sender::new(false),
+            accepted_hold: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
 
 impl Runtime {
+    /// Hold (or release) the background read of the reviewed commits.
+    pub fn hold_accepted_reads(&self, hold: bool) {
+        self.accepted_hold
+            .store(hold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn accepted_held(&self) -> bool {
+        self.accepted_hold.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Wait until [`spawn`] has taken up the jobs of the last daemon. From
     /// then on, the start does not take a running job as lost.
     pub async fn recovered(&self) {
@@ -329,6 +395,10 @@ struct Lost {
     /// The red end of a run past [`MAX_LOST_RERUNS`]: after the kill the
     /// job ends with it instead of going back to the queue.
     red: Option<JobEnd>,
+    /// The work tree of its slot on the target ([`slot_dir`]), when it
+    /// has a slot: the job goes back to the queue only after the lock of
+    /// that tree is free ([`wait_slot_free`], TER-676).
+    dir: Option<String>,
 }
 
 /// TER-123: end the processes that the jobs of the last daemon left on
@@ -399,6 +469,7 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 // a running one that gets a cancel meanwhile keeps its
                 // slot as a draining job (TER-123 review 2, major 1).
                 let live = LiveRun::new(&job.id);
+                let dir = job.slot.map(|s| slot_dir(&delivery, &job.project, s));
                 out.push(Lost {
                     job,
                     running,
@@ -407,6 +478,7 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                     other_host,
                     why: None,
                     red: None,
+                    dir,
                 });
             }
             Ok(out)
@@ -438,15 +510,16 @@ async fn end_lost(state: &Shared, l: Lost) {
         other_host,
         why,
         red,
+        dir,
     } = l;
     let mut report = None;
     let wraps = def.as_ref().is_some_and(crate::run_kill::kind_wraps);
-    match def {
+    match &def {
         Some(def) if wraps => {
             let r = crate::run_kill::kill_file(
                 state,
-                &def,
-                Some(format!("{}/jobs", job.project)),
+                def,
+                Some(terrarium_host::native::service_holder(&job.project, "jobs")),
                 &crate::run_kill::job_pidfile(&job.id),
             )
             .await;
@@ -467,6 +540,37 @@ async fn end_lost(state: &Shared, l: Lost) {
         Some(_) => debug!(job = %job.id, "a lost job run on a target without PID files"),
         None => {}
     }
+    // TER-676: a job that goes back to the queue starts again only after
+    // the lost run let go of its slot. Its receive step takes the slot
+    // lock without a wait, so a rerun that starts while the lost run still
+    // ends fails as held. Past the cap the job ends, with why.
+    let red = match (&def, dir.as_deref()) {
+        (Some(def), Some(dir)) if running && red.is_none() && wraps && !other_host => {
+            match wait_slot_free(state, def, &job, dir).await {
+                Some(held) => {
+                    let merge = job.kind == JobKind::Merge;
+                    let (outcome, counts) = if merge {
+                        (OUTCOME_INFRA, "an infra failure, not a test failure")
+                    } else {
+                        ("red", "red")
+                    };
+                    Some(JobEnd {
+                        passed: false,
+                        outcome: Some(outcome.into()),
+                        tail: Some(format!(
+                            "the run was lost ({}), and its kill did not end it: {held}. \
+                             The job does not rerun and counts as {counts}. Stop the \
+                             processes that hold the lock on the target, then queue the job again.",
+                            why.as_deref().unwrap_or("the last daemon left it running")
+                        )),
+                        ..JobEnd::default()
+                    })
+                }
+                None => None,
+            }
+        }
+        _ => red,
+    };
     // TER-190 review, finding 2: processes of the run may still write into
     // the slot's tree. The slot is free below, so the next job of the slot
     // makes its tree new first. The mark is written before the slot frees.
@@ -526,6 +630,117 @@ async fn end_lost(state: &Shared, l: Lost) {
     }
     drop(live);
     kick(state);
+}
+
+/// How long, in all, the end of a lost run waits for its slot lock to be
+/// free before the job ends instead of going back to the queue (TER-676).
+pub const LOST_SLOT_WAIT_SECS: u64 = 120;
+
+/// The longest single wait for the slot lock on the target. Between two
+/// waits the kill of the lost run runs again.
+const LOST_SLOT_PROBE_SECS: u64 = 15;
+
+/// The wait of [`LOST_SLOT_WAIT_SECS`] of some jobs, for the tests of the
+/// capped path.
+fn lost_slot_waits() -> MutexGuard<'static, HashMap<String, u64>> {
+    static W: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    match W.get_or_init(Mutex::default).lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// Set the wait for the slot lock of lost job `job` to `secs`. For the
+/// tests of the capped path only ([`wait_slot_free`]).
+#[doc(hidden)]
+pub fn set_lost_slot_wait(job: &str, secs: u64) {
+    lost_slot_waits().insert(job.to_owned(), secs);
+}
+
+/// `sh -c SLOT_FREE sh <dir> <secs>`: wait at most `secs` for the lock of
+/// slot tree `dir` (TER-448, [`RECEIVE_SCRIPT`]) and let go of it at
+/// once. Prints `free`, `held` (still locked after the wait), `noflock`,
+/// or `error`.
+const SLOT_FREE: &str = r#"lock=$1.lock; w=$2
+command -v flock >/dev/null 2>&1 || { echo noflock; exit 0; }
+[ -e "$lock" ] || { echo free; exit 0; }
+flock -E 75 -w "$w" "$lock" true 2>/dev/null
+case $? in 0) echo free ;; 75) echo held ;; *) echo error ;; esac
+"#;
+
+/// Wait until no process of lost job `job` holds the lock of its slot
+/// tree `dir` on target `def` (TER-676). The kill of a lost run
+/// ([`end_lost`]) can end before the run does: under load, or when the
+/// kill could not start. While the lock is held, the kill runs again
+/// (a PID file that is still there gets it), up to
+/// [`LOST_SLOT_WAIT_SECS`]. `None` when the lock is free, or when the
+/// target cannot tell (no `flock`, an error): the receive step then
+/// decides as before. `Some(why)` when it is still held at the cap.
+async fn wait_slot_free(state: &Shared, def: &TargetDef, job: &Job, dir: &str) -> Option<String> {
+    let holder = Some(terrarium_host::native::service_holder(&job.project, "jobs"));
+    let cap = lost_slot_waits()
+        .remove(&job.id)
+        .unwrap_or(LOST_SLOT_WAIT_SECS);
+    let started = Instant::now();
+    let until = started + Duration::from_secs(cap);
+    loop {
+        let left = until.saturating_duration_since(Instant::now()).as_secs();
+        let wait = left.clamp(1, LOST_SLOT_PROBE_SECS);
+        let probe = RemoteCmd {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                SLOT_FREE.into(),
+                "sh".into(),
+                dir.to_owned(),
+                wait.to_string(),
+            ],
+            timeout_secs: Some(wait + 30),
+            holder: holder.clone(),
+            ..RemoteCmd::default()
+        };
+        let said = match crate::executor::start_cmd(state, def, &probe) {
+            Ok(run) => {
+                let c = run.collect(4096).await;
+                String::from_utf8_lossy(&c.stdout).trim().to_owned()
+            }
+            Err(e) => {
+                warn!(job = %job.id, "cannot check the slot lock of a lost job run: {e}");
+                return None;
+            }
+        };
+        match said.as_str() {
+            "free" => {
+                if started.elapsed() >= Duration::from_secs(1) {
+                    info!(job = %job.id, secs = started.elapsed().as_secs(),
+                        "the slot of a lost job run is free; the job goes back to the queue");
+                }
+                return None;
+            }
+            "held" => {}
+            other => {
+                debug!(job = %job.id, said = other, "the target cannot tell if the slot of a lost job run is free");
+                return None;
+            }
+        }
+        if Instant::now() >= until {
+            let lock = format!("{dir}.lock");
+            warn!(job = %job.id, lock, cap, "the processes of a lost job run still hold its slot");
+            return Some(format!(
+                "its processes still held the slot lock {lock} after {} s",
+                started.elapsed().as_secs()
+            ));
+        }
+        warn!(job = %job.id, dir, "the slot of a lost job run is still held; its kill runs again");
+        let r = crate::run_kill::kill_file(
+            state,
+            def,
+            holder.clone(),
+            &crate::run_kill::job_pidfile(&job.id),
+        )
+        .await;
+        debug!(job = %job.id, report = %r, "the kill of a lost job run, again");
+    }
 }
 
 /// True when the kill of a lost job run shows that none of its processes
@@ -625,6 +840,125 @@ pub fn kick(state: &Shared) {
     });
 }
 
+/// Record the reviewed commit of the cards that came into the merge queue
+/// (TER-553), in the background: the read of each head is a `git
+/// ls-remote` in the daemon. The API move and comment, the rule effects,
+/// and a timer call it.
+pub fn record_accepted_soon(state: &Shared) {
+    let state = state.clone();
+    tokio::spawn(async move { record_accepted_heads(&state).await });
+}
+
+/// Read and record the head of each card branch whose round in the merge
+/// queue has no commit yet (TER-553). A card without a usable repo or
+/// branch, or a branch that is not on the remote, keeps its round open
+/// with a note: a batch leaves the card out until its head is recorded.
+/// The read takes the tip at read time, so it fills only a round accepted
+/// within [`accepted_heads::FILL_MAX_AGE_SECS`] (TER-580): an older open
+/// round gets [`accepted_heads::EXPIRED_NOTE`] and needs a fresh accept.
+/// Returns the count of recorded heads.
+pub async fn record_accepted_heads(state: &Shared) -> usize {
+    use crate::store::accepted_heads;
+    if state.job_queue.accepted_held() {
+        return 0;
+    }
+    let now = chrono::Utc::now();
+    // A failed read waits a minute: a card without its branch on the
+    // remote does not cost a `git ls-remote` on each queue kick.
+    let retry_before =
+        (now - chrono::Duration::seconds(60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let accepted_after = accepted_heads::fill_cutoff();
+    let cutoff = accepted_after.clone();
+    if let Err(e) = state
+        .db
+        .write("system", move |t| {
+            accepted_heads::expire(t, &cutoff)?;
+            note_stalls(t)
+        })
+        .await
+    {
+        warn!("cannot note the expired reviewed-commit reads: {e}");
+    }
+    let cutoff = accepted_after;
+    let pending = match state
+        .db
+        .read(move |c| accepted_heads::pending(c, &retry_before, &cutoff))
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("cannot read the pending reviewed commits: {e}");
+            return 0;
+        }
+    };
+    let mut recorded = 0;
+    for p in pending {
+        let card = p.card.clone();
+        let place = state
+            .db
+            .read(move |c| {
+                let card = board::get_card(c, &card)?;
+                let repo = crate::api::jobs::repo_of(c, &card, None)?;
+                let branch = crate::api::jobs::branch_of(&card, None)?;
+                Ok((card.project, repo, branch))
+            })
+            .await;
+        let read = match place {
+            Ok((project, repo, branch)) => {
+                match remote_head(state, &project, &repo, &branch).await {
+                    Ok(Some(h)) if check_commit(&h).is_ok() => Ok((branch, h)),
+                    Ok(Some(h)) => Err(format!("bad head `{h}` of `{branch}`")),
+                    Ok(None) => Err(format!(
+                        "branch `{branch}` is not on the remote of `{repo}`"
+                    )),
+                    Err(e) => Err(e.message),
+                }
+            }
+            Err(e) => Err(e.message),
+        };
+        let (card, round) = (p.card.clone(), p.round.clone());
+        let done = state
+            .db
+            .write("system", move |t| match &read {
+                // The cutoff at the write: the reads before took time.
+                Ok((branch, head)) => accepted_heads::record(
+                    t,
+                    &card,
+                    &round,
+                    branch,
+                    head,
+                    &accepted_heads::fill_cutoff(),
+                ),
+                Err(why) => accepted_heads::note(t, &card, &round, why).map(|()| false),
+            })
+            .await;
+        match done {
+            Ok(true) => recorded += 1,
+            Ok(false) => {}
+            Err(e) => warn!(card = %p.card, "cannot record the reviewed commit: {e}"),
+        }
+    }
+    recorded
+}
+
+/// Post one card comment on each round that needs a fresh accept (the
+/// upgrade backfilled it, or the read did not fill it in time), so the
+/// card does not wait in the merge queue without a signal (TER-580).
+fn note_stalls(t: &mut crate::db::Tx<'_>) -> ApiResult<()> {
+    use crate::store::accepted_heads;
+    for s in accepted_heads::stalls(t)? {
+        let body = format!(
+            "Job queue: the reviewed commit of this card is not recorded: {}. A merge leaves \
+             the card out. Fix: review the head of the branch, then move the card out of \
+             `{}` and back in (a fresh accept records the head then).",
+            s.note, s.column
+        );
+        board::system_comment(t, &s.card, &body, None)?;
+        accepted_heads::stall_noted(t, &s.card)?;
+    }
+    Ok(())
+}
+
 /// A queued job that waits for its host (TER-160).
 struct Wait {
     /// The first time that the host could not be reached.
@@ -669,7 +1003,7 @@ fn host_down(conn: &rusqlite::Connection, state: &Shared, def: &DeliveryDef) -> 
 
 /// [`host_down`] of a target that is read.
 fn agent_down(state: &Shared, name: &str, def: &TargetDef) -> Option<String> {
-    if def.kind == TargetKind::Ssh {
+    if matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
         return None;
     }
     let host = def.host.as_deref()?;
@@ -724,8 +1058,9 @@ fn note_long_waits(t: &mut Tx<'_>) -> ApiResult<()> {
 pub async fn tick(state: &Shared) -> ApiResult<()> {
     prepare_hosts(&state.db, None).await?;
     // A deploy drains the daemon first: no job starts, and the running
-    // ones go on (TER-123, P5). The end of the drain kicks the queue.
-    let drain = state.self_update.draining();
+    // ones go on (TER-123, P5). The end of the drain kicks the queue. A
+    // drain of the job slots only (TER-614 R4) does the same for jobs.
+    let drain = state.self_update.jobs_draining();
     // The live runs are read and added in the write, so two ticks and a
     // cancel (all writes) see them in order.
     let st = state.clone();
@@ -769,6 +1104,23 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
         let state = state.clone();
         tokio::spawn(async move {
             let end = match run(&state, &job, &def).await {
+                // A merge that failed before its tests (TER-614 R3): one
+                // retry after the wait, with no attempt used; the second
+                // such end is an infra end.
+                Ran::End(end) if before_tests(&job, &end) => {
+                    let first = infra_retried().insert(job.id.clone());
+                    if first {
+                        set_control(&job.id, None);
+                        requeue_before_tests(&state, &job, &end).await;
+                        drop(live_run);
+                        return;
+                    }
+                    infra_retried().remove(&job.id);
+                    JobEnd {
+                        outcome: Some(OUTCOME_INFRA.into()),
+                        ..end
+                    }
+                }
                 Ran::End(end) => end,
                 Ran::Wait { why, ssh } => {
                     set_control(&job.id, None);
@@ -834,8 +1186,7 @@ async fn prepare_hosts_with(
     extra: Option<String>,
     resolve: impl Fn(&str) -> String + Send + Sync + 'static,
 ) -> ApiResult<()> {
-    static PREPARE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _prepare = PREPARE.lock().await;
+    let _prepare = db.host_pins().lock().await;
     let names = db.read(move |c| jobs::unresolved_hosts(c, extra)).await?;
     if names.is_empty() {
         return Ok(());
@@ -988,6 +1339,108 @@ fn error_end(message: impl Into<String>) -> JobEnd {
     }
 }
 
+/// The marker of the failed step in the tail of a job.
+const FAILED_STEP: &str = "[failed step: ";
+
+/// A failed end with the step that failed as the last line of its tail
+/// (TER-614 R3), so the job keeps it. The tail is clipped from its start,
+/// so the last line stays.
+fn with_failed_step(mut end: JobEnd, step: &str) -> JobEnd {
+    if end.passed {
+        return end;
+    }
+    let mut tail = end.tail.take().unwrap_or_default();
+    if !tail.is_empty() && !tail.ends_with('\n') {
+        tail.push('\n');
+    }
+    tail.push_str(&format!("{FAILED_STEP}{step}]"));
+    end.tail = Some(tail);
+    end
+}
+
+/// The steps of a job, in order.
+const STEPS: [&str; 6] = [
+    STEP_SETUP,
+    STEP_PREPARE,
+    STEP_RECEIVE,
+    STEP_SECRETS,
+    STEP_RECIPE,
+    STEP_PUSH,
+];
+
+/// The step that failed, from the last line of the tail of a job
+/// ([`with_failed_step`]). Only one of the six step names counts: the
+/// output of a recipe cannot name a step (TER-614 review, minor 6).
+pub fn failed_step(tail: Option<&str>) -> Option<&'static str> {
+    let last = tail?.trim_end().lines().last()?.trim();
+    let name = last.strip_prefix(FAILED_STEP)?.strip_suffix(']')?;
+    STEPS.into_iter().find(|s| *s == name)
+}
+
+/// The steps whose failure is one of the host or its transport, not of a
+/// card (TER-614 review, major 1): the clone on the target, the secrets
+/// and the Docker tunnel, the start of the recipe. A failure in the
+/// daemon (`setup`, `prepare`) stays an error: a card branch that cannot
+/// be fetched or merged leaves the merge instead ([`Left::unfetched`]).
+const HOST_STEPS: [&str; 3] = [STEP_RECEIVE, STEP_SECRETS, STEP_RECIPE];
+
+/// A merge end that failed on its host before its tests (TER-614 R3):
+/// outcome `error`, no tested commit, and a failed step of
+/// [`HOST_STEPS`]. A failed push after the tests has a commit, and stays
+/// an error.
+fn before_tests(job: &Job, end: &JobEnd) -> bool {
+    job.kind == JobKind::Merge
+        && !end.passed
+        && end.outcome.as_deref() == Some("error")
+        && end.head.is_none()
+        && failed_step(end.tail.as_deref()).is_some_and(|s| HOST_STEPS.contains(&s))
+}
+
+/// The merge jobs that failed before their tests and wait for their one
+/// retry ([`OUTCOME_INFRA`]), by job ID. An end of the job clears it.
+fn infra_retried() -> MutexGuard<'static, HashSet<String>> {
+    static S: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    match S.get_or_init(Mutex::default).lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// The wait before the retry of a merge job that failed before its tests,
+/// in milliseconds ([`INFRA_RETRY`]; the tests set it).
+static INFRA_RETRY_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(INFRA_RETRY.as_millis() as u64);
+
+/// Set the wait before the retry of a merge job that failed before its
+/// tests. For the tests only.
+#[doc(hidden)]
+pub fn set_infra_retry(d: Duration) {
+    INFRA_RETRY_MS.store(d.as_millis() as u64, Ordering::SeqCst);
+}
+
+fn infra_retry() -> Duration {
+    Duration::from_millis(INFRA_RETRY_MS.load(Ordering::SeqCst))
+}
+
+/// The comment with the failed step and the last lines of the output of
+/// failed job `j` (TER-614 R3), next to its rerun, split, or infra
+/// comment. `None` without output. The output is untrusted text: it goes
+/// indented, as in the failure block. The daemon writes it in both
+/// flows ([`on_end`]).
+pub fn output_comment(j: &Job) -> Option<String> {
+    let t = j.tail.as_deref().filter(|t| !t.trim().is_empty())?;
+    let lines: Vec<&str> = t.trim_end().lines().collect();
+    let from = lines.len().saturating_sub(COMMENT_TAIL_LINES);
+    let step = failed_step(Some(t)).unwrap_or("-");
+    let body: String = lines[from..].iter().map(|l| format!("    {l}\n")).collect();
+    Some(format!(
+        "Job queue: {} job {} (attempt {}), failed step: {step}. Job output, last lines:\n\n{body}",
+        j.kind.as_str(),
+        j.id,
+        j.attempt
+    ))
+}
+
 /// Run one step on the target and read it to the end. The step can be
 /// killed through [`kill`] while it runs.
 ///
@@ -1079,11 +1532,12 @@ async fn rerun_lost(state: &Shared, job: Job, why: String, red: Option<JobEnd>, 
     hold(&job.id, why.clone(), None);
     // As in [`recover_lost`]: the kill goes to the current delivery
     // target, and a job that ran on another host gets no confirmed kill.
-    let (project, ran_on) = (job.project.clone(), job.host.clone());
+    let (project, ran_on, slot) = (job.project.clone(), job.host.clone(), job.slot);
     let found = state
         .db
         .read(move |c| {
             let delivery = jobs::delivery(c, &project)?;
+            let dir = slot.map(|s| slot_dir(&delivery, &project, s));
             let def = match delivery.target.as_deref().map(|n| targets::get(c, n)) {
                 Some(Ok(row)) if row.def.project.as_ref().is_none_or(|p| *p == project) => {
                     Some(row.def)
@@ -1094,12 +1548,12 @@ async fn rerun_lost(state: &Shared, job: Job, why: String, red: Option<JobEnd>, 
                 && ran_on
                     .as_deref()
                     .is_some_and(|h| h != jobs::host_of(c, &delivery));
-            Ok((def, other))
+            Ok((def, other, dir))
         })
         .await;
-    let (def, other_host) = found.unwrap_or_else(|e| {
+    let (def, other_host, dir) = found.unwrap_or_else(|e| {
         warn!(job = %job.id, "cannot read the target of a lost job run: {e}");
-        (None, false)
+        (None, false, None)
     });
     end_lost(
         state,
@@ -1111,6 +1565,7 @@ async fn rerun_lost(state: &Shared, job: Job, why: String, red: Option<JobEnd>, 
             other_host,
             why: Some(why),
             red,
+            dir,
         },
     )
     .await;
@@ -1144,20 +1599,84 @@ async fn requeue(state: &Shared, job: &Job, why: String, ssh: bool) {
     }
 }
 
+/// Put a merge job that failed before its tests back in the queue for
+/// its one retry (TER-614 R3): no attempt, no split, no card move. It
+/// waits [`INFRA_RETRY`], and while its host agent is offline. The job
+/// keeps the output and the failed step in its tail, and each card gets
+/// them in a comment.
+async fn requeue_before_tests(state: &Shared, job: &Job, end: &JobEnd) {
+    let wait = infra_retry();
+    let tail = end.tail.clone().unwrap_or_default();
+    let why = tail
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("no output")
+        .to_owned();
+    warn!(job = %job.id, "a merge job failed before its tests: {why}");
+    hold(
+        &job.id,
+        format!("it failed before its tests: {why}"),
+        Some(Instant::now() + wait),
+    );
+    let id = job.id.clone();
+    let after = if wait >= Duration::from_secs(60) {
+        format!("{} min", wait.as_secs().div_ceil(60))
+    } else {
+        format!("{} s", wait.as_secs().max(1))
+    };
+    let back = state
+        .db
+        .write("system", move |t| {
+            let Some(j) = jobs::requeue_before_tests(t, &id, &tail)? else {
+                return Ok(None);
+            };
+            let flow = code_flow(t, &j.project)?;
+            for v in card_views(&j) {
+                if flow {
+                    set_labels(t, &v.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
+                }
+                comment(t, &v.card, &infra_comment(&v, Some(&after)))?;
+                output_note(t, &v)?;
+            }
+            Ok(Some(j))
+        })
+        .await;
+    match back {
+        Ok(Some(j)) => debug!(job = %j.id, "the job waits for its retry"),
+        Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
+        Err(e) => warn!(job = %job.id, "cannot put a job back in the queue: {e}"),
+    }
+}
+
+/// The job as each of its cards sees it ([`card_view`]): the job itself
+/// for a job of one card.
+fn card_views(j: &Job) -> Vec<Job> {
+    if j.batch.is_empty() {
+        vec![j.clone()]
+    } else {
+        j.batch.iter().map(|c| card_view(j, c)).collect()
+    }
+}
+
 /// Run a job to its end. Never fails: an error is a failed end, a wait
 /// when the target could not be reached before the recipe started, or a
 /// lost run when the infrastructure lost the recipe run (TER-196).
 async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> Ran {
     let recipe = AtomicBool::new(false);
     let lost = OnceLock::new();
-    let end = match run_inner(state, job, def, &recipe, &lost).await {
+    let step = Mutex::new(STEP_SETUP);
+    let end = match run_inner(state, job, def, &recipe, &lost, &step).await {
         Ok(end) => end,
         Err(e) => error_end(format!("the job could not run: {}", e.message)),
     };
+    let at = *step
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let end = with_failed_step(end, at);
     if !end.passed
         && let Some(why) = lost.into_inner()
     {
-        return lost_or_red(&job.id, why, end);
+        return lost_or_red(&job.id, job.kind == JobKind::Merge, why, end);
     }
     if end.passed || end.outcome.as_deref() != Some("error") || recipe.load(Ordering::SeqCst) {
         return Ran::End(end);
@@ -1171,8 +1690,10 @@ async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> Ran {
 /// A lost run of job `job`: it reruns ([`Ran::Lost`] without `red`) up
 /// to [`MAX_LOST_RERUNS`] times in a row. The next lost run ends red,
 /// with the reason in its tail, so a run that keeps getting lost ends.
-/// Both get the kill of a lost run first.
-fn lost_or_red(job: &str, why: String, end: JobEnd) -> Ran {
+/// Both get the kill of a lost run first. A merge job (`merge`) ends with
+/// [`OUTCOME_INFRA`], not red (TER-614 R3): the tests did not fail, so its
+/// batch does not split and its cards stay in the merge queue.
+fn lost_or_red(job: &str, merge: bool, why: String, end: JobEnd) -> Ran {
     let n = {
         let mut m = lost_runs();
         let n = m.entry(job.to_owned()).or_insert(0);
@@ -1183,12 +1704,17 @@ fn lost_or_red(job: &str, why: String, end: JobEnd) -> Ran {
         return Ran::Lost { why, red: None };
     }
     lost_runs().remove(job);
+    let (outcome, counts) = if merge {
+        (OUTCOME_INFRA, "an infra failure, not a test failure")
+    } else {
+        ("red", "red")
+    };
     let tail = format!(
-        "the infrastructure lost the run {n} times in a row, so this run counts as red: {why}\n{}",
+        "the infrastructure lost the run {n} times in a row, so this run counts as {counts}: {why}\n{}",
         end.tail.as_deref().unwrap_or("")
     );
     let red = JobEnd {
-        outcome: Some("red".into()),
+        outcome: Some(outcome.into()),
         tail: Some(tail),
         ..end
     };
@@ -1326,6 +1852,7 @@ async fn run_inner(
     def: &DeliveryDef,
     recipe_started: &AtomicBool,
     recipe_lost: &OnceLock<String>,
+    step: &Mutex<&'static str>,
 ) -> ApiResult<JobEnd> {
     let target = def
         .target
@@ -1392,7 +1919,7 @@ async fn run_inner(
             )));
         }
     };
-    let holder = Some(format!("{}/jobs", job.project));
+    let holder = Some(terrarium_host::native::service_holder(&job.project, "jobs"));
     let ionice = has_ionice(state, job, &target, &row.def, holder.clone()).await;
     let project = job.project.clone();
     let wipe = state
@@ -1410,6 +1937,7 @@ async fn run_inner(
         ionice,
         recipe_started,
         recipe_lost,
+        step,
         ssh_host: row
             .def
             .address
@@ -1430,7 +1958,10 @@ async fn run_inner(
 
 /// The work tree of a slot on the target (TER-190):
 /// `<work_dir>/<project>/slot-<n>`, kept from job to job. Only one running
-/// job holds a slot ([`jobs::pick`]), so no two jobs share a tree.
+/// job holds a slot ([`jobs::pick`]), so no two jobs share a tree. The
+/// steps of the job hold an exclusive lock on `<dir>.lock` (TER-448), so
+/// a second daemon on the same work dir cannot take the tree; it fails
+/// with a clear error instead.
 pub fn slot_dir(def: &DeliveryDef, project: &str, slot: i64) -> String {
     format!(
         "{}/{project}/slot-{slot}",
@@ -1589,6 +2120,9 @@ struct StepCtx<'a> {
     /// Set when the infrastructure lost the recipe run, with why
     /// ([`lost_run`], TER-196): the job goes back to the queue.
     recipe_lost: &'a OnceLock<String>,
+    /// The step that runs now, for the `[failed step: ...]` line of a
+    /// failed end (TER-614 R3).
+    step: &'a Mutex<&'static str>,
     /// The host of an ssh target ([`jobs::address_key`]), for the lines of
     /// the ssh client about a broken link.
     ssh_host: Option<String>,
@@ -1600,6 +2134,14 @@ struct StepCtx<'a> {
 }
 
 impl StepCtx<'_> {
+    /// Note that step `name` of the job starts now.
+    fn at(&self, name: &'static str) {
+        *self
+            .step
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = name;
+    }
+
     /// A git step on the target, without any credential.
     fn plain_cmd(&self, script: &str, args: &[&str]) -> RemoteCmd {
         let mut argv = vec![
@@ -1679,6 +2221,226 @@ fn job_ref(kind: JobKind) -> &'static str {
     }
 }
 
+/// Why a card left a merge: a `conflict` (the conflicting files, or why
+/// the merge failed), or `moved` (TER-553: the head of the branch is no
+/// longer the reviewed commit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Left {
+    outcome: &'static str,
+    note: String,
+}
+
+impl Left {
+    fn conflict(note: String) -> Self {
+        Left {
+            outcome: OUTCOME_CONFLICT,
+            note,
+        }
+    }
+
+    /// A card branch that the daemon could not fetch (TER-614 review,
+    /// major 1): deleted or rewritten after the accept. It leaves the
+    /// merge as a conflict does: the top of ready, for its worker.
+    fn unfetched(branch: &str, why: &str) -> Self {
+        Left {
+            outcome: OUTCOME_CONFLICT,
+            note: format!(
+                "the branch `{branch}` cannot be fetched (deleted or rewritten after the accept?): {why}"
+            ),
+        }
+    }
+
+    fn moved(branch: &str, reviewed: &str, tip: &str) -> Self {
+        Left {
+            outcome: OUTCOME_MOVED,
+            note: format!(
+                "the branch `{branch}` moved after its review: the reviewed commit is {reviewed}, the head is now {tip}"
+            ),
+        }
+    }
+}
+
+/// The outcome of a card whose branch did not merge onto `next`.
+pub const OUTCOME_CONFLICT: &str = "conflict";
+/// The outcome of a card whose branch head is no longer its reviewed
+/// commit (TER-553). It goes back to review, with no rerun.
+pub const OUTCOME_MOVED: &str = "moved";
+
+/// Is `outcome` one that takes a card out of its merge (a conflict, or a
+/// branch that moved after its review)? Such a card never runs again.
+pub fn left_merge(outcome: Option<&str>) -> bool {
+    matches!(outcome, Some(OUTCOME_CONFLICT | OUTCOME_MOVED))
+}
+
+/// The end of a merge in which no card merged: a `conflict` when a card
+/// conflicted, else `moved`.
+fn none_merged(job: &Job, left: HashMap<usize, Left>, batch: Option<Vec<BatchCard>>) -> JobEnd {
+    let mut all: Vec<(usize, Left)> = left.into_iter().collect();
+    all.sort_by_key(|(i, _)| *i);
+    let conflict = all.iter().any(|(_, l)| l.outcome == OUTCOME_CONFLICT);
+    let notes = |o: &str| -> Vec<String> {
+        all.iter()
+            .filter(|(_, l)| l.outcome == o)
+            .map(|(_, l)| l.note.clone())
+            .collect()
+    };
+    let tail = if conflict {
+        let what = if job.batch.is_empty() {
+            format!("the branch `{}` does", job.branch)
+        } else {
+            "none of the branches of the batch does".to_owned()
+        };
+        let mut t = format!(
+            "{what} not merge onto `{}` without conflicts; the queue does not resolve them. Files:\n{}",
+            job.onto(),
+            notes(OUTCOME_CONFLICT).join("\n")
+        );
+        let moved = notes(OUTCOME_MOVED);
+        if !moved.is_empty() {
+            t.push_str(&format!(
+                "\nLeft out, moved after review:\n{}",
+                moved.join("\n")
+            ));
+        }
+        t
+    } else {
+        format!(
+            "nothing merged: each branch moved after its review, and the queue merges only the reviewed commit.\n{}",
+            notes(OUTCOME_MOVED).join("\n")
+        )
+    };
+    JobEnd {
+        passed: false,
+        outcome: Some(
+            if conflict {
+                OUTCOME_CONFLICT
+            } else {
+                OUTCOME_MOVED
+            }
+            .into(),
+        ),
+        tail: Some(tail),
+        batch,
+        ..JobEnd::default()
+    }
+}
+
+/// The checks of a merge onto the release branch `release` (TER-607),
+/// fetched as `refs/remotes/job/next`, with `next` as
+/// `refs/remotes/job/upstream`: the job has one card with a tested commit,
+/// that commit is on `next` (its passed merge onto `next` took it), and
+/// it brings nothing into the release that `next` had before the fix.
+///
+/// The last rule (review round 3): let M be the oldest commit of the
+/// first-parent line of `next` that holds the tested commit (the merge of
+/// the fix). No commit of `release..tested` may be in `release..M^1`, the
+/// history of `next` before the fix landed. So a fix branch made from
+/// `next` after the cut, or stacked on (or merging) a card that merged
+/// onto `next` before the fix, is refused: it would take unreleased
+/// cards into the frozen version. A fix that merges a card branch that
+/// is not on `next` yet cannot be told apart from the fix's own commits.
+///
+/// M must be the fix's own merge (TER-637): its second parent is the
+/// tested commit, as [`git::JobRepo::merge`] writes it. A passed merge
+/// onto `next` of a commit that `next` held already makes no merge
+/// commit, so M is then the merge of another card, and `M^1` does not
+/// hold that card's commits: such a fix is refused, as is an M with no
+/// first parent.
+fn release_fix(repo: &git::JobRepo, job: &Job, release: &str) -> Result<(), String> {
+    let onto = job.onto();
+    let cards = job.cards();
+    let [card] = cards.as_slice() else {
+        return Err(format!("a merge onto `{onto}` takes one card"));
+    };
+    let Some(want) = &card.commit else {
+        return Err(format!(
+            "card {} has no tested commit: merge it onto next first",
+            card.card
+        ));
+    };
+    let upstream = "refs/remotes/job/upstream";
+    let tested = match repo.commit_of(want) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Err(format!("the tested commit {want} is not on next")),
+        Err(e) => return Err(e.to_string()),
+    };
+    match repo.is_ancestor(&tested, upstream) {
+        Ok(true) => {}
+        Ok(false) => return Err(format!("the tested commit {want} is not on next")),
+        Err(e) => return Err(e.to_string()),
+    }
+    let foreign = brought_from_next(repo, release, &tested, upstream)?;
+    if !foreign.is_empty() {
+        let shown: Vec<&str> = foreign.iter().take(5).map(String::as_str).collect();
+        return Err(format!(
+            "branch `{}` is not based on `{onto}`: its commit {want} brings {} commit(s) that \
+             were on next before the fix and are not in the release ({}). Make the fix \
+             branch from `{onto}`, with no other card in it",
+            card.branch,
+            foreign.len(),
+            shown.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The commits of `release..tested` that `next` (`upstream`) held before
+/// the merge of `tested` (see [`release_fix`]), newest first. M, the
+/// oldest first-parent commit of `upstream` that holds `tested`, is found
+/// by a binary search: along the first-parent line, once a commit holds
+/// `tested`, each newer one does too. An M that is not the merge of
+/// `tested` (no first parent, or a second parent that is not `tested`)
+/// is an error: the check cannot tell what `next` held before the fix.
+fn brought_from_next(
+    repo: &git::JobRepo,
+    release: &str,
+    tested: &str,
+    upstream: &str,
+) -> Result<Vec<String>, String> {
+    let git = |e: git::GitError| e.to_string();
+    // Newest first, so the commits that hold `tested` are a prefix.
+    let line = repo.rev_list(upstream, release, true).map_err(git)?;
+    let (mut lo, mut hi) = (0, line.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if repo.is_ancestor(tested, &line[mid]).map_err(git)? {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    // `line[lo - 1]` is M. Without one, `tested` is in the release already.
+    let Some(m) = lo.checked_sub(1).map(|i| &line[i]) else {
+        return Ok(Vec::new());
+    };
+    let Some(before) = repo.commit_of(&format!("{m}^1")).map_err(git)? else {
+        return Err(format!(
+            "the merge {m} that took the tested commit {tested} onto next has no first \
+             parent: cannot check what next held before the fix"
+        ));
+    };
+    let own = repo.commit_of(&format!("{m}^2")).map_err(git)?;
+    if own.as_deref() != Some(tested) {
+        return Err(format!(
+            "the tested commit {tested} came onto next with commit {m}, which is not its own \
+             merge: next held it already when its merge onto next passed (that merge made no \
+             commit). Make the fix branch from the release branch, with a commit of its own, \
+             and merge it onto next again"
+        ));
+    }
+    let had: HashSet<String> = repo
+        .rev_list(&before, release, false)
+        .map_err(git)?
+        .into_iter()
+        .collect();
+    Ok(repo
+        .rev_list(tested, release, false)
+        .map_err(git)?
+        .into_iter()
+        .filter(|c| had.contains(c))
+        .collect())
+}
+
 /// Step 1, in the daemon, with the repo credential (TER-103): fetch, check
 /// out or merge, record the commit as [`job_ref`], and write the bundle.
 /// Blocking.
@@ -1697,71 +2459,125 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
     // a merge, the merge-base of the commit and `next` for a validate.
     let base;
     let head = if job.kind == JobKind::Merge {
-        // The branches of the merge, in order: the job's, then the rest of
-        // a batch.
-        let mut branches = vec![job.branch.clone()];
-        branches.extend(job.cards().iter().skip(1).map(|c| c.branch.clone()));
-        let mut specs = vec!["+refs/heads/next:refs/remotes/job/next".to_owned()];
-        specs.extend(
-            branches
-                .iter()
-                .enumerate()
-                .map(|(i, b)| format!("+refs/heads/{b}:refs/remotes/job/card{i}")),
-        );
+        // The cards of the merge, in order: the job's, then the rest of a
+        // batch, each with its reviewed commit (TER-553).
+        let cards = job.cards();
+        let branches: Vec<String> = cards.iter().map(|c| c.branch.clone()).collect();
+        // `next`, or the release branch of `card merge --onto` (TER-607).
+        let onto = job.onto();
+        let release = onto != jobs::NEXT;
+        let mut specs = vec![format!("+refs/heads/{onto}:refs/remotes/job/next")];
+        if release {
+            // The tested commit is on `next`, so the card branch is not
+            // fetched; `next` also shows the cards that the release must
+            // not take.
+            specs.push("+refs/heads/next:refs/remotes/job/upstream".to_owned());
+        } else {
+            specs.extend(
+                branches
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| format!("+refs/heads/{b}:refs/remotes/job/card{i}")),
+            );
+        }
+        // A card branch that is gone (deleted after the accept) fails
+        // the whole fetch (TER-614 review, major 1): then `next` alone,
+        // and each branch on its own. A branch that does not come leaves
+        // the merge with the reason; the others go on. A release job
+        // fetches no card branch, so a failed fetch fails it.
+        let mut gone: HashMap<usize, String> = HashMap::new();
         if let Err(e) = repo.fetch(&specs) {
-            return failed(format!(
-                "cannot fetch next and {} (does the repo have a next branch?): {e}",
-                branches.join(" ")
-            ));
+            if release {
+                return failed(format!(
+                    "cannot fetch {onto} and next (does the repo have a {onto} branch?): {e}"
+                ));
+            }
+            if let Err(e) = repo.fetch(&specs[..1]) {
+                return failed(format!(
+                    "cannot fetch next and {} (does the repo have a next branch?): {e}",
+                    branches.join(" ")
+                ));
+            }
+            for (i, spec) in specs.iter().skip(1).enumerate() {
+                if let Err(one) = repo.fetch(std::slice::from_ref(spec)) {
+                    gone.insert(i, one.to_string());
+                }
+            }
+            if gone.is_empty() {
+                return failed(format!("cannot fetch next and {}: {e}", branches.join(" ")));
+            }
         }
         let mut cur = match repo.commit_of("refs/remotes/job/next") {
             Ok(Some(c)) => c,
-            Ok(None) => return failed("the repo has no next branch".into()),
+            Ok(None) => return failed(format!("the repo has no {onto} branch")),
             Err(e) => return failed(e.to_string()),
         };
         base = Some(cur.clone());
+        if release && let Err(why) = release_fix(repo, job, &cur) {
+            return failed(why);
+        }
         // A branch that conflicts, or whose merge fails otherwise, leaves
-        // the merge; the next branch merges onto the ones before it.
-        let mut left: HashMap<usize, String> = HashMap::new();
+        // the merge; the next branch merges onto the ones before it. So
+        // does a branch whose head is no longer its reviewed commit
+        // (TER-553): a push after the accept was not reviewed.
+        let mut left: HashMap<usize, Left> = HashMap::new();
         let mut merged = 0;
         for (i, b) in branches.iter().enumerate() {
-            let other = format!("refs/remotes/job/card{i}");
-            match repo.merge(&cur, &other, &format!("Merge {b} onto next")) {
+            // The ref of a branch that did not come may be one of an
+            // older job of this repo: it is not read.
+            if let Some(e) = gone.get(&i) {
+                left.insert(i, Left::unfetched(b, e));
+                continue;
+            }
+            // Onto a release branch, the tested commit that
+            // [`release_fix`] checked, never the branch head: a push after
+            // the merge onto `next` does not count (TER-607).
+            let fetched = match &cards[i].commit {
+                Some(c) if release => c.clone(),
+                _ => format!("refs/remotes/job/card{i}"),
+            };
+            let tip = match repo.commit_of(&fetched) {
+                Ok(Some(c)) => c,
+                Ok(None) => {
+                    left.insert(i, Left::unfetched(b, "the fetch brought no commit"));
+                    continue;
+                }
+                Err(e) => return failed(e.to_string()),
+            };
+            if let Some(want) = cards[i].commit.as_ref().filter(|_| !release) {
+                // A reviewed commit that the fetch did not bring (the
+                // branch was rewritten) is no head either.
+                let reviewed = repo.commit_of(want).ok().flatten();
+                if reviewed.as_deref() != Some(tip.as_str()) {
+                    left.insert(i, Left::moved(b, want, &tip));
+                    continue;
+                }
+            }
+            // The commit, not the ref: the merge takes what was checked.
+            match repo.merge(&cur, &tip, &format!("Merge {b} onto {onto}")) {
                 Ok(git::MergeStep::Merged(c)) => {
                     cur = c;
                     merged += 1;
                 }
                 Ok(git::MergeStep::Conflict(files)) => {
-                    left.insert(i, files.join("\n"));
+                    left.insert(i, Left::conflict(files.join("\n")));
                 }
                 Ok(git::MergeStep::Failed(msg)) => {
-                    left.insert(i, format!("the merge failed without a conflict:\n{msg}"));
+                    left.insert(
+                        i,
+                        Left::conflict(format!("the merge failed without a conflict:\n{msg}")),
+                    );
                 }
-                Err(e) => return failed(format!("cannot merge {b}: {e}")),
+                Err(e) => {
+                    left.insert(i, Left::conflict(format!("the merge of `{b}` failed: {e}")));
+                }
             }
         }
         if !job.batch.is_empty() {
-            batch = Some(mark_conflicts(&job.batch, &left));
+            batch = Some(mark_left(&job.batch, &left));
         }
         if merged == 0 {
-            let what = if job.batch.is_empty() {
-                format!("the branch `{}` does", job.branch)
-            } else {
-                "none of the branches of the batch does".to_owned()
-            };
-            let mut files: Vec<(usize, String)> = left.into_iter().collect();
-            files.sort();
-            let files: Vec<String> = files.into_iter().map(|(_, f)| f).collect();
-            return Prepared::End(JobEnd {
-                passed: false,
-                outcome: Some("conflict".into()),
-                tail: Some(format!(
-                    "{what} not merge onto `next` without conflicts; the queue does not resolve them. Files:\n{}",
-                    files.join("\n")
-                )),
-                batch,
-                ..JobEnd::default()
-            });
+            return Prepared::End(none_merged(job, left, batch));
         }
         cur
     } else {
@@ -1815,7 +2631,13 @@ async fn steps(
         for c in job.cards().iter().skip(1) {
             check_ref(&c.branch)?;
         }
+        for c in job.cards() {
+            if let Some(commit) = &c.commit {
+                check_commit(commit)?;
+            }
+        }
     }
+    x.at(STEP_PREPARE);
     let (j, bundle) = (job.clone(), x.bundle.clone());
     let (head, batch, base) = match x
         .daemon(move |r| {
@@ -1857,6 +2679,7 @@ async fn steps(
         RECEIVE_SCRIPT,
         &[x.dir, &head, job.kind.as_str(), &base, &tree, wipe],
     );
+    x.at(STEP_RECEIVE);
     let c = x.run(&receive, STEP_MAX, Some(data)).await?;
     let received = result_line(&c.stdout).get("outcome").map(String::as_str) == Some("ok");
     if received && x.wipe {
@@ -1910,6 +2733,7 @@ async fn steps(
             warn!(job = %job.id, "cannot update merge group recipe boundary: {e}");
         }
     }
+    x.at(STEP_SECRETS);
     let injected = merge_secrets(x.state, job, delivery).await?;
     let own: Vec<_> = injected
         .iter()
@@ -1934,7 +2758,11 @@ async fn steps(
             config,
         )
         .await?;
-        env.insert("DOCKER_HOST".into(), tunnel.endpoint.clone());
+        // Never `DOCKER_HOST` here: see [`crate::docker_tunnel::ENDPOINT_ENV`].
+        env.insert(
+            crate::docker_tunnel::ENDPOINT_ENV.into(),
+            tunnel.endpoint.clone(),
+        );
         Some(tunnel)
     } else {
         None
@@ -1949,6 +2777,7 @@ async fn steps(
         holder: x.holder.clone(),
         ..RemoteCmd::default()
     };
+    x.at(STEP_RECIPE);
     // An error here is a recipe that did not start: no session.
     if killed(&job.id) {
         return Err(ApiError::conflict("the job was cancelled"));
@@ -2029,13 +2858,16 @@ async fn steps(
     if !ok || job.kind != JobKind::Merge {
         return Ok(result);
     }
+    x.at(STEP_PUSH);
     // Step 3, in the daemon, with the credential: push the recorded merge
     // commit from the daemon's repo. The recipe never had that repo, so
     // nothing it did to its clone reaches the push.
     let h = head.clone();
+    let onto = job.onto().to_owned();
+    let to = onto.clone();
     let pushed = x
         .daemon(move |r| match r.commit_of("refs/job/merge") {
-            Ok(Some(c)) if c == h => r.push(&h, "next"),
+            Ok(Some(c)) if c == h => r.push(&h, &to),
             Ok(_) => Err(git::GitError::Refused(format!(
                 "the job repo does not hold the merge commit {h}"
             ))),
@@ -2048,7 +2880,7 @@ async fn steps(
             passed: false,
             outcome: Some("error".into()),
             tail: Some(format!(
-                "the recipe passed, but the push to `next` failed; did `next` move?\n{e}"
+                "the recipe passed, but the push to `{onto}` failed; did `{onto}` move?\n{e}"
             )),
             head: Some(head),
             batch,
@@ -2170,13 +3002,54 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
 /// Keep merged stdout/stderr outside the reusable slot, so the next checkout
 /// cannot clean it away. Only a bounded excerpt crosses the runner protocol.
 /// No pipeline wraps the recipe: its exact exit status remains the job status.
+///
+/// The slot's tree stays this job's alone (TER-448): the script holds the
+/// receive step's lock (`TERRARIUM_SLOT_LOCK`) for the whole recipe, and a
+/// head that is not `TERRARIUM_HEAD` (another daemon took the slot between
+/// the two steps and replaced the tree) ends the job before the recipe
+/// runs. Both fail with exit 125 and the reason on stderr; without `flock`
+/// on the target, the recipe runs as before this, unlocked, and the step
+/// says so in one line.
+///
+/// Only this wrapper shell holds the lock (fd 8). The recipe runs as its
+/// child with fd 8 closed, so a process that the recipe leaves behind (a
+/// background server, a build daemon) cannot keep the slot locked after
+/// the job. The wrapper catches TERM, INT and HUP with a no-op trap (a
+/// caught signal goes back to its default in the child), so on a cancel it
+/// holds the lock until its recipe child ends; a SIGKILL of the group ends
+/// both. With the lock, a recipe that a signal ends gives exit 128+n, not
+/// the signal: both are a red end.
 fn logged_recipe(recipe: String, log: &str) -> String {
     use crate::executor::sh_quote;
     format!(
         r#"log={log}
 mkdir -p -- "$(dirname -- "$log")" || exit 125
 (umask 077 && : > "$log") || exit 125
-exec sh -c {recipe} > "$log" 2>&1
+lock=${{TERRARIUM_SLOT_LOCK:-}}
+if [ -z "$lock" ]; then
+  exec sh -c {recipe} > "$log" 2>&1
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  echo "no flock on the target: slot not locked"
+  exec sh -c {recipe} > "$log" 2>&1
+fi
+exec 8>>"$lock" || {{ echo "cannot open the slot lock $lock"; exit 125; }}
+flock -n 8 || {{
+  echo "the slot tree of this job is held by another job or daemon: $lock"
+  echo "stop it, or give this project its own work_dir"
+  exit 125
+}}
+if [ -n "${{TERRARIUM_HEAD:-}}" ]; then
+  got=$(git rev-parse -q --verify 'HEAD^{{commit}}' 2>/dev/null 8>&-)
+  if [ "$got" != "$TERRARIUM_HEAD" ]; then
+    echo "another daemon replaced the slot tree between the steps of this job"
+    echo "(HEAD is ${{got:-nothing}}, not $TERRARIUM_HEAD); the recipe did not run"
+    exit 125
+  fi
+fi
+trap : TERM INT HUP
+sh -c {recipe} > "$log" 2>&1 8>&-
+exit $?
 "#,
         log = sh_quote(log),
         recipe = sh_quote(&recipe),
@@ -2211,7 +3084,8 @@ tail -c 1200 -- "$log"
 }
 
 /// The env of the recipe (TER-100, docs/api.md 35.2): the job kind and
-/// ID, the tested head, the slot (TER-190), and with a base, the base and the absolute path
+/// ID, the tested head, the slot (TER-190), the slot's lock file (TER-448),
+/// and with a base, the base and the absolute path
 /// of the changed files. No credential goes in here.
 fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
@@ -2222,6 +3096,13 @@ fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<
     if let Some(s) = job.slot {
         env.insert("TERRARIUM_JOB_SLOT".into(), s.to_string());
     }
+    // TER-448: the recipe holds this lock, the receive step's lock, for its
+    // whole run, so a second daemon on the same work dir cannot take the
+    // slot's tree while the recipe runs in it.
+    env.insert(
+        "TERRARIUM_SLOT_LOCK".into(),
+        format!("{}.lock", dir.trim_end_matches('/')),
+    );
     if let Some(b) = base {
         env.insert("TERRARIUM_BASE".into(), b.to_owned());
         env.insert(
@@ -2234,14 +3115,14 @@ fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<
 
 /// The batch with each card that left the merge (by its index in the
 /// batch) marked `conflict`, with its files or the reason.
-fn mark_conflicts(batch: &[BatchCard], found: &HashMap<usize, String>) -> Vec<BatchCard> {
+fn mark_left(batch: &[BatchCard], found: &HashMap<usize, Left>) -> Vec<BatchCard> {
     batch
         .iter()
         .enumerate()
         .map(|(i, c)| match found.get(&i) {
-            Some(files) => BatchCard {
-                outcome: Some("conflict".into()),
-                note: Some(files.clone()),
+            Some(l) => BatchCard {
+                outcome: Some(l.outcome.into()),
+                note: Some(l.note.clone()),
                 ..c.clone()
             },
             None => BatchCard {
@@ -2256,18 +3137,25 @@ fn mark_conflicts(batch: &[BatchCard], found: &HashMap<usize, String>) -> Vec<Ba
 /// One line on the cards of a batch: those that merged, and those that
 /// conflicted.
 fn batch_summary(batch: &[BatchCard]) -> String {
-    let (bad, good): (Vec<&BatchCard>, Vec<&BatchCard>) = batch
-        .iter()
-        .partition(|c| c.outcome.as_deref() == Some("conflict"));
-    let names = |l: &[&BatchCard]| {
-        l.iter()
+    let with = |o: Option<&str>| -> String {
+        batch
+            .iter()
+            .filter(|c| match o {
+                Some(o) => c.outcome.as_deref() == Some(o),
+                None => !left_merge(c.outcome.as_deref()),
+            })
             .map(|c| c.card.as_str())
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let mut s = format!("batch: merged {}", names(&good));
+    let mut s = format!("batch: merged {}", with(None));
+    let bad = with(Some(OUTCOME_CONFLICT));
     if !bad.is_empty() {
-        s.push_str(&format!("; left out on a conflict {}", names(&bad)));
+        s.push_str(&format!("; left out on a conflict {bad}"));
+    }
+    let moved = with(Some(OUTCOME_MOVED));
+    if !moved.is_empty() {
+        s.push_str(&format!("; left out, moved after review {moved}"));
     }
     s
 }
@@ -2419,8 +3307,11 @@ pub fn queue_comment(j: &Job, card: &str) -> String {
                 .unwrap_or("the branch head at the start")
         ),
         JobKind::Merge if j.batch.is_empty() => format!(
-            "Job queue: merge job {} queued: {} onto next of {}.",
-            j.id, j.branch, j.repo
+            "Job queue: merge job {} queued: {} onto {} of {}.",
+            j.id,
+            j.branch,
+            j.onto(),
+            j.repo
         ),
         JobKind::Merge => {
             let names: Vec<&str> = j.batch.iter().map(|c| c.card.as_str()).collect();
@@ -2476,9 +3367,30 @@ pub fn split_comment(v: &Job, left: &Job, right: &Job) -> String {
     )
 }
 
+/// The comment of a merge job that failed before its tests
+/// ([`OUTCOME_INFRA`], TER-614 R3). `retry`: the wait to its one retry
+/// (`5 min`), `None` at the end (the retry failed too).
+pub fn infra_comment(v: &Job, retry: Option<&str>) -> String {
+    match retry {
+        Some(m) => format!(
+            "Job queue: {} job {} (attempt {}) failed before its tests: an infra failure, not a test failure. No attempt is used and the batch does not split. The cards stay in the merge queue, and the job runs once more in {m}, when its host is back.",
+            v.kind.as_str(),
+            v.id,
+            v.attempt
+        ),
+        None => format!(
+            "{} The job failed before its tests again: an infra failure, not a test failure. It does not rerun and the batch does not split. The cards stay in the merge queue with no job: they go in the next batch when a card enters the merge queue or the lead queues them (`card merge`), or move them out of the merge queue and back.",
+            end_comment(v, "failed")
+        ),
+    }
+}
+
 /// The verdict word of the final failure of a card: `j` is the job, `v`
 /// the card's view of it ([`card_view`]).
 pub fn fail_phrase(j: &Job, v: &Job) -> &'static str {
+    if v.outcome.as_deref() == Some(OUTCOME_MOVED) {
+        return MOVED_PHRASE;
+    }
     if j.batch.is_empty() {
         // A card split out of a red batch alone was red there already.
         if j.parent.is_some() && j.outcome.as_deref() == Some("red") {
@@ -2492,9 +3404,23 @@ pub fn fail_phrase(j: &Job, v: &Job) -> &'static str {
     "failed again"
 }
 
+/// The verdict words of a card whose branch moved after its review
+/// (TER-553).
+const MOVED_PHRASE: &str =
+    "left the merge: the branch moved after its review, so the card goes back to review";
+
 /// The comment of the final failure of a card ([`fail_phrase`]).
 pub fn fail_comment(j: &Job, v: &Job) -> String {
-    end_comment(v, fail_phrase(j, v))
+    let mut s = end_comment(v, fail_phrase(j, v));
+    // A branch that moved (TER-553): the reviewed commit and the head, in
+    // the comment of the move back to review. The daemon wrote the tail.
+    if v.outcome.as_deref() == Some(OUTCOME_MOVED)
+        && let Some(tail) = &v.tail
+    {
+        s.push(' ');
+        s.push_str(tail);
+    }
+    s
 }
 
 /// The body of the mail to the worker of a card that failed.
@@ -2517,15 +3443,47 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
 /// then the coded card flow (the move, the rerun, or the split).
 fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     emit_verdicts(t, j)?;
+    // The failed step and the output on each card (TER-614 R3), from the
+    // daemon in both flows: the rules quote a template value onto one
+    // line, which would lose the lines of the output. Not for red: a red
+    // end has the failure block with the output already (review, minor 5).
+    for v in card_views(j) {
+        if matches!(verdict_of(&v), "error" | "infra") {
+            output_note(t, &v)?;
+        }
+    }
     // With `board_flow = rules` the board rules act on the verdicts.
     if !code_flow(t, &j.project)? {
         return Ok(());
+    }
+    if j.outcome.as_deref() == Some(OUTCOME_INFRA) {
+        return infra_end(t, j);
     }
     if j.batch.is_empty() {
         single_end(t, j)
     } else {
         batch_end(t, j)
     }
+}
+
+/// The end of a merge job that failed before its tests twice
+/// ([`OUTCOME_INFRA`], TER-614 R3): no rerun, no split, no failure of a
+/// card. Each card keeps its column (the merge queue), loses the job
+/// labels, and gets the comment with the failed step and the output.
+fn infra_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    for v in &card_views(j) {
+        // A card that left the merge (a conflict, a moved branch) did so
+        // before the run was lost: it ends as in a batch end.
+        match v.outcome.as_deref() {
+            Some(OUTCOME_MOVED) => back_to_review(t, v)?,
+            Some(OUTCOME_CONFLICT) => fail_card(t, v, fail_phrase(j, v))?,
+            _ => {
+                set_labels(t, &v.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
+                comment(t, &v.card, &infra_comment(v, None))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The verdict of a job for one card (TER-167): `passed`, `red`,
@@ -2537,6 +3495,8 @@ fn verdict_of(j: &Job) -> &'static str {
     }
     match j.outcome.as_deref() {
         Some("conflict") => "conflict",
+        Some(OUTCOME_MOVED) => "moved",
+        Some(OUTCOME_INFRA) => "infra",
         _ if j.state == jobs::JobState::Passed => "passed",
         Some("red") => "red",
         _ => "error",
@@ -2559,7 +3519,11 @@ pub fn verdict_comment(v: &Job) -> String {
 /// The failure block of the verdict of `v`, for a failure only. It holds
 /// the tail of the job output: untrusted text.
 pub fn verdict_failure(v: &Job) -> Option<String> {
-    matches!(verdict_of(v), "red" | "conflict" | "error").then(|| failure_block(v))
+    matches!(
+        verdict_of(v),
+        "red" | "conflict" | "moved" | "error" | "infra"
+    )
+    .then(|| failure_block(v))
 }
 
 /// The `job.verdict` event data of each card of an ended or cancelled
@@ -2605,6 +3569,7 @@ pub fn emit_verdicts(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     // Each end and each cancel (API or rule) comes here: the job's count
     // of lost runs goes (TER-196 review 2, minor 2).
     lost_runs().remove(&j.id);
+    infra_retried().remove(&j.id);
     for data in verdicts(j) {
         let card = data["card"].as_str().unwrap_or_default().to_owned();
         let summary = format!(
@@ -2628,6 +3593,9 @@ fn single_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
         return pass_card(t, j);
     }
     let outcome = j.outcome.as_deref();
+    if outcome == Some(OUTCOME_MOVED) {
+        return back_to_review(t, j);
+    }
     // A card split out of a red batch alone was red there already: a red
     // of its own is the second.
     let split_red = j.parent.is_some() && outcome == Some("red");
@@ -2646,10 +3614,14 @@ fn batch_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
         .batch
         .iter()
         .cloned()
-        .partition(|c| c.outcome.as_deref() == Some("conflict"));
+        .partition(|c| left_merge(c.outcome.as_deref()));
     for c in &conflicted {
         let v = card_view(j, c);
-        fail_card(t, &v, fail_phrase(j, &v))?;
+        if c.outcome.as_deref() == Some(OUTCOME_MOVED) {
+            back_to_review(t, &v)?;
+        } else {
+            fail_card(t, &v, fail_phrase(j, &v))?;
+        }
     }
     if j.state == jobs::JobState::Passed {
         for c in &merged {
@@ -2694,6 +3666,18 @@ pub fn card_view(j: &Job, c: &BatchCard) -> Job {
     v.card = c.card.clone();
     v.branch = c.branch.clone();
     v.by_agent = c.by_agent.clone();
+    v.commit = c.commit.clone();
+    if c.outcome.as_deref() == Some(OUTCOME_MOVED) {
+        v.outcome = Some(OUTCOME_MOVED.into());
+        v.exit_code = None;
+        v.head = None;
+        v.tail = Some(format!(
+            "{}; the queue merges only the reviewed commit. Review the new commits, then accept the card again.",
+            c.note
+                .as_deref()
+                .unwrap_or("the branch moved after its review")
+        ));
+    }
     if c.outcome.as_deref() == Some("conflict") {
         v.outcome = Some("conflict".into());
         v.exit_code = None;
@@ -2716,6 +3700,17 @@ fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     };
     let note = end_comment(j, "passed");
     move_or_comment(t, &j.card, &to, None, &note)?;
+    unassign(t, &j.card)
+}
+
+/// A card whose branch moved after its review (TER-553): its new commits
+/// were not reviewed, so it goes back to review with the reason, and is
+/// free. The move out of the merge queue ends its round, and the next
+/// accept records the head then. No rerun: the branch must be reviewed.
+fn back_to_review(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
+    let to = board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?;
+    move_or_comment(t, &j.card, &to, None, &fail_comment(j, j))?;
     unassign(t, &j.card)
 }
 
@@ -2750,6 +3745,15 @@ fn unassign(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
         Ok(_) => Ok(()),
         Err(e) if e.code.status().is_client_error() => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+/// The comment with the failed step and the output of `v`
+/// ([`output_comment`]), when it has output.
+fn output_note(t: &mut Tx<'_>, v: &Job) -> ApiResult<()> {
+    match output_comment(v) {
+        Some(text) => comment(t, &v.card, &text),
+        None => Ok(()),
     }
 }
 
@@ -2884,11 +3888,32 @@ res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 /// a base (an ancestor of `sha`, so in the bundle), it writes the changed
 /// files to [`CHANGED_FILES`] (TER-100); else that file is gone. Prints
 /// `outcome=ok head=<sha> base=<sha or empty>` or `outcome=error`.
+///
+/// The slot's tree belongs to one job of one daemon at a time (TER-448):
+/// the step holds an exclusive `flock` on `<dir>.lock`, a sibling of the
+/// dir that a wipe keeps, and refuses the job with a clear error when
+/// another job or daemon holds it. The recipe step holds the same lock
+/// ([`logged_recipe`]). Without `flock` on the target, both run as before
+/// this, unlocked, and print one line that says so.
 const RECEIVE_SCRIPT: &str = r#"dir=$1; sha=$2; kind=$3; base=${4:-}; tree=${5:-}; wipe_first=${6:-}
 case "$dir" in /*/*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
 case "$sha" in *[!0-9a-f]*|'') echo "bad commit"; res error; exit 2 ;; esac
 case "$base" in *[!0-9a-f]*) echo "bad base"; res error; exit 2 ;; esac
 case "$tree" in *[!0-9a-f]*|'') echo "bad tree"; res error; exit 2 ;; esac
+# TER-448: one job of one daemon at a time in the slot's tree. The lock
+# file sits next to the dir, so a wipe of the slot keeps it, and flock
+# lets go of it when this step and its children are gone.
+lock=$dir.lock
+if command -v flock >/dev/null 2>&1; then
+  mkdir -p -- "$(dirname -- "$dir")" || { echo "cannot make the dir of $lock"; res error; exit 2; }
+  exec 9>>"$lock" || { echo "cannot open the slot lock $lock"; res error; exit 2; }
+  flock -n 9 || {
+    echo "the slot $dir is held by another job or daemon; stop it, or give this project its own work_dir"
+    res error; exit 2
+  }
+else
+  echo "no flock on the target: slot not locked"
+fi
 b=$dir.bundle
 if [ "$kind" = merge ]; then r=refs/job/merge; else r=refs/job/head; fi
 # Git only ever sees this tree: never a repo above it.
@@ -3067,10 +4092,7 @@ mod tests {
         let log = dir.path().join("logs with 'quotes/job.log");
         let recipe = "printf 'test early_failure ... FAILED\\n'\nprintf \"thread 'early_failure' panicked at test.rs:1:2:\\nexpected value\\n\" >&2\ni=0; while [ \"$i\" -lt 2000 ]; do printf 'unrelated build noise\\n'; i=$((i + 1)); done\nexit 101";
         let script = logged_recipe(recipe.into(), log.to_str().unwrap());
-        let out = std::process::Command::new("sh")
-            .args(["-c", &script])
-            .output()
-            .unwrap();
+        let out = recipe_sh().args(["-c", &script]).output().unwrap();
         assert_eq!(out.status.code(), Some(101));
         let full = std::fs::read_to_string(&log).unwrap();
         assert!(full.len() > RECIPE_MAX / 32);
@@ -3101,10 +4123,7 @@ mod tests {
                 "printf \"custom [failure] 'marker'\\nmessage\\n\"; exit 7".into(),
                 log.to_str().unwrap(),
             );
-            let out = std::process::Command::new("sh")
-                .args(["-c", &script])
-                .output()
-                .unwrap();
+            let out = recipe_sh().args(["-c", &script]).output().unwrap();
             assert_eq!(out.status.code(), Some(7));
             let summary = std::process::Command::new("sh")
                 .args([
@@ -3131,7 +4150,7 @@ mod tests {
             "umask 022\n{}",
             logged_recipe("umask; touch output".into(), log.to_str().unwrap())
         );
-        let out = std::process::Command::new("sh")
+        let out = recipe_sh()
             .current_dir(dir.path())
             .args(["-c", &script])
             .output()
@@ -3435,6 +4454,282 @@ mod tests {
                 &self.bundle(sha),
             )
         }
+    }
+
+    /// A shell for a [`logged_recipe`] script, without the job env of an
+    /// outer job: a merge job runs these tests inside its own recipe, and
+    /// its `TERRARIUM_HEAD` (a head this test's dir does not have) and
+    /// `TERRARIUM_SLOT_LOCK` (the lock that job holds) would end the
+    /// wrapper with exit 125 before the recipe.
+    fn recipe_sh() -> std::process::Command {
+        let mut c = std::process::Command::new("sh");
+        c.env_remove("TERRARIUM_HEAD")
+            .env_remove("TERRARIUM_SLOT_LOCK");
+        c
+    }
+
+    /// The exit status and both outputs of a step, for an assertion.
+    fn shown(out: &std::process::Output) -> String {
+        format!(
+            "{:?}\nstdout:\n{}\nstderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+
+    /// True when `flock` works here: the TER-448 lock tests need it.
+    fn flock_works() -> bool {
+        std::process::Command::new("sh")
+            .args([
+                "-c",
+                "command -v flock >/dev/null 2>&1 && flock -n /dev/null true",
+            ])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// Hold the lock of `path` (as another daemon would) until the holder
+    /// is stopped. The holder runs in its own process group, so
+    /// [`stop_holder`] can end the whole tree: the lock goes with it. It
+    /// waits for the lock (up to 60 s, so a slow start or a step that ends
+    /// late under load does not make it give up), then prints `held`:
+    /// [`until_held`] reads that line.
+    fn flock_holder(path: &std::path::Path) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new("flock")
+            .arg("-w")
+            .arg("60")
+            .arg(path)
+            .arg("sh")
+            .arg("-c")
+            .arg("echo held; exec sleep 60")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    }
+
+    /// End the holder and its children, so its lock goes.
+    fn stop_holder(holder: &mut std::process::Child) {
+        let pgid = nix::unistd::Pid::from_raw(holder.id() as i32);
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(-pgid.as_raw()),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        let _ = holder.wait();
+    }
+
+    /// Wait until the holder holds `path`: it prints `held` once it has the
+    /// lock. A holder that ends first (it could not take the lock) fails
+    /// the test with its exit status and stderr.
+    fn until_held(holder: &mut std::process::Child, path: &std::path::Path) {
+        use std::io::{BufRead, Read};
+        let mut line = String::new();
+        std::io::BufReader::new(holder.stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        if line.trim() != "held" {
+            let status = holder.wait().unwrap();
+            let mut err = String::new();
+            let _ = holder.stderr.as_mut().unwrap().read_to_string(&mut err);
+            panic!(
+                "the holder never took {}: {status:?}, stdout {line:?}, stderr {err:?}",
+                path.display()
+            );
+        }
+    }
+
+    /// TER-448: the receive step holds an exclusive lock on `<slot>.lock`,
+    /// so a second daemon on the same work dir cannot replace the tree of
+    /// a slot: its step fails with a clear error and leaves the tree as it
+    /// is. The lock goes when its holder ends.
+    #[test]
+    fn a_busy_slot_lock_refuses_the_receive_step() {
+        if !flock_works() {
+            return;
+        }
+        let s = Src::new();
+        let (one, t1) = s.commit("one");
+        let (ok, text) = s.receive(&one, &t1, "");
+        assert!(ok, "{text}");
+        let slot = s.slot();
+        let lock = slot.with_file_name("slot-1.lock");
+        assert!(lock.exists(), "the receive step leaves the slot lock");
+        let mut holder = flock_holder(&lock);
+        until_held(&mut holder, &lock);
+        let (two, t2) = s.commit("two");
+        let (ok, text) = s.receive(&two, &t2, "");
+        assert!(!ok, "{text}");
+        assert!(text.contains("held by another job or daemon"), "{text}");
+        // The tree of the running job is untouched.
+        assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]), one);
+        stop_holder(&mut holder);
+        // The lock went with its holder: the next job of the slot passes.
+        let (ok, text) = s.receive(&two, &t2, "");
+        assert!(ok, "{text}");
+        assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]), two);
+    }
+
+    /// TER-448: the recipe holds the slot's lock for its whole run (its
+    /// own second flock fails), and a busy lock, or a head that is not the
+    /// job's head (another daemon replaced the tree between the steps),
+    /// ends the job before the recipe runs.
+    #[test]
+    fn the_recipe_holds_the_slot_lock_and_rechecks_the_head() {
+        if !flock_works() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let slot = tmp.path().join("slot-1");
+        std::fs::create_dir_all(&slot).unwrap();
+        git_in(&slot, &["init", "-q", "-b", "main"]);
+        std::fs::write(slot.join("OK"), "yes\n").unwrap();
+        git_in(&slot, &["add", "."]);
+        git_in(&slot, &["commit", "-q", "-m", "one"]);
+        let head = git_in(&slot, &["rev-parse", "HEAD"]);
+        let lock = tmp.path().join("slot-1.lock");
+        let log = tmp.path().join("logs/1-1.log");
+        let script = logged_recipe(
+            "flock -n \"$TERRARIUM_SLOT_LOCK\" true && exit 9; echo ran".into(),
+            log.to_str().unwrap(),
+        );
+        let run = |head: &str| {
+            recipe_sh()
+                .arg("-c")
+                .arg(&script)
+                .current_dir(&slot)
+                .env("TERRARIUM_SLOT_LOCK", &lock)
+                .env("TERRARIUM_HEAD", head)
+                .output()
+                .unwrap()
+        };
+        // The recipe runs with the lock held: its own second flock fails.
+        let out = run(&head);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "ran\n");
+        // Another daemon replaced the tree between the steps.
+        let out = run("5555555555555555555555555555555555555555");
+        assert_eq!(out.status.code(), Some(125));
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(text.contains("replaced the slot tree"), "{text}");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
+        // A busy lock: the recipe does not run either.
+        let mut holder = flock_holder(&lock);
+        until_held(&mut holder, &lock);
+        let out = run(&head);
+        assert_eq!(out.status.code(), Some(125));
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(text.contains("held by another job or daemon"), "{text}");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
+        stop_holder(&mut holder);
+    }
+
+    /// TER-448 review 1: only the wrapper holds the slot lock. A process
+    /// that the recipe leaves behind does not get the lock fd, so the slot
+    /// is free as soon as the job ends, while that process still runs.
+    #[test]
+    fn a_child_that_outlives_the_recipe_does_not_hold_the_slot() {
+        if !flock_works() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = tmp.path().join("slot-1.lock");
+        let log = tmp.path().join("logs/1-1.log");
+        let pid_file = tmp.path().join("sleeper.pid");
+        let script = logged_recipe(
+            format!(
+                "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > {}; echo ran",
+                crate::executor::sh_quote(pid_file.to_str().unwrap())
+            ),
+            log.to_str().unwrap(),
+        );
+        let out = recipe_sh()
+            .arg("-c")
+            .arg(&script)
+            .current_dir(tmp.path())
+            .env("TERRARIUM_SLOT_LOCK", &lock)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "the wrapper failed: {}", shown(&out));
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "ran\n",
+            "{}",
+            shown(&out)
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let pid = nix::unistd::Pid::from_raw(pid);
+        let alive = nix::sys::signal::kill(pid, None).is_ok();
+        // The next job of the slot can take the lock.
+        let free = std::process::Command::new("flock")
+            .arg("-n")
+            .arg(&lock)
+            .arg("true")
+            .status()
+            .unwrap()
+            .success();
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        assert!(alive, "the sleeper outlives the recipe");
+        assert!(free, "a child of the recipe holds the slot lock");
+    }
+
+    /// TER-448 review 3: without `flock` on the target the recipe runs
+    /// unlocked, and the step says so in one line.
+    #[test]
+    fn without_flock_the_recipe_says_the_slot_is_not_locked() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A PATH with the tools of the wrapper, but no flock.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for tool in ["sh", "mkdir", "dirname"] {
+            let path = String::from_utf8(
+                std::process::Command::new("sh")
+                    .args(["-c", &format!("command -v {tool}")])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(path.trim(), bin.join(tool)).unwrap();
+        }
+        let lock = tmp.path().join("slot-1.lock");
+        let log = tmp.path().join("logs/1-1.log");
+        let script = logged_recipe("echo ran".into(), log.to_str().unwrap());
+        let out = std::process::Command::new(bin.join("sh"))
+            .arg("-c")
+            .arg(&script)
+            .current_dir(tmp.path())
+            .env_remove("TERRARIUM_HEAD")
+            .env("PATH", &bin)
+            .env("TERRARIUM_SLOT_LOCK", &lock)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "the wrapper failed: {}", shown(&out));
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("no flock on the target: slot not locked"),
+            "{text}"
+        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "ran\n");
     }
 
     #[test]
@@ -3791,12 +5086,13 @@ mod tests {
             ..JobEnd::default()
         };
         for _ in 0..MAX_LOST_RERUNS {
-            let r = lost_or_red(&job, "error lost: gone".into(), end());
+            let r = lost_or_red(&job, false, "error lost: gone".into(), end());
             assert!(matches!(r, Ran::Lost { ref why, red: None } if why == "error lost: gone"));
         }
         // Past the cap: still a lost run, so it gets the kill of a lost
         // run, but it ends red (review 2, major 1).
-        let Ran::Lost { red: Some(e), .. } = lost_or_red(&job, "error lost: gone".into(), end())
+        let Ran::Lost { red: Some(e), .. } =
+            lost_or_red(&job, false, "error lost: gone".into(), end())
         else {
             panic!("the run after the cap has no red end");
         };
@@ -3815,10 +5111,81 @@ mod tests {
             "{tail}"
         );
         assert!(matches!(
-            lost_or_red(&job, "again".into(), end()),
+            lost_or_red(&job, false, "again".into(), end()),
             Ran::Lost { red: None, .. }
         ));
         lost_runs().remove(&job);
+    }
+
+    /// TER-614 R3: a merge job whose runs keep getting lost ends as an
+    /// infra failure, not red, so its batch does not split.
+    #[test]
+    fn lost_merge_runs_past_the_cap_are_infra() {
+        let job = ulid::Ulid::new().to_string();
+        let end = || JobEnd {
+            outcome: Some("error".into()),
+            tail: Some("output".into()),
+            ..JobEnd::default()
+        };
+        for _ in 0..MAX_LOST_RERUNS {
+            assert!(matches!(
+                lost_or_red(&job, true, "error lost: gone".into(), end()),
+                Ran::Lost { red: None, .. }
+            ));
+        }
+        let Ran::Lost { red: Some(e), .. } =
+            lost_or_red(&job, true, "error lost: gone".into(), end())
+        else {
+            panic!("the run after the cap has no end");
+        };
+        assert_eq!(e.outcome.as_deref(), Some(OUTCOME_INFRA));
+        assert!(e.tail.unwrap().contains("an infra failure"));
+    }
+
+    /// TER-614 R3: a failed end keeps its step as the last line of its
+    /// tail, and the card comment shows the step and the last lines.
+    #[test]
+    fn a_failed_end_keeps_its_step_and_tail() {
+        let end = with_failed_step(error_end("line 1\n[error lost: gone]"), STEP_RECEIVE);
+        let tail = end.tail.clone().unwrap();
+        assert!(tail.ends_with("[failed step: receive]"), "{tail}");
+        assert_eq!(failed_step(Some(&tail)), Some("receive"));
+        // Only a known step on the last line counts (review, minor 6).
+        assert_eq!(failed_step(Some("out\n[failed step: evil]")), None);
+        assert_eq!(
+            failed_step(Some("[failed step: recipe]\nmore output")),
+            None
+        );
+        // A failure in the daemon is no host failure (review, major 1).
+        let job = ended(JobKind::Merge, jobs::JobState::Failed, Some("error"));
+        let prepare = with_failed_step(error_end("cannot fetch next"), STEP_PREPARE);
+        assert!(!before_tests(&job, &prepare));
+        assert!(before_tests(&job, &end));
+        let pass = with_failed_step(
+            JobEnd {
+                passed: true,
+                tail: Some("ok".into()),
+                ..JobEnd::default()
+            },
+            STEP_RECIPE,
+        );
+        assert_eq!(pass.tail.as_deref(), Some("ok"));
+        let long: String = (0..50).map(|i| format!("line {i}\n")).collect();
+        let j = Job {
+            tail: with_failed_step(error_end(long), STEP_RECIPE).tail,
+            ..ended(JobKind::Merge, jobs::JobState::Failed, Some("error"))
+        };
+        let note = output_comment(&j).unwrap();
+        assert!(note.contains("failed step: recipe."), "{note}");
+        assert!(
+            note.contains("    line 49\n") && !note.contains("line 30\n"),
+            "{note}"
+        );
+        let none = Job {
+            tail: None,
+            ..ended(JobKind::Merge, jobs::JobState::Failed, Some("error"))
+        };
+        assert!(output_comment(&none).is_none());
     }
 
     #[test]
@@ -3836,25 +5203,45 @@ mod tests {
 
     #[test]
     fn batch_conflicts_are_marked_by_index() {
-        let found: HashMap<usize, String> =
-            [(1, "README\nsrc/a.rs".to_owned()), (3, "b.txt".to_owned())]
-                .into_iter()
-                .collect();
+        let found: HashMap<usize, Left> = [
+            (1, Left::conflict("README\nsrc/a.rs".to_owned())),
+            (3, Left::conflict("b.txt".to_owned())),
+            (4, Left::moved("t-5", "abc1234", "def5678")),
+        ]
+        .into_iter()
+        .collect();
         let card = |c: &str| BatchCard {
             card: c.into(),
             branch: c.to_lowercase(),
             by_agent: None,
+            commit: None,
             outcome: None,
             note: None,
         };
-        let batch = vec![card("T-1"), card("T-2"), card("T-3"), card("T-4")];
-        let marked = mark_conflicts(&batch, &found);
+        let batch = vec![
+            card("T-1"),
+            card("T-2"),
+            card("T-3"),
+            card("T-4"),
+            card("T-5"),
+        ];
+        let marked = mark_left(&batch, &found);
         let outcomes: Vec<Option<&str>> = marked.iter().map(|c| c.outcome.as_deref()).collect();
-        assert_eq!(outcomes, [None, Some("conflict"), None, Some("conflict")]);
+        assert_eq!(
+            outcomes,
+            [
+                None,
+                Some("conflict"),
+                None,
+                Some("conflict"),
+                Some("moved")
+            ]
+        );
         assert_eq!(marked[1].note.as_deref(), Some("README\nsrc/a.rs"));
+        assert!(marked[4].note.as_deref().unwrap().contains("abc1234"));
         assert_eq!(
             batch_summary(&marked),
-            "batch: merged T-1 T-3; left out on a conflict T-2 T-4"
+            "batch: merged T-1 T-3; left out on a conflict T-2 T-4; left out, moved after review T-5"
         );
     }
 
@@ -4039,6 +5426,7 @@ mod tests {
             split_path: String::new(),
             planned_secs: None,
             slot: None,
+            onto: None,
         }
     }
 
@@ -4047,6 +5435,7 @@ mod tests {
             card: card.into(),
             branch: card.to_lowercase(),
             by_agent: Some(by.into()),
+            commit: None,
             outcome: outcome.map(str::to_owned),
             note: outcome.map(|_| "src/a.rs".to_owned()),
         }
@@ -4075,6 +5464,7 @@ mod tests {
             (Failed, Some("red"), "red", "failed"),
             (Failed, Some("conflict"), "conflict", "failed"),
             (Failed, Some("error"), "error", "failed"),
+            (Failed, Some(OUTCOME_INFRA), "infra", "failed"),
             (Failed, None, "error", "failed"),
             (Cancelled, None, "cancelled", "was cancelled"),
         ];

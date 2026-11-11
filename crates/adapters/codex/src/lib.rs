@@ -360,6 +360,7 @@ mod tests {
                 context_window: Some(131_072),
                 ..SelfHosted::default()
             }),
+            cloud: None,
         };
         let spec = a.launch_for(&agent, None, Some(&s));
         let i = spec.args.iter().position(|x| x == "-m").expect("-m");

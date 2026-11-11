@@ -8,6 +8,9 @@ import type { AgentEvent, Question, QuestionAnswer, QuestionStatus } from "../..
 /** The longest answer or reply, as in the daemon. */
 const MAX_TEXT = 8000;
 
+/** The longest operator message of a move into a thread (`to-thread`), as the answer in the daemon. */
+export const THREAD_MOVE_MESSAGE_MAX = MAX_TEXT;
+
 /** Open first: critical first, then urgent, then the oldest first. Then the others, the newest first. As the daemon. */
 export function sortQuestions(list: Question[]): Question[] {
   const rank = (q: Question) => (q.status === "open" ? 2 - (q.priority === "critical" ? 2 : q.priority === "urgent" ? 1 : 0) : 3);
@@ -28,7 +31,7 @@ export function putQuestion(list: Question[], q: Question): Question[] {
 
 /** The body of an answer from the form: a choice, a text, or both; else the reason the form cannot send. */
 export function answerBody(q: Pick<Question, "options" | "status">, text: string, option: number | null, skip = false): { body: QuestionAnswer } | { error: string } {
-  if (q.status !== "open") return { error: `The question is ${q.status}.` };
+  if (q.status !== "open" && q.status !== "in_thread") return { error: `The question is ${q.status}.` };
   if (skip && !text.trim()) return { error: "Write a reason to skip the question." };
   const t = skip ? `Skipped question: ${text.trim()}` : text.trim();
   if (skip) option = null;
@@ -43,14 +46,14 @@ export function answerBody(q: Pick<Question, "options" | "status">, text: string
 
 /** The optional reply of an acknowledge: the trimmed text, or undefined; else the reason the form cannot send. */
 export function ackText(status: QuestionStatus, text: string): { text?: string } | { error: string } {
-  if (status !== "open") return { error: `The notice is ${status}.` };
+  if (status !== "open" && status !== "in_thread") return { error: `The notice is ${status}.` };
   const t = text.trim();
   if (t.length > MAX_TEXT) return { error: `The reply is longer than ${MAX_TEXT} characters.` };
   return t ? { text: t } : {};
 }
 
 /** The chip class of a status. */
-export const statusChip = (s: QuestionStatus): string => ({ open: "info", answered: "ok", acknowledged: "ok", retracted: "" })[s] ?? "";
+export const statusChip = (s: QuestionStatus): string => ({ open: "info", in_thread: "info", answered: "ok", acknowledged: "ok", retracted: "" })[s] ?? "";
 
 /** The label of the chosen option, if any. */
 export const chosenLabel = (q: Pick<Question, "options" | "answer_option">): string | null =>
@@ -68,6 +71,12 @@ export function shortQuestion(text: string, max = 80): string {
 
 /** The board with the drawer of `card` open (`?card=`). */
 export const cardHref = (project: string, card: string): string => `/p/${encodeURIComponent(project)}/board?card=${encodeURIComponent(card)}`;
+
+/** The mail thread of a question ("Show mail", GitHub #32): the Mail tab of the logs, filtered to the thread, with the thread open. */
+export const mailThreadHref = (thread: string): string => `/logs/mail?thread=${encodeURIComponent(thread)}&open=${encodeURIComponent(thread)}`;
+
+/** "Open in thread" (GitHub #32): open the linked Inbox thread, or create one from an open question or notice (to-thread). A bundle does not move. */
+export const canOpenInThread = (q: Pick<Question, "kind" | "status" | "thread">): boolean => !!q.thread || (q.kind !== "bundle" && q.status === "open");
 
 /** The Inbox item ID of a question, bundle, or notice: `<kind>:<id>` (docs/api.md §6.9). */
 export const questionItemId = (q: Pick<Question, "id" | "kind">): string => `${q.kind}:${q.id}`;

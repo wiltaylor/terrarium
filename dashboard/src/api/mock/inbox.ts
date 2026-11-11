@@ -221,10 +221,23 @@ export function createInboxMock(c: InboxMockContext) {
 
   const counts = (project?: string): InboxCounts => {
     const all = items().filter((i) => i.open && (!project || i.project === project));
-    // A watch waits for an agent: it is not in `open`.
-    const open = all.filter((i) => i.kind !== "watch");
+    // A watch waits for an agent, and a thread counts on the Threads screen (TER-466): neither is in `open`.
+    const open = all.filter((i) => i.kind !== "watch" && i.kind !== "thread");
+    const threads = all.filter((i) => i.kind === "thread");
     const n = (k: InboxKind) => all.filter((i) => i.kind === k).length;
-    return { open: open.length, urgent: open.filter((i) => i.urgent).length, critical: open.filter((i) => i.critical).length, question: n("question"), notice: n("notice"), mail: n("mail"), system: n("system"), watch: n("watch"), thread: n("thread") };
+    return {
+      open: open.length,
+      urgent: open.filter((i) => i.urgent).length,
+      critical: open.filter((i) => i.critical).length,
+      question: n("question"),
+      notice: n("notice"),
+      mail: n("mail"),
+      system: n("system"),
+      watch: n("watch"),
+      thread: threads.length,
+      thread_urgent: threads.filter((i) => i.urgent).length,
+      thread_critical: threads.filter((i) => i.critical).length,
+    };
   };
 
   /** Is the thread item open now? For the `inbox` event of a change. */
@@ -248,7 +261,8 @@ export function createInboxMock(c: InboxMockContext) {
         if (!["open", "done", "all"].includes(status)) fail(422, "invalid", `bad status \`${status}\`: use open, done, or all`);
         if (q.kind && !["question", "notice", "mail", "system", "watch", "thread"].includes(q.kind)) fail(422, "invalid", `bad kind \`${q.kind}\`: use question, notice, mail, system, watch, or thread`);
         return items()
-          .filter((i) => (status === "all" || (status === "open") === i.open) && (!q.kind || i.kind === q.kind) && (!q.project || i.project === q.project))
+          // Only `kind=thread` lists the threads (TER-466).
+          .filter((i) => (status === "all" || (status === "open") === i.open) && (q.kind ? i.kind === q.kind : i.kind !== "thread") && (!q.project || i.project === q.project))
           .sort(order);
       }),
     counts: (project) => reply(() => counts(project)),

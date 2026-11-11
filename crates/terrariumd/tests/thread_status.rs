@@ -158,16 +158,13 @@ async fn the_agent_sets_waiting_agent_or_tracking_with_its_message() {
 }
 
 #[tokio::test]
-async fn the_status_verb_is_for_the_attached_agent_and_a_question_wins() {
+async fn the_status_verb_is_for_the_attached_agent_or_the_operator_and_a_question_wins() {
     let lab = lab().await;
     lab.post(&lab.arch, json!({"text": "Will do."})).await;
     assert_eq!(lab.thread().await["status"], "waiting_operator");
 
-    // Another agent and the operator do not set it.
+    // Another agent does not set it.
     lab.status(&lab.lead, "waiting_agent")
-        .await
-        .err(403, "forbidden");
-    lab.status("operator", "waiting_agent")
         .await
         .err(403, "forbidden");
     lab.status(&lab.arch, "waiting_operator")
@@ -200,6 +197,40 @@ async fn the_status_verb_is_for_the_attached_agent_and_a_question_wins() {
         .await
         .ok();
     let r = lab.status(&lab.arch, "tracking").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["status"], "tracking");
+    assert!(r.body["tracking_at"].is_string(), "{}", r.body);
+}
+
+#[tokio::test]
+async fn the_operator_sets_the_status_and_a_question_wins() {
+    let lab = lab().await;
+    lab.post(&lab.arch, json!({"text": "Will do."})).await;
+    assert_eq!(lab.thread().await["status"], "waiting_operator");
+
+    lab.status("operator", "waiting_operator")
+        .await
+        .err(422, "invalid");
+    let r = lab.status("operator", "waiting_agent").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["status"], "waiting_agent");
+    assert_eq!(lab.counted().await, 0);
+
+    // An open question refuses the operator too.
+    let q = lab.ask().await;
+    for s in ["waiting_agent", "tracking"] {
+        lab.status("operator", s).await.err(409, "conflict");
+    }
+    assert_eq!(lab.thread().await["status"], "waiting_operator");
+
+    lab.td
+        .post(
+            &format!("/api/questions/{q}/answer"),
+            json!({"option": "yes"}),
+        )
+        .await
+        .ok();
+    let r = lab.status("operator", "tracking").await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.body["status"], "tracking");
     assert!(r.body["tracking_at"].is_string(), "{}", r.body);

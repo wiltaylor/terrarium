@@ -675,6 +675,13 @@ pub enum RepoCmd {
     },
     /// Attach a repo to the project (project_admin)
     Add(RepoAddArgs),
+    /// Remove a repo registration from the project (project_admin). The
+    /// clones in workspaces and on targets stay. Refused while a job, the
+    /// delivery config, a pipeline, or a bound agent's checkout uses it
+    Rm {
+        /// The repo name or ID
+        repo: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1152,7 +1159,8 @@ pub enum MailCmd {
         #[arg(long)]
         from: Option<String>,
     },
-    /// Reply to every participant of the message's thread
+    /// Reply to every participant of the message's thread (the operator
+    /// only on a message from or to the operator)
     Reply {
         id: String,
         /// The body, or `-` for stdin (or `--body`)
@@ -1382,7 +1390,10 @@ pub enum CardCmd {
     /// cards, one job merges them in the given order, validates once, and
     /// pushes `next` when green. A card that conflicts goes back to
     /// `ready`; on red the batch splits in halves until the failing card is
-    /// found, and the others merge
+    /// found, and the others merge. With `--onto release/X.Y.Z` (one
+    /// card), the job merges the card's tested commit onto that release
+    /// branch of a frozen version instead, and pushes it there; main then
+    /// gets the release merge as usual
     Merge {
         /// The cards, in merge order
         #[arg(required = true, value_name = "ID")]
@@ -1398,6 +1409,11 @@ pub enum CardCmd {
         /// ETA of each card is the job start plus this. Without it, no ETA
         #[arg(long, value_name = "DURATION")]
         eta: Option<String>,
+        /// The branch to merge onto: `next` (the default), or the release
+        /// branch `release/X.Y.Z` of a frozen version, for a release-blocker
+        /// fix (one card only)
+        #[arg(long, value_name = "BRANCH")]
+        onto: Option<String>,
     },
     /// Move a card to a column. A move to another column clears the ETA
     Move {
@@ -2843,7 +2859,7 @@ pub enum QuestionCmd {
     Ls {
         #[arg(long)]
         all: bool,
-        /// open, answered, acknowledged, or retracted
+        /// open, in_thread, answered, acknowledged, or retracted
         #[arg(long)]
         status: Option<String>,
         /// question, notice, or bundle (default: all)
@@ -2893,6 +2909,15 @@ pub enum QuestionCmd {
         #[arg(long, short = 'm')]
         reason: Option<String>,
     },
+    /// Move an open question or notice into a new Inbox thread with its
+    /// agent (the operator): the thread starts with the question, and the
+    /// question is `in_thread` until it is answered or retracted there
+    ToThread {
+        id: String,
+        /// A message to the agent after the question (`-` reads stdin)
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+    },
 }
 
 /// `terrarium admin question ...`: the operator answers.
@@ -2907,7 +2932,7 @@ pub enum AdminQuestionCmd {
         /// Only the open questions (the default)
         #[arg(long, conflicts_with_all = ["status", "all"])]
         open: bool,
-        /// open, answered, acknowledged, or retracted
+        /// open, in_thread, answered, acknowledged, or retracted
         #[arg(long)]
         status: Option<String>,
         /// Every status
@@ -2950,6 +2975,15 @@ pub enum AdminQuestionCmd {
         id: String,
         #[arg(long, short = 'm')]
         reason: Option<String>,
+    },
+    /// Move an open question or notice into a new Inbox thread with its
+    /// agent (the operator): the thread starts with the question, and the
+    /// question is `in_thread` until it is answered or retracted there
+    ToThread {
+        id: String,
+        /// A message to the agent after the question (`-` reads stdin)
+        #[arg(long, short = 'm')]
+        message: Option<String>,
     },
 }
 
@@ -3094,8 +3128,8 @@ pub enum TargetsCmd {
     /// Show one target: its definition, state, and the key of its
     /// credential with the fingerprint
     Show { name: String },
-    /// Log in to an ssh target once with its key, and report the result:
-    /// ok, auth_refused, host_key_unknown, host_key_mismatch,
+    /// Log in to an ssh target, or the VM of an exedev target, once with
+    /// its key, and report the result: ok, auth_refused, host_key_unknown, host_key_mismatch,
     /// unreachable, or error. Exit 1 when it is not ok
     Test { name: String },
     #[command(flatten)]
@@ -3784,10 +3818,16 @@ pub enum GroupCmd {
         #[arg(long)]
         eta: Option<String>,
     },
-    /// Acknowledge publication after release CI succeeds
-    Built { key: String, version: String },
+    /// Acknowledge publication after release CI succeeds: one or more
+    /// group keys, then the version (`group built KEY... VERSION`)
+    Built {
+        #[arg(value_name = "KEY... VERSION", num_args = 2.., required = true)]
+        keys_and_version: Vec<String>,
+    },
     /// Remove a snapshot member, for example a card returned for a fix
     Remove { key: String, card: String },
+    /// Add a late accepted card to an open version group
+    Add { key: String, card: String },
 }
 
 /// `terrarium rule` (docs/api.md §19.12). The project is `--project`, else
@@ -3946,11 +3986,36 @@ pub enum ScheduleCmd {
 #[derive(Debug, Args)]
 pub struct ScheduleArgs {
     /// A five-field cron expression, for example "*/15 * * * *", or @hourly, @daily
-    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json", "manual"])]
+    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json", "manual", "day_start"])]
     pub cron: Option<String>,
+    /// Start of day: one run per calendar day (in --tz), at the first start
+    /// of the day: the daemon start, a resume from sleep, the reconnect of
+    /// the host agent of the --exec target, or the change of day while the
+    /// daemon is up
+    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json", "manual"])]
+    pub day_start: bool,
+    /// Start of day: a start before this local time (HH:MM) runs at it
+    #[arg(long, value_name = "HH:MM", requires = "day_start")]
+    pub not_before: Option<String>,
+    /// Start of day: no run that day when the run would be after this
+    /// local time (HH:MM)
+    #[arg(long, value_name = "HH:MM", requires = "day_start")]
+    pub not_after: Option<String>,
+    /// Start of day: wait this long after the start (5m, 1h; at most 12h)
+    #[arg(long, value_name = "DUR", requires = "day_start")]
+    pub delay: Option<String>,
+    /// Start of day: only on these days (mon,tue,...,sun; repeat or
+    /// separate with commas). Default: every day
+    #[arg(
+        long,
+        value_name = "DAY",
+        value_delimiter = ',',
+        requires = "day_start"
+    )]
+    pub weekdays: Vec<String>,
     /// A project action: no time and no event; it runs only on demand
     /// (`schedule run`, or its button on the project dashboard and Home)
-    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json"])]
+    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json", "day_start"])]
     pub manual: bool,
     /// An interval: 90s, 30m, 2h, 1d, or 1h30m (60 s or more)
     #[arg(long, conflicts_with_all = ["at", "on", "spec_json", "manual"])]
@@ -4002,8 +4067,9 @@ pub struct ScheduleArgs {
     /// The action as JSON (docs/api.md §19), in place of the action flags
     #[arg(long, value_name = "JSON", conflicts_with_all = ["mail", "turn", "exec", "agent", "probe", "card", "webhook", "webhook_url_secret"])]
     pub action_json: Option<String>,
-    /// The zone of a cron expression: UTC (the default) or an IANA zone
-    #[arg(long, requires = "cron")]
+    /// The zone of a cron expression or of a start-of-day schedule: UTC
+    /// (the default) or an IANA zone
+    #[arg(long)]
     pub tz: Option<String>,
     /// Action: send mail to an agent, `project:<name>`, or `operator`
     #[arg(long, value_name = "TO", conflicts_with_all = ["turn", "exec", "agent", "probe", "card", "webhook", "webhook_url_secret"])]
@@ -4365,6 +4431,14 @@ pub struct AdminTargetEditArgs {
     /// `true` or `false`: take a snapshot before the first task
     #[arg(long, value_name = "BOOL")]
     pub snapshot_before_task: Option<bool>,
+    /// The absolute parent of card-agent build roots
+    /// (`<work_root>/<project>/<agent>`); the default is `/src/terrarium`,
+    /// else `~/.terrarium-work` when the agent user cannot create it
+    #[arg(long, value_name = "PATH", conflicts_with = "clear_work_root")]
+    pub work_root: Option<String>,
+    /// Remove `work_root`: use the default again
+    #[arg(long)]
+    pub clear_work_root: bool,
     /// Set these limits; the other limits stay
     #[command(flatten)]
     pub limits: LimitArgs,
@@ -4647,8 +4721,15 @@ pub enum UpdateCmd {
         #[arg(long, default_value_t = 600)]
         wait: u64,
     },
-    /// For the updater: end a drain
-    #[command(hide = true)]
+    /// Before an update: drain the job slots only. No job of the job queue
+    /// starts, the running jobs finish, and the agents go on. Waits for the
+    /// running jobs; `resume` ends it, and so does a restart
+    DrainJobs {
+        /// The most seconds to wait for the running jobs
+        #[arg(long, default_value_t = 0)]
+        wait: u64,
+    },
+    /// End a drain, or a drain of the job slots
     Resume,
 }
 

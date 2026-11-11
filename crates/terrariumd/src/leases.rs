@@ -17,7 +17,7 @@
 //!   types no pointer.
 //! - The timer: one task for each lease with an expiry, at that time, and a
 //!   sweep every [`SWEEP`] that also catches leases that ended while the
-//!   daemon was down.
+//!   daemon was down. Tests set another sweep interval ([`Sweep`]).
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -37,6 +37,27 @@ use crate::store::{agents, targets};
 
 /// How often the timer looks for leases past their expiry.
 pub const SWEEP: Duration = Duration::from_secs(10);
+
+/// The interval of the lease sweep (`AppState::lease_sweep`): [`SWEEP`]
+/// unless a test sets another.
+#[derive(Debug, Default)]
+pub struct Sweep(std::sync::Mutex<Option<Duration>>);
+
+impl Sweep {
+    /// The interval of the sweep.
+    pub fn every(&self) -> Duration {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or(SWEEP)
+    }
+
+    /// Tests: another interval. It applies within a second. A long one
+    /// leaves the expiry to the timer of each lease.
+    pub fn set_every(&self, d: Duration) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(d);
+    }
+}
 
 /// The end code of an exec session whose lease ended.
 pub const LEASE_REVOKED: &str = "lease_revoked";
@@ -415,18 +436,26 @@ pub fn schedule(state: &Shared, at: &str) {
     });
 }
 
-/// The sweep: [`expire`] every [`SWEEP`], from the daemon start.
+/// The sweep: [`expire`] from the daemon start, then each
+/// `state.lease_sweep` interval ([`SWEEP`] unless a test sets another).
 pub fn spawn_timer(state: &Shared) -> JoinHandle<()> {
     let weak: Weak<AppState> = Arc::downgrade(state);
     tokio::spawn(async move {
+        // It wakes at least each second, so a new interval applies soon.
+        let mut last: Option<std::time::Instant> = None;
         loop {
-            {
+            let every = {
                 let Some(state) = weak.upgrade() else { return };
-                if let Err(e) = expire(&state).await {
-                    warn!("lease expiry failed: {e}");
+                let every = state.lease_sweep.every();
+                if last.is_none_or(|l| l.elapsed() >= every) {
+                    if let Err(e) = expire(&state).await {
+                        warn!("lease expiry failed: {e}");
+                    }
+                    last = Some(std::time::Instant::now());
                 }
-            }
-            tokio::time::sleep(SWEEP).await;
+                every
+            };
+            tokio::time::sleep(every.min(Duration::from_secs(1))).await;
         }
     })
 }

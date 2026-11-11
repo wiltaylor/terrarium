@@ -41,6 +41,7 @@ use crate::db::Tx;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
 use crate::rules_engine::{Done, RunCtx, lookup};
+use crate::store::accepted_heads;
 use crate::store::board::{self, Card, CardPatch, NewCard, NewLink};
 use crate::store::jobs::{self, BatchCard, Job, JobKind, JobState, NewJob};
 use crate::store::mail::{self, Address};
@@ -72,6 +73,9 @@ pub enum Effect {
     Kick,
     /// Kill the run of a cancelled job that was running.
     Kill(String),
+    /// Record the reviewed commit of the cards that came into the merge
+    /// queue (TER-553).
+    RecordAccepted,
     /// Run the queued unparks of an owner.
     RetryOwner(String),
     /// Wake an unparked agent.
@@ -90,6 +94,7 @@ pub async fn apply(state: &Shared, effects: Vec<Effect>) {
         match e {
             Effect::Kick => crate::jobs::kick(state),
             Effect::Kill(id) => crate::jobs::kill(&id),
+            Effect::RecordAccepted => crate::jobs::record_accepted_soon(state),
             Effect::RetryOwner(owner) => crate::bound::retry_owner(state, &owner).await,
             Effect::Wake(id) => {
                 if let Ok(a) = id.parse::<AgentId>() {
@@ -210,7 +215,8 @@ fn the_job<'a>(ctx: &'a RunCtx, verb: &str) -> ApiResult<&'a Job> {
     })
 }
 
-/// The GitHub author gate (TER-85): no verb acts on a held card. The
+/// The GitHub author gate (TER-85): no verb but the move mails acts on a
+/// held card (TER-536). The
 /// run's card, and for a `job.*` verb each card of the event's job.
 fn refuse_held(conn: &Connection, ctx: &RunCtx, verb: &str) -> ApiResult<()> {
     let mut cards: Vec<String> = ctx.card.iter().map(|c| c.id.clone()).collect();
@@ -249,7 +255,11 @@ pub fn perform(
     action: &Action,
 ) -> ApiResult<(Done, Vec<Effect>)> {
     let verb = action.verb.as_str();
-    refuse_held(t, ctx, verb)?;
+    // The move mails only notify: a held card moved to blocked or done
+    // gets its mail in rules flow as in code flow (TER-536).
+    if !matches!(verb, "card.blocked_mail" | "card.done_mail") {
+        refuse_held(t, ctx, verb)?;
+    }
     let a = Args { action, ctx };
     let mut effects = Vec::new();
     let done = match verb {
@@ -278,7 +288,7 @@ pub fn perform(
         "group.open" | "group.add" | "group.remove" | "group.status" | "group.close" => {
             group_verb(t, actor, ctx, &a)?
         }
-        "card.move" => card_move(t, actor, ctx, &a)?,
+        "card.move" => card_move(t, actor, ctx, &a, &mut effects)?,
         "card.label" => card_label(t, actor, ctx, &a)?,
         "card.comment" => {
             let card = the_card(ctx, verb)?;
@@ -289,6 +299,7 @@ pub fn perform(
         "card.assign" => card_assign(t, actor, ctx, &a)?,
         "card.prepend" => card_prepend(t, actor, ctx, &a)?,
         "mail" => send_mail(t, actor, ctx, &a)?,
+        "card.blocked_mail" | "card.done_mail" => move_mail(t, actor, ctx, verb)?,
         "job.queue" => job_queue(t, actor, ctx, &a, &mut effects)?,
         "job.cancel" => job_cancel(t, actor, ctx, &mut effects)?,
         "job.rerun" => job_rerun(t, actor, ctx, &a, &mut effects)?,
@@ -413,7 +424,13 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
     })
 }
 
-fn card_move(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
+fn card_move(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    a: &Args<'_>,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
     let card = the_card(ctx, "card.move")?;
     let to = column_name(ctx, a.raw("to").unwrap_or_default())?;
     let from = a.columns("from")?;
@@ -431,7 +448,10 @@ fn card_move(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiRe
     }
     let position = (a.raw("position") == Some("top")).then_some(0);
     let comment = a.text("comment");
-    board::move_card(t, actor, &card.id, &to, position, comment.as_deref())?;
+    let moved = board::move_card(t, actor, &card.id, &to, position, comment.as_deref())?;
+    if crate::store::accepted_heads::is_queue(&moved.column, moved.column_role.as_deref()) {
+        effects.push(Effect::RecordAccepted);
+    }
     Ok(changed(
         json!({"card": card.id, "from": card.column, "to": to}),
     ))
@@ -572,6 +592,64 @@ fn send_mail(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiRe
     Ok(changed(json!({"messages": sent, "subject": subject})))
 }
 
+/// The mails of a card move that the coded flow sends in `apply_move`
+/// (TER-162 D10): `card.blocked_mail` mails the blocked notice from
+/// `system` to the operator and the card's creator, not to the mover;
+/// `card.done_mail` mails the done notice to the participants of each
+/// linked thread. The texts are the coded flow's. Only on the `moved`
+/// event of a move to a blocked column, or to `done`: else a no-op.
+fn move_mail(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, verb: &str) -> ApiResult<Done> {
+    let card = the_card(ctx, verb)?;
+    let event = ctx
+        .event
+        .as_ref()
+        .filter(|e| e.kind == "card")
+        .ok_or_else(|| ApiError::invalid(format!("{verb} needs a `card` event")))?;
+    // With `board_flow = code` the daemon's move sends the mail: the verb
+    // would send it twice (TER-536).
+    if crate::jobs::code_flow(t, &card.project)? {
+        return Ok(noop(
+            json!({"card": card.id, "reason": "board_flow = code sends the move mail"}),
+        ));
+    }
+    let data = &event.data;
+    let blocked = verb == "card.blocked_mail";
+    let fits = data["change"] == "moved"
+        && if blocked {
+            data["to_role"] == board::BLOCKED
+        } else {
+            data["to"] == board::DONE
+        };
+    if !fits {
+        return Ok(noop(
+            json!({"card": card.id, "reason": "not a move to the column of the mail"}),
+        ));
+    }
+    policy::admin_project(
+        actor,
+        &card.project,
+        &format!("sending the move mail of {}", card.id),
+    )?;
+    let comment = data["comment"].as_str();
+    if blocked {
+        // The mover: `author` of the event; an older event has only its
+        // actor (`agent:<id>`, `operator`, `system`, ...).
+        let author = match data["author"].as_str() {
+            Some(a) => a.to_owned(),
+            None => match event.actor.as_deref() {
+                Some("operator") => "operator".to_owned(),
+                Some(a) => a.strip_prefix("agent:").unwrap_or("system").to_owned(),
+                None => "system".to_owned(),
+            },
+        };
+        let column = data["to"].as_str().unwrap_or(&card.column);
+        board::mail_blocked(t, &card.id, column, &author, comment.unwrap_or_default())?;
+    } else {
+        board::mail_done(t, &card.id, comment)?;
+    }
+    Ok(changed(json!({"card": card.id})))
+}
+
 // ------------------------------------------------------------- job verbs
 
 /// The worker of a card's job: its `by:<agent>` label, else its agent
@@ -629,6 +707,19 @@ fn job_queue(
         )));
     }
     let branch = api_jobs::branch_of(card, None)?;
+    // A merge takes the reviewed commit that the accept recorded, never
+    // the head at run time (TER-553). A validate tests the head.
+    let commit = if kind == JobKind::Merge {
+        match accepted_heads::commit_for(t, &card.id, &branch)? {
+            Some(c) => Some(c),
+            None => {
+                let why = accepted_heads::missing_reason(t, &card.id, &branch)?;
+                return Ok(noop(json!({"card": card.id, "reason": why})));
+            }
+        }
+    } else {
+        None
+    };
     if let Some(open) = open_job(t, &card.id)? {
         return Ok(noop(json!({
             "card": card.id, "job": open.id,
@@ -644,7 +735,7 @@ fn job_queue(
             kind,
             repo,
             branch,
-            commit: None,
+            commit,
             by_agent: worker_of(card),
             batch: Vec::new(),
             planned_secs: None,
@@ -675,7 +766,16 @@ pub struct BatchPick {
     /// The repo of the batch: the repo of the first card that waits. A
     /// card of another repo is left out and waits for a later batch.
     pub repo: Option<String>,
+    /// The batch is one card with the [`RELEASE_BLOCKER`] label (TER-607):
+    /// it goes at once, alone, before the other cards.
+    pub release_blocker: bool,
 }
+
+/// The label of a release-blocker fix (TER-607): the merge queue takes the
+/// first card with it alone and first, as a batch of one that goes at
+/// once. After it is on `next`, `card merge --onto release/X.Y.Z` merges
+/// the same commit into the frozen version.
+pub const RELEASE_BLOCKER: &str = "release-blocker";
 
 /// The cards of column `from` of `project` that a batch takes, in board
 /// order, at most `limit` (`None`: all). A card that is held, has an
@@ -684,6 +784,10 @@ pub struct BatchPick {
 /// waiting, so it does not block the queue; it goes in a later batch
 /// (TER-227). There is no limit of the daemon's own: the rule sets it
 /// (TER-162 D9).
+///
+/// A card that could go and has the [`RELEASE_BLOCKER`] label is the
+/// whole batch (TER-607): the first such card in board order, of any
+/// repo, alone, and the others wait for the next batch.
 pub fn pick_batch(
     conn: &Connection,
     project: &str,
@@ -692,6 +796,8 @@ pub fn pick_batch(
 ) -> ApiResult<BatchPick> {
     let board = board::get_board(conn, project)?;
     let mut out = BatchPick::default();
+    // The cards that could go, with their repo, in board order.
+    let mut ready: Vec<(&Card, String)> = Vec::new();
     for c in board
         .cards
         .iter()
@@ -706,6 +812,23 @@ pub fn pick_batch(
                 .push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
             continue;
         }
+        // A card goes in a batch only with its reviewed commit, the head
+        // that the review accept recorded (TER-553); until then it waits,
+        // and does not count as waiting.
+        let branch = match api_jobs::branch_of(c, None) {
+            Ok(b) => b,
+            Err(e) if e.code == Code::Invalid => {
+                out.left_out
+                    .push(json!({"card": c.id, "reason": e.message}));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        if accepted_heads::commit_for(conn, &c.id, &branch)?.is_none() {
+            let why = accepted_heads::missing_reason(conn, &c.id, &branch)?;
+            out.left_out.push(json!({"card": c.id, "reason": why}));
+            continue;
+        }
         // A card without a usable repo (none in a project of several
         // repos, or one that is not the project's) is left out, so it
         // does not stop the batch or the timers (TER-227 review).
@@ -718,6 +841,27 @@ pub fn pick_batch(
             }
             Err(e) => return Err(e),
         };
+        ready.push((c, r));
+    }
+    if let Some(i) = ready
+        .iter()
+        .position(|(c, _)| c.labels.iter().any(|l| l == RELEASE_BLOCKER))
+    {
+        let (c, r) = ready.remove(i);
+        for (o, _) in ready {
+            out.left_out.push(json!({
+                "card": o.id,
+                "reason": format!("the release-blocker card {} goes first, alone", c.id),
+            }));
+        }
+        out.waiting = 1;
+        out.first_since = since_of(conn, c)?;
+        out.repo = Some(r);
+        out.cards.push(c.clone());
+        out.release_blocker = true;
+        return Ok(out);
+    }
+    for (c, r) in ready {
         match &out.repo {
             Some(have) if *have != r => {
                 out.left_out.push(json!({
@@ -730,9 +874,7 @@ pub fn pick_batch(
             None => out.repo = Some(r),
         }
         out.waiting += 1;
-        let since = board::last_moved_at(conn, &c.id)?.unwrap_or_else(|| c.created_at.clone());
-        if let Ok(t) = DateTime::parse_from_rfc3339(&since) {
-            let t = t.with_timezone(&Utc);
+        if let Some(t) = since_of(conn, c)? {
             out.first_since = Some(out.first_since.map_or(t, |f| f.min(t)));
         }
         if limit.is_none_or(|l| out.cards.len() < l) {
@@ -742,15 +884,27 @@ pub fn pick_batch(
     Ok(out)
 }
 
+/// When `c` came into its column: its newest move, else its creation.
+fn since_of(conn: &Connection, c: &Card) -> ApiResult<Option<DateTime<Utc>>> {
+    let since = board::last_moved_at(conn, &c.id)?.unwrap_or_else(|| c.created_at.clone());
+    Ok(DateTime::parse_from_rfc3339(&since)
+        .ok()
+        .map(|t| t.with_timezone(&Utc)))
+}
+
 /// When a batch with `min_cards` and `max_wait_minutes` goes: `Ok` now,
 /// `Err((reason, due))` when it waits, with the time it goes by the
-/// wait (`None`: only a card more makes it go).
+/// wait (`None`: only a card more makes it go). A release-blocker batch
+/// goes now (TER-607).
 pub fn batch_goes(
     pick: &BatchPick,
     min_cards: Option<i64>,
     max_wait_minutes: Option<i64>,
     now: DateTime<Utc>,
 ) -> Result<(), (String, Option<DateTime<Utc>>)> {
+    if pick.release_blocker {
+        return Ok(());
+    }
     let Some(min) = min_cards.and_then(|n| usize::try_from(n).ok()) else {
         return Ok(());
     };
@@ -779,7 +933,9 @@ pub fn batch_goes(
 /// `limit`. A card that is held or has an open job is left out. With
 /// `min_cards` the job waits for that many cards, or (with
 /// `max_wait_minutes`) until the first card waited that long; until then
-/// the verb is a no-op that says when the batch goes.
+/// the verb is a no-op that says when the batch goes. While a merge job
+/// of the project is queued or running (the merge lane is busy), the verb
+/// is a no-op too (TER-644).
 fn queue_batch(
     t: &mut Tx<'_>,
     actor: &Actor,
@@ -801,6 +957,16 @@ fn queue_batch(
             "reason": format!("no card to merge in {from}"),
         })));
     }
+    // One merge at a time per project: while a merge job holds the lane,
+    // the cards wait and the batch grows. The timer checks again when
+    // the lane is free (TER-644).
+    if let Some(job) = jobs::open_merge(t, &project)? {
+        return Ok(noop(json!({
+            "column": from, "waiting": pick.waiting, "left_out": left_out,
+            "lane": job,
+            "reason": format!("the merge lane is busy: job {job}; the batch waits for its end"),
+        })));
+    }
     if let Err((reason, due)) = batch_goes(
         &pick,
         a.count("min_cards"),
@@ -814,10 +980,13 @@ fn queue_batch(
     }
     let mut batch = Vec::new();
     for c in &pick.cards {
+        let branch = api_jobs::branch_of(c, None)?;
+        let commit = accepted_heads::commit_for(t, &c.id, &branch)?;
         batch.push(BatchCard {
             card: c.id.clone(),
-            branch: api_jobs::branch_of(c, None)?,
+            branch,
             by_agent: crate::jobs::by_agent_of(&c.labels),
+            commit,
             outcome: None,
             note: None,
         });
@@ -838,7 +1007,7 @@ fn queue_batch(
             kind: JobKind::Merge,
             repo,
             branch: first.branch.clone(),
-            commit: None,
+            commit: first.commit.clone(),
             by_agent: first.by_agent.clone(),
             batch: if batch.len() > 1 { batch } else { Vec::new() },
             planned_secs: None,
@@ -884,11 +1053,12 @@ fn job_cancel(
     Ok(changed(json!({"job": j.id, "was": job.state})))
 }
 
-/// The cards of a job that did not conflict.
+/// The cards of a job that did not conflict, and whose branch did not
+/// move after its review (TER-553).
 fn merged(j: &Job) -> Vec<BatchCard> {
     j.cards()
         .into_iter()
-        .filter(|c| c.outcome.as_deref() != Some("conflict"))
+        .filter(|c| !crate::jobs::left_merge(c.outcome.as_deref()))
         .collect()
 }
 
@@ -1006,10 +1176,11 @@ fn job_rerun(
     let max = a.count("max_attempts").unwrap_or(2);
     let why = if j.state != JobState::Failed {
         Some(format!("job {} is {}", j.id, j.state.as_str()))
-    } else if j.outcome.as_deref() == Some("conflict") {
+    } else if crate::jobs::left_merge(j.outcome.as_deref()) {
         Some(format!(
-            "job {} is a conflict: a conflict never runs again",
-            j.id
+            "job {} is a {}: it never runs again",
+            j.id,
+            j.outcome.as_deref().unwrap_or_default()
         ))
     } else if j.attempt >= max {
         Some(format!("job {} is attempt {} of {max}", j.id, j.attempt))

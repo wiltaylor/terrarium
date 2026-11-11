@@ -975,6 +975,94 @@ async fn spawn_headroom_picks_pool_then_allowed_alternative() {
     assert_eq!(r.status, 409, "{}", r.body);
 }
 
+/// TER-630: the automatic main/alt switch never moves a spawn to a cloud
+/// subscription. A template that names the cloud subscription itself gets
+/// it, up to 100 percent of its budget window (not 80).
+#[tokio::test]
+async fn spawn_alt_fallback_never_takes_a_cloud_subscription() {
+    let (td, _lead, _w) = setup().await;
+    let s = state(&td);
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "main-a", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    let login = r#"{"claudeAiOauth":{"accessToken":"test","refreshToken":"test","expiresAt":4102444800000}}"#;
+    terrariumd::accounts::write_credential(
+        &s.state_dir,
+        "main-a",
+        HarnessId::Claude,
+        login.as_bytes(),
+    )
+    .unwrap();
+    td.post(
+        "/api/subscriptions/aws/api-key",
+        json!({"provider": "bedrock", "key": "bedrock-api-key-alt-test",
+               "cloud": {"region": "us-east-1", "budget_usd": 100}}),
+    )
+    .await
+    .ok();
+    for (name, spec) in [
+        (
+            "cloudy",
+            json!({"harness": "claude", "subscription": "main-a"}),
+        ),
+        (
+            "cloudy-alt",
+            json!({"harness": "claude", "subscription": "aws"}),
+        ),
+        (
+            "aws-direct",
+            json!({"harness": "claude", "subscription": "aws"}),
+        ),
+    ] {
+        td.post(
+            "/api/templates",
+            json!({"name": name, "project": "p", "spec": spec}),
+        )
+        .await
+        .ok();
+    }
+    let o = id(&td
+        .agent(
+            "p",
+            "selector",
+            json!({"policy": {"spawn": {
+        "templates": ["cloudy", "cloudy-alt", "aws-direct"], "max_concurrent": 10}}}),
+        )
+        .await);
+    // The main template has no headroom: the alt names the cloud
+    // subscription, and the spawn does not move to it.
+    s.db.write("system", |t| {
+        terrariumd::store::subscriptions::insert_sample(t, "main-a", "7d", 90.0, None, &json!({}))?;
+        terrariumd::store::subscriptions::insert_sample(t, "aws", "budget", 85.0, None, &json!({}))
+    })
+    .await
+    .unwrap();
+    let r = spawn_as(&td, &o, &o, json!({"template": "cloudy"})).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(
+        r.body
+            .to_string()
+            .contains("never taken by the automatic -alt fallback"),
+        "{}",
+        r.body
+    );
+    // Named by the template itself: allowed at 85 percent of the budget.
+    let r = spawn_as(&td, &o, &o, json!({"template": "aws-direct"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["agent"]["subscription"], "aws");
+    // At 100 percent: refused.
+    s.db.write("system", |t| {
+        terrariumd::store::subscriptions::insert_sample(t, "aws", "budget", 100.0, None, &json!({}))
+    })
+    .await
+    .unwrap();
+    let r = spawn_as(&td, &o, &o, json!({"template": "aws-direct"})).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+}
+
 #[tokio::test]
 async fn spawn_headroom_ignores_reset_windows_and_full_streams() {
     let (td, _lead, _w) = setup().await;

@@ -446,7 +446,7 @@ refused it. Do not parse the message; use `code`.
 | 409 | `lease_held` | Another agent holds a lease on the target that the new lease clashes with (§17.7). `details: {"target", "holder", "holder_id", "lease_id", "exclusive", "expires_at"}`. |
 | 413 | `too_large` | An upload is over the per-file limit or the project quota. |
 | 415 | `unsupported_media_type` | An attachment is not a PNG, JPEG, GIF, or WebP image (§6.2). |
-| 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. An agent has too many live exec sessions (§17). A host agent runs its maximum of sessions. |
+| 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. An agent has too many live exec sessions (§17). A host agent runs its maximum of sessions. All upload slots of the daemon are busy (§12.2). |
 | 501 | `not_available` | The route exists, but this phase does not do the request. |
 | 503 | `unavailable` | The daemon cannot do the request on this machine: the repo browser has no `bwrap` to read an agent tree (§5.3). |
 | 422 | `invalid` | Well-formed values that break a rule: a bad name, an empty title, a missing column. |
@@ -886,7 +886,13 @@ uses the project's `card-review` template, falling back to `global:card-review`,
 and that admin's spawn rights, caps, and template grants.
 
 Each card in review gets at most one review agent at a time. `review_round`
-on the card counts successful review spawns. Only the current review agent's
+on the card counts successful review spawns. A card of a project without a
+review dispatcher counts each move into its review column instead (TER-614),
+so a review by the lead counts too; `0` means it was never in review.
+`review_round` is in `GET /api/cards/{id}` and in each card of the board list.
+`trouble` on a card holds its active trouble signals (TER-79): the trouble
+pass sets them while the card is in a working or review column, and clears
+them when it leaves, so a done card shows `[]`. Only the current review agent's
 comment can supply a verdict: its first line must be `Review verdict: accept` or
 `Review verdict: changes` (bare `accept` and `changes` also work), with findings below it.
 At three rounds, automatic reviews stop and the owner is notified.
@@ -919,6 +925,7 @@ three letters and digits in upper case, then longer, then with a number
 | `DELETE /api/projects/{name}?confirm=true` | | `204` | sysadmin |
 | `GET /api/projects/{name}/agents` | | `200` agents by ID | read |
 | `GET /api/projects/{name}/targets` | | `200` targets, the project's and the global ones | read |
+| `GET /api/projects/{name}/counts` | | `200` `{"blocked_cards", "questions"}`, below | read |
 | `GET /api/projects/{name}/target-grants` | | `200` the global targets granted to the project for its project-owned monitors and schedules (§30.7) | read |
 | `POST /api/projects/{name}/target-grants` | `{target, for}` | `201` the grant | sysadmin |
 | `DELETE /api/projects/{name}/target-grants/{target}/{for}` | | `204` | sysadmin |
@@ -928,6 +935,19 @@ three letters and digits in upper case, then longer, then with a number
 Names are 1 to 63 of `a-z`, `0-9`, `-`, `_`, and start with a letter or a
 digit. `card_prefix` is 1 to 10 of `A-Z` and `0-9`, and starts with a
 letter. The prefix cannot change after the first card (`conflict`).
+
+`GET /api/projects/{name}/counts` gives the counts of the project tabs of
+the dashboard (TER-154). `blocked_cards` counts the cards in the columns with
+the `blocked` role, archived cards not counted. `questions` is `{"open",
+"urgent", "critical"}`: the open questions, bundles, and tool run approvals
+of the project, also those in a thread (a notice needs no decision).
+`urgent` counts the urgent and the critical ones, `critical` only the
+critical ones. `questions` is `null` for an actor that may not list the
+questions of the project (`GET /api/questions?project=`: the operator, a
+sysadmin or architect, or a project_admin of the project). The counts use
+indexes and read no card or question rows, so the dashboard reads them again
+on each `card` and `question` event of the project. An unknown project is
+`404`.
 
 `idle_alert` is the threshold of the idle alert (§6.2, "Idle alert"): a
 duration (`15m`, `1h`), or `off` (also `0`). `null` sets the default
@@ -1013,6 +1033,7 @@ helper gives the agent's proxy credential, not the forge token.
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
 | `GET /api/repos/{id}` | | `200` repo | read |
+| `DELETE /api/repos/{id}` | | `200` the removed repo; `409` while a queued or running job, `next_repos` of the delivery config, a `github` pipeline of the same `owner/name`, or an open bound agent's checkout at the repo's `path` uses it; `409 file_managed` for a repo of a project file. The clones stay. Audit and event `repo.delete` | project_admin |
 | `POST /api/repos/{id}/checkout` | below | `200` checkout result | own workspace: read; another agent's: project_admin |
 | `POST /api/repos/credential` | `{"protocol", "host", "path"?}` | `200` `{"username", "password"}` | an agent |
 | `GET /api/repos/{id}/trees...` | | the repo browser (§5.3) | read |
@@ -1514,6 +1535,7 @@ with more than one secret field (below). A name that breaks the rule is
 | git | `GIT_*` (all) |
 | Programs that other programs start | `EDITOR`, `VISUAL`, `PAGER`, `MANPAGER`, `LESSOPEN`, `LESSCLOSE`, `BROWSER` |
 | Language runtimes | `NODE_*`, `NPM_CONFIG_*`, `YARN_*`, `BUN_*`, `DENO_*`, `PYTHON*`, `PIP_*`, `UV_*`, `CONDA_*`, `VIRTUAL_ENV`, `PERL5*`, `PERLLIB`, `RUBY*`, `GEM_*`, `BUNDLE_*`, `JAVA_*`, `JDK_JAVA_OPTIONS`, `CLASSPATH`, `DOTNET_*`, `COREHOST_*`, `GOFLAGS`, `GOPATH`, `GOROOT`, `GOPROXY`, `GOENV`, `GOTOOLCHAIN`, `GOINSECURE`, `GOPRIVATE`, `GONOSUMDB`, `GONOPROXY`, `CGO_*`, `CARGO_*`, `RUSTC*`, `RUSTDOC*`, `RUSTFLAGS`, `RUSTUP_*`, `LUA_*`, `TCLLIBPATH`, `PHPRC` (`_JAVA_OPTIONS` breaks the shape) |
+| OpenSSL, Kerberos and D-Bus (ssh and the git and docker credential helpers load them) | `OPENSSL_*` (`OPENSSL_CONF`, `OPENSSL_MODULES`, `OPENSSL_ENGINES`), `KRB5*` (`KRB5_CONFIG`, `KRB5CCNAME`), `DBUS_*` (`DBUS_SESSION_BUS_ADDRESS`) |
 | Proxies and CA files | `*_PROXY` (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, ...; a lower-case `http_proxy` breaks the shape), `NO_PROXY`, `SSL_CERT_*`, `CURL_CA_BUNDLE`, `CURL_HOME`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `SSLKEYLOGFILE`, `WGETRC`, `GNUPGHOME` |
 | Harnesses and their accounts | `ANTHROPIC_*`, `CLAUDE_*`, `OPENAI_*`, `CODEX_*`, `COPILOT_*`, `PI_*`, `DISABLE_*`, `IS_SANDBOX`, `ENABLE_CLAUDEAI_MCP_SERVERS`, the provider keys of pi (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `ZAI_API_KEY`, `KIMI_API_KEY`, `MOONSHOT_API_KEY`), and the harness home vars |
 
@@ -1643,8 +1665,11 @@ secret with several secret fields needs one (`422`).
   through the git proxy `403`. A refused reference starts nothing.
 - The value goes into the env of the remote process only: on an `ssh`
   target as one base64 line on the stdin of the remote shell, which reads
-  and exports it; on a `docker` target through `docker exec -e KEY` with
-  the value in the env of the `docker` process on the host; on a `host`
+  and exports it; on a `docker` target through `docker exec --env-file`
+  with a 0600 file on the host that is removed when the `docker` process
+  exits (TER-490); a multi-line value goes instead through `-e KEY` into
+  the env of the `docker` process on the host, and some names and long
+  lines are refused ([host protocol](host-protocol.md#docker)); on a `host`
   target in the env of the process. It is never on a command line (local
   or remote), in the sandbox env, in the daemon log, or in a record. A
   `vmlab` target takes no env (`422`).
@@ -3115,7 +3140,7 @@ redacted from the output, the log, and the tail, and writes a
 | `POST /api/agents/{id}/waits` | below | `201` the wait | the agent itself, the operator |
 | `POST /api/agents/{id}/run` | `{"target", "cmd": [..], "name"?, "cwd"?, "env"?, "timeout"?, "reason"?, "agent"?}` | `201 {"wait", "session_id", "target"}` | the agent itself, the operator; the run uses the agent's rights |
 | `GET /api/waits/{id}` | | `200` the wait | as for the list; else `404` |
-| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait: on a `host`, `docker`, or `ssh` target each process of the process group and session of the run gets `TERM`, then `KILL` after 5 s | `200` the cancelled wait; with a kill on such a target also `kill`: `{pid, term, kill, left}` (the PIDs on the target that got `TERM`, needed `KILL`, and still run) or `{error}`; a wait that is not open is `409 conflict` | as for the list |
+| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait: on a `host`, `docker`, or `ssh` target each process of the process group and session of the run gets `TERM`, then `KILL` after 5 s | `200` the cancelled wait; with a kill on such a target also `kill`: `{pid, term, kill, left}` (the PIDs on the target that got `TERM`, needed `KILL`, and still run), with `pid_dir_refused` (the path) when the private PID directory `/tmp/terrarium-run-<uid>` was refused as a symlink or another user's, so the run had no PID file, or `{error}`; a wait that is not open is `409 conflict` | as for the list |
 | `GET /api/waits/{id}/log` | `?max=` bytes (at most 65536) | `200 {"wait_id", "session_id", "target", "running", "output", "end"?}` | as for the list; a wait that is not `process` is `422` |
 
 The create body:
@@ -3221,12 +3246,12 @@ except for the differences in "Bundles" below.
 | `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
 | `card` | Optional. A card of the agent's project. The question then shows on that card on the board (§8) and in the Inbox. Link or unlink later with `PATCH` (see "Cards"). |
 | `priority` | `normal`, `urgent`, or `critical`. Lists put the critical open questions first, then the urgent ones. Use `critical` only when the operator must act now: production is down, data is lost, a security problem, or a spent budget that stops all work. While a critical item is open, the dashboard shows a banner on each page and flashes its browser tab (§6.9). |
-| `status` | A question: `open`, `answered`, or `retracted`. A notice: `open`, `acknowledged`, or `retracted`. Only `open` changes. |
+| `status` | A question: `open`, `in_thread`, `answered`, or `retracted`. A notice: `open`, `in_thread`, `acknowledged`, or `retracted`. Only `open` and `in_thread` change. `in_thread`: the operator moved it into an Inbox thread with its agent (see "To thread"). |
 | `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. For an acknowledged notice, `answer` is the reply of the operator, if any. |
 | `answered_by`, `answered_by_name` | `operator`, or the ULID and `project/name` of a sysadmin agent. |
 | `retract_reason`, `retracted_by` | The reason, and the actor label (`operator`, `agent:<ulid>`, or `system` for a deleted agent). |
 | `thread_id` | The mail thread of the question. The answer goes on it. |
-| `thread` | The Inbox thread that the question was asked in (§6.13), or absent. |
+| `thread` | The Inbox thread that the question was asked in, or moved into (§6.13, "To thread"), or absent. |
 | `revision` | 1 at the ask. Each update that changes a field adds 1. |
 
 The rights:
@@ -3237,6 +3262,7 @@ The rights:
 | Read | The agent itself, a project_admin of its project, a sysadmin, the operator. Another caller gets `404` for one question and `403` for a list. |
 | Answer, acknowledge | The operator. A sysadmin agent, for the question or notice of another agent. Never the asking agent (`403`). |
 | Retract | The asking leader, or the operator. |
+| To thread | The operator. Another caller that reads the question gets `403`. |
 | Link to a card, unlink | The asking leader while the question is open. The operator, and a sysadmin agent for the question of another agent, at each status. |
 
 | Endpoint | Body or query | Answer |
@@ -3248,7 +3274,8 @@ The rights:
 | `PATCH /api/questions/{id}` | `{"text"?, "options"?, "items"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field; `items` replaces all items of a bundle. `{"card": "<id>" \| null}` alone links or unlinks a card (see "Cards") | `200` the question. A question that is not open is `409 conflict`, except for a change of the card by the operator or a sysadmin. A card of another project, or an unknown card, is `422 invalid`. |
 | `POST /api/questions/{id}/answer` | `{"answer"?, "option"?, "revision"?}`: a text, an option (its label, or its 0-based index), or both. A bundle: `{"items": [{"answer"?, "option"?}, ...], "revision"?}` | `200` the question. A question that is not open is `409 conflict`. A notice is `409 conflict`. A `revision` that is not the current one is `409 conflict`, with `details.revision`. |
 | `POST /api/questions/{id}/ack` | `{"text"?}`, or no body | `200` the notice, `acknowledged`. A notice that is not open is `409 conflict`. A question is `409 conflict`. |
-| `POST /api/questions/{id}/retract` | `{"reason"?}`, or no body | `200` the question. A question that is not open is `409 conflict`. |
+| `POST /api/questions/{id}/retract` | `{"reason"?}`, or no body | `200` the question. A question that is not open or `in_thread` is `409 conflict`. |
+| `POST /api/questions/{id}/to-thread` | `{"message"?}` (at most 8000 characters), or no body | `201` `{"question", "thread"}`: the question, `in_thread`, and the new thread (§6.13). A bundle, a tool run approval, a hold question, a question that is not open, and a question asked in a thread are `409 conflict`. |
 
 The rules:
 
@@ -3284,18 +3311,21 @@ The rules:
   the answer mail (or the retract mail of the operator) is its wake mail,
   so the agent gets one mail, not two. The mail says that the wait is
   resolved. A timeout of the wait sends the usual wake mail from `system`.
-- A deleted agent: its open questions are `retracted` (`retracted_by:
-  "system"`), with no mail.
+- A deleted agent: its open and `in_thread` questions are `retracted`
+  (`retracted_by: "system"`), with no mail.
+- An answer, an acknowledgement, and a retract settle an `in_thread`
+  question as an open one. An update of it is `409 conflict`.
 - The open questions and notices of one agent share the limit of 50. The
   copy check compares a new text with the open items of the same kind.
 - The recap turn of a new session lists the open questions, the open
   notices, the answers since the last turn, and the acknowledgements since
   the last turn, with the replies.
 - Each change writes an audit row (`question.ask`, `question.update`,
-  `question.answer`, `question.ack`, `question.retract`), a `question`
+  `question.answer`, `question.ack`, `question.retract`,
+  `question.to_thread`), a `question`
   event: `{question_id, kind, change, status, priority, text, revision,
   agent_id, card_id?, previous_card_id?}`, where `change` is `asked`,
-  `updated`, `answered`, `acknowledged`, or `retracted`, and an `inbox`
+  `updated`, `answered`, `acknowledged`, `retracted`, or `to_thread`, and an `inbox`
   event (§6.9). The event has the top-level `card` of the linked card.
 
 Cards:
@@ -3361,6 +3391,46 @@ Bundles:
 - The recap turn lists an open bundle as `<id> [bundle of N items]`, and
   an answered bundle item by item.
 
+To thread (GitHub #30, TER-469):
+
+- The operator moves an open question or notice into a new Inbox thread
+  with the asking agent: the Inbox action "Open in thread" (GitHub #32), `POST
+  /api/questions/{id}/to-thread`, or `terrarium question to-thread <id>
+  [-m <message>]` (also `terrarium admin question to-thread`).
+- The thread (§6.13) is in the project of the question, with the asking
+  agent attached, the operator as its opener, no template, and
+  `from_question` set to the question. Its first message, by the operator,
+  quotes the question, its options, and its context, and then gives the
+  optional `message`. It is `waiting_agent`. A question with a card links
+  the card to the thread (an archived card is not linked). The quotes add
+  to the size: when the first message has more than 32 KiB, the move is
+  `422 invalid`, with `bytes` and `max` in the details, and nothing moves
+  (TER-495).
+- The question becomes `in_thread`, with `thread` set: it is not open, so
+  it leaves the open counts, the Inbox, and the `X-Open-Questions` count,
+  and the thread item stands for it. Its `question` waits stay open.
+  In its thread it counts as an open question (TER-495): the agent sets no
+  `waiting_agent` or `tracking` (`409 conflict`), a message of the agent
+  makes the thread `waiting_operator`, and a close retracts it. The
+  operator's `POST .../status` `waiting_agent` passes it (TER-514).
+- The agent gets one mail from the operator on the mail thread of the
+  question (`In a thread: ...`), with the commands to read the thread and
+  reply there. The agent is not bound to the thread, so each later
+  message and response of the operator in the thread also comes to it as
+  mail (`Thread: ...`), on the same mail thread.
+- In the thread the operator answers (or acknowledges) the question with
+  the usual verbs, and it becomes `answered` (or `acknowledged`) with its
+  `thread` link. The agent retracts it, and can ask a revised question in
+  the thread (`terrarium thread ask <thread> ...`). A close of the thread
+  retracts it, as an open question of the thread.
+- The recap turn lists the `in_thread` questions with their threads.
+- A bundle does not move (`409 conflict`): that is a follow-up.
+- In the dashboard (GitHub #32), "Open in thread" on a question or notice
+  with a linked thread opens that thread, also after the answer. On an
+  open one with none it moves it, as above, and opens the new thread.
+  "Show mail" opens the mail thread of the question (`thread_id`). The
+  thread shows the question in its conversation.
+
 ### 6.9 The Inbox
 
 PLAN §12e gives the design. The code is in
@@ -3409,8 +3479,8 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system\|watch\|thread`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
-| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system", "watch", "thread"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. `open` does not count `watch`: a watch waits for an agent. The dashboard badge shows `open`, red when `urgent` is not 0. |
+| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system\|watch\|thread`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. Thread items show only with `kind=thread`: a list with no `kind` leaves them out (TER-466). `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds but `watch` and `thread`). System items show only while they are open; the audit log keeps their history. |
+| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system", "watch", "thread", "thread_urgent", "thread_critical"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. `open` does not count `watch`: a watch waits for an agent. `open`, `urgent`, and `critical` do not count the threads either: `thread` counts the open thread items, `thread_urgent` the ones with an urgent or critical open question, and `thread_critical` the ones with a critical one (TER-466). The dashboard Inbox badge shows `open`, red when `urgent` is not 0; the Threads badge shows `thread`, red when `thread_urgent` is not 0. |
 | `POST /api/inbox/mail/{id}/ack` | `{"reply"?}`, or no body | `200` `{"message", "replies"}`. The mail becomes `read`. With `reply`, the reply goes as `operator` on the thread of the mail to its other participants (§7.2), and the mail becomes `replied`. A message that is not to the operator is `404`. One that is acknowledged already is `409 conflict`. A reply to a system mail that has nobody to answer is `422 invalid`. |
 
 | `POST /api/inbox/asks` | `{"to", "text"?, "question"?}` | `201` `{"message", "watch"}`: the mail (§7) and the new watch. Below. |
@@ -3528,7 +3598,7 @@ for any agent.
 |---|---|---|
 | `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?, "targets"?, "grants"?, "bind"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
 | `GET /api/agents/{owner}/spawned` | `?limit=&cursor=`; for `operator`: `?project=` | `200` the spawns of the owner, running and finished, newest first, paged (§2.4). |
-| `GET /api/spawns/{id}` | | `200` one spawn, also after the finish. |
+| `GET /api/spawns/{id}` | | `200` one spawn, also after the finish. A reader of its project reads it; a spawn of `operator`: the operator only. |
 | `POST /api/agents/{id}/done` | `{"result"?}` | `202` the spawn. The close follows after 3 s. |
 | `POST /api/agents/{id}/cancel` | | `200` the spawn, closed with the outcome `cancelled`. |
 
@@ -3691,8 +3761,8 @@ agent:
 
 | Card event | Bound agent |
 |---|---|
-| Moved to `validating`, `review`, or `accepted` | parked |
-| Moved out of `validating`, `review`, or `accepted` while parked (for example to `ready` after a failed job, or to `in_progress`) | unparked |
+| Moved to `validating`, `review`, `merge_queue`, or `accepted` | parked |
+| Moved out of `validating`, `review`, `merge_queue`, or `accepted` while parked (for example to `ready` after a failed job, or to `in_progress`) | unparked |
 | Moved between two other columns (for example `in_progress` to `blocked` or `ready`) | nothing |
 | A merge job passed (merged onto `next`), or moved to `done` | closed, `done` |
 | Archived | closed, `cancelled` |
@@ -3704,8 +3774,9 @@ reason}`), `agent.unpark_queued` (`{spawn_id, name, bound, cause,
 owner}`), `agent.unpark_dropped` (`{spawn_id, name, bound, reason}`: the
 card moved into a wait column again while its unpark waited, so the
 unpark and its return turn are dropped), and `agent.unparked`
-(`{spawn_id, name, bound, cause}`) are on the bound agent. The wait columns are names: a board without them never
-parks its bound agents.
+(`{spawn_id, name, bound, cause}`) are on the bound agent. A wait column is a column whose role is one of these,
+or a column with no role whose name is one: a board without them never parks
+its bound agents.
 
 **Finish.** Only these end an ephemeral agent:
 
@@ -3782,28 +3853,6 @@ no event: the dashboard reads the list again when its window gets the
 focus.
 
 ### 6.12 Project folders
-
-#### Sidebar bookmarks
-
-`/api/bookmarks` stores the operator's sidebar bookmarks in SQLite, shared
-across browsers. All methods are operator-only. GET returns an array of
-`{title, href}` in insertion order. PUT accepts `{title, href}`, adds or
-renames that URL, and returns the list. DELETE accepts `{href}` and returns
-the list, including when the URL was absent. Mutations write `bookmark.add`
-or `bookmark.remove` audit rows.
-
-PUT also accepts an optional `previous_href` to edit an existing bookmark's
-title and URL atomically, preserving its position. A missing source or a URL
-already used by another bookmark returns `422 invalid` without changing the list.
-
-Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
-without credentials, or a relative `/p/<project>/knowledge/wiki` path.
-URLs are normalized and deduplicated, and are limited to 8192 bytes on add.
-Invalid values return `422 invalid`. Wiki links open in place. External
-links open in a new window. The dashboard refreshes on focus and every 30
-seconds and imports its old `terrarium.bookmarks` list on first load,
-clearing that list only after successful import. Existing daemon titles win
-over legacy titles during migration.
 
 The code is in `crates/terrariumd/src/store/project_folders.rs` and
 `crates/terrariumd/src/api/project_folders.rs`. The tables are
@@ -3888,6 +3937,7 @@ There is no register of threads and no conflict check between threads
 | `closed_at`, `closed_by` | When and by whom it was closed: `operator`, or `system` for a stale close or a failed start. |
 | `close_proposal` | The close that the attached agent proposes (TER-95): `{summary, links, by, at}`, as `handoff`, or `null`. The operator confirms it (below). |
 | `close_reason` | On a closed thread: `confirmed` (the operator confirmed the agent's proposal), `operator` (the operator closed it), `stale` (untouched, below), or `failed_start` (its agent did not start). |
+| `from_question` | The question or notice that the operator moved into this thread (§6.8, "To thread"), or absent. Each message and response of the operator then also goes to the attached agent as mail. |
 | `session_id` | The session of the thread agent, set at the close: the agent ends and its session is archived (§6.6), so `/sessions/<id>` opens it after the agent is gone. `null` for a named agent, which lives on. |
 | `reminded_at` | The time of the last Inbox reminder of the untouched thread (below), or `null`. |
 | `tracking_at` | When the attached agent moved the thread into tracking (TER-145, below), or `null`. It stays set while an operator post wakes the agent, so that the agent's reply puts the thread back into `tracking`. |
@@ -3909,10 +3959,12 @@ when the agent starts the work now (`terrarium thread post <id> -m <text>
 into tracking as `POST .../track`. `POST .../status` with `{"status"}`
 (`terrarium thread status <id> waiting_agent|tracking`) sets it without
 a message. Both withdraw a close proposal. Only `waiting_agent` and
-`tracking` are allowed (`422`), only for the attached agent (a `status`
-in an operator message is `422`, the status verb `403`), and an open
-question of the thread is `409 conflict`: a question keeps the thread on
-the operator. A `waiting_agent` or `tracking` thread is not in the Inbox
+`tracking` are allowed (`422`). The attached agent and the operator use
+the status verb (another agent is `403`); a `status` in an operator
+message is `422`. An open question of the thread is `409 conflict` for
+both: a question keeps the thread on the operator. An `in_thread`
+question refuses only the agent: the operator's `waiting_agent` passes it
+(TER-514). A `waiting_agent` or `tracking` thread is not in the Inbox
 badge and gets no reminder or stale close.
 
 **Tracking on a card link** (GitHub #28). When a card is linked
@@ -3933,9 +3985,9 @@ a `[Thread:<id>]` turn that ends with a note that the thread tracks; the
 agent's next message makes it `tracking` again, not `waiting_operator`, and
 parks the agent. A question that the agent asks makes it
 `waiting_operator` as usual; the agent's message after the answer puts it
-back into `tracking`. Only the close ends tracking. The dashboard Inbox
-lists these threads on the Threads tab under Tracking, between Open and
-Done.
+back into `tracking`. Only the close ends tracking. The Threads screen of
+the dashboard lists these threads under Open, with a tracking icon
+(TER-466).
 
 **Linked cards** (TER-146, TER-144 D2). A thread tracks cards of any
 project (table `thread_cards`: thread, project, card). The lead links a
@@ -4090,7 +4142,7 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
 | `POST /api/threads/{id}/track` | no body, or `{"cards"?, "monitor"?}`: at most 50 cards to link first (TER-146), optional monitor `project:name` (TER-149) | The attached agent: `200` the thread, `tracking`, with `tracking_at`, `cards` and optional `monitor`. `409` with an open question; invalid links roll back the whole write |
-| `POST /api/threads/{id}/status` | `{"status"}`: `waiting_agent` or `tracking` (GitHub #28) | The attached agent: `200` the thread. `403` for anyone else, `409` with an open question, `422` for another status |
+| `POST /api/threads/{id}/status` | `{"status"}`: `waiting_agent` or `tracking` (GitHub #28) | The attached agent: `200` the thread. `403` for anyone else, `409` with an open question (for the operator's `waiting_agent`, only an `open` one, not `in_thread`), `422` for another status |
 | `POST /api/threads/{id}/cards` | `{"card"}`: `<project>:<card>` or `<card>` | `200` the thread with `cards`, also when the card was linked already. `404` without the read right on the thread, for a card that does not exist or is not in the named project, and without the read right on the card's project; `422` for an archived card; `409` on a closed thread |
 
 **Ops tracking** (TER-149, D6). `terrarium thread track <id> --monitor <project>:<monitor>`
@@ -4217,9 +4269,12 @@ thread of the loop guard). It is open while the thread is
 message or a response of the operator makes the thread `waiting_agent`, but
 its open questions still wait for the operator). The Inbox shows every
 thread, without the limit of 200 of the list. The item has `thread`: the thread as
-`GET /api/threads` lists it. `GET /api/inbox?kind=thread` filters them, and
-`/api/inbox/counts` has `thread`. An item is urgent when one of its open
-questions is urgent or critical.
+`GET /api/threads` lists it. Only `GET /api/inbox?kind=thread` lists them:
+the default list and `open` of `/api/inbox/counts` leave them out, because
+the dashboard shows the threads on their own Threads screen (TER-466).
+`/api/inbox/counts` has `thread`, `thread_urgent`, and `thread_critical`
+for its badge. An item is urgent when one of its open questions is urgent
+or critical.
 
 **Delivery.** The operator's messages and responses reach the attached
 agent as turns with TER-92 (`[Thread:<id>] ...`). Until then the agent
@@ -4233,6 +4288,34 @@ rows: `thread.open`, `thread.agent`, `thread.respond`,
 `thread.propose_close`, `thread.remind`, `thread.track`,
 `thread.card_link`, `thread.card_wake`, `thread.close` (with `reason`,
 `session`, and the commented `cards`).
+
+### 6.14 Sidebar bookmarks
+
+The code is in `crates/terrariumd/src/api/bookmarks.rs` (migration 93).
+
+`/api/bookmarks` stores the operator's sidebar bookmarks in SQLite, shared
+across browsers. All methods are operator-only. GET returns an array of
+`{title, href}` in insertion order. PUT accepts `{title, href}`, adds or
+renames that URL, and returns the list. DELETE accepts `{href}` and returns
+the list, including when the URL was absent. Mutations write `bookmark.add`
+or `bookmark.remove` audit rows.
+
+PUT also accepts an optional `previous_href` to edit an existing bookmark's
+title and URL atomically, preserving its position. A missing source or a URL
+already used by another bookmark returns `422 invalid` without changing the list.
+
+Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
+without credentials, or a relative `/p/<project>/knowledge/wiki` path.
+URLs are normalized and deduplicated, and are limited to 8192 bytes on add.
+Invalid values return `422 invalid`. Wiki links open in place. External
+links open in a new window. The dashboard refreshes on focus and every 30
+seconds and imports its old `terrarium.bookmarks` list on first load.
+It clears that list only after each row was imported or refused: a row that
+the daemon refuses (`422 invalid`, for example a title over 500 bytes) is
+skipped and reported once in the sidebar, and it does not block the import
+or later changes (TER-257). Existing daemon titles win over legacy titles
+during migration. A dashboard user that is not the operator gets `403`: the
+dashboard then keeps the bookmarks in that browser only, with no error.
 
 ## 7. Mail
 
@@ -4298,6 +4381,11 @@ For an agent sender:
 | `GET /api/mail/{id}` | | `200` message |
 | `POST /api/mail/{id}/read` | none | `200` message |
 | `POST /api/mail/{id}/reply` | `{"body", "subject"?}` | `201` **array** of messages, one for each recipient |
+
+- A reply goes to every other participant of the thread. The operator is a
+  recipient only when the replied-to message came from or went to
+  `operator`. To reach the operator on another message of the thread, send
+  to `operator` with `thread_id`.
 
 - `state` is a state or `unread` (`queued` and `delivered`).
 - `project` keeps the messages from or to the inbox of the project, or
@@ -5309,6 +5397,12 @@ Multipart (`multipart/form-data`): a `file` part with the bytes (its
   of its root, and with `index.html` at the root. Else `422 invalid`.
 - Over the per-file limit or the project quota: `413 too_large`, with
   `details` (`size`, `max_file_bytes`, or `used_bytes`, `quota_bytes`).
+- The daemon runs at most 8 uploads at one time. An upload that finds no
+  free slot within 3 s gets `429 rate_limited` with `Retry-After: 2` and
+  `details` (`retry_after`, `max_concurrent_uploads`). It stores nothing
+  (TER-605). `terrarium artifact push` and `terrarium test push` try a `429`
+  again after `Retry-After` (else `details.retry_after`, else 2 s, at most
+  60 s), at most 5 tries in all, then fail with the error (TER-661).
 
 Limits come from `$TERRARIUM_CONFIG_DIR/daemon.toml`. The daemon reads the
 file at the first artifact call; a change needs a restart.
@@ -5331,7 +5425,7 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
 | Endpoint | Body | Answer |
 |---|---|---|
 | `GET /api/projects/{name}/artifacts?label=&limit=&cursor=` | | `200` artifacts newest first, cursor: number; `label` keeps the artifacts with that exact label |
-| `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact |
+| `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact; `429 rate_limited` with `Retry-After` when all 8 upload slots stay busy for 3 s (§12.2) |
 | `GET /api/projects/{name}/artifacts/usage` | | `200 {"project", "count", "used_bytes", "quota_bytes", "max_file_bytes"}` |
 | `GET /api/artifacts/{id}` | | `200` artifact |
 | `DELETE /api/artifacts/{id}` | | `204`; the author or an admin |
@@ -5677,7 +5771,7 @@ keep their card.
 | `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. A plan account: removes the account directory and nothing else; no harness command runs, so no other account and no shared file changes. `409 conflict` while an agent's current subscription is this one. A subscription with no account (a shared login before its migration): runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command (it uses API keys only): `422 invalid`. An old pi plan account (from before pi took API keys only) logs out as any plan account: its directory goes. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
 | `POST /api/subscriptions/{name}/default` | | The subscription (§16.1), with `default: true`. Its plan account becomes the default account of its harness; the old default stops being one, in the same transaction. The audit row is `subscription.default` (`{harness, from, to, reason}`), and a `subscription` event (§16.7) follows. `422 invalid` for an API-key subscription, a subscription with no plan account, and a pi account or a provider that is not the plan provider of the harness. `404 not_found` for an unknown name. |
 | `PUT /api/subscriptions/{name}/label` | `{label}` | The subscription (§16.1). `label` is a string (at most 80 characters, no control characters) or `null`; `null` or only spaces removes it, and `display_name` comes from the vendor table again. Text for people only: the name, the ids, and the keys stay. Works on a file subscription too. Needs the operator or sysadmin. The audit row is `subscription.label` (`{label}`). |
-| `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?}` | The subscription, without the key. `plan` is for `zai` and `moonshot` only. See §16.5. |
+| `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?, key_id?, cloud?}` | The subscription, without the key. `plan` is for `zai` and `moonshot` only; `key_id` for `bedrock`, `cloud` for `bedrock`, `gcp`, and `foundry`. See §16.5. |
 | `GET /api/subscriptions/detect` | | Logins found in the Claude Code, Codex, and Copilot homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, logged_in, plan?, detail?, suggested}]`. pi uses API keys only: no pi login is found. `suggested` is a subscription definition. |
 | `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
 | `GET /api/subscriptions/login/{id}` | | The login session. |
@@ -5803,7 +5897,7 @@ defaults. Unknown fields and negative limits are rejected. Example:
 {"time_seconds":{"small":2700,"impl":7200,"impl-hard":14400},
  "tokens":{},"turns":{},"red_streak":3,"red_same_commit":2,
  "review_rounds":2,"eta_delays":3,"timer_polls":3,"compactions":3,
- "review_wait_seconds":3600}
+ "review_wait_seconds":3600,"no_progress_seconds":3600}
 ```
 
 Time, token and turn maps are keyed by the suffix of the card's `type:` label
@@ -5817,8 +5911,15 @@ they use the fixed fallbacks above (`hard` also uses four hours). Explicit
 project time overrides take precedence. A zero threshold disables that check.
 An ETA at or before now produces `eta_overdue`. The other signal names are
 `time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
-`validation_red`, `timer_polls`, `compactions` and `review_wait`. Review wait
-starts at the most recent entry into review and clears on return to work.
+`validation_red`, `timer_polls`, `compactions`, `review_wait`, `no_progress`
+and `shipped_accepted`. `shipped_accepted` (TER-608) marks an accepted card
+with a `version:X.Y.Z` or `version:vX.Y.Z` label (not `version:vnext`) when
+a closed version group of the project has the status `Built X.Y.Z` or
+`Built vX.Y.Z` (from `group built`). The daemon sees no Git tags, so that
+acknowledgement is its record of a published tag. Each pass reads the built
+versions once per project from `card_groups`, not from the event log. Only the leads get
+its mail. It clears when the card leaves accepted or loses the label.
+Review wait starts at the most recent entry into review and clears on return to work.
 Assignment changes while the card stays in review do not reset its age.
 Job-set ETAs do not count as agent ETA extensions.
 
@@ -5829,6 +5930,25 @@ examined per card. Three consecutive red runs, or
 two red runs on the same nonempty commit within the streak, trigger the mark.
 Short timer waits (at most one minute) and compaction requests use a rolling
 one-hour window. Review rounds and ETA extensions count the card's history.
+For a card in a working-role column with a repo, the remote scan reads the
+actual branch head with `git ls-remote`, so direct pushes count. Research
+cards are not watched and never get `no_progress`. The branch is the card's
+branch, else the lowercase card id (as for validation jobs). The scan has its
+own five-minute timer, reads at most 32 cards per pass from a rotating cursor,
+and stops a pass after 120 seconds. The cursor moves past a card only after
+its read finishes, so a read cut by the cap comes first in the next pass. The
+capacity is 32 cards per five minutes: with more watched cards, each card is
+read less often, and with slow remotes the cap cuts a pass short. Then a
+stored read can grow older than the threshold, and no mark is set for that
+card until a fresh read (no false marks). A failed repo, credential or
+`ls-remote` read is logged and changes nothing. `no_progress` starts after
+`no_progress_seconds` of agent working time (waits excluded) without a new
+head: counted from the claim while the branch was never seen on the remote,
+otherwise from the working time when the current head was first seen. A new
+head clears the mark. No mark is set while the last successful read is older
+than the threshold, or when the stored read is for another repo or branch of
+the card. A zero threshold disables it. Proxy `repo.push result=forwarded`
+audit rows are not push evidence.
 
 The lifecycle tick plans in a read, using lightweight working/review/research
 card metadata and marked cards that need clearing. It opens a write only if
@@ -5842,13 +5962,13 @@ exception is `eta_overdue`: when the worker's card reminder is enabled
 (agent override, otherwise the daemon default), the reminder owns its nudge.
 The trouble pass records the signal and mails the lead, but does not send a
 second worker mail that could delay the reminder. If reminders are disabled,
-the worker still gets the trouble state request. Other signals are unchanged.
+the worker still gets the trouble state request. `no_progress` is lead-only.
+Other signals are unchanged.
 The once-per-card
 and signal record survives restarts, resolution and recurrence. A mark clears
 when its condition stops holding, its threshold is disabled, or the card
 leaves working/research/review or is archived. A recurrence can restore the
 mark but cannot send another notice. The existing idle alert is separate.
-No-push detection is deferred to successful remote-head tracking (TER-370).
 
 The CLI calls `GET /api/usage?agent=<me>` for `terrarium usage` and
 `GET /api/usage?project=<p>` for `terrarium usage project`. Both work;
@@ -5925,6 +6045,9 @@ directories are `0700`), and sets `env_var`:
 | `github` | `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with Copilot Requests; the Copilot probe uses it) |
 | `zai` (takes `plan`) | `ZAI_API_KEY`, and the Claude Code vars below |
 | `moonshot` (takes `plan`; pi only) | `MOONSHOT_API_KEY`, and `KIMI_API_KEY` for a Kimi Code plan |
+| `bedrock` (takes `key_id` and `cloud`; Claude Code only) | `AWS_SECRET_ACCESS_KEY` with `key_id`, else `AWS_BEARER_TOKEN_BEDROCK`; the Claude Code vars below |
+| `gcp` (takes `cloud`; Claude Code only) | `GOOGLE_APPLICATION_CREDENTIALS` (a file); the Claude Code vars below |
+| `foundry` (takes `cloud`; Claude Code only) | `ANTHROPIC_FOUNDRY_API_KEY`; the Claude Code vars below |
 
 A new name makes an `api` subscription (harness `pi`, or `copilot` for
 `github`, or `claude` and `pi` for `zai`). No endpoint returns the key. The
@@ -6077,6 +6200,84 @@ every agent whose `subscription` has `env_var`
 the adapter's env. The start log and `terrariumd sandbox-dry-run` show the
 value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
 `<redacted>`.
+
+**Cloud providers (Claude Code only).** `provider` `bedrock` (Amazon
+Bedrock), `gcp` (Google Cloud Vertex AI), or `foundry` (Microsoft
+Foundry); the code is `crates/terrarium-core/src/cloud.rs`. The
+subscription gets `harnesses = ["claude"]` (another harness is `422
+invalid`), no plan, no probe, and `login_status` `api_key`. The key file
+keeps the secrets:
+
+- `bedrock`: `key` is the secret access key and `key_id` the access key
+  ID of an IAM user, or `key` alone is an Amazon Bedrock API key.
+- `gcp`: `key` is the service-account JSON (an object with `type`).
+- `foundry`: `key` is the API key of the resource.
+
+`cloud` holds the settings, which are no secret. They go to the
+definition (`[cloud]` in `subscriptions/<name>.toml`, or `cloud` in `POST
+/api/subscriptions`), not to the key file. A key without `cloud` keeps
+the stored settings, and a `cloud` without `models` keeps the stored
+model map. A file subscription takes its `[cloud]` from the file only
+(`422 invalid` with `cloud`). Today the key endpoint is the only API path
+that changes `cloud`, so a new budget sends the key again.
+
+| Field | Kinds | Claude Code var |
+|---|---|---|
+| `region` | `bedrock`, `gcp` | `AWS_REGION`, `CLOUD_ML_REGION` |
+| `project_id` (needed) | `gcp` | `ANTHROPIC_VERTEX_PROJECT_ID` |
+| `resource` (or `base_url`, one of them needed) | `foundry` | `ANTHROPIC_FOUNDRY_RESOURCE` |
+| `base_url` (`https://`) | all | `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`, `ANTHROPIC_FOUNDRY_BASE_URL` |
+| `models` | all | `ANTHROPIC_DEFAULT_OPUS_MODEL`, `_SONNET_MODEL`, `_HAIKU_MODEL` for the keys `opus`, `sonnet`, `haiku`; and `--model` |
+| `budget_usd` | all | none: the monthly budget (below) |
+
+The env of an agent on it adds the switch (`CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, or `CLAUDE_CODE_USE_FOUNDRY` = `1`) and the key
+vars: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or
+`AWS_BEARER_TOKEN_BEDROCK`; `ANTHROPIC_FOUNDRY_API_KEY`. Every value comes
+through `terrarium exec-env` (`POST /api/agent/secrets/env`), never the
+launch spec. The GCP JSON is in `credential_files` of that answer:
+`exec-env` writes it with mode `0600` (the dir `0700`) to
+`$HOME/.terrarium/credentials/<agent>/`, a tmpfs in the bwrap sandbox,
+and sets `GOOGLE_APPLICATION_CREDENTIALS` to the file. In sandbox mode
+`none` (development and tests) the daemon names the dir in
+`TERRARIUM_CREDENTIAL_DIR`: `<runtime dir>/credentials/<agent>`, which it
+removes when the harness exits. The redaction matcher has
+the key, `key_id`, and the `private_key` and `private_key_id` of a GCP
+JSON.
+
+`models` maps Terrarium model names to cloud model ids: a Bedrock
+inference profile id or ARN, a Vertex model id, a Foundry deployment
+name. The keys are lowercase (`opus`, `sonnet`, `haiku`, or a Claude id
+such as `claude-opus-5-5`). Claude Code gets `--model` with the map entry
+of the agent's `model`, else the model as it is for the aliases `opus`,
+`sonnet`, and `haiku` (Claude Code maps them with the
+`ANTHROPIC_DEFAULT_*_MODEL` vars or its default for the cloud). Any other
+name that is not in the map is refused: `422 invalid` at agent create, a
+patch, a file sync, and a template; a start refusal (`NotReady`) at start.
+The message names the subscription and the missing `cloud.models.<name>`.
+
+A cloud subscription is never in the automatic account choice: the
+auto-swap after a usage limit (§16.6) never moves an agent to one, the
+spawn pick takes one only when the template or the agent names it as
+`subscription`, never from `subscription_pool`, and the `<template>-alt`
+fallback of a spawn without headroom never takes one, also when the alt
+template names it. The spawn pick counts a cloud subscription as full at
+100 percent of its budget window, not at 80. A swap that names it is
+allowed (`POST /api/agents/{id}/subscription`, §6.2, with the rules of a
+swap).
+
+**The monthly budget.** With `budget_usd`, the daemon keeps the spend of
+the UTC month: the sum of the `costUSD` running totals of the Claude Code
+sessions on the subscription (`cost-state` of the session file; the list
+price of the tokens, not the cloud bill). The subscription shows a
+`budget` window with `used_pct`, `resets_at` (the start of the next month),
+and `balance` (`total` the budget, `used`, `remaining`, `currency` `USD`).
+The quota notices of §16.6 mail the operator at `alert_at` (default 80),
+90, and 100 percent. At 100 percent, new turns of the agents on the
+subscription wait: a hold with the cause `cloud-budget:<name>` until the
+start of the next month (`quota.blocked`). A raised or removed budget ends
+the hold at the next check (after each new session total, and on each
+policy tick).
 
 ### 16.6 The quota policy
 
@@ -6341,7 +6542,7 @@ all projects. Targets are project targets by default: a global target
 
 | Field | Meaning |
 |---|---|
-| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Keep project shared caches outside each agent root. |
+| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. A `work_root` that is set never falls back: its failure names it. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
 | `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. A snapshot delete removes a name. A snapshot list removes the names that the host no longer has (§17.3, "Snapshots"). |
@@ -6499,7 +6700,10 @@ and `write_iops` (nonnegative integers).
 
 The `used` object includes charged `cpu_millis`, `memory_bytes`, the summed
 per-device `io` map, and sorted `exclusive_cores` CPU IDs. Queued and terminal
-reservations are excluded. Admission locks are per host agent. Docker lifecycle
+reservations are excluded. Every actor reads the capacity, and the totals
+count every project. A `used.gpus` entry shows `reservation` and `holder`
+only to an actor that reads the project of the reservation; other actors
+see the `claim` only. Admission locks are per host agent. Docker lifecycle
 verbs publish an in-progress intent, then release admission while pulling or
 creating a container. Verbs may overlap on the same host. Resource changes on
 that host return `409 resource_busy` until all verbs finish, except a grant
@@ -6532,9 +6736,18 @@ The top-level `exclusive` remains the CPU affinity option, independent of each
 GPU claim's `exclusive`. The CLI accepts the array through `reserve new --gpus
 '[...]'`. No MIG partitions are created.
 
-Exclusive GPUs require a managed **ephemeral Docker target**. Native host,
-SSH and vmlab exclusive GPU requests are refused, never granted as unenforced
-exclusive access. Shared claims are supported for native host targets and
+Exclusive GPUs require a managed **ephemeral Docker target**, or a native
+`host` target on a host agent whose `capabilities.native_gpu.enforced` is
+true (the root helper of docs/native-gpu-helper.md, TER-345). On any other
+native host the request is a `409` that gives the helper's reason. SSH and
+vmlab exclusive GPU requests are refused, never granted as unenforced
+exclusive access. On a host with native enforcement, every command of a
+`host` target runs in a device policy with only its reservation's GPUs,
+and a command with no GPU reservation gets no GPU. When the host agent
+stops reporting enforcement while a native exclusive GPU reservation is
+managed on the host, every command of a `host` target on that host is a
+`409` that names the reservation and the reason, until enforcement is
+back or the reservation ended. Shared claims are supported for native host targets and
 managed ephemeral Docker targets. Docker reservations belong to the target,
 not individual agents. SSH and vmlab GPU reservations are unsupported.
 
@@ -6762,8 +6975,13 @@ POST /api/targets/box/test
 
 `host_key` is `known`, `added`, `unknown`, `mismatch`, or `not_checked`.
 `stderr` is the tail of the ssh stderr (at most 2000 bytes). The key
-never shows. A target of another kind is `422 invalid` ("not
-supported"); for a target with a host agent, use the `status` verb
+never shows. An `exedev` target is tested through the ssh target of its
+recorded VM (`exedev@<ssh_dest>`, its `credential`); the report keeps
+`"kind": "exedev"` and shows that address. With no VM, or a VM with no
+ssh host yet, the test is `409 conflict`: bring the VM up with the `up`
+verb or a holder's start, then test again (TER-651). A target of another
+kind is `422 invalid` ("not supported"); for a target with a host agent,
+use the `status` verb
 (§17.3). A target whose credential does not work is `422 invalid`. Each
 test writes a `target.test` audit row with `{result, host_key,
 exit_code}`.
@@ -7070,9 +7288,10 @@ of `sh -c <script>` on the target. The URL, the path, the branch, and the
 depth are arguments of the script. The credential of the repo goes in the
 env of that run only: `TERRARIUM_GIT_USERNAME` and
 `TERRARIUM_GIT_PASSWORD` for a token, which a `credential.helper` of `-c`
-reads, or `TERRARIUM_GIT_SSH_KEY` for an SSH key, which the script writes
-to a 0600 temp file for `GIT_SSH_COMMAND` and removes at exit. The secret
-is never on a command line. The target needs `git` and `sh`. A vmlab
+reads, or `TERRARIUM_GIT_SSH_KEY` for an SSH key, base64-encoded on one
+line, which the script decodes with `base64 -d` into a 0600 temp file for
+`GIT_SSH_COMMAND` and removes at exit. The secret is never on a command
+line. The target needs `git` and `sh`, and `base64` for an SSH key. A vmlab
 target is `422 invalid`.
 
 `path` is an absolute path on the target, or a path under
@@ -7110,6 +7329,80 @@ start or a restart fails. A restart of the harness and a daemon shutdown
 leave the targets as they are. Each of these verbs writes an audit row
 with the actor `system`: `target.up` with `"reason": "agent_start"`, and
 `target.destroy` with `"reason": "agent_stop"`.
+
+#### exe.dev VMs (`kind = "exedev"`)
+
+An `exedev` target is an exe.dev VM that the daemon makes on `up` and
+removes on `down` (`crate::exedev`, TER-294). It needs `ephemeral = true`,
+no `keep`, no `address`, `host` or `port`, and a `credential`: an
+`ssh_key` that exe.dev accepts for VMs with the target's tag.
+`sync_workspace = true` mirrors the holder's workspace as on an ssh target.
+
+```toml
+kind = "exedev"
+ephemeral = true
+credential = "github-deploy-cloud-test"
+sync_workspace = true
+
+[exedev]                     # every key is optional
+api_token = "exedev-api-token"   # the API token secret: new, ls, rm
+cpu = 2                      # new --cpu
+memory_gb = 4                # new --memory=<n>GB, at most 2 per vCPU
+tag = "terrarium-dev-ssh"    # new --tag
+user = "exedev"              # the ssh user on the VM
+max_life_secs = 28800        # 60 to 28800 (8 hours)
+```
+
+- The lifecycle goes through `POST https://exe.dev/exec` with the token
+  in the `Authorization` header only: `new
+  --name=terrarium-x-<instance>-<target>-<id> --sandbox --tag=<tag>
+  --cpu=<n> --memory=<n>GB`, `ls`, `rm`. `<instance>` is the exe.dev
+  instance id of the daemon: 8 hex characters, made once in its database
+  (table `exedev_instance`). Two daemons on one exe.dev account have two
+  ids. Commands,
+  copies and the workspace sync go over ssh to `<user>@<ssh_dest>` (the
+  API stops a command at 30 s and a body at 64 KB). `up` waits up to 180 s
+  for ssh.
+- Each VM has a row in the table `exedev_vms`, written before `new` runs:
+  the VM name, the target, the account it was made on (the token secret
+  name, the target's project, and whether an admin set the target), the
+  tag, the ssh host, and `created_at` and `expires_at`. The row outlives
+  the target: `rm` always runs on the account the VM was made on, also
+  after the target's `api_token` changes or the target is deleted.
+- One lock per target serializes `up`, `down`, `status` and the sweep's
+  removal of that target's VM. An `up` that finds a recorded VM in `ls`,
+  in its life, adopts it (also a row that `new` never answered: the ssh
+  host then comes from `ls`). A recorded VM past its life is removed and
+  replaced, never adopted. A row with no ssh host that `ls` does not list
+  stays for 10 minutes after its `created_at` (its `new` may still run):
+  `status` answers `absent`, and `up` makes a new VM next to it. A `new` that fails removes its VM; when that
+  `rm` fails too, the row stays for the sweep.
+- At most 3 VMs at once over all exedev targets (the recorded ones and the
+  `terrarium-x-` VMs in `ls`). The fourth `up` answers `409` with
+  `exe.dev cap: 3 of 3 VMs run (...)`.
+- The sweep runs one minute after the start, then at the next `expires_at`
+  of a recorded VM and at least every hour, and on
+  `POST /api/exedev/sweep` (the operator only; the answer is
+  `{removed: [{vm, target, reason}], errors}`, audit row `exedev.sweep`).
+  It runs `ls` once for each account of the rows and the targets, and
+  removes:
+  - `expired`: a recorded VM past its life, with a mail to the project
+    inbox (or to the operator for a global target);
+  - `orphaned`: a recorded VM whose target is gone;
+  - `unready`: a recorded VM with no ssh host after 10 minutes, held or not;
+  - `unheld`: a recorded VM that no running agent holds after 10 minutes
+    (the holders are read again under the target lock, right before the
+    `rm`);
+  - `leftover`: a VM in `ls` with this daemon's `terrarium-x-<instance>-`
+    prefix and a tag of the account, that no row of any account records,
+    10 minutes after its `created_at` in `ls` (or after the sweep first
+    saw it). A VM of another daemon (another instance id) is never a
+    leftover here.
+  Each removal of a recorded VM writes `target.destroy` with
+  `"reason": "exedev_<reason>"`. A VM without the prefix is never removed.
+- Deleting the target removes its VM. When that `rm` fails, the target is
+  deleted and the row stays, so the next sweep removes the VM as
+  `orphaned`.
 
 ### 17.7 Target leases
 
@@ -7928,12 +8221,14 @@ A schedule:
 | `created_by` | `operator` or `agent:<ulid>`. |
 | `owner` | `actor` (the default), `project`, or `system` (§19.6). |
 | `run_as` | The actor of the runs of an actor-owned schedule. It is `created_by`, until a caller changes the `action` or the `owner`, or takes the schedule over: then it is that caller. A project- or system-owned schedule does not use it. |
-| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, and always for a trigger and a project action. |
+| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, always for a trigger and a project action, and for a `day_start` schedule while no start planned its run. |
 | `last_run` | `{at, status, summary, run_id}` of the last run, or `null`. |
 | `runs_count` | The runs so far, the skipped runs too. |
 | `source` | `api`, `file` (`[[schedules]]` in `projects/<name>.toml`), or `fleet:<name>` (§18.1). |
 | `consecutive_skips` | The runs in a row that the rights check skipped. |
 | `disabled_reason` | Why the daemon disabled the schedule. Absent when it did not. |
+| `day_start_done` | A `day_start` schedule: the local day (`YYYY-MM-DD`, in its `tz`) of its last run. A start on that day, or on an earlier day, plans no run. Absent before the first run. |
+| `day_start_last` | A `day_start` schedule: `{cause, at}` of the last detected start that planned a run. `cause` is `daemon_start`, `resume`, `host_reconnect`, or `day_change`. Absent before the first plan. |
 
 The specs:
 
@@ -7944,6 +8239,7 @@ The specs:
 | `{"kind": "at", "at": "2026-11-01T02:00:00Z"}` | One run at an RFC 3339 time in the future. |
 | `{"kind": "on", "kinds": ["ci.run.failed"], "match"?, "dedupe"?, "escalate"?, "max_per_hour"?: 30}` | A trigger: each matching event starts a run. See §19.4. |
 | `{"kind": "manual"}` | A project action: no time and no event. Only `POST .../run` starts a run. See §19.10. |
+| `{"kind": "day_start", "tz"?: "UTC", "not_before"?, "not_after"?, "delay"?, "weekdays"?}` | Start of day: one run per calendar day in `tz`, at the first start of the day. See "Start of day" in §19.3. `not_before` and `not_after` are local times as `HH:MM`; `not_after` is not before `not_before`. `delay` is a duration as for `interval`, at most `12h`. `weekdays` is a list of `mon` to `sun`; empty or absent is every day. `catch_up` does not apply. |
 
 The actions:
 
@@ -7982,13 +8278,14 @@ A run:
 | Field | Meaning |
 |---|---|
 | `status` | `running`, then `ok`, `failed`, or `skipped`. |
-| `trigger` | `cron` (the timer, for each spec kind), `manual` (`POST .../run`), `catch_up`, or `event` (a trigger). |
+| `trigger` | `cron` (the timer, for each spec kind), `manual` (`POST .../run`), `catch_up`, `event` (a trigger), or `day_start` (the planned run of a `day_start` schedule). |
 | `summary` | One line. A skip starts with `skipped:`. |
 | `output` | `webhook`: `delivery` (the ID) and `url` (§19.5). `exec`: `target`, `cmd`, `exit_code`, `end`, and the last 4000 bytes of `stdout` and `stderr`. `mail`: `message_id`, `thread_id`, `to`, `held`, `held_reason`. `turn`: `agent`, `started`, `delivery`, `status_before`. `agent`: `agent`, `verb`, `status`. `probe`: the probe outcome with `windows`. `card`: `card` (the ID, or `null`), `op` (`open`, `comment`, or `close`), and `column` for a close. |
 | `error` | Why the run failed or was skipped. |
 | `actor` | Who triggered the run: `run_as` for a timed run, the caller for a run-now, the actor of the event for a trigger run (for example `source:terra/github`). |
 | `event_seq` | The `seq` of the event that started a trigger run. `null` for the other runs. |
 | `event` | `{seq, kind, summary}` of that event, while the log has it. Absent for the other runs. |
+| `day_start` | A `day_start` run: `{cause, at}` of the detected start that planned it (as `day_start_last`). Absent for the other runs. |
 
 ### 19.2 Endpoints
 
@@ -8098,6 +8395,33 @@ daemon left `running` becomes `failed` ("the daemon stopped during the
 run"). A schedule whose next run passed more than one tick before the
 start computes its next run from now; with `catch_up: once`, it also
 runs one time, with the trigger `catch_up`.
+
+**Start of day.** A `day_start` schedule has no time of its own. The
+daemon plans its run at each detected start:
+
+- `daemon_start`: the daemon starts.
+- `resume`: the timer runs again after a gap of more than 60 s (the
+  machine slept).
+- `host_reconnect`: the host agent of the target of an `exec` action
+  comes back online. An `exec` whose target is unknown, or whose host
+  agent is offline, plans no run until then.
+- `day_change`: the day changes in `tz` while the daemon is up.
+
+A start plans a run when the day in `tz` is after `day_start_done` and is
+in `weekdays`. The run is at the start plus `delay`, and not before
+`not_before`. A run that would be after `not_after` is not planned. A
+local time that a clock change skips moves on by one hour; a time that it
+shows twice is the first instant for `not_before` and the last for
+`not_after`. The planned run sets `next_run_at`, and the timer starts it
+with the trigger `day_start`. It records the day of its start in
+`day_start_done`, so the other starts of that day plan nothing: one run
+per day. A run planned before midnight for a time after midnight runs for
+the day of its start. The daemon drops a planned run when the target's
+host agent goes offline, when it is past `not_after`, or when the machine
+slept past it into a later day; the next start plans again. At a daemon
+start, a planned run that passed is dropped, with no catch-up run.
+`schedule show` gives `next run: at the first start after <day>` while no
+run is planned.
 
 **Retention.** The daily prune timer keeps the newest 500 runs of each
 schedule.
@@ -8546,12 +8870,13 @@ any number of `if_card` and `if_job` conditions on the current state
 `card_move` (`to`, `from?`, `comment?`, `position?` `top` or `bottom`),
 `card_label` (`add?`, `remove?`), `card_comment` (`text`), `card_assign`
 (`who`), `card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
-`job_queue` (`kind` `validate`, `merge`, or `batch`; `from`, `limit?`,
+`card_blocked_mail`, `card_done_mail`, `job_queue` (`kind` `validate`, `merge`, or `batch`; `from`, `limit?`,
 `min_cards?`, and `max_wait_minutes?` for a batch only;
 `max_wait_minutes` needs `min_cards`, and `min_cards` is at most
 `limit`), `job_cancel`, `job_rerun` (`max_attempts?`), `job_split`,
-`job_fix` (`to?`, `labels?`), `agent_park`, `agent_unpark` (`turn?`), and
-`agent_end` (`outcome` `done` or `cancelled`).
+`job_fix` (`to?`, `labels?`), `agent_park`, `agent_unpark` (`turn?`),
+`agent_end` (`outcome` `done` or `cancelled`), and `script` (`source`,
+`fuel?`; TER-173, see "Script steps" in §19.9).
 
 The checks beyond the schema:
 
@@ -8671,7 +8996,7 @@ one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
 of a `job` event, `data.id`, or of a `job.verdict` event, `data.job`; a
 rule with one runs only for those events): `state` (`queued`, `running`,
 `passed`, `failed`, `cancelled`), `outcome` (`red`, `conflict`, `error`,
-`none`), and the booleans `split` (the job is a half of a split batch),
+`infra`, `none`), and the booleans `split` (the job is a half of a split batch),
 `batch` (two or more cards of the job merged, did not conflict), `rerun`
 (a rerun of the job is queued or ran), and `halves` (the job was split).
 Every field that is set must hold; every block must hold.
@@ -8731,22 +9056,29 @@ Each cut opens a project-scoped unique `version:<ULID>` group, records
 gathering, cut, version branch e2e, pre-release, and done steps, and mails
 the project lead (the operator if no lead exists). No Git work is done.
 The lead chooses the version, relabels only the snapshot members, branches,
-tests, and publishes. Later accepted cards are not added to that snapshot.
+tests, and publishes. Later accepted cards are not added to that snapshot
+by the rule. The lead adds a late card with `group add`.
 
 | endpoint | body | result |
 |---|---|---|
-| `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A closed group rejects updates. |
-| `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, group}`. Explicit acknowledgement after release CI publishes. Moves only the snapshot's accepted members to done, clears assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
+| `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A step after `cut` that starts (running, done or failed) also finishes `cut`. A closed group rejects updates. |
+| `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, also_done, group}`. Explicit acknowledgement after release CI publishes. Moves the snapshot's accepted members to done, then every other active, unheld accepted card labelled `version:vX.Y.Z` or `version:X.Y.Z` (either form of the given version) that is in no open group (TER-608), listed in `also_done`. Clears their assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
 | `POST /api/projects/{project}/version-groups/{key}/remove` | `{card}` | `{changed, group}`. Explicitly drops a member from an open snapshot without moving or editing that card. Use for a card returned for a fix, archived, or held. Removal is audited. Duplicate removal is a no-op. Closed groups reject removal. |
+| `POST /api/projects/{project}/version-groups/{key}/add` | `{card}` | `{changed, group}`. Adds a late card to an open snapshot (TER-608). The card must be active, unheld, in the accepted column, and in no other open group. Addition is audited (`version.member_added`). Duplicate addition is a no-op. Closed groups reject addition. |
 
-All three endpoints require project admin. Keys are project-scoped. A successful
+All four endpoints require project admin. Keys are project-scoped. A successful
 pipeline poll is never a built acknowledgement. The `version.built` event
-contains `key`, `version`, and `members` and names the group card.
+contains `key`, `version`, `members` and `also_done` and names the group card.
 
 Lead CLI (uses `--project`, else the agent's project):
 `terrarium group status <key> --step "version branch e2e" --state running --eta 10m`,
-`terrarium group remove <key> <card>`, and
-`terrarium group built <key> vX.Y.Z`. Removed cards do not count in that build.
+`terrarium group remove <key> <card>`, `terrarium group add <key> <card>`, and
+`terrarium group built <key>... vX.Y.Z` (one call for each key; repeat the
+command after a failure, as built is idempotent). Removed cards do not count in that build.
+
+The `version_cut` rule opens no new group while another version group of the
+project is open past its cut step (the cut step is done, or a later step has
+started). The accepted cards wait for the next version (TER-609).
 
 - `group_open`: required `key`, `title`, `column`, and `done_when`. The key
   is project-scoped. Repeating an open is a no-op, even after closure.
@@ -8796,6 +9128,15 @@ expression. No manual close endpoint exists.
   `project:<name>`, or an agent; one whose placeholder is empty is left
   out). The body defaults to the subject. A rule notifies the operator
   with `to = ["operator"]`.
+- `card_blocked_mail`, `card_done_mail`: the mails of a card move, with
+  the texts and recipients of the coded flow (TER-162 D10). On the
+  `moved` event of a move to a blocked column, `card_blocked_mail` mails
+  the blocked notice from `system` to the operator and the card's
+  creator, not to the mover. On the `moved` event of a move to `done`,
+  `card_done_mail` mails the done notice (the move's comment, else the
+  newest comment) to the participants of each linked thread. On another
+  event: a no-op. With `board_flow = code` the move sends these mails
+  itself.
 - `job_queue`: `validate` or `merge` queues a job for the run's card, of
   its repo and branch (the card's, else its ID in lower case), with the
   API's checks (the queue is set, a merge needs `project_admin` and a
@@ -8847,6 +9188,54 @@ expression. No manual close endpoint exists.
   turn. `agent_park` takes a `reason` (default `rule <name>`).
   `agent_end` closes the agent with `outcome` as `agent done` does, with
   `result` for the owner (default `the rule <name> ended it`).
+
+Script steps (TER-173): `script { source = <<'WS' ... WS  fuel = n }`
+holds a wscript program (Configweave/wscript, tag v0.3.0) for what WCL
+cannot say. `source` is 1 to 16384 bytes and has no templates; `fuel` is
+the most wscript instructions (default 100000, at most 10000000). The
+program has one module, `rule`: `rule::get(name)` reads the value of a
+placeholder (`event.<path>`, `card.*`, `group.*`, `job.*`, `rule.name`)
+as an `Option[string]`, as a template of the step would read it now,
+and `rule::quote(text)` writes a text as a WCL string. No other module
+(no fs, process, json, or env), no import, and `print` writes nowhere.
+`fn main() -> string` returns verb blocks in the syntax of `rules.wcl`
+(at most 16384 bytes and 20 verbs; empty: none), for example
+`card_move { to = "@review" }`. In a wscript string `{x}` is a hole, so
+a brace is `{{` or `}}`.
+
+- The engine runs the program in a child process of the daemon binary
+  (`terrariumd __rule-script`): an empty environment, `/` as its
+  directory, its input (the source and the values, at most 256 KiB) on
+  stdin and its result on stdout. The child first closes each file from
+  3 up, then sets its own limits: 256 MiB of data (`RLIMIT_DATA`), 10 s
+  of CPU, no file writes, no core file, 16 open files. The parent stops
+  it after 5 s, with a call depth of 200. The runs of the engine share 4
+  children at a time and wait at most 30 s for a slot (then the step
+  fails: "the script slots are busy"). The program runs between two
+  writes of the run, never inside a database closure.
+- The returned blocks are checked as the verbs of one rule (the schema,
+  the arguments, the templates, the columns of the board): no rule, no
+  condition, no field of the rule, and no script step. The step is then
+  replaced by those verbs in the stored rule of the run, so a restart
+  runs them and not the program again. Each runs as the rule actor,
+  with the checks of a verb of the file; their `{{...}}` placeholders
+  are filled quoted. Each line of each text argument (also a text in a
+  list) that starts with a turn tag is defused (`[User]` becomes
+  `[\User]`).
+- The step's result in `steps` is `{verb: "script.run", ok, changed:
+  false, detail: {verbs, fuel_used}}`. A program that does not compile,
+  fails, runs out of fuel, hits a limit, or returns blocks that do not
+  check fails the run at the step (`action <n> (script.run) failed:
+  <reason>`); the actions after it do not run.
+- The dry run runs the programs after its read and shows `{verb:
+  "script.run", fuel_used, returned}` followed by the returned verbs,
+  filled as the others. A program that fails makes the plan `failed`,
+  with the reason. A dry run whose rules (stored or `text`) hold a
+  script step needs `project_admin` of the project (else `403`). The dry
+  runs have their own single child slot, never one of the engine's: a
+  dry run waits at most 2 s for it (then the plan fails: "the script
+  slots are busy"), runs at most 20 programs, and all its programs take
+  at most 15 s together; the ones after that are not run.
 
 Timers (TER-172): the engine checks the batch rules (`job_queue` of kind
 `batch` with `min_cards` and `max_wait_minutes`) about every 10 seconds.
@@ -8971,7 +9360,27 @@ Its rules, in order:
 | `merge-red-group`, `merge-red-split-note`, `merge-red-fix-note` | a red merge with two or more merged cards | `job_fix` (at most 3 fix cards), then `job_split` after 3; the split comment, or the labels off and a note of the fix card |
 | `job-fail-conflict`, `job-fail-red`, `job-fail-error` | a final failure | labels off, the failure block on the body, the top of `@ready` with the comment, unassign, a mail to the worker |
 | `job-cancelled` | a cancelled verdict | labels off |
-| `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `accepted` (names, as §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
+| `card-blocked-mail`, `card-done-mail` | a card move to the blocked column; to `done` | the blocked notice to the operator and the creator; the done notice on each linked thread |
+| `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `merge_queue`, `accepted` (roles, with the names as fallback, §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
+
+The move mails of the rules differ from the mails of the coded move
+(TER-536):
+
+- The rules send them after the move, in their own write. A late run
+  names the column of the event (`data.to`), not the column the card is
+  in now. An event without `author` names its actor (`operator`, the
+  agent, else `system`).
+- `card-blocked-mail` and `card-done-mail` set `max_per_hour = 600`: at
+  most 600 runs of each rule in an hour, per project and per card. A
+  later move in that hour sends no mail (a `skipped` run).
+- A move at chain depth 4 (a move by a rule run of a chain of rule runs)
+  starts no run, so it sends no mail (a `skipped` run, loop guard).
+- `card.blocked_mail` and `card.done_mail` only notify: they act on a
+  card held by the GitHub author gate, as the coded move does. Every
+  other verb refuses a held card.
+- With `board_flow = code` the move sends the mails, and the two verbs
+  are a no-op (`noop`), so a `rules.wcl` that uses them sends no second
+  mail.
 
 One change from the coded flow, by the operator's rule of 2026-11-07
 (MEM-84): a red merge group gets a fix card first, and splits in halves
@@ -9022,11 +9431,25 @@ or name) and a `review` column:
 |---|---|---|
 | `merge-queue-move` | a new merge job (`card merge`, `POST /api/merges`, or the batch rule) | each card to `@merge_queue` (a card there already stays) |
 | `merge-queue-cancel` | a cancelled merge verdict | the card from `@merge_queue` back to `@review` |
-| `merge-queue-batch` | a card moved to the `merge_queue` role column, and its timer | one batch merge of the cards that wait in `@merge_queue`, in board order: `limit = 8`, `min_cards = 8`, `max_wait_minutes = 30` (8 cards wait, or 30 minutes after the first one) |
+| `merge-queue-batch` | a card moved to the `merge_queue` role column, and its timer | one batch merge of the cards that wait in `@merge_queue`, in board order, when the merge lane is free: `limit = 8`, `min_cards = 4`, `max_wait_minutes = 30` (4 cards wait, or 30 minutes after the first one) |
 
 The pass (`@accepted`), the red result (the top of `@ready`), and the
 labels and comments stay with the flow of the project. Change the three
 numbers of `merge-queue-batch` to change the batch.
+
+The merge lane (TER-644): a `job_queue` batch is a no-op while a merge
+job of the project is queued or running, with the job in `lane` of the
+run detail, so the cards wait and the next batch takes them all. The
+engine checks each batch rule with `min_cards` and `max_wait_minutes`
+about every 10 seconds: when the lane is free and `min_cards` cards wait,
+or the first one came `max_wait_minutes` ago, it writes a `rule.timer`
+event that runs the rule. While the lane is busy it writes no timer and
+keeps the wait, so 1 to 3 cards go soon after the lane is free once they
+waited 30 minutes. A `release-blocker` card (TER-607) also waits for a
+busy lane, then goes first and alone with no count or wait. A project
+trigger on the end of a merge job (for
+example a schedule that mails the lead) can stay as a notice; the batch
+does not need it.
 
 A switch back from `rules` to `code` drops the pack at the next pass of
 the engine. A job that ended under `rules` but whose events the engine
@@ -9060,7 +9483,7 @@ board screen.
 
 **The migration.** The pack names columns by role (`@review`,
 `@accepted`, `@ready`), and its bound agent rules name the wait columns
-(`validating`, `review`, `accepted`). A board can lack some of them. On
+(`validating`, `review`, `merge_queue`, `accepted`). A board can lack some of them. On
 such a board a run of the pack fails (§19.9). The migration maps the pack
 to the board's columns:
 
@@ -9086,6 +9509,18 @@ Each changed pack rule becomes an override (a rule with the pack rule's
 name, §19.11) at the end of the project's `rules.wcl`, with the reasons
 in its `description`. A pack rule that `rules.wcl` replaces already stays
 as it is (`kept`). A second migration of the same board changes nothing.
+
+A migration before TER-222 left `merge_queue` out of the `agent-park` and
+`agent-unpark` overrides, so a move from review to the merge queue woke
+the bound agent. Each load of the config (the start and `POST
+/api/reload`) adds it one time to the API rules of a project (TER-243). It
+changes only a block that is still exactly the text of that old migration
+for the board, and the board needs a merge queue column (the role
+`merge_queue`, else the name on a column with no role). The changed block
+gets `merge_queue added (TER-243).` at the end of its `description`, and
+a block with that note is never changed again. An edited block and a
+file's rules stay as they are. The write is a `rules.put` audit row. A
+problem is one line in the load report and does not fail the load.
 
 **The lint.** It reads the rules that the engine runs: the pack with the
 project's own rules for `board_flow = rules`, else only its own rules.
@@ -10350,7 +10785,7 @@ A run (the list items, and the answer of an upload and a link change):
  "file_name":"junit.xml","raw_size":12345,"notes":[],
  "cards":["DEMO-12"],"labels":["version:1.2.0"],
  "created_by":"01M5PA0T…","created_by_name":"demo/worker",
- "created_at":"2026-11-02T01:03:00.000Z","url":"/p/demo/board/tests/01JB7…"}
+ "created_at":"2026-11-02T01:03:00.000Z","url":"/p/demo/tests/01JB7…"}
 ```
 
 | Field | Meaning |
@@ -11191,6 +11626,38 @@ has no restore, because a restore replaces the database under the daemon.
    root that the backup does not have (`work`, without `--work`) does not
    change; `--skip-work` leaves the work root too.
 
+**The restore drill.** Test a backup before you need it:
+
+```sh
+terrariumd backup drill <file> [--base <full>] [--passphrase-file <file>] [--into <dir>] [--keep] [--json]
+```
+
+The drill restores the backup into an empty scratch dir (default: a new
+`.drill-<id>` dir in the backup dir), with the roots `state`, `config`,
+and `work` in it. It then checks that each manifest entry is in place
+with its size, that the restored database passes `PRAGMA
+integrity_check` and has the schema version of the header, and that
+`secrets.key` is back. The live data does not change, so the daemon can
+run. The scratch dir holds the secrets in plain form: the drill deletes it
+at the end unless `--keep`. Only an absent or empty dir is taken: a dir
+with content, one that cannot be read (for example permission denied),
+or a symlink is refused and not deleted. Run a drill
+after the first scheduled backup, after a key rotation, and after an
+upgrade of terrariumd.
+
+**The restore, step by step.**
+
+1. Pick the backup: `terrariumd backup ls`. For a diff, its base must be in
+   the same dir (or give `--base`).
+2. Get the passphrase: the `backup-key` secret is in the backup itself, so
+   use your off-server copy. A backup older than the last rotation needs
+   the old passphrase.
+3. Drill it: `terrariumd backup drill <file> --passphrase-file <file>`.
+4. Stop the daemon.
+5. Restore: `terrariumd backup restore <file> --passphrase-file <file>`.
+6. Start the daemon. Check the board, the agents, and `terrarium secret
+   ls`.
+
 Delete the `.terrarium-pre-restore-*` dirs when the daemon runs well. The
 restore writes the files as the user that runs it: run it as the user of
 the daemon. A database from an older terrariumd migrates at the next
@@ -11199,18 +11666,72 @@ migrations of this build) does not start.
 
 ### 32.4 Scheduled backups
 
-`TERRARIUM_BACKUP_SCHEDULE` (default `off`; `daily`, `weekly`, or a
-duration of `1h` or more): a daemon task makes a backup one interval after
-the newest backup in the dir, and not before 10 minutes after the start. A
-failed run waits one interval too. The backup is `full` when the dir has no
-full backup or when the newest is older than `TERRARIUM_BACKUP_FULL_EVERY`
-(default `7d`); else it is a `diff` of the newest full backup. Then the
-task keeps the newest `TERRARIUM_BACKUP_KEEP` (default `4`) full backups and
-their diffs, and deletes the rest (audit `backup.prune`).
-`TERRARIUM_BACKUP_WORK=on` adds the workspaces.
-`TERRARIUM_BACKUP_PASSPHRASE_FILE` seals each backup with the first line
-of that file. The audit actor is `system:backup`. A failure writes the
-audit row `backup.failed` with the error.
+The settings are daemon env vars:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TERRARIUM_BACKUP_SCHEDULE` | `off` | `daily`, `weekly`, or a duration of `1h` or more. |
+| `TERRARIUM_BACKUP_FULL_EVERY` | `7d` | The longest time between two full backups. |
+| `TERRARIUM_BACKUP_KEEP` | `4` | The full backups to keep, each with its diffs. |
+| `TERRARIUM_BACKUP_WORK` | `off` | `on`: add the workspaces. |
+| `TERRARIUM_BACKUP_KEY_SECRET` | `backup-key` | The global secret with the passphrase. |
+| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. The daemon user must own it, and only the owner may read it (mode `0600` or `0400`); else each run fails. |
+
+A bad value stops the daemon start. With a schedule, a daemon task makes a
+backup one interval after the newest backup in the dir, and not before 10
+minutes after the start. A failed run waits one interval too.
+
+**Kind.** The backup is `full` when the dir has no full backup, when the
+newest is older than `TERRARIUM_BACKUP_FULL_EVERY`, or when the key does
+not open the newest full backup (it is not sealed, or the key was
+rotated). Else it is a `diff` of the newest full backup. A diff and its
+base so always have the same key. A run holds the one-backup lock of the
+dir from the choice of the kind and the base to the prune: a manual
+backup (§32.5) during the run gets `409 conflict`; it does not wait.
+
+**The key.** A scheduled backup holds every secret, so it is always
+sealed (§32.2). The passphrase is the `passphrase` field of the global
+secret `backup-key`, else its `value` field (`terrarium secret set
+backup-key`; an `api_key` or a `generic` secret). With no key the run
+fails and the operator gets a mail. The key never goes into a log, an
+event, an audit row, or an error. Keep a copy of the passphrase off the
+server: the secret store is in the backup, so a lost server takes the
+secret with it.
+
+**Rotation.** Set a new value on the secret. The next run is a full backup
+with the new key. The older backups keep the old key: keep the old
+passphrase until the retention deletes the last of them (after
+`TERRARIUM_BACKUP_KEEP` newer full backups). Restore or verify an old
+backup with the old passphrase (`--passphrase-file`).
+
+**Verify and record.** Each run reads the new backup back and checks each
+file against the manifest (§32.3 `verify`). The audit actor is
+`system:backup`. The rows are `backup.create`, `backup.verify` (`name`,
+`id`, `kind`, `checked_files`), `backup.prune`, `backup.failed` (`kind`,
+`error`), `backup.recovered`, and `backup.missed` (`due`). Each run also
+writes a global event of the kind `backup` with `change`: `verified`,
+`pruned`, `failed` (`level: error`), `recovered`, or `missed`
+(`level: error`). A backup that does not verify moves to
+`.unverified-<name>` in the backup dir: it is not a base and not a kept
+backup. When the move fails the run deletes the file; when that fails
+too, the error mail says to delete it by hand.
+
+**Retention.** Only a full backup that verified prunes the dir: it keeps
+the newest `TERRARIUM_BACKUP_KEEP` full backups and their diffs, and
+deletes the rest. Nothing is deleted before a newer full backup is
+verified, and nothing is deleted while the runs fail.
+
+**Alerts.** The first failed run of a streak mails the operator from
+`system` (subject `Scheduled backup failed`, with the error). The next
+failures write events only, and the first good run writes `recovered`. A
+missed run (no backup and no try for one interval and one hour, for
+example after the daemon was down) mails the operator once per due time
+(subject `Scheduled backup missed`). A new backup then runs 10 minutes
+after the start. The schedule keeps its marks in `.schedule.json` in the
+backup dir: the time it was turned on, the last try, and the due time of
+the last missed mail. So a restart does not mail the same missed run
+again, and a schedule that is turned on over an old manual backup mails
+no missed run at once. The file goes when the schedule is off.
 
 This task is not a project schedule (§19): a project schedule starts agent
 turns in one project, and a backup is of the whole daemon.
@@ -11218,7 +11739,8 @@ turns in one project, and a backup is of the whole daemon.
 ### 32.5 The API
 
 The operator only (`403` for an agent, also a sysadmin). One backup runs at
-a time: a create while one runs is `409 conflict`.
+a time per backup dir: a create while one runs is `409 conflict`. A scheduled run waits
+for a running backup instead.
 
 #### `POST /api/backups`
 
@@ -11602,8 +12124,9 @@ The updater:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TERRARIUM_UPDATE_VERIFY` | `gh` | The image check (§34.4): `gh`, `cosign`, `off`, or `command:<shell command>`. |
-| `TERRARIUM_UPDATE_WORKFLOW` | `.github/workflows/ci.yml` | The workflow in `TERRARIUM_UPDATE_REPO` that signs the releases (`--signer-workflow`). |
+| `TERRARIUM_UPDATE_VERIFY` | `cosign` | The image check (§34.4): `cosign`, `gh`, `cosign-keyless`, `off`, or `command:<shell command>`. |
+| `TERRARIUM_UPDATE_COSIGN_KEY` | `/opt/terrarium/release/cosign.pub` | The public key of the `cosign` check: the release key of the image (`docker/release/cosign.pub`). |
+| `TERRARIUM_UPDATE_WORKFLOW` | `.github/workflows/ci.yml` | The workflow in `TERRARIUM_UPDATE_REPO` that signed the releases (`gh`, `--signer-workflow`). |
 | `TERRARIUM_UPDATE_IMAGE` | `ghcr.io/wiltaylor/terrarium` | The image repository of the releases. |
 | `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium` | The GitHub repo: the identity of the signing workflow. |
 | `TERRARIUM_UPDATE_DRAIN_WAIT` | `600` | Seconds that the drain waits for the running turns. |
@@ -11660,12 +12183,22 @@ One run at a time: a request while a run runs is `409 conflict`.
 `TERRARIUM_UPDATE_VERIFY` names a program, so that the check follows the
 way the release signs its images ([release.md](release.md)):
 
-- `gh` (the default): `gh attestation verify oci://<repo image>@<digest>
+- `cosign` (the default): `cosign verify --key <TERRARIUM_UPDATE_COSIGN_KEY>
+  <repo image>@<digest>`. The local release build (`just release::publish`,
+  [release.md](release.md), "The local release build") signs the image
+  digest with the release key pair. cosign checks the signature and its
+  transparency log entry with the public key, which the image has at
+  `/opt/terrarium/release/cosign.pub` (`docker/release/cosign.pub`). The
+  image has cosign 3.1.4 (pinned with its SHA-256 in the Dockerfile). A
+  missing key file fails the check before cosign runs. A release that the
+  GitHub workflow made has no cosign signature: this check refuses it (see
+  release.md, "The switch from the workflow to the local build").
+- `gh`: `gh attestation verify oci://<repo image>@<digest>
   --repo <repo> --signer-workflow <repo>/.github/workflows/ci.yml
-  --bundle-from-oci`. The release signs only with
-  `actions/attest-build-provenance` and pushes the Sigstore bundle to the
-  registry; this is the check of [release.md](release.md), "How to verify
-  a release". gh reads the bundle from GHCR, and checks the signature, the
+  --bundle-from-oci`. The check of the releases that the GitHub workflow
+  made: they sign only with `actions/attest-build-provenance` and push the
+  Sigstore bundle to the registry ([release.md](release.md), "A release of
+  the workflow"). gh reads the bundle from GHCR, and checks the signature, the
   transparency log entry, the digest, and that the certificate is of the
   release workflow of the repo. The image has gh 2.100.0 (pinned with its
   SHA-256 in the Dockerfile). gh asks for a token before it starts, also
@@ -11673,18 +12206,12 @@ way the release signs its images ([release.md](release.md)):
   `GITHUB_TOKEN`, the updater gives gh a placeholder. gh sends it to no
   GitHub API in this mode; a call that needs a real token fails, and so
   does the update. Set `GH_TOKEN` in the updater env to use a real one.
-- `cosign`: `cosign verify --certificate-identity-regexp
+- `cosign-keyless`: `cosign verify --certificate-identity-regexp
   '^https://github\.com/<repo>/\.github/workflows/'
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
-  <ref>`. The release makes no cosign signature and the image has no
-  cosign: this mode is for an image of your own (`TERRARIUM_UPDATE_IMAGE`,
-  `TERRARIUM_UPDATER_IMAGE`).
-
-Why gh and not cosign: the release has only the GitHub attestation, and
-`gh attestation verify` is the documented check for it. cosign v2.4 reads
-signatures and attestations in its own format; its reading of the GitHub
-bundle in the OCI referrers was not proved to work, so it is not the
-default.
+  <ref>`. For an image of your own that a GitHub workflow signs with
+  keyless cosign (`TERRARIUM_UPDATE_IMAGE`, `TERRARIUM_UPDATER_IMAGE`).
+  Before TER-613 this mode was named `cosign`.
 - `command:<shell command>`: `sh -c <command>` with the image in
   `TERRARIUM_UPDATE_REF`. Exit 0 accepts the image.
 - `off`: no check. The `verify` step is `skipped`, and the updater logs a
@@ -11793,8 +12320,16 @@ Answers `202` with `{run}`. No previous switch: the run fails at once
 
 #### `POST /api/system/update/drain`, `POST /api/system/update/resume`
 
-The operator only. Answer `{on, since, by, busy, jobs}`. The drain writes the
-audit row `system.drain`.
+The operator only. Answer `{on, since, by, busy, jobs, jobs_drain}`. The drain
+writes the audit row `system.drain`.
+
+With the body `{"jobs_only": true}` (TER-614, `terrarium admin update
+drain-jobs`) only the job slots drain, for example once an update is
+announced: no job of the job queue starts, the running jobs finish, and
+the agents go on. `jobs` lists the running jobs; `jobs_drain` is `{since,
+by}` while it is on, else `null`. The queued jobs wait. `resume` ends it,
+and so does a restart (it lives in memory). A running job that must not
+wait for its end is cancelled with the job cancel.
 
 ### 34.8 Mail
 
@@ -11891,8 +12426,15 @@ The daemon pins the Docker VM's public host key and owns its SSH local
 forward. Trusted relay code embedded in the daemon release, never read
 from the merged branch, creates a 0600 Unix socket in a job-private
 directory on the target. Docker byte streams travel over its executor
-session to the daemon's SSH forward. The recipe gets only
-`DOCKER_HOST=unix://<job socket>`. Teardown closes the relay, socket, and
+session to the daemon's SSH forward. The daemon starts the relay only after
+a Docker `GET /_ping` through its forward returned 200 (it retries for up to
+90 seconds after the reset). The recipe gets only
+`TERRARIUM_DOCKER_HOST=unix://<job socket>`, not `DOCKER_HOST`: on a
+`docker` target the host agent's own `docker exec` client would read
+`DOCKER_HOST` (TER-477). The gate script sets `DOCKER_HOST` from it when
+`TERRARIUM_DOCKER_CI=1`. The daemon logs the reset start and result (exit
+code and the last stdout line), the tunnel up or its failure, and the relay
+socket path. Teardown closes the relay, socket, and
 SSH child on success or failure. Other processes sharing the target OS
 account can reach that socket during the job. This is an accepted risk:
 it grants Docker control of the throwaway VM, not access to its SSH key.
@@ -11900,7 +12442,7 @@ Before opening the tunnel the daemon calls META-104's forced-command SSH
 reset as `dockerci@10.3.0.2` on port 22, with the second job-only key and
 strict checking against configured `reset_known_hosts` in its private RunDir.
 It sends no remote command. Exit 0 permits the tunnel, exit 1 fails, exit
-75 reports the reset lock busy, and a 150-second timeout fails closed.
+75 reports the reset lock busy, and a 180-second timeout per attempt fails closed.
 Both keys remain daemon-side. The VM's LAN and Tailscale egress is blocked
 outside the VM by vmlab switch rules, so branch code cannot undo it.
 The generic stream relay
@@ -11961,6 +12503,7 @@ for a merge job. It never receives the repository credential:
 | `TERRARIUM_JOB_ID`        | the job ID                                                            |
 | `TERRARIUM_HEAD`          | the tested commit: the card commit, or the merge commit               |
 | `TERRARIUM_JOB_SLOT`      | the slot of the job (TER-190): `1` to `slots` for a validate job, `0` for a merge |
+| `TERRARIUM_SLOT_LOCK`     | the absolute path of the slot's lock file (`<slot>.lock`, TER-448): the recipe holds it, with the clone step, for its whole run |
 | `TERRARIUM_BASE`          | the base of the change: for a validate job the merge-base of the card commit and `next`, for a merge job `next` before the merge |
 | `TERRARIUM_CHANGED_FILES` | the absolute path of a file in the clone (`.git/terrarium/changed-files`) with the paths that differ between the base and the head, one per line (`git diff --name-only --no-renames`, so a rename lists both paths) |
 
@@ -12020,7 +12563,18 @@ Each slot has one work tree on the target, `<work_dir>/<project>/slot-<n>`
 jobs before. A job takes a slot when it starts: the lowest of `1` to
 `slots` that no running job of its project holds, and `0` for a merge,
 so merges have a tree of their own. A cancelled job holds its slot until
-its processes are gone, and no two jobs use one tree at once. The job
+its processes are gone, and no two jobs use one tree at once. The clone
+step and the recipe also hold an exclusive lock on `<slot>.lock` next
+to the tree (TER-448), so a second daemon on the same target with the
+same project name and work dir (two daemons share the default
+`/tmp/terrarium-jobs/<project>`) cannot replace the tree of a running
+job: its job fails with a clear error, and the recipe checks the tested
+head again under the lock. Only the job's own wrapper shell holds the
+lock: the recipe runs as its child without the lock's file descriptor,
+so a process that the recipe leaves running does not keep the slot
+locked after the job. The lock needs `flock` on the target; without
+it the steps run unlocked, as before TER-448, and each step prints
+`no flock on the target: slot not locked`. The job
 row has `slot` while it runs. The step checks out the commit with
 `git checkout -f` and removes every file that the commit does not track,
 ignored ones too, except `target/` at the root (`git clean -ffdx -e
@@ -12177,7 +12731,33 @@ one key, the strictest applies until a cap write replaces them.
   way at most 3 times in a row in one daemon run: the next lost run gets
   the same kill (and the slot mark), then it is `red`, and its `tail`
   starts with `the infrastructure lost the run 4
-  times in a row, so this run counts as red: <why>`.
+  times in a row, so this run counts as red: <why>`. A merge job ends
+  `infra` instead (below).
+- A merge job that failed on its host before its tests (TER-614) is not a
+  test failure. It does not split, does not rerun at once, and uses no
+  attempt. Two paths. An end with outcome `error`, no tested commit
+  (`head`), and a failed step `receive`, `secrets`, or `recipe` (the
+  recipe did not start) goes back to the queue (event change `requeued`)
+  and runs once more after 5 minutes, and not while its host agent is
+  offline (a host agent that comes back online ends the wait early); each
+  card gets a comment that says so. A second such end ends the job with
+  outcome `infra` (verdict `infra`). A run lost past the cap above ends
+  `infra` at once, with no delayed retry. An `infra` end has no rerun, no
+  split, and no failure block: its cards lose the job labels and stay in
+  the merge queue with no job, with a comment. They go in the next batch
+  when a card enters the merge queue or the lead queues them. The retry
+  mark lives in memory: a daemon restart gives at most one extra run.
+- A failure in the daemon before the tests (`setup`, `prepare`) stays
+  `error`. A card branch that the daemon cannot fetch (deleted or
+  rewritten after the accept) or merge leaves the merge as a conflict does:
+  the failure block, the top of `ready`, a mail to its worker; the other
+  cards of the batch go on.
+- Each failed end has the step that failed as the last line of its `tail`:
+  `[failed step: <step>]`, one of `setup`, `prepare`, `receive`, `secrets`,
+  `recipe`, `push`. Each card gets a comment with the failed step and the
+  last 20 lines of the tail, indented. The daemon writes it in both board flows, after each `error`
+  or `infra` end and at the first infra end. A `red` end has the output in
+  its failure block.
 
 A batch merge:
 
@@ -12213,8 +12793,8 @@ start with `Job queue:`.
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?, eta?}`. `eta` is the planned duration (§35.5). The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
-| `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?}`. `eta` is the planned duration (§35.5). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
-| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of one or more cards, in this order (no limit of the daemon; the batch rule of the merge queue sets its own, §19.11). All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
+| `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?, onto?}`. `eta` is the planned duration (§35.5). `onto` is `next` (the default) or a release branch `release/X.Y.Z` (see the release-blocker fix below). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of one or more cards, in this order (no limit of the daemon; the batch rule of the merge queue sets its own, §19.11). All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. A batch of two or more cards with a `release-blocker` card is refused with `409`: that card merges alone. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/projects/{name}/jobs/stats` | members                            | `?since=`: an RFC 3339 time, or a duration back from now such as `7d` (the default); anything else is `400`. The jobs created at or after `since` (a rerun keeps the `created_at` of its first try): `{project, since, jobs, first_attempt, validate, merge, reruns, conflicts, errors, cancelled, open, splits, failed_steps: [{step, failed}], failed_targets: [{target, failed, first_attempt}], untargeted_test_fails}`. Each of `first_attempt`, `validate`, `merge`, and `reruns` is `{ended, passed, failed, pass_rate}`; `pass_rate` is `passed / ended` from 0 to 1, `null` with none ended. A first attempt is attempt 1 and no split half; a `conflict` counts in `conflicts`, not in `ended`. A job with outcome `error` could not run (host agent offline, prepare step failed, push to `next` failed): first attempts and reruns with it count in `errors`, not in `ended`, so an outage does not lower the rate. Split halves count in `splits` only. `failed_targets` (most first) come from the `error: N targets failed:` lines of the failed jobs' output tails, all attempts; `failed_steps` from the first ``error: recipe `<step>` failed`` line, or `timeout`. `untargeted_test_fails` counts the failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
@@ -12222,6 +12802,61 @@ start with `Job queue:`.
 
 A held card (the GitHub author gate, §8.3) gets no validate or merge
 job, from any caller (`403`).
+
+A merge takes the reviewed commit of each card (TER-553): the head of the
+card branch that the daemon recorded when the card moved into the merge
+queue. A card in the merge queue without a reviewed commit for the branch
+of the merge is refused with `409` (TER-580): the head is not recorded
+yet, the commit is of another branch (a `branch` in the body, or a branch
+changed after the accept), or the card has no round (a column got the
+`merge_queue` role while it held the card). A card outside the merge
+queue merges the head of its branch on the remote at queue time.
+
+The daemon reads the head right before the move, and in the background
+after it when that read failed. The background read fills a round only
+within 10 minutes of the accept; after that the round needs a fresh
+accept. The rounds that the TER-553 upgrade opened for the cards already
+in the merge queue need one too (TER-580): they hold no reviewed commit.
+For each such round the card gets one `Job queue:` comment with the
+reason. To go on, review the head of the branch, then move the card out
+of the merge queue and back in.
+
+**Upgrade step (TER-580).** After the upgrade, each card that was in the
+merge queue at the TER-553 upgrade and has not left it since stays out of
+merges until it is moved out of the merge queue and back in.
+
+**A release-blocker fix (TER-607).** A frozen version keeps its members.
+A fix for it goes in a card with the label `release-blocker`, on a branch
+made from the release branch `release/X.Y.Z`, not from `next` and not on
+top of another card.
+
+1. The batch rule of the merge queue takes the first card of the column
+   with the label that could go, alone and at once, as a batch of one.
+   The other cards wait for the next batch. There is no preemption: a
+   merge job that is queued or running already, and the halves of a red
+   batch that splits, still run before the blocker. A `card merge` (`POST
+   /api/merges`) of two or more cards with a `release-blocker` card is
+   refused with `409`.
+2. After its merge onto `next` passed, `card merge <id> --onto
+   release/X.Y.Z` (`onto` in the body; one card, a project admin) merges
+   the commit that this merge took onto the release branch, and pushes
+   only that branch. `main` then gets the release merge as usual. The
+   job never takes the head of the card branch: a push after the merge
+   onto `next` does not reach the release. A card without a passed merge
+   of its branch onto `next` is refused with `409`.
+3. The job checks what the fix brings into the release. The tested
+   commit must be on `next`. Let M be the oldest commit of the
+   first-parent line of `next` that holds the tested commit (the merge
+   of the fix onto `next`). No commit of `release/X.Y.Z..tested` may be
+   in `release/X.Y.Z..M^1`, the history of `next` before the fix landed
+   that the release does not have. So a fix branch made from `next`
+   after the cut is refused, and so is a fix stacked on, or merging, a
+   card that merged onto `next` before the fix: both would take
+   unreleased cards into the frozen version. The job then fails with
+   outcome `error`, the release branch stays, and the tail names the
+   commits. Limit: a fix that merges a card branch that is not on `next`
+   yet passes, since its commits cannot be told apart from the fix's own
+   commits. Those commits then reach `next` in the same merge as the fix.
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.

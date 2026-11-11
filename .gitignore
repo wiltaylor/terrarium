@@ -17,6 +17,8 @@ dashboard/dist/
 .idea/
 .vscode/
 *.swp
+# The output of `just release::*` (scripts/release.py)
+/release-out/
 # Python
 __pycache__/
 .venv/

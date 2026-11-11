@@ -15,7 +15,8 @@ use terrarium_updater::protocol::{DEFAULT_SOCKET, ENV_SOCKET, Request, Response}
 use terrarium_updater::registry::HttpRegistry;
 use terrarium_updater::store::{DEFAULT_KEEP, Store};
 use terrarium_updater::verify::{
-    CommandVerifier, DEFAULT_REPO, DEFAULT_WORKFLOW, ENV_REPO, ENV_VERIFY, ENV_WORKFLOW, Mode,
+    CommandVerifier, DEFAULT_COSIGN_KEY, DEFAULT_REPO, DEFAULT_WORKFLOW, ENV_COSIGN_KEY, ENV_REPO,
+    ENV_VERIFY, ENV_WORKFLOW, Mode, Signer,
 };
 use terrarium_updater::{client, server};
 
@@ -59,13 +60,16 @@ struct ServeArgs {
     /// The GitHub repo of the releases, for the signature identity.
     #[arg(long, env = ENV_REPO, default_value = DEFAULT_REPO)]
     repo: String,
-    /// The image check: gh (the build provenance), cosign, off, or
-    /// command:<shell command>.
-    #[arg(long, env = ENV_VERIFY, default_value = "gh")]
+    /// The image check: cosign (the release key), gh (the build provenance
+    /// of the GitHub workflow), cosign-keyless, off, or command:<shell command>.
+    #[arg(long, env = ENV_VERIFY, default_value = "cosign")]
     verify: String,
-    /// The workflow in the repo that signs the releases.
+    /// The workflow in the repo that signed the releases (gh).
     #[arg(long, env = ENV_WORKFLOW, default_value = DEFAULT_WORKFLOW)]
     workflow: String,
+    /// The release public key of the cosign check.
+    #[arg(long, env = ENV_COSIGN_KEY, default_value = DEFAULT_COSIGN_KEY)]
+    cosign_key: String,
     /// Seconds that the drain waits for the running turns.
     #[arg(long, env = "TERRARIUM_UPDATE_DRAIN_WAIT", default_value_t = 600)]
     drain_wait: u64,
@@ -147,8 +151,11 @@ async fn serve(socket: &std::path::Path, a: ServeArgs) -> anyhow::Result<()> {
         Arc::new(HttpRegistry::new().map_err(anyhow::Error::msg)?),
         Arc::new(CommandVerifier {
             mode,
-            repo: a.repo,
-            workflow: a.workflow,
+            signer: Signer {
+                repo: a.repo,
+                workflow: a.workflow,
+                key: a.cosign_key,
+            },
         }),
         Store::new(a.state, DEFAULT_KEEP),
         Config {

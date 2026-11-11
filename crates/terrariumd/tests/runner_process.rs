@@ -40,7 +40,10 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-const WAIT: Duration = Duration::from_secs(20);
+/// The fixed deadlines of this file. 20 s was too short at load 40 to 60
+/// on 32 cores (TER-647). The state waits of [`Td`] count only time
+/// without progress ([`common::Stall`]).
+const WAIT: Duration = common::WAIT;
 
 fn fake_tui() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../terrarium-runner/tests/fake_tui/fake_tui.py")
@@ -194,7 +197,22 @@ fn env_wrapper(root: &Path) -> PathBuf {
     bin
 }
 
-fn supervisor(root: &Path, tools: Option<&Path>, cli: bool) -> Arc<RunnerSupervisor> {
+/// The daemon build that the supervisor compares runners with, and its
+/// upgrade limit ([`Td::upgrade`]).
+#[derive(Clone, Default)]
+struct Upgrade {
+    version: Option<String>,
+    limit: Option<usize>,
+    /// Start the runner processes through [`gated_runner`].
+    runner: Option<PathBuf>,
+}
+
+fn supervisor(
+    root: &Path,
+    tools: Option<&Path>,
+    cli: bool,
+    upgrade: &Upgrade,
+) -> Arc<RunnerSupervisor> {
     let mut homes = HashMap::new();
     for h in [
         HarnessId::Claude,
@@ -244,7 +262,18 @@ fn supervisor(root: &Path, tools: Option<&Path>, cli: bool) -> Arc<RunnerSupervi
         submit_timeout: Duration::from_secs(3),
         ..RunnerTuning::default()
     };
-    cfg.mode = RunnerMode::Process { bin: runner_bin() };
+    cfg.mode = RunnerMode::Process {
+        bin: upgrade.runner.clone().unwrap_or_else(runner_bin),
+    };
+    // A version with no ref schedules no upgrade restart. The runner binary
+    // of the tests can be of another build than the test daemon: the
+    // pinned N-1 runner, or a `terrarium-runner` that `runner_bin` finds
+    // from an earlier build with another `TERRARIUM_GIT_REF`. Only the
+    // upgrade test claims a build.
+    cfg.version = upgrade.version.clone().unwrap_or_else(|| "0.0.0".into());
+    if let Some(n) = upgrade.limit {
+        cfg.upgrade_limit = n;
+    }
     Arc::new(RunnerSupervisor::new(cfg))
 }
 
@@ -261,6 +290,8 @@ struct Td {
     /// The sandbox binds the real `terrarium` CLI, and the harness writes
     /// its env ([`Td::start_with_cli`]).
     cli: bool,
+    /// The next [`Td::boot`] claims this daemon build.
+    upgrade: Upgrade,
 }
 
 impl Td {
@@ -325,6 +356,7 @@ impl Td {
             daemon: None,
             tools,
             cli,
+            upgrade: Upgrade::default(),
         }
     }
 
@@ -344,6 +376,7 @@ impl Td {
                 self.dir.path(),
                 self.tools.as_ref().map(|t| t.dir.as_path()),
                 self.cli,
+                &self.upgrade,
             ),
             insecure_agent_header: true,
             artifact_listen: None,
@@ -448,17 +481,29 @@ impl Td {
         self.get(&format!("/api/agents/{id}")).await["status"].clone()
     }
 
+    /// The newest event `seq` of the agent and its status: what moves
+    /// while a start, a restart or a turn goes on.
+    async fn progress(&self, id: &str) -> (Value, Value) {
+        let newest = self
+            .get(&format!("/api/agents/{id}/events?order=desc&limit=1"))
+            .await;
+        (newest[0]["seq"].clone(), self.status(id).await)
+    }
+
     async fn wait_status(&self, id: &str, want: &str) {
-        let start = Instant::now();
+        let mut stall = common::Stall::new(self.progress(id).await);
         loop {
             let s = self.status(id).await;
             if s == want {
                 return;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "agent never reached {want}; last {s}"
-            );
+            if stall.due() {
+                let mark = self.progress(id).await;
+                assert!(
+                    stall.moved(mark),
+                    "agent never reached {want}; last {s} ({stall})"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -472,16 +517,19 @@ impl Td {
     }
 
     async fn wait_events(&self, id: &str, kind: &str, f: impl Fn(&[Value]) -> bool) -> Vec<Value> {
-        let start = Instant::now();
+        let mut stall = common::Stall::new(self.progress(id).await);
         loop {
             let ev = self.events(id, kind).await;
             if f(&ev) {
                 return ev;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "{kind} events never matched: {ev:#?}"
-            );
+            if stall.due() {
+                let mark = self.progress(id).await;
+                assert!(
+                    stall.moved(mark),
+                    "{kind} events never matched ({stall}): {ev:#?}"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
     }
@@ -967,6 +1015,406 @@ async fn hot_swap_probation(rollback: bool) {
             1
         );
     }
+}
+
+/// A runner command that waits while the file `gate` exists, then runs
+/// the real runner: a relaunch holds there.
+fn gated_runner(dir: &Path, gate: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("gated-runner");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nwhile [ -e '{}' ]; do sleep 0.02; done\nexec '{}' \"$@\"\n",
+            gate.display(),
+            runner_bin().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// The status events of the daemon in store order: (agent, status, reason).
+fn status_order(td: &Td) -> Vec<(String, String, String)> {
+    let db = rusqlite::Connection::open(td.dir.path().join("state/terrarium.db")).unwrap();
+    let mut q = db
+        .prepare("SELECT agent_id, payload FROM events WHERE kind = 'status' ORDER BY seq")
+        .unwrap();
+    q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .map(|r| {
+            let (agent, payload) = r.unwrap();
+            let v: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+            let d = v.get("data").unwrap_or(&v);
+            let text = |k: &str| d[k].as_str().unwrap_or_default().to_owned();
+            (agent, text("status"), text("reason"))
+        })
+        .collect()
+}
+
+/// The upgrade restarts in store order: an agent is in its upgrade from
+/// its `restarting` (reason `upgrade`) to the `starting` of the new launch.
+/// The most agents in their upgrade at one time.
+fn most_upgrading(order: &[(String, String, String)]) -> usize {
+    let mut now = std::collections::HashSet::new();
+    let mut most = 0;
+    for (agent, status, reason) in order {
+        if status == "restarting" && reason == "upgrade" {
+            now.insert(agent.clone());
+            most = most.max(now.len());
+        } else if status == "starting" {
+            now.remove(agent);
+        }
+    }
+    most
+}
+
+/// R4 (TER-262): after a hot swap, a runner of another build gets
+/// `restart_scheduled` (reason `upgrade`). An agent out of its turn
+/// restarts with resume, one in a turn when the turn ends. A runner
+/// `blocked` on a question is in its turn: it keeps running until it
+/// rests. Here the new daemon claims another build. With a limit of 1, each
+/// next upgrade starts only after the earlier launch is in (M1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_runner_upgrades_after_its_turn() {
+    let mut td = Td::start().await;
+    let idle = [
+        td.agent("calm", json!({})).await,
+        td.agent("rest", json!({})).await,
+        td.agent("more", json!({})).await,
+    ];
+    let busy = td.agent("busy", json!({})).await;
+    let asks = td.agent("asks", json!({})).await;
+    for id in idle.iter().chain([&busy, &asks]) {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_status(id, "idle").await;
+    }
+    td.post(
+        &format!("/api/agents/{busy}/send"),
+        Some(json!({"text": "/hold"})),
+    )
+    .await;
+    td.wait_status(&busy, "working").await;
+    td.post(
+        &format!("/api/agents/{asks}/send"),
+        Some(json!({"text": "/question"})),
+    )
+    .await;
+    td.wait_status(&asks, "blocked").await;
+    let pid = |td: &Td, id: &str| td.runner_pid(id).unwrap();
+    let old: HashMap<String, u32> = idle
+        .iter()
+        .chain([&busy, &asks])
+        .map(|id| (id.clone(), pid(&td, id)))
+        .collect();
+
+    td.shutdown();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    td.upgrade = Upgrade {
+        version: Some("0.0.0+0000000".into()),
+        limit: Some(1),
+        runner: None,
+    };
+    td.boot().await;
+
+    // Each agent out of a turn restarts with resume on a new runner.
+    for id in &idle {
+        let notices = td
+            .wait_events(id, "system", |e| {
+                e.iter().any(|n| {
+                    n["data"]["message"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with("restart_scheduled (reason upgrade)"))
+                })
+            })
+            .await;
+        assert!(!notices.is_empty());
+        td.wait_events(id, "session_started", |e| e.len() == 2)
+            .await;
+        td.wait_status(id, "idle").await;
+        assert_ne!(pid(&td, id), old[id], "a new runner process");
+        let statuses = td.events(id, "status").await;
+        let reasons: Vec<&str> = statuses
+            .iter()
+            .filter_map(|s| s["data"]["reason"].as_str())
+            .collect();
+        assert!(reasons.contains(&"upgrade"), "{reasons:?}");
+        assert!(
+            reasons.iter().any(|r| r.starts_with("resuming session")),
+            "{reasons:?}"
+        );
+    }
+    let order = status_order(&td);
+    assert_eq!(most_upgrading(&order), 1, "at most the limit: {order:#?}");
+
+    // In a turn, and blocked on a question in a turn: no restart.
+    for id in [&busy, &asks] {
+        assert_eq!(td.runner_pid(id), Some(old[id]), "no restart in a turn");
+        assert_eq!(td.events(id, "session_started").await.len(), 1);
+    }
+    assert_eq!(td.status(&busy).await, "working");
+    assert_eq!(td.status(&asks).await, "blocked");
+    for (id, line) in [(&busy, "go"), (&asks, "y")] {
+        td.post(
+            &format!("/api/agents/{id}/send"),
+            Some(json!({"text": line, "raw": true})),
+        )
+        .await;
+        let starts = td
+            .wait_events(id, "session_started", |e| e.len() == 2)
+            .await;
+        let ends = td.events(id, "turn_end").await;
+        assert!(
+            ends.last().unwrap()["seq"].as_u64() < starts[1]["seq"].as_u64(),
+            "the restart came after the turn: {ends:#?} {starts:#?}"
+        );
+        td.wait_status(id, "idle").await;
+        assert_ne!(td.runner_pid(id), Some(old[id]), "a new runner process");
+    }
+    assert_eq!(most_upgrading(&status_order(&td)), 1);
+
+    // The new runners are not upgraded again.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for id in idle.iter().chain([&busy, &asks]) {
+        assert_eq!(td.events(id, "session_started").await.len(), 2);
+    }
+    for id in idle.iter().chain([&busy, &asks]) {
+        td.post(&format!("/api/agents/{id}/stop"), None).await;
+        td.wait_status(id, "stopped").await;
+    }
+}
+
+/// TER-524: a runner `blocked` on a question is in its turn. An account
+/// swap that cannot be live waits for the answer and the end of the turn,
+/// then restarts the harness with resume. A swap while the agent is
+/// `blocked` does not restart at once, and a swap that waits from
+/// `working` does not restart when the runner turns `blocked`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_swap_waits_for_a_blocked_turn() {
+    let td = Td::start().await;
+    for n in ["max-x", "max-y"] {
+        td.post(
+            "/api/subscriptions",
+            Some(json!({"name": n, "provider": "anthropic", "harnesses": ["claude"]})),
+        )
+        .await;
+    }
+    let id = td
+        .agent(
+            "asks",
+            json!({"subscription": "max-x", "subscription_pool": ["max-x", "max-y"]}),
+        )
+        .await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+
+    // Swap while blocked on a question: the restart waits.
+    let old = td.runner_pid(&id).unwrap();
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/question"})),
+    )
+    .await;
+    td.wait_status(&id, "blocked").await;
+    let mark = last_seq(&td, &id).await;
+    swap_waits(&td, &id, "max-y", old, 1).await;
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "y", "raw": true})),
+    )
+    .await;
+    restarted_after_turn(&td, &id, mark, 2, old).await;
+
+    // Swap while working: the runner turns `blocked` in the same turn
+    // (a question hook), and the restart still waits for its end.
+    let old = td.runner_pid(&id).unwrap();
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/hold"})),
+    )
+    .await;
+    td.wait_status(&id, "working").await;
+    let mark = last_seq(&td, &id).await;
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": "max-x"})),
+        )
+        .await;
+    assert_eq!(r["applied"], "restart_scheduled", "{r}");
+    let sock = td.run_dir().join(format!("agents/{id}.sock"));
+    hook(&sock, "Notification", json!({"message": "Allow the tool?"})).await;
+    td.wait_status(&id, "blocked").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(td.runner_pid(&id), Some(old), "no restart at blocked");
+    assert_eq!(td.events(&id, "session_started").await.len(), 2);
+    assert_eq!(td.status(&id).await, "blocked");
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "go", "raw": true})),
+    )
+    .await;
+    restarted_after_turn(&td, &id, mark, 3, old).await;
+
+    // Queued work does not hold the swap back, and it goes to the new
+    // launch: a mail that comes during the turn queues a pointer, and the
+    // pointer turn starts only in the new session.
+    let old = td.runner_pid(&id).unwrap();
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/hold"})),
+    )
+    .await;
+    td.wait_status(&id, "working").await;
+    let mark = last_seq(&td, &id).await;
+    let m = td
+        .post(
+            "/api/mail",
+            Some(json!({"to": "demo/asks", "body": "mail during the turn"})),
+        )
+        .await;
+    let thread = m["thread_id"].as_str().unwrap().to_owned();
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": "max-y"})),
+        )
+        .await;
+    assert_eq!(r["applied"], "restart_scheduled", "{r}");
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "go", "raw": true})),
+    )
+    .await;
+    restarted_after_turn(&td, &id, mark, 4, old).await;
+    let start = td.events(&id, "session_started").await[3]["seq"]
+        .as_u64()
+        .unwrap();
+    let pointed = |e: &Value| {
+        e["data"]["prompt"]
+            .as_str()
+            .is_some_and(|p| p.contains(&thread))
+    };
+    let turns = td
+        .wait_events(&id, "turn_start", |e| e.iter().any(pointed))
+        .await;
+    let seqs: Vec<u64> = turns
+        .iter()
+        .filter(|e| pointed(e))
+        .filter_map(|e| e["seq"].as_u64())
+        .collect();
+    assert!(
+        seqs.iter().all(|s| *s > start),
+        "the pointer went to the old harness: {start} {seqs:?} {turns:#?}"
+    );
+
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+}
+
+/// The `seq` of the newest status event of agent `id`.
+async fn last_seq(td: &Td, id: &str) -> u64 {
+    td.events(id, "status").await.last().unwrap()["seq"]
+        .as_u64()
+        .unwrap()
+}
+
+/// A swap of a `blocked` agent to `to` is scheduled, and for 500 ms the
+/// runner `old` and its `sessions` session starts stay.
+async fn swap_waits(td: &Td, id: &str, to: &str, old: u32, sessions: usize) {
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": to})),
+        )
+        .await;
+    assert_eq!(r["applied"], "restart_scheduled", "{r}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(td.runner_pid(id), Some(old), "no restart in a turn");
+    assert_eq!(td.events(id, "session_started").await.len(), sessions);
+    assert_eq!(td.status(id).await, "blocked");
+}
+
+/// The harness started its session number `n` on a new runner, after a
+/// `turn_end` of the turn that was open at `mark` (a `seq` from before the
+/// swap call).
+async fn restarted_after_turn(td: &Td, id: &str, mark: u64, n: usize, old: u32) {
+    let starts = td
+        .wait_events(id, "session_started", |e| e.len() == n)
+        .await;
+    let start = starts[n - 1]["seq"].as_u64().unwrap();
+    let ends = td.events(id, "turn_end").await;
+    assert!(
+        ends.iter()
+            .filter_map(|e| e["seq"].as_u64())
+            .any(|s| s > mark && s < start),
+        "no turn_end between the swap and the restart: {mark} {ends:#?} {starts:#?}"
+    );
+    td.wait_status(id, "idle").await;
+    assert_ne!(td.runner_pid(id), Some(old), "a new runner process");
+}
+
+/// M2 (TER-262): a stop between the kill of the old runner and the launch
+/// of the new one frees the upgrade slot: the next upgrade still runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_during_an_upgrade_frees_its_slot() {
+    let mut td = Td::start().await;
+    let agents = [
+        td.agent("first", json!({})).await,
+        td.agent("second", json!({})).await,
+    ];
+    for id in &agents {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_status(id, "idle").await;
+    }
+    td.shutdown();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The relaunch of the upgrade holds until the gate goes.
+    let gate = td.dir.path().join("relaunch-gate");
+    std::fs::write(&gate, "").unwrap();
+    td.upgrade = Upgrade {
+        version: Some("0.0.0+0000000".into()),
+        limit: Some(1),
+        runner: Some(gated_runner(td.dir.path(), &gate)),
+    };
+    td.boot().await;
+
+    // One agent holds the only slot: its old runner is gone, the new one
+    // waits at the gate.
+    let start = Instant::now();
+    let (held, other) = loop {
+        let mut restarting = Vec::new();
+        for id in &agents {
+            if td.status(id).await == "restarting" {
+                restarting.push(id.clone());
+            }
+        }
+        if let [one] = restarting.as_slice() {
+            let other = agents.iter().find(|a| *a != one).unwrap().clone();
+            break (one.clone(), other);
+        }
+        assert!(start.elapsed() < WAIT, "no upgrade restart");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    td.post(&format!("/api/agents/{held}/stop"), None).await;
+    td.wait_status(&held, "stopped").await;
+    std::fs::remove_file(&gate).unwrap();
+
+    // The other agent gets the slot.
+    td.wait_events(&other, "session_started", |e| e.len() == 2)
+        .await;
+    td.wait_status(&other, "idle").await;
+    let reasons: Vec<String> = td
+        .events(&other, "status")
+        .await
+        .iter()
+        .filter_map(|s| s["data"]["reason"].as_str().map(str::to_owned))
+        .collect();
+    assert!(reasons.iter().any(|r| r == "upgrade"), "{reasons:?}");
+    td.wait_runner_gone(&held).await;
+    td.post(&format!("/api/agents/{other}/stop"), None).await;
+    td.wait_status(&other, "stopped").await;
 }
 
 /// PLAN §18: the daemon restarts, the agent does not. A new supervisor on
@@ -1537,6 +1985,8 @@ async fn the_harness_credentials_come_through_exec_env_only() {
         key: Option<(&'static str, &'static str)>,
         /// A Copilot plan account token, if any.
         account_token: Option<&'static str>,
+        /// More fields of the key body (`key_id` and `cloud` of a cloud key).
+        extra: Value,
         /// The vars that the harness must see with the value.
         want: &'static [(&'static str, &'static str)],
     }
@@ -1547,6 +1997,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
             sub: json!({"name": "ant", "provider": "anthropic", "harnesses": ["claude"]}),
             key: Some(("anthropic", "sk-ant-E2E-anthropic-1")),
             account_token: None,
+            extra: Value::Null,
             want: &[("ANTHROPIC_API_KEY", "sk-ant-E2E-anthropic-1")],
         },
         Case {
@@ -1556,6 +2007,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                         "harnesses": ["claude", "pi"]}),
             key: Some(("zai", "zai-E2E-glm-key-2")),
             account_token: None,
+            extra: Value::Null,
             want: &[
                 ("ANTHROPIC_AUTH_TOKEN", "zai-E2E-glm-key-2"),
                 ("ZAI_API_KEY", "zai-E2E-glm-key-2"),
@@ -1569,6 +2021,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                         "harnesses": ["pi"]}),
             key: Some(("zai", "zai-E2E-pi-key-3")),
             account_token: None,
+            extra: Value::Null,
             want: &[("ZAI_API_KEY", "zai-E2E-pi-key-3")],
         },
         Case {
@@ -1578,6 +2031,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                         "harnesses": ["pi"]}),
             key: Some(("moonshot", "sk-E2E-moonshot-4")),
             account_token: None,
+            extra: Value::Null,
             want: &[
                 ("MOONSHOT_API_KEY", "sk-E2E-moonshot-4"),
                 ("KIMI_API_KEY", "sk-E2E-moonshot-4"),
@@ -1589,6 +2043,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
             sub: json!({"name": "or", "provider": "openrouter", "harnesses": ["pi"]}),
             key: Some(("openrouter", "sk-or-E2E-openrouter-5")),
             account_token: None,
+            extra: Value::Null,
             want: &[("OPENROUTER_API_KEY", "sk-or-E2E-openrouter-5")],
         },
         Case {
@@ -1597,6 +2052,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
             sub: json!({"name": "oa", "provider": "openai", "harnesses": ["codex"]}),
             key: Some(("openai", "sk-E2E-openai-6")),
             account_token: None,
+            extra: Value::Null,
             want: &[("OPENAI_API_KEY", "sk-E2E-openai-6")],
         },
         Case {
@@ -1605,6 +2061,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
             sub: json!({"name": "pat", "provider": "github", "harnesses": ["copilot"]}),
             key: Some(("github", "github_pat_E2E_copilot_7")),
             account_token: None,
+            extra: Value::Null,
             want: &[("COPILOT_GITHUB_TOKEN", "github_pat_E2E_copilot_7")],
         },
         Case {
@@ -1613,23 +2070,96 @@ async fn the_harness_credentials_come_through_exec_env_only() {
             sub: json!({"name": "ghplan", "provider": "github", "harnesses": ["copilot"]}),
             key: None,
             account_token: Some("gho_E2E_copilot_plan_8"),
+            extra: Value::Null,
             want: &[("COPILOT_GITHUB_TOKEN", "gho_E2E_copilot_plan_8")],
+        },
+        // The cloud kinds (TER-630), Claude Code only. A mocked call: the
+        // fake harness shows the env that Claude Code would get.
+        Case {
+            agent: "claude-bedrock",
+            harness: "claude",
+            sub: json!({"name": "aws", "provider": "bedrock",
+                        "cloud": {"region": "us-east-1",
+                                  "models": {"opus": "us.anthropic.claude-opus-5-5"}}}),
+            key: Some(("bedrock", "E2E-aws-secret-access-key-9")),
+            account_token: None,
+            extra: json!({"key_id": "AKIAE2EACCESSKEYID10"}),
+            want: &[
+                ("CLAUDE_CODE_USE_BEDROCK", "1"),
+                ("AWS_REGION", "us-east-1"),
+                ("AWS_ACCESS_KEY_ID", "AKIAE2EACCESSKEYID10"),
+                ("AWS_SECRET_ACCESS_KEY", "E2E-aws-secret-access-key-9"),
+                (
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                    "us.anthropic.claude-opus-5-5",
+                ),
+            ],
+        },
+        Case {
+            agent: "claude-bedrock-key",
+            harness: "claude",
+            sub: json!({"name": "aws-key", "provider": "bedrock"}),
+            key: Some(("bedrock", "E2E-bedrock-api-key-11")),
+            account_token: None,
+            extra: Value::Null,
+            want: &[
+                ("CLAUDE_CODE_USE_BEDROCK", "1"),
+                ("AWS_BEARER_TOKEN_BEDROCK", "E2E-bedrock-api-key-11"),
+            ],
+        },
+        // The GCP JSON is a 0600 file; its var has the path (checked below).
+        Case {
+            agent: "claude-gcp",
+            harness: "claude",
+            sub: json!({"name": "vertex", "provider": "gcp",
+                        "cloud": {"project_id": "e2e-proj", "region": "global"}}),
+            key: Some((
+                "gcp",
+                r#"{"type":"service_account","private_key_id":"E2E-GCP-KEY-ID-13","private_key":"E2E-GCP-PRIVATE-KEY-14"}"#,
+            )),
+            account_token: None,
+            extra: Value::Null,
+            want: &[
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("CLOUD_ML_REGION", "global"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "e2e-proj"),
+            ],
+        },
+        Case {
+            agent: "claude-foundry",
+            harness: "claude",
+            sub: json!({"name": "azure", "provider": "foundry",
+                        "cloud": {"resource": "e2e-res"}}),
+            key: Some(("foundry", "E2E-foundry-api-key-12")),
+            account_token: None,
+            extra: Value::Null,
+            want: &[
+                ("CLAUDE_CODE_USE_FOUNDRY", "1"),
+                ("ANTHROPIC_FOUNDRY_RESOURCE", "e2e-res"),
+                ("ANTHROPIC_FOUNDRY_API_KEY", "E2E-foundry-api-key-12"),
+            ],
         },
     ];
 
     let td = Td::start_with_cli().await;
     let state = td.dir.path().join("state");
-    let mut values = Vec::new();
+    let mut values: Vec<String> = Vec::new();
     for c in &cases {
         let name = c.sub["name"].as_str().unwrap();
         td.post("/api/subscriptions", Some(c.sub.clone())).await;
         if let Some((provider, key)) = c.key {
-            td.post(
-                &format!("/api/subscriptions/{name}/api-key"),
-                Some(json!({"provider": provider, "key": key})),
-            )
-            .await;
-            values.push(key);
+            let mut body = json!({"provider": provider, "key": key});
+            if let Value::Object(extra) = &c.extra {
+                for (k, v) in extra {
+                    body[k] = v.clone();
+                    if let Some(s) = v.as_str() {
+                        values.push(s.to_owned());
+                    }
+                }
+            }
+            td.post(&format!("/api/subscriptions/{name}/api-key"), Some(body))
+                .await;
+            values.push(key.to_owned());
         }
         if let Some(token) = c.account_token {
             terrariumd::accounts::write_credential(
@@ -1639,7 +2169,7 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                 token.as_bytes(),
             )
             .unwrap();
-            values.push(token);
+            values.push(token.to_owned());
         }
         let id = td
             .agent(c.agent, json!({"harness": c.harness, "subscription": name}))
@@ -1655,23 +2185,70 @@ async fn the_harness_credentials_come_through_exec_env_only() {
                 c.agent
             );
         }
+        // GCP: the var is the path of a 0600 file in the private runtime
+        // dir with the JSON, and the JSON is in no var.
+        let mut gcp_file = None;
+        if c.agent == "claude-gcp" {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(
+                !seen.contains("E2E-GCP-PRIVATE-KEY-14"),
+                "the JSON is in a var"
+            );
+            assert!(!seen.contains("E2E-GCP-KEY-ID-13"), "the JSON is in a var");
+            let path = seen
+                .lines()
+                .find_map(|l| l.strip_prefix("GOOGLE_APPLICATION_CREDENTIALS="))
+                .expect("no GOOGLE_APPLICATION_CREDENTIALS");
+            let path = std::path::PathBuf::from(path);
+            assert!(
+                path.starts_with(td.dir.path().join("run").join("credentials")),
+                "{}",
+                path.display()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), c.key.unwrap().1);
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(path.parent().unwrap()), 0o700);
+            gcp_file = Some(path);
+            // Not in runner.json, nor in a state-dir file (checked below).
+            values.push("E2E-GCP-PRIVATE-KEY-14".to_owned());
+            values.push("E2E-GCP-KEY-ID-13".to_owned());
+        }
         // The runner spec of this launch is there, with no value.
         let spec = std::fs::read_to_string(td.private_dir(&id).join("runner.json")).unwrap();
         assert!(spec.contains("exec-env"), "{}: {spec}", c.agent);
         assert!(spec.contains("--require-credentials"), "{}", c.agent);
         for v in &values {
-            assert!(!spec.contains(v), "{}: runner.json holds a key", c.agent);
+            assert!(
+                !spec.contains(v.as_str()),
+                "{}: runner.json holds a key",
+                c.agent
+            );
         }
         td.post(&format!("/api/agents/{id}/stop"), None).await;
         td.wait_status(&id, "stopped").await;
         td.wait_runner_gone(&id).await;
+        // Sandbox mode `none`: the file goes when the harness exits.
+        if let Some(path) = gcp_file {
+            let gone = || !path.exists();
+            for _ in 0..100 {
+                if gone() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(gone(), "{} is still there", path.display());
+        }
     }
     // No file of the state dir holds a value, except the credential
     // stores (`credentials/`).
     let all = tree_text(&state, &[state.join("credentials")]);
     assert!(!all.is_empty());
     for v in &values {
-        assert!(!all.contains(v), "a file of the state dir holds {v}");
+        assert!(
+            !all.contains(v.as_str()),
+            "a file of the state dir holds {v}"
+        );
     }
 }
 

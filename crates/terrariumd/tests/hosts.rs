@@ -21,10 +21,76 @@ use terrarium_runner::{RequestContext, RequestHandler};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
+/// How long a host link may take to come online and open admission. The
+/// connect writes the `host.connected` event and the target states, and
+/// each daemon DB commit is an fsync: on a busy disk that took more than
+/// the old 6 s budget (300 polls of 20 ms) with no error (TER-497).
+const LINK_WAIT: Duration = Duration::from_secs(60);
+/// The longest wait for admission, also while the connect reconcile still
+/// makes progress ([`Lab::wait_admission_ready`]).
+const ADMISSION_CAP: Duration = Duration::from_secs(300);
+
 struct Lab {
     td: TestDaemon,
     addr: SocketAddr,
     bins: tempfile::TempDir,
+    trace: TraceBuf,
+    _trace: tracing::subscriber::DefaultGuard,
+}
+
+/// The daemon trace of one lab (TER-497). The subscriber is the thread
+/// default, not the global one: `jobs.rs` owns the global subscriber of
+/// this test binary. A `#[tokio::test]` runs the daemon tasks on the test
+/// thread, so they log here.
+#[derive(Clone, Default)]
+struct TraceBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for TraceBuf {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl TraceBuf {
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        let writer = self.clone();
+        tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.clone())
+                .finish(),
+        )
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+    }
+}
+
+/// Poll `ready` each 20 ms for up to [`LINK_WAIT`], as the admission wait
+/// does. On the timeout, panic with `what`, the time, and the daemon trace:
+/// a fixed count of polls failed on a busy disk with no cause (TER-512).
+async fn wait_until(trace: &TraceBuf, what: &str, mut ready: impl AsyncFnMut() -> bool) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < LINK_WAIT {
+        if ready().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "{what} after {:?}; daemon trace:\n{}",
+        start.elapsed(),
+        trace.text()
+    );
 }
 
 impl Lab {
@@ -33,6 +99,8 @@ impl Lab {
     }
 
     async fn with_config(f: impl FnOnce(&Path)) -> Self {
+        let trace = TraceBuf::default();
+        let guard = trace.install();
         let td = TestDaemon::with_config(f).await;
         let state = td.daemon.as_ref().unwrap().state.clone();
         let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
@@ -45,7 +113,13 @@ impl Lab {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        Self { td, addr, bins }
+        Self {
+            td,
+            addr,
+            bins,
+            trace,
+            _trace: guard,
+        }
     }
 
     fn state(&self) -> terrariumd::api::Shared {
@@ -115,7 +189,8 @@ impl Lab {
     }
 
     async fn wait_online(&self, name: &str, online: bool) {
-        for _ in 0..300 {
+        let start = std::time::Instant::now();
+        while start.elapsed() < LINK_WAIT {
             let r = self.td.get(&format!("/api/hosts/{name}")).await;
             if r.body["online"] == online {
                 if online {
@@ -131,13 +206,32 @@ impl Lab {
     async fn wait_admission_ready(&self, name: &str) {
         // The link becomes online before reservation reconciliation opens
         // admission. Target verbs must wait for both, including on reconnect.
-        for _ in 0..300 {
+        // Admission opens after the connect reconcile, one `status` of each
+        // target in turn, each a fake tool run. Under merge-job load (load
+        // average 40) six of them took over a minute while each call still
+        // ran (TER-648), so the deadline counts only time without a new
+        // tool call.
+        let start = std::time::Instant::now();
+        let mut seen = self.log().len();
+        let mut moved = std::time::Instant::now();
+        while moved.elapsed() < LINK_WAIT && start.elapsed() < ADMISSION_CAP {
             if !self.state().executor.resource_pending(name) {
                 return;
             }
+            let now = self.log().len();
+            if now != seen {
+                seen = now;
+                moved = std::time::Instant::now();
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("host {name} admission never became ready");
+        // The reconcile error is only in the daemon log (TER-497).
+        panic!(
+            "host {name} admission never became ready after {:?} ({:?} without a tool call); daemon trace:\n{}",
+            start.elapsed(),
+            moved.elapsed(),
+            self.trace.text()
+        );
     }
 
     async fn target(&self, def: Value) {
@@ -164,6 +258,12 @@ case "$1" in
   rm) rm -f "$f" ;;
   exec) for a in "$@"; do
           if [ "$a" = 'command -v python3 >/dev/null || printf missing-python3' ] && [ -f '{missing_python}' ]; then printf missing-python3; exit 0; fi
+          if [ "$a" = "import os, sys; sys.stdout.write(os.path.expanduser('~'))" ]; then printf /home/agent; exit 0; fi
+          if [ "$a" = prepare ]; then for arg in "$@"; do
+            if [ "$arg" = /src/terrarium ] && [ -f '{no_default}' ]; then echo 'base unavailable: denied' >&2; exit 3; fi
+            if [ "$arg" = /home/agent/.terrarium-work ] && [ -f '{no_fallback}' ]; then echo 'base unavailable: denied' >&2; exit 3; fi
+            if [ "$arg" = /home/agent/.terrarium-work ] && [ -f '{broken_fallback}' ]; then echo 'disk full' >&2; exit 1; fi
+          done; fi
           if [ "$a" = measure ] && [ -f '{bad_measure}' ]; then
             value=invalid; for arg in "$@"; do if [ "$arg" = zz-good ]; then value=0; fi; done
             printf '%s' "$value"; exit 0
@@ -177,7 +277,10 @@ esac"#,
             hc = dir.join("docker.host-config").display(),
             end = dir.join("sleeper.end").display(),
             missing_python = dir.join("missing-python").display(),
-            bad_measure = dir.join("bad-measure").display()
+            bad_measure = dir.join("bad-measure").display(),
+            no_default = dir.join("no-default-base").display(),
+            no_fallback = dir.join("no-fallback-base").display(),
+            broken_fallback = dir.join("broken-fallback-base").display()
         ),
         _ => format!(
             r#"case "$1" in
@@ -211,8 +314,19 @@ esac"#,
             snaps = dir.join("vmlab.snaps").display()
         ),
     };
+    // The log shows the names in a `--env-file` (comma-separated), not its
+    // temp path: the host agent removes the file when the call ends.
     format!(
-        "#!/bin/sh\necho \"{tool} $* (in $(pwd))\" >> '{log}'\n{body}\nexit 0\n",
+        r#"#!/bin/sh
+line=; prev=
+for a in "$@"; do
+  if [ "$prev" = --env-file ]; then a=$(cut -d= -f1 "$a" | paste -sd, -); fi
+  line="$line $a"; prev=$a
+done
+echo "{tool}$line (in $(pwd))" >> '{log}'
+{body}
+exit 0
+"#,
         log = log.display()
     )
 }
@@ -360,6 +474,8 @@ async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
     if terrarium_version::this().git_ref.is_none() {
         return; // no git: nothing is stale, so nothing is offered
     }
+    let trace = TraceBuf::default();
+    let _trace = trace.install();
     let dist = tempfile::tempdir().unwrap();
     let served = fake_host_binary(terrarium_version::FULL);
     write_exec(
@@ -438,13 +554,11 @@ async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
     // daemon records it.
     let task = tokio::spawn(Client::new(options(terrarium_version::FULL)).run());
     let mut found = Vec::new();
-    for _ in 0..300 {
+    wait_until(&trace, "the update was never confirmed", async || {
         found = events(&td, "host.updated").await;
-        if !found.is_empty() && !sidecar(&bin, PENDING).exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+        !found.is_empty() && !sidecar(&bin, PENDING).exists()
+    })
+    .await;
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0]["data"]["from"], "0.0.9+0000000");
     assert_eq!(found[0]["data"]["to"], terrarium_version::FULL);
@@ -468,12 +582,10 @@ async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
         let mut o = options(terrarium_version::FULL);
         o.self_update.as_mut().unwrap().enabled = false;
         let task = tokio::spawn(Client::new(o).run());
-        for _ in 0..300 {
-            if events(&td, "host.connected").await.len() > before {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        wait_until(&trace, "the host link never connected", async || {
+            events(&td, "host.connected").await.len() > before
+        })
+        .await;
         task.abort();
         let _ = task.await;
     }
@@ -491,6 +603,8 @@ async fn a_self_update_with_a_wrong_checksum_changes_nothing() {
     if terrarium_version::this().git_ref.is_none() {
         return;
     }
+    let trace = TraceBuf::default();
+    let _trace = trace.install();
     let dist = tempfile::tempdir().unwrap();
     let name = format!("terrarium-host-{}-linux", std::env::consts::ARCH);
     write_exec(
@@ -525,13 +639,10 @@ async fn a_self_update_with_a_wrong_checksum_changes_nothing() {
     });
     let run = tokio::spawn(Client::new(o).run());
     // The agent stays online and its binary stays.
-    for _ in 0..300 {
-        let h = td.get("/api/hosts/bad").await;
-        if h.body["online"] == true {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_until(&trace, "host bad never became online", async || {
+        td.get("/api/hosts/bad").await.body["online"] == true
+    })
+    .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         !run.is_finished(),
@@ -795,6 +906,140 @@ async fn owned_target_roots_legacy_python_and_bad_measurement() {
     );
     let audit = lab.td.get("/api/audit?action=agent.target_cleanup").await;
     assert_eq!(audit.ok()[0]["detail"]["agent"], "zz-good");
+}
+
+/// TER-498: a target without work_root whose /src the agent user may not
+/// create falls back to the agent home; when that fails too, the error
+/// names work_root.
+#[tokio::test]
+async fn owned_target_roots_fall_back_to_the_agent_home() {
+    let lab = Lab::start().await;
+    let _host = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    lab.target(json!({"name": "terra-box", "kind": "docker", "host": "lab1", "image": "alpine:3", "project": "terra"})).await;
+    let owner = lab
+        .td
+        .agent(
+            "terra",
+            "lead",
+            json!({"roles": ["project_admin"],
+        "policy": {"targets": ["terra-box"], "spawn": {"templates": ["project:*"],
+        "max_concurrent": 1, "max_lifetime": "5m", "bound": true}}}),
+        )
+        .await;
+    lab.td
+        .post(
+            "/api/templates",
+            json!({"name": "builder", "project": "terra",
+        "spec": {"harness": "claude", "policy": {"targets": ["terra-box"]}}}),
+        )
+        .await
+        .ok();
+    let card = lab
+        .td
+        .post(
+            "/api/projects/terra/cards",
+            json!({"title": "Build", "column": "in_progress"}),
+        )
+        .await
+        .ok()
+        .clone();
+    let owner_id = owner["id"].as_str().unwrap();
+    let worker = lab.td.post_as(owner_id, &format!("/api/agents/{owner_id}/spawn"),
+        json!({"template": "builder", "task": "Build", "bind": format!("card:{}", card["id"].as_str().unwrap())})).await.ok().clone();
+    let id = worker["id"].as_str().unwrap().to_owned();
+    let name = worker["name"].as_str().unwrap().to_owned();
+    let state = lab.state();
+    let base_of = |state: terrariumd::api::Shared| async move {
+        state
+            .db
+            .read(|c| {
+                Ok(c.query_row("SELECT base FROM agent_target_roots", [], |r| {
+                    r.get::<_, Option<String>>(0)
+                })?)
+            })
+            .await
+            .unwrap()
+    };
+    std::fs::write(lab.bins.path().join("no-default-base"), "").unwrap();
+    std::fs::write(lab.bins.path().join("no-fallback-base"), "").unwrap();
+    let r = lab
+        .td
+        .post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["true"]}))
+        .await;
+    r.err(422, "invalid");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("has no work_root"), "{msg}");
+    assert!(msg.contains("/home/agent/.terrarium-work"), "{msg}");
+    assert!(
+        msg.contains("terrarium admin target edit terra-box --work-root"),
+        "{msg}"
+    );
+    std::fs::remove_file(lab.bins.path().join("no-fallback-base")).unwrap();
+    for _ in 0..2 {
+        let r = lab
+            .td
+            .post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["true"]}))
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
+    }
+    assert_eq!(
+        base_of(state.clone()).await.as_deref(),
+        Some("/home/agent/.terrarium-work")
+    );
+    let log = lab.log();
+    // The owned build env is set (docker gets it by name; build_env gives
+    // the value under the root of the prepared base).
+    assert!(
+        log.lines()
+            .any(|l| env_file_names(l).contains(&"CARGO_TARGET_DIR")),
+        "{log}"
+    );
+    // Any later failure at the stored fallback names work_root too.
+    std::fs::write(lab.bins.path().join("broken-fallback-base"), "").unwrap();
+    let r = lab
+        .td
+        .post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["true"]}))
+        .await;
+    r.err(422, "invalid");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("has no work_root"), "{msg}");
+    assert!(msg.contains("disk full"), "{msg}");
+    assert!(
+        msg.contains("terrarium admin target edit terra-box --work-root"),
+        "{msg}"
+    );
+    std::fs::remove_file(lab.bins.path().join("broken-fallback-base")).unwrap();
+    let log = lab.log();
+    // The stored base is used directly: the default is tried one time only.
+    assert_eq!(
+        log.matches("prepare /src/terrarium terra").count(),
+        1,
+        "{log}"
+    );
+    assert_eq!(
+        log.matches("prepare /home/agent/.terrarium-work terra")
+            .count(),
+        4,
+        "{log}"
+    );
+    terrariumd::spawn::close(
+        &state,
+        &id,
+        terrariumd::store::spawns::DONE,
+        Some("Built".into()),
+        false,
+    )
+    .await
+    .unwrap();
+    terrariumd::target_roots::sweep(&state).await.unwrap();
+    let log = lab.log();
+    assert!(
+        log.contains(&format!("measure /home/agent/.terrarium-work terra {name}")),
+        "{log}"
+    );
+    assert!(!log.contains("measure /src/terrarium"), "{log}");
 }
 
 #[tokio::test]
@@ -1179,17 +1424,26 @@ async fn reconnect_resumes_a_running_session() {
     let _h = lab.host("lab1").await;
     lab.target(json!({"name": "box", "kind": "host", "host": "lab1"}))
         .await;
-    let sid = exec(
-        &lab.td,
-        "box",
-        json!({"cmd": ["sh", "-c", "echo one; sleep 1; echo two; exit 4"]}),
-    )
-    .await;
+    // The session runs until the test makes the flag, after the
+    // reconnect. A fixed `sleep 1` ended the session before the reconnect
+    // under load, and the reconnect then resumed 0 sessions (TER-610).
+    let dir = tempfile::tempdir().unwrap();
+    let flag = dir.path().join("go");
+    let script = format!(
+        "echo one; while [ ! -e '{}' ]; do sleep 0.02; done; echo two; exit 4",
+        flag.display()
+    );
+    let sid = exec(&lab.td, "box", json!({"cmd": ["sh", "-c", script]})).await;
     // Wait for the first line, then cut the link.
     let path = format!("/api/targets/box/sessions/{sid}/output?since=0&wait=5");
     let first = lab.td.get(&path).await;
     assert!(!first.ok()["chunks"].as_array().unwrap().is_empty());
     assert!(lab.state().executor.hosts.drop_link("lab1"));
+    wait_until(&lab.trace, "the host never connected again", async || {
+        events(&lab.td, "host.connected").await.len() == 2
+    })
+    .await;
+    std::fs::write(&flag, b"").unwrap();
     let d = drain(&lab.td, "box", &sid).await;
     assert_eq!(String::from_utf8_lossy(&d.stdout), "one\ntwo\n");
     assert_eq!(d.end["code"], 4);
@@ -1473,7 +1727,7 @@ async fn lifecycle_verbs_map_to_docker_and_vmlab() {
         .err(422, "invalid");
     let log = lab.log();
     assert!(
-        log.contains("docker run -d --init --name terrarium-dbox -e NVIDIA_VISIBLE_DEVICES --label terrarium.target=dbox alpine:3 sleep infinity"),
+        log.contains("docker run -d --init --name terrarium-dbox --env-file NVIDIA_VISIBLE_DEVICES --label terrarium.target=dbox alpine:3 sleep infinity"),
         "{log}"
     );
     assert!(log.contains("docker rm -f -v terrarium-dbox"), "{log}");
@@ -2537,12 +2791,10 @@ async fn an_enrol_token_is_swapped_for_a_stored_long_lived_token() {
 
     // A reconnect uses the stored token.
     assert!(lab.state().executor.hosts.drop_link("lab1"));
-    for _ in 0..300 {
-        if events(&lab.td, "host.connected").await.len() == 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_until(&lab.trace, "the host never reconnected", async || {
+        events(&lab.td, "host.connected").await.len() == 2
+    })
+    .await;
     let ev = events(&lab.td, "host.connected").await;
     assert_eq!(ev.len(), 2, "the host came back with the stored token");
     assert_eq!(ev[1]["data"]["enrolled"], false);
@@ -2699,12 +2951,58 @@ async fn a_lease_grants_and_a_revoke_ends_the_sessions() {
     assert_eq!(changes, ["granted", "ended"], "{ev:#?}");
 }
 
+/// The grant schedules the timer of its lease: with the sweep off, a lease
+/// granted with a short `until` still expires, as `system` (TER-512). No
+/// step needs the lease, so a slow commit cannot fail the test.
+#[tokio::test]
+async fn a_granted_lease_expires_by_its_own_timer() {
+    let lab = Lab::start().await;
+    lab.state().lease_sweep.set_every(Duration::from_secs(3600));
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    lab.td.agent("terra", "worker", json!({})).await;
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1"}))
+        .await;
+    let g = lab
+        .td
+        .post(
+            "/api/targets/box/leases",
+            json!({"agent": "terra/worker", "until": "1s"}),
+        )
+        .await;
+    assert_eq!(g.status, 201, "{}", g.body);
+    // The `state` of a lease reads `expired` once `expires_at` is past,
+    // before any expiry runs: wait for the audit row that only the expiry
+    // writes.
+    wait_until(&lab.trace, "the granted lease never expired", async || {
+        let a = lab.td.get("/api/audit?action=target.lease_expired").await;
+        !a.ok().as_array().unwrap().is_empty()
+    })
+    .await;
+    let row = last_audit(&lab.td, "target.lease_expired").await;
+    assert_eq!(row["actor"], "system");
+    assert_eq!(row["target"], "box");
+    let all = lab
+        .td
+        .get("/api/agents/terra%2Fworker/leases?all=true")
+        .await;
+    assert_eq!(all.ok()[0]["state"], "expired");
+    assert_eq!(all.ok()[0]["revoked_by"], "system");
+}
+
 /// A lease with a short `until` expires: the timer ends the session with
 /// `lease_revoked`, writes `target.lease_expired` as `system`, and the
 /// next exec is `403`.
+///
+/// The grant is long and the extend shortens it only after the exec has
+/// started: a short `until` at the grant could run out in the slow commits
+/// of a loaded disk before the exec (TER-509). The sweep is off (1 h), so
+/// only the timer that the extend scheduled can end the session before the
+/// `sleep 30` ends by itself (TER-512).
 #[tokio::test]
 async fn an_expired_lease_ends_the_sessions() {
     let lab = Lab::start().await;
+    lab.state().lease_sweep.set_every(Duration::from_secs(3600));
     let _h = lab.host("lab1").await;
     lab.td.project("terra").await;
     let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
@@ -2714,7 +3012,7 @@ async fn an_expired_lease_ends_the_sessions() {
         .td
         .post(
             "/api/targets/box/leases",
-            json!({"agent": "terra/worker", "until": "2s"}),
+            json!({"agent": "terra/worker", "until": "1h"}),
         )
         .await;
     assert_eq!(g.status, 201, "{}", g.body);
@@ -2725,10 +3023,16 @@ async fn an_expired_lease_ends_the_sessions() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let sid = r.body["session_id"].as_str().unwrap().to_owned();
-    let started = std::time::Instant::now();
+    let e = lab
+        .td
+        .patch(
+            "/api/targets/box/leases/terra%2Fworker",
+            json!({"until": "1s"}),
+        )
+        .await;
+    assert_eq!(e.status, 200, "{}", e.body);
     let d = drain_as(&lab.td, Some(&w), "box", &sid).await;
     assert_eq!(d.end["code"], "lease_revoked", "{}", d.end);
-    assert!(started.elapsed() < Duration::from_secs(15));
     let row = last_audit(&lab.td, "target.lease_expired").await;
     assert_eq!(row["actor"], "system");
     assert_eq!(row["target"], "box");
@@ -3265,6 +3569,14 @@ async fn a_host_connect_reconciles_the_target_states() {
 
 // ------------------------------------------------------------ mode 1
 
+/// The names in the `--env-file` of a logged call ([`fake_tool`]).
+fn env_file_names(line: &str) -> Vec<&str> {
+    line.split_once("--env-file ")
+        .and_then(|(_, rest)| rest.split(' ').next())
+        .map(|names| names.split(',').collect())
+        .unwrap_or_default()
+}
+
 /// The `docker run` lines of the fake's log.
 fn runs(lab: &Lab) -> Vec<String> {
     lab.log()
@@ -3332,7 +3644,8 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
     assert_eq!(r.len(), 1, "{r:?}");
     let v1 = format!("-v {}:/work/terra/w1", ws("w1").display());
     assert!(
-        r[0].contains("--name terrarium-terra-dbox -e HOME") && r[0].contains(&v1),
+        r[0].contains("--name terrarium-terra-dbox --env-file HOME,NVIDIA_VISIBLE_DEVICES")
+            && r[0].contains(&v1),
         "{}",
         r[0]
     );
@@ -4604,6 +4917,8 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         .await
         .unwrap()
         .def;
+    // A killed earlier run with the same PID can leave this name behind.
+    drop(ContainerGuard(name.clone()));
     let _guard = ContainerGuard(name.clone());
     terrariumd::executor::lifecycle(
         &state,
@@ -4628,42 +4943,146 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         );
         serde_json::from_slice::<Value>(&out.stdout).unwrap()[0].clone()
     };
+    // Facts from earlier steps (the inspect before recreate, the docker cp
+    // probe), printed at once and again in each failure.
+    let notes = std::cell::RefCell::new(Vec::<String>::new());
+    let note = |line: String| {
+        println!("{line}");
+        notes.borrow_mut().push(line);
+    };
+    // On failure: the container, the workspace dir as the container sees
+    // it, and the daemon trace, so that a gate failure names its step.
+    let diag = |step: &str| {
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("docker")
+                .args(args)
+                .output()
+                .unwrap();
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        format!(
+            "{step}\n{}\ndocker inspect: {}\nworkspace dir:\n{}\ndaemon trace:\n{}",
+            notes.borrow().join("\n"),
+            run(&[
+                "inspect",
+                "--format",
+                "{{json .Id}} {{json .Config.Image}} {{json .State}} {{json .Mounts}}",
+                &name,
+            ]),
+            run(&["exec", "-u", "0", &name, "ls", "-lan", "/work/terra/worker"]),
+            lab.trace.text()
+        )
+    };
+    // The managed container is up when Docker reports it running, not when
+    // the API call returns. Poll before each exec.
+    let wait_running = async |step: &str| {
+        let start = std::time::Instant::now();
+        while start.elapsed() < LINK_WAIT {
+            let out = std::process::Command::new("docker")
+                .args(["inspect", "--format", "{{.State.Running}}", &name])
+                .output()
+                .unwrap();
+            if out.status.success() && out.stdout.trim_ascii() == b"true" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!(
+            "{}",
+            diag(&format!("{step}: not running after {LINK_WAIT:?}"))
+        );
+    };
+    let read_seed = |step: &str| {
+        let out = std::process::Command::new("docker")
+            .args(["exec", &name, "cat", "/work/terra/worker/seed"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && out.stdout == b"workspace-survives-recreate\n",
+            "{}",
+            diag(&format!(
+                "{step}: cat exited {:?}, stdout {:?}, stderr {:?}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        );
+    };
+    wait_running("up").await;
     let before = inspect();
-    // With DOCKER_HOST=ssh://..., this bind source is on the daemon,
-    // not on the test host. Transfer the seed through Docker's archive
-    // API instead of assuming the daemon can read a local temp file.
-    let seed = state.work_dir.join("terra/worker/seed");
-    std::fs::write(&seed, "workspace-survives-recreate\n").unwrap();
-    let copied = std::process::Command::new("docker")
+    note(format!(
+        "docker inspect before: {}",
+        json!({"Id":before["Id"],"Image":before["Image"],"Mounts":before["Mounts"]})
+    ));
+    // With DOCKER_HOST set, this bind source is on the Docker daemon's
+    // machine, not on the test host. Write the seed in the container, as
+    // root because Docker creates a missing bind source as root, and read
+    // it back before `down`: an empty seed after recreate then names the
+    // recreate, not the write.
+    let wrote = std::process::Command::new("docker")
         .args([
-            "cp",
-            seed.to_str().unwrap(),
-            &format!("{name}:/work/terra/worker/seed"),
+            "exec",
+            "-u",
+            "0",
+            &name,
+            "sh",
+            "-c",
+            "printf 'workspace-survives-recreate\\n' > /work/terra/worker/seed && sync",
         ])
         .output()
         .unwrap();
     assert!(
-        copied.status.success(),
+        wrote.status.success(),
         "{}",
-        String::from_utf8_lossy(&copied.stderr)
+        diag(&format!(
+            "write seed: {}",
+            String::from_utf8_lossy(&wrote.stderr)
+        ))
     );
-    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    read_seed("before down");
+    // Probe, not an assert: does `docker cp` (the archive API, through the
+    // gate's relay) keep the body of a file in the workspace? The source is
+    // outside the work root, so only docker cp can put it in the bind
+    // source, also with a local Docker daemon (TER-527).
+    let probe = lab.bins.path().join("seed-cp");
+    std::fs::write(&probe, "docker-cp-probe\n").unwrap();
+    let copied = std::process::Command::new("docker")
+        .args([
+            "cp",
+            probe.to_str().unwrap(),
+            &format!("{name}:/work/terra/worker/seed-cp"),
+        ])
+        .output()
+        .unwrap();
+    let read = std::process::Command::new("docker")
+        .args(["exec", &name, "cat", "/work/terra/worker/seed-cp"])
+        .output()
+        .unwrap();
+    note(format!(
+        "docker cp probe: cp exited {:?} (stderr {:?}), cat exited {:?}, {} bytes, content ok: {}",
+        copied.status.code(),
+        String::from_utf8_lossy(&copied.stderr).trim(),
+        read.status.code(),
+        read.stdout.len(),
+        read.stdout == b"docker-cp-probe\n"
+    ));
+    let down = lab.td.post_empty("/api/targets/dbox/down").await;
+    down.ok();
+    assert_eq!(down.body["state"], "stopped", "{}", diag("down"));
     lab.td
         .patch("/api/targets/dbox", json!({"image":"alpine:3.21"}))
         .await
         .ok();
-    lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
+    let recreated = lab.td.post_empty("/api/targets/dbox/recreate").await;
+    recreated.ok();
+    assert_eq!(recreated.body["state"], "running", "{}", diag("recreate"));
+    wait_running("recreate").await;
     let after = inspect();
-    let content = std::process::Command::new("docker")
-        .args(["exec", &name, "cat", "/work/terra/worker/seed"])
-        .output()
-        .unwrap();
-    assert!(content.status.success());
-    assert_eq!(content.stdout, b"workspace-survives-recreate\n");
-    println!(
-        "docker inspect before: {}",
-        json!({"Id":before["Id"],"Image":before["Image"],"Mounts":before["Mounts"]})
-    );
+    read_seed("after recreate");
     println!(
         "docker inspect after: {}",
         json!({"Id":after["Id"],"Image":after["Image"],"Mounts":after["Mounts"]})

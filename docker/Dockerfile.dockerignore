@@ -10,6 +10,8 @@ dashboard/node_modules
 dashboard/dist
 !docker/entrypoint.sh
 !docker/hot-swap.py
+# The release public key of the updater's cosign check (/opt/terrarium/release).
+!docker/release/**
 # The packaged defaults: prompts and harness settings (/opt/terrarium/defaults).
 !defaults/**
 # The host installer: terrariumd embeds it (GET /install/host.sh).

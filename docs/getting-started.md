@@ -1368,8 +1368,8 @@ CLI is `terrarium admin subscription disable|enable <name>` and
 ### 2.13d Test runs: proof that the tests pass
 
 An agent uploads the result file of a test run with `terrarium test
-push`. You see each test case on the Tests tab of the Board screen
-(`/p/<project>/board/tests`) and on the card (PLAN §15.5). A run with a
+push`. You see each test case on the Tests tab of the project
+(`/p/<project>/tests`) and on the card (PLAN §15.5). A run with a
 version label (`--label version:1.4.0`) shows the label, which opens the
 board filtered by that version.
 
@@ -1935,9 +1935,12 @@ image. After that, `<dir>/terrarium-compose up -d` keeps the release image
 (`<dir>/updater/state/image`). `just deploy::update` from source works as
 before and takes the install back to a source build.
 
-The updater checks the build provenance of each image with `gh attestation
-verify` before the pull (`TERRARIUM_UPDATE_VERIFY=gh`, docs/release.md). The check needs the network. When it
-fails, the update stops and nothing changes.
+The updater checks the release signature of each image with `cosign verify
+--key` and the release public key of the image before the pull
+(`TERRARIUM_UPDATE_VERIFY=cosign`, docs/release.md). A release that the
+GitHub workflow made needs `TERRARIUM_UPDATE_VERIFY=gh` (docs/release.md,
+"The switch from the workflow to the local build"). The check needs the
+network. When it fails, the update stops and nothing changes.
 
 ## 3. Configuration directories
 

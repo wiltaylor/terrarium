@@ -304,6 +304,22 @@ pub struct ExecLimits {
     pub limits: Limits,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reservation: Option<terrarium_core::resources::RuntimeLimits>,
+    /// Run the session through the native GPU helper (TER-345). The
+    /// daemon sends it only to a host agent with an enforced
+    /// `capabilities.native_gpu`. The GPUs are `reservation.gpu_devices`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_gpu: Option<NativeGpu>,
+}
+
+/// The GPU grant of a native session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeGpu {
+    /// The reservation that grants the exclusive GPUs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease: Option<String>,
+    /// The GPUs that `lease` reserves exclusively.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusive: Vec<String>,
 }
 
 /// Apply a budget without stopping a container or a holder's scopes.
@@ -1363,6 +1379,7 @@ mod tests {
                     docker: true,
                 }),
                 no_workspaces: true,
+                native_gpu: None,
             },
             max_sessions: 32,
             max_running_targets: Some(4),

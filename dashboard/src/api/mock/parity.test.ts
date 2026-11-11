@@ -1198,6 +1198,14 @@ describe("mode 1 targets (docs/api.md §17.2, §17.3, §17.7, §17.8)", () => {
     for (const b of bad) await expect(api.targets.create(b)).rejects.toMatchObject({ status: 422, code: "invalid" });
   });
 
+  it("takes an exedev target with a credential and ephemeral, as the daemon does (TER-651)", async () => {
+    const api = mock();
+    await expect(api.targets.create({ name: "x", kind: "exedev", ephemeral: true })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.create({ name: "x", kind: "exedev", credential: "vmkey" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.create({ name: "x", kind: "exedev", credential: "vmkey", ephemeral: true, keep: true })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.create({ name: "ex", kind: "exedev", credential: "vmkey", ephemeral: true })).resolves.toMatchObject({ kind: "exedev", host_online: null });
+  });
+
   it("prefixes a project target made through the API, keeps a prefixed name, and keeps a global name", async () => {
     const api = mock();
     expect((await api.targets.create({ name: "box", kind: "host", host: "lab1", project: "terrarium" })).name).toBe("terrarium-box");
@@ -1873,6 +1881,36 @@ describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
     expect(await failed).toMatchObject({ status: "failed", error: "exit code 1" });
     expect((await api.schedules.get(failing.id)).last_run).toMatchObject({ status: "failed" });
     ev.close();
+  });
+
+  it("a turn to a stopped agent without start_if_stopped wakes it and queues the turn (TER-210)", async () => {
+    const tick = fakeClock();
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleRunMs: 15 });
+    const s = await api.schedules.create({ name: "nudge-docs", project: "terrarium", spec: { kind: "interval", every: "1h" }, action: { type: "turn", agent: "terrarium/docs-writer", text: "go", start_if_stopped: false } });
+    const pending = api.schedules.run(s.id);
+    await tick(15);
+    expect(await pending).toMatchObject({ status: "ok", summary: "woke terrarium/docs-writer and sent the turn", output: { agent: "terrarium/docs-writer", started: true, delivery: "queued", status_before: "stopped" }, error: null });
+  });
+
+  it("a turn says what the daemon says for a live agent and after start_if_stopped (TER-546)", async () => {
+    const tick = fakeClock();
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleRunMs: 15 });
+    const run = async (name: string, agent: string, start_if_stopped: boolean) => {
+      const s = await api.schedules.create({ name, project: "terrarium", spec: { kind: "interval", every: "1h" }, action: { type: "turn", agent, text: "go", start_if_stopped } });
+      const pending = api.schedules.run(s.id);
+      await tick(15);
+      return pending;
+    };
+    // A live agent: the turn goes in at once, with or without start_if_stopped.
+    for (const start of [false, true])
+      expect(await run(`live-${start}`, "terrarium/lead", start)).toMatchObject({ status: "ok", summary: "turn sent to terrarium/lead", output: { agent: "terrarium/lead", started: false, delivery: "accepted", status_before: "idle" }, error: null });
+    // A stopped agent with start_if_stopped: started first, then the turn.
+    expect(await run("start", "terrarium/docs-writer", true)).toMatchObject({ status: "ok", summary: "started terrarium/docs-writer and sent the turn", output: { agent: "terrarium/docs-writer", started: true, delivery: "accepted", status_before: "stopped" }, error: null });
+    // An agent in error is not live: without start_if_stopped the turn is queued, as for a stopped one.
+    const err = await api.schedules.create({ name: "err", project: "webshop", spec: { kind: "interval", every: "1h" }, action: { type: "turn", agent: "webshop/css-worker", text: "go", start_if_stopped: false } });
+    const pending = api.schedules.run(err.id);
+    await tick(15);
+    expect(await pending).toMatchObject({ status: "ok", summary: "woke webshop/css-worker and sent the turn", output: { started: true, delivery: "queued", status_before: "error" } });
   });
 
   it("pages runs newest first with a cursor", async () => {

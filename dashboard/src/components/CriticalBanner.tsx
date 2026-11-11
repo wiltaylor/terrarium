@@ -1,7 +1,8 @@
 // The critical banner on every page, and the flashing browser tab, while an
-// open item of the Inbox has the priority `critical` (docs/api.md §6.8).
-// The inbox store follows the `inbox` and `question` events, so the banner
-// comes and goes with no reload. The logic is in features/inbox/critical.
+// open item of the Inbox, or an open question inside a thread (TER-488), has
+// the priority `critical` (docs/api.md §6.8). The inbox store follows the
+// `inbox` and `question` events, so the banner comes and goes with no reload.
+// The logic is in features/inbox/critical.
 
 import { A } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";

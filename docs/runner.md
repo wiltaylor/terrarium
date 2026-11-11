@@ -541,6 +541,12 @@ The `delivery` frame:
 | `false` | `write` | The write to the PTY failed. `error.message` tells why. |
 | `false` | `dropped` | The runner dropped the turn. |
 
+With `ok: true`, `seq` is the seq of the last line of `events.jsonl` when
+the turn started. The status events of the turn, and its end, have a higher
+seq. The events come on another stream than the `delivery` frame, so the
+daemon uses `seq` to tell whether the rest event of a short turn came
+before the outcome. A runner from before the field sends no `seq`.
+
 A delivery outcome goes only to the connection that typed the turn. When
 that connection closes first, the outcome is lost. A failed delivery is
 also an `Event::DeliveryFailed` in the events.
@@ -672,6 +678,25 @@ runner, `forward` connects again with `events_since` set to the last seq
 that it passed on, and adopts the new connection. Only when that connect
 fails does the supervisor treat the agent as exited. In `inprocess` mode,
 `recover` always returns `Gone`.
+
+### Upgrade after the turn
+
+After a hot swap, `recover` compares `hello().version` with the daemon
+build (`terrarium_version::is_stale`). A runner of another build gets
+`restart_scheduled` with the reason `upgrade` (a `system` event and a log
+line). When the agent is out of a turn and the hot swap is committed (no
+probation), the agent restarts with `--resume`. Out of a turn means: the
+runner rests (`idle` or `waiting`), and no turn, recap or pointer is on
+its way (the conditions of an idle stop). A runner that is `blocked` is
+in a turn (a question on screen, a stalled tool call) and keeps running.
+The check and the restart claim are under one lock, and no work goes out
+while the restart runs: it waits for the next launch. At most
+`upgrade_limit` agents (3) restart for an upgrade at one time. A slot
+frees when the new launch reports `starting`, or when the agent goes
+down. A turn that starts while the agent waits for a slot keeps the
+upgrade pending until the turn ends. The new launch runs the new runner
+binary, the active harness pin, the sandbox spec and the skills. A daemon
+build with no git ref (`+unknown`) does not schedule upgrades.
 
 ## Tests
 

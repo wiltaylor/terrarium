@@ -200,4 +200,22 @@ describe("questions in the mock", () => {
     expect(api.world.audit.filter((a) => a.action === "question.update").length).toBeGreaterThanOrEqual(3);
     close();
   });
+
+  it("moves an open question into a thread with its agent, and answers it there (GitHub #30)", async () => {
+    const api = mock();
+    const q = (await api.questions.ofAgent("terrarium/lead")).find((x) => x.kind === "question" && x.status === "open" && !x.thread)!;
+    const { question, thread } = await api.questions.toThread(q.id, "Tell me more.");
+    expect(question.status).toBe("in_thread");
+    expect(question.thread).toBe(thread.id);
+    expect(thread.agent).toBe(q.agent);
+    expect(thread.from_question).toBe(q.id);
+    expect(thread.status).toBe("waiting_agent");
+    expect(thread.messages![0]!.text).toContain(`> ${q.text}`);
+    expect(thread.messages![0]!.text).toContain("Tell me more.");
+    await expect(api.questions.toThread(q.id)).rejects.toMatchObject({ status: 409 });
+    const answered = await api.questions.answer(q.id, { answer: "Go ahead." });
+    expect(answered.status).toBe("answered");
+    const bundle = (await api.questions.list()).find((x) => x.kind === "bundle")!;
+    await expect(api.questions.toThread(bundle.id)).rejects.toMatchObject({ status: 409 });
+  });
 });

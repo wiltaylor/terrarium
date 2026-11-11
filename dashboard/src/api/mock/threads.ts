@@ -331,9 +331,11 @@ export function createThreadMock(c: ThreadMockContext) {
     return { summary, links: checked };
   }
 
-  /** Close a thread with a handoff, for a reason: its open questions are retracted. */
+  /** Close a thread with a handoff, for a reason: its open and in_thread questions are retracted, as the daemon does. */
   function closeAs(t: MockThread, reason: "operator" | "confirmed", handoff: ThreadHandoff): Thread {
-    const open = openQuestions(t.id).map((q) => q.id);
+    const open = questionsOf(t.id)
+      .filter((q) => q.status === "open" || q.status === "in_thread")
+      .map((q) => q.id);
     // Closed first in the mock, so that the retracts do not move the status.
     const at = c.iso();
     Object.assign(t, { status: "closed", handoff, closed_at: at, closed_by: "operator", close_reason: reason, close_proposal: null, updated_at: at });

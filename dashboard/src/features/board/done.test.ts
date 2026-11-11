@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Board, Card } from "../../api/types";
-import { boardView } from "./done";
+import { boardView, doneToggleHref } from "./done";
 import { buildLanes } from "./lanes";
 
 const card = (id: string, column: string, version: string): Card => ({
@@ -33,5 +33,17 @@ describe("done screen", () => {
   });
   it("handles an empty done screen", () => {
     expect(boardView({ ...board, cards: [] }, true).cards).toEqual([]);
+  });
+});
+
+describe("done toggle", () => {
+  it("keeps the version filter and the grouping both ways", () => {
+    expect(doneToggleHref("/p/p", false, { version: "vnext", group: "version" })).toBe("/p/p/board/done?version=vnext&group=version");
+    expect(doneToggleHref("/p/p", true, { version: "1.0", group: "version" })).toBe("/p/p/board?version=1.0&group=version");
+  });
+  it("drops empty and other values", () => {
+    expect(doneToggleHref("/p/p", false, {})).toBe("/p/p/board/done");
+    expect(doneToggleHref("/p/p", true, { version: " ", group: "rows" })).toBe("/p/p/board");
+    expect(doneToggleHref("/p/a%20b", false, { version: "v 1" })).toBe("/p/a%20b/board/done?version=v+1");
   });
 });

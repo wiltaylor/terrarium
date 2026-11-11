@@ -2,6 +2,7 @@
 //! `&Connection` to read or a `&mut Tx` to write; the API layer runs them
 //! through [`crate::db::Db`].
 
+pub mod accepted_heads;
 pub mod agents;
 pub mod artifacts;
 pub mod audit;
@@ -9,6 +10,7 @@ pub mod board;
 pub mod calendar;
 pub mod card_files;
 pub mod card_history;
+pub mod cloud_spend;
 pub mod event_sources;
 pub mod github_gate;
 pub mod groups;
@@ -97,6 +99,20 @@ pub fn valid_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
+/// The name of a new agent (create, spawn): [`check_name`], and not the
+/// bare name of a project service. The services' holders are
+/// `<project>/@<service>`, which no name can take (no `@`); the bare names
+/// are reserved too, so no new agent can look like one. An agent made
+/// before keeps its name (and only its own scope).
+pub fn check_new_agent_name(name: &str) -> crate::error::ApiResult<()> {
+    if terrarium_host::native::PROJECT_SERVICES.contains(&name) {
+        return Err(crate::error::ApiError::invalid(format!(
+            "agent name `{name}` is reserved for a project service"
+        )));
+    }
+    check_name("agent", name)
+}
+
 pub fn check_name(kind: &str, name: &str) -> crate::error::ApiResult<()> {
     if valid_name(name) {
         Ok(())
@@ -134,6 +150,23 @@ pub fn json_col<T: serde::de::DeserializeOwned + Default>(text: &str) -> T {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// No agent can take a project service's holder (`<project>/@jobs`):
+    /// `@` is never in a name, and the bare service names are reserved for
+    /// new agents (create, spawn).
+    #[test]
+    fn agent_names_never_pass_for_a_project_service() {
+        for service in terrarium_host::native::PROJECT_SERVICES {
+            assert!(check_new_agent_name(service).is_err(), "{service}");
+            assert!(check_new_agent_name(&format!("@{service}")).is_err());
+            assert!(check_name("agent", &format!("@{service}")).is_err());
+            // An agent made before the reservation keeps working (its
+            // target root, its updates), and other kinds keep the name.
+            check_name("agent", service).unwrap();
+            check_name("project", service).unwrap();
+        }
+        check_new_agent_name("jobs-1").unwrap();
+    }
 
     #[test]
     fn names() {
