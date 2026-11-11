@@ -539,6 +539,7 @@ async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
             enabled: true,
             supervised: true,
             idle_poll: Duration::from_millis(20),
+            drain_timeout: Duration::from_secs(600),
         });
         o
     };
@@ -643,6 +644,7 @@ async fn a_self_update_with_a_wrong_checksum_changes_nothing() {
         enabled: true,
         supervised: true,
         idle_poll: Duration::from_millis(20),
+        drain_timeout: Duration::from_secs(600),
     });
     let run = tokio::spawn(Client::new(o).run());
     // The agent stays online and its binary stays.

@@ -1,4 +1,5 @@
 import { useInstance } from "../../instance";
+import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
 // The Mail tab of the Logs screen (docs/api.md §7): every message, newest
 // first, with filters (from, to, project, thread, time range, free text)
 // and the live mode of the log tabs (components/Live.tsx). The log is a record: it keeps no unread state for the
@@ -253,6 +254,7 @@ function LogRow(props: {
 function ThreadPanel(props: { thread: string; row: Message; project?: string; feed: MailFeed; onCompose: (to?: string) => void; onError: (e: unknown) => void }) {
   const { api } = useInstance();
   const messages = createMemo(() => threadOf(props.feed.messages(), props.thread));
+  const read = useReadBoundary("mail", () => props.thread, () => messages().map((m) => m.created_at));
   const [text, setText] = createSignal("");
   const [sending, setSending] = createSignal(false);
   const [made, setMade] = createSignal<Card | null>(null);
@@ -269,11 +271,15 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
   };
   return (
     <div class="log-thread stack">
+      <ErrorBanner error={read.error()} />
       <For each={messages()}>
-        {(m) => (
+        {(m, index) => (
+          <>
+          <Show when={index() === read.first()}><ReadBoundary /></Show>
           <div class={m.id === props.row.id ? "current" : undefined}>
             <MessageView message={m} />
           </div>
+          </>
         )}
       </For>
       <Show when={toInbox()}>

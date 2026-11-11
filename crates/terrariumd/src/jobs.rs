@@ -164,7 +164,7 @@ use crate::git;
 use crate::policy;
 use crate::secrets::{self, RunDirs};
 use crate::store::board::{self, CardPatch};
-use crate::store::jobs::{self, BatchCard, Job, JobEnd, JobKind};
+use crate::store::jobs::{self, BatchCard, Job, JobEnd, JobKind, JobState};
 use crate::store::mail::{self, Address, Outgoing};
 use crate::store::{repos, targets};
 
@@ -225,6 +225,8 @@ const JOBS_DIR: &str = "jobs";
 
 /// The queue state of one daemon (`AppState::job_queue`).
 pub struct Runtime {
+    tasks: Mutex<Vec<JoinHandle<()>>>,
+    stopping: AtomicBool,
     pub(crate) log_cleanup: tokio::sync::Mutex<()>,
     /// True once [`spawn`] has taken up the jobs of the last daemon
     /// ([`recover_lost`]). A job that starts before that counts as lost and
@@ -238,6 +240,8 @@ pub struct Runtime {
 impl Default for Runtime {
     fn default() -> Self {
         Self {
+            tasks: Mutex::new(Vec::new()),
+            stopping: AtomicBool::new(false),
             recovered: tokio::sync::watch::Sender::new(false),
             log_cleanup: tokio::sync::Mutex::new(()),
             accepted_hold: std::sync::atomic::AtomicBool::new(false),
@@ -246,6 +250,16 @@ impl Default for Runtime {
 }
 
 impl Runtime {
+    pub fn stop(&self) -> Vec<JoinHandle<()>> {
+        let mut owned = self.tasks.lock().unwrap_or_else(|p| p.into_inner());
+        self.stopping.store(true, Ordering::SeqCst);
+        let tasks = std::mem::take(&mut *owned);
+        for task in &tasks {
+            task.abort();
+        }
+        tasks
+    }
+
     /// Hold (or release) the background read of the reviewed commits.
     pub fn hold_accepted_reads(&self, hold: bool) {
         self.accepted_hold
@@ -443,6 +457,46 @@ struct Lost {
 /// and a tick follows. A kill that fails is logged, and the job goes on
 /// anyway.
 pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
+    // Pre-upgrade native jobs have no continuation checkpoint. Keep the
+    // old kill/requeue path for them instead of replaying prepare beneath
+    // an untracked recipe. Read outside the shared DB writer transaction.
+    let journal = crate::hosts::resume::Journal::new(&state.state_dir);
+    let checkpoints: HashSet<String> = match journal.scan::<serde_json::Value>("prepare/") {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|(key, _)| {
+                key.strip_prefix("prepare/")
+                    .and_then(|rest| rest.split('/').next())
+                    .map(str::to_owned)
+            })
+            .collect(),
+        Err(error) => {
+            warn!(%error, "cannot read native job checkpoints");
+            HashSet::new()
+        }
+    };
+    let completed: Vec<_> = checkpoints.iter().cloned().collect();
+    let completed = state
+        .db
+        .read(move |conn| {
+            let mut out = Vec::new();
+            for id in completed {
+                if let Ok(job) = jobs::get(conn, &id)
+                    && matches!(job.state, JobState::Passed | JobState::Failed)
+                {
+                    out.push(id);
+                }
+            }
+            Ok(out)
+        })
+        .await;
+    if let Ok(completed) = completed {
+        for id in completed {
+            if let Err(error) = state.executor.hosts.forget_job(&id) {
+                warn!(job = %id, %error, "cannot clean completed job after restart");
+            }
+        }
+    }
     let since = (chrono::Utc::now() - chrono::Duration::hours(DRAIN_WINDOW_HOURS))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let found = state
@@ -460,6 +514,7 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 .filter(|(j, _)| !ours.contains(&j.id))
                 .collect::<Vec<_>>();
             let mut out = Vec::new();
+            let mut resumed = Vec::new();
             for (job, running) in lost {
                 // A release ran on the release target (TER-623).
                 let delivery = jobs::job_delivery(&jobs::delivery(t, &job.project)?, job.kind)
@@ -493,28 +548,41 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 // a running one that gets a cancel meanwhile keeps its
                 // slot as a draining job (TER-123 review 2, major 1).
                 let live = LiveRun::new(&job.id);
+                if running && !other_host && checkpoints.contains(&job.id)
+                    && def.as_ref().is_some_and(|d|
+                        matches!(d.kind, TargetKind::Host | TargetKind::Docker | TargetKind::Vmlab))
+                {
+                    resumed.push((job, delivery, live));
+                    continue;
+                }
                 let dir = job.slot.map(|s| slot_dir(&delivery, &job.project, s));
+                let why = def.as_ref().filter(|d|
+                    matches!(d.kind, TargetKind::Ssh | TargetKind::Exedev))
+                    .map(|_| "interrupted (ssh transport)".to_owned());
                 out.push(Lost {
                     job,
                     running,
                     def,
                     live,
                     other_host,
-                    why: None,
+                    why,
                     red: None,
                     dir,
                 });
             }
-            Ok(out)
+            Ok((out, resumed))
         })
         .await;
-    let found = match found {
+    let (found, resumed) = match found {
         Ok(f) => f,
         Err(e) => {
             warn!("cannot read the lost jobs: {e}");
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     };
+    for (job, delivery, live) in resumed {
+        spawn_job(state.clone(), job, delivery, live);
+    }
     let state = state.clone();
     tokio::spawn(async move {
         let ends = found.into_iter().map(|l| end_lost(&state, l));
@@ -631,6 +699,12 @@ async fn end_lost(state: &Shared, l: Lost) {
         // with its attempt and its place, as TER-160 does for a host that
         // could not be reached. TER-196: the same for a run lost to the
         // infrastructure; a batch reruns whole.
+        // This is an intentional rerun after kill/slot recovery, not a
+        // daemon reattachment. Its prior replay channel was consumed.
+        if let Err(error) = state.executor.hosts.forget_job(&job.id) {
+            warn!(job = %job.id, %error, "cannot discard lost recipe checkpoint");
+            return;
+        }
         let id = job.id.clone();
         let cards = job.cards();
         let back = state
@@ -1213,46 +1287,60 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
         })
         .await?;
     for (job, def, live_run) in started {
-        let state = state.clone();
-        tokio::spawn(async move {
-            let end = match run(&state, &job, &def).await {
-                // A merge that failed before its tests (TER-614 R3): one
-                // retry after the wait, with no attempt used; the second
-                // such end is an infra end.
-                Ran::End(end) if before_tests(&job, &end) => {
-                    let first = infra_retried().insert(job.id.clone());
-                    if first {
-                        set_control(&job.id, None);
-                        requeue_before_tests(&state, &job, &end).await;
-                        drop(live_run);
-                        return;
-                    }
-                    infra_retried().remove(&job.id);
-                    JobEnd {
-                        outcome: Some(OUTCOME_INFRA.into()),
-                        ..end
-                    }
-                }
-                Ran::End(end) => end,
-                Ran::Wait { why, ssh } => {
+        spawn_job(state.clone(), job, def, live_run);
+    }
+    Ok(())
+}
+
+fn spawn_job(state: Shared, job: Job, def: DeliveryDef, live_run: LiveRun) {
+    let owner = state.clone();
+    let mut tasks = owner
+        .job_queue
+        .tasks
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if owner.job_queue.stopping.load(Ordering::SeqCst) {
+        return;
+    }
+    let task = tokio::spawn(async move {
+        let end = match run(&state, &job, &def).await {
+            // A merge that failed before its tests (TER-614 R3): one
+            // retry after the wait, with no attempt used; the second
+            // such end is an infra end.
+            Ran::End(end) if before_tests(&job, &end) => {
+                let first = infra_retried().insert(job.id.clone());
+                if first {
                     set_control(&job.id, None);
-                    requeue(&state, &job, why, ssh).await;
+                    requeue_before_tests(&state, &job, &end).await;
                     drop(live_run);
                     return;
                 }
-                Ran::Lost { why, red } => {
-                    set_control(&job.id, None);
-                    rerun_lost(&state, job.clone(), why, red, live_run).await;
-                    return;
+                infra_retried().remove(&job.id);
+                JobEnd {
+                    outcome: Some(OUTCOME_INFRA.into()),
+                    ..end
                 }
-            };
-            set_control(&job.id, None);
-            finish_job(&state, &job.id, end).await;
-            drop(live_run);
-            kick(&state);
-        });
-    }
-    Ok(())
+            }
+            Ran::End(end) => end,
+            Ran::Wait { why, ssh } => {
+                set_control(&job.id, None);
+                requeue(&state, &job, why, ssh).await;
+                drop(live_run);
+                return;
+            }
+            Ran::Lost { why, red } => {
+                set_control(&job.id, None);
+                rerun_lost(&state, job.clone(), why, red, live_run).await;
+                return;
+            }
+        };
+        set_control(&job.id, None);
+        finish_job(&state, &job.id, end).await;
+        drop(live_run);
+        kick(&state);
+    });
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(task);
 }
 
 /// End running job `id` with `end`, then run its card flow
@@ -1267,6 +1355,9 @@ async fn finish_job(state: &Shared, id: &str, end: JobEnd) {
         .await;
     match ended {
         Ok(Some(j)) => {
+            if let Err(error) = state.executor.hosts.forget_job(&j.id) {
+                warn!(job = %j.id, %error, "cannot clean completed job checkpoints");
+            }
             if let Err(e) = after_end(state, &j).await {
                 warn!(job = %j.id, "cannot handle the end of a job: {e}");
             }
@@ -1778,6 +1869,10 @@ async fn requeue(state: &Shared, job: &Job, why: String, ssh: bool) {
 /// keeps the output and the failed step in its tail, and each card gets
 /// them in a comment.
 async fn requeue_before_tests(state: &Shared, job: &Job, end: &JobEnd) {
+    if let Err(error) = state.executor.hosts.forget_job(&job.id) {
+        warn!(job = %job.id, %error, "cannot discard failed setup checkpoint");
+        return;
+    }
     let wait = infra_retry();
     let tail = end.tail.clone().unwrap_or_default();
     let why = tail
@@ -2067,6 +2162,28 @@ async fn run_inner(
             "target `{target}` belongs to project `{p}`, not `{}`",
             job.project
         )));
+    }
+    if !matches!(row.def.kind, TargetKind::Ssh | TargetKind::Exedev) {
+        let host = crate::executor::host_of(&row.def)?;
+        if !state.executor.hosts.wait_online(host).await {
+            return Err(ApiError::conflict(
+                "host did not reconnect within the resume grace",
+            ));
+        }
+        // An offline recipe can already be finished at reconnect. Its
+        // replay is available before reservation enforcement is restored,
+        // but reading the retained log requires admission for a new session.
+        tokio::time::timeout(state.executor.hosts.resume_grace, async {
+            while state.executor.resource_pending(host) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            ApiError::conflict(
+                "host reservation reconciliation did not finish within the resume grace",
+            )
+        })?;
     }
     let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
     let slot = job
@@ -2525,6 +2642,7 @@ impl StepCtx<'_> {
 }
 
 /// What the daemon's prepare step gave.
+#[derive(serde::Serialize, serde::Deserialize)]
 enum Prepared {
     /// The commit to test, in the bundle; the batch with its conflicts
     /// marked.
@@ -2972,6 +3090,21 @@ fn bundle_ready(
     Prepared::Ready { head, batch, base }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RecipeResume {
+    head: String,
+    batch: Option<Vec<BatchCard>>,
+    log: String,
+    ionice: bool,
+    own: Vec<(String, String)>,
+    #[serde(default)]
+    log_target: Option<String>,
+}
+
+fn recipe_resume_key(job: &Job) -> String {
+    format!("recipe/{}/{}", job.id, job.attempt)
+}
+
 /// Prepare in the daemon, clone on the target from the bundle, run the
 /// recipe there, and push `next` from the daemon for a merge.
 async fn steps(
@@ -2981,6 +3114,44 @@ async fn steps(
     guard: tokio::sync::OwnedMutexGuard<()>,
 ) -> ApiResult<JobEnd> {
     let job = x.job;
+    let journal = crate::hosts::resume::Journal::new(&x.state.state_dir);
+    let resume_key = recipe_resume_key(job);
+    if let Some(saved) = journal.load::<RecipeResume>(&resume_key)?
+        && let Some((host, id)) = journal.load::<(String, u32)>(&format!("bound/{resume_key}"))?
+    {
+        drop(guard);
+        x.at(STEP_RECIPE);
+        x.recipe_started.store(true, Ordering::SeqCst);
+        let session = x
+            .state
+            .executor
+            .hosts
+            .reattach(&host, id)
+            .ok_or_else(|| ApiError::internal("the saved recipe has no replay channel"))?;
+        let own: Vec<_> = saved
+            .own
+            .iter()
+            .map(|(label, value)| (label.clone(), zeroize::Zeroizing::new(value.clone())))
+            .collect();
+        let run = crate::executor::redact_run(
+            crate::executor::pump_host(session),
+            crate::executor::own_redactor(&own),
+            x.state.db.redactor().get(),
+            terrarium_core::redact::View::All,
+        );
+        set_control(&job.id, Some(run.ctl.clone()));
+        if killed(&job.id) {
+            let _ = run.ctl.send(Control::Kill);
+        }
+        let c = run.collect(RECIPE_MAX).await;
+        // Reuse the original writer identity. Calling begin here would revoke
+        // this attempt's ledger row even though its recipe was not restarted.
+        if let Some(identity) = &saved.log_target {
+            crate::job_logs::record_output(x.state, job, delivery, &saved.log, identity, &c.stdout)
+                .await?;
+        }
+        return finish_recipe(x, delivery, saved, c).await;
+    }
     if job.kind == JobKind::Merge {
         for c in job.cards().iter().skip(1) {
             check_ref(&c.branch)?;
@@ -2993,8 +3164,22 @@ async fn steps(
     }
     x.at(STEP_PREPARE);
     let guard = Arc::new(guard);
-    let mut prepared = None;
+    let prepare_key = format!("prepare/{}/{}", job.id, job.attempt);
+    let cached = journal.load::<Prepared>(&prepare_key)?;
+    let mut prepared = if let Some(Prepared::Ready { head, batch, base }) = cached {
+        let bundle = x.bundle.clone();
+        let kind = job.kind;
+        Some(
+            x.daemon(move |r| bundle_ready(r, kind, &bundle, head, batch, base))
+                .await?,
+        )
+    } else {
+        None
+    };
     for attempt in 0..2 {
+        if prepared.is_some() {
+            break;
+        }
         let (j, bundle, prepare_guard) = (job.clone(), x.bundle.clone(), guard.clone());
         let (result, damaged) = x
             .daemon(move |r| {
@@ -3027,11 +3212,14 @@ async fn steps(
         x.lifetime = Some(Arc::new(lifetime));
     }
     drop(guard);
-    let (head, batch, base) =
-        match prepared.ok_or_else(|| ApiError::internal("the prepare loop did not run"))? {
-            Prepared::Ready { head, batch, base } => (head, batch, base),
-            Prepared::End(end) => return Ok(end),
-        };
+    let prepared = prepared.ok_or_else(|| ApiError::internal("the prepare loop did not run"))?;
+    if !matches!(x.def.kind, TargetKind::Ssh | TargetKind::Exedev) {
+        journal.save(&prepare_key, &prepared)?;
+    }
+    let (head, batch, base) = match prepared {
+        Prepared::Ready { head, batch, base } => (head, batch, base),
+        Prepared::End(end) => return Ok(end),
+    };
     check_commit(&head)?;
     // The tree that the slot's work tree must have (TER-190 review,
     // finding 1), from the daemon's repo, not from the slot.
@@ -3064,12 +3252,35 @@ async fn steps(
     } else {
         ""
     };
-    let receive = x.plain_cmd(
+    let mut receive = x.plain_cmd(
         RECEIVE_SCRIPT,
         &[x.dir, &head, job.kind.as_str(), &base, &tree, wipe],
     );
+    let receive_key = format!("receive/{}/{}", job.id, job.attempt);
+    receive.resume_key = Some(receive_key.clone());
     x.at(STEP_RECEIVE);
-    let c = x.run(&receive, STEP_MAX, Some(data)).await?;
+    // Input has no replay offset in the host protocol. Finish any old
+    // receive with EOF before retrying an incomplete bundle, never wipe
+    // the slot while that receive still holds it.
+    let old = journal.load::<(String, u32)>(&format!("bound/{receive_key}"))?;
+    let previous = if let Some((host, id)) = old {
+        let session = x
+            .state
+            .executor
+            .hosts
+            .reattach(&host, id)
+            .ok_or_else(|| ApiError::internal("the saved receive has no replay channel"))?;
+        let run = crate::executor::pump_host(session);
+        set_control(&job.id, Some(run.ctl.clone()));
+        let _ = run.ctl.send(Control::Eof);
+        Some(run.collect(STEP_MAX).await)
+    } else {
+        None
+    };
+    let c = match previous {
+        Some(c) if result_line(&c.stdout).get("outcome").map(String::as_str) == Some("ok") => c,
+        _ => x.run(&receive, STEP_MAX, Some(data)).await?,
+    };
     let received = result_line(&c.stdout).get("outcome").map(String::as_str) == Some("ok");
     if received && x.wipe {
         // The slot is new: the mark of the lost job goes (finding 2).
@@ -3211,15 +3422,54 @@ async fn steps(
     }
     let recipe_cmd = RemoteCmd {
         argv: low_priority(recipe_cmd.argv.clone(), x.ionice),
+        resume_key: Some(resume_key.clone()),
         ..recipe_cmd
     };
+    let saved = RecipeResume {
+        log_target: log_target.clone(),
+        head,
+        batch,
+        log,
+        ionice: x.ionice,
+        own: own
+            .iter()
+            .map(|(label, value)| (label.clone(), value.to_string()))
+            .collect(),
+    };
+    if !matches!(x.def.kind, TargetKind::Ssh | TargetKind::Exedev) {
+        journal.save(&resume_key, &saved)?;
+    }
     let c = step_redacted(x.state, &job.id, x.def, &recipe_cmd, RECIPE_MAX, None, &own).await?;
     if let Some(identity) = log_target {
-        crate::job_logs::record_output(x.state, job, delivery, &log, &identity, &c.stdout).await?;
+        crate::job_logs::record_output(x.state, job, delivery, &saved.log, &identity, &c.stdout)
+            .await?;
     }
     if let Some(tunnel) = tunnel {
         tunnel.close().await;
     }
+    finish_recipe(x, delivery, saved, c).await
+}
+
+async fn finish_recipe(
+    x: &mut StepCtx<'_>,
+    delivery: &DeliveryDef,
+    saved: RecipeResume,
+    c: Collected,
+) -> ApiResult<JobEnd> {
+    let job = x.job;
+    let RecipeResume {
+        head,
+        batch,
+        log,
+        ionice,
+        own,
+        log_target: _,
+    } = saved;
+    x.ionice = ionice;
+    let own: Vec<_> = own
+        .into_iter()
+        .map(|(label, value)| (label, zeroize::Zeroizing::new(value)))
+        .collect();
     x.recipe_started.store(true, Ordering::SeqCst);
     let ok = c.end.as_ref().is_some_and(End::success);
     // TER-196: a run that the infrastructure lost is no red; [`run`]

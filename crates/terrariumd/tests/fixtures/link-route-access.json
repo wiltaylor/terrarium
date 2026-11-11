@@ -1,6 +1,19 @@
 {
   "routes": [
     {
+      "source": "api/read_positions.rs",
+      "registration": "\"/read-positions/{kind}/{item}\",post(visit)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/read-positions/thread/x",
+          "body": { "through": "2026-01-01T00:00:00Z" },
+          "allowed": false
+        }
+      ]
+    },
+    {
       "source": "api/agents.rs",
       "registration": "\"/agents\",get(list).post(create)",
       "access": "other",

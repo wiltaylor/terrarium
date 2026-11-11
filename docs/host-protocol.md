@@ -1145,9 +1145,10 @@ When the connection drops, the host agent:
 
 The daemon then:
 
-1. Checks that `resume.token` is the last token it gave to this host. If
-   not (for example, the daemon restarted), it sends `welcome` with an empty
-   `resume` list.
+1. Checks `resume.token` against its encrypted, durable host journal. The
+   token remains stable across reconnects and daemon restarts, including a
+   disconnect before a `welcome` reaches the host. A mismatched token gets
+   an empty `resume` list. Host bearer authentication is still required.
 2. Lists in `welcome.resume` each offered session it still wants, with
    `received`: the output bytes it has. `received` may be more than its last
    `ack`.
@@ -1165,8 +1166,17 @@ A session that stays without a link for longer than `resume_grace_secs`
 (default 600) is killed with `reason: "detached_timeout"`. The host agent
 keeps its output and terminal frames for the next `hello`.
 
-When the daemon restarts, it loses its exec sessions. The host agent kills
-them at the next `welcome`. Targets (containers, VMs) are not affected.
+On a daemon restart, host-agent sessions and their process waits reattach.
+Running native queue jobs retain their slot and phase, exit code, output
+tail and files on the target, including JUnit results. The journal commits
+output offsets and terminal events before acknowledging them. It keeps up
+to 8 MiB and 4096 stdout/stderr events per session for replay, without
+changing the absolute resume offset. Copy file data is not tail-truncated.
+Closed execs and completed jobs remove their checkpoints. Finished helper
+sessions without a durable owner expire after five minutes. SSH and exe.dev
+run interruptions are reported as `interrupted (ssh transport)` and queue
+jobs on those transports are killed and requeued. Native jobs from an older
+daemon without continuation checkpoints also use kill/requeue.
 
 ## Self-update
 
@@ -1214,8 +1224,12 @@ another host. A TLS proxy in front of the host listener must pass
    `<binary>.new --version`. The new binary must exit 0 in 10 seconds and
    print the offered version (`-dirty` does not count). Else it removes
    `.new` and stops.
-5. It waits until it holds no session (it looks every 10 seconds). An
-   update does not kill the sessions of agents.
+5. It stops admitting new sessions and waits until it holds no session
+   (it looks every 10 seconds). Existing sessions retain control traffic.
+   A failed update reopens admission. An update does not kill live sessions.
+   Each drain is bounded by `auto_update_drain_secs` (default 600 seconds).
+   If sessions remain at that bound, admission reopens and `.new` stays
+   staged. The agent retries after 10 seconds, without another download.
 6. It keeps the running binary as `<binary>.prev` (a hard link), writes the
    new version to `<binary>.pending`, and renames `.new` over the binary.
    The rename is atomic: the binary is always the old one or the new one.
@@ -1391,6 +1405,7 @@ allowed_cwd_roots = ["/home/alice/labs", "/srv/build"]   # optional; absent mean
 # repos_dir = "/srv/terrarium/repos"        # the host path of TERRARIUM_REPOS_DIR, for a local lab_repo; default ./repos
 # max_running_targets = 4                   # docker and vmlab targets that may run at one time
 # auto_update = true                        # take the daemon's build (see "Self-update")
+# auto_update_drain_secs = 600              # reopen admission after this bound and retry
 
 # [display]                                 # target displays (see "display"); all optional
 # enabled = false                           # open THIS machine's desktop to `desktop` targets
