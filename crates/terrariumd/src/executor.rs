@@ -5665,9 +5665,7 @@ mod tests {
         bad.insert("TERRARIUM_GIT_SSH_KEY".into(), "not base64!".into());
         let out = run(&bad);
         assert!(!out.status.success());
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("cannot decode the SSH key")
-        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot decode the SSH key"));
         assert!(!String::from_utf8_lossy(&out.stdout).contains("cannot decode the SSH key"));
     }
 
