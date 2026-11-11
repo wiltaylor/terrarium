@@ -762,7 +762,7 @@ mod tests {
             let (ctl, mut controls) = mpsc::unbounded_channel();
             let (ready, _) = oneshot::channel();
             let bridge_task = tokio::spawn(bridge(
-                crate::executor::Running { events: rx, ctl },
+                crate::executor::Running { events: rx, ctl, host_session: None },
                 path,
                 ready,
             ));
@@ -847,7 +847,7 @@ mod tests {
             let (ctl, mut controls) = mpsc::unbounded_channel();
             let (ready, _) = oneshot::channel();
             let task = tokio::spawn(bridge(
-                crate::executor::Running { events: rx, ctl },
+                crate::executor::Running { events: rx, ctl, host_session: None },
                 path,
                 ready,
             ));
@@ -929,7 +929,7 @@ mod tests {
         let (ctl, mut controls) = mpsc::unbounded_channel();
         let (ready, ready_rx) = oneshot::channel();
         let task = tokio::spawn(bridge(
-            crate::executor::Running { events: rx, ctl },
+            crate::executor::Running { events: rx, ctl, host_session: None },
             upstream,
             ready,
         ));
@@ -1000,7 +1000,7 @@ mod tests {
         let (ctl, mut controls) = mpsc::unbounded_channel();
         let (ready, _) = oneshot::channel();
         let task = tokio::spawn(bridge(
-            crate::executor::Running { events: rx, ctl },
+            crate::executor::Running { events: rx, ctl, host_session: None },
             path.clone(),
             ready,
         ));
@@ -1064,7 +1064,7 @@ mod tests {
         let (ctl, mut controls) = mpsc::unbounded_channel();
         let (ready, _) = oneshot::channel();
         let task = tokio::spawn(bridge(
-            crate::executor::Running { events: rx, ctl },
+            crate::executor::Running { events: rx, ctl, host_session: None },
             path,
             ready,
         ));
@@ -1111,7 +1111,7 @@ mod tests {
         let (ctl, mut controls) = mpsc::unbounded_channel();
         let (ready, ready_rx) = oneshot::channel();
         let task = tokio::spawn(bridge(
-            crate::executor::Running { events: rx, ctl },
+            crate::executor::Running { events: rx, ctl, host_session: None },
             path,
             ready,
         ));

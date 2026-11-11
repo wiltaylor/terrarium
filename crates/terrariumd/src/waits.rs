@@ -242,6 +242,8 @@ async fn reconcile_runs(state: &Shared) -> ApiResult<()> {
                     )
                 })
                 .await?;
+        } else if let Some(session) = w.session().and_then(|s| state.executor.find(s)) {
+            spawn_run_reader(state, w.id, w.agent, session);
         }
     }
     Ok(())

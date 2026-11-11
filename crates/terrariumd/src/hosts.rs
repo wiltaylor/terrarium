@@ -34,7 +34,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::connect_info::{ConnectInfo, Connected};
@@ -43,7 +43,7 @@ use axum::extract::{FromRequestParts, Request, State, WebSocketUpgrade};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 pub use terrarium_host::protocol::METRICS_INTERVAL_SECS;
 use terrarium_host::protocol::{
@@ -91,7 +91,7 @@ pub const METRICS_HISTORY: usize = 360;
 pub const METRICS_STALE: Duration = Duration::from_secs(30);
 
 /// What a session reports to its consumer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionEvent {
     Started {
         pid: Option<u32>,
@@ -138,6 +138,8 @@ pub enum HostError {
     Offline(String),
     #[error("host agent `{0}` runs its maximum of {1} sessions")]
     Busy(String, u32),
+    #[error("cannot persist host session state")]
+    Persistence,
 }
 
 impl From<HostError> for ApiError {
@@ -145,6 +147,7 @@ impl From<HostError> for ApiError {
         match e {
             HostError::Offline(_) => ApiError::conflict(e.to_string()),
             HostError::Busy(..) => ApiError::new(Code::RateLimited, e.to_string()),
+            HostError::Persistence => ApiError::internal(e.to_string()),
         }
     }
 }
@@ -175,6 +178,24 @@ struct Slot {
     /// The host holds state for the session: it sent `started`, or it
     /// offered the session in a resume.
     held: bool,
+    events: u64,
+    terminal: bool,
+    restored: Option<mpsc::UnboundedReceiver<SessionEvent>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedSlot {
+    received: u64,
+    held: bool,
+    events: u64,
+    terminal: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedHost {
+    token: Option<String>,
+    next_id: u32,
+    sessions: HashMap<SessionId, SavedSlot>,
 }
 
 /// The live state of a host, from its last `hello`.
@@ -257,6 +278,7 @@ pub struct HostRegistry {
     next_conn: std::sync::atomic::AtomicU64,
     pub heartbeat: Duration,
     pub resume_grace: Duration,
+    journal: OnceLock<resume::Journal>,
 }
 
 impl Default for HostRegistry {
@@ -280,7 +302,68 @@ impl HostRegistry {
             next_conn: std::sync::atomic::AtomicU64::new(1),
             heartbeat,
             resume_grace,
+            journal: OnceLock::new(),
         }
+    }
+
+    /// Restore before the HTTP/host listeners and process-wait reconciliation.
+    pub fn restore(&self, state_dir: &std::path::Path) -> crate::error::ApiResult<()> {
+        let journal = resume::Journal::new(state_dir);
+        let saved = journal.scan::<SavedHost>("host/")?;
+        let mut entries = self.lock();
+        for (key, saved) in saved {
+            let host = key.strip_prefix("host/").unwrap().to_owned();
+            let mut entry = Entry {
+                resume_token: saved.token,
+                next_id: saved.next_id,
+                ..Entry::default()
+            };
+            for (id, saved) in saved.sessions {
+                let (tx, rx) = mpsc::unbounded_channel();
+                for (_, ev) in journal.scan::<SessionEvent>(&format!("event/{host}/{id}/"))? {
+                    let _ = tx.send(ev);
+                }
+                entry.sessions.insert(id, Slot {
+                    tx, received: saved.received, held: saved.held,
+                    events: saved.events, terminal: saved.terminal, restored: Some(rx),
+                });
+            }
+            entries.insert(host, entry);
+        }
+        self.journal.set(journal)
+            .map_err(|_| ApiError::internal("host journal already restored"))?;
+        Ok(())
+    }
+
+    fn persist(&self, host: &str, entry: &Entry, event: Option<(SessionId, &SessionEvent)>)
+        -> crate::error::ApiResult<()>
+    {
+        let Some(journal) = self.journal.get() else { return Ok(()) };
+        let saved = SavedHost {
+            token: entry.resume_token.clone(),
+            next_id: entry.next_id,
+            sessions: entry.sessions.iter().map(|(&id, s)| (id, SavedSlot {
+                received: s.received, held: s.held, events: s.events, terminal: s.terminal,
+            })).collect(),
+        };
+        let encode = |v| serde_json::to_value(v)
+            .map_err(|_| ApiError::internal("cannot encode host resume state"));
+        let mut values = vec![(format!("host/{host}"), encode(&saved)?)];
+        if let Some((id, event)) = event {
+            let seq = entry.sessions[&id].events;
+            values.push((format!("event/{host}/{id}/{seq:020}"), serde_json::to_value(event)
+                .map_err(|_| ApiError::internal("cannot encode host session event"))?));
+        }
+        journal.save_many(&values)
+    }
+
+    /// Claim the replay channel of a session from the previous daemon.
+    pub fn reattach(self: &Arc<Self>, host: &str, id: SessionId) -> Option<HostSession> {
+        let rx = self.lock().get_mut(host)?.sessions.get_mut(&id)?.restored.take()?;
+        Some(HostSession {
+            registry: self.clone(), host: host.to_owned(), id, rx,
+            finished: false, consumed: 0, acked: 0,
+        })
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
@@ -298,7 +381,7 @@ impl HostRegistry {
         match g.get(host) {
             Some(e) => LiveView {
                 online: e.conn.is_some(),
-                sessions: e.sessions.len(),
+                sessions: e.sessions.values().filter(|s| !s.terminal).count(),
                 info: e.info.clone(),
             },
             None => LiveView {
@@ -411,7 +494,7 @@ impl HostRegistry {
             .filter(|e| e.conn.is_some())
             .ok_or_else(|| HostError::Offline(host.to_owned()))?;
         let max = e.info.as_ref().map_or(32, |i| i.max_sessions.max(1));
-        if e.sessions.len() >= max as usize {
+        if e.sessions.values().filter(|s| !s.terminal).count() >= max as usize {
             return Err(HostError::Busy(host.to_owned(), max));
         }
         let id = loop {
@@ -427,8 +510,15 @@ impl HostRegistry {
                 tx,
                 received: 0,
                 held: false,
+                events: 0,
+                terminal: false,
+                restored: None,
             },
         );
+        if self.persist(host, e, None).is_err() {
+            e.sessions.remove(&id);
+            return Err(HostError::Persistence);
+        }
         if let Some(c) = &e.conn {
             let _ = c.tx.send(Outgoing::frame(make(id)));
         }
@@ -445,10 +535,11 @@ impl HostRegistry {
 
     /// The host sent `hello` on a new link. Returns the `welcome`, the link
     /// it replaces, and how many sessions it resumes.
-    fn attach(&self, row: &Host, hello: &Hello, conn: Conn) -> (Welcome, Option<Conn>, usize, u64) {
+    fn attach(&self, row: &Host, hello: &Hello, conn: Conn) -> crate::error::ApiResult<(Welcome, Option<Conn>, usize, u64)> {
         let token = format!("r-{}", ulid::Ulid::new());
         let mut g = self.lock();
         let e = g.entry(row.name.clone()).or_default();
+        let previous_token = e.resume_token.clone();
         let old = e.conn.replace(conn);
         e.generation += 1;
         e.last_error = None;
@@ -462,6 +553,9 @@ impl HostRegistry {
         let ids: Vec<SessionId> = e.sessions.keys().copied().collect();
         let mut lost = Vec::new();
         for id in ids {
+            if e.sessions[&id].terminal {
+                continue;
+            }
             if offers.contains_key(&id) {
                 if let Some(s) = e.sessions.get_mut(&id) {
                     s.held = true;
@@ -470,12 +564,18 @@ impl HostRegistry {
                         received: s.received,
                     });
                 }
-            } else if let Some(s) = e.sessions.remove(&id) {
-                lost.push(s);
+            } else {
+                lost.push(id);
             }
         }
         resume.sort_by_key(|r| r.session);
-        send_events(lost, "the host agent no longer holds the session");
+        for id in lost {
+            if !self.deliver(&row.name, e, id, SessionEvent::Lost {
+                message: "the host agent no longer holds the session".into(),
+            }) {
+                return Err(ApiError::internal("cannot persist missing host session"));
+            }
+        }
         e.resume_token = Some(token.clone());
         e.info = Some(LiveInfo {
             host_id: row.id.clone(),
@@ -488,7 +588,12 @@ impl HostRegistry {
             connected_at: crate::db::now(),
         });
         let n = resume.len();
-        (
+        if let Err(error) = self.persist(&row.name, e, None) {
+            e.resume_token = previous_token;
+            e.conn = old;
+            return Err(error);
+        }
+        Ok((
             Welcome {
                 host_id: row.id.clone(),
                 heartbeat_secs: self.heartbeat.as_secs().max(1),
@@ -501,7 +606,7 @@ impl HostRegistry {
             old,
             n,
             e.generation,
-        )
+        ))
     }
 
     /// The link `conn_id` ended. True when it was the current link.
@@ -524,11 +629,12 @@ impl HostRegistry {
             && e.conn.is_none()
             && e.generation == generation
         {
-            let slots: Vec<Slot> = e.sessions.drain().map(|(_, s)| s).collect();
-            send_events(
-                slots,
-                "the host agent did not come back within the resume grace",
-            );
+            let ids: Vec<_> = e.sessions.keys().copied().collect();
+            for id in ids {
+                self.deliver(host, e, id, SessionEvent::Lost {
+                    message: "the host agent did not come back within the resume grace".into(),
+                });
+            }
         }
     }
 
@@ -566,11 +672,32 @@ impl HostRegistry {
             );
             return;
         }
-        s.received += f.payload.len() as u64;
-        let _ = s.tx.send(SessionEvent::Data {
+        if s.terminal { return; }
+        let event = SessionEvent::Data {
             stream: f.stream,
             bytes: f.payload,
-        });
+        };
+        self.deliver(host, g.get_mut(host).unwrap(), f.session, event);
+    }
+
+    /// Save before exposing output to a consumer that can acknowledge it.
+    fn deliver(&self, host: &str, entry: &mut Entry, id: SessionId, event: SessionEvent) -> bool {
+        let Some(s) = entry.sessions.get_mut(&id) else { return false };
+        if s.terminal { return false; }
+        let old = (s.received, s.held, s.events, s.terminal);
+        s.events += 1;
+        s.terminal = event.is_terminal();
+        if matches!(event, SessionEvent::Started { .. }) { s.held = true; }
+        if let SessionEvent::Data { bytes, .. } = &event { s.received += bytes.len() as u64; }
+        if self.persist(host, entry, Some((id, &event))).is_err() {
+            let s = entry.sessions.get_mut(&id).unwrap();
+            (s.received, s.held, s.events, s.terminal) = old;
+            if let Some(c) = &entry.conn { let _ = c.tx.send(Outgoing::Close(None)); }
+            warn!(host, session = id, "host journal commit failed; closing without acknowledgement");
+            return false;
+        }
+        let _ = entry.sessions[&id].tx.send(event);
+        true
     }
 
     /// A control frame about a session.
@@ -617,27 +744,15 @@ impl HostRegistry {
         };
         let mut g = self.lock();
         let Some(e) = g.get_mut(host) else { return };
-        if matches!(event, SessionEvent::Started { .. })
-            && let Some(s) = e.sessions.get_mut(&session)
-        {
-            s.held = true;
-        }
-        if !event.is_terminal() {
-            match e.sessions.get(&session) {
-                Some(s) => {
-                    let _ = s.tx.send(event);
-                }
-                None => debug!(host, session, "frame for an unknown session"),
-            }
+        let terminal = event.is_terminal();
+        let error = matches!(event, SessionEvent::Error { .. });
+        if !self.deliver(host, e, session, event) || !terminal {
             return;
         }
-        let Some(s) = e.sessions.remove(&session) else {
-            debug!(host, session, "terminal frame for an unknown session");
-            return;
-        };
+        let s = &e.sessions[&session];
         // An `error` for a session that never started holds no state on
         // the host: no `release` for it.
-        let release = s.held || !matches!(event, SessionEvent::Error { .. });
+        let release = s.held || !error;
         if let Some(c) = &e.conn {
             let _ = c.tx.send(Outgoing::frame(DaemonFrame::Ack {
                 session,
@@ -647,17 +762,17 @@ impl HostRegistry {
                 let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
             }
         }
-        let _ = s.tx.send(event);
     }
 
     /// The consumer dropped a session before its end: abandon it.
     fn abandon(&self, host: &str, session: SessionId) {
         let mut g = self.lock();
-        if let Some(e) = g.get_mut(host)
-            && e.sessions.remove(&session).is_some()
-            && let Some(c) = &e.conn
-        {
-            let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
+        if let Some(e) = g.get_mut(host) {
+            if self.deliver(host, e, session, SessionEvent::Lost {
+                message: "the session consumer abandoned the run".into(),
+            }) && let Some(c) = &e.conn {
+                let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
+            }
         }
     }
 }
@@ -675,6 +790,10 @@ pub struct HostSession {
 }
 
 impl HostSession {
+    pub fn abandon(&mut self) {
+        self.registry.abandon(&self.host, self.id);
+        self.finished = true;
+    }
     pub fn id(&self) -> SessionId {
         self.id
     }
@@ -764,7 +883,7 @@ impl HostSession {
 
 impl Drop for HostSession {
     fn drop(&mut self) {
-        if !self.finished {
+        if !self.finished && self.registry.journal.get().is_none() {
             self.registry.abandon(&self.host, self.id);
         }
     }
@@ -1275,7 +1394,7 @@ async fn serve_link(
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
     state.executor.set_resource_pending(&row.name, true);
-    let (mut welcome, old, resumed, _) = reg.attach(
+    let attached = reg.attach(
         &row,
         &hello,
         Conn {
@@ -1283,6 +1402,13 @@ async fn serve_link(
             tx: tx.clone(),
         },
     );
+    let (mut welcome, old, resumed, _) = match attached {
+        Ok(attached) => attached,
+        Err(e) => {
+            warn!(host = %row.name, "cannot persist host welcome: {e}");
+            return;
+        }
+    };
     if let Some(old) = old {
         let _ = old.tx.send(Outgoing::Close(Some((
             "replaced",

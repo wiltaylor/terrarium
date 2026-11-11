@@ -1389,7 +1389,7 @@ async fn contended_command_errors_are_end_events_and_dropped_controls_kill() {
     )
     .unwrap();
     drop(guard);
-    let terrariumd::executor::Running { ctl, mut events } = run;
+    let terrariumd::executor::Running { ctl, mut events, .. } = run;
     while let Some(event) = events.recv().await {
         if matches!(event, terrariumd::executor::Ev::Started) {
             break;

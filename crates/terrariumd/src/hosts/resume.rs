@@ -55,23 +55,58 @@ impl Journal {
     }
 
     pub fn save(&self, id: &str, value: &impl Serialize) -> ApiResult<()> {
-        let plain = zeroize::Zeroizing::new(
-            serde_json::to_vec(value)
-                .map_err(|_| ApiError::internal("cannot encode the host reconnect journal"))?,
-        );
+        self.save_many(&[(id.to_owned(), serde_json::to_value(value)
+            .map_err(|_| ApiError::internal("cannot encode the host reconnect journal"))?)])
+    }
+
+    /// Commit a session's event and received offset together.
+    pub fn save_many(&self, values: &[(String, serde_json::Value)]) -> ApiResult<()> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
             .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
         let key = crate::secrets::key(&self.state_dir)?;
+        for (id, value) in values {
+        let plain = zeroize::Zeroizing::new(
+            serde_json::to_vec(value)
+                .map_err(|_| ApiError::internal("cannot encode the host reconnect journal"))?,
+        );
         let sealed = key.seal(&plain, &super::resume_aad(id))?;
         tx.execute(
             "INSERT INTO host_resume(id,sealed) VALUES (?1,?2)
              ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed",
             params![id, sealed],
         )?;
+        }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn scan<T: DeserializeOwned>(&self, prefix: &str) -> ApiResult<Vec<(String, T)>> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
+            .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
+        let key = crate::secrets::key(&self.state_dir)?;
+        let mut out = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT id,sealed FROM host_resume WHERE substr(id,1,length(?1))=?1 ORDER BY id",
+            )?;
+            let rows = stmt.query_map([prefix], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })?;
+            for row in rows {
+                let (id, sealed) = row?;
+                let plain = key.open(&sealed, &super::resume_aad(&id))
+                    .ok_or_else(|| ApiError::internal("cannot decrypt the host reconnect journal"))?;
+                let value = serde_json::from_slice(&plain)
+                    .map_err(|_| ApiError::internal("cannot decode the host reconnect journal"))?;
+                out.push((id, value));
+            }
+        }
+        tx.commit()?;
+        Ok(out)
     }
 }
 
