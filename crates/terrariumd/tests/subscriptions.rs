@@ -3407,9 +3407,19 @@ async fn cloud_settings_response_never_reads_the_key_file() {
     assert_eq!(r.ok()["has_api_key"], true);
     assert_eq!(r.body["cloud"]["region"], "us-west-2");
     assert_eq!(r.body["month_spend_usd"], 0.0);
-    let r = td.put("/api/subscriptions/aws/cloud", json!({"region": "us-west-2", "budget_usd": 50})).await;
+    let r = td
+        .put(
+            "/api/subscriptions/aws/cloud",
+            json!({"region": "us-west-2", "budget_usd": 50}),
+        )
+        .await;
     assert_eq!(r.ok()["cloud"]["budget_usd"], 50);
-    let r = td.put("/api/subscriptions/aws/cloud", json!({"region": "us-west-2", "budget_usd": null})).await;
+    let r = td
+        .put(
+            "/api/subscriptions/aws/cloud",
+            json!({"region": "us-west-2", "budget_usd": null}),
+        )
+        .await;
     assert!(r.ok()["cloud"]["budget_usd"].is_null());
     assert_eq!(r.body["month_spend_usd"], 0.0);
     assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
