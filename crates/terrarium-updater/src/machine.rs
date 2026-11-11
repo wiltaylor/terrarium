@@ -480,14 +480,14 @@ impl Updater {
         };
         self.with_run(|r| r.to = Some(to.clone()));
 
-        let prepared = self
+        let (prepared, _) = self
             .step(
                 "environment",
                 async {
                     if let Some(spec) = recorded {
                         let mut saved = cur.clone();
                         saved.spec = spec;
-                        Ok(saved)
+                        Ok((saved, String::new()))
                     } else {
                         let prepared = self.engine.prepare(&cur, &to).await?;
                         let out = self.engine.run_once(
@@ -501,16 +501,16 @@ impl Updater {
                                 out.code, out.stdout.trim(), out.stderr.trim()
                             ));
                         }
-                        Ok(prepared)
+                        Ok((prepared, out.stdout.trim().to_owned()))
                     }
                 },
-                |c| {
+                |(c, templates)| {
                     if kind == RunKind::Rollback {
                         return "using recorded container environment (values hidden)".into();
                     }
                     let keys = c.spec["changed_env_keys"].as_array();
                     format!(
-                        "required daemon templates: all present; resolved deployment environment; changed keys (values hidden): {}",
+                        "{templates}; resolved deployment environment; changed keys (values hidden): {}",
                         keys.map(|a| a
                             .iter()
                             .filter_map(|v| v.as_str())

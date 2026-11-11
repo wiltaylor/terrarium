@@ -41,10 +41,13 @@ async fn daemon_main() -> anyhow::Result<()> {
     let settings = Settings::parse();
     if matches!(settings.command, Some(Command::RequiredTemplatesCheck)) {
         let warnings = terrariumd::required_templates::precheck(&settings.config_repo);
-        if !warnings.is_empty() {
-            anyhow::bail!("{}", warnings.join("\n"));
+        if warnings.is_empty() {
+            println!("required daemon templates: all present");
+        } else {
+            for warning in warnings {
+                println!("warning: {warning}");
+            }
         }
-        println!("required daemon templates: all present");
         return Ok(());
     }
     let tools = settings.tools_config();
