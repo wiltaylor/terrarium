@@ -417,6 +417,9 @@ async fn watcher_key(
         .map(|w| w.trim().to_owned())
         .filter(|w| !w.is_empty() && w != "me");
     let Some(who) = who else {
+        if matches!(actor, Actor::Operator) {
+            policy::operator_only(actor, "watching a calendar for the operator Inbox")?;
+        }
         return Ok(match actor {
             Actor::Operator => "operator".into(),
             Actor::Agent(a) => a.id.clone(),

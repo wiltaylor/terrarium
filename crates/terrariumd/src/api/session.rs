@@ -888,11 +888,7 @@ pub async fn delete(
 }
 
 fn operator_only(actor: &Actor) -> ApiResult<()> {
-    if actor.is_operator() {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden("only the operator manages the login"))
-    }
+    crate::policy::operator_only(actor, "managing the login")
 }
 
 /// `DELETE /api/sessions`: log out everywhere. The password version goes

@@ -6,7 +6,8 @@
 //!   [`CALLER`] for the whole handler, so [`crate::actor::Actor::label`]
 //!   gives `link:<id>` in audit rows and events. For the rules the caller
 //!   is the operator ([`crate::actor::Actor::Operator`]), minus the deny
-//!   list of [`denied`].
+//!   list of [`denied`]. Operator-only gates additionally deny links by
+//!   default, with the read exceptions in [`operator_route_allowed`].
 //! - [`Runtime`]: the revocation signal of each key (a revoke or rotate
 //!   closes the open streams and long polls of the key), the throttle of
 //!   the use record and of the `link.forbidden` audit rows, and the
@@ -46,6 +47,53 @@ pub struct LinkCaller {
 tokio::task_local! {
     /// The link of the request that the current task serves.
     pub static CALLER: LinkCaller;
+    /// Only the HTTP auth layer may grant an operator-route exception.
+    pub static OPERATOR_ROUTE: bool;
+}
+
+/// Operator-only routes exposed to a paired remote. Keep method and path
+/// together: allowing a read must never allow a write on the same resource.
+pub fn operator_route_allowed(method: &Method, path: &str) -> bool {
+    if !matches!(*method, Method::GET | Method::HEAD) {
+        return false;
+    }
+    match path {
+        // Remote dashboard Inbox badge, without operator mail contents.
+        "/api/inbox/counts" => true,
+        // Remote dashboard conversation tabs.
+        "/api/pins" => true,
+        // Remote dashboard sidebar wiki shortcuts.
+        "/api/bookmarks" => true,
+        // Remote dashboard default conversation selection.
+        "/api/preferences" => true,
+        // Remote dashboard global calendar watch state.
+        "/api/calendar/global/watches" => true,
+        _ => {
+            // Remote dashboard project calendar watch state.
+            let parts: Vec<_> = path.split('/').collect();
+            matches!(parts.as_slice(), ["", "api", "projects", p, "calendar", "watches"] if !p.is_empty())
+        }
+    }
+}
+
+/// An operator-only gate denies link provenance unless HTTP auth explicitly
+/// allowed this route. No request context (including a spawned task) fails
+/// closed for links.
+pub fn operator_only(what: &str) -> ApiResult<()> {
+    operator_only_with_provenance(is_link_call(), what)
+}
+
+/// Store transactions also retain provenance in `Tx::link`, including when
+/// the caller passed an audit label after leaving the original request task.
+pub fn operator_only_with_provenance(link: bool, what: &str) -> ApiResult<()> {
+    if !(link || is_link_call()) || OPERATOR_ROUTE.try_with(|allowed| *allowed).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            crate::error::Code::LinkForbidden,
+            format!("a link key may not {what}"),
+        ))
+    }
 }
 
 /// `link:<id>` when the current task serves a link request.
@@ -69,6 +117,21 @@ where
         Ok(c) => tokio::spawn(CALLER.scope(c, fut)),
         Err(_) => tokio::spawn(fut),
     }
+}
+
+/// Keep provenance across database blocking tasks too. An absent route grant
+/// is false, so callers cannot acquire an exception by changing task type.
+pub fn spawn_blocking<F, T>(f: F) -> tokio::task::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let caller = CALLER.try_with(Clone::clone).ok();
+    let allowed = OPERATOR_ROUTE.try_with(|v| *v).unwrap_or(false);
+    tokio::task::spawn_blocking(move || match caller {
+        Some(c) => CALLER.sync_scope(c, || OPERATOR_ROUTE.sync_scope(allowed, f)),
+        None => f(),
+    })
 }
 
 /// Whether the current task serves a link request.
@@ -135,8 +198,13 @@ pub fn denied(
         }
     }
     match rest {
-        // A link must never acquire or drive another home's link keys.
-        ["remotes", ..] => Some("the remotes of this daemon"),
+        // Private infrastructure, credentials, and audit data never form part
+        // of a remote dashboard's operator-route exceptions (TER-791).
+        [
+            "admin" | "secrets" | "audit" | "subscriptions" | "credentials" | "targets" | "hosts"
+            | "remotes",
+            ..,
+        ] => Some("private operator infrastructure"),
         // A link cannot make another link; it may only end itself.
         ["links", "self"] if *method == Method::DELETE => None,
         ["links", ..] => Some("the links of this daemon"),
@@ -144,14 +212,7 @@ pub fn denied(
         ["session"] if !get => Some("the login sessions of this daemon"),
         ["sessions"] if *method == Method::DELETE => Some("the login sessions of this daemon"),
         ["auth", ..] => Some("the operator password"),
-        ["secrets", _, _, "reveal"] => Some("revealing a secret"),
         ["agent", "secrets", ..] => Some("revealing a secret"),
-        ["credentials", ..] if !get => Some("the credentials of this daemon"),
-        ["hosts"] if *method == Method::POST => Some("host agent tokens"),
-        ["hosts", _] if *method == Method::DELETE => Some("host agent tokens"),
-        ["hosts", _, "rotate"] => Some("host agent tokens"),
-        ["subscriptions", "login", ..] => Some("the subscription logins"),
-        ["subscriptions", _, "api-key"] => Some("the subscription API keys"),
         // A backup holds secrets.key, session.key, and every sealed secret.
         ["backups"] if !get => Some("the backups"),
         ["backups", _, ..] => Some("the backups"),
@@ -482,10 +543,8 @@ mod tests {
             (Method::GET, "/api/agents/a1/pty"),
             (Method::POST, "/api/projects/p/cards"),
             (Method::GET, "/api/backups"),
-            (Method::GET, "/api/hosts"),
             (Method::GET, "/api/config/status"),
             (Method::POST, "/api/config/commit"),
-            (Method::GET, "/api/secrets"),
             (Method::DELETE, "/api/links/self"),
             (Method::GET, "/api/system/instance"),
             (Method::GET, "/api/sessions/S1"),

@@ -40,6 +40,16 @@ function recorder(opts: HttpApiOptions = {}, answer: unknown = undefined) {
   return { api: createHttpApi(t, opts), calls, sockets, raw };
 }
 
+it("sets and clears a cloud budget without a credential", async () => {
+  const { api, calls } = recorder();
+  await api.subscriptions.setCloud("aws", { region: "us-east-1", budget_usd: 50 });
+  await api.subscriptions.setCloud("aws", { region: "us-east-1", budget_usd: null });
+  expect(calls.map((c) => [c.method, c.path, c.opts?.body])).toEqual([
+    ["PUT", "/api/subscriptions/aws/cloud", { region: "us-east-1", budget_usd: 50 }],
+    ["PUT", "/api/subscriptions/aws/cloud", { region: "us-east-1", budget_usd: null }],
+  ]);
+});
+
 describe("createHttpApi", () => {
   it("reads Home JSON pages with the column, project and cursor", async () => {
     const answer = { items: [], next: "after" };

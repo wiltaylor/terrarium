@@ -635,7 +635,11 @@ async fn require_token(
     // `session::delete` checks a cookie and a CLI token itself: with no
     // cookie, a logout needs no proof; with a session cookie, it needs
     // `X-CSRF-Token`.
-    if session_path && req.method() == axum::http::Method::DELETE {
+    if session_path
+        && req.method() == axum::http::Method::DELETE
+        && !session::bearer_value(req.headers())
+            .is_some_and(|t| t.starts_with(crate::store::links::KEY_PREFIX))
+    {
         return next.run(req).await;
     }
     let header_token = session::bearer_value(req.headers()).map(str::to_owned);
@@ -880,12 +884,16 @@ async fn link_request(
     req.extensions_mut().insert(caller.clone());
     req.extensions_mut().insert(guard.clone());
     let g = guard.clone();
-    let run = CALLER.scope(caller, async move {
-        tokio::select! {
-            r = next.run(req) => Some(r),
-            () = g.revoked() => None,
-        }
-    });
+    let operator_route = crate::links::operator_route_allowed(&method, &path);
+    let run = CALLER.scope(
+        caller,
+        crate::links::OPERATOR_ROUTE.scope(operator_route, async move {
+            tokio::select! {
+                r = next.run(req) => Some(r),
+                () = g.revoked() => None,
+            }
+        }),
+    );
     let Some(mut resp) = run.await else {
         return unauthorized("the link was revoked");
     };
@@ -3230,6 +3238,66 @@ mod tests {
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         (v["link_id"].as_str().unwrap().to_owned(), key)
     }
+
+    #[tokio::test]
+    async fn link_operator_gate_survives_database_and_spawn_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let caller = crate::links::LinkCaller {
+            id: "L1".into(),
+            label: "home".into(),
+            read_only: false,
+            key_hash: "h".into(),
+        };
+        crate::links::CALLER
+            .scope(caller, async {
+                // A new operator-only action is closed without changing any
+                // route deny list. Both helpers must agree.
+                assert!(
+                    crate::policy::operator_only(&crate::actor::Actor::Operator, "new feature")
+                        .is_err()
+                );
+                assert!(!crate::actor::Actor::Operator.is_operator());
+                assert!(
+                    !s.db
+                        .read(|_| Ok(crate::actor::Actor::Operator.is_operator()))
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    !s.db
+                        .write("operator", |_| Ok(
+                            crate::actor::Actor::Operator.is_operator()
+                        ))
+                        .await
+                        .unwrap()
+                );
+                crate::links::OPERATOR_ROUTE
+                    .scope(true, async {
+                        assert!(crate::actor::Actor::Operator.is_operator());
+                        assert!(
+                            s.db.read(|_| Ok(crate::actor::Actor::Operator.is_operator()))
+                                .await
+                                .unwrap()
+                        );
+                        // Spawned work does not inherit a read route exception.
+                        assert!(
+                            !crate::links::spawn(async {
+                                crate::actor::Actor::Operator.is_operator()
+                            })
+                            .await
+                            .unwrap()
+                        );
+                    })
+                    .await;
+                assert!(!crate::actor::Actor::Operator.is_operator());
+            })
+            .await;
+        // No leaked task-local restriction on ordinary operator requests.
+        assert!(crate::actor::Actor::Operator.is_operator());
+    }
+
+    include!("link_access_tests.rs");
 
     #[tokio::test]
     async fn a_link_key_acts_as_the_operator_minus_the_deny_list() {

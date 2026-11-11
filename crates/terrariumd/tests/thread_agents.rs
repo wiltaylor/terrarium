@@ -577,6 +577,113 @@ async fn request_tracks_lead_cards_and_linked_lead_can_reopen() {
 }
 
 #[tokio::test]
+async fn request_cross_project_card_rights_end_at_close() {
+    let l = lab().await;
+    // Model a global request agent in meta reporting to p/lead.
+    let th = l.open(json!({"scope": "global", "template": "global:helper", "topic": "Cross-project request"})).await;
+    let tid = id(&th);
+    let (thread, lead) = (tid.clone(), l.p_lead.clone());
+    state(&l.td)
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE threads SET request = 1, report_to = ?2 WHERE id = ?1",
+                rusqlite::params![thread, lead],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let agent = th["agent"].as_str().unwrap();
+    let made =
+        l.td.post("/api/projects/p/cards", json!({"title": "Lead work"}))
+            .await;
+    let card = id(made.ok());
+    let path = format!("/api/cards/{card}");
+    assert_eq!(l.td.get_as(agent, &path).await.status, 200);
+    assert_eq!(
+        l.td.get_as(agent, "/api/projects/p/cards").await.status,
+        200
+    );
+    assert_eq!(
+        l.td.patch_as(agent, &path, json!({"title": "No"}))
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        l.td.post_as(agent, &format!("{path}/comments"), json!({"body": "No"}))
+            .await
+            .status,
+        403
+    );
+    let other =
+        l.td.post("/api/projects/q/cards", json!({"title": "Other work"}))
+            .await;
+    let other_card = id(other.ok());
+    assert_eq!(
+        l.td.get_as(agent, &format!("/api/cards/{other_card}"))
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        l.td.post_as(
+            agent,
+            &format!("/api/threads/{tid}/cards"),
+            json!({"card": format!("q:{other_card}")})
+        )
+        .await
+        .status,
+        404
+    );
+    let second = l.open(json!({"scope": "p", "topic": "Other thread"})).await;
+    // The caller can read this thread as its opener, but is not its
+    // attached agent. Refusal must come from the own-request link gate.
+    let (other_thread, opener) = (id(&second), agent.to_owned());
+    state(&l.td)
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE threads SET opened_by = ?2 WHERE id = ?1",
+                rusqlite::params![other_thread, opener],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        l.td.get_as(agent, &format!("/api/threads/{}", id(&second)))
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        l.td.post_as(
+            agent,
+            &format!("/api/threads/{}/cards", id(&second)),
+            json!({"card": format!("p:{card}")})
+        )
+        .await
+        .status,
+        404
+    );
+    let tracked =
+        l.td.post_as(
+            agent,
+            &format!("/api/threads/{tid}/track"),
+            json!({"cards": [format!("p:{card}")]}),
+        )
+        .await;
+    assert_eq!(tracked.status, 200, "{}", tracked.body);
+    assert_eq!(tracked.body["cards"][0]["card"], card);
+    l.td.post(&format!("/api/threads/{tid}/close"), json!({}))
+        .await
+        .ok();
+    assert_ne!(l.td.get_as(agent, &path).await.status, 200);
+}
+
+#[tokio::test]
 async fn request_concurrent_reopen_has_one_winner() {
     let l = lab().await;
     let th = request(&l).await;

@@ -44,7 +44,8 @@ import {
   type WizardState,
 } from "./wizard";
 
-export const PATHS: { path: WizardPath; title: string; detail: string }[] = [
+export const PATHS: { path: WizardPath; title: string; detail: string; setup?: WizardSetup }[] = [
+  { path: "api_key", setup: { provider: "litellm" }, title: "LiteLLM", detail: "Claude Code through your LiteLLM proxy: HTTPS base URL, key, and models." },
   { path: "claude", title: "Claude Code", detail: "Anthropic plan. Runs claude auth login; paste the code back." },
   { path: "codex", title: "Codex", detail: "ChatGPT plan. Device code with codex login --device-auth." },
   { path: "copilot", title: "Copilot", detail: "GitHub plan. Device code with copilot login --device-code." },
@@ -142,7 +143,7 @@ export function AddSubscriptionWizard(props: { path?: WizardPath; setup?: Wizard
           <div class="kind-grid">
             <For each={PATHS}>
               {(k) => (
-                <button onClick={() => send({ type: "pick", path: k.path })}>
+                <button onClick={() => send({ type: "pick", path: k.path, setup: k.setup })}>
                   <strong>{k.title}</strong>
                   <span class="muted small">{k.detail}</span>
                 </button>
@@ -352,6 +353,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
   const [projectId, setProjectId] = createSignal("");
   const [resource, setResource] = createSignal("");
   const [cloudModels, setCloudModels] = createSignal<Record<string, string>>({});
+  const [budgetUsd, setBudgetUsd] = createSignal("");
   const [baseUrl, setBaseUrl] = createSignal("");
   const [plan, setPlan] = createSignal(defaultPlan(props.setup.provider ?? "openrouter"));
   const [models, setModels] = createSignal("");
@@ -364,7 +366,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
     setBusy(true);
     try {
       const n = name().trim();
-      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models(), keyId: keyId(), region: region(), projectId: projectId(), resource: resource(), cloudModels: cloudModels() }));
+      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models(), keyId: keyId(), region: region(), projectId: projectId(), resource: resource(), cloudModels: cloudModels(), budgetUsd: budgetUsd() }));
       setKey("");
       setKeyId("");
       props.onSaved(n);
@@ -469,6 +471,12 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
           </label>
         )}</For>
       </Show>
+      <Show when={["bedrock", "gcp", "foundry"].includes(provider())}>
+        <label>Monthly budget (USD)
+          <input type="number" min="1" max="4294967295" step="1" value={budgetUsd()} onInput={(e) => setBudgetUsd(e.currentTarget.value)} />
+        </label>
+        <p class="muted small">Optional. Local estimate, UTC month. Sends mail at 80% and 100%, never holds agents.</p>
+      </Show>
       <Show when={takesPlan(provider())}>
         <label>
           Plan
@@ -482,10 +490,10 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
           {KEY_HELP[provider()]}
         </p>
       </Show>
-      <Show when={isSelfHosted(provider()) && !fixedName}>
+      <Show when={(isSelfHosted(provider()) || provider() === "litellm") && !fixedName}>
         <label>
-          Base URL (a new subscription: an OpenAI-style server)
-          <input type="url" value={baseUrl()} onInput={(e) => setBaseUrl(e.currentTarget.value)} placeholder="http://gpu.lan:8000/v1" />
+          {provider() === "litellm" ? "LiteLLM HTTPS base URL (Anthropic root, without /v1)" : "Base URL (a new subscription: an OpenAI-style server)"}
+          <input type="url" value={baseUrl()} onInput={(e) => setBaseUrl(e.currentTarget.value)} placeholder={provider() === "litellm" ? "https://litellm.example.com" : "http://gpu.lan:8000/v1"} required />
         </label>
       </Show>
       <Show when={!["bedrock", "gcp", "foundry"].includes(provider())}><label>

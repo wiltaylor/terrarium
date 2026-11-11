@@ -185,6 +185,18 @@ fn stub() -> axum::Router {
     }
     axum::Router::new()
         .route(
+            "/api/subscriptions/aws",
+            get(|| async {
+                Json(json!({"name": "aws", "cloud": {"region": "us-east-1", "models": {"haiku": "profile"}}}))
+            }),
+        )
+        .route(
+            "/api/subscriptions/aws/cloud",
+            axum::routing::put(|Json(cloud): Json<Value>| async move {
+                Json(json!({"name": "aws", "cloud": cloud}))
+            }),
+        )
+        .route(
             "/api/health",
             get(|| async { Json(json!({"status": "ok", "version": "9.9.9", "uptime": 3700})) }),
         )
@@ -335,6 +347,29 @@ fn claim_and_eta_print_similar_card_history() {
     let o = run(&socket, &["--json", "card", "claim", "TER-1"]);
     let value: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(value["eta_history"]["n"], 7);
+}
+
+#[test]
+fn subscription_cloud_budget_set_and_clear_preserve_settings() {
+    let dir = temp_dir("budget");
+    let socket = serve_unix(&dir);
+    for flags in [vec!["--budget-usd", "50"], vec!["--clear-budget-usd"]] {
+        let mut args = vec!["--json", "admin", "subscription", "set", "aws"];
+        args.extend(flags);
+        let o = run(&socket, &args);
+        assert!(o.status.success(), "{}", text(&o.stderr));
+        let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+        assert_eq!(v["cloud"]["region"], "us-east-1");
+        assert_eq!(v["cloud"]["models"]["haiku"], "profile");
+        assert_eq!(
+            v["cloud"]["budget_usd"],
+            if args.contains(&"--budget-usd") {
+                json!(50)
+            } else {
+                Value::Null
+            }
+        );
+    }
 }
 
 #[test]
