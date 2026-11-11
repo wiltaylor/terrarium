@@ -18,11 +18,11 @@
 
 use std::time::Duration;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
-use axum::{Json, Router};
 use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Deserializer};
@@ -46,20 +46,66 @@ use crate::store::schedules::{
 };
 use crate::store::{Page, board};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/schedules", get(list).post(create))
-        .route("/schedules/{id}", get(show).patch(update).delete(remove))
-        .route("/schedules/{id}/run", post(run_now))
-        .route("/schedules/{id}/enable", post(enable))
-        .route("/schedules/{id}/disable", post(disable))
-        .route("/schedules/{id}/runs", get(runs))
-        .route("/schedules/{id}/deliveries", get(deliveries))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/schedules",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/schedules/{id}",
+            get(show).patch(update).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/schedules/{id}/run",
+            post(run_now),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/schedules/{id}/enable",
+            post(enable),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/schedules/{id}/disable",
+            post(disable),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/schedules/{id}/runs",
+            get(runs),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/schedules/{id}/deliveries",
+            get(deliveries),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
         .route(
             "/schedules/{id}/deliveries/{delivery}/redeliver",
             post(redeliver),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
         )
-        .route("/schedules/{id}/test", post(test_run))
+        .route(
+            "/schedules/{id}/test",
+            post(test_run),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 /// The bytes of stdout and stderr that an exec run keeps.

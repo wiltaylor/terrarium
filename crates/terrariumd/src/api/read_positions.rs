@@ -1,7 +1,7 @@
 //! Operator visit cursors. A visit returns the previous cursor and advances it
 //! atomically, without an audit/event row for each page opening.
 use axum::extract::{Path, State};
-use axum::{Json, Router, routing::post};
+use axum::{Json, routing::post};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -10,8 +10,15 @@ use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult};
 use crate::{policy, store};
 
-pub fn routes() -> Router<Shared> {
-    Router::new().route("/read-positions/{kind}/{item}", post(visit))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new().route(
+        "/read-positions/{kind}/{item}",
+        post(visit),
+        &[(
+            axum::http::Method::POST,
+            super::link_registry::Access::OperatorOnly,
+        )],
+    )
 }
 
 #[derive(Serialize)]
