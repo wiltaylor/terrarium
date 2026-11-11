@@ -1393,7 +1393,12 @@ mod tests {
         let mut c = Connection::open_in_memory().unwrap();
         crate::db::migrate(&mut c).unwrap();
         assert_eq!(
-            c.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'board_columns_name_watch'", [], |r| r.get::<_, i64>(0)).unwrap(),
+            c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'board_columns_name_watch'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
             0
         );
         let plan = |sql: &str, args: usize| -> Vec<String> {
@@ -1445,16 +1450,24 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn pass_cap_keeps_cursor_before_interrupted_read() {
-        let cards = || (1..=3).map(|n| BranchCard {
-            id: format!("P-{n}"), project: "p".into(), repo: "r".into(), branch: "b".into(),
-        }).collect();
+        let cards = || {
+            (1..=3)
+                .map(|n| BranchCard {
+                    id: format!("P-{n}"),
+                    project: "p".into(),
+                    repo: "r".into(),
+                    branch: "b".into(),
+                })
+                .collect::<Vec<_>>()
+        };
         let mut cursor = String::new();
         let seen = read_remote_heads(cards(), &mut cursor, async |card| {
             if card.id == "P-2" {
                 tokio::time::sleep(OBSERVE_PASS_CAP * 2).await;
             }
             Some(Some("head".into()))
-        }).await;
+        })
+        .await;
         assert_eq!(cursor, "P-1");
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0.id, "P-1");
