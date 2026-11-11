@@ -4579,12 +4579,18 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
     assert_eq!(repos, [std::ffi::OsString::from("app.git")]);
 }
 
-/// A crash can leave a lock or broken ref in the daemon's persistent
-/// cache. The next job rebuilds it, fetches, and merges successfully.
+/// Another prepare may change the daemon scratch ref before this push.
 #[tokio::test]
 async fn ter275_a_merge_push_uses_its_commit_after_the_daemon_scratch_ref_changes() {
     let lab = lab(2).await;
-    let cached = lab.td.daemon.as_ref().unwrap().state.state_dir.join("jobs/p/repos/app.git");
+    let cached = lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .state_dir
+        .join("jobs/p/repos/app.git");
     // This native-host fixture can reach the daemon cache. Unlike the
     // target-clone tampering test, change the actual daemon scratch ref.
     let recipe = format!(
@@ -4605,7 +4611,8 @@ async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
     let gate = lab._dirs.path().join("gate");
     let recipe = format!(
         "touch '{}/recipe-'\"$TERRARIUM_JOB_SLOT\" && {}",
-        lab._dirs.path().display(), common::gate_wait(&gate, DEADLINE)
+        lab._dirs.path().display(),
+        common::gate_wait(&gate, DEADLINE)
     );
     lab.td.put("/api/projects/p/delivery", json!({
         "target": "p-box", "recipe": recipe, "slots": 2,
@@ -4614,12 +4621,24 @@ async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
     for name in ["ter275-one", "ter275-two"] {
         let head = lab.branch(name, "next", &[("OK", name)]);
         let card = lab.card(name, name).await;
-        let response = lab.td.post_as(&lab.w1, &format!("/api/cards/{card}/validate"), json!({"commit": head})).await;
+        let response = lab
+            .td
+            .post_as(
+                &lab.w1,
+                &format!("/api/cards/{card}/validate"),
+                json!({"commit": head}),
+            )
+            .await;
         assert_eq!(response.status, 201, "{}", response.body);
     }
     let start = Instant::now();
-    while !(lab._dirs.path().join("recipe-1").exists() && lab._dirs.path().join("recipe-2").exists()) {
-        assert!(start.elapsed() < DEADLINE, "recipes serialized behind the cache lock");
+    while !(lab._dirs.path().join("recipe-1").exists()
+        && lab._dirs.path().join("recipe-2").exists())
+    {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "recipes serialized behind the cache lock"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     std::fs::write(&gate, "go").unwrap();
