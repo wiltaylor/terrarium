@@ -1951,7 +1951,9 @@ mod tests {
         let reg = Arc::new(registry("lab1", true));
         reg.restore(dir.path()).unwrap();
         reg.lock().get_mut("lab1").unwrap().resume_token = Some("host-kept-token".into());
-        let session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
         let id = session.id();
         let hello = Hello {
             protocol: 1,
@@ -1964,23 +1966,40 @@ mod tests {
             max_running_targets: None,
             resume: Some(terrarium_host::protocol::Resume {
                 token: "host-kept-token".into(),
-                sessions: vec![terrarium_host::protocol::ResumeOffer { session: id, sent: 0 }],
+                sessions: vec![terrarium_host::protocol::ResumeOffer {
+                    session: id,
+                    sent: 0,
+                }],
             }),
             update_failed: None,
         };
         // Commit welcome, but simulate losing it before the host receives it.
-        let (welcome, _, n, _) = reg.attach(&host_row(), &hello, Conn {
-            id: 2, tx: mpsc::unbounded_channel().0,
-        }).unwrap();
+        let (welcome, _, n, _) = reg
+            .attach(
+                &host_row(),
+                &hello,
+                Conn {
+                    id: 2,
+                    tx: mpsc::unbounded_channel().0,
+                },
+            )
+            .unwrap();
         assert_eq!(n, 1);
         assert_eq!(welcome.resume_token, "host-kept-token");
         drop(session);
         drop(reg);
         let restored = HostRegistry::default();
         restored.restore(dir.path()).unwrap();
-        let (_, _, n, _) = restored.attach(&host_row(), &hello, Conn {
-            id: 3, tx: mpsc::unbounded_channel().0,
-        }).unwrap();
+        let (_, _, n, _) = restored
+            .attach(
+                &host_row(),
+                &hello,
+                Conn {
+                    id: 3,
+                    tx: mpsc::unbounded_channel().0,
+                },
+            )
+            .unwrap();
         assert_eq!(n, 1, "the host still holds the pre-welcome token");
         assert!(!restored.lock()["lab1"].sessions[&id].terminal);
     }
