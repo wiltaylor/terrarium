@@ -11,3 +11,4 @@ CREATE TABLE conflict_fixes (
     PRIMARY KEY (job, card)
 );
 CREATE INDEX conflict_fixes_pending ON conflict_fixes(done, retry_at);
+CREATE INDEX conflict_fixes_card_pending ON conflict_fixes(card, done);

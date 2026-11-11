@@ -17,6 +17,10 @@ struct Request {
     task: String,
 }
 
+/// Equality on done, range on retry_at, then the implicit rowid suffix of
+/// conflict_fixes_pending provide a bounded ordered walk without sorting.
+pub const PENDING: &str = "SELECT job, card, project, template, task FROM conflict_fixes WHERE done = 0 AND retry_at <= unixepoch() ORDER BY retry_at, rowid LIMIT 16";
+
 /// Queue from the trusted per-card verdict, in the job-end transaction.
 /// Dispatch waits for the existing conflict-return flow to reach ready.
 pub fn enqueue(t: &mut crate::db::Tx<'_>, j: &crate::store::jobs::Job) -> ApiResult<()> {
@@ -178,7 +182,7 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
 /// restart cannot lose it. Atomic bound checks arbitrate with dispatchers.
 pub async fn pass(state: &Shared) {
     let requests = state.db.read(|c| {
-        let mut q = c.prepare("SELECT job, card, project, template, task FROM conflict_fixes WHERE done = 0 AND retry_at <= unixepoch() ORDER BY rowid LIMIT 16")?;
+        let mut q = c.prepare(PENDING)?;
         Ok(q.query_map([], |row| Ok(Request { job: row.get(0)?, card: row.get(1)?, project: row.get(2)?, template: row.get(3)?, task: row.get(4)? }))?.collect::<Result<Vec<_>, _>>()?)
     }).await;
     let Ok(requests) = requests else { return };
