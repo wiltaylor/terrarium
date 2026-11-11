@@ -609,7 +609,9 @@ class Release(unittest.TestCase):
         proc = self.run_release("publish")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.calls(), [])
-        self.assertEqual(self.summary()["version"], {"do_release": "false"})
+        self.assertEqual(
+            self.summary()["version"], {"do_release": "false", "tested_at_cut": "false"}
+        )
 
     def test_publish_needs_each_secret(self):
         proc = self.run_release("publish", secrets=False, env={"GH_TOKEN": "x"})
