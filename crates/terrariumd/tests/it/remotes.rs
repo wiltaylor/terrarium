@@ -125,7 +125,8 @@ async fn separate_artifact_pin_requires_operator_confirmation_and_rotation() {
     assert!(
         !client
             .post(&endpoint)
-            .json(&body)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
             .send()
             .await
             .unwrap()
@@ -136,7 +137,8 @@ async fn separate_artifact_pin_requires_operator_confirmation_and_rotation() {
         client
             .post(&endpoint)
             .bearer_auth("test-home-operator")
-            .json(&body)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
             .send()
             .await
             .unwrap()
@@ -156,7 +158,8 @@ async fn separate_artifact_pin_requires_operator_confirmation_and_rotation() {
         !client
             .post(&endpoint)
             .bearer_auth("test-home-operator")
-            .json(&body)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
             .send()
             .await
             .unwrap()
@@ -168,7 +171,8 @@ async fn separate_artifact_pin_requires_operator_confirmation_and_rotation() {
         client
             .post(&endpoint)
             .bearer_auth("test-home-operator")
-            .json(&body)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
             .send()
             .await
             .unwrap()
