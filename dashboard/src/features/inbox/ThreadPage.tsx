@@ -25,6 +25,7 @@ import { BundleCard } from "./BundleCard";
 import { CloseProposal, HandoffLinks } from "./CloseProposal";
 import { QuestionCard } from "./QuestionCard";
 import { TrackedCards } from "./TrackedCards";
+import { ThreadIcon } from "./ThreadsPage";
 import { byOperator, closeBody, retractedOnClose, scopeLabel, THREAD_MESSAGE_MAX, THREAD_RESPONSE_MAX, threadChip, threadText, timeline, type TimelineEntry, whoName } from "./threads";
 
 export default function ThreadPage() {
@@ -88,6 +89,15 @@ export default function ThreadPage() {
     return s && s !== "global" ? s : "";
   };
   const [closing, setClosing] = createSignal(false);
+  const [reply, setReply] = createSignal("");
+  const [quoting, setQuoting] = createSignal(0);
+  const quote = (text: string, post: HTMLElement) => {
+    const selection = window.getSelection();
+    const selected = selection && post.contains(selection.anchorNode) && post.contains(selection.focusNode) ? selection.toString() : "";
+    const value = (selected || text).split("\n").map((line) => `> ${line}`).join("\n");
+    setReply((old) => `${old}${old ? "\n\n" : ""}${value}\n\n`);
+    setQuoting((n) => n + 1);
+  };
   /** A write got a 409: the thread changed elsewhere (closed, for example). Read it again, also without events. */
   const conflict = (e: unknown) => {
     if (e instanceof ApiError && e.status === 409) void load();
@@ -111,33 +121,31 @@ export default function ThreadPage() {
             </PageHead>
             <ThreadMeta thread={t()} now={now()} />
             <TrackedCards thread={t()} now={now()} />
-            <Show when={t().response}>
-              {(r) => (
-                <section class="card-box stack" style={{ gap: "4px" }} aria-label="Your response">
-                  <span class="small muted">
-                    Your response, {ago(r().at, now())}. The agent quotes it word for word in the work it hands off.
-                  </span>
-                  <SafeHtml class="prose" html={renderMarkdown(r().text, project())} />
-                </section>
-              )}
-            </Show>
             <div class="stack thread-log" style={{ gap: "10px" }} aria-label="Conversation">
               <Show when={log.entries.length} fallback={<Empty>No messages yet.</Empty>}>
                 <For each={log.entries}>
-                  {(entry) => (
+                  {(entry, index) => {
+                    let post!: HTMLElement;
+                    const author = () => entry.kind === "message" ? entry.message.author_name : entry.kind === "question" ? entry.question.agent_name : whoName(t(), entry.kind === "response" ? t().response?.by ?? null : entry.kind === "proposal" ? t().close_proposal?.by ?? null : t().closed_by);
+                    const operator = () => entry.kind === "message" ? byOperator(entry.message) : entry.kind === "response" || (entry.kind === "handoff" && t().closed_by === "operator");
+                    const label = () => entry.kind === "message" ? (entry.message.kind === "response" ? "Response" : "Message") : entry.kind === "question" ? (entry.question.kind === "bundle" ? "Question bundle" : "Question") : entry.kind === "proposal" ? "Close proposal" : entry.kind === "handoff" ? "Handoff" : "Response";
+                    const text = () => entry.kind === "message" ? entry.message.text : entry.kind === "question" ? entry.question.text : entry.kind === "response" ? t().response?.text ?? "" : entry.kind === "proposal" ? t().close_proposal?.summary ?? "" : t().handoff?.summary ?? "";
+                    return (
+                    <article ref={post} id={`post-${index() + 1}`} class={`thread-post post-${label().toLowerCase().replaceAll(" ", "-")}`}>
+                      <header class="thread-post-header">
+                        <ThreadIcon icon={operator() ? "you" : "agent"} />
+                        <strong>{author()}</strong>
+                        <span class="chip">{label()}</span>
+                        <Show when={entry.kind === "question" && entry.question.status === "open"}><span class="chip warn">Waiting on you</span></Show>
+                        <time class="muted" dateTime={entry.at} title={entry.at}>{ago(entry.at, now())}</time>
+                        <A href={`/threads/${encodeURIComponent(t().id)}#post-${index() + 1}`} aria-label={`Permalink to post ${index() + 1}`}>#{index() + 1}</A>
+                        <Show when={!closed()}><button type="button" onClick={() => quote(text(), post)}>Quote</button></Show>
+                      </header>
+                      <div class="thread-post-body">
                     <Switch>
                       <Match when={entry.kind === "message" && entry.message}>
                         {(m) => (
                           <article class={`card-box stack thread-msg${byOperator(m()) ? " mine" : ""}${m().kind === "response" ? " response" : ""}`} style={{ gap: "4px" }} aria-label={`Message ${m().id}`}>
-                            <div class="row small" style={{ gap: "6px", "flex-wrap": "wrap" }}>
-                              <strong>{byOperator(m()) ? "You" : m().author_name}</strong>
-                              <Show when={m().kind === "response"}>
-                                <span class="chip ok">response</span>
-                              </Show>
-                              <span class="muted" title={m().at}>
-                                {ago(m().at, now())}
-                              </span>
-                            </div>
                             <SafeHtml class="prose" html={renderMarkdown(m().text, project())} />
                           </article>
                         )}
@@ -151,18 +159,26 @@ export default function ThreadPage() {
                           </div>
                         )}
                       </Match>
+                      <Match when={entry.kind === "response"}><section aria-label="Your response"><SafeHtml class="prose" html={renderMarkdown(text(), project())} /></section></Match>
+                      <Match when={entry.kind === "proposal"}><CloseProposal thread={t()} now={now()} onChanged={changed} onError={conflict} /></Match>
+                      <Match when={entry.kind === "handoff"}><Handoff thread={t()} now={now()} /></Match>
                     </Switch>
-                  )}
+                      </div>
+                    </article>
+                  ); }}
                 </For>
               </Show>
             </div>
-            <Show when={!closed()} fallback={<Handoff thread={t()} now={now()} />}>
-              <CloseProposal thread={t()} now={now()} onChanged={changed} onError={conflict} />
+            <Show when={!closed()}>
               <Composer
                 label="Message"
                 placeholder={t().agent_name ? `A message to ${t().agent_name} (Markdown)` : "A message (Markdown)"}
                 button="Send"
                 max={THREAD_MESSAGE_MAX}
+                text={reply()}
+                onText={setReply}
+                quoting={quoting()}
+                project={project()}
                 send={(text) => api.threads.post(t().id, text)}
                 onSent={changed}
                 onError={conflict}
@@ -174,6 +190,7 @@ export default function ThreadPage() {
                 placeholder="Your overall response (Markdown)"
                 button="Send response"
                 max={THREAD_RESPONSE_MAX}
+                project={project()}
                 send={(text) => api.threads.respond(t().id, text)}
                 onSent={changed}
                 onError={conflict}
@@ -225,8 +242,13 @@ function ThreadMeta(props: { thread: Thread; now: number }) {
 }
 
 /** A text box with one send button: a message or the overall response. */
-function Composer(props: { label: string; title?: string; hint?: string; placeholder: string; button: string; max: number; send: (text: string) => Promise<Thread>; onSent: (t: Thread) => void; onError?: (e: unknown) => void }) {
-  const [text, setText] = createSignal("");
+function Composer(props: { label: string; title?: string; hint?: string; placeholder: string; button: string; max: number; text?: string; onText?: (text: string) => void; quoting?: number; project: string; send: (text: string) => Promise<Thread>; onSent: (t: Thread) => void; onError?: (e: unknown) => void }) {
+  const [localText, setLocalText] = createSignal("");
+  const text = () => props.text ?? localText();
+  const setText = (value: string) => props.onText ? props.onText(value) : setLocalText(value);
+  const [preview, setPreview] = createSignal(false);
+  let editor!: HTMLTextAreaElement;
+  createEffect(on(() => props.quoting, (n) => { if (n) { setPreview(false); queueMicrotask(() => { editor.focus(); editor.setSelectionRange(text().length, text().length); }); } }));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
   const submit = async (e: Event) => {
@@ -255,7 +277,12 @@ function Composer(props: { label: string; title?: string; hint?: string; placeho
         <span class="small muted">{props.hint}</span>
       </Show>
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
-      <textarea rows={3} placeholder={props.placeholder} value={text()} onInput={(e) => setText(e.currentTarget.value)} aria-label={`${props.label} text`} />
+      <div role="tablist" aria-label={`${props.label} editor`} class="row">
+        <button type="button" role="tab" aria-selected={!preview()} onClick={() => setPreview(false)}>Write</button>
+        <button type="button" role="tab" aria-selected={preview()} onClick={() => setPreview(true)}>Preview</button>
+      </div>
+      <div role="tabpanel" hidden={preview()}><textarea ref={editor} rows={5} placeholder={props.placeholder} value={text()} onInput={(e) => setText(e.currentTarget.value)} aria-label={`${props.label} text`} /></div>
+      <Show when={preview()}><div role="tabpanel" aria-label={`${props.label} preview`}><SafeHtml class="prose" html={renderMarkdown(text(), props.project)} /></div></Show>
       <div>
         <button class="primary" type="submit" disabled={busy()}>
           {props.button}
