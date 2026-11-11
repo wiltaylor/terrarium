@@ -291,7 +291,7 @@ export interface Api {
     list(): Promise<Project[]>;
     get(name: string): Promise<Project>;
     create(p: NewProject): Promise<Project>;
-    update(name: string, patch: { description?: string; card_prefix?: string }): Promise<Project>;
+    update(name: string, patch: { description?: string; card_prefix?: string; home_board_columns?: import("./home").HomeBoardColumns }): Promise<Project>;
     /** Sends `?confirm=true`. The daemon refuses a project with agents or a file project. */
     remove(name: string): Promise<void>;
     agents(name: string): Promise<Agent[]>;

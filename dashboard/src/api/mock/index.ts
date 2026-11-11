@@ -17,6 +17,7 @@
 // the cookie is good.
 
 import type { Api } from "../client";
+import { defaultHomeColumns } from "../home";
 import { mockDisplayName } from "./displayName";
 import { ApiError, AuthError, isMutating, type Page } from "../http";
 import { createWsEventStream, type EventStream, type RawSocket, type SocketEvent } from "../sockets";
@@ -2405,6 +2406,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             p.card_prefix = patch.card_prefix;
           }
           if (patch.description !== undefined) p.description = patch.description;
+          if (patch.home_board_columns !== undefined) {
+            for (const values of Object.values(patch.home_board_columns)) {
+              if (values.length > 32 || values.some(s => !s.trim() || s.length > 128)) fail(422, "invalid", "Invalid Home column selectors");
+            }
+            p.home_board_columns = structuredClone(patch.home_board_columns);
+          }
           p.updated_at = iso();
           audit("project.update", name, name, { ...patch });
           return p;
@@ -2967,9 +2974,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     home: {
       cards: (q) => reply(() => {
-        const selectors = { in_progress: ["working", "research"], review: ["review", "merge_queue"], accepted: ["accepted"], blocked: ["blocked"] };
         const rows = w.cards.filter(c => !c.archived && (!q.project || c.project === q.project))
-          .filter(c => selectors[q.column].includes(roleOf(c.project, c.column) ?? c.column.toLowerCase()))
+          .filter(c => (project(c.project).home_board_columns ?? defaultHomeColumns)[q.column].some(selector => {
+            const cols = w.columns[c.project] ?? [];
+            const selected = cols.find(col => col.role === selector) ?? cols.find(col => col.name.toLowerCase() === selector.toLowerCase())
+              ?? (selector === "working" ? cols.find(col => ["in progress", "in_progress"].includes(col.name.toLowerCase())) : undefined);
+            return selected?.name === c.column;
+          }))
           .sort((a, b) => a.id.localeCompare(b.id));
         const start = Number(q.cursor ?? 0), end = start + (q.limit ?? 100);
         return { items: rows.slice(start, end).map(c => {

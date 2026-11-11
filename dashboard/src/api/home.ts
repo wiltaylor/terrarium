@@ -1,4 +1,8 @@
 export type HomeColumn = "in_progress" | "review" | "accepted" | "blocked";
+export type HomeBoardColumns = Record<HomeColumn, string[]>;
+export const defaultHomeColumns: HomeBoardColumns = {
+  in_progress: ["working", "research"], review: ["review", "merge_queue"], accepted: ["accepted"], blocked: ["blocked"],
+};
 export interface HomeCard {
   id: string;
   title: string;

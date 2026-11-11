@@ -10,7 +10,7 @@ vi.mock("../../stores", () => ({ api: { home }, cardPeek: { open }, projects: { 
 vi.mock("@solidjs/router", () => ({ A: (p: { href: string; children: unknown }) => <a href={p.href}>{p.children as string}</a> }));
 const { HomeBoard } = await import("./HomeBoard");
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); document.body.innerHTML = ""; vi.resetAllMocks(); });
+afterEach(() => { dispose?.(); document.body.replaceChildren(); vi.resetAllMocks(); });
 const settle = () => new Promise(r => setTimeout(r, 0));
 function mount() {
   home.cards.mockResolvedValue({ items: [], next: null });
