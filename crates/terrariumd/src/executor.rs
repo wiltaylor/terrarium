@@ -3154,7 +3154,9 @@ pub async fn recreate(state: &Shared, def: &TargetDef, opts: &RecreateOpts) -> A
             })
         })
         .await?;
-        let before = inspected.result.as_ref().unwrap();
+        let before = inspected.result.as_ref().ok_or_else(|| {
+            ApiError::conflict("recreate refused: missing container inspection result")
+        })?;
         let after = checked.result.as_ref();
         if !after.is_some_and(|after| {
             before["id"] == after["id"]
