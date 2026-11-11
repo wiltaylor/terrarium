@@ -620,6 +620,9 @@ pub async fn handle(state: &Shared, ev: StoredEvent) {
         }
     };
     debug!(thread = %tid, agent = %open.id, ?action, "thread event of a bound agent");
+    if ev.data.get("agent").and_then(Value::as_str).is_some_and(|agent| agent != open.id) {
+        return;
+    }
     let r = match action {
         Action::Park => {
             let reason = if ev.data.get("status").and_then(Value::as_str)

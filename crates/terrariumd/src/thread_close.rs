@@ -281,15 +281,15 @@ pub async fn sweep(state: &Shared) {
     if let Some(cut) = before(Duration::from_secs(86_400)) {
         let read_cut = cut.clone();
         let ids = state.db.read(move |c| {
-            let mut st = c.prepare("SELECT id FROM threads WHERE request = 1 AND status = 'waiting_operator' AND close_proposal IS NOT NULL AND updated_at < ?1")?;
+            let mut st = c.prepare("SELECT id FROM threads WHERE request = 1 AND status = 'waiting_operator' AND close_proposal IS NOT NULL AND updated_at < ?1 AND NOT EXISTS (SELECT 1 FROM thread_cards WHERE thread = threads.id)")?;
             Ok(st.query_map([read_cut], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
         }).await;
         match ids {
             Ok(ids) => for id in ids {
                 let cut = cut.clone();
                 if let Err(e) = state.db.write("system", move |t| {
-                    let th = threads::get_bare(t, &id)?;
-                    if th.request && th.status == ThreadStatus::WaitingOperator && th.close_proposal.is_some() && th.updated_at < cut {
+                    let th = threads::get(t, &id)?;
+                    if th.request && th.status == ThreadStatus::WaitingOperator && th.close_proposal.is_some() && th.updated_at < cut && th.cards.as_deref().unwrap_or_default().is_empty() {
                         threads::confirm_close(t, &id)?;
                     }
                     Ok(())

@@ -1,5 +1,36 @@
 # Terrarium daemon API
 
+## Request threads
+
+Ask an agent and Message an agent open `POST /api/threads` with
+`{report_to: "project/lead", topic, text}`. Only the operator opens a
+request, and `report_to` must name a project_admin. The scope is that lead's
+project. The daemon spawns `global:request` (META-136), with no named agent
+or alternative template accepted. A missing template fails the start with
+the existing closed-thread error rather than silently sending plain mail.
+Forwarding an existing Inbox question still uses the watched-mail path.
+
+The request agent acknowledges the request, mails the selected lead, links
+and tracks the lead's cards, and reports in the thread. It does not change
+code or perform the work. Existing thread card-link and tracking endpoints
+apply. An answer-only close proposal waits for one-click operator
+confirmation, or is confirmed automatically after 24 hours without activity.
+An operator reply withdraws the proposal. Threads with linked cards retain
+the ordinary close lifecycle. The operator can close a request at any time.
+
+`POST /api/threads/{id}/swap` with `{template, reason}` replaces an open
+request's agent with a new agent from an architect template. The operator
+or report-to lead can do this. `terrarium thread swap <id> --template <key>
+--reason <text>` is the CLI equivalent.
+
+`POST /api/threads/{id}/reopen` with `{reason}` reopens a closed request.
+The operator, report-to lead, or a project_admin whose project has a card
+linked to the thread can reopen it. `terrarium thread reopen <id> --reason
+<text>` is the CLI equivalent. Reopening creates a new `global:request`
+agent, never restores the previous session. The reason is a visible post.
+Both replacement paths keep the conversation and linked cards and include
+the thread history as quoted data in the new agent's task.
+
 This document is the contract between `terrariumd` and its clients: the CLI,
 the dashboard, and (later) the agent runner. The code is in
 `crates/terrariumd/src/api/`. The integration tests in

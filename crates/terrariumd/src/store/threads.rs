@@ -1105,6 +1105,9 @@ pub fn restart_request(t: &mut Tx<'_>, id: &str, by: &str, reason: &str, templat
     let reason = t.redact_string(reason);
     let at = now();
     let verb = if reopening { "Reopened" } else { "Agent replaced" };
+    if let Some(handoff) = &th.handoff {
+        insert_message(t, id, "system", "message", &format!("Previous close handoff (quoted data):\n{}", serde_json::to_string(handoff).map_err(|e| ApiError::invalid(e.to_string()))?), &at)?;
+    }
     insert_message(t, id, by, "message", &format!("{verb}: {reason}"), &at)?;
     t.execute(
         "UPDATE threads SET status = 'waiting_agent', template = ?2, agent = NULL,
@@ -1898,7 +1901,7 @@ pub fn emit(t: &mut Tx<'_>, th: &Thread, change: &str) -> ApiResult<()> {
 /// the new message) and `author`, which the thread agent driver reads
 /// ([`crate::thread_agent`]).
 fn emit_with(t: &mut Tx<'_>, th: &Thread, change: &str, extra: Value) -> ApiResult<()> {
-    let mut data: Value = json!({"change": change, "id": th.id, "scope": th.scope,
+    let mut data: Value = json!({"change": change, "id": th.id, "scope": th.scope, "agent": th.agent,
                                  "status": th.status});
     if let (Some(d), Value::Object(x)) = (data.as_object_mut(), extra) {
         d.extend(x);
