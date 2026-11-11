@@ -20,9 +20,10 @@ import { ProjectTree } from "./ProjectTree";
 import { projectFromPath } from "./treeModel";
 import { LoginScreen } from "./LoginScreen";
 import { PinnedBar } from "./PinnedBar";
+import { Remotes } from "./Remotes";
 
 export function Layout(props: RouteSectionProps) {
-  const { api, projects, agents, inbox, pins, bookmarks, projectFolders, subscriptions, events, cardPeek, auth, theme, signOutNow } = useInstance();
+  const { key, api, projects, agents, inbox, pins, bookmarks, projectFolders, subscriptions, events, cardPeek, auth, theme, signOutNow } = useInstance();
   const location = useLocation();
   const [open, setOpen] = createSignal(false);
   const [health, { refetch }] = createResource(() => api.health().catch(() => null));
@@ -107,6 +108,7 @@ export function Layout(props: RouteSectionProps) {
 
         <ProjectTree />
 
+        <Show when={key === "local"}><Remotes /></Show>
         {/* At the bottom, above the footer. The link is active on every /settings/... tab. */}
         <div class="nav-section nav-settings">
           <h4>Settings</h4>

@@ -34,6 +34,7 @@ export function instanceHref(name: string | undefined, path: string): string {
 
 export function createInstance(options: {
   name?: string;
+  remoteOrigin?: string;
   auth: AuthStore;
   api?: Api;
   storage?: InstanceStorage | null;
@@ -68,7 +69,7 @@ export function createInstance(options: {
     const [promptVersion, setPromptVersion] = createSignal(0);
     const promptLibrary = { version: promptVersion, refresh: () => setPromptVersion((v) => v + 1) };
     return {
-      key, api, storage, session, expanded, promptLibrary,
+      key, api, storage, session, expanded, promptLibrary, remoteOrigin: options.remoteOrigin,
       apiHref: (path: string) => `${name === undefined ? import.meta.env.VITE_API_BASE ?? "" : `/api/remotes/${name}/proxy`}${path}`,
       href: (path: string) => instanceHref(name, path),
       path: (path: string) => name === undefined ? path : path.replace(new RegExp(`^/remote/${name}(?=/|$)`), "") || "/",

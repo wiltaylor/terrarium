@@ -31,6 +31,30 @@ const canLogout = (s: Subscription) => !s.has_api_key && !isSelfHosted(s.provide
 
 const suggestName = (d: DetectedLogin) => d.suggested.name || `${d.pi_provider ?? d.provider}-${d.harness}`;
 
+function CloudBudget(props: { subscription: Subscription; onSaved: () => Promise<void> }) {
+  const { api } = useInstance();
+  const [error, setError] = createSignal<unknown>(null);
+  const [busy, setBusy] = createSignal(false);
+  return <form onSubmit={async (e) => {
+    e.preventDefault();
+    const data = new FormData(e.currentTarget);
+    const text = String(data.get("budget") ?? "").trim();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.subscriptions.setCloud(props.subscription.name, { ...props.subscription.cloud, budget_usd: text ? Number(text) : null });
+      await props.onSaved();
+    } catch (err) { setError(err); } finally { setBusy(false); }
+  }}>
+    <label>Monthly budget (USD)
+      <input name="budget" type="number" min="1" max="4294967295" step="1" value={props.subscription.cloud?.budget_usd ?? ""} disabled={props.subscription.source !== "api" || busy()} />
+    </label>
+    <span class="muted small">Blank clears it. Sends mail at 80% and 100%, never holds agents.</span>
+    <button type="submit" disabled={props.subscription.source !== "api" || busy()}>Save budget</button>
+    <ErrorBanner error={error()} />
+  </form>;
+}
+
 export default function SubscriptionsPage() {
   const { subscriptions, api } = useInstance();
   const now = useNow(30_000);
@@ -219,6 +243,12 @@ export default function SubscriptionsPage() {
                     </Show>
                     <Show when={s.fallback_spend_usd != null && !s.windows.some((w) => w.window === "budget")}>
                       <div class="muted small">Local monthly spend: ${s.fallback_spend_usd?.toFixed(2)} USD</div>
+                    </Show>
+                    <Show when={s.month_spend_usd !== undefined}>
+                      <div class="small">This month (UTC): ${s.month_spend_usd?.toFixed(2)} USD · local estimate</div>
+                    </Show>
+                    <Show when={["bedrock", "gcp", "foundry"].includes(s.provider)}>
+                      <CloudBudget subscription={s} onSaved={() => subscriptions.refresh()} />
                     </Show>
                     <Show when={s.windows.length}>
                       <div class="muted small">

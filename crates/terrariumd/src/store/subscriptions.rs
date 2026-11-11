@@ -204,6 +204,9 @@ pub const REASON_DISABLED: &str = "subscription_disabled";
 /// written before the probe existed get it too.
 pub fn default_probe(provider: &str, plan: Option<&str>) -> Option<String> {
     use terrarium_core::zai;
+    if provider == "litellm" {
+        return Some(crate::probes::litellm::NAME.to_owned());
+    }
     if zai::is_zai(provider) && zai::plan_or_default(plan) == zai::Plan::Coding {
         return Some(crate::probes::zai::NAME.to_owned());
     }

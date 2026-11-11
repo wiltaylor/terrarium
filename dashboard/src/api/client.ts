@@ -727,6 +727,7 @@ export interface Api {
     makeDefault(name: string): Promise<Subscription>;
     /** Write-only. The answer never has the key. */
     setApiKey(name: string, input: ApiKeyInput): Promise<Subscription>;
+    setCloud(name: string, input: NonNullable<Subscription["cloud"]>): Promise<Subscription>;
     /** `PATCH`: `alert_at`, and the harnesses and the server of a self-hosted one. `409 file_managed` for a file subscription. */
     update(name: string, patch: SubscriptionPatch): Promise<Subscription>;
     /** Agents on it may start and wake again; agents with work wake now. */
@@ -1483,6 +1484,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       logout: (name) => post(`${sub(name)}/logout`),
       makeDefault: (name) => post(`${sub(name)}/default`),
       setApiKey: (name, input) => post(`${sub(name)}/api-key`, input),
+      setCloud: (name, input) => put(`${sub(name)}/cloud`, input),
       update: (name, body) => patch(sub(name), body),
       enable: (name) => post(`${sub(name)}/enable`),
       disable: (name) => post(`${sub(name)}/disable`),

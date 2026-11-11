@@ -13360,7 +13360,9 @@ audit row.
 
 A link key is `Authorization: Bearer tlk_...` (on a WebSocket upgrade also
 the subprotocol `bearer.tlk_...`). For the rules the caller is the operator,
-minus a deny list. Audit rows and events of its actions carry the actor
+minus a deny list. Operator-only gates deny link keys by default, except
+the GET/HEAD remote-dashboard reads explicitly listed in
+`links::operator_route_allowed`. Audit rows and events of its actions carry the actor
 `link:<id>`; `GET /api/audit` adds `link_label` to those rows. Mail, card
 authors, and pins stay `operator`. `GET /api/session` gives `kind: "link"`.
 

@@ -95,7 +95,7 @@ impl Actor {
     }
 
     pub fn is_operator(&self) -> bool {
-        matches!(self, Self::Operator)
+        matches!(self, Self::Operator) && crate::links::operator_only("act as the operator").is_ok()
     }
 
     /// The project of an agent actor.
