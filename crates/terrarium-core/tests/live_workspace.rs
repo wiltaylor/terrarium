@@ -4,6 +4,7 @@ use ulid::Ulid;
 fn envelope(revision: u64, kind: Kind) -> Envelope {
     let request = Request {
         version: PROTOCOL_VERSION,
+        provenance: Provenance { daemon_instance: Ulid::from(100), caller: Caller::LocalOperator },
         operation: OperationId(Ulid::from(revision as u128)),
         host: Ulid::from(1),
         target: "test-target".into(),
@@ -11,7 +12,10 @@ fn envelope(revision: u64, kind: Kind) -> Envelope {
             registration: RegistrationId(Ulid::from(2)),
             incarnation: RuntimeId(Ulid::from(3)),
             container_id: "a".repeat(64),
-            namespace: NamespaceIdentity { device: 1, inode: 2 },
+            namespace: NamespaceIdentity {
+                device: 1,
+                inode: 2,
+            },
         },
         revision,
         kind,
@@ -22,13 +26,20 @@ fn envelope(revision: u64, kind: Kind) -> Envelope {
                 agent: terrarium_core::AgentId(Ulid::from(5)),
                 project: "project".into(),
                 name: "agent".into(),
-                source: SourceIdentity { device: 1, inode: 3 },
+                source: SourceIdentity {
+                    device: 1,
+                    inode: 3,
+                },
             },
             attachment: AttachmentId(Ulid::from(6)),
             domain: TrustDomainId(Ulid::from(7)),
         }),
     };
-    Envelope { original_hash: request.hash().unwrap(), original: request, delivery: Delivery::Apply }
+    Envelope {
+        original_hash: request.hash().unwrap(),
+        original: request,
+        delivery: Delivery::Apply,
+    }
 }
 
 fn journal() -> Journal {
@@ -50,12 +61,24 @@ fn finish(j: &mut Journal, e: &Envelope) -> Reply {
         &[Phase::Verified]
     } else {
         match e.original.kind {
-            Kind::Grant => &[Phase::Staged, Phase::StageVerified, Phase::Published, Phase::Verified],
-            Kind::Revoke => &[Phase::OrdinaryUnmountObserved, Phase::LazyDetachObserved, Phase::PlaceholderRemoved, Phase::Verified],
+            Kind::Grant => &[
+                Phase::Staged,
+                Phase::StageVerified,
+                Phase::Published,
+                Phase::Verified,
+            ],
+            Kind::Revoke => &[
+                Phase::OrdinaryUnmountObserved,
+                Phase::LazyDetachObserved,
+                Phase::PlaceholderRemoved,
+                Phase::Verified,
+            ],
             _ => &[Phase::Verified],
         }
     };
-    for &p in phases { j.advance(e.original.operation, p).unwrap(); }
+    for &p in phases {
+        j.advance(e.original.operation, p).unwrap();
+    }
     j.commit(e.original.operation).unwrap()
 }
 
@@ -67,7 +90,10 @@ fn immutable_original_and_superseded_barrier() {
     let hash = e.original_hash;
     e.delivery = Delivery::Superseded;
     assert_eq!(j.prepare(e.clone()), Ok(None));
-    assert_eq!(j.advance(e.original.operation, Phase::Staged), Err(Reply::Failed));
+    assert_eq!(
+        j.advance(e.original.operation, Phase::Staged),
+        Err(Reply::Failed)
+    );
     assert_eq!(finish(&mut j, &e), Reply::Superseded);
     assert_eq!(j.prepare(e.clone()), Ok(Some(Reply::Superseded)));
     assert_eq!(e.original, original);
@@ -82,7 +108,10 @@ fn duplicate_gap_stale_and_pending_are_nonmutating() {
     let mut j = journal();
     let e = envelope(1, Kind::Grant);
     let before = j.clone();
-    assert_eq!(j.prepare(envelope(2, Kind::Grant)), Err(Reply::RevisionGap { expected: 1 }));
+    assert_eq!(
+        j.prepare(envelope(2, Kind::Grant)),
+        Err(Reply::RevisionGap { expected: 1 })
+    );
     assert_eq!(j, before);
     j.prepare(e.clone()).unwrap();
     assert_eq!(j.prepare(e.clone()), Err(Reply::Busy));
@@ -125,8 +154,18 @@ fn every_uncommitted_crash_boundary_quarantines_without_evidence() {
         j.prepare(e.clone()).unwrap();
         let mut states = vec![j.clone()];
         let phases: &[Phase] = match kind {
-            Kind::Grant => &[Phase::Staged, Phase::StageVerified, Phase::Published, Phase::Verified],
-            Kind::Revoke => &[Phase::OrdinaryUnmountObserved, Phase::LazyDetachObserved, Phase::PlaceholderRemoved, Phase::Verified],
+            Kind::Grant => &[
+                Phase::Staged,
+                Phase::StageVerified,
+                Phase::Published,
+                Phase::Verified,
+            ],
+            Kind::Revoke => &[
+                Phase::OrdinaryUnmountObserved,
+                Phase::LazyDetachObserved,
+                Phase::PlaceholderRemoved,
+                Phase::Verified,
+            ],
             _ => &[Phase::Verified],
         };
         for &p in phases {
@@ -140,8 +179,14 @@ fn every_uncommitted_crash_boundary_quarantines_without_evidence() {
             recovered.recover_without_evidence();
             assert!(recovered.quarantined);
             assert_eq!(recovered.last_contiguous_revision, 0);
-            assert_eq!(recovered.commit(e.original.operation), Err(Reply::Quarantined));
-            assert_eq!(recovered.prepare(envelope(2, kind)), Err(Reply::Quarantined));
+            assert_eq!(
+                recovered.commit(e.original.operation),
+                Err(Reply::Quarantined)
+            );
+            assert_eq!(
+                recovered.prepare(envelope(2, kind)),
+                Err(Reply::Quarantined)
+            );
         }
         j.commit(e.original.operation).unwrap();
         j.recover_without_evidence();
@@ -155,13 +200,22 @@ fn strict_bounded_frames_and_disabled_activation() {
     let e = envelope(1, Kind::Grant);
     let bytes = serde_json::to_vec(&e).unwrap();
     assert_eq!(decode_frame(&bytes), Ok(e.clone()));
-    assert_eq!(decode_frame(&vec![b' '; MAX_FRAME_BYTES + 1]), Err(Reply::Failed));
+    assert_eq!(
+        decode_frame(&vec![b' '; MAX_FRAME_BYTES + 1]),
+        Err(Reply::Failed)
+    );
     let mut value = serde_json::to_value(e.clone()).unwrap();
     value["original"]["source_path"] = "/".into();
-    assert_eq!(decode_frame(&serde_json::to_vec(&value).unwrap()), Err(Reply::Failed));
+    assert_eq!(
+        decode_frame(&serde_json::to_vec(&value).unwrap()),
+        Err(Reply::Failed)
+    );
     let mut changed = e;
     changed.original.revision += 1;
-    assert_eq!(decode_frame(&serde_json::to_vec(&changed).unwrap()), Err(Reply::Failed));
+    assert_eq!(
+        decode_frame(&serde_json::to_vec(&changed).unwrap()),
+        Err(Reply::Failed)
+    );
     assert_eq!(Activation::default(), Activation::Disabled);
     assert!(serde_json::from_str::<Activation>("\"enabled\"").is_err());
 }
@@ -188,8 +242,13 @@ fn names_aliases_and_runtime_reuse_are_not_identity() {
 
 #[test]
 fn capability_is_not_activation_and_versions_fail_closed() {
-    let mut c = Capability { version: PROTOCOL_VERSION, state_version: STATE_VERSION,
-        workspace_mount: true, ready: false, reason: "startup reconciliation pending".into() };
+    let mut c = Capability {
+        version: PROTOCOL_VERSION,
+        state_version: STATE_VERSION,
+        workspace_mount: true,
+        ready: false,
+        reason: "startup reconciliation pending".into(),
+    };
     assert!(!c.compatible());
     c.ready = true;
     assert!(c.compatible());
@@ -201,4 +260,38 @@ fn capability_is_not_activation_and_versions_fail_closed() {
     let mut j = journal();
     j.state_version += 1;
     assert_eq!(j.prepare(envelope(1, Kind::Grant)), Err(Reply::Unsupported));
+}
+
+#[test]
+fn daemon_ack_and_runtime_commit_are_distinct_durable_boundaries() {
+    let e = envelope(1, Kind::Grant);
+    let mut op = DaemonOperation { envelope: e.clone(), phase: DaemonPhase::Intent, helper_result: None };
+    assert_eq!(op.commit_runtime(), Err(Reply::Failed));
+    // Lost acknowledgement: resend exactly the saved intent, not a new revision.
+    let saved = serde_json::to_vec(&op).unwrap();
+    let mut restored: DaemonOperation = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(restored.envelope, e);
+    restored.acknowledge(&e, Reply::Applied).unwrap();
+    assert_eq!(restored.phase, DaemonPhase::HelperCommitted);
+    restored.commit_runtime().unwrap();
+    restored.acknowledge(&e, Reply::Applied).unwrap();
+    assert_eq!(restored.phase, DaemonPhase::RuntimeCommitted);
+    assert_eq!(op.acknowledge(&e, Reply::PathRevokedVerified), Err(Reply::Conflict));
+    assert_eq!(op.phase, DaemonPhase::Quarantined);
+}
+
+#[test]
+fn divergent_or_missing_committed_history_quarantines() {
+    let mut j = journal();
+    let e = envelope(1, Kind::Grant);
+    j.prepare(e.clone()).unwrap();
+    finish(&mut j, &e);
+    let mut missing = j.clone();
+    missing.operations.clear();
+    missing.recover_without_evidence();
+    assert!(missing.quarantined);
+    let i = j.operations.get_mut(&e.original.operation).unwrap();
+    i.envelope.original_hash = [0; 32];
+    j.recover_without_evidence();
+    assert!(j.quarantined);
 }

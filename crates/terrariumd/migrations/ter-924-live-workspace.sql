@@ -42,6 +42,12 @@ CREATE TRIGGER live_workspace_target_identity BEFORE UPDATE OF
     registration_id, host_id, target_id, trust_domain_id, runtime_id, container_id,
     namespace_dev, namespace_ino ON live_workspace_targets
 BEGIN SELECT RAISE(ABORT, 'registration identity is immutable'); END;
+CREATE TRIGGER live_workspace_target_revisions BEFORE UPDATE OF last_contiguous_revision, allocated_revision ON live_workspace_targets
+WHEN NEW.last_contiguous_revision < OLD.last_contiguous_revision
+    OR NEW.last_contiguous_revision > OLD.last_contiguous_revision + 1
+    OR NEW.allocated_revision < OLD.allocated_revision
+    OR NEW.allocated_revision > OLD.allocated_revision + 1
+BEGIN SELECT RAISE(ABORT, 'revision barrier'); END;
 
 CREATE TABLE workspace_reservations (
     workspace_id TEXT PRIMARY KEY NOT NULL REFERENCES live_workspaces(workspace_id),
@@ -108,3 +114,11 @@ WHEN OLD.phase != 'intent' OR OLD.delivery != 'apply' OR NEW.delivery != 'supers
 BEGIN SELECT RAISE(ABORT, 'delivery already decided'); END;
 CREATE TRIGGER live_workspace_operation_no_delete BEFORE DELETE ON live_workspace_operations
 BEGIN SELECT RAISE(ABORT, 'operation history is permanent'); END;
+CREATE TRIGGER live_workspace_operation_forward BEFORE UPDATE OF phase ON live_workspace_operations
+WHEN NOT (NEW.phase = OLD.phase OR NEW.phase = 'quarantined'
+    OR (OLD.phase = 'intent' AND NEW.phase = 'helper_committed')
+    OR (OLD.phase = 'helper_committed' AND NEW.phase = 'daemon_committed'))
+BEGIN SELECT RAISE(ABORT, 'invalid daemon commit order'); END;
+CREATE TRIGGER live_workspace_operation_saved_result BEFORE UPDATE OF result ON live_workspace_operations
+WHEN OLD.result IS NOT NULL AND NEW.result IS NOT OLD.result
+BEGIN SELECT RAISE(ABORT, 'committed helper result is immutable'); END;

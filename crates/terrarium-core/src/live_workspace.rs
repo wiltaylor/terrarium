@@ -116,11 +116,27 @@ pub struct Holder {
     pub domain: TrustDomainId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Caller {
+    LocalOperator,
+    Agent(crate::AgentId),
+    Link(Ulid),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provenance {
+    pub daemon_instance: Ulid,
+    pub caller: Caller,
+}
+
 /// This original body is immutable, including when authority ends before send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub version: u32,
+    pub provenance: Provenance,
     pub operation: OperationId,
     pub host: Ulid,
     pub target: String,
@@ -141,7 +157,11 @@ impl Request {
             && self.revision > 0
             && segment(&self.target)
             && self.runtime.container_id.len() == 64
-            && self.runtime.container_id.bytes().all(|b| b.is_ascii_hexdigit())
+            && self
+                .runtime
+                .container_id
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
             && self.runtime.namespace.inode > 0
             && (!matches!(self.kind, Kind::Grant | Kind::Revoke) || self.holder.is_some())
             && self.holder.as_ref().is_none_or(|h| {
@@ -217,7 +237,9 @@ pub enum Reply {
     Failed,
     Quarantined,
     Conflict,
-    RevisionGap { expected: u64 },
+    RevisionGap {
+        expected: u64,
+    },
     Applied,
     Superseded,
     /// Fresh-path disappearance only, NOT descriptor/process revocation.
@@ -256,8 +278,71 @@ pub enum Activation {
 #[serde(deny_unknown_fields)]
 pub struct Intent {
     pub envelope: Envelope,
+    pub expected: ExpectedState,
     pub phase: Phase,
     pub result: Option<Reply>,
+    /// Namespace-scoped evidence is recorded independently for each view.
+    pub host_evidence: Vec<MountEvidence>,
+    pub receiver_evidence: Vec<MountEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectedState {
+    DestinationAbsent,
+    AttachmentPresent,
+    RegistrationRecheck,
+}
+
+/// Durable daemon record. The intent includes the reservation change in the
+/// same FULL-synchronous transaction. A helper acknowledgement never directly
+/// implies a daemon runtime commit. B4 supplies the actual transaction/callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonOperation {
+    pub envelope: Envelope,
+    pub phase: DaemonPhase,
+    pub helper_result: Option<Reply>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonPhase {
+    Intent,
+    HelperCommitted,
+    RuntimeCommitted,
+    Quarantined,
+}
+
+impl DaemonOperation {
+    pub fn acknowledge(&mut self, receipt: &Envelope, result: Reply) -> Result<(), Reply> {
+        let expected = match (self.envelope.delivery, self.envelope.original.kind) {
+            (Delivery::Superseded, _) => Reply::Superseded,
+            (_, Kind::Revoke) => Reply::PathRevokedVerified,
+            _ => Reply::Applied,
+        };
+        if receipt != &self.envelope || result != expected {
+            self.phase = DaemonPhase::Quarantined;
+            return Err(Reply::Conflict);
+        }
+        if self.phase == DaemonPhase::Quarantined {
+            return Err(Reply::Quarantined);
+        }
+        self.helper_result = Some(result);
+        if self.phase == DaemonPhase::Intent {
+            self.phase = DaemonPhase::HelperCommitted;
+        }
+        Ok(())
+    }
+
+    /// Call only within the same DB transaction that updates runtime.attached.
+    pub fn commit_runtime(&mut self) -> Result<(), Reply> {
+        if self.phase != DaemonPhase::HelperCommitted || self.helper_result.is_none() {
+            return Err(Reply::Failed);
+        }
+        self.phase = DaemonPhase::RuntimeCommitted;
+        Ok(())
+    }
 }
 
 /// Serializable helper journal schema. Mutations are an in-memory MODEL, not
@@ -297,7 +382,10 @@ impl Journal {
         if self.quarantined {
             return Err(Reply::Quarantined);
         }
-        let expected = self.last_contiguous_revision.checked_add(1).ok_or(Reply::Failed)?;
+        let expected = self
+            .last_contiguous_revision
+            .checked_add(1)
+            .ok_or(Reply::Failed)?;
         if r.revision < expected {
             return Err(Reply::Stale);
         }
@@ -315,7 +403,21 @@ impl Journal {
                 self.tombstones.insert(holder.attachment, r.revision);
             }
         }
-        self.operations.insert(r.operation, Intent { envelope, phase: Phase::Prepared, result: None });
+        self.operations.insert(
+            r.operation,
+            Intent {
+                expected: match r.kind {
+                    Kind::Grant => ExpectedState::DestinationAbsent,
+                    Kind::Revoke => ExpectedState::AttachmentPresent,
+                    _ => ExpectedState::RegistrationRecheck,
+                },
+                envelope,
+                phase: Phase::Prepared,
+                result: None,
+                host_evidence: Vec::new(),
+                receiver_evidence: Vec::new(),
+            },
+        );
         Ok(None)
     }
 
@@ -327,14 +429,23 @@ impl Journal {
         let i = self.operations.get_mut(&id).ok_or(Reply::Failed)?;
         let permitted = match (i.envelope.delivery, i.envelope.original.kind) {
             (Delivery::Superseded, _) => i.phase == Phase::Prepared && next == Phase::Verified,
-            (_, Kind::Grant) => matches!((i.phase, next),
-                (Phase::Prepared, Phase::Staged) | (Phase::Staged, Phase::StageVerified)
-                | (Phase::StageVerified, Phase::Published) | (Phase::Published, Phase::Verified)),
-            (_, Kind::Revoke) => matches!((i.phase, next),
+            (_, Kind::Grant) => matches!(
+                (i.phase, next),
+                (Phase::Prepared, Phase::Staged)
+                    | (Phase::Staged, Phase::StageVerified)
+                    | (Phase::StageVerified, Phase::Published)
+                    | (Phase::Published, Phase::Verified)
+            ),
+            (_, Kind::Revoke) => matches!(
+                (i.phase, next),
                 (Phase::Prepared, Phase::OrdinaryUnmountObserved)
-                | (Phase::OrdinaryUnmountObserved, Phase::LazyDetachObserved)
-                | (Phase::OrdinaryUnmountObserved | Phase::LazyDetachObserved, Phase::PlaceholderRemoved)
-                | (Phase::PlaceholderRemoved, Phase::Verified)),
+                    | (Phase::OrdinaryUnmountObserved, Phase::LazyDetachObserved)
+                    | (
+                        Phase::OrdinaryUnmountObserved | Phase::LazyDetachObserved,
+                        Phase::PlaceholderRemoved
+                    )
+                    | (Phase::PlaceholderRemoved, Phase::Verified)
+            ),
             _ => i.phase == Phase::Prepared && next == Phase::Verified,
         };
         if !permitted {
@@ -350,8 +461,10 @@ impl Journal {
             return Err(Reply::Quarantined);
         }
         let i = self.operations.get_mut(&id).ok_or(Reply::Failed)?;
-        if i.phase != Phase::Verified || i.result.is_some()
-            || self.last_contiguous_revision.checked_add(1) != Some(i.envelope.original.revision) {
+        if i.phase != Phase::Verified
+            || i.result.is_some()
+            || self.last_contiguous_revision.checked_add(1) != Some(i.envelope.original.revision)
+        {
             return Err(Reply::Failed);
         }
         let reply = match (i.envelope.delivery, i.envelope.original.kind) {
@@ -368,7 +481,29 @@ impl Journal {
     /// Without fresh kernel evidence EVERY uncommitted crash state is ambiguous.
     /// Never infer success from a saved phase or retry a kernel mutation blindly.
     pub fn recover_without_evidence(&mut self) {
-        if self.state_version != STATE_VERSION || self.operations.values().any(|i| i.result.is_none()) {
+        let mut revisions = Vec::new();
+        let mut divergent = false;
+        for (id, i) in &self.operations {
+            let r = &i.envelope.original;
+            let expected_result = match (i.envelope.delivery, r.kind) {
+                (Delivery::Superseded, _) => Reply::Superseded,
+                (_, Kind::Revoke) => Reply::PathRevokedVerified,
+                _ => Reply::Applied,
+            };
+            divergent |= *id != r.operation || r.host != self.host || r.target != self.target
+                || r.runtime != self.runtime || !r.valid()
+                || r.hash().ok() != Some(i.envelope.original_hash)
+                || i.phase != Phase::Committed || i.result != Some(expected_result)
+                || (i.envelope.delivery == Delivery::Superseded && r.kind != Kind::Grant);
+            revisions.push(r.revision);
+        }
+        revisions.sort_unstable();
+        divergent |= revisions.len() as u64 != self.last_contiguous_revision
+            || revisions.iter().enumerate().any(|(n, &r)| r != n as u64 + 1);
+        if self.state_version != STATE_VERSION
+            || divergent
+            || self.operations.values().any(|i| i.result.is_none())
+        {
             self.quarantined = true;
         }
     }
