@@ -12930,8 +12930,8 @@ one key, the strictest applies until a cap write replaces them.
 
 ### 35.3 Results
 
-New daemon recipe logs have a per-attempt ownership ledger. Legacy logs and
-release-client logs are not adopted or deleted. Delivery config accepts
+New daemon recipe logs have a per-attempt ownership ledger. Unconfirmed legacy
+logs and release-client logs are not adopted or deleted. Delivery config accepts
 `log_retention_secs` (default 604800, seven days, capped at ten years) and
 `log_retention_bytes` (default 1073741824, one GiB of completed logs per project).
 The CLI sets these with `project delivery set --log-retention-secs N
@@ -12939,8 +12939,7 @@ The CLI sets these with `project delivery set --log-retention-secs N
 bytes respectively. Age is fixed when an attempt is first recorded. Changing
 the byte budget affects the next cleanup pass.
 
-Without `flock`, recipes still run as before. Their logs have no ledger row,
-are never auto-cleaned, and job output states this in one line. Tracked logs
+Without `flock`, recipe log capture fails closed before running the recipe. Tracked logs
 use a shared directory lock and a writer-held inode lock. Log roots must be
 absolute physical paths without symlink components. Cleanup pins the recorded
 directory and verifies its device/inode and the log inode. A private quarantine
@@ -12963,6 +12962,31 @@ continues the pass, and zero ends it. Concurrent cleanup returns a conflict.
 `GET /api/jobs/{id}` includes `logs`, with attempt, target, path, written_at,
 expires_at, bytes and expired. `job show` explicitly marks removed logs as
 expired while preserving the job's stored output tail.
+
+`terrarium admin job legacy-logs <target> [--older-than 30d] [--after JOB_ID]`
+is an operator-only dry run for the selected project's current delivery log root.
+Agents, including project admins, and link keys are refused. It probes exact
+daemon filenames (`<ULID>-<attempt>.log`) from at most 256 indexed job records,
+not a directory scan. Only terminal non-release jobs ended before the cutoff
+and without a ledger row qualify. Unrelated filenames and files without a job
+record are untouched and are not enumerated or included in skip counts.
+The response lists paths, jobs, attempts, size, mtime, identities, total bytes,
+skip counts by reason, and an independent `next` cursor. Missing, symlinked,
+locked or unreachable files/roots are skipped. Log roots must be absolute,
+physical paths without symlink components.
+
+`--confirm DIGEST` is an explicit operator attestation of ownership, not an
+inference from job output tails or current configuration. The server stores a
+single-use listing digest, valid for 15 minutes, binding the observed paths,
+root/file inodes, size, mtime and target identity. Confirmation rechecks these
+observations and job states. Changed/new files are skipped. An expired, consumed
+or unknown digest is refused. Only confirmed unchanged entries enter the
+existing ownership ledger and durable lock/quarantine removal protocol.
+Each adoption and confirmed removal is audited. Interrupted removals use the
+existing recovery path, with bytes charged until confirmed expiry and changed
+size/mtime retained as a conflict. Scheduled maintenance never lists or adopts
+legacy logs. The API is `POST /api/projects/{name}/jobs/legacy-logs` with
+`target`, optional `after`, `older_than_secs` (default 2592000), and `confirm`.
 
 Before moving a log, cleanup commits its `quarantining` state and deterministic
 `quarantine` path in the ledger. Interrupted moves are reconciled on later

@@ -42,6 +42,7 @@ pub mod input_watchdog;
 pub mod job_logs;
 pub mod jobs;
 pub mod leases;
+pub mod legacy_job_logs;
 pub mod lifecycle;
 pub mod links;
 pub mod login_session;
