@@ -29,13 +29,24 @@ async fn remote() -> TestDaemon {
 async fn browser_admission_is_retained_until_socket_close_and_has_retry_after() {
     let home = TestDaemon::start().await;
     let remote = remote().await;
-    link(&home,&remote,false).await;
+    link(&home, &remote, false).await;
     let mut tabs = Vec::new();
-    for _ in 0..32 { tabs.push(home.ws("/api/remotes/lab/proxy/api/events?live=1",None).await.unwrap()); }
-    let error = home.ws("/api/remotes/lab/proxy/api/events?live=1",None).await.expect_err("33rd browser must be refused");
-    let tokio_tungstenite::tungstenite::Error::Http(response) = error else { panic!("expected HTTP refusal"); };
-    assert_eq!(response.status(),StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(response.headers()["retry-after"],"1");
+    for _ in 0..32 {
+        tabs.push(
+            home.ws("/api/remotes/lab/proxy/api/events?live=1", None)
+                .await
+                .unwrap(),
+        );
+    }
+    let error = home
+        .ws("/api/remotes/lab/proxy/api/events?live=1", None)
+        .await
+        .expect_err("33rd browser must be refused");
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("expected HTTP refusal");
+    };
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()["retry-after"], "1");
     home.delete("/api/remotes/lab").await.ok();
     drop(tabs);
 }
@@ -49,109 +60,216 @@ async fn historical_pages_obey_upstream_request_admission() {
     let maximum = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(tokio::sync::Semaphore::new(0));
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    let (a,m,e,g) = (active.clone(),maximum.clone(),entered.clone(),release.clone());
+    let (a, m, e, g) = (
+        active.clone(),
+        maximum.clone(),
+        entered.clone(),
+        release.clone(),
+    );
     let app = Router::new()
-        .route("/api/system/instance",get(move || { let id=instance.clone(); async move { Json(json!({"id":id,"version":terrarium_version::VERSION})) } }))
-        .route("/api/events/latest",get(|| async { Json(json!({"seq":0})) }))
-        .route("/api/events",get(move |req: axum::extract::Request| {
-            let (a,m,e,g) = (a.clone(),m.clone(),e.clone(),g.clone());
-            async move {
-                if req.headers().contains_key("upgrade") {
-                    let (mut parts,_) = req.into_parts();
-                    let ws = axum::extract::WebSocketUpgrade::from_request_parts(&mut parts,&()).await.unwrap();
-                    return ws.on_upgrade(|socket| async move { let _socket = socket; std::future::pending::<()>().await; }).into_response();
+        .route(
+            "/api/system/instance",
+            get(move || {
+                let id = instance.clone();
+                async move { Json(json!({"id":id,"version":terrarium_version::VERSION})) }
+            }),
+        )
+        .route(
+            "/api/events/latest",
+            get(|| async { Json(json!({"seq":0})) }),
+        )
+        .route(
+            "/api/events",
+            get(move |req: axum::extract::Request| {
+                let (a, m, e, g) = (a.clone(), m.clone(), e.clone(), g.clone());
+                async move {
+                    if req.headers().contains_key("upgrade") {
+                        let (mut parts, _) = req.into_parts();
+                        let ws =
+                            axum::extract::WebSocketUpgrade::from_request_parts(&mut parts, &())
+                                .await
+                                .unwrap();
+                        return ws
+                            .on_upgrade(|socket| async move {
+                                let _socket = socket;
+                                std::future::pending::<()>().await;
+                            })
+                            .into_response();
+                    }
+                    let n = a.fetch_add(1, Ordering::SeqCst) + 1;
+                    m.fetch_max(n, Ordering::SeqCst);
+                    e.add_permits(1);
+                    g.acquire().await.unwrap().forget();
+                    a.fetch_sub(1, Ordering::SeqCst);
+                    Json(json!([])).into_response()
                 }
-                let n = a.fetch_add(1,Ordering::SeqCst)+1;
-                m.fetch_max(n,Ordering::SeqCst);
-                e.add_permits(1);
-                g.acquire().await.unwrap().forget();
-                a.fetch_sub(1,Ordering::SeqCst);
-                Json(json!([])).into_response()
-            }
-        }));
-    let _server = fake(&home,app,&id).await;
-    let live = home.ws("/api/remotes/lab/proxy/api/events?live=1",None).await.unwrap();
+            }),
+        );
+    let _server = fake(&home, app, &id).await;
+    let live = home
+        .ws("/api/remotes/lab/proxy/api/events?live=1", None)
+        .await
+        .unwrap();
     let row = home.get("/api/remotes/lab").await;
-    let limits = home.daemon.as_ref().unwrap().state.remotes.get(row.ok()["id"].as_str().unwrap());
+    let limits = home
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .remotes
+        .get(row.ok()["id"].as_str().unwrap());
     let held: Vec<_> = (0..62).map(|_| limits.acquire(false).unwrap()).collect();
-    let first = home.ws("/api/remotes/lab/proxy/api/events?since=0",None).await.unwrap();
-    let second = home.ws("/api/remotes/lab/proxy/api/events?since=0",None).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10),entered.acquire_many(2)).await.unwrap().unwrap().forget();
-    home.get("/api/remotes/lab/proxy/api/projects").await.err(429,"rate_limited");
-    assert_eq!(maximum.load(Ordering::SeqCst),2);
+    let first = home
+        .ws("/api/remotes/lab/proxy/api/events?since=0", None)
+        .await
+        .unwrap();
+    let second = home
+        .ws("/api/remotes/lab/proxy/api/events?since=0", None)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), entered.acquire_many(2))
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    home.get("/api/remotes/lab/proxy/api/projects")
+        .await
+        .err(429, "rate_limited");
+    assert_eq!(maximum.load(Ordering::SeqCst), 2);
     assert!(limits.acquire(false).is_err());
     release.add_permits(2);
     drop(held);
     home.delete("/api/remotes/lab").await.ok();
-    drop((live,first,second));
+    drop((live, first, second));
 }
 
 #[tokio::test]
 async fn remote_count_is_capped_lists_are_paged_and_duplicate_checks_use_index() {
     let home = TestDaemon::start().await;
     let remote = remote().await;
-    link(&home,&remote,false).await;
+    link(&home, &remote, false).await;
     let key = terrariumd::secrets::key(&home.state).unwrap();
-    home.daemon.as_ref().unwrap().state.db.write("operator", move |t| {
-        let base = terrariumd::store::remotes::get(t,"lab")?;
-        for i in 0..63 {
-            let mut row = base.clone();
-            row.id = ulid::Ulid::new().to_string();
-            row.name = format!("remote{i:02}");
-            let sealed = key.seal(b"test-key",&terrariumd::store::remotes::aad(&row.id))?;
-            terrariumd::store::remotes::insert(t,&row,&sealed)?;
-        }
-        let mut overflow = base.clone();
-        overflow.id=ulid::Ulid::new().to_string(); overflow.name="overflow".into();
-        assert!(terrariumd::store::remotes::insert(t,&overflow,b"unused").is_err());
-        assert_eq!(terrariumd::store::remotes::list_page(t,None,usize::MAX)?.len(),64);
-        let sql = format!("EXPLAIN QUERY PLAN {}",terrariumd::store::remotes::EXISTS_SQL);
-        let plan = t.prepare(&sql)?.query_map(["lab"],|r| r.get::<_,String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?.join(" ");
-        assert!(plan.contains("SEARCH remotes") && plan.contains("INDEX"),"{plan}");
-        assert!(terrariumd::store::remotes::check_add(t,"lab").is_err());
-        Ok(())
-    }).await.unwrap();
+    home.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("operator", move |t| {
+            let base = terrariumd::store::remotes::get(t, "lab")?;
+            for i in 0..63 {
+                let mut row = base.clone();
+                row.id = ulid::Ulid::new().to_string();
+                row.name = format!("remote{i:02}");
+                let sealed = key.seal(b"test-key", &terrariumd::store::remotes::aad(&row.id))?;
+                terrariumd::store::remotes::insert(t, &row, &sealed)?;
+            }
+            let mut overflow = base.clone();
+            overflow.id = ulid::Ulid::new().to_string();
+            overflow.name = "overflow".into();
+            assert!(terrariumd::store::remotes::insert(t, &overflow, b"unused").is_err());
+            assert_eq!(
+                terrariumd::store::remotes::list_page(t, None, usize::MAX)?.len(),
+                64
+            );
+            let sql = format!(
+                "EXPLAIN QUERY PLAN {}",
+                terrariumd::store::remotes::EXISTS_SQL
+            );
+            let plan = t
+                .prepare(&sql)?
+                .query_map(["lab"], |r| r.get::<_, String>(3))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .join(" ");
+            assert!(
+                plan.contains("SEARCH remotes") && plan.contains("INDEX"),
+                "{plan}"
+            );
+            assert!(terrariumd::store::remotes::check_add(t, "lab").is_err());
+            Ok(())
+        })
+        .await
+        .unwrap();
     let refusal = home.post("/api/remotes",json!({"name":"overflow","url":"http://127.0.0.1:1","instance_id":ulid::Ulid::new().to_string(),"code":"unused"})).await;
-    refusal.err(409,"conflict");
-    assert!(refusal.body["error"]["message"].as_str().unwrap().contains("64"));
+    refusal.err(409, "conflict");
+    assert!(
+        refusal.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("64")
+    );
     let page = home.get("/api/remotes?limit=2").await;
-    assert_eq!(page.ok().as_array().unwrap().len(),2);
+    assert_eq!(page.ok().as_array().unwrap().len(), 2);
     let cursor = page.next_cursor().unwrap();
-    let next = home.get(&format!("/api/remotes?limit=2&cursor={cursor}")).await;
-    assert_eq!(next.ok().as_array().unwrap().len(),2);
-    assert_ne!(page.ok()[0]["name"],next.ok()[0]["name"]);
+    let next = home
+        .get(&format!("/api/remotes?limit=2&cursor={cursor}"))
+        .await;
+    assert_eq!(next.ok().as_array().unwrap().len(), 2);
+    assert_ne!(page.ok()[0]["name"], next.ok()[0]["name"]);
 }
 
 #[tokio::test]
 async fn agent_name_filters_match_backlog_and_live_with_independent_tabs() {
     let home = TestDaemon::start().await;
     let remote = remote().await;
-    let worker = remote.agent("terra","worker",json!({})).await;
-    let other = remote.agent("terra","other",json!({})).await;
-    let (worker,other) = (worker["id"].as_str().unwrap().to_owned(),other["id"].as_str().unwrap().to_owned());
+    let worker = remote.agent("terra", "worker", json!({})).await;
+    let other = remote.agent("terra", "other", json!({})).await;
+    let (worker, other) = (
+        worker["id"].as_str().unwrap().to_owned(),
+        other["id"].as_str().unwrap().to_owned(),
+    );
     async fn emit(d: &TestDaemon, worker: &str, other: &str) {
-        let (worker,other) = (worker.to_owned(),other.to_owned());
-        d.daemon.as_ref().unwrap().state.db.write("operator", move |t| {
-            for (id,name) in [(worker,"worker"),(other,"other")] {
-                t.emit(terrariumd::events::EventDraft::new("filter-test","test event",json!({})).agent(id,name).project("terra"))?;
-            }
-            Ok(())
-        }).await.unwrap();
+        let (worker, other) = (worker.to_owned(), other.to_owned());
+        d.daemon
+            .as_ref()
+            .unwrap()
+            .state
+            .db
+            .write("operator", move |t| {
+                for (id, name) in [(worker, "worker"), (other, "other")] {
+                    t.emit(
+                        terrariumd::events::EventDraft::new("filter-test", "test event", json!({}))
+                            .agent(id, name)
+                            .project("terra"),
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
-    async fn received(ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>, id: &str) {
-        let frame = tokio::time::timeout(Duration::from_secs(10),ws.next()).await.unwrap().unwrap().unwrap();
+    async fn received(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+        id: &str,
+    ) {
+        let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let v: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-        assert_eq!(v["agent_id"],id);
+        assert_eq!(v["agent_id"], id);
     }
-    emit(&remote,&worker,&other).await;
-    link(&home,&remote,false).await;
-    let mut first = home.ws("/api/remotes/lab/proxy/api/events?since=0&agent=worker&kind=filter-test",None).await.unwrap();
-    let mut second = home.ws("/api/remotes/lab/proxy/api/events?since=0&agent=terra%2Fother&kind=filter-test",None).await.unwrap();
-    received(&mut first,&worker).await;
-    received(&mut second,&other).await;
-    emit(&remote,&worker,&other).await;
-    received(&mut first,&worker).await;
-    received(&mut second,&other).await;
+    emit(&remote, &worker, &other).await;
+    link(&home, &remote, false).await;
+    let mut first = home
+        .ws(
+            "/api/remotes/lab/proxy/api/events?since=0&agent=worker&kind=filter-test",
+            None,
+        )
+        .await
+        .unwrap();
+    let mut second = home
+        .ws(
+            "/api/remotes/lab/proxy/api/events?since=0&agent=terra%2Fother&kind=filter-test",
+            None,
+        )
+        .await
+        .unwrap();
+    received(&mut first, &worker).await;
+    received(&mut second, &other).await;
+    emit(&remote, &worker, &other).await;
+    received(&mut first, &worker).await;
+    received(&mut second, &other).await;
     home.delete("/api/remotes/lab").await.ok();
 }
 

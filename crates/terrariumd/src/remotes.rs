@@ -367,13 +367,17 @@ pub struct Runtime {
 }
 impl Default for Runtime {
     fn default() -> Self {
-        Self { remotes: Mutex::default(), browsers: Arc::new(Semaphore::new(32)) }
+        Self {
+            remotes: Mutex::default(),
+            browsers: Arc::new(Semaphore::new(32)),
+        }
     }
 }
 impl Runtime {
     pub fn acquire_browser(&self) -> ApiResult<OwnedSemaphorePermit> {
-        self.browsers.clone().try_acquire_owned()
-            .map_err(|_| ApiError::new(Code::RateLimited, "home remote browser limit is 32 sockets"))
+        self.browsers.clone().try_acquire_owned().map_err(|_| {
+            ApiError::new(Code::RateLimited, "home remote browser limit is 32 sockets")
+        })
     }
     pub fn get(&self, id: &str) -> Arc<Limits> {
         self.remotes

@@ -13350,8 +13350,8 @@ Read-only links cannot call `DELETE /api/links/self` under the P1 policy.
 Removing one therefore returns `revoke_on_remote: true` and leaves revocation
 to the remote operator. The home does not widen that policy.
 
-Limits per remote are 64 upstream requests and 8 upstream streams, a 30 s
-connect timeout. Each home admits at most 32 remote browser WebSockets,
+Limits per remote are 64 upstream requests and 8 upstream streams.
+Each home admits at most 32 remote browser WebSockets,
 with admission retained for the entire socket lifetime. A 33rd receives 429
 with Retry-After. Historical event page reads take upstream request permits.
 The home stores at most 64 remotes. Listings use bounded, name-cursor pages

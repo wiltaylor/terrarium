@@ -46,11 +46,21 @@ async fn load(s: &Shared, name: String) -> ApiResult<Remote> {
     s.db.read(move |c| store::get(c, &name)).await
 }
 
-async fn list(State(s): State<Shared>, actor: Actor, ApiQuery(q): ApiQuery<crate::store::Page>) -> ApiResult<Response> {
+async fn list(
+    State(s): State<Shared>,
+    actor: Actor,
+    ApiQuery(q): ApiQuery<crate::store::Page>,
+) -> ApiResult<Response> {
     operator(&actor)?;
     let limit = q.limit().min(store::MAX_REMOTES);
-    let rows = s.db.read(move |c| store::list_page(c,q.cursor.as_deref(),limit.saturating_add(1))).await?;
-    Ok(super::paged(crate::store::Paged::from_rows(rows,limit,|r: &Remote| r.name.clone())))
+    let rows =
+        s.db.read(move |c| store::list_page(c, q.cursor.as_deref(), limit.saturating_add(1)))
+            .await?;
+    Ok(super::paged(crate::store::Paged::from_rows(
+        rows,
+        limit,
+        |r: &Remote| r.name.clone(),
+    )))
 }
 
 async fn show(
@@ -166,7 +176,7 @@ async fn add(
     }
     let url = net::check_url(&b.url)?.to_string();
     let name = b.name.clone();
-    s.db.read(move |c| store::check_add(c,&name)).await?;
+    s.db.read(move |c| store::check_add(c, &name)).await?;
     let label = b.label.unwrap_or_else(|| b.name.clone());
     if label.len() > 64 || label.chars().any(char::is_control) {
         return Err(ApiError::invalid("invalid remote label"));
@@ -353,11 +363,16 @@ async fn proxy(
             Ok(permit) => Some(permit),
             Err(error) => {
                 let mut response = error.into_response();
-                response.headers_mut().insert(header::RETRY_AFTER, "1".parse().map_err(|_| net::unreachable())?);
+                response.headers_mut().insert(
+                    header::RETRY_AFTER,
+                    "1".parse().map_err(|_| net::unreachable())?,
+                );
                 return Ok(response);
             }
         }
-    } else { None };
+    } else {
+        None
+    };
     let id = r.id.clone();
     s.db.write(actor.label(), move |t| store::count_call(t, &id))
         .await?;
@@ -449,7 +464,7 @@ async fn forward(
     browser: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> ApiResult<Response> {
     if ws && path == "/api/events" {
-        return event_feed::connect(s, r, req,browser.ok_or_else(net::unreachable)?).await;
+        return event_feed::connect(s, r, req, browser.ok_or_else(net::unreachable)?).await;
     }
     let start = Instant::now();
     let method = req.method().clone();
@@ -525,7 +540,7 @@ async fn forward(
             .max_message_size(net::JSON_MAX)
             .max_frame_size(net::JSON_MAX)
             .on_upgrade(move |socket| async move {
-                let _permits = (permit, stream_permit,browser);
+                let _permits = (permit, stream_permit, browser);
                 let cfg = tungstenite::protocol::WebSocketConfig::default()
                     .max_message_size(Some(net::JSON_MAX))
                     .max_frame_size(Some(net::JSON_MAX));
