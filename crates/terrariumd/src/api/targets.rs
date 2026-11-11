@@ -14,12 +14,12 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use axum::Json;
 use axum::extract::ws::WebSocket;
 use axum::extract::{FromRequestParts, Path, Request, State, WebSocketUpgrade};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -40,43 +40,166 @@ use crate::store::leases::{self, LeaseRow, Standing};
 use crate::store::targets::{self, TargetRow};
 use crate::supervisor::{PtyAttachment, PtyInput};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/targets", get(list).post(create))
-        .route("/targets/{name}", get(show).patch(update).delete(remove))
-        .route("/targets/{name}/test", post(test))
-        .route("/targets/{name}/up", post(up))
-        .route("/targets/{name}/recreate", post(recreate))
-        .route("/targets/{name}/down", post(down))
-        .route("/targets/{name}/snapshot", post(snapshot))
-        .route("/targets/{name}/restore", post(restore))
-        .route("/targets/{name}/status", post(status))
-        .route("/targets/{name}/snapshots", get(snapshots_list))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/targets",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/targets/{name}",
+            get(show).patch(update).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/targets/{name}/test",
+            post(test),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/targets/{name}/up",
+            post(up),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/targets/{name}/recreate",
+            post(recreate),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/targets/{name}/down",
+            post(down),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/targets/{name}/snapshot",
+            post(snapshot),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/targets/{name}/restore",
+            post(restore),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/targets/{name}/status",
+            post(status),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/targets/{name}/snapshots",
+            get(snapshots_list),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
         .route(
             "/targets/{name}/snapshots/{snap}",
             axum::routing::delete(snapshot_delete),
+            &[(
+                axum::http::Method::DELETE,
+                super::link_registry::Access::Link,
+            )],
         )
-        .route("/targets/{name}/exec", post(exec))
-        .route("/targets/{name}/cp", post(cp))
+        .route(
+            "/targets/{name}/exec",
+            post(exec),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/targets/{name}/cp",
+            post(cp),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
         .route(
             "/targets/{name}/sessions/{id}",
             get(session_show).delete(session_close),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
         )
-        .route("/targets/{name}/sessions/{id}/input", post(session_input))
-        .route("/targets/{name}/sessions/{id}/output", get(session_output))
-        .route("/targets/{name}/sessions/{id}/ws", get(session_ws))
+        .route(
+            "/targets/{name}/sessions/{id}/input",
+            post(session_input),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/targets/{name}/sessions/{id}/output",
+            get(session_output),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/targets/{name}/sessions/{id}/ws",
+            get(session_ws),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
         .route(
             "/targets/{name}/display/info",
             get(display_info).post(display_info_post),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
         )
-        .route("/targets/{name}/display/{op}", post(display_op))
-        .route("/targets/{name}/leases", get(leases_of_target).post(grant))
+        .route(
+            "/targets/{name}/display/{op}",
+            post(display_op),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/targets/{name}/leases",
+            get(leases_of_target).post(grant),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
         .route(
             "/targets/{name}/leases/{agent}",
             axum::routing::patch(extend).delete(revoke),
+            &[
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
         )
-        .route("/agents/{id}/leases", get(leases_of_agent))
-        .route("/exedev/sweep", post(exedev_sweep))
+        .route(
+            "/agents/{id}/leases",
+            get(leases_of_agent),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/exedev/sweep",
+            post(exedev_sweep),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
 }
 
 /// `POST /api/exedev/sweep`: run the exe.dev sweep now (TER-294). The

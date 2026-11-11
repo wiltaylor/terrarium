@@ -1,5 +1,5 @@
 //! Operator sidebar bookmarks. Mutations affect one URL, never a stale whole list.
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{Json, extract::State, routing::get};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -71,8 +71,25 @@ fn list_rows(c: &Connection, owner: &str) -> ApiResult<Vec<Bookmark>> {
         .collect::<Result<_, _>>()?)
 }
 
-pub fn routes() -> Router<Shared> {
-    Router::new().route("/bookmarks", get(list).put(add).delete(remove))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new().route(
+        "/bookmarks",
+        get(list).put(add).delete(remove),
+        &[
+            (
+                axum::http::Method::GET,
+                super::link_registry::Access::OperatorRead,
+            ),
+            (
+                axum::http::Method::PUT,
+                super::link_registry::Access::OperatorOnly,
+            ),
+            (
+                axum::http::Method::DELETE,
+                super::link_registry::Access::OperatorOnly,
+            ),
+        ],
+    )
 }
 
 async fn list(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Vec<Bookmark>>> {

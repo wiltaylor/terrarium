@@ -8,12 +8,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::io::AsyncReadExt;
@@ -37,10 +37,30 @@ fn busy_lock(dir: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
     m.entry(dir.to_path_buf()).or_default().clone()
 }
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/backups", get(list).post(create))
-        .route("/backups/{name}", get(download))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/backups",
+            get(list).post(create),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::POST,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+            ],
+        )
+        .route(
+            "/backups/{name}",
+            get(download),
+            &[(
+                axum::http::Method::GET,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
 }
 
 /// The body of `POST /api/backups`.
