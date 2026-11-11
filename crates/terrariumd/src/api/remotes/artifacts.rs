@@ -44,8 +44,7 @@ pub(super) async fn repin(
     let instance = net::instance(&c, &r, &h).await?;
     let u = net::check_url(&b.origin)?;
     if u.scheme() != "https"
-        || b.pin_sha256.len() != 64
-        || !b.pin_sha256.bytes().all(|c| c.is_ascii_hexdigit())
+        || terrarium_host::tls::parse_fingerprint(&b.pin_sha256).is_err()
     {
         return Err(ApiError::invalid(
             "an HTTPS origin and SHA-256 leaf pin are required",
