@@ -14,6 +14,7 @@ mod config;
 mod event_sources;
 mod fleet;
 mod hosts;
+mod home;
 mod inbox;
 pub mod install;
 pub(crate) mod jobs;
@@ -301,6 +302,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .route("/events", get(streams::firehose).post(event_sources::emit))
         .route("/events/latest", get(streams::latest))
         .merge(projects::routes())
+        .merge(home::routes())
         .merge(project_folders::routes())
         .merge(repos::routes())
         .merge(repo_trees::routes())

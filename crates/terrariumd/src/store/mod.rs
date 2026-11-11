@@ -16,6 +16,7 @@ pub mod github_gate;
 pub mod groups;
 pub mod harness_updates;
 pub mod hosts;
+pub mod home;
 pub mod inbox;
 pub mod jobs;
 pub mod leases;
