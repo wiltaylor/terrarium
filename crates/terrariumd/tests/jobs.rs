@@ -5438,6 +5438,152 @@ async fn a_lost_host_agent_session_reruns_the_whole_batch() {
     );
 }
 
+// ------------------------------------------------------------- TER-676
+
+/// True when `flock` with a wait works here: the TER-676 tests need it.
+fn flock_waits() -> bool {
+    std::process::Command::new("sh")
+        .args([
+            "-c",
+            "command -v flock >/dev/null 2>&1 && flock -E 75 -w 1 /dev/null true",
+        ])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// A process outside the job's run that takes the lock `lock` of a slot
+/// tree as soon as it is free, and keeps it for `secs`. It waits in its
+/// own process group, so the kill of a lost run does not end it, and
+/// [`stop_group`] does.
+fn slot_holder(lock: &Path, secs: u32) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new("flock")
+        .args(["-w", "300"])
+        .arg(lock)
+        .args(["sleep", &secs.to_string()])
+        .process_group(0)
+        .spawn()
+        .unwrap()
+}
+
+/// End the process group of `child` and reap it.
+fn stop_group(mut child: std::process::Child) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .status();
+    let _ = child.wait();
+}
+
+/// Queue a merge of one card whose first run sleeps until it is lost and
+/// whose rerun passes. When the recipe runs, `hold` secs of a slot holder
+/// start (it gets the lock once the lost run lets go of it), and the host
+/// agent restarts: the run is lost. `wait`: the cap of the wait for the
+/// slot lock of this job. Returns the card, the job, and the holder.
+async fn lose_a_run_with_a_held_slot(
+    lab: &Lab,
+    m: &Path,
+    hold: u32,
+    wait: Option<u64>,
+) -> (String, String, std::process::Child) {
+    let md = m.display().to_string();
+    set_recipe(
+        lab,
+        &format!(
+            "test -f OK && echo run >> '{md}/runs' && \
+             if test -f '{md}/ran'; then exit 0; fi; touch '{md}/ran'; sleep 600"
+        ),
+    )
+    .await;
+    lab.branch("ter-h1", "next", &[("OK", "yes\n"), ("h1", "1")]);
+    let c1 = lab.card("h1", "ter-h1").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job_id = r.body["job"]["id"].as_str().unwrap().to_owned();
+    if let Some(w) = wait {
+        terrariumd::jobs::set_lost_slot_wait(&job_id, w);
+    }
+    let ran = m.join("ran");
+    let start = Instant::now();
+    while !ran.exists() {
+        assert!(start.elapsed() < DEADLINE, "the recipe never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The holder waits for the lock that the lost run holds: when the
+    // kill ends the run, the holder has it before the daemon looks.
+    let lock = lab._dirs.path().join("jobs/p/slot-0.lock");
+    assert!(lock.exists(), "no slot lock at {}", lock.display());
+    let holder = slot_holder(&lock, hold);
+    lab.agent_down().await;
+    lab.agent_up().await;
+    (c1, job_id, holder)
+}
+
+/// TER-676: the slot of a lost run is still held for a few seconds after
+/// its kill (here by a process that the kill does not reach, as a run
+/// that ends slowly under load). The job goes back to the queue only
+/// when the lock is free, so its rerun does not fail in the receive step
+/// as held, and the card merges.
+#[tokio::test]
+async fn a_lost_run_reruns_only_after_its_slot_lock_is_free() {
+    if !flock_waits() {
+        eprintln!("skipped: no flock with -w and -E here");
+        return;
+    }
+    let lab = lab(1).await;
+    let marks = tempfile::tempdir().unwrap();
+    let (c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 6, None).await;
+    let card = lab
+        .until_card(&c1, "accepted", |c| c["column"] == "accepted")
+        .await;
+    stop_group(holder);
+    let text = comments(&card);
+    assert!(!text.contains("is held by another job"), "{card}");
+    assert!(!text.contains("failed before its tests"), "{card}");
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{job_id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(j["attempt"], 1, "{j:#}");
+    let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
+    assert_eq!(runs.lines().count(), 2, "{runs}");
+}
+
+/// TER-676: when the slot of a lost run stays held past the cap of the
+/// wait, the job does not rerun into a receive step that fails as held.
+/// It ends as an infra failure (a merge), with the lock in its tail.
+#[tokio::test]
+async fn a_lost_run_whose_slot_stays_held_ends_with_the_lock_in_its_tail() {
+    if !flock_waits() {
+        eprintln!("skipped: no flock with -w and -E here");
+        return;
+    }
+    let lab = lab(1).await;
+    let marks = tempfile::tempdir().unwrap();
+    let (_c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 120, Some(2)).await;
+    let jobs = lab.until_idle().await;
+    stop_group(holder);
+    assert_eq!(jobs.len(), 1, "{jobs:#?}");
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{job_id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(j["state"], "failed", "{j:#}");
+    assert_eq!(j["outcome"], "infra", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or("");
+    assert!(tail.contains("its kill did not end it"), "{tail}");
+    assert!(tail.contains("slot-0.lock"), "{tail}");
+    let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
+    assert_eq!(runs.lines().count(), 1, "the job reran: {runs}");
+}
+
 /// TER-196 review 2, major 1: a run that the infrastructure lost past
 /// `MAX_LOST_RERUNS` ends red, but only after the kill of a lost run. The
 /// delivery moved to another host while the recipe ran, so that kill
