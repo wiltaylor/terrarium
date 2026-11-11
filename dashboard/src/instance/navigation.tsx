@@ -3,6 +3,18 @@ import type { ComponentProps } from "solid-js";
 import type { NavigateOptions } from "@solidjs/router";
 import { useInstance } from ".";
 
+/** Non-router links keep download and external-link browser behavior. */
+export function InstanceAnchor(props: ComponentProps<"a">) {
+  const instance = useInstance();
+  const href = () => {
+    const path = props.href;
+    if (!path) return path;
+    if (path.startsWith("/api/")) return path.startsWith(instance.apiHref("/api/")) ? path : instance.apiHref(path);
+    return instance.href(path);
+  };
+  return <a {...props} href={href()} />;
+}
+
 export function A(props: ComponentProps<typeof RouterLink>) {
   const instance = useInstance();
   return <RouterLink {...props} href={instance.href(props.href)} />;
@@ -19,6 +31,7 @@ export function useNavigate(): ReturnType<typeof routerNavigate> {
   const instance = useInstance();
   return ((to: string | number, options?: Partial<NavigateOptions>) => {
     if (typeof to === "number") navigate(to);
+    else if (options === undefined) navigate(instance.href(to));
     else navigate(instance.href(to), options);
   }) as ReturnType<typeof routerNavigate>;
 }

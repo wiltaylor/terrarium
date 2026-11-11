@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../../instance/navigation";
 import { useInstance } from "../../instance";
 // Settings, Subscriptions tab (PLAN §16.1, docs/api.md §16): every plan
 // with its login and probe status, the logins the daemon found with no
@@ -226,9 +227,9 @@ export default function SubscriptionsPage() {
                 <div class="row" style={{ "flex-wrap": "wrap", "justify-content": "flex-end" }}>
                   <Show when={s.status_url}>
                     {(u) => (
-                      <a class="btn small" href={u()} target="_blank" rel="noopener noreferrer" title={`Open ${u()} in a new tab`}>
+                      <InstanceAnchor class="btn small" href={u()} target="_blank" rel="noopener noreferrer" title={`Open ${u()} in a new tab`}>
                         Status page
-                      </a>
+                      </InstanceAnchor
                     )}
                   </Show>
                   <Show

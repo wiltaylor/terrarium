@@ -1,6 +1,7 @@
+import { InstanceAnchor } from "../instance/navigation";
 import { useInstance } from "../instance";
 // Plain text with links (GitHub #31, TER-571). `lib/linkText` splits the text;
-// each segment goes into the page as a text node or an `<a>` that Solid
+// each segment goes into the page as a text node or an `<InstanceAnchor>` that Solid
 // builds. No string ever reaches the DOM as HTML.
 
 import { A } from "../instance/navigation";
@@ -42,9 +43,9 @@ export function LinkText(props: { text: string; project: string }) {
         <Switch fallback={s.text}>
           <Match when={s.kind === "external" && s}>
             {(e) => (
-              <a href={e().href} target="_blank" rel="noopener noreferrer" class="text-link external">
+              <InstanceAnchor href={e().href} target="_blank" rel="noopener noreferrer" class="text-link external">
                 {e().text}
-              </a>
+              </InstanceAnchor
             )}
           </Match>
           <Match when={s.kind === "wiki" && s}>
@@ -56,7 +57,7 @@ export function LinkText(props: { text: string; project: string }) {
           </Match>
           <Match when={s.kind === "card" && s}>
             {(c) => (
-              <a
+              <InstanceAnchor
                 href={c().href}
                 class="text-link card-key"
                 title={`Open card ${c().id}`}
@@ -67,7 +68,7 @@ export function LinkText(props: { text: string; project: string }) {
                 }}
               >
                 {c().text}
-              </a>
+              </InstanceAnchor
             )}
           </Match>
         </Switch>

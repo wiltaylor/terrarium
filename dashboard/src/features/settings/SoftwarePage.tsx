@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../../instance/navigation";
 import { useInstance } from "../../instance";
 // Settings, Software tab: the build of the running daemon
 // (`GET /api/system/version`, docs/api.md §4): the version, the git ref,
@@ -141,9 +142,9 @@ export default function SoftwarePage() {
                   <Show when={r().latest} fallback={<span class="muted">unknown{r().check_error ? ` (${r().check_error})` : ""}</span>}>
                     {(l) => (
                       <>
-                        <a class="mono" href={l().url} target="_blank" rel="noreferrer">
+                        <InstanceAnchor class="mono" href={l().url} target="_blank" rel="noreferrer">
                           {l().version}
-                        </a>{" "}
+                        </InstanceAnchor{" "}
                         <Show when={l().prerelease}>
                           <span class="chip info">pre-release</span>{" "}
                         </Show>

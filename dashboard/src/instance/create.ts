@@ -1,4 +1,4 @@
-import { createRoot } from "solid-js";
+import { createRoot, createSignal } from "solid-js";
 import { createHttpApi, type Api } from "../api/client";
 import { createHttpTransport } from "../api/http";
 import type { AuthStore } from "../stores/auth";
@@ -60,8 +60,10 @@ export function createInstance(options: {
     const cardPeek = createCardPeekStore();
 
     const expanded = createExpandedStore(storage);
+    const [promptVersion, setPromptVersion] = createSignal(0);
+    const promptLibrary = { version: promptVersion, refresh: () => setPromptVersion((v) => v + 1) };
     return {
-      key, api, storage, session, expanded,
+      key, api, storage, session, expanded, promptLibrary,
       apiHref: (path: string) => `${name === undefined ? import.meta.env.VITE_API_BASE ?? "" : `/api/remotes/${name}/proxy`}${path}`,
       href: (path: string) => instanceHref(name, path),
       path: (path: string) => name === undefined ? path : path.replace(new RegExp(`^/remote/${name}(?=/|$)`), "") || "/",

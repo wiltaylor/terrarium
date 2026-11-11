@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../../instance/navigation";
 import { useInstance } from "../../instance";
 // The Files tab of the repo browser: a file tree on the left and a preview
 // of the selection on the right, as on GitHub. The query `path` keeps the
@@ -493,9 +494,9 @@ function FileView(props: { repo: Repo; tree: string; reload: string; path: strin
           <Show when={!props.readme}>
             <Show when={raw()}>
               {(u) => (
-                <a class="btn small" href={u()} target="_blank" rel="noopener noreferrer" title="The bytes in a new tab (text), or a download">
+                <InstanceAnchor class="btn small" href={u()} target="_blank" rel="noopener noreferrer" title="The bytes in a new tab (text), or a download">
                   Raw
-                </a>
+                </InstanceAnchor
               )}
             </Show>
             <CopyButton text={props.path} label="Copy path" />

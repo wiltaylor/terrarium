@@ -13,18 +13,15 @@ import { errorText } from "../../lib/errors";
 import { systemPromptProblem } from "./form";
 import { afterSave, applyChoice, byRoleName, choiceOf, choiceValue, missingPersonaWarning, parseChoice, promptNameProblem, type PromptChoice, type PromptFields } from "./systemPrompt";
 
-// The library, for every selector of the page. A save or a delete bumps the version.
-const [libraryVersion, setLibraryVersion] = createSignal(0);
-
 /** Load the library again: after a save, an edit, or a delete. */
-export function refreshPromptLibrary() {
-  setLibraryVersion((v) => v + 1);
+export function refreshPromptLibrary(library = useInstance().promptLibrary) {
+  library.refresh();
 }
 
 /** The library entries, or undefined while they load (or when the daemon has no config repo). */
 export function usePromptLibrary(): () => SystemPromptSummary[] | undefined {
-  const { api } = useInstance();
-  const [list] = createResource(libraryVersion, () => api.systemPrompts.list().catch(() => undefined));
+  const { api, promptLibrary } = useInstance();
+  const [list] = createResource(promptLibrary.version, () => api.systemPrompts.list().catch(() => undefined));
   return () => list();
 }
 
@@ -32,9 +29,9 @@ export const SYSTEM_PROMPT_SELECT_HELP = "The system prompt replaces the harness
 
 /** The read-only text of a library entry. */
 export function PromptPreview(props: { name: string }) {
-  const { api } = useInstance();
+  const { api, promptLibrary } = useInstance();
   const [entry] = createResource(
-    () => [props.name, libraryVersion()] as const,
+    () => [props.name, promptLibrary.version()] as const,
     ([n]) => api.systemPrompts.get(n),
   );
   return (
@@ -52,7 +49,7 @@ export function SystemPromptSelect(props: {
   roles: readonly string[];
   onChange: (f: PromptFields) => void;
 }) {
-  const { api } = useInstance();
+  const { api, promptLibrary } = useInstance();
   const library = usePromptLibrary();
   // Custom stays picked while the text is still empty.
   const [custom, setCustom] = createSignal(!!props.value.system_prompt.trim());
@@ -105,7 +102,7 @@ export function SystemPromptSelect(props: {
     setError("");
     try {
       await api.systemPrompts.create({ name: n, text: props.value.system_prompt, ...(description().trim() ? { description: description().trim() } : {}) });
-      refreshPromptLibrary();
+      refreshPromptLibrary(promptLibrary);
       setCustom(false);
       setSaving(false);
       setName("");

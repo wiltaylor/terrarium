@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../../instance/navigation";
 import { useInstance } from "../../instance";
 // The "Harness versions" table: the active version and the version dirs on
 // disk, the latest release on npm, a status chip, and the
@@ -171,9 +172,9 @@ export function HarnessVersions() {
                             <Show when={h.auto_update?.changelog}>
                               {(u) => (
                                 <div>
-                                  <a href={u()} target="_blank" rel="noopener noreferrer">
+                                  <InstanceAnchor href={u()} target="_blank" rel="noopener noreferrer">
                                     changelog
-                                  </a>
+                                  </InstanceAnchor
                                 </div>
                               )}
                             </Show>

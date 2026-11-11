@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../instance/navigation";
 import { useInstance } from "../instance";
 // The answer of a wiki `db` block (docs/api.md §27). lib/markdown turns the
 // fence into `<div class="db-embed" data-db-query>`; components/Markdown
@@ -38,7 +39,7 @@ export function DbEmbed(props: { project: string; query: string }) {
     <div class="db-embed-box">
       <div class="db-embed-head small">
         <code class="db-embed-query">{props.query}</code>
-        <Show when={answer()}>{(r) => <a href={typeHref(props.project, r().type, { q: props.query })}>Open in DB</a>}</Show>
+        <Show when={answer()}>{(r) => <InstanceAnchor href={typeHref(props.project, r().type, { q: props.query })}>Open in DB</InstanceAnchor}</Show>
       </div>
       <Show when={!result.error} fallback={<span class="muted small db-embed-error">DB query failed: {describeError(result.error)?.message ?? "unknown error"}</span>}>
         <Show when={answer()} fallback={<span class="muted small">Loading…</span>}>
@@ -56,7 +57,7 @@ function DbAnswer(props: { project: string; r: DbQueryResult }) {
     const v = () => columnValue(p.col, p.rec);
     return (
       <Show when={p.col.kind === "ref" && typeof v() === "string" && v()} fallback={cellText(p.col, v(), props.r.labels)}>
-        {(id) => <a href={typeHref(props.project, p.col.ref ?? "", { id: id() as string })}>{cellText(p.col, id(), props.r.labels)}</a>}
+        {(id) => <InstanceAnchor href={typeHref(props.project, p.col.ref ?? "", { id: id() as string })}>{cellText(p.col, id(), props.r.labels)}</InstanceAnchor}
       </Show>
     );
   };
@@ -97,7 +98,7 @@ function DbAnswer(props: { project: string; r: DbQueryResult }) {
           <For each={props.r.records}>
             {(rec) => (
               <li>
-                <a href={typeHref(props.project, props.r.type, { id: rec.id })}>{cellText(cols()[0] ?? { name: "id", kind: "string", required: false, meta: true }, cols()[0] ? columnValue(cols()[0]!, rec) : rec.id, props.r.labels) || rec.id}</a>
+                <InstanceAnchor href={typeHref(props.project, props.r.type, { id: rec.id })}>{cellText(cols()[0] ?? { name: "id", kind: "string", required: false, meta: true }, cols()[0] ? columnValue(cols()[0]!, rec) : rec.id, props.r.labels) || rec.id}</InstanceAnchor
                 <Show when={cols().length > 1}>
                   <span class="muted">
                     {" "}

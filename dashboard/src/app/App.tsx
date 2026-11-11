@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../instance/navigation";
 import { useInstance } from "../instance";
 import { Route, Router, useParams } from "@solidjs/router";
 import { Navigate } from "../instance/navigation";
@@ -65,7 +66,7 @@ function ProjectIndex() {
 function NotFound() {
   return (
     <div class="empty">
-      Page not found. <a href="/">Go home</a>.
+      Page not found. <InstanceAnchor href="/">Go home</InstanceAnchor.
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../../instance/navigation";
 import { useInstance } from "../../instance";
 // Add subscription wizard (PLAN §16.1, docs/api.md §16.4). One path per kind.
 // The state machine is in ./wizard.ts. The login terminal is operator-only;
@@ -292,9 +293,9 @@ function LiveLogin(props: { kind: WizardLogin; session: LoginSession; onError: (
       </Show>
       <Show when={props.session.url} fallback={<p class="muted small">Waiting for the login URL in the terminal…</p>}>
         <div class="copy-row">
-          <a href={props.session.url} target="_blank" rel="noopener noreferrer" class="ellipsis">
+          <InstanceAnchor href={props.session.url} target="_blank" rel="noopener noreferrer" class="ellipsis">
             {props.session.url}
-          </a>
+          </InstanceAnchor
           <CopyButton text={props.session.url!} label="Copy URL" />
         </div>
       </Show>

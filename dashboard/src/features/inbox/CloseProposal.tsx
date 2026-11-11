@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../../instance/navigation";
 import { useInstance } from "../../instance";
 // The agent's close proposal of an Inbox thread (TER-95, docs/api.md §6.13):
 // the proposed handoff (summary and links) with Confirm and Decline, on the
@@ -27,9 +28,9 @@ export function HandoffLinks(props: { links: ThreadLink[] }) {
               <span class="chip">{l.kind}</span>{" "}
               <Show when={safeUrl(l)} fallback={<span>{l.ref}</span>}>
                 {(u) => (
-                  <a href={u()} target="_blank" rel="noopener noreferrer">
+                  <InstanceAnchor href={u()} target="_blank" rel="noopener noreferrer">
                     {l.ref}
-                  </a>
+                  </InstanceAnchor
                 )}
               </Show>
             </li>

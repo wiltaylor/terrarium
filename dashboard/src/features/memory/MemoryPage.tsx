@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../../instance/navigation";
 import { useInstance } from "../../instance";
 // The Memory tab of the knowledge screen (app/nav.ts KNOWLEDGE_TABS): the
 // memories of the project, and the graph of the memory of `?id=`.
@@ -92,9 +93,9 @@ export default function MemoryPage() {
               <For each={recent()}>
                 {(m) => (
                   <li>
-                    <a href={`?id=${m.id}`} onClick={(e) => (e.preventDefault(), setSearch({ id: m.id }))}>
+                    <InstanceAnchor href={`?id=${m.id}`} onClick={(e) => (e.preventDefault(), setSearch({ id: m.id }))}>
                       {m.id}
-                    </a>{" "}
+                    </InstanceAnchor{" "}
                     {m.title} <span class="muted">· {m.author_name ?? m.author}, {ago(m.updated_at)}</span>
                   </li>
                 )}
@@ -139,9 +140,9 @@ export default function MemoryPage() {
                       <li>
                         <span class={`chip ${FIRST.includes(l.relation) ? "bad" : ""}`}>{humanize(l.relation)}</span>{" "}
                         {l.from === m().id ? "→" : "←"}{" "}
-                        <a href={`?id=${l.from === m().id ? l.to : l.from}`} onClick={(e) => (e.preventDefault(), setSearch({ id: l.from === m().id ? l.to : l.from }))}>
+                        <InstanceAnchor href={`?id=${l.from === m().id ? l.to : l.from}`} onClick={(e) => (e.preventDefault(), setSearch({ id: l.from === m().id ? l.to : l.from }))}>
                           {l.from === m().id ? l.to : l.from}
-                        </a>{" "}
+                        </InstanceAnchor{" "}
                         <Show when={l.other_title}>
                           <span>{l.other_title} </span>
                         </Show>

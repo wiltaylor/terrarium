@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../../instance/navigation";
 import { useInstance } from "../../instance";
 // The Calendar page (docs/api.md §33): the calendar of a project
 // (/p/:project/calendar), with the global events marked, and the combined
@@ -104,9 +105,9 @@ function EventDetail(props: { event: CalendarEvent; occurrence: CalendarOccurren
                   <span class="cal-link">
                     {k}:{" "}
                     <Show when={k === "url" && /^https?:\/\//i.test(v)} fallback={<span class="mono">{v}</span>}>
-                      <a href={v} target="_blank" rel="noopener noreferrer">
+                      <InstanceAnchor href={v} target="_blank" rel="noopener noreferrer">
                         {v}
-                      </a>
+                      </InstanceAnchor
                     </Show>
                   </span>
                 )}

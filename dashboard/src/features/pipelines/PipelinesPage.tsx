@@ -1,3 +1,4 @@
+import { InstanceAnchor } from "../../instance/navigation";
 import { useInstance } from "../../instance";
 // The Pipelines page of a project (/p/:project/pipelines, docs/api.md §31):
 // each CI/CD pipeline with the status of its newest run, its last poll, an
@@ -36,9 +37,9 @@ function ExtLink(props: { href: string | null | undefined; children: string }) {
   return (
     <Show when={safeHref(props.href)} fallback={<span>{props.children}</span>}>
       {(h) => (
-        <a href={h()} target="_blank" rel="noopener noreferrer">
+        <InstanceAnchor href={h()} target="_blank" rel="noopener noreferrer">
           {props.children}
-        </a>
+        </InstanceAnchor
       )}
     </Show>
   );
@@ -86,9 +87,9 @@ function RunDetailBody(props: { run: PipelineRunDetail; now: number }) {
         <StatusBadge state={r().status} />
         <Show when={safeHref(r().url)}>
           {(h) => (
-            <a href={h()} target="_blank" rel="noopener noreferrer">
+            <InstanceAnchor href={h()} target="_blank" rel="noopener noreferrer">
               Open in {r().adapter === "github" ? "GitHub" : "the CI system"} ↗
-            </a>
+            </InstanceAnchor
           )}
         </Show>
       </div>
