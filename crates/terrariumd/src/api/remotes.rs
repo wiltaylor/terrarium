@@ -1,4 +1,5 @@
 //! Operator-only home proxy. The browser never receives a link key.
+pub(super) mod artifacts;
 mod event_feed;
 use std::sync::Arc;
 use std::time::Instant;
@@ -26,6 +27,7 @@ pub fn routes() -> Router<Shared> {
         .route("/remotes/{name}", get(show).delete(remove))
         .route("/remotes/{name}/repin", post(repin))
         .route("/remotes/{name}/pair", post(repair))
+        .route("/remotes/{name}/artifacts/{id}/url", post(artifacts::mint))
         .route("/remotes/{name}/proxy/{*rest}", any(proxy))
         .route_layer(axum::middleware::from_fn(operator_guard))
 }

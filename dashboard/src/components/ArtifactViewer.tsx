@@ -1,4 +1,3 @@
-import { InstanceAnchor } from "../instance/navigation";
 import { useInstance } from "../instance";
 // Preview for one artifact (§15.2, docs/api.md §12). The viewer mints a
 // short-lived signed URL (`POST /api/artifacts/{id}/url`) and loads the
@@ -38,17 +37,13 @@ export function previewKind(a: Pick<Artifact, "content_type" | "kind" | "name"> 
 }
 
 export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolean }) {
-  const { api, key, remoteOrigin } = useInstance();
+  const { api } = useInstance();
   const kind = () => previewKind(props.artifact);
   // The uid is unique across projects, so it is the safest key.
   const [signed] = createResource(() => props.artifact.uid || props.artifact.id, (key) => api.artifacts.url(key));
   const url = () => {
     const raw = signed()?.url;
-    if (!raw || key === "local") return raw;
-    try {
-      const target = new URL(raw, remoteOrigin);
-      return ["http:", "https:"].includes(target.protocol) ? target.href : undefined;
-    } catch { return undefined; }
+    return raw;
   };
   const origin = () => {
     const u = url();
@@ -62,15 +57,10 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
     return o === artifactOrigin ? null : o;
   };
   const [text] = createResource(
-    () => (key === "local" && (kind() === "markdown" || kind() === "text") ? url() : null),
+    () => ((kind() === "markdown" || kind() === "text") ? url() : null),
     (u) => api.artifacts.text(u),
   );
-  return <Show when={key === "local"} fallback={<div class="stack">
-    <strong>{props.artifact.name}</strong>
-    <p>Remote artifact. Opens externally on the remote artifact origin, not in this dashboard.</p>
-    <Show when={signed.error}><ErrorBanner error={signed.error} /></Show>
-    <Show when={url()}>{(u) => <a href={u()} target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open remote artifact (external)</a>}</Show>
-  </div>}>
+  return <>
   {(
     <div class="stack" style={{ gap: "8px" }}>
       <Show when={!props.compact}>
@@ -84,9 +74,9 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
               {(u) => (
                 <>
                   {" · "}
-                  <InstanceAnchor href={u()} download={props.artifact.name} target="_blank" rel="noopener noreferrer">
+                  <a href={u()} download={props.artifact.name} target="_blank" rel="noopener noreferrer">
                     {props.artifact.kind === "bundle" ? "Open" : "Download"}
-                  </InstanceAnchor>
+                  </a>
                 </>
               )}
             </Show>
@@ -118,9 +108,9 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
             <Match when={kind() === "pdf"}>
               {/* No <object>: the CSP has object-src 'none'. Some browsers do not draw a PDF in a sandboxed frame; the link opens it. */}
               <iframe class="artifact-frame" src={u()} sandbox="allow-scripts" referrerPolicy="no-referrer" title={props.artifact.name} style={{ "min-height": "420px" }} />
-              <InstanceAnchor class="small" href={u()} target="_blank" rel="noopener noreferrer">
+              <a class="small" href={u()} target="_blank" rel="noopener noreferrer">
                 Open {props.artifact.name} in a new tab
-              </InstanceAnchor>
+              </a>
             </Match>
             <Match when={kind() === "html"}>
               <iframe class="artifact-frame" src={u()} sandbox="allow-scripts" referrerPolicy="no-referrer" title={props.artifact.name} />
@@ -134,9 +124,9 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
             <Match when={kind() === "download"}>
               <div class="empty">
                 No preview for {props.artifact.content_type}.{" "}
-                <InstanceAnchor href={u()} download={props.artifact.name}>
+                <a href={u()} download={props.artifact.name}>
                   Download
-                </InstanceAnchor>
+                </a>
               </div>
             </Match>
           </Switch>
@@ -144,5 +134,5 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
       </Show>
     </div>
   )}
-  </Show>;
+  </>;
 }

@@ -1599,6 +1599,31 @@
     },
     {
       "source": "api/remotes.rs",
+      "registration": "\"/remotes/{name}/artifacts/{id}/url\",post(artifacts::mint)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/remotes/x/artifacts/U1/url",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/remotes/artifacts.rs",
+      "registration": "\"/ra/{cap}/{exp}/{sig}/\",get(root)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/remotes/artifacts.rs",
+      "registration": "\"/ra/{cap}/{exp}/{sig}/{*path}\",get(asset)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/remotes.rs",
       "registration": "\"/remotes/{name}/proxy/{*rest}\",any(proxy)",
       "access": "operator-only",
       "cases": [

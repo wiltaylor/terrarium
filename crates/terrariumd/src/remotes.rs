@@ -273,14 +273,20 @@ pub fn response_headers(input: &HeaderMap, name: &str, empty: bool) -> ApiResult
 
 /// Resolve once, pin the address, disable environment proxies and redirects.
 pub async fn client(remote: &Remote, own_ports: &[u16]) -> ApiResult<Client> {
+    client_with_policy(remote, own_ports, PrivateMode::from_env()).await
+}
+
+/// An explicit destination policy, independent of webhook environment settings.
+pub async fn client_with_policy(
+    remote: &Remote,
+    own_ports: &[u16],
+    mode: PrivateMode,
+) -> ApiResult<Client> {
     let u = check_url(&remote.url)?;
-    let addr = tokio::time::timeout(
-        CONNECT,
-        net::resolve(&u, PrivateMode::from_env(), own_ports, None),
-    )
-    .await
-    .map_err(|_| unreachable())?
-    .map_err(|_| unreachable())?;
+    let addr = tokio::time::timeout(CONNECT, net::resolve(&u, mode, own_ports, None))
+        .await
+        .map_err(|_| unreachable())?
+        .map_err(|_| unreachable())?;
     if u.scheme() == "http" && !addr.ip().is_loopback() {
         return Err(unreachable());
     }
@@ -319,6 +325,8 @@ pub async fn client(remote: &Remote, own_ports: &[u16]) -> ApiResult<Client> {
 pub struct Instance {
     pub id: String,
     pub version: String,
+    #[serde(default)]
+    pub artifact_origin: Option<String>,
 }
 
 pub async fn limited(
