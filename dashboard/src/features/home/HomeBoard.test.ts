@@ -7,7 +7,7 @@ import { allHome, type HomeCard } from "../../api/home";
 const home = { cards: vi.fn(), monitors: vi.fn(), pipelines: vi.fn() };
 const open = vi.fn();
 vi.mock("../../stores", () => ({ api: { home }, cardPeek: { open }, projects: { projects: () => [{ name: "one" }, { name: "two" }] }, events: { on: () => () => {} } }));
-vi.mock("@solidjs/router", () => ({ A: (p: { href: string; children: unknown }) => <a href={p.href}>{p.children as string}</a> }));
+vi.mock("@solidjs/router", () => ({ A: (p: { children: unknown }) => p.children }));
 const { HomeBoard } = await import("./HomeBoard");
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.replaceChildren(); vi.resetAllMocks(); });
