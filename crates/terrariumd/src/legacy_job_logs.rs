@@ -16,6 +16,7 @@ const PAGE_SQL: &str = "SELECT id FROM jobs INDEXED BY jobs_legacy_log_page WHER
 struct Entry {
     job: String,
     attempt: i64,
+    ended_at: String,
     path: String,
     root: String,
     root_identity: String,
@@ -166,6 +167,7 @@ pub async fn list(
                     root: root.clone(),
                     job: id,
                     attempt: job.attempt,
+                    ended_at: job.ended_at.unwrap_or_default(),
                     root_identity: String::new(),
                     file_identity: String::new(),
                     size: 0,
@@ -237,7 +239,7 @@ pub async fn confirm(
         let mut ids = Vec::new();
         for e in verified {
             let job = jobs::get(tx,&e.job)?;
-            if job.project != p || job.state.is_open() || job.ended_at.is_none() || job.attempt != e.attempt || job.kind == jobs::JobKind::Release { changed += 1; continue; }
+            if job.project != p || job.state.is_open() || job.ended_at.as_deref() != Some(e.ended_at.as_str()) || job.attempt != e.attempt || job.kind == jobs::JobKind::Release { changed += 1; continue; }
             let n = tx.execute("INSERT OR IGNORE INTO job_logs(project,job,attempt,target,path,root,root_identity,file_identity,target_identity,written_at,expires_at,bytes,legacy_size,legacy_mtime) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![p,e.job,e.attempt,target,e.path,e.root,e.root_identity,e.file_identity,identity,job.ended_at,"2000-01-01",e.size,e.size,e.mtime])?;
             if n == 0 { changed += 1; continue; }
             let id = tx.last_insert_rowid();
@@ -301,6 +303,17 @@ mod tests {
     fn legacy_page_uses_a_bounded_indexed_seek() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::open(&dir.path().join("db")).unwrap();
+        db.execute_batch("BEGIN").unwrap();
+        for n in 0..650 {
+            db.execute("INSERT INTO jobs(id,project,card,kind,repo,branch,state,created_by,created_at) VALUES (?,?,'C','validate','r','b','running','system','x')",params![format!("{n:026}"),if n%2==0 {"p"} else {"other"}]).unwrap();
+        }
+        db.execute_batch("COMMIT").unwrap();
+        let page = |after: &str| db.prepare(PAGE_SQL).unwrap().query_map(params!["p",after],|r|r.get::<_,String>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        let first = page("");
+        assert_eq!(first.len(),PAGE);
+        let second = page(first.last().unwrap());
+        assert_eq!(second.len(),325-PAGE);
+        assert!(second[0]>first[PAGE-1]);
         let plans = db
             .prepare(&format!("EXPLAIN QUERY PLAN {PAGE_SQL}"))
             .unwrap()
