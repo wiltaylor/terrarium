@@ -252,7 +252,13 @@ impl Engine for Fake {
             if argv.get(1).is_some_and(|s| s == "required-templates-check") {
                 let failed = self.0.lock().unwrap().fail.contains("required-templates");
                 return Ok(ExecOut {
-                    code: i64::from(self.0.lock().unwrap().fail.contains("required-templates-crash")),
+                    code: i64::from(
+                        self.0
+                            .lock()
+                            .unwrap()
+                            .fail
+                            .contains("required-templates-crash"),
+                    ),
                     stdout: if failed {
                         "warning: required daemon template global:request is missing".into()
                     } else {
@@ -643,7 +649,10 @@ async fn missing_required_template_warns_and_update_proceeds() {
         .await;
     assert_eq!(run.outcome, Outcome::Succeeded);
     let step = run.steps.iter().find(|s| s.name == "environment").unwrap();
-    assert!(step.detail.contains("warning: required daemon template global:request is missing"));
+    assert!(
+        step.detail
+            .contains("warning: required daemon template global:request is missing")
+    );
     assert!(steps(&run).contains(&"drain".to_string()));
 }
 
@@ -651,7 +660,10 @@ async fn missing_required_template_warns_and_update_proceeds() {
 async fn crashed_template_check_stops_before_drain() {
     let r = rig();
     r.fake.fail("required-templates-crash");
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Failed);
     assert!(!steps(&run).contains(&"drain".to_string()));
 }
