@@ -375,7 +375,7 @@ pub(super) async fn prepare(
 }
 
 impl Sync {
-    async fn download(&self, stage: &Path) -> ApiResult<String> {
+    async fn refresh_basis(&self) -> ApiResult<String> {
         // rsync must never resolve live-workspace symlinks as basis paths.
         // Refresh a private, symlink-free copy. No other process can replace its
         // directories during the remote transfer, and no hard links are used.
@@ -386,7 +386,11 @@ impl Sync {
             None,
             true,
         )
-        .await?;
+        .await
+    }
+
+    async fn download(&self, stage: &Path) -> ApiResult<String> {
+        self.refresh_basis().await?;
         rsync_basis(
             &self.remote,
             &format!("{}/", stage.display()),
@@ -824,6 +828,11 @@ mod tests {
         assert!(
             stats.contains("Number of regular files transferred: 0"),
             "{stats}"
+        );
+        let stats = sync.refresh_basis().await.unwrap();
+        assert!(
+            stats.contains("Number of regular files transferred: 0"),
+            "unchanged basis must not be copied again: {stats}"
         );
         for name in SECRET_NAMES {
             assert_eq!(
