@@ -339,6 +339,12 @@ pub(super) async fn prepare(
         .collect::<Vec<_>>()
         .join(" ");
     let remote_root = if exedev {
+        // Prepare ownership before mkdir/rsync can create any part of the
+        // mirror. Keep the mirror below the root, not at the marker's level.
+        let owned = crate::target_roots::prepare(state, actor, def, None).await?;
+        if let Some(owned) = owned {
+            PathBuf::from(owned).join("workspace")
+        } else {
         let base = if let Some(base) = &def.work_root {
             base.clone()
         } else {
@@ -368,7 +374,8 @@ pub(super) async fn prepare(
         crate::target_roots::check_base(&base)?;
         crate::store::check_name("project", project)?;
         crate::store::check_name("agent", agent)?;
-        PathBuf::from(format!("{base}/{project}/{agent}"))
+        PathBuf::from(format!("{base}/{project}/{agent}/workspace"))
+        }
     } else {
         root.clone()
     };
