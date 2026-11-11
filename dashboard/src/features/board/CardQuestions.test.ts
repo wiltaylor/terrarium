@@ -24,7 +24,7 @@ it("shows the card's question and answers it with the same control as the Inbox"
   const q = {
     id: "Q1", kind: "question", status: "open", priority: "normal",
     agent: "A1", agent_name: "lead", project: "p", card: "P-1",
-    text: "Proceed with the work?", options: [], revision: 1,
+    text: "Proceed with the work?", options: [], revision: 1, thread_id: "MT1",
     created_at: "2026-11-10T00:00:00Z", updated_at: "2026-11-10T00:00:00Z",
   } as Question;
   vi.mocked(api.questions.list).mockResolvedValue([q]);

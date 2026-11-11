@@ -643,7 +643,13 @@ async fn at_most_fifty_open_questions() {
     for i in 0..50 {
         ask(&td, &lead, json!({"text": format!("question {i}")})).await;
     }
-    let card = id(td.post("/api/projects/p/cards", json!({"title": "Another decision"})).await.ok());
+    let card = id(td
+        .post(
+            "/api/projects/p/cards",
+            json!({"title": "Another decision"}),
+        )
+        .await
+        .ok());
     let r = td
         .post_as(
             &lead,
