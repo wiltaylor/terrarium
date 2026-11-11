@@ -12,10 +12,10 @@
 //! operator for each write (`crate::owner`, docs/api.md §30.7). The
 //! target is a global target or one of the project.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::{Json};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -34,15 +34,57 @@ use crate::store::target_grants::Purpose;
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/projects/{name}/monitors", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/projects/{name}/monitors/test", post(test_run), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/projects/{name}/eta-accuracy", get(eta_accuracy), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route(
+            "/projects/{name}/monitors",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/projects/{name}/monitors/test",
+            post(test_run),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/eta-accuracy",
+            get(eta_accuracy),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
         .route(
             "/projects/{name}/dashboard",
-            get(dashboard).put(put_dashboard), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PUT, super::link_registry::Access::Link)])
-        .route("/monitors/{id}", get(show).patch(update).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PATCH, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/monitors/{id}/run", post(run_now), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/monitors/{id}/results", get(results), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+            get(dashboard).put(put_dashboard),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/monitors/{id}",
+            get(show).patch(update).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/monitors/{id}/run",
+            post(run_now),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/monitors/{id}/results",
+            get(results),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
 }
 
 /// Fill `running` from the runtime.

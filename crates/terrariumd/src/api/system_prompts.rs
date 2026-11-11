@@ -8,10 +8,10 @@
 //! the operator. A write goes to the work tree of the config repo after
 //! the secret scan, and stays uncommitted.
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
-use axum::{Json};
 use serde::Deserialize;
 use serde_json::json;
 use terrarium_core::Role;
@@ -25,10 +25,26 @@ use crate::system_prompts::{self as lib, Detail, Dirs, Summary, User};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/system-prompts", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route(
+            "/system-prompts",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
         .route(
             "/system-prompts/{name}",
-            get(show).put(update).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PUT, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+            get(show).put(update).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
 }
 
 /// The body of `POST /api/system-prompts`.

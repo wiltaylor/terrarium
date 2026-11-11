@@ -19,13 +19,13 @@
 //! `sandbox` and `default-src 'none'`. An `<img>` of the dashboard still
 //! shows an image (an SVG in an `<img>` runs no script).
 
+use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
@@ -50,9 +50,28 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             "/cards/{id}/files",
             get(list)
                 .post(upload)
-                .layer(DefaultBodyLimit::max(body_limit)), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/cards/{id}/files/{name}", get(download).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/cards/{id}/files/{name}/versions", get(versions), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+                .layer(DefaultBodyLimit::max(body_limit)),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/cards/{id}/files/{name}",
+            get(download).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/cards/{id}/files/{name}/versions",
+            get(versions),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
 }
 
 /// The card, after the read right of its project.

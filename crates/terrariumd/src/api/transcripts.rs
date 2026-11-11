@@ -9,12 +9,12 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::redact::View;
@@ -45,13 +45,21 @@ const STREAM_TICK: Duration = Duration::from_secs(1);
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/agents/{id}/sessions", get(sessions), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route(
+            "/agents/{id}/sessions",
+            get(sessions),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
         .route(
             "/agents/{id}/sessions/{session}/transcript",
-            get(transcript), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+            get(transcript),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
         .route(
             "/agents/{id}/sessions/{session}/transcript/stream",
-            get(stream), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+            get(stream),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
 }
 
 /// A row of `GET /api/agents/{id}/sessions`.

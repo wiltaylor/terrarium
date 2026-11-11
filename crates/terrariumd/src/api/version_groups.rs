@@ -7,7 +7,7 @@ use crate::{
     store::{groups, version_groups},
 };
 use axum::{
-    Json, axum::Router,
+    Json,
     extract::{Path, State},
     routing::post,
 };
@@ -18,14 +18,24 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
         .route(
             "/projects/{project}/version-groups/{key}/built",
-            post(built), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+            post(built),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
         .route(
             "/projects/{project}/version-groups/{key}/status",
-            post(status), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+            post(status),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
         .route(
             "/projects/{project}/version-groups/{key}/remove",
-            post(remove), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/projects/{project}/version-groups/{key}/add", post(add), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+            post(remove),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{project}/version-groups/{key}/add",
+            post(add),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 async fn add(

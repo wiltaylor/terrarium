@@ -1,9 +1,9 @@
 //! `/api/usage...`: local accounting for the dashboard and for
 //! `terrarium usage` (PLAN §16.2), and the agent status self-report.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
-use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use terrarium_core::AgentStatus;
@@ -21,14 +21,39 @@ use crate::store::usage::{self as ustore, Bucket, GroupBy, Hold, Totals, UsageFi
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/usage", get(series), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/usage/me", get(me), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/usage/project", get(project), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/cards/{id}/usage", get(card_usage), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route(
+            "/usage",
+            get(series),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/usage/me",
+            get(me),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/usage/project",
+            get(project),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/cards/{id}/usage",
+            get(card_usage),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
         .route(
             "/projects/{name}/trouble",
-            get(trouble_settings).put(update_trouble_settings), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PUT, super::link_registry::Access::Link)])
-        .route("/agents/{id}/status", post(self_report), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+            get(trouble_settings).put(update_trouble_settings),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/agents/{id}/status",
+            post(self_report),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 async fn trouble_settings(

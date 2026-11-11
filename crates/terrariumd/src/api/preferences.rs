@@ -12,7 +12,20 @@ pub struct Preferences {
 }
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
-    super::link_registry::RegisteredRouter::new().route("/preferences", get(read).put(update), &[(axum::http::Method::GET, super::link_registry::Access::OperatorRead), (axum::http::Method::PUT, super::link_registry::Access::OperatorOnly)])
+    super::link_registry::RegisteredRouter::new().route(
+        "/preferences",
+        get(read).put(update),
+        &[
+            (
+                axum::http::Method::GET,
+                super::link_registry::Access::OperatorRead,
+            ),
+            (
+                axum::http::Method::PUT,
+                super::link_registry::Access::OperatorOnly,
+            ),
+        ],
+    )
 }
 
 fn load(c: &rusqlite::Connection, owner: &str) -> ApiResult<Preferences> {

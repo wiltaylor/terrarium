@@ -50,11 +50,11 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
-use axum::{Json};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use terrarium_core::config::DeliveryDef;
@@ -72,20 +72,92 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
         .route(
             "/projects/{name}/delivery",
-            get(show_delivery).put(set_delivery), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PUT, super::link_registry::Access::Link)])
-        .route("/projects/{name}/jobs", get(list), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/projects/{name}/jobs/stats", get(stats), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/jobs/{id}", get(show).delete(cancel), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/cards/{id}/validate", post(validate), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/cards/{id}/merge", post(merge), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/cards/{id}/e2e", post(e2e), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/cards/{id}/release", post(release), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/release-targets", get(list_release_targets), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/release-targets/{name}", delete(retire_release_target), &[(axum::http::Method::DELETE, super::link_registry::Access::OperatorOnly)])
-        .route("/merges", post(merge_batch), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/job-hosts", get(list_hosts), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/job-hosts/{host}", put(set_host).delete(clear_host), &[(axum::http::Method::PUT, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/job-hosts/{host}/aliases", put(set_aliases), &[(axum::http::Method::PUT, super::link_registry::Access::Link)])
+            get(show_delivery).put(set_delivery),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/projects/{name}/jobs",
+            get(list),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/jobs/stats",
+            get(stats),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/jobs/{id}",
+            get(show).delete(cancel),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/cards/{id}/validate",
+            post(validate),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/cards/{id}/merge",
+            post(merge),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/cards/{id}/e2e",
+            post(e2e),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/cards/{id}/release",
+            post(release),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/release-targets",
+            get(list_release_targets),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/release-targets/{name}",
+            delete(retire_release_target),
+            &[(
+                axum::http::Method::DELETE,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/merges",
+            post(merge_batch),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/job-hosts",
+            get(list_hosts),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/job-hosts/{host}",
+            put(set_host).delete(clear_host),
+            &[
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/job-hosts/{host}/aliases",
+            put(set_aliases),
+            &[(axum::http::Method::PUT, super::link_registry::Access::Link)],
+        )
 }
 
 /// The host caps and the running jobs on each host.

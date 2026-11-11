@@ -5,9 +5,9 @@
 //! in `crate::fleet`; this layer adds the live-session check of a prune,
 //! the clones of new agents, and `--start`.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
-use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::fleet::{self, Fleet, Issue, ObjectRef, References};
@@ -22,12 +22,36 @@ use crate::store::{agents, repos};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/fleet", get(list), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/fleet/validate", post(validate), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/fleet/plan", post(plan), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/fleet/apply", post(apply), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/fleet/export", get(export), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/fleet/{name}", get(show), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route(
+            "/fleet",
+            get(list),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/fleet/validate",
+            post(validate),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/fleet/plan",
+            post(plan),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/fleet/apply",
+            post(apply),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/fleet/export",
+            get(export),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/fleet/{name}",
+            get(show),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
 }
 
 /// The body of `POST /api/fleet/{validate,plan,apply}`.

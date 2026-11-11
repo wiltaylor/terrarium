@@ -10,14 +10,18 @@ use crate::{
     },
 };
 use axum::{
-    Json, axum::Router,
+    Json,
     extract::{Path, State},
     routing::get,
 };
 use serde::Deserialize;
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
-    super::link_registry::RegisteredRouter::new().route("/home/{kind}", get(list), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+    super::link_registry::RegisteredRouter::new().route(
+        "/home/{kind}",
+        get(list),
+        &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+    )
 }
 
 #[derive(Default, Deserialize)]

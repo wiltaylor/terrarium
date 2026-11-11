@@ -25,11 +25,11 @@
 //!   A card linked while the thread waits on the operator only because of
 //!   the agent's last message moves the thread into tracking (GitHub #28).
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json};
 use serde::Deserialize;
 
 use super::{ApiJson, ApiQuery, Shared};
@@ -44,19 +44,76 @@ use crate::store::{agents, templates};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/threads", get(list).post(open), &[(axum::http::Method::GET, super::link_registry::Access::Conditional), (axum::http::Method::POST, super::link_registry::Access::Conditional)])
-        .route("/threads/{id}", get(show), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/threads/{id}/messages", post(post_message), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/threads/{id}/respond", post(respond), &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
-        .route("/threads/{id}/close", post(close), &[(axum::http::Method::POST, super::link_registry::Access::Conditional)])
-        .route("/threads/{id}/track", post(track), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/threads/{id}/status", post(set_status), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/threads/{id}/cards", post(link_card), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route(
+            "/threads",
+            get(list).post(open),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::Conditional,
+                ),
+                (
+                    axum::http::Method::POST,
+                    super::link_registry::Access::Conditional,
+                ),
+            ],
+        )
+        .route(
+            "/threads/{id}",
+            get(show),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/threads/{id}/messages",
+            post(post_message),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/threads/{id}/respond",
+            post(respond),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/threads/{id}/close",
+            post(close),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/threads/{id}/track",
+            post(track),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/threads/{id}/status",
+            post(set_status),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/threads/{id}/cards",
+            post(link_card),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
         .route(
             "/projects/{project}/version-thread/messages",
-            post(post_version), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/threads/{id}/reopen", post(reopen), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/threads/{id}/swap", post(swap), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+            post(post_version),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/threads/{id}/reopen",
+            post(reopen),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/threads/{id}/swap",
+            post(swap),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 #[derive(Debug, Deserialize)]

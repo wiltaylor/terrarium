@@ -5,11 +5,11 @@
 //! ends the pause of a thread (docs/api.md §7.4). The Inbox shows both as
 //! system items.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
-use axum::{Json};
 use serde::Deserialize;
 
 use super::longpoll::{self, WaitQuery};
@@ -25,16 +25,68 @@ use crate::store::mail::{self, Address, MailFilter, Message, Outgoing};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/mail", get(list).post(send), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/mail/{id}", get(show), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/mail/{id}/read", post(read), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/mail/{id}/reply", post(reply), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/mail/{id}/release", post(release), &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
-        .route("/mail/threads/{thread}/resume", post(resume), &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
-        .route("/projects/{name}/inbox", get(inbox_list).post(inbox_send), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/projects/{name}/inbox/{id}", get(inbox_show), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/projects/{name}/inbox/{id}/read", post(inbox_read), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/projects/{name}/inbox/{id}/reply", post(inbox_reply), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route(
+            "/mail",
+            get(list).post(send),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/mail/{id}",
+            get(show),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/mail/{id}/read",
+            post(read),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/mail/{id}/reply",
+            post(reply),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/mail/{id}/release",
+            post(release),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/mail/threads/{thread}/resume",
+            post(resume),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/projects/{name}/inbox",
+            get(inbox_list).post(inbox_send),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/projects/{name}/inbox/{id}",
+            get(inbox_show),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/inbox/{id}/read",
+            post(inbox_read),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/inbox/{id}/reply",
+            post(inbox_reply),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

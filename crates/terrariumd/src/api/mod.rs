@@ -18,8 +18,8 @@ mod hosts;
 mod inbox;
 pub mod install;
 pub(crate) mod jobs;
-mod links;
 pub mod link_registry;
+mod links;
 mod longpoll;
 pub(crate) mod mail;
 mod memory;
@@ -289,26 +289,81 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
     routes_with_registry(state, serve_artifacts, host_connect).0
 }
 
-fn routes_with_registry(state: Shared, serve_artifacts: bool, host_connect: bool) -> (Router, Arc<link_registry::Registry>) {
+fn routes_with_registry(
+    state: Shared,
+    serve_artifacts: bool,
+    host_connect: bool,
+) -> (Router, Arc<link_registry::Registry>) {
     let api = link_registry::RegisteredRouter::new()
-        .route("/health", get(system::health), &[(axum::http::Method::GET, link_registry::Access::Link)])
-        .route("/system/version", get(system::version), &[(axum::http::Method::GET, link_registry::Access::Link)])
+        .route(
+            "/health",
+            get(system::health),
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        )
+        .route(
+            "/system/version",
+            get(system::version),
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        )
         .merge(system_update::routes())
-        .route("/harnesses", get(system::harnesses), &[(axum::http::Method::GET, link_registry::Access::Link)])
-        .route("/harnesses/update", post(system::harness_update_all), &[(axum::http::Method::POST, link_registry::Access::Link)])
-        .route("/harnesses/{name}/update", post(system::harness_update), &[(axum::http::Method::POST, link_registry::Access::Link)])
-        .route("/harnesses/check", post(system::harness_check), &[(axum::http::Method::POST, link_registry::Access::Link)])
-        .route("/harnesses/{name}/pin", post(system::harness_pin), &[(axum::http::Method::POST, link_registry::Access::Link)])
-        .route("/harnesses/{name}/unpin", post(system::harness_unpin), &[(axum::http::Method::POST, link_registry::Access::Link)])
+        .route(
+            "/harnesses",
+            get(system::harnesses),
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        )
+        .route(
+            "/harnesses/update",
+            post(system::harness_update_all),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
+        .route(
+            "/harnesses/{name}/update",
+            post(system::harness_update),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
+        .route(
+            "/harnesses/check",
+            post(system::harness_check),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
+        .route(
+            "/harnesses/{name}/pin",
+            post(system::harness_pin),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
+        .route(
+            "/harnesses/{name}/unpin",
+            post(system::harness_unpin),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
         .merge(hosts::routes())
         .merge(reservations::routes())
         .merge(targets::routes())
         .merge(tools::routes())
-        .route("/reload", post(system::reload), &[(axum::http::Method::POST, link_registry::Access::Link)])
-        .route("/audit", get(system::audit), &[(axum::http::Method::GET, link_registry::Access::Link)])
+        .route(
+            "/reload",
+            post(system::reload),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
+        .route(
+            "/audit",
+            get(system::audit),
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        )
         .merge(backups::routes())
-        .route("/events", get(streams::firehose).post(event_sources::emit), &[(axum::http::Method::GET, link_registry::Access::Link), (axum::http::Method::POST, link_registry::Access::Link)])
-        .route("/events/latest", get(streams::latest), &[(axum::http::Method::GET, link_registry::Access::Link)])
+        .route(
+            "/events",
+            get(streams::firehose).post(event_sources::emit),
+            &[
+                (axum::http::Method::GET, link_registry::Access::Link),
+                (axum::http::Method::POST, link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/events/latest",
+            get(streams::latest),
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        )
         .merge(projects::routes())
         .merge(home::routes())
         .merge(project_folders::routes())
@@ -360,14 +415,40 @@ fn routes_with_registry(state: Shared, serve_artifacts: bool, host_connect: bool
             "/session",
             get(session::current)
                 .post(session::create)
-                .delete(session::delete), &[(axum::http::Method::GET, link_registry::Access::Conditional), (axum::http::Method::POST, link_registry::Access::Conditional), (axum::http::Method::DELETE, link_registry::Access::Conditional)])
-        .route("/sessions", axum::routing::delete(session::delete_all), &[(axum::http::Method::DELETE, link_registry::Access::OperatorOnly)])
-        .route("/auth/password", axum::routing::put(session::set_password), &[(axum::http::Method::PUT, link_registry::Access::OperatorOnly)])
-        .map_router(|router| router.fallback(api_not_found)
-        .method_not_allowed_fallback(api_method_not_allowed)
-        .layer(middleware::from_fn_with_state(state.clone(), resolve_actor)));
+                .delete(session::delete),
+            &[
+                (axum::http::Method::GET, link_registry::Access::Conditional),
+                (axum::http::Method::POST, link_registry::Access::Conditional),
+                (
+                    axum::http::Method::DELETE,
+                    link_registry::Access::Conditional,
+                ),
+            ],
+        )
+        .route(
+            "/sessions",
+            axum::routing::delete(session::delete_all),
+            &[(
+                axum::http::Method::DELETE,
+                link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/auth/password",
+            axum::routing::put(session::set_password),
+            &[(axum::http::Method::PUT, link_registry::Access::OperatorOnly)],
+        )
+        .map_router(|router| {
+            router
+                .fallback(api_not_found)
+                .method_not_allowed_fallback(api_method_not_allowed)
+                .layer(middleware::from_fn_with_state(state.clone(), resolve_actor))
+        });
     // The host installer: outside /api, so no token (docs/api.md §17.9).
-    let (mut app, registry) = link_registry::RegisteredRouter::new().nest("/api", api).merge(install::routes()).into_parts();
+    let (mut app, registry) = link_registry::RegisteredRouter::new()
+        .nest("/api", api)
+        .merge(install::routes())
+        .into_parts();
     if serve_artifacts {
         app = app.merge(artifacts::serving_routes(&state));
     }
@@ -377,7 +458,8 @@ fn routes_with_registry(state: Shared, serve_artifacts: bool, host_connect: bool
             get(crate::hosts::connect),
         );
     }
-    let app = app.fallback(crate::assets::serve)
+    let app = app
+        .fallback(crate::assets::serve)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             upgrade_probation,
@@ -848,7 +930,9 @@ async fn link_request(
     let access = registry.access(&method, &path);
     let registry_denied = matches!(access, None | Some(link_registry::Access::OperatorOnly))
         .then_some("an unregistered or operator-only endpoint");
-    if let Some(why) = registry_denied.or_else(|| crate::links::denied(&method, &path, websocket, caller.read_only)) {
+    if let Some(why) = registry_denied
+        .or_else(|| crate::links::denied(&method, &path, websocket, caller.read_only))
+    {
         if links
             .runtime
             .should_audit_forbidden(&caller.id, &method, &path)
@@ -1058,11 +1142,13 @@ fn authenticated_router(state: Shared, app: Router, auth: TokenAuth) -> Router {
     }
     // Fallback service keeps authentication and the registry check outside
     // the API's router, including unknown paths and unsupported methods.
-    Router::new().fallback_service(app).layer(middleware::from_fn_with_state(
-        Arc::new(auth),
-        require_token,
-    ))
-    .layer(middleware::from_fn_with_state(state, security_headers))
+    Router::new()
+        .fallback_service(app)
+        .layer(middleware::from_fn_with_state(
+            Arc::new(auth),
+            require_token,
+        ))
+        .layer(middleware::from_fn_with_state(state, security_headers))
 }
 
 /// Bind the Unix socket and serve on it in the background.

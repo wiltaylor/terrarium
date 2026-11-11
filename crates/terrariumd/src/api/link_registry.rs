@@ -33,12 +33,22 @@ impl Registry {
     fn new(entries: Vec<Entry>) -> Self {
         let mut paths: HashMap<String, HashMap<Method, Access>> = HashMap::new();
         for e in &entries {
-            let previous = paths.entry(e.path.clone()).or_default().insert(e.method.clone(), e.access);
-            assert!(previous.is_none(), "duplicate link declaration: {} {}", e.method, e.path);
+            let previous = paths
+                .entry(e.path.clone())
+                .or_default()
+                .insert(e.method.clone(), e.access);
+            assert!(
+                previous.is_none(),
+                "duplicate link declaration: {} {}",
+                e.method,
+                e.path
+            );
         }
         let mut matcher = matchit::Router::new();
         for (path, methods) in paths {
-            matcher.insert(path, methods).expect("link patterns must match axum's syntax");
+            matcher
+                .insert(path, methods)
+                .expect("link patterns must match axum's syntax");
         }
         Self { matcher, entries }
     }
@@ -54,17 +64,24 @@ pub struct RegisteredRouter {
 }
 
 impl Default for RegisteredRouter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl From<Router<Shared>> for RegisteredRouter {
     fn from(router: Router<Shared>) -> Self {
-        Self { router, entries: Vec::new() }
+        Self {
+            router,
+            entries: Vec::new(),
+        }
     }
 }
 
 impl RegisteredRouter {
-    pub fn new() -> Self { Router::new().into() }
+    pub fn new() -> Self {
+        Router::new().into()
+    }
 
     pub fn map_router(mut self, f: impl FnOnce(Router<Shared>) -> Router<Shared>) -> Self {
         self.router = f(self.router);
@@ -73,12 +90,25 @@ impl RegisteredRouter {
 
     /// The method declarations are authoritative, not methods hidden in an
     /// axum MethodRouter or helper. An undeclared method always fails closed.
-    pub fn route(mut self, path: &str, methods: MethodRouter<Shared>, declarations: &[(Method, Access)]) -> Self {
+    pub fn route(
+        mut self,
+        path: &str,
+        methods: MethodRouter<Shared>,
+        declarations: &[(Method, Access)],
+    ) -> Self {
         self.router = self.router.route(path, methods);
         for (method, access) in declarations {
-            self.entries.push(Entry { method: method.clone(), path: path.to_owned(), access: *access });
+            self.entries.push(Entry {
+                method: method.clone(),
+                path: path.to_owned(),
+                access: *access,
+            });
             if *method == Method::GET && !declarations.iter().any(|(m, _)| *m == Method::HEAD) {
-                self.entries.push(Entry { method: Method::HEAD, path: path.to_owned(), access: *access });
+                self.entries.push(Entry {
+                    method: Method::HEAD,
+                    path: path.to_owned(),
+                    access: *access,
+                });
             }
         }
         self
@@ -111,10 +141,22 @@ mod tests {
 
     #[test]
     fn registry_nests_methods_and_denies_undeclared_methods() {
-        let child = RegisteredRouter::new().route("/{id}", axum::routing::get(|| async {}), &[(Method::GET, Access::Link)]);
-        let (_, registry) = RegisteredRouter::new().nest("/api/items", child).into_parts();
-        assert_eq!(registry.access(&Method::GET, "/api/items/one"), Some(Access::Link));
-        assert_eq!(registry.access(&Method::HEAD, "/api/items/one"), Some(Access::Link));
+        let child = RegisteredRouter::new().route(
+            "/{id}",
+            axum::routing::get(|| async {}),
+            &[(Method::GET, Access::Link)],
+        );
+        let (_, registry) = RegisteredRouter::new()
+            .nest("/api/items", child)
+            .into_parts();
+        assert_eq!(
+            registry.access(&Method::GET, "/api/items/one"),
+            Some(Access::Link)
+        );
+        assert_eq!(
+            registry.access(&Method::HEAD, "/api/items/one"),
+            Some(Access::Link)
+        );
         assert_eq!(registry.access(&Method::POST, "/api/items/one"), None);
         assert_eq!(registry.access(&Method::GET, "/items/one"), None);
     }

@@ -1,21 +1,31 @@
 // Runtime registry entries are the boundary. These additional reviewed cases
 // exercise conditional actions and real approval resources.
 #[derive(serde::Deserialize)]
-struct LinkRouteInventory { routes: Vec<LinkRouteEntry> }
+struct LinkRouteInventory {
+    routes: Vec<LinkRouteEntry>,
+}
 #[derive(serde::Deserialize)]
-struct LinkRouteEntry { cases: Vec<LinkRouteCase> }
+struct LinkRouteEntry {
+    cases: Vec<LinkRouteCase>,
+}
 #[derive(serde::Deserialize)]
 struct LinkRouteCase {
     method: String,
     path: String,
-    #[serde(default)] body: serde_json::Value,
-    #[serde(default)] allowed: bool,
-    #[serde(default)] approval: bool,
+    #[serde(default)]
+    body: serde_json::Value,
+    #[serde(default)]
+    allowed: bool,
+    #[serde(default)]
+    approval: bool,
 }
 fn link_inventory() -> LinkRouteInventory {
-    serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/link-route-access.json"))).unwrap()
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/link-route-access.json"
+    )))
+    .unwrap()
 }
-
 
 async fn link_approval_fixtures(
     s: &Shared,
@@ -128,12 +138,35 @@ async fn link_operator_routes_deny_by_default() {
     let h = [("authorization", auth.as_str())];
     let (_, registry) = routes_with_registry(s.clone(), false, false);
     for entry in &registry.entries {
-        if entry.access != link_registry::Access::OperatorOnly { continue; }
-        let path = entry.path.split('/').map(|segment| {
-            if segment.starts_with('{') { "link-test" } else { segment }
-        }).collect::<Vec<_>>().join("/");
-        let response = send_body(link_app(&s), entry.method.as_str(), &path, &h, &serde_json::json!({})).await;
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{} {path}", entry.method);
+        if entry.access != link_registry::Access::OperatorOnly {
+            continue;
+        }
+        let path = entry
+            .path
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') {
+                    "link-test"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let response = send_body(
+            link_app(&s),
+            entry.method.as_str(),
+            &path,
+            &h,
+            &serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{} {path}",
+            entry.method
+        );
     }
     let mut approvals = Vec::new();
     for entry in link_inventory().routes {
@@ -211,20 +244,38 @@ async fn link_unregistered_routes_never_reach_handlers() {
         let called = called.clone();
         // No registration helper: this could equally come from a macro,
         // a cfg'd helper, or a nested/merged axum router.
-        let plain = Router::new().route("/hidden", get(move || async move {
-            called.fetch_add(1, Ordering::SeqCst);
-            StatusCode::OK
-        }));
+        let plain = Router::new().route(
+            "/hidden",
+            get(move || async move {
+                called.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }),
+        );
         let (real, registry) = routes_with_registry(s.clone(), false, false);
-        let mut auth = TokenAuth::new("t".into(), false).with_links(LinkAuth { db: s.db.clone(), runtime: s.links.clone() });
+        let mut auth = TokenAuth::new("t".into(), false).with_links(LinkAuth {
+            db: s.db.clone(),
+            runtime: s.links.clone(),
+        });
         auth.registry = registry;
         authenticated_router(s.clone(), real.nest("/api/unregistered", plain), auth)
     };
     let bearer = format!("Bearer {key}");
-    let response = send(app(), "GET", "/api/unregistered/hidden", &[("authorization", &bearer)]).await;
+    let response = send(
+        app(),
+        "GET",
+        "/api/unregistered/hidden",
+        &[("authorization", &bearer)],
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(called.load(Ordering::SeqCst), 0);
-    let response = send(app(), "GET", "/api/unregistered/hidden", &[("authorization", "Bearer t")]).await;
+    let response = send(
+        app(),
+        "GET",
+        "/api/unregistered/hidden",
+        &[("authorization", "Bearer t")],
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(called.load(Ordering::SeqCst), 1);
 }

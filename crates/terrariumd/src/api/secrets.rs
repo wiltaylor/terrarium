@@ -10,11 +10,11 @@
 
 use std::collections::BTreeMap;
 
+use axum::Json;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
-use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -26,13 +26,47 @@ use crate::secrets::{self, GLOBAL, Kind, NewSecret, PutMode, SecretInfo, SecretI
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/secrets", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route(
+            "/secrets",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
         .route(
             "/secrets/{scope}/{name}",
-            get(show).put(replace).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PUT, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/secrets/{scope}/{name}/reveal", post(reveal), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/credentials", get(list_credentials).post(put_credential), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/credentials/{name}", delete(delete_credential), &[(axum::http::Method::DELETE, super::link_registry::Access::Link)])
+            get(show).put(replace).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/secrets/{scope}/{name}/reveal",
+            post(reveal),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/credentials",
+            get(list_credentials).post(put_credential),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/credentials/{name}",
+            delete(delete_credential),
+            &[(
+                axum::http::Method::DELETE,
+                super::link_registry::Access::Link,
+            )],
+        )
 }
 
 #[derive(Debug, Default, Deserialize)]

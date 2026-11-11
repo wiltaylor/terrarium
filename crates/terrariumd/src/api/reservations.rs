@@ -4,7 +4,7 @@ use super::{ApiJson, Shared};
 use crate::store::{hosts, reservations as store};
 use crate::{actor::Actor, error::ApiResult, policy, reservations};
 use axum::{
-    Json, axum::Router,
+    Json,
     extract::{Path, State},
     routing::{get, post},
 };
@@ -15,12 +15,42 @@ use terrarium_core::resources::IoAmounts;
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/hosts/{host}/capacity", get(capacity).put(configure), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PUT, super::link_registry::Access::Link)])
-        .route("/hosts/{host}/reservations", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route(
+            "/hosts/{host}/capacity",
+            get(capacity).put(configure),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/hosts/{host}/reservations",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
         .route(
             "/reservations/{id}",
-            get(show).patch(extend).delete(retract), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PATCH, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/reservations/{id}/cancel", post(cancel), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+            get(show).patch(extend).delete(retract),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/reservations/{id}/cancel",
+            post(cancel),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 /// Whoever has an actor. The totals count every project; the reservation

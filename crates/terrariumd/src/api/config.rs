@@ -6,9 +6,9 @@
 //! before each commit, unless a pull brought `export/` changes that wait
 //! for `pull --apply`.
 
+use axum::Json;
 use axum::extract::State;
 use axum::routing::{get, post};
-use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -25,20 +25,78 @@ use crate::secrets::export::{self as secrets_export, Report as SecretsReport};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/config/status", get(status), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/config/diff", get(diff), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/config/log", get(log), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/config/commit", post(commit), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/config/pull", post(pull), &[(axum::http::Method::POST, super::link_registry::Access::Conditional)])
-        .route("/config/push", post(push), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/config/sync", post(sync), &[(axum::http::Method::POST, super::link_registry::Access::Conditional)])
-        .route("/config/abort", post(abort), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route(
+            "/config/status",
+            get(status),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/config/diff",
+            get(diff),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/config/log",
+            get(log),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/config/commit",
+            post(commit),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/config/pull",
+            post(pull),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/config/push",
+            post(push),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/config/sync",
+            post(sync),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/config/abort",
+            post(abort),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
         .route(
             "/config/remote",
-            axum::routing::put(remote_set).delete(remote_clear), &[(axum::http::Method::PUT, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/config/defaults", get(defaults_pending), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/config/defaults/accept", post(defaults_accept), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/config/defaults/keep", post(defaults_keep), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+            axum::routing::put(remote_set).delete(remote_clear),
+            &[
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/config/defaults",
+            get(defaults_pending),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/config/defaults/accept",
+            post(defaults_accept),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/config/defaults/keep",
+            post(defaults_keep),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 fn allow(actor: &Actor, what: &str) -> ApiResult<()> {

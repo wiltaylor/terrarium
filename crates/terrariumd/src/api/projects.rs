@@ -1,10 +1,10 @@
 //! `/api/projects/...`: projects, their agents, targets, and repos.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
-use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -20,18 +20,71 @@ use crate::store::{Page, agents, board};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/projects", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/projects/{name}", get(show).patch(update).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Conditional), (axum::http::Method::PATCH, super::link_registry::Access::Conditional), (axum::http::Method::DELETE, super::link_registry::Access::Conditional)])
-        .route("/projects/{name}/agents", get(list_agents), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/projects/{name}/counts", get(counts), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/projects/{name}/targets", get(list_targets), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route(
+            "/projects",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/projects/{name}",
+            get(show).patch(update).delete(remove),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::Conditional,
+                ),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Conditional,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Conditional,
+                ),
+            ],
+        )
+        .route(
+            "/projects/{name}/agents",
+            get(list_agents),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/counts",
+            get(counts),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/targets",
+            get(list_targets),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
         .route(
             "/projects/{name}/target-grants",
-            get(list_grants).post(add_grant), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+            get(list_grants).post(add_grant),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
         .route(
             "/projects/{name}/target-grants/{target}/{purpose}",
-            delete(remove_grant), &[(axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/projects/{name}/repos", get(list_repos).post(attach_repo), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+            delete(remove_grant),
+            &[(
+                axum::http::Method::DELETE,
+                super::link_registry::Access::Link,
+            )],
+        )
+        .route(
+            "/projects/{name}/repos",
+            get(list_repos).post(attach_repo),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
 }
 
 async fn list(

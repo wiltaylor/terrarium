@@ -20,12 +20,12 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -40,10 +40,31 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
         .route(
             "/secrets/{scope}/{name}/grants",
-            get(list).post(create).delete(revoke), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/agent/secrets", get(mine), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/agent/secrets/{name}/get", post(read_value), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agent/secrets/env", post(launch_env), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+            get(list).post(create).delete(revoke),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/agent/secrets",
+            get(mine),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agent/secrets/{name}/get",
+            post(read_value),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agent/secrets/env",
+            post(launch_env),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 /// `terrarium secret get` answers at most this many times per agent in

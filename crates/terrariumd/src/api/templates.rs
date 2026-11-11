@@ -12,10 +12,10 @@
 //! `terrarium admin config commit` (or a sync) commits it, with the secret
 //! scan.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::{Json};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use terrarium_core::agent_template::{self, Spec};
@@ -32,11 +32,44 @@ use crate::template_files;
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/templates", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/templates/{id}", get(show).patch(update).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PATCH, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/templates/{id}/resolve", get(resolve), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/templates/{id}/wcl", get(wcl), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/templates/from-agent/{agent}", post(from_agent), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route(
+            "/templates",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/templates/{id}",
+            get(show).patch(update).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/templates/{id}/resolve",
+            get(resolve),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/templates/{id}/wcl",
+            get(wcl),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/templates/from-agent/{agent}",
+            post(from_agent),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 /// `Some(None)` for an explicit `null`, `None` when the key is absent.

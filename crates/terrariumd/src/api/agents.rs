@@ -1,10 +1,10 @@
 //! `/api/agents/...`: agent CRUD, lifecycle, turns, sessions, and roles.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use terrarium_core::turn_tag::{self, TurnSource};
@@ -20,27 +20,120 @@ use crate::supervisor::{AnswerInput, SupervisorError};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/agents", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}", get(show).patch(update).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PATCH, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/agents/{id}/start", post(start), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/stop", post(stop), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/restart", post(restart), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/pause", post(pause), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/unpause", post(unpause), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/compact", post(compact), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/new-session", post(new_session), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/send", post(send), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/keys", post(keys), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/interrupt", post(interrupt), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/answer", post(answer), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/events", get(streams::agent_events), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/agents/{id}/pty", get(streams::pty), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/agents/{id}/roles", get(roles).put(set_roles), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PUT, super::link_registry::Access::Link)])
-        .route("/agents/{id}/subscription", post(swap), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/agents/{id}/queued", get(queued), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route(
+            "/agents",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/agents/{id}",
+            get(show).patch(update).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/agents/{id}/start",
+            post(start),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/stop",
+            post(stop),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/restart",
+            post(restart),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/pause",
+            post(pause),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/unpause",
+            post(unpause),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/compact",
+            post(compact),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/new-session",
+            post(new_session),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/send",
+            post(send),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/keys",
+            post(keys),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/interrupt",
+            post(interrupt),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/answer",
+            post(answer),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/events",
+            get(streams::agent_events),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/pty",
+            get(streams::pty),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/roles",
+            get(roles).put(set_roles),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/agents/{id}/subscription",
+            post(swap),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/agents/{id}/queued",
+            get(queued),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
         .route(
             "/agents/{id}/queued/{turn}",
-            axum::routing::delete(remove_queued), &[(axum::http::Method::DELETE, super::link_registry::Access::Link)])
+            axum::routing::delete(remove_queued),
+            &[(
+                axum::http::Method::DELETE,
+                super::link_registry::Access::Link,
+            )],
+        )
 }
 
 pub fn supervisor_error(e: SupervisorError) -> ApiError {

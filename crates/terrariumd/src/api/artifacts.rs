@@ -10,12 +10,12 @@
 //! origin ([`cors_origin`]), so the viewer can `fetch` a text or markdown
 //! artifact from the separate origin.
 
+use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -45,12 +45,43 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             "/projects/{name}/artifacts",
             get(list)
                 .post(upload)
-                .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/projects/{name}/artifacts/usage", get(usage), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/artifacts/prune", post(prune), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/artifacts/{id}", get(show).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/artifacts/{id}/links", post(link), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/artifacts/{id}/url", post(mint_url), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+                .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/projects/{name}/artifacts/usage",
+            get(usage),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/artifacts/prune",
+            post(prune),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/artifacts/{id}",
+            get(show).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/artifacts/{id}/links",
+            post(link),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/artifacts/{id}/url",
+            post(mint_url),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 /// The serving routes, to merge into a router that has the state, with

@@ -15,12 +15,12 @@
 //!
 //! The parse runs off the async threads, before the write.
 
+use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json};
 use base64::Engine;
 use serde::Deserialize;
 
@@ -42,11 +42,41 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             "/projects/{name}/test-runs",
             get(list)
                 .post(upload)
-                .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/test-runs/{id}", get(show).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/test-runs/{id}/raw", get(raw), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/test-runs/{id}/compare", get(compare), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/test-runs/{id}/links", axum::routing::patch(links), &[(axum::http::Method::PATCH, super::link_registry::Access::Link)])
+                .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/test-runs/{id}",
+            get(show).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/test-runs/{id}/raw",
+            get(raw),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/test-runs/{id}/compare",
+            get(compare),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/test-runs/{id}/links",
+            axum::routing::patch(links),
+            &[(
+                axum::http::Method::PATCH,
+                super::link_registry::Access::Link,
+            )],
+        )
 }
 
 // ---- upload ----

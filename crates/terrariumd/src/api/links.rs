@@ -25,12 +25,60 @@ use crate::store::links::{self, Home, Link};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
-        .route("/system/instance", get(instance), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
-        .route("/links", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::OperatorOnly), (axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
-        .route("/links/pair", post(pair), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
-        .route("/links/self", delete(end_self), &[(axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/links/{id}", get(show).delete(revoke), &[(axum::http::Method::GET, super::link_registry::Access::OperatorOnly), (axum::http::Method::DELETE, super::link_registry::Access::OperatorOnly)])
-        .route("/links/{id}/rotate", post(rotate), &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
+        .route(
+            "/system/instance",
+            get(instance),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/links",
+            get(list).post(create),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::POST,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+            ],
+        )
+        .route(
+            "/links/pair",
+            post(pair),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/links/self",
+            delete(end_self),
+            &[(
+                axum::http::Method::DELETE,
+                super::link_registry::Access::Link,
+            )],
+        )
+        .route(
+            "/links/{id}",
+            get(show).delete(revoke),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+            ],
+        )
+        .route(
+            "/links/{id}/rotate",
+            post(rotate),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
 }
 
 /// This daemon's instance: the ID, the name, and the build.

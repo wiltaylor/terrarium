@@ -5,10 +5,10 @@
 //! library). A write goes to the work tree of the config repo and stays
 //! uncommitted (`crate::skills`).
 
+use axum::Json;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
 use axum::routing::get;
-use axum::{Json};
 use serde::Serialize;
 use serde_json::json;
 
@@ -21,11 +21,31 @@ use crate::skills::{self, Detail, Summary, WriteBody};
 pub fn routes() -> super::link_registry::RegisteredRouter {
     let limit = DefaultBodyLimit::max(body_limit(terrarium_core::skills::max_bytes()));
     super::link_registry::RegisteredRouter::new()
-        .route("/skills", get(list).post(create).layer(limit), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route(
+            "/skills",
+            get(list).post(create).layer(limit),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
         .route(
             "/skills/{name}",
-            get(show).put(update).delete(remove).layer(limit), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PUT, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
-        .route("/skills/{name}/usage", get(usage), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+            get(show).put(update).delete(remove).layer(limit),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/skills/{name}/usage",
+            get(usage),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
 }
 
 /// The body limit of a skill write: a skill of `max_bytes` as JSON. A
