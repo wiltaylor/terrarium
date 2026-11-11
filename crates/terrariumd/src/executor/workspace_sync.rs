@@ -276,7 +276,6 @@ pub(super) async fn prepare(
     if !def.sync_workspace {
         return Ok(None);
     }
-    check_rsync().await?;
     // An exedev target comes here as the ssh target of its VM
     // (`executor::resolved_def`).
     if def.kind != TargetKind::Ssh {
@@ -362,6 +361,9 @@ pub(super) async fn prepare(
         }
         return Err(ApiError::invalid("could not create remote workspace"));
     }
+    // Diagnose remote path permissions before checking transfer dependencies.
+    // The patched rsync requirement still gates every file transfer.
+    check_rsync().await?;
     let before = scan(&root).await?;
     let address = def
         .address
