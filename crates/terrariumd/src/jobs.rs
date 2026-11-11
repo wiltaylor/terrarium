@@ -2247,14 +2247,16 @@ async fn maintain_job_cache(
     };
     let project = path
         .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .file_name()
-        .unwrap()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::file_name)
+        .ok_or_else(|| ApiError::internal("job cache has no project name"))?
         .to_string_lossy()
         .into_owned();
-    let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+    let name = path
+        .file_stem()
+        .ok_or_else(|| ApiError::internal("job cache has no repository name"))?
+        .to_string_lossy()
+        .into_owned();
     let (repo, busy) = db.read(move |c| {
         let busy: bool = c.query_row(
             "SELECT EXISTS(SELECT 1 FROM jobs WHERE project = ?1 AND repo = ?2 AND state IN ('queued', 'running'))",
