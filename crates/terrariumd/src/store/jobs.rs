@@ -1585,7 +1585,7 @@ pub fn create_onto(t: &mut Tx<'_>, n: NewJob, onto: Option<&str>) -> ApiResult<J
             [card],
             |r| r.get(0),
         )?;
-        if is_group && n.kind != JobKind::E2e {
+        if is_group && !matches!(n.kind, JobKind::E2e | JobKind::Release) {
             return Err(ApiError::invalid(
                 "group cards cannot be validated or merged",
             ));
@@ -2853,6 +2853,75 @@ mod tests {
             unresolved_hosts(&conn, None).unwrap(),
             ["active.invalid", "queued.invalid"]
         );
+    }
+
+    #[tokio::test]
+    async fn recovered_pin_counts_running_jobs_before_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        db.write("operator", |t| {
+            t.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, host,
+                                   created_by, created_at)
+                 VALUES ('old', 'a', 'C', 'validate', 'app', 'b', 'running',
+                         'recover.invalid', 't', 't')",
+                [],
+            )?;
+            pin_hosts(
+                t,
+                vec![("recover.invalid".into(), "recover.invalid".into())],
+            )?;
+            pin_hosts(t, vec![("recover.invalid".into(), "192.0.2.10".into())])?;
+            let run = super::running(t)?;
+            assert_eq!(run[0].host.as_deref(), Some("192.0.2.10"));
+            let q = queues(&[("a", 4, "192.0.2.10"), ("b", 4, "192.0.2.10")]);
+            let caps = HashMap::from([("192.0.2.10".to_owned(), 1)]);
+            assert!(
+                pick(
+                    vec![job("new", "b", JobKind::Validate, "r", "b")],
+                    &run,
+                    &q,
+                    &caps
+                )
+                .is_empty()
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_alias_retry_cannot_steal_another_agents_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        db.write("operator", |t| {
+            hosts::create(t, "first", false)?;
+            hosts::create(t, "second", false)?;
+            set_host_aliases(t, "first", &["192.0.2.1".into()])?;
+            set_host_aliases(t, "second", &["retry.invalid".into()])?;
+            pin_hosts(t, vec![("retry.invalid".into(), "retry.invalid".into())])?;
+            pin_hosts(t, vec![("retry.invalid".into(), "192.0.2.1".into())])?;
+            let key: String = t.query_row(
+                "SELECT host_key FROM job_host_keys WHERE hostname = 'retry.invalid'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(key, "retry.invalid");
+            assert_eq!(canonical_key(t, "192.0.2.1")?, hosts::get(t, "first")?.id);
+            assert_eq!(unresolved_hosts(t, None)?, ["retry.invalid"]);
+            pin_hosts(t, vec![("retry.invalid".into(), "192.0.2.2".into())])?;
+            assert_eq!(canonical_key(t, "192.0.2.2")?, hosts::get(t, "second")?.id);
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

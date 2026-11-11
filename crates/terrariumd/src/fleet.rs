@@ -1752,6 +1752,7 @@ fn apply_project(
                     t,
                     &def.name,
                     &ProjectPatch {
+                        home_board_columns: None,
                         card_dispatcher: None,
                         review_dispatcher: None,
                         human_comment_notifications: None,

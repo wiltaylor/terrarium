@@ -165,6 +165,56 @@ async fn agent_commits_have_bot_identity_and_current_terrarium_session() {
     }
     assert!(!parsed.to_lowercase().contains("co-authored"));
 
+    // Card updates refresh the live file without a new session or status.
+    let card = td
+        .post_as(
+            "terra/worker",
+            "/api/projects/terra/cards",
+            json!({"title": "work"}),
+        )
+        .await;
+    let card_id = card.body["id"].as_str().unwrap();
+    td.post_as(
+        "terra/worker",
+        &format!("/api/cards/{card_id}/claim"),
+        json!({}),
+    )
+    .await
+    .ok();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if std::fs::read_to_string(&file)
+                .unwrap()
+                .contains(&format!("Terrarium-Card: {card_id}"))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    td.post_as(
+        "terra/worker",
+        &format!("/api/cards/{card_id}/assign"),
+        json!({"assignee": null}),
+    )
+    .await
+    .ok();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("Terrarium-Card:")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
     // A new session must replace the old trailer, including on --amend.
     let key = id.clone();
     let second = state

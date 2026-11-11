@@ -52,8 +52,36 @@ pub fn routes() -> Router<Shared> {
         .route("/threads/{id}/track", post(track))
         .route("/threads/{id}/status", post(set_status))
         .route("/threads/{id}/cards", post(link_card))
+        .route(
+            "/projects/{project}/version-thread/messages",
+            post(post_version),
+        )
         .route("/threads/{id}/reopen", post(reopen))
         .route("/threads/{id}/swap", post(swap))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionPostBody {
+    version: String,
+    changed: String,
+    test: String,
+}
+
+async fn post_version(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(project): Path<String>,
+    ApiJson(b): ApiJson<VersionPostBody>,
+) -> ApiResult<Response> {
+    policy::admin_project(&actor, &project, "posting a version update")?;
+    let th = state
+        .db
+        .write(actor.label(), move |t| {
+            threads::version_post(t, &project, &b.version, &b.changed, &b.test)
+        })
+        .await?;
+    Ok((StatusCode::CREATED, Json(th)).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -381,6 +409,7 @@ async fn close(
             .db
             .write(label, move |t| {
                 let th = readable(&actor, threads::get_bare(t, &id)?)?;
+                threads::check_close(&th)?;
                 match &actor {
                     Actor::Agent(a) if th.agent.as_deref() != Some(a.id.as_str()) => {
                         Err(ApiError::forbidden(format!(

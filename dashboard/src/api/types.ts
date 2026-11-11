@@ -298,6 +298,7 @@ export interface HarnessReport {
 
 /** docs/api.md §5. */
 export interface Project {
+  home_board_columns?: import("./home").HomeBoardColumns;
   name: string;
   description?: string;
   card_prefix: string;
@@ -944,6 +945,8 @@ export type QuestionKind = "question" | "notice" | "bundle";
 
 /** One question of a bundle, with its answer when the bundle is answered. The agent's words, as for a question. */
 export interface BundleItem {
+  multi_select?: boolean;
+  answer_options?: number[];
   text: string;
   options: string[];
   context?: string | null;
@@ -960,6 +963,8 @@ export interface BundleItem {
  * optional reply, and the `answered_*` fields are set.
  */
 export interface Question {
+  multi_select?: boolean;
+  answer_options?: number[];
   id: string;
   kind: QuestionKind;
   /** The asking agent's ULID. */
@@ -995,6 +1000,7 @@ export interface Question {
 
 /** The answer to one item of a bundle: a text, an option (label or 0-based index), or both. */
 export interface BundleItemAnswer {
+  options?: (string | number)[];
   answer?: string;
   option?: string | number;
 }
@@ -1005,6 +1011,7 @@ export interface BundleItemAnswer {
  * the operator saw; another one is a 409 (the agent changed the question meanwhile).
  */
 export interface QuestionAnswer {
+  options?: (string | number)[];
   answer?: string;
   option?: string | number;
   items?: BundleItemAnswer[];
@@ -2564,6 +2571,9 @@ export interface StartLogin {
 export interface ApiKeyInput {
   provider: string;
   key: string;
+  key_id?: string;
+  cloud?: { region?: string; models?: Record<string, string> };
+  test_connection?: boolean;
   /**
    * `zai`: `coding` (GLM Coding Plan, the default) or `api` (pay as you go).
    * `moonshot` (pi only): `coding` (Kimi Code, the default), `coding-cn`, `api` (Open Platform), or `api-cn`.

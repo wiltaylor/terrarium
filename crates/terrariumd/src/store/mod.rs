@@ -15,6 +15,7 @@ pub mod event_sources;
 pub mod github_gate;
 pub mod groups;
 pub mod harness_updates;
+pub mod home;
 pub mod hosts;
 pub mod inbox;
 pub mod jobs;

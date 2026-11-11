@@ -124,6 +124,86 @@ async fn release_e2e_rejects_card_branches_members_and_missing_docker_config() {
     );
 }
 
+/// TER-753: the version header owns release queue and outcome comments.
+/// This does not grant workers release rights or allow card jobs on groups.
+#[tokio::test]
+async fn release_on_version_group_keeps_comments_and_permissions() {
+    use terrariumd::store::{groups, jobs};
+    let lab = lab(1).await;
+    release_client(&lab, "rel-client").await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "true", "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs"),
+                   "release_target": "rel-client", "release_recipe": "echo release-ok"}),
+        )
+        .await
+        .ok();
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let header = state
+        .db
+        .write("system", |t| {
+            groups::open(
+                t,
+                groups::Open {
+                    project: "p",
+                    rule: "version-cut",
+                    key: "version:test",
+                    title: "Version test",
+                    column: "accepted",
+                    done_when: "done",
+                    eta: None,
+                    close_after: None,
+                },
+            )?;
+            let header = groups::by_key(t, "p", "version:test")?.unwrap().id;
+            for kind in [jobs::JobKind::Validate, jobs::JobKind::Merge] {
+                let error = jobs::create(
+                    t,
+                    jobs::NewJob {
+                        project: "p".into(),
+                        card: header.clone(),
+                        kind,
+                        repo: "app".into(),
+                        branch: "main".into(),
+                        commit: None,
+                        by_agent: None,
+                        batch: Vec::new(),
+                        planned_secs: None,
+                    },
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("group cards cannot"));
+            }
+            Ok(header)
+        })
+        .await
+        .unwrap();
+    let path = format!("/api/cards/{header}/release");
+    let response = lab.td.post_as(&lab.w1, &path, json!({})).await;
+    assert_eq!(response.status, 403, "{}", response.body);
+    let main = git(&lab.origin, &["rev-parse", "main"]);
+    let response = lab
+        .td
+        .post_as(&lab.lead, &path, json!({"commit": main}))
+        .await;
+    assert_eq!(response.status, 201, "{}", response.body);
+    assert_eq!(response.body["job"]["card"], header);
+    assert_eq!(response.body["job"]["kind"], "release");
+    let job_id = response.body["job"]["id"].as_str().unwrap();
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["id"] == job_id).unwrap();
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let card = lab.card_of(&header).await;
+    let notes = comments(&card);
+    assert!(notes.contains("queued"), "{notes}");
+    assert!(notes.contains(job_id), "{notes}");
+    assert!(notes.contains("passed"), "{notes}");
+    assert_eq!(card["column"], "accepted");
+    assert_eq!(card["archived"], false);
+}
+
 /// A wait on the queue or a card that fails after [`DEADLINE`] without
 /// progress, or after two of them in all. Under merge-job load (load 39,
 /// IO pressure 40%) a queue that still moved took longer than
@@ -1590,16 +1670,31 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
     lab.settle().await;
     assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
     if flow == "rules" {
-        let g = lab
-            .td
-            .daemon
-            .as_ref()
-            .unwrap()
-            .state
-            .db
-            .read(move |c| Ok(terrariumd::store::groups::by_key(c, "p", &group_key)?.unwrap()))
-            .await
-            .unwrap();
+        // The accepted card move can precede the recipe boundary's group
+        // writes. Wait for that step to finish, not for the card or job row.
+        let deadline = Instant::now() + DEADLINE;
+        let g = loop {
+            let key = group_key.clone();
+            let g = lab
+                .td
+                .daemon
+                .as_ref()
+                .unwrap()
+                .state
+                .db
+                .read(move |c| Ok(terrariumd::store::groups::by_key(c, "p", &key)?.unwrap()))
+                .await
+                .unwrap();
+            let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
+            if recipe.state == "done" {
+                break g;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "e2e recipe boundary did not finish: {recipe:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
         let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
         assert!(
             recipe.started_at.is_some(),
@@ -4598,6 +4693,75 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
     assert_eq!(repos, [std::ffi::OsString::from("app.git")]);
 }
 
+/// Another prepare may change the daemon scratch ref before this push.
+#[tokio::test]
+async fn ter275_a_merge_push_uses_its_commit_after_the_daemon_scratch_ref_changes() {
+    let lab = lab(2).await;
+    let cached = lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .state_dir
+        .join("jobs/p/repos/app.git");
+    // This native-host fixture can reach the daemon cache. Unlike the
+    // target-clone tampering test, change the actual daemon scratch ref.
+    let recipe = format!(
+        "git --git-dir='{}' update-ref refs/job/merge refs/remotes/job/next",
+        cached.display()
+    );
+    let job = merge_with_recipe(&lab, "ter275-scratch", &recipe).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let pushed = git(&lab.origin, &["rev-parse", "next"]);
+    assert_eq!(job["head"], pushed);
+    assert_ne!(git(&cached, &["rev-parse", "refs/job/merge"]), pushed);
+}
+
+#[tokio::test]
+async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
+    let lab = lab(2).await;
+    let fixtures = common::FixtureGuard::new(lab._dirs.path());
+    let gate = lab._dirs.path().join("gate");
+    let recipe = format!(
+        "touch '{}/recipe-'\"$TERRARIUM_JOB_SLOT\" && {}",
+        lab._dirs.path().display(),
+        common::gate_wait(&gate, DEADLINE)
+    );
+    lab.td.put("/api/projects/p/delivery", json!({
+        "target": "p-box", "recipe": recipe, "slots": 2,
+        "next_repos": ["app"], "work_dir": lab._dirs.path().join("jobs").display().to_string()
+    })).await.ok();
+    for name in ["ter275-one", "ter275-two"] {
+        let head = lab.branch(name, "next", &[("OK", name)]);
+        let card = lab.card(name, name).await;
+        let response = lab
+            .td
+            .post_as(
+                &lab.w1,
+                &format!("/api/cards/{card}/validate"),
+                json!({"commit": head}),
+            )
+            .await;
+        assert_eq!(response.status, 201, "{}", response.body);
+    }
+    let start = Instant::now();
+    while !(lab._dirs.path().join("recipe-1").exists()
+        && lab._dirs.path().join("recipe-2").exists())
+    {
+        assert!(
+            start.elapsed() < common::WAIT,
+            "recipes serialized behind the cache lock"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    std::fs::write(&gate, "go").unwrap();
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 2, "{jobs:#?}");
+    assert!(jobs.iter().all(|j| j["state"] == "passed"), "{jobs:#?}");
+    fixtures.assert_none_left().await;
+}
+
 /// A crash can leave a lock or broken ref in the daemon's persistent
 /// cache. The next job rebuilds it, fetches, and merges successfully.
 #[tokio::test]
@@ -4613,7 +4777,10 @@ async fn the_next_job_recovers_a_damaged_daemon_repo() {
         .state
         .state_dir
         .join("jobs/p/repos/app.git");
-    for (i, damage) in ["index.lock", "refs/job/broken"].iter().enumerate() {
+    for (i, damage) in ["index.lock", "refs/job/merge.lock", "refs/job/broken"]
+        .iter()
+        .enumerate()
+    {
         std::fs::write(cached.join(damage), "interrupted").unwrap();
         let branch = format!("ter-recover-{i}");
         lab.branch(&branch, "next", &[(&branch, "new\n")]);

@@ -146,6 +146,34 @@ fn print_thread(c: &Ctx, v: &Value) {
 
 pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
     match cmd {
+        ThreadCmd::Version {
+            version,
+            changed,
+            test,
+        } => {
+            if changed == "-" && test == "-" {
+                return Err(CliError::usage(
+                    "only one of --changed and --test may read stdin",
+                ));
+            }
+            let project = ctx.project_or(None).await?;
+            let body =
+                json!({"version": version, "changed": ctx.text(changed)?, "test": ctx.text(test)?});
+            let v = ctx
+                .api
+                .post(
+                    &format!("/api/projects/{}/version-thread/messages", encode(&project)),
+                    Some(body),
+                )
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "quiet version post in thread {} ({}).",
+                    field(v, "id"),
+                    field(v, "status")
+                ))
+            })
+        }
         ThreadCmd::Reopen { id, reason, card } => {
             let mut body = json!({"reason": reason});
             super::set_opt(&mut body, "card", card.clone());
@@ -217,6 +245,7 @@ pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
             id,
             text,
             options,
+            multi_select,
             bundle,
             items,
             items_file,
@@ -236,6 +265,9 @@ pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
                 ));
             }
             let mut body = json!({"text": ctx.text(text)?, "thread": id});
+            if *multi_select {
+                body["multi_select"] = json!(true);
+            }
             if *bundle {
                 body["kind"] = json!("bundle");
                 body["items"] = match items_file {

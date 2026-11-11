@@ -849,6 +849,178 @@ fn fake_runner(dir: &Path, answer: fn(&Value) -> Value) -> (PathBuf, Arc<Mutex<V
 }
 
 #[test]
+fn checkbox_question_and_thread_flags_reach_the_api() {
+    let dir = temp_dir("checkbox-ask");
+    let (socket, seen) = fake_runner(
+        &dir,
+        |_| json!({"status": 201, "headers": {}, "body": {"id": "Q1"}}),
+    );
+    for args in [
+        vec![
+            "question",
+            "ask",
+            "Choose",
+            "--card",
+            "TER-1",
+            "--multi-select",
+            "-o",
+            "A",
+            "-o",
+            "B",
+        ],
+        vec![
+            "thread",
+            "ask",
+            "TH1",
+            "Choose",
+            "--multi-select",
+            "-o",
+            "A",
+        ],
+    ] {
+        let o = bin()
+            .env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", text(&o.stderr));
+    }
+    let requests = seen.lock().unwrap();
+    let sent: Vec<_> = requests
+        .iter()
+        .filter(|r| r["method"] == "http")
+        .map(|r| &r["params"]["body"])
+        .collect();
+    assert_eq!(sent.len(), 2);
+    assert!(sent.iter().all(|b| b["multi_select"] == true));
+    assert_eq!(sent[1]["thread"], "TH1");
+}
+
+#[test]
+fn checkbox_cli_answers_send_zero_one_and_several_selections() {
+    let dir = temp_dir("checkbox-answer");
+    let (socket, seen) = fake_runner(&dir, |p| {
+        json!({"status": 200, "headers": {}, "body": if p["method"] == "GET" {
+            json!({"id": "Q1", "multi_select": true, "options": ["A", "B", "C"], "revision": 1})
+        } else { json!({"id": "Q1"}) }})
+    });
+    for selected in [vec![], vec!["B"], vec!["A", "C"]] {
+        let mut c = bin();
+        c.env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .args(["admin", "question", "answer", "Q1"]);
+        if selected.is_empty() {
+            c.arg("--select-none");
+        }
+        for label in selected {
+            c.args(["--select", label]);
+        }
+        let o = c.output().unwrap();
+        assert!(o.status.success(), "{}", text(&o.stderr));
+    }
+    let requests = seen.lock().unwrap();
+    let sent: Vec<_> = requests
+        .iter()
+        .filter(|r| r["method"] == "http" && r["params"]["method"] == "POST")
+        .map(|r| r["params"]["body"]["options"].clone())
+        .collect();
+    assert_eq!(sent, vec![json!([]), json!(["B"]), json!(["A", "C"])]);
+}
+
+#[test]
+fn checkbox_bundle_cli_preserves_item_types_and_answers() {
+    let dir = temp_dir("checkbox-bundle");
+    let items = json!([
+        {"text": "Pick", "multi_select": true, "options": ["A", "B", "C"]},
+        {"text": "Other", "multi_select": true}
+    ]);
+    let items_path = dir.join("items.json");
+    std::fs::write(&items_path, items.to_string()).unwrap();
+    let (socket, seen) = fake_runner(&dir, |p| {
+        json!({"status": 200, "headers": {}, "body": if p["method"] == "GET" {
+            json!({"id": "B1", "kind": "bundle", "revision": 1, "items": [
+                {"text": "Pick", "multi_select": true, "options": ["A", "B", "C"]},
+                {"text": "Other", "multi_select": true, "options": []}
+            ]})
+        } else { json!({"id": "B1", "kind": "bundle", "items": [{}, {}]}) }})
+    });
+    let mut c = bin();
+    let o = c
+        .env("TERRARIUM_AGENT", "01AGENT")
+        .env("TERRARIUM_SOCKET", &socket)
+        .args([
+            "question",
+            "bundle",
+            "Together",
+            "--card",
+            "TER-1",
+            "--items-file",
+        ])
+        .arg(&items_path)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    for selected in [json!([]), json!(["B"]), json!([1, 3])] {
+        let answers_path = dir.join("answers.json");
+        std::fs::write(
+            &answers_path,
+            json!([{"options": selected}, {}]).to_string(),
+        )
+        .unwrap();
+        let o = bin()
+            .env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .args(["admin", "question", "answer", "B1", "--answers-file"])
+            .arg(&answers_path)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", text(&o.stderr));
+    }
+    let requests = seen.lock().unwrap();
+    let sent: Vec<_> = requests
+        .iter()
+        .filter(|r| r["method"] == "http" && r["params"]["method"] == "POST")
+        .map(|r| &r["params"]["body"])
+        .collect();
+    assert_eq!(sent[0]["items"], items);
+    assert_eq!(sent[1]["items"][0]["options"], json!([]));
+    assert_eq!(sent[2]["items"][0]["options"], json!(["B"]));
+    assert_eq!(sent[3]["items"][0]["options"], json!([0, 2]));
+}
+
+#[test]
+fn checkbox_bundle_cli_rejects_non_array_options_without_posting() {
+    let dir = temp_dir("checkbox-invalid-options");
+    let (socket, seen) = fake_runner(&dir, |_| {
+        json!({"status": 200, "headers": {}, "body": {"id": "B1", "kind": "bundle", "revision": 1, "items": [
+            {"text": "Pick", "multi_select": true, "options": ["A"]},
+            {"text": "Other", "multi_select": true, "options": []}
+        ]}})
+    });
+    for options in [
+        json!("A"),
+        json!(null),
+        json!(false),
+        json!(1),
+        json!({"A": true}),
+    ] {
+        let answers_path = dir.join("answers.json");
+        std::fs::write(&answers_path, json!([{"options": options}, {}]).to_string()).unwrap();
+        let o = bin()
+            .env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .args(["admin", "question", "answer", "B1", "--answers-file"])
+            .arg(&answers_path)
+            .output()
+            .unwrap();
+        assert!(!o.status.success());
+        assert!(text(&o.stderr).contains("options must be an array"));
+    }
+    assert!(!seen.lock().unwrap().iter().any(|r| r["method"] == "http"));
+}
+
+#[test]
 fn version_group_actions_use_project_scoped_api() {
     let dir = temp_dir("version-groups");
     let (socket, seen) = fake_runner(

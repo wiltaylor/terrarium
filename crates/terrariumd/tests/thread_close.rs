@@ -586,6 +586,7 @@ async fn activity_after_a_reminder_allows_a_new_one_and_off_sends_none() {
 #[tokio::test]
 async fn an_answer_to_the_last_question_declines_the_proposal() {
     let lab = lab().await;
+    let card = lab.card("Retention").await;
     let (tid, eph, _sid) = lab.started("Retention").await;
     let asks = format!("/api/agents/{eph}/questions");
     let r = lab
@@ -603,7 +604,7 @@ async fn an_answer_to_the_last_question_declines_the_proposal() {
         .post_as(
             &eph,
             &asks,
-            json!({"text": "Note this.", "kind": "notice", "thread": tid, "priority": "urgent"}),
+            json!({"text": "Note this.", "kind": "notice", "thread": tid, "priority": "urgent", "card": card}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);

@@ -24,6 +24,75 @@ use tokio_tungstenite::tungstenite::Message;
 const ANTHROPIC: &str = "https://api.anthropic.com/api/oauth/usage";
 const OPENAI: &str = "https://chatgpt.com/backend-api/wham/usage";
 
+#[tokio::test]
+async fn bedrock_save_defaults_and_failed_test_leave_credentials_unchanged() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    let response = td
+        .post(
+            "/api/subscriptions/bedrock-setup/api-key",
+            json!({
+                "provider": "bedrock", "key": "E2E-old-secret", "key_id": "E2E-old-id",
+                "cloud": {"models": {"opus": "custom-opus"}}
+            }),
+        )
+        .await;
+    let sub = response.ok();
+    assert_eq!(sub["cloud"]["region"], "us-east-1");
+    assert_eq!(sub["cloud"]["models"]["opus"], "custom-opus");
+    assert_eq!(
+        sub["cloud"]["models"]["sonnet"],
+        "us.anthropic.claude-sonnet-4-6"
+    );
+    assert_eq!(
+        sub["cloud"]["models"]["haiku"],
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    );
+    // A caller-supplied endpoint must be refused without a connection.
+    // The old key and settings must survive it, for pairs and bearer keys.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("https://{}", listener.local_addr().unwrap());
+    for key_id in [Some("E2E-new-id"), None] {
+        let response = td
+            .post(
+                "/api/subscriptions/bedrock-setup/api-key",
+                json!({
+                    "provider": "bedrock", "key": "E2E-new-secret", "key_id": key_id,
+                    "test_connection": true, "cloud": {"base_url": endpoint}
+                }),
+            )
+            .await;
+        response.err(422, "invalid");
+        let text = response.body.to_string();
+        assert!(text.contains("Nothing was saved"), "{text}");
+        assert!(text.contains("save without test_connection"), "{text}");
+        assert!(!text.contains("E2E-") && !text.contains(&endpoint));
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    }
+    let response = td
+        .post(
+            "/api/subscriptions/bedrock-setup/api-key",
+            json!({
+                "provider": "bedrock", "key": "E2E-new-secret", "key_id": "E2E-new-id",
+                "test_connection": true, "cloud": {"region": "us-east"}
+            }),
+        )
+        .await;
+    response.err(422, "invalid");
+    assert!(
+        response
+            .body
+            .to_string()
+            .contains("invalid Bedrock test region")
+    );
+    let stored = terrariumd::login_session::read_key(&td.state, "bedrock-setup").unwrap();
+    assert_eq!(stored.key, "E2E-old-secret");
+    assert_eq!(stored.key_id.as_deref(), Some("E2E-old-id"));
+    let response = td.get("/api/subscriptions/bedrock-setup").await;
+    assert_eq!(response.ok()["cloud"], sub["cloud"]);
+}
+
 fn fixture(rel: &str) -> String {
     std::fs::read_to_string(format!(
         "{}/tests/fixtures/{rel}",
@@ -2212,7 +2281,7 @@ fn base64_url(s: &str) -> String {
 /// Run each probe once against the real logins of this machine
 /// (`~/.claude`, `~/.codex`, and `COPILOT_GITHUB_TOKEN`/`GH_TOKEN`). Read-only
 /// GETs; prints the window numbers, never a token.
-/// `cargo test -p terrariumd --test subscriptions -- --ignored live_probes`
+/// `cargo test -p terrariumd --test it subscriptions::live_probes -- --ignored`
 #[tokio::test]
 #[ignore = "needs real logins and the network"]
 async fn live_probes_against_real_homes() {

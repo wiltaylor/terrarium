@@ -117,14 +117,13 @@ pub(super) fn items_value(ctx: &Ctx, arg: &str) -> anyhow::Result<Value> {
 
 /// The `items` of a bundle answer from `--answers-file`. An option is a
 /// label of its item, or a number from 1, as `--option` takes it.
-fn answers_value(ctx: &Ctx, arg: &str, bundle: &Value) -> anyhow::Result<Value> {
+fn answers_value(given: Vec<Value>, bundle: &Value) -> anyhow::Result<Value> {
     if bundle["kind"] != "bundle" {
         return Err(CliError::usage(
             "--answers-file is for a bundle; answer a question with a text or --option",
         ));
     }
     let items = as_items(&bundle["items"]);
-    let given = json_list(ctx, arg, "answers", "items")?;
     let mut out = Vec::with_capacity(given.len());
     for (i, a) in given.into_iter().enumerate() {
         let item = items.get(i).cloned().unwrap_or_default();
@@ -143,6 +142,27 @@ fn answers_value(ctx: &Ctx, arg: &str, bundle: &Value) -> anyhow::Result<Value> 
                 if let Some(o) = opt {
                     entry["option"] = option_ref(&item, &o)
                         .map_err(|e| CliError::usage(format!("item {}: {e}", i + 1)))?;
+                }
+                if let Some(options) = o.get("options") {
+                    let options = options.as_array().ok_or_else(|| {
+                        CliError::usage(format!("item {}: options must be an array", i + 1))
+                    })?;
+                    let selected = options
+                        .iter()
+                        .map(|o| {
+                            let label = match o {
+                                Value::String(s) => s.clone(),
+                                Value::Number(n) => n.to_string(),
+                                _ => {
+                                    return Err(CliError::usage(
+                                        "a checked option must be a label or number",
+                                    ));
+                                }
+                            };
+                            option_ref(&item, &label)
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    entry["options"] = json!(selected);
                 }
             }
             _ => {
@@ -186,6 +206,7 @@ fn print_items(c: &Ctx, v: &Value, items: &[Value]) {
             c.line(format!("item {n} chosen option: {}. {label}", k + 1));
         }
         if let Some(a) = item["answer"].as_str() {
+            print_selected(c, item);
             c.line(format!(
                 "item {n} answer by {}:",
                 field(v, "answered_by_name")
@@ -201,6 +222,7 @@ fn print_items(c: &Ctx, v: &Value, items: &[Value]) {
 /// One question: the fields, then the agent's words between markers,
 /// then the answer.
 fn print_question(c: &Ctx, v: &Value) {
+    print_selected(c, v);
     let mut head = v.clone();
     let mut take = |k: &str| head.as_object_mut().and_then(|o| o.remove(k));
     let text = take("text");
@@ -259,6 +281,16 @@ fn print_question(c: &Ctx, v: &Value) {
     }
 }
 
+fn print_selected(c: &Ctx, v: &Value) {
+    for index in as_items(&v["answer_options"]) {
+        if let Some(i) = index.as_u64().and_then(|i| usize::try_from(i).ok())
+            && let Some(label) = v["options"].get(i).and_then(Value::as_str)
+        {
+            c.line(format!("chosen option: {}. {label}", i + 1));
+        }
+    }
+}
+
 /// The agent whose questions to list: `--agent`, else the caller.
 async fn subject(ctx: &Ctx, agent: &Option<String>) -> anyhow::Result<String> {
     match agent {
@@ -275,6 +307,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
         QuestionCmd::Ask {
             text,
             options,
+            multi_select,
             context,
             card,
             urgent,
@@ -290,6 +323,9 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             }
             let me = ctx.me().await?;
             let mut body = json!({"text": ctx.text(text)?});
+            if *multi_select {
+                body["multi_select"] = json!(true);
+            }
             super::set_list(&mut body, "options", options);
             super::set_opt(&mut body, "context", context_value(ctx, context)?);
             super::set_opt(&mut body, "card", card.clone());
@@ -579,13 +615,27 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
             id,
             text,
             option,
+            selected,
+            select_none,
             answers_file,
         } => {
             if let Some(f) = answers_file {
+                let given = json_list(ctx, f, "answers", "items")?;
+                for (i, entry) in given.iter().enumerate() {
+                    if entry
+                        .get("options")
+                        .is_some_and(|options| !options.is_array())
+                    {
+                        return Err(CliError::usage(format!(
+                            "item {}: options must be an array",
+                            i + 1
+                        )));
+                    }
+                }
                 let q = ctx.api.get(&path(id), vec![]).await?;
                 // The revision that the answers are for: a change of the
                 // agent meanwhile is a conflict.
-                let body = json!({"items": answers_value(ctx, f, &q)?, "revision": q["revision"]});
+                let body = json!({"items": answers_value(given, &q)?, "revision": q["revision"]});
                 let v = ctx
                     .api
                     .post(&format!("{}/answer", path(id)), Some(body))
@@ -599,13 +649,26 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
                     ));
                 });
             }
-            if text.is_none() && option.is_none() {
+            if text.is_none() && option.is_none() && selected.is_empty() && !select_none {
                 return Err(CliError::usage(
                     "give the answer as text, --option <label|n>, or both; answer a bundle \
                      with --answers-file",
                 ));
             }
+            let q = if !selected.is_empty() {
+                ctx.api.get(&path(id), vec![]).await?
+            } else {
+                Value::Null
+            };
             let mut body = json!({});
+            if *select_none || !selected.is_empty() {
+                body["options"] = json!(
+                    selected
+                        .iter()
+                        .map(|o| option_ref(&q, o))
+                        .collect::<anyhow::Result<Vec<_>>>()?
+                );
+            }
             if let Some(t) = text {
                 body["answer"] = json!(ctx.text(t)?);
             }
@@ -667,9 +730,9 @@ pub(super) fn set_priority(body: &mut Value, urgent: bool, critical: bool) {
 
 /// `terrarium notify`: a leader sends a notice to the operator.
 pub async fn notify(ctx: &Ctx, a: &NotifyArgs) -> anyhow::Result<()> {
-    if a.card.is_none() && a.reply_to.is_none() && !a.urgent && !a.critical {
+    if a.card.is_none() && !a.critical {
         return Err(CliError::usage(
-            "notify requires --card, --reply-to or --urgent: only answers to the operator, one done per request, or real problems belong in the Inbox",
+            "notify requires --card unless --critical: otherwise post in an open thread on the topic with `terrarium thread post`",
         ));
     }
     if !ctx.is_agent() {

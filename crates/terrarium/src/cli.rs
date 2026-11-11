@@ -465,6 +465,10 @@ pub enum ProjectCmd {
         /// Empty the GitHub author gate (operator only): no gate
         #[arg(long = "github-authors-clear", conflicts_with = "github_author")]
         github_authors_clear: bool,
+        /// Home board columns as a JSON object with in_progress, review,
+        /// accepted and blocked arrays of roles or column names
+        #[arg(long)]
+        home_board_columns: Option<String>,
     },
     /// Delete a project (sysadmin)
     Rm {
@@ -2696,6 +2700,16 @@ pub struct QuestionContext {
 /// `terrarium thread ...` (docs/api.md §6.13): Inbox threads.
 #[derive(Debug, Subcommand)]
 pub enum ThreadCmd {
+    /// Post one quiet pre-release update in the project's standing Versions thread (lead only)
+    Version {
+        version: String,
+        /// What changed, as Markdown (`-` reads stdin)
+        #[arg(long)]
+        changed: String,
+        /// How to test this pre-release, as Markdown (`-` reads stdin)
+        #[arg(long = "test")]
+        test: String,
+    },
     /// Reopen a closed request with a new request agent and its history
     Reopen {
         id: String,
@@ -2763,6 +2777,9 @@ pub enum ThreadCmd {
         /// A choice for the operator; repeat for more (at most 10)
         #[arg(long = "option", short = 'o', conflicts_with = "bundle")]
         options: Vec<String>,
+        /// Allow any number of checked options, including none
+        #[arg(long, conflicts_with = "bundle")]
+        multi_select: bool,
         /// Ask a bundle: the questions come from --item or --items-file
         #[arg(long)]
         bundle: bool,
@@ -2872,6 +2889,9 @@ pub enum QuestionCmd {
         /// A choice for the operator; repeat for more (at most 10)
         #[arg(long = "option", short = 'o')]
         options: Vec<String>,
+        /// Allow any number of checked options, including none
+        #[arg(long)]
+        multi_select: bool,
         #[command(flatten)]
         context: QuestionContext,
         /// The card that the question is about
@@ -3031,10 +3051,16 @@ pub enum AdminQuestionCmd {
         /// The chosen option: its label, or its number from 1
         #[arg(long)]
         option: Option<String>,
+        /// A checked option, label or number from 1. Repeat for multi-select
+        #[arg(long = "select", conflicts_with = "option")]
+        selected: Vec<String>,
+        /// Submit a checkbox answer with no checked options
+        #[arg(long, conflicts_with_all = ["option", "selected"])]
+        select_none: bool,
         /// The answers of a bundle as JSON (`-` reads stdin), one for each
         /// item, in order: `[{"option": "<label or number from 1>",
         /// "answer": "<text>"}, ...]`; a plain string is a text answer
-        #[arg(long, conflicts_with_all = ["text", "option"])]
+        #[arg(long, conflicts_with_all = ["text", "option", "selected", "select_none"])]
         answers_file: Option<String>,
     },
     /// Link a question, a bundle, or a notice to a card of its project, or

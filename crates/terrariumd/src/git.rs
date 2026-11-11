@@ -2461,8 +2461,51 @@ pub struct JobRepo {
 }
 
 impl JobRepo {
+    /// Inspect the cache without changing it. The caller holds the prepare
+    /// mutex and a repository lifetime read guard.
+    pub fn open(c: Checkout) -> Result<Option<Self>, GitError> {
+        check_url(&c.url, &c.deny_local_under)?;
+        let me = Self { c };
+        if me.needs_rebuild() {
+            Ok(None)
+        } else {
+            Ok(Some(me))
+        }
+    }
+
+    pub fn needs_rebuild(&self) -> bool {
+        let healthy = || -> Result<bool, GitError> {
+            let fd = open_git_dir(&self.c.dest, true)?;
+            check_git_dir(&fd, &self.c.dest)?;
+            Ok(!self.c.dest.join("job-damaged").exists() && !job_repo_has_locks(&self.c.dest)?)
+        };
+        !healthy().unwrap_or(false)
+    }
+
+    /// Rebuild only while the caller owns the lifetime write guard.
+    pub fn rebuild(&self) -> Result<Self, GitError> {
+        if std::fs::symlink_metadata(&self.c.dest).is_ok() {
+            std::fs::remove_dir_all(&self.c.dest).map_err(io)?;
+        }
+        Self::create(self.c.clone())
+    }
+
+    // Only failed mutations pay for connectivity checking. Persist the result
+    // so a cancelled job still leaves recovery work for the next prepare.
+    fn checked_mutation(&self, result: Result<String, GitError>) -> Result<(), GitError> {
+        if result.is_err()
+            && self
+                .local(&["fsck", "--connectivity-only", "--no-dangling"])
+                .is_err()
+        {
+            std::fs::write(self.c.dest.join("job-damaged"), b"").map_err(io)?;
+        }
+        result.map(|_| ())
+    }
+
     /// Open the persistent bare repo at `c.dest`, or initialize it in a
-    /// 0700 parent dir. The caller serializes creation and preparation.
+    /// 0700 parent dir. The caller holds the prepare mutex and the lifetime
+    /// write guard, since an unhealthy cache is deleted here.
     pub fn create(c: Checkout) -> Result<Self, GitError> {
         use std::os::unix::fs::PermissionsExt;
         check_url(&c.url, &c.deny_local_under)?;
@@ -2474,16 +2517,7 @@ impl JobRepo {
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
         let me = Self { c };
         if std::fs::symlink_metadata(&me.c.dest).is_ok() {
-            let healthy = || -> Result<bool, GitError> {
-                let fd = open_git_dir(&me.c.dest, true)?;
-                check_git_dir(&fd, &me.c.dest)?;
-                if job_repo_has_locks(&me.c.dest)? {
-                    return Ok(false);
-                }
-                me.local(&["fsck", "--connectivity-only", "--no-dangling"])?;
-                Ok(true)
-            };
-            if healthy().unwrap_or(false) {
+            if !me.needs_rebuild() {
                 return Ok(me);
             }
             // A killed fetch/update-ref can leave locks or incomplete
@@ -2531,9 +2565,10 @@ impl JobRepo {
             self.c.url.as_str(),
         ];
         args.extend(specs.iter().map(String::as_str));
-        self.runner(true)?
-            .git(Some(&self.c.dest), &args, &mut |_| {})
-            .map(|_| ())
+        self.checked_mutation(
+            self.runner(true)?
+                .git(Some(&self.c.dest), &args, &mut |_| {}),
+        )
     }
 
     /// The commit that `rev` names, if any.
@@ -2598,7 +2633,7 @@ impl JobRepo {
 
     /// Point `refname` at `sha`.
     pub fn set_ref(&self, refname: &str, sha: &str) -> Result<(), GitError> {
-        self.local(&["update-ref", refname, sha]).map(|_| ())
+        self.checked_mutation(self.local(&["update-ref", refname, sha]))
     }
 
     /// Merge `other` onto `head` with a merge commit (as `merge --no-ff`

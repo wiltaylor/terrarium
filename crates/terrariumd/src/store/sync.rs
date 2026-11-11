@@ -85,6 +85,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
                     )?;
                     if prefix_change.is_some() {
                         let patch = projects::ProjectPatch {
+                            home_board_columns: None,
                             card_dispatcher: None,
                             review_dispatcher: None,
                             human_comment_notifications: None,

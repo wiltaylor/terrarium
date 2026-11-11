@@ -3277,16 +3277,12 @@ pub async fn lifecycle(
                     let fits = want.iter().all(|w| now.contains(w));
                     match docker_state(state, def).await?.as_str() {
                         "running" if fits => {}
-                        "running" => match recreate_refusal(state, def) {
-                            None => {
-                                docker_rm(state, def).await?;
-                                docker_run(state, def, &want).await?;
-                                attached = Some(want);
-                            }
-                            Some(why) => {
+                        "running" => {
+                            // Docker workspace changes always refuse recreation.
+                            if let Some(why) = recreate_refusal(state, def) {
                                 attach_error = Some(attach_refused(def, &now, &want, &why))
                             }
-                        },
+                        }
                         "absent" => {
                             check_running_cap(state, def, None).await?;
                             docker_run(state, def, &want).await?;
@@ -3936,9 +3932,10 @@ pub async fn delete_snapshot(
 // agent holds, at `/work/<project>/<agent>`. A docker target binds it at
 // `docker run`; a vmlab target syncs it with an `@dev` decorator in the
 // lab file of its instance (`vmlab.prepare`). Neither can add a workspace
-// to a running container or lab, so a new holder of a running target
-// needs a new container (or lab instance): the daemon makes one when the
-// target is ephemeral and no session is live, else the answer says
+// to a running container or lab. The daemon may replace an ephemeral lab
+// instance when no session is live. It never replaces a running Docker
+// container for workspace changes, since background processes may remain
+// after exec sessions end. A workspace that cannot join gets
 // "attach needs a restart of the target".
 
 /// A `lab_repo` or `lab_from_workspace` target: the daemon makes its lab
@@ -4793,30 +4790,18 @@ pub async fn detach(
               "the workspace stays attached until the target runs again: {why}");
         return Ok(None);
     }
-    let want = attach_set(state, &row.def.name, None, Some(agent)).await?;
-    let out = match row.def.kind {
-        TargetKind::Docker => {
-            docker_rm(state, &row.def).await?;
-            docker_run(state, &row.def, &want).await?;
-            let mut rt = row.runtime.clone();
-            rt.attached = want.clone();
-            store_runtime(state, &row.def.name, rt).await?;
-            json!({"target": row.def.name, "verb": "up", "state": "running", "attached": want})
-        }
-        _ => {
-            let d = LifecycleOpts {
-                destroy: true,
-                leaving: Some(agent.to_owned()),
-                ..LifecycleOpts::default()
-            };
-            lifecycle(state, &row.def, LifecycleVerb::Destroy, &d).await?;
-            let u = LifecycleOpts {
-                leaving: Some(agent.to_owned()),
-                ..LifecycleOpts::default()
-            };
-            lifecycle(state, &row.def, LifecycleVerb::Up, &u).await?
-        }
+    // Docker always returned above: only lab instances can be replaced.
+    let d = LifecycleOpts {
+        destroy: true,
+        leaving: Some(agent.to_owned()),
+        ..LifecycleOpts::default()
     };
+    lifecycle(state, &row.def, LifecycleVerb::Destroy, &d).await?;
+    let u = LifecycleOpts {
+        leaving: Some(agent.to_owned()),
+        ..LifecycleOpts::default()
+    };
+    let out = lifecycle(state, &row.def, LifecycleVerb::Up, &u).await?;
     audit_system(state, &row, "target.detach", reason, &out).await?;
     Ok(Some(out))
 }
@@ -5123,6 +5108,11 @@ fi
 if [ -n "${TERRARIUM_COMMIT_HOOK:-}" ] && [ "$action" != not_updated ]; then
   [ ! -L "$dest/.git" ] && [ ! -L "$dest/.git/hooks" ] || exit 2
   mkdir -p "$dest/.git/hooks"
+  hook="$dest/.git/hooks/prepare-commit-msg"
+  if [ -e "$hook" ] && ! grep -q '^# terrarium managed provenance hook$' "$hook"; then
+    [ ! -e "$hook.repo" ] && [ ! -L "$hook.repo" ] || exit 2
+    mv "$hook" "$hook.repo"
+  fi
   hook_tmp=$(mktemp "$dest/.git/hooks/.terrarium-commit.XXXXXX")
   printf '%s' "$TERRARIUM_COMMIT_HOOK" > "$hook_tmp"
   chmod 755 "$hook_tmp"
@@ -5577,6 +5567,71 @@ mod tests {
     /// S9 (secret manager review, 2026-10-29): the agent can write the
     /// repo config on the target. A planted `core.fsmonitor` or hook must
     /// not run while the token is in the env of the checkout script.
+    #[test]
+    fn target_checkout_chains_existing_hook_on_repeated_updates() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        let dest = tmp.path().join("dest");
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env_remove("TERRARIUM_GIT_TRAILERS")
+                .env_remove("TERRARIUM_GIT_TRAILERS_FILE")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        std::fs::create_dir(&origin).unwrap();
+        git(&origin, &["init", "-q"]);
+        git(&origin, &["commit", "--allow-empty", "-m", "one"]);
+        git(
+            tmp.path(),
+            &["clone", origin.to_str().unwrap(), dest.to_str().unwrap()],
+        );
+        let hook = dest.join(".git/hooks/prepare-commit-msg");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf '\\nRepo-Note: yes\\n' >> \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let p = crate::git_identity::Provenance {
+            identity: crate::git_identity::Identity::from_env(),
+            trailers: "Terrarium-Agent: test/worker\n".into(),
+        };
+        for _ in 0..2 {
+            let c = checkout_cmd(
+                origin.to_str().unwrap(),
+                dest.to_str().unwrap(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let out = Command::new(&c.argv[0])
+                .args(&c.argv[1..])
+                .envs(c.env)
+                .env("TERRARIUM_COMMIT_HOOK", p.hook())
+                .env("TERRARIUM_COMMIT_NAME", &p.identity.name)
+                .env("TERRARIUM_COMMIT_EMAIL", &p.identity.email)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+        git(&dest, &["commit", "--allow-empty", "-m", "two"]);
+        let message = git(&dest, &["show", "-s", "--format=%B"]);
+        assert_eq!(message.matches("Repo-Note: yes").count(), 1);
+        assert!(message.contains("Terrarium-Agent: test/worker"));
+    }
+
     #[test]
     fn checkout_script_ignores_a_planted_repo_config() {
         use std::os::unix::fs::PermissionsExt;

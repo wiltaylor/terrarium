@@ -30,15 +30,19 @@ export function putQuestion(list: Question[], q: Question): Question[] {
 }
 
 /** The body of an answer from the form: a choice, a text, or both; else the reason the form cannot send. */
-export function answerBody(q: Pick<Question, "options" | "status">, text: string, option: number | null, skip = false): { body: QuestionAnswer } | { error: string } {
+export function answerBody(q: Pick<Question, "options" | "status" | "multi_select">, text: string, option: number | null, skip = false, selected: number[] = []): { body: QuestionAnswer } | { error: string } {
   if (q.status !== "open" && q.status !== "in_thread") return { error: `The question is ${q.status}.` };
   if (skip && !text.trim()) return { error: "Write a reason to skip the question." };
   const t = skip ? `Skipped question: ${text.trim()}` : text.trim();
   if (skip) option = null;
   if (option !== null && (option < 0 || option >= q.options.length)) return { error: "Pick one of the options." };
-  if (!t && option === null) return { error: q.options.length ? "Pick an option or write an answer." : "Write an answer." };
+  if (!t && option === null && !q.multi_select) return { error: q.options.length ? "Pick an option or write an answer." : "Write an answer." };
   if (t.length > MAX_TEXT) return { error: `The answer is longer than ${MAX_TEXT} characters.` };
   const body: QuestionAnswer = {};
+  if (q.multi_select) {
+    if (selected.some((i) => !Number.isInteger(i) || i < 0 || i >= q.options.length) || new Set(selected).size !== selected.length) return { error: "Pick from the options once each." };
+    body.options = skip ? [] : selected;
+  }
   if (option !== null) body.option = option;
   if (t) body.answer = t;
   return { body };
