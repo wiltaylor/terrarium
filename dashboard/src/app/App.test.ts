@@ -13,7 +13,7 @@ const { stub } = vi.hoisted(() => ({ stub: (label: string) => () => label }));
 vi.mock("../api", () => ({ isMock: false }));
 // The project shell reads the tab counts (TER-154): no agent, no count.
 vi.mock("../stores", async () => { const { instanceTestStores } = await import("../test/instance"); return instanceTestStores(({
-  auth: { mode: () => "operator" },
+  auth: { mode: () => "operator", token: () => null, csrf: () => null },
   agents: { inProject: () => [] },
   api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) } },
   events: { on: () => () => {} },

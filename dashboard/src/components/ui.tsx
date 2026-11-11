@@ -188,9 +188,11 @@ export function Tabs<T extends string>(props: { tabs: readonly { id: T; label: s
 
 /** The page title and its actions. A tab of a page with its own title (Settings) gives `level={2}`. */
 export function PageHead(props: { title: JSX.Element; level?: 1 | 2; children?: JSX.Element }) {
+  const { key } = useInstance();
   return (
     <div class="page-head">
       {props.level === 2 ? <h2>{props.title}</h2> : <h1>{props.title}</h1>}
+      <Show when={key !== "local"}><strong class="chip warn">Remote: {key.slice(7)}</strong></Show>
       <div class="actions">{props.children}</div>
     </div>
   );

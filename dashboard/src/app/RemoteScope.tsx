@@ -13,7 +13,7 @@ export function RemoteScope(props: RouteSectionProps) {
   return <Show when={!remote.error} fallback={<ErrorBanner error={remote.error} />}>
     <Show keyed when={!remote.loading && remote()?.name === params.remote ? remote() : undefined} fallback={<div role="status">Loading remote…</div>}>
       {(r) => {
-        const instance = createInstance({ name: r.name, auth });
+        const instance = createInstance({ name: r.name, remoteOrigin: r.url, auth });
         onCleanup(instance.dispose);
         const previousTitle = document.title;
         createEffect(() => { document.title = `[${r.name}] Terrarium`; });
