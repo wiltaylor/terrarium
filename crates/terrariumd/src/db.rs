@@ -2795,6 +2795,7 @@ impl<'c> Tx<'c> {
         Self {
             tx,
             actor: actor.to_owned(),
+            link: actor.strip_prefix("link:").map(str::to_owned),
             cause: None,
             events: Vec::new(),
             audits: RefCell::default(),
