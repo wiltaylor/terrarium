@@ -112,7 +112,8 @@ async fn held_turns_are_redacted_stable_and_removable_by_the_lead() {
     let response = td
         .get_as("p/w1", &format!("/api/agents/{w}/queued"))
         .await
-        .ok();
+        .ok()
+        .clone();
     assert!(!response.to_string().contains("held-test-secret-value"));
     let held: Vec<_> = response["items"]
         .as_array()
