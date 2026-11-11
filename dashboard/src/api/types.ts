@@ -298,6 +298,7 @@ export interface HarnessReport {
 
 /** docs/api.md §5. */
 export interface Project {
+  home_board_columns?: import("./home").HomeBoardColumns;
   name: string;
   description?: string;
   card_prefix: string;
