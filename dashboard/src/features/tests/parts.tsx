@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Small parts of the test run views: the stacked counts bar, the status chip,
 // the run row, the chip of a linked label, and the list of the runs linked to a
 // card (the card drawer). Every status shows as an icon and a word, not
@@ -8,7 +9,7 @@ import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "s
 import type { CardTests, TestCounts, TestRunStatus, TestRunSummary } from "../../api/types";
 import { ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { api, events } from "../../stores";
+
 import { labelHref } from "../board/versionLabels";
 import { barSegments, CASE_ICON, chipText, combinedStatus, countsText, latestByName, STATUS_TONE, sumCounts, testDuration } from "./model";
 
@@ -89,6 +90,7 @@ export function RunLine(props: { run: TestRunSummary }) {
  * `test_run` event of the project.
  */
 export function LinkedRuns(props: { project: string; card?: string; title?: string }) {
+  const { api, events } = useInstance();
   const [runs, setRuns] = createSignal<TestRunSummary[]>([]);
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);

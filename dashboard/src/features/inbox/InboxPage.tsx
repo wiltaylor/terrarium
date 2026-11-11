@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Inbox: everything that waits for the operator (`GET /api/inbox`).
 // Questions, bundles of questions, and notices of the leaders, mail to `operator`, and threads that
 // the loop guard paused. Tabs pick the kind and Open or Done; the project
@@ -10,7 +11,7 @@ import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMo
 import { createStore, reconcile } from "solid-js/store";
 import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
-import { api, events, inbox, projects } from "../../stores";
+
 import { MailItemCard, PausedThreadCard, WatchCard } from "./cards";
 import { AskDialog } from "./AskDialog";
 import { MessageDialog } from "./MessageDialog";
@@ -38,6 +39,7 @@ export default function InboxPage() {
 }
 
 function InboxScreen() {
+  const { api, events, inbox, projects } = useInstance();
   const now = useNow(30_000);
   const [params, setParams] = useSearchParams<{ tab?: string; status?: string; project?: string; item?: string }>();
   // `?tab=watch` (the Asked kind tab of 0.1.0) opens the Asked status tab, or Done with the asks.

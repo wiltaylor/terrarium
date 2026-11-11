@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The chat page of one Inbox thread (docs/api.md §6.13): the messages and
 // the questions of the agent in order, with the questions answerable inline;
 // a message box; the "Send response" box (the overall response, the approval
@@ -18,7 +19,7 @@ import { SafeHtml } from "../../components/SafeHtml";
 import { Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api, events, inbox } from "../../stores";
+
 import { BundleCard } from "./BundleCard";
 import { CloseProposal, HandoffLinks } from "./CloseProposal";
 import { QuestionCard } from "./QuestionCard";
@@ -26,6 +27,7 @@ import { TrackedCards } from "./TrackedCards";
 import { byOperator, closeBody, retractedOnClose, scopeLabel, THREAD_MESSAGE_MAX, THREAD_RESPONSE_MAX, threadChip, threadText, timeline, type TimelineEntry, whoName } from "./threads";
 
 export default function ThreadPage() {
+  const { api, events, inbox } = useInstance();
   const params = useParams<{ id: string }>();
   const now = useNow(30_000);
   const [thread, setThread] = createSignal<Thread | null>(null);
@@ -264,6 +266,7 @@ function Composer(props: { label: string; title?: string; hint?: string; placeho
 
 /** The confirmation of a close, with the handoff: a summary and links. The open questions of the thread are retracted. */
 function CloseDialog(props: { thread: Thread; onClose: () => void; onClosed: (t: Thread) => void; onError?: (e: unknown) => void }) {
+  const { api } = useInstance();
   const [summary, setSummary] = createSignal("");
   const [links, setLinks] = createSignal("");
   const [busy, setBusy] = createSignal(false);

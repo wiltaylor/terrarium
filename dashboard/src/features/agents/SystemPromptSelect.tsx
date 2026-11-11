@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The one "System prompt" selector of an agent and a template (docs/api.md
 // §28): by role, the harness default, an entry of the system prompt
 // library, or a custom text. It writes the two fields `persona` and
@@ -8,7 +9,7 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 import type { SystemPromptSummary } from "../../api/types";
 import { errorText } from "../../lib/errors";
-import { api } from "../../stores";
+
 import { systemPromptProblem } from "./form";
 import { afterSave, applyChoice, byRoleName, choiceOf, choiceValue, missingPersonaWarning, parseChoice, promptNameProblem, type PromptChoice, type PromptFields } from "./systemPrompt";
 
@@ -22,6 +23,7 @@ export function refreshPromptLibrary() {
 
 /** The library entries, or undefined while they load (or when the daemon has no config repo). */
 export function usePromptLibrary(): () => SystemPromptSummary[] | undefined {
+  const { api } = useInstance();
   const [list] = createResource(libraryVersion, () => api.systemPrompts.list().catch(() => undefined));
   return () => list();
 }
@@ -30,6 +32,7 @@ export const SYSTEM_PROMPT_SELECT_HELP = "The system prompt replaces the harness
 
 /** The read-only text of a library entry. */
 export function PromptPreview(props: { name: string }) {
+  const { api } = useInstance();
   const [entry] = createResource(
     () => [props.name, libraryVersion()] as const,
     ([n]) => api.systemPrompts.get(n),
@@ -49,6 +52,7 @@ export function SystemPromptSelect(props: {
   roles: readonly string[];
   onChange: (f: PromptFields) => void;
 }) {
+  const { api } = useInstance();
   const library = usePromptLibrary();
   // Custom stays picked while the text is still empty.
   const [custom, setCustom] = createSignal(!!props.value.system_prompt.trim());

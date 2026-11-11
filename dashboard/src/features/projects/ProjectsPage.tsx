@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 import { A, useNavigate } from "@solidjs/router";
 import { createSignal, For, Show } from "solid-js";
 import { Empty, ErrorBanner, Modal, PageHead } from "../../components/ui";
@@ -6,9 +7,10 @@ import { defaultHomeColumns, type HomeColumn } from "../../api/home";
 import { ProjectDot } from "../../components/ProjectDot";
 import { ago } from "../../lib/format";
 import { projectHealth, projectHealthLabel } from "../../lib/projectHealth";
-import { agents, api, projects } from "../../stores";
+
 
 export function ProjectForm(props: { project?: Project; onClose: () => void; onSaved: (p: Project) => void }) {
+  const { api, projects } = useInstance();
   const [name, setName] = createSignal(props.project?.name ?? "");
   const [description, setDescription] = createSignal(props.project?.description ?? "");
   const [prefix, setPrefix] = createSignal(props.project?.card_prefix ?? "");
@@ -76,6 +78,7 @@ export function ProjectForm(props: { project?: Project; onClose: () => void; onS
 }
 
 export default function ProjectsPage() {
+  const { projects, agents } = useInstance();
   const navigate = useNavigate();
   const [creating, setCreating] = createSignal(false);
   return (

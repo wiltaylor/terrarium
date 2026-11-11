@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Mail pieces that the mail log and the Inbox share. A subject and a body
 // are the sender's words: they go into the page as text nodes only.
 
@@ -6,7 +7,7 @@ import { SessionLink } from "../../components/SessionLink";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Message } from "../../api/types";
 import { ago } from "../../lib/format";
-import { agents, api, projects } from "../../stores";
+
 
 /** The delivery state of a message, as chips. The state is the recipient's; the log keeps no unread state for the operator. */
 export function StateChips(props: { message: Message }) {
@@ -65,6 +66,7 @@ export function MessageView(props: { message: Message }) {
 }
 
 export function Compose(props: { to?: string; onClose: () => void; onSent: (m: Message) => void }) {
+  const { api, agents, projects } = useInstance();
   const [to, setTo] = createSignal(props.to ?? "");
   const [subject, setSubject] = createSignal("");
   const [body, setBody] = createSignal("");

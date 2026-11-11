@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The shell of every project page. The first path segment selects a project
 // tab, so deep links and browser history keep working without a route change.
 
@@ -5,11 +6,12 @@ import { useLocation, useParams, type RouteSectionProps } from "@solidjs/router"
 import { createEffect, on } from "solid-js";
 import { PageHead } from "../../components/ui";
 import { decodePath, decodePathParam, projectBase } from "../../lib/url";
-import { agents, api, events } from "../../stores";
+
 import { ProjectTabs } from "./ProjectTabs";
 import { blockedAgents, createProjectCounts, tabBadge } from "./tabCounts";
 
 export default function ProjectScreen(props: RouteSectionProps) {
+  const { api, events, agents } = useInstance();
   const params = useParams<{ project: string }>();
   const location = useLocation();
 

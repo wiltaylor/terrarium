@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The records of one DB type (/p/:project/knowledge/db/:type): a query box
 // (prefilled `type:<name>`, Enter runs it), a table with the first fields
 // as columns and a column chooser, sortable headers (they write `sort:`
@@ -8,13 +9,14 @@ import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import type { DbQueryResult, DbRecord } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
-import { api, events } from "../../stores";
+
 import { cellText, columnValue, defaultColumns, errorAt, queryErrorOf, sortOf, splitTerms, toggleSort, withType } from "./model";
 import { projectBase } from "../../lib/url";
 import { RecordModal } from "./RecordModal";
 import { SchemaEditor } from "./SchemaEditor";
 
 export default function DbRecordsPage() {
+  const { api, events } = useInstance();
   const params = useParams<{ project: string; type: string }>();
   const [search, setSearch] = useSearchParams<{ q?: string; id?: string }>();
   const navigate = useNavigate();

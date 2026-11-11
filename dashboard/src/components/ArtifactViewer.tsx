@@ -1,3 +1,4 @@
+import { useInstance } from "../instance";
 // Preview for one artifact (§15.2, docs/api.md §12). The viewer mints a
 // short-lived signed URL (`POST /api/artifacts/{id}/url`) and loads the
 // bytes from the artifact origin (docs/security-review.md F5). HTML, bundles,
@@ -12,7 +13,7 @@ import { artifactOriginKind, SAME_ORIGIN_WARNING } from "../lib/artifact-origin"
 import { renderMarkdown } from "../lib/markdown";
 import { SafeHtml } from "./SafeHtml";
 import { bytes } from "../lib/format";
-import { api } from "../stores";
+
 import { ErrorBanner } from "./ui";
 
 /** What the viewer needs. A full artifact fits, and so does a version's artifact entry. */
@@ -36,6 +37,7 @@ export function previewKind(a: Pick<Artifact, "content_type" | "kind" | "name"> 
 }
 
 export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolean }) {
+  const { api } = useInstance();
   const kind = () => previewKind(props.artifact);
   // The uid is unique across projects, so it is the safest key.
   const [signed] = createResource(() => props.artifact.uid || props.artifact.id, (key) => api.artifacts.url(key));

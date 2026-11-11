@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Home, Hosts: one card per host agent with CPU, memory, network IO, disk
 // IO, and disk space (docs/api.md §17.1). The page polls every 10 s: the
 // daemon sends no event for a sample. Each card takes the full row, so the
@@ -10,7 +11,7 @@ import type { Host, HostMetricsSample } from "../../api/types";
 import { isMissingEndpoint } from "../../api/http";
 import { Empty } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { api } from "../../stores";
+
 import { HostReservations } from "./Reservations";
 import {
   CARD_MINUTES,
@@ -43,6 +44,7 @@ interface HostRow {
 
 /** The hosts and the last 15 minutes of each, again every 10 s. A daemon without the endpoints gives none. */
 function useHostMetrics() {
+  const { api } = useInstance();
   const [tick, setTick] = createSignal(0);
   let missing = false;
   const [rows] = createResource(tick, async (): Promise<HostRow[]> => {

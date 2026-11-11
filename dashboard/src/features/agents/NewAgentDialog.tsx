@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // "New agent" (docs/api.md §6.1, §21.3). The dialog opens on a chooser: a
 // card for each template of the project (its own, then the global ones)
 // and a Custom card. A template card opens a short form: the name and a
@@ -11,7 +12,7 @@ import { A } from "@solidjs/router";
 import { createEffect, createResource, createSignal, For, on, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import { roleLabel, type Agent, type AgentTemplate } from "../../api/types";
-import { agents, api } from "../../stores";
+
 import { emptyAgentForm, validateAgentForm, type AgentFormValues } from "./form";
 import { AgentFields } from "./AgentFields";
 import { AgentFormFields } from "./AgentForm";
@@ -30,6 +31,7 @@ function arrowKeys(e: KeyboardEvent) {
 }
 
 export function NewAgentDialog(props: { project: string; onClose: () => void; onSaved: (a: Agent) => void }) {
+  const { api, agents } = useInstance();
   const [step, setStep] = createSignal<NewAgentStep | null>(null);
   // The name stays across the steps.
   const [name, setName] = createSignal("");

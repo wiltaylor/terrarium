@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Home, Work in progress (TER-43): every card in a working or research
 // column of every project, with its project, column, agent and live
 // status, and ETA. It reloads on card and agent status events (batched)
@@ -9,7 +10,7 @@ import { A } from "@solidjs/router";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { ActiveCard } from "../../api/types";
 import { Empty, ErrorBanner } from "../../components/ui";
-import { api, events } from "../../stores";
+
 import { ActionButtons } from "../actions/ActionButtons";
 import { actionsByProject } from "../actions/model";
 import { cardHref } from "../inbox/questions";
@@ -18,6 +19,7 @@ import { idleBadge } from "../../lib/idle";
 
 /** The section. `now` drives the ETA countdown. */
 export function ActiveCards(props: { now: number }) {
+  const { api, events } = useInstance();
   const [tick, setTick] = createSignal(0);
   const [cards] = createResource(tick, () => api.cards.active());
   // One list for all projects. A failed list shows no buttons; the table stays.

@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The "Harness versions" table: the active version and the version dirs on
 // disk, the latest release on npm, a status chip, and the
 // live agents that still run an older version (GET /api/harnesses?latest=true).
@@ -17,7 +18,7 @@
 
 import { createResource, createSignal, For, Show } from "solid-js";
 import { ConfirmButton, CopyButton, ErrorBanner } from "../../components/ui";
-import { api } from "../../stores";
+
 import type { HarnessUpdateResult } from "../../api/types";
 import {
   canPinCurrent,
@@ -57,6 +58,7 @@ interface UpdateRun {
 }
 
 export function HarnessVersions() {
+  const { api } = useInstance();
   const [report, { refetch }] = createResource((_: unknown, info: { refetching?: unknown }) => api.harnesses(info.refetching === true, true));
   const [run, setRun] = createSignal<UpdateRun | null>(null);
   const busy = () => !!run() && !run()!.done;

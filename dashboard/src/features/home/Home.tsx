@@ -1,10 +1,11 @@
+import { useInstance } from "../../instance";
 import { A, useNavigate } from "@solidjs/router";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { isLocalOnly, Sparkline, UsageTile } from "../../components/UsageTile";
 import { Empty, ErrorBanner, Modal, PageHead, ProviderLogo, Tabs, useNow } from "../../components/ui";
 import type { Subscription, UsageGroup, UsagePoint } from "../../api/types";
 import { ago, compact, subscriptionTitle } from "../../lib/format";
-import { api, events, projects, subscriptions } from "../../stores";
+
 import { usageLabel } from "./labels";
 import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
 import { HostCards } from "./HostCards";
@@ -19,6 +20,7 @@ const HOUR = 3_600_000;
 
 /** The tokens of each subscription per hour over the last 24 hours (`GET /api/usage?bucket=hour&group=subscription`). */
 function useStripUsage(now: () => number) {
+  const { api, events } = useInstance();
   const [tick, setTick] = createSignal(0);
   const [usage] = createResource(tick, () => api.usage.series({ bucket: "hour", group: "subscription", since: new Date(Date.now() - 24 * HOUR).toISOString() }).catch(() => [] as UsagePoint[]));
   onMount(() => {
@@ -46,6 +48,7 @@ function useStripUsage(now: () => number) {
 }
 
 export function Home() {
+  const { subscriptions } = useInstance();
   const navigate = useNavigate();
   const [compose, setCompose] = createSignal<"ask" | "message" | "thread" | null>(null);
   const now = useNow(15_000);
@@ -103,6 +106,7 @@ const RANGES = [
 
 /** Click-through of a tile: consumption over time, split by project, agent, and model; the probe's raw numbers. */
 function UsageDetail(props: { sub: Subscription; onClose: () => void }) {
+  const { api, projects } = useInstance();
   const [range, setRange] = createSignal<(typeof RANGES)[number]["id"]>("24h");
   const r = () => RANGES.find((x) => x.id === range())!;
   const query = (group?: UsageGroup) => ({ subscription: props.sub.name, bucket: r().bucket, since: new Date(Date.now() - r().hours * HOUR).toISOString(), group });

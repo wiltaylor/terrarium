@@ -1,9 +1,10 @@
+import { useInstance } from "../../instance";
 import { A, useNavigate, useParams } from "@solidjs/router";
 import { createResource, createSignal, For, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { projectBase } from "../../lib/url";
-import { agents, api, projects } from "../../stores";
+
 import { ProjectForm } from "./ProjectsPage";
 import { ScopeChip } from "../targets/ScopeChip";
 import { filterByScope, groupByScope } from "../../lib/target-scope";
@@ -14,6 +15,7 @@ import { filterByScope, groupByScope } from "../../lib/target-scope";
  * their own page (features/repos, /p/:project/repos).
  */
 export default function ProjectSettings() {
+  const { api, projects, agents } = useInstance();
   const params = useParams<{ project: string }>();
   const navigate = useNavigate();
   const [project, { refetch }] = createResource(() => params.project, (p) => api.projects.get(p));
@@ -76,6 +78,7 @@ export default function ProjectSettings() {
  * Targets tab of Settings for the project.
  */
 export function TargetsPanel(props: { project: string }) {
+  const { api } = useInstance();
   const [targets] = createResource(() => props.project, (p) => api.projects.targets(p));
   const own = () => filterByScope(targets() ?? [], "project", props.project).length;
   const href = (scope?: "project" | "global") => `/settings/targets?project=${encodeURIComponent(props.project)}${scope ? `&scope=${scope}` : ""}`;

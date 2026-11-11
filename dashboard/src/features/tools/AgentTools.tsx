@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Tools section of the agent page's Details tab (design D7): the tools
 // that the agent may run, its own grants and its project's, each with its
 // target and command. The links show in its sandbox at
@@ -6,10 +7,11 @@
 import { A } from "@solidjs/router";
 import { createResource, For, Show } from "solid-js";
 import type { Agent } from "../../api/types";
-import { api } from "../../stores";
+
 import { commandLine, toolsOf } from "./model";
 
 export function AgentTools(props: { agent: Agent }) {
+  const { api } = useInstance();
   const [tools] = createResource(
     () => props.agent.id,
     () => api.tools.list().catch(() => null),

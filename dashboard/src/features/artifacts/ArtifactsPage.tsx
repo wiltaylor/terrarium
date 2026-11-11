@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Artifacts page of a project (no tab since TER-507; old links still open it): the files of
 // the project and the viewer of the artifact of the URL (/p/:project/board/artifacts/:id).
 
@@ -8,11 +9,12 @@ import { ConfirmButton, Empty, ErrorBanner, Modal, PageHead } from "../../compon
 import type { Artifact } from "../../api/types";
 import { bundlePaths, buildTar } from "../../lib/tar";
 import { ago, bytes } from "../../lib/format";
-import { api } from "../../stores";
+
 import { attachTarget } from "./attach";
 import { labelHref } from "../board/versionLabels";
 
 export default function ArtifactsPage() {
+  const { api } = useInstance();
   const params = useParams<{ project: string; id?: string }>();
   const navigate = useNavigate();
   const [list, { refetch }] = createResource(() => params.project, (p) => api.artifacts.list(p).catch((e: unknown) => (setError(e), [] as Artifact[])));
@@ -121,6 +123,7 @@ export default function ArtifactsPage() {
  * `index.html`. The multipart fields are `file`, `name`, `kind`, `attach`.
  */
 function UploadModal(props: { project: string; onClose: () => void; onDone: (a: Artifact) => void }) {
+  const { api } = useInstance();
   const [mode, setMode] = createSignal<"files" | "folder">("files");
   const [files, setFiles] = createSignal<File[]>([]);
   const [name, setName] = createSignal("");

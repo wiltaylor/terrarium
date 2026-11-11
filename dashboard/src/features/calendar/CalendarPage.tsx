@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Calendar page (docs/api.md §33): the calendar of a project
 // (/p/:project/calendar), with the global events marked, and the combined
 // view of every project for the operator (/calendar). A month grid, a week
@@ -13,7 +14,7 @@ import type { CalendarEvent, CalendarOccurrence, CalendarView } from "../../api/
 import { Markdown } from "../../components/Markdown";
 import { ConfirmButton, Empty, ErrorBanner, Modal, PageHead, Tabs, useNow } from "../../components/ui";
 import { renderMarkdown } from "../../lib/markdown";
-import { api, events } from "../../stores";
+
 import { EventDialog } from "./EventDialog";
 import { agenda, DAY_LABELS, dayKey, isRunning, kindClass, kindLabel, monthGrid, monthRange, scopeLabel, timeLabel, weekDays, weekStart } from "./model";
 import { DAYS } from "./recur";
@@ -46,6 +47,7 @@ function Chip(props: { o: CalendarOccurrence; now: number; showScope: boolean; o
 }
 
 function EventDetail(props: { event: CalendarEvent; occurrence: CalendarOccurrence; now: number; onClose: () => void; onEdit: () => void; onChanged: () => void }) {
+  const { api } = useInstance();
   const [error, setError] = createSignal<unknown>(null);
   const e = () => props.event;
   const act = async (fn: () => Promise<unknown>) => {
@@ -139,6 +141,7 @@ function EventDetail(props: { event: CalendarEvent; occurrence: CalendarOccurren
 }
 
 export default function CalendarPage() {
+  const { api, events } = useInstance();
   const params = useParams<{ project?: string }>();
   const project = () => params.project ?? null;
   const now = useNow(30_000);

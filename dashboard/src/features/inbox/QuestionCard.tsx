@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // One question or notice of a leader to the operator. A question has the
 // answer form; a notice has Acknowledge with an optional reply. The text and
 // the options are the agent's words: they go into the page as text nodes
@@ -12,7 +13,7 @@ import { SafeHtml } from "../../components/SafeHtml";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api } from "../../stores";
+
 import { ackText, answerBody, canOpenInThread, cardHref, chosenLabel, mailThreadHref, statusChip, THREAD_MOVE_MESSAGE_MAX } from "./questions";
 import { threadHref } from "./threads";
 
@@ -27,6 +28,7 @@ import { threadHref } from "./threads";
  * and opens it. "Show mail" opens the mail thread of the question.
  */
 export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; inThread?: boolean; actions?: JSX.Element; prefill?: { text: string }; onChange: (q: Question) => void }) {
+  const { api } = useInstance();
   const navigate = useNavigate();
   const q = () => props.question;
   const notice = () => q().kind === "notice";

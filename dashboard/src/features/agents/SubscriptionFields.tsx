@@ -1,10 +1,11 @@
+import { useInstance } from "../../instance";
 // The subscription select and the model field of the agent form, also on
 // the agent page. The logic is in ./subscription.ts.
 
 import { A } from "@solidjs/router";
 import { createMemo, createResource, createSignal, For, onMount, Show } from "solid-js";
 import type { Harness } from "../../api/types";
-import { api, subscriptions } from "../../stores";
+
 import { ModelPicker } from "../../components/ModelPicker";
 import { compatibleSubscriptions, defaultModelFor, loginText, modelSourceText, normalizePool, poolCandidates, subscriptionOptions } from "./subscription";
 
@@ -13,6 +14,7 @@ export const ADD_API_KEY_HREF = "/settings/subscriptions?add=api_key";
 
 /** A select of the subscriptions that `harness` can spend, and "none". Loads the list itself. */
 export function SubscriptionSelect(props: { harness: Harness; value: string; onChange: (name: string) => void; disabled?: boolean; label?: string }) {
+  const { subscriptions } = useInstance();
   onMount(() => void subscriptions.ensureLoaded());
   const options = () => subscriptionOptions(subscriptions.list(), props.harness, props.value);
   const none = () => subscriptions.loaded() && compatibleSubscriptions(subscriptions.list(), props.harness).length === 0;
@@ -50,6 +52,7 @@ export function SubscriptionSelect(props: { harness: Harness; value: string; onC
  * subscription is always in a pool, so its box stays on.
  */
 export function PoolPicker(props: { harness: Harness; current: string; value: string[]; onChange: (pool: string[]) => void; disabled?: boolean }) {
+  const { subscriptions } = useInstance();
   onMount(() => void subscriptions.ensureLoaded());
   const candidates = () => poolCandidates(subscriptions.list(), props.harness, props.current);
   const cur = () => props.current.trim();
@@ -83,6 +86,7 @@ export function PoolPicker(props: { harness: Harness; current: string; value: st
  * Without a subscription, or when the list does not load, a text field.
  */
 export function ModelField(props: { harness: Harness; subscription: string; value: string; onChange: (model: string) => void }) {
+  const { subscriptions, api } = useInstance();
   const sub = () => subscriptions.byName(props.subscription.trim());
   const def = () => defaultModelFor(sub(), props.harness);
   // Each click on Refresh asks the daemon to read the list again.
@@ -119,6 +123,7 @@ export function ModelField(props: { harness: Harness; subscription: string; valu
 
 /** What the daemon does with no model: the hint under the model field. */
 export function defaultModelHint(harness: Harness, subscription: string): string | null {
+  const { subscriptions } = useInstance();
   const s = subscriptions.byName(subscription.trim());
   if (!s) return null;
   const def = defaultModelFor(s, harness);

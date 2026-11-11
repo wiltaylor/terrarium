@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The page of one test run (/p/:project/tests/:id, docs/api.md, test
 // runs): the summary, the compare with the previous run of the same name, the
 // suites with their cases, and the output of a case. The output is plain text in
@@ -11,12 +12,13 @@ import type { TestCase, TestRun } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";
 import { ago, bytes } from "../../lib/format";
 import { projectBase } from "../../lib/url";
-import { api } from "../../stores";
+
 import { CASE_ICON, caseDetails, compareSections, countsText, defaultFailedOnly, failing, groupBySuite, shortCommit, STATUS_TONE, testDuration } from "./model";
 import { CountsBar, runHref, RunStatusChip } from "./parts";
 import { labelHref } from "../board/versionLabels";
 
 export default function TestRunPage() {
+  const { api } = useInstance();
   const params = useParams<{ project: string; id: string }>();
   const navigate = useNavigate();
   const [run, setRun] = createSignal<TestRun | null>(null);

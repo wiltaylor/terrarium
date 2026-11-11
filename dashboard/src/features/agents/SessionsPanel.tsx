@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Sessions tab of the agent page (docs/api.md §6.3): the sessions of the
 // agent, one row for each harness session (its resumes counted on the row),
 // and a read-only viewer of one transcript.
@@ -8,7 +9,7 @@ import type { Agent, Session } from "../../api/types";
 import { createPagedList } from "../../components/paged";
 import { ErrorBanner, LoadMore } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { api } from "../../stores";
+
 import { createTranscriptView, StreamChip, TranscriptLog } from "./conversation/TranscriptLog";
 import { findGroup, groupChip, groupSessions, sessionLabel, type SessionGroup } from "./sessions";
 
@@ -19,6 +20,7 @@ export function SessionsPanel(props: {
   onOpen: (id: string | null) => void;
   onOpenConversation: () => void;
 }) {
+  const { api } = useInstance();
   const sessions = createPagedList(
     () => props.agent.id,
     (aid, cursor) => api.agents.sessions(aid, { cursor }),

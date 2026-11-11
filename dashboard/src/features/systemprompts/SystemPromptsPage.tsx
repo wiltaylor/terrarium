@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The System prompts tab of the settings screen (docs/api.md §28): the
 // library of the config repo (`system-prompts/<name>.md`), with view, edit,
 // delete, and "New system prompt". A delete of an entry in use answers 409
@@ -10,7 +11,7 @@ import { createResource, createSignal, For, Show } from "solid-js";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import type { SystemPromptDetail, SystemPromptSummary, SystemPromptUser } from "../../api/types";
 import { ago, bytes } from "../../lib/format";
-import { api } from "../../stores";
+
 import { systemPromptProblem } from "../agents/form";
 import { refreshPromptLibrary } from "../agents/SystemPromptSelect";
 import { promptNameProblem } from "../agents/systemPrompt";
@@ -48,6 +49,7 @@ function PromptFields(props: { description: string; text: string; onDescription:
 }
 
 function NewPromptForm(props: { onCreated: (d: SystemPromptDetail) => void; onCancel: () => void }) {
+  const { api } = useInstance();
   const [name, setName] = createSignal("");
   const [description, setDescription] = createSignal("");
   const [text, setText] = createSignal("");
@@ -102,6 +104,7 @@ function NewPromptForm(props: { onCreated: (d: SystemPromptDetail) => void; onCa
 
 /** One entry: its text, its users, edit, and delete. */
 function PromptDetail(props: { name: string; onChanged: () => void; onDeleted: () => void }) {
+  const { api } = useInstance();
   const [version, setVersion] = createSignal(0);
   const [entry] = createResource(
     () => [props.name, version()] as const,
@@ -254,6 +257,7 @@ function PromptDetail(props: { name: string; onChanged: () => void; onDeleted: (
 }
 
 export default function SystemPromptsPage() {
+  const { api } = useInstance();
   const [version, setVersion] = createSignal(0);
   const [list] = createResource(version, () => api.systemPrompts.list());
   const [q, setQ] = createSignal("");

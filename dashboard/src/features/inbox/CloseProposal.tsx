@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The agent's close proposal of an Inbox thread (TER-95, docs/api.md §6.13):
 // the proposed handoff (summary and links) with Confirm and Decline, on the
 // chat page and in the Threads list. Confirm is `POST .../close` with
@@ -12,7 +13,7 @@ import { ApiError } from "../../api/http";
 import type { Thread, ThreadLink } from "../../api/types";
 import { ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { api } from "../../stores";
+
 import { pendingProposal, retractedOnClose, safeUrl, THREAD_MESSAGE_MAX, threadText, whoName } from "./threads";
 
 /** The links of a handoff or a proposal. */
@@ -45,6 +46,7 @@ export function HandoffLinks(props: { links: ThreadLink[] }) {
  * `onError` gets each failed write (a 409: the thread changed elsewhere).
  */
 export function CloseProposal(props: { thread: Thread; now: number; onChanged: (t: Thread) => void; onError?: (e: unknown) => void }) {
+  const { api } = useInstance();
   const [declining, setDeclining] = createSignal(false);
   const [text, setText] = createSignal("");
   const [busy, setBusy] = createSignal(false);

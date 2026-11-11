@@ -1,6 +1,7 @@
+import { useInstance } from "../instance";
 import { A } from "@solidjs/router";
 import { For, Show } from "solid-js";
-import { bookmarks } from "../stores";
+
 import { skippedReport } from "../stores/bookmarks";
 import { ErrorBanner } from "../components/ui";
 import { expanded, TreeNode } from "./TreeRoot";
@@ -12,6 +13,7 @@ export const bookmarkKey = (href: string) => `bookmark:${href}`;
 
 /** A real node of the Projects navigation tree. */
 export function Bookmarks(props: { nav?: ReturnType<typeof createRovingTree> }) {
+  const { bookmarks } = useInstance();
   const nav = props.nav ?? createRovingTree({ keys: () => [BOOKMARKS_KEY, ...bookmarks.items().map((b) => bookmarkKey(b.href))] });
   return (
     <TreeNode label="Bookmarks" rowKey={BOOKMARKS_KEY} project="" groupId="bookmarks-group" open={expanded.isOpen(BOOKMARKS_KEY)} onToggle={() => expanded.toggle(BOOKMARKS_KEY)} nav={nav} actionKey="F2" action={

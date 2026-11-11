@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // One bundle of related questions of a leader to the operator (kind
 // `bundle`). The operator answers every item, then sends all answers in one
 // step: "Submit all answers" is on only when each item has an option or a
@@ -15,7 +16,7 @@ import { SafeHtml } from "../../components/SafeHtml";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api } from "../../stores";
+
 import {
   andList,
   type BundleDraft,
@@ -35,6 +36,7 @@ import {
 import { cardHref, statusChip } from "./questions";
 
 export function BundleCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; actions?: JSX.Element; onChange: (q: Question) => void }) {
+  const { api } = useInstance();
   const q = () => props.question;
   const store = sessionDraftStorage();
   const [draft, setDraft] = createSignal<BundleDraft>(loadDraft(store, q()) ?? emptyDraft(q()));

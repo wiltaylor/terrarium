@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Pipelines page of a project (/p/:project/pipelines, docs/api.md §31):
 // each CI/CD pipeline with the status of its newest run, its last poll, an
 // on/off switch, Refresh, Edit, and Delete. A row opens the recent runs; a
@@ -13,7 +14,7 @@ import type { Pipeline, PipelineRun, PipelineRunDetail, PipelineTestReport } fro
 import { ConfirmButton, Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { everyWords, parseEvery } from "../../lib/schedule";
-import { api, events } from "../../stores";
+
 import { defOf, formOf, parseEnvSecrets, pipelineState, runDuration, sourceText, STATUS_META, stateCounts, type PipelineForm, type PipelineState } from "./model";
 
 /** A link to the CI system: http and https only. */
@@ -47,6 +48,7 @@ function ExtLink(props: { href: string | null | undefined; children: string }) {
 const runWhere = (r: Pick<PipelineRun, "environment" | "branch" | "commit">) => r.environment ?? [r.branch, r.commit?.slice(0, 8)].filter(Boolean).join(" · ");
 
 export function RunDetail(props: { pipeline: string; run: string; onClose: () => void }) {
+  const { api } = useInstance();
   const now = useNow(5_000);
   const [d] = createResource(
     () => [props.pipeline, props.run] as const,
@@ -141,6 +143,7 @@ function RunDetailBody(props: { run: PipelineRunDetail; now: number }) {
 }
 
 function RunsTable(props: { pipeline: Pipeline; version: string | null; now: number; onOpen: (run: string) => void }) {
+  const { api } = useInstance();
   const [runs] = createResource(
     () => [props.pipeline.id, props.version] as const,
     ([id]) => api.pipelines.runs(id, 50),
@@ -188,6 +191,7 @@ function RunsTable(props: { pipeline: Pipeline; version: string | null; now: num
 }
 
 export function PipelineDialog(props: { project: string; pipeline?: Pipeline; onClose: () => void; onSaved: (p: Pipeline) => void }) {
+  const { api } = useInstance();
   const [f, setF] = createSignal<PipelineForm>(formOf(props.pipeline));
   const set = <K extends keyof PipelineForm>(k: K, v: PipelineForm[K]) => setF((x) => ({ ...x, [k]: v }));
   const [error, setError] = createSignal<unknown>(null);
@@ -386,6 +390,7 @@ function TestReport(props: { report: PipelineTestReport }) {
 }
 
 export default function PipelinesPage() {
+  const { api, events } = useInstance();
   const params = useParams<{ project: string }>();
   const now = useNow(5_000);
   const [error, setError] = createSignal<unknown>(null);

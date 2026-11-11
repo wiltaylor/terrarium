@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Settings, Hosts tab: host agents (PLAN §19, docs/host-protocol.md):
 // online or offline, the capabilities each host reported in `hello`, last
 // seen, why an offline host is offline (`offline_reason`), add with a token
@@ -19,7 +20,7 @@ import type { Host, NewHostToken } from "../../api/types";
 import { ago } from "../../lib/format";
 import { INSTALL_NOTES, installLine } from "../../lib/host-install";
 import { runningLabel, runningOnHost } from "../../lib/target-runtime";
-import { api } from "../../stores";
+
 import { hostDisplayLabel, hostDisplayOn } from "../targets/display";
 import { hostLimitsChip } from "../../lib/limits";
 import { staleTitle } from "../../lib/build-version";
@@ -36,6 +37,7 @@ export function capabilityChips(h: Pick<Host, "capabilities">): { label: string;
 }
 
 export default function HostsPage() {
+  const { api } = useInstance();
   const now = useNow(15_000);
   const [hosts, { refetch: refetchHosts }] = createResource(() => api.hosts.list());
   // The targets, for the running count of each host. A caller that cannot list them sees no count.
@@ -204,6 +206,7 @@ export default function HostsPage() {
 }
 
 function AddHostDialog(props: { onClose: () => void }) {
+  const { api } = useInstance();
   const [name, setName] = createSignal("");
   const [error, setError] = createSignal<unknown>(null);
   // The token lives in this dialog only. Closing it drops the token for good.

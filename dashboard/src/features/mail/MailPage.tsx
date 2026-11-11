@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Mail tab of the Logs screen (docs/api.md §7): every message, newest
 // first, with filters (from, to, project, thread, time range, free text)
 // and the live mode of the log tabs (components/Live.tsx). The log is a record: it keeps no unread state for the
@@ -15,7 +16,7 @@ import { SessionLink } from "../../components/SessionLink";
 import { Empty, ErrorBanner, LoadMore, PageHead, useNow } from "../../components/ui";
 import type { Card, Message } from "../../api/types";
 import { ago } from "../../lib/format";
-import { api, events, projects } from "../../stores";
+
 import { createMailFeed, type MailFeed } from "./feed";
 import {
   applyFilter,
@@ -39,6 +40,7 @@ import { Compose, MessageView, StateChips } from "./parts";
 const PAGE = 50;
 
 export default function MailPage() {
+  const { api, projects, events } = useInstance();
   const route = useParams<{ project?: string }>();
   const [params, setParams] = useSearchParams<LogParams>();
   /** The project of the route wins over the filter. */
@@ -248,6 +250,7 @@ function LogRow(props: {
 }
 
 function ThreadPanel(props: { thread: string; row: Message; project?: string; feed: MailFeed; onCompose: (to?: string) => void; onError: (e: unknown) => void }) {
+  const { api } = useInstance();
   const messages = createMemo(() => threadOf(props.feed.messages(), props.thread));
   const [text, setText] = createSignal("");
   const [sending, setSending] = createSignal(false);

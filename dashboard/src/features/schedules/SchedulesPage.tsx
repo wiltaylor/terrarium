@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Schedules (docs/api.md §19). Two views: a project view
 // (`/p/:project/schedules`, the Schedules tab of the project;
 // `GET /api/schedules?project=`: the project's schedules and the global
@@ -16,7 +17,7 @@ import { createEffect, createSignal, For, Index, on, onCleanup, onMount, Show } 
 import { MockOnlyNote } from "../../components/MockOnly";
 import { ConfirmButton, Empty, ErrorBanner, LoadMore, PageHead, Tabs, useNow } from "../../components/ui";
 import type { Schedule } from "../../api/types";
-import { api, events } from "../../stores";
+
 import { SCOPE_FILTERS, type ScopeFilter } from "../../lib/target-scope";
 import { actionWords, dayStartMarkWords, guardWords, matchesWords, nextRunWords, specWords } from "../../lib/schedule";
 import { ago } from "../../lib/format";
@@ -30,6 +31,7 @@ import { ownerText } from "../dashboard/model";
 const COLS = 8;
 
 export default function SchedulesPage() {
+  const { api, events } = useInstance();
   const params = useParams<{ project?: string }>();
   const [search, setSearch] = useSearchParams<{ scope?: string; open?: string; tab?: string }>();
   const project = () => params.project ?? null;
@@ -373,6 +375,7 @@ export default function SchedulesPage() {
 
 /** The runs of one schedule, newest first, with Load more; a live run comes in from the events. */
 function RunHistoryPanel(props: { schedule: Schedule }) {
+  const { api, events } = useInstance();
   // The panel belongs to one schedule; a new schedule mounts a new panel.
   const h = createRunHistory(api, props.schedule.id);
   const trigger = props.schedule.spec.kind === "on";

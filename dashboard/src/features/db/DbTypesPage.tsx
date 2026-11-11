@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The DB tab of the knowledge screen (app/nav.ts KNOWLEDGE_TABS,
 // /p/:project/knowledge/db): the record types of the project, with their
 // field and record counts. "New type" opens the schema editor. A type
@@ -7,11 +8,12 @@ import { A, useNavigate, useParams } from "@solidjs/router";
 import { createResource, createSignal, For, onCleanup, Show } from "solid-js";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { api, events } from "../../stores";
+
 import { typeHref } from "./model";
 import { SchemaEditor } from "./SchemaEditor";
 
 export default function DbTypesPage() {
+  const { api, events } = useInstance();
   const params = useParams<{ project: string }>();
   const navigate = useNavigate();
   const [typesRes, { refetch }] = createResource(() => params.project, (p) => api.db.types(p));

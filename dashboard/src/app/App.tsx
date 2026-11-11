@@ -1,8 +1,9 @@
+import { useInstance } from "../instance";
 import { Navigate, Route, Router, useParams } from "@solidjs/router";
 import { For, lazy, Match, Show, Switch } from "solid-js";
 import { isMock } from "../api";
 import { escapeMalformedPath } from "../lib/url";
-import { auth } from "../stores";
+
 import { Layout } from "./Layout";
 import { MOVED_ROUTES, movedTo, withQuery } from "./nav";
 import { LoginScreen } from "./LoginScreen";
@@ -69,6 +70,7 @@ function NotFound() {
 }
 
 export function App() {
+  const { auth } = useInstance();
   // @solidjs/router decodes the location in every link. Escape a malformed
   // path before it renders; valid paths and their project params stay intact.
   const pathname = escapeMalformedPath(window.location.pathname);

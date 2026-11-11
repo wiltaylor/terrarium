@@ -1,3 +1,4 @@
+import { useInstance } from "../../../instance";
 // The transcript of one session as blocks (docs/api.md §6, transcripts): the
 // window of blocks, "load earlier", the live tail, and the scroll logic. The
 // Conversation tab shows the current session with it; the Sessions tab shows
@@ -11,7 +12,7 @@ import { createMemo, createSignal, For, Match, Show, Switch, type JSX } from "so
 import type { Agent, Block, Session, TurnPart } from "../../../api/types";
 import { Markdown } from "../../../components/Markdown";
 import { ErrorBanner } from "../../../components/ui";
-import { api } from "../../../stores";
+
 import {
   assistantHtml,
   bodySegments,
@@ -42,6 +43,7 @@ export function createTranscriptView(
   /** The page source. Default: the agent's own transcript endpoint. The session page passes `GET /api/sessions/{id}/transcript`. */
   fetch: TranscriptSource["fetch"] = (aid, sid, after, limit) => api.agents.transcript(aid, sid, { after, limit }),
 ) {
+  const { api } = useInstance();
   let scroller: HTMLDivElement | undefined;
   const [tail, setTail] = createSignal(TAIL_START);
   const toBottom = () => {

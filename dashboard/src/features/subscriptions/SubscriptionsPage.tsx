@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Settings, Subscriptions tab (PLAN §16.1, docs/api.md §16): every plan
 // with its login and probe status, the logins the daemon found with no
 // definition, and the actions: verify, probe, re-login, logout, delete. Above them, the harness
@@ -8,7 +9,7 @@ import { ConfirmButton, Empty, ErrorBanner, PageHead, ProviderLogo, useNow } fro
 import { isLocalOnly, LOGIN_CHIP } from "../../components/UsageTile";
 import type { DetectedLogin, Subscription } from "../../api/types";
 import { ago, balanceText, humanize, orderWindows, subscriptionTitle, timeUntil, windowLabel, windowValue } from "../../lib/format";
-import { api, subscriptions } from "../../stores";
+
 import { AddSubscriptionWizard } from "./AddSubscriptionWizard";
 import { HarnessVersions } from "./HarnessVersions";
 import { isSelfHosted, reloginFor, selfHostedSummary, stopAllText, streamsText, wizardFromQuery, type WizardPath, type WizardSetup } from "./wizard";
@@ -29,6 +30,7 @@ const canLogout = (s: Subscription) => !s.has_api_key && !isSelfHosted(s.provide
 const suggestName = (d: DetectedLogin) => d.suggested.name || `${d.pi_provider ?? d.provider}-${d.harness}`;
 
 export default function SubscriptionsPage() {
+  const { subscriptions, api } = useInstance();
   const now = useNow(30_000);
   const [wizard, setWizard] = createSignal<{ path?: WizardPath; setup?: WizardSetup } | null>(null);
   const [error, setError] = createSignal<unknown>(null);

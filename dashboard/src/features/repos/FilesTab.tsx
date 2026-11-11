@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Files tab of the repo browser: a file tree on the left and a preview
 // of the selection on the right, as on GitHub. The query `path` keeps the
 // selection (a file or a folder; "" is the root). On a phone the tree goes
@@ -17,7 +18,7 @@ import { CopyButton, Empty, ErrorBanner } from "../../components/ui";
 import { crumbs, dirOf, imageType, isMarkdown } from "../../lib/diff";
 import { bytes } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api, auth } from "../../stores";
+
 import { createTreeCache, isEntryKey, visibleRows, type FileTree } from "./fileTree";
 
 // The trees stay loaded while the page lives: a tab change or a tree change
@@ -47,11 +48,13 @@ function storedWidth(): number {
  * Only a cookie session can open it: a bearer token is not in a link.
  */
 function rawUrl(repo: string, tree: string, path: string): string | null {
+  const { auth } = useInstance();
   if (isMock || auth.mode() !== "session") return null;
   return `${import.meta.env.VITE_API_BASE ?? ""}/api/repos/${seg(repo)}/trees/${seg(tree)}/file${buildQuery({ path })}`;
 }
 
 export function FilesTab(props: { repo: Repo; tree: string; head?: string | null; reload: string; path: string; onPath: (p: string) => void }) {
+  const { api } = useInstance();
   const ft = createMemo(() => {
     const id = props.repo.id;
     const tree = props.tree;
@@ -437,6 +440,7 @@ function FolderView(props: { repo: Repo; tree: string; ft: FileTree; reload: str
  * `readme` gives the short header of the README under a folder.
  */
 function FileView(props: { repo: Repo; tree: string; reload: string; path: string; onPath: (p: string) => void; readme?: boolean }) {
+  const { api } = useInstance();
   const [rendered, setRendered] = createSignal(true);
   const [file] = createResource(
     () => [props.repo.id, props.tree, props.path, props.reload] as const,

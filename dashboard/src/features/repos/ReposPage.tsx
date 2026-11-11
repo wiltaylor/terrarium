@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Repos page of a project (/p/:project/repos): the repos, an Add repo
 // form (./AddRepoForm, `POST /api/projects/{name}/repos`, project_admin), and for each repo
 // a link to its browser (/p/:project/repos/:repo) and a checkout row.
@@ -8,12 +9,13 @@ import { isMissingEndpoint } from "../../api/http";
 import type { Repo, Target } from "../../api/types";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { decodePathParam } from "../../lib/url";
-import { api, repos as reposStore } from "../../stores";
+
 import { AddRepoForm } from "./AddRepoForm";
 
 export const repoHref = (project: string, repo: string) => `/p/${encodeURIComponent(project)}/repos/${encodeURIComponent(repo)}`;
 
 export default function ReposPage() {
+  const { api, repos: reposStore } = useInstance();
   const params = useParams<{ project: string }>();
   // Router params keep their URL encoding: "my app" arrives as "my%20app".
   const project = () => decodePathParam(params.project);
@@ -47,6 +49,7 @@ export default function ReposPage() {
 }
 
 function RepoRow(props: { repo: Repo; targets: Target[] }) {
+  const { api } = useInstance();
   const [open, setOpen] = createSignal(false);
   const [branch, setBranch] = createSignal(props.repo.default_branch ?? "");
   const [target, setTarget] = createSignal("");

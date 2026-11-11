@@ -1,3 +1,4 @@
+import { useInstance } from "../instance";
 // The critical banner on every page, and the flashing browser tab, while an
 // open item of the Inbox, or an open question inside a thread (TER-488), has
 // the priority `critical` (docs/api.md §6.8). The inbox store follows the
@@ -7,9 +8,10 @@
 import { A } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { announce, browserFlashEnv, createTitleFlasher, criticalBanner } from "../features/inbox/critical";
-import { inbox } from "../stores";
+
 
 export function CriticalBanner() {
+  const { inbox } = useInstance();
   const banner = createMemo(() => criticalBanner(inbox.open()));
   const id = () => banner()?.item.id ?? null;
 

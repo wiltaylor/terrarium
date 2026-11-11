@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Tests tab of the project (app/nav.ts PROJECT_TABS): the test runs of
 // the project, newest first (docs/api.md, test runs). Agents push them with
 // `terrarium test push`. The filters are in the URL (`?name=&status=&card=&label=`),
@@ -9,13 +10,14 @@ import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "s
 import type { TestRunListQuery, TestRunStatus, TestRunSummary } from "../../api/types";
 import { Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { api, events } from "../../stores";
+
 import { shortCommit, testDuration } from "./model";
 import { CountsBar, LabelChip, runHref, RunStatusChip } from "./parts";
 
 const STATUSES: TestRunStatus[] = ["failed", "passed", "empty"];
 
 export default function TestRunsPage() {
+  const { api, events } = useInstance();
   const params = useParams<{ project: string }>();
   const [search, setSearch] = useSearchParams<{ name?: string; status?: string; card?: string; label?: string }>();
   const [runs, setRuns] = createSignal<TestRunSummary[]>([]);

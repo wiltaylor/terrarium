@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Memory tab of the knowledge screen (app/nav.ts KNOWLEDGE_TABS): the
 // memories of the project, and the graph of the memory of `?id=`.
 
@@ -6,7 +7,7 @@ import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Empty, PageHead } from "../../components/ui";
 import { RELATIONS, type Memory, type MemoryEdge, type Relation } from "../../api/types";
 import { ago, humanize } from "../../lib/format";
-import { api } from "../../stores";
+
 import { MemoryGraph } from "./MemoryGraph";
 
 const FIRST: Relation[] = ["contradicts", "supersedes"];
@@ -16,6 +17,7 @@ export function sortLinks(links: MemoryEdge[]): MemoryEdge[] {
 }
 
 export default function MemoryPage() {
+  const { api } = useInstance();
   const params = useParams<{ project: string }>();
   const [search, setSearch] = useSearchParams<{ id?: string }>();
   const [q, setQ] = createSignal("");

@@ -1,3 +1,4 @@
+import { useInstance } from "../instance";
 // The answer of a wiki `db` block (docs/api.md §27). lib/markdown turns the
 // fence into `<div class="db-embed" data-db-query>`; components/Markdown
 // mounts this component in it, with the query read as text. It runs the
@@ -10,9 +11,10 @@ import { createResource, For, Match, onCleanup, Show, Switch } from "solid-js";
 import type { DbQueryResult } from "../api/types";
 import { cellText, columnValue, groupText, typeHref } from "../features/db/model";
 import { describeError } from "../lib/errors";
-import { api, events } from "../stores";
+
 
 export function DbEmbed(props: { project: string; query: string }) {
+  const { api, events } = useInstance();
   const [result, { refetch }] = createResource(
     () => ({ p: props.project, q: props.query }),
     (k) => api.db.query(k.p, k.q),

@@ -1,3 +1,4 @@
+import { useInstance } from "../instance";
 // The sidebar project tree: a Projects root that links the project cards,
 // and under it one row per project. Each project row links its tabbed
 // project page. Keyboard follows the WAI-ARIA tree pattern with a roving
@@ -32,12 +33,12 @@ import {
   type TreeEntry,
 } from "../features/projectFolders/model";
 import { projectHealth, projectHealthLabel } from "../lib/projectHealth";
-import { agents, projectFolders, projects } from "../stores";
+
 import { expanded, ROOT_KEY, TreeRoot, type DropTarget } from "./TreeRoot";
 import { filterProjects, FILTER_THRESHOLD, agentFromPath, projectFromPath, projectKey, PROJECTS_ROOT, projectTreeKeys } from "./treeModel";
 import { createRovingTree } from "./treeNav";
 import { Bookmarks, BOOKMARKS_KEY, bookmarkKey } from "./Bookmarks";
-import { bookmarks } from "../stores";
+
 
 const projectHref = (name: string) => `/p/${encodeURIComponent(name)}`;
 const settingsHref = (name: string) => `${projectHref(name)}/settings`;
@@ -56,6 +57,7 @@ const DRAG_TYPE = "application/x-terrarium-tree";
 const entryKey = (e: TreeEntry) => (e.kind === "folder" ? folderKey(e.folder.id) : projectKey(e.name));
 
 export function ProjectTree() {
+  const { agents, projectFolders, projects, bookmarks } = useInstance();
   const location = useLocation();
   const navigate = useNavigate();
   const [query, setQuery] = createSignal("");

@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Threads screen (TER-466, docs/api.md §6.13): the Inbox threads as a
 // forum table (`GET /api/threads`). Each row has a status icon, the topic with
 // the scope, the agent and the report-to under it, the messages, the open
@@ -13,7 +14,7 @@ import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, S
 import type { Board, Thread } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { api, events, inbox, projects } from "../../stores";
+
 import { CloseProposal, isConflict } from "./CloseProposal";
 import { NewThreadDialog } from "./NewThreadDialog";
 import { loadBoards, ProgressChip } from "./TrackedCards";
@@ -30,6 +31,7 @@ const EMPTY: Record<ThreadsViewId, string> = {
 };
 
 export default function ThreadsPage() {
+  const { api, events, inbox, projects } = useInstance();
   const now = useNow(30_000);
   const [params, setParams] = useSearchParams<{ status?: string; project?: string }>();
   const view = (): ThreadsViewId => threadsViewOf(params.status);

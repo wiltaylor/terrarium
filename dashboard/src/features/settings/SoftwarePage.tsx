@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Settings, Software tab: the build of the running daemon
 // (`GET /api/system/version`, docs/api.md §4): the version, the git ref,
 // the build time, and the host agents built from another ref
@@ -13,13 +14,14 @@ import { SafeHtml } from "../../components/SafeHtml";
 import { staleHosts } from "../../lib/build-version";
 import { renderMarkdown } from "../../lib/markdown";
 import { blockedReason, canRollback, imageText, outcomeChip, runningRun, updateTarget } from "../../lib/self-update";
-import { api } from "../../stores";
+
 import type { UpdateRun } from "../../api/types";
 
 /** How often the page reads the state while a run runs. */
 const POLL_MS = 3000;
 
 export default function SoftwarePage() {
+  const { api } = useInstance();
   const [version, { refetch }] = createResource(() => api.systemVersion());
   // A caller that cannot list the hosts sees no host line.
   const [hosts] = createResource(() => api.hosts.list().catch(() => null));
