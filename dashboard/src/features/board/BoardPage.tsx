@@ -1,5 +1,7 @@
 import { useInstance } from "../../instance";
 import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
+import { CommentPost } from "../../components/CommentPost";
+import { PostEditor } from "../../components/PostEditor";
 import { useParams, useSearchParams } from "@solidjs/router";
 import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
@@ -977,24 +979,10 @@ function CardDrawer(props: {
           {(c, index) => (
             <>
             <Show when={index() === read.first()}><ReadBoundary /></Show>
-            <div class="comment">
-              <div class="small muted">
-                <strong style={{ color: "var(--text)" }}>{c.author_name ?? c.author}</strong> · {ago(c.created_at)}
-                <Show when={c.session}>
-                  {(s) => (
-                    <>
-                      {" · "}
-                      <A href={sessionHref(s().id)} title={`${s().harness} session ${s().id}`}>
-                        View session
-                      </A>
-                    </>
-                  )}
-                </Show>
-              </div>
-              <div>
-                <TextMarkdown text={c.body} project={props.card.project} />
-              </div>
-            </div>
+            <CommentPost comment={c} index={index()} card={props.card.id} project={props.card.project} onQuote={(text) => {
+              setComment((old) => old + (old ? "\n\n" : "") + text);
+              commentInput?.focus();
+            }} />
             </>
           )}
         </For>
@@ -1012,7 +1000,9 @@ function CardDrawer(props: {
             }
           }}
         >
+          <PostEditor label="Comment" text={comment()} project={props.card.project}>
           <textarea ref={commentInput} value={comment()} onInput={(e) => setComment(e.currentTarget.value)} placeholder="Comment as operator" aria-label="Comment" />
+          </PostEditor>
           <EmojiPicker onPick={(code) => {
             const start = commentInput?.selectionStart ?? comment().length;
             const end = commentInput?.selectionEnd ?? start;

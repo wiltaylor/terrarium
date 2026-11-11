@@ -50,6 +50,12 @@ it("opens full details for a Done card absent from the active board", async () =
   await waitFor(() => expect(get).toHaveBeenCalledWith(done.id));
   await waitFor(() => expect(document.body.textContent).toContain("Full comment only"));
   expect(document.body.textContent).toContain("Full detail only");
+  const post = document.querySelector(".thread-post")!;
+  expect(post.querySelector(".thread-post-header")!.textContent).toContain("#1");
+  [...post.querySelectorAll("button")].find((b) => b.textContent === "Quote")!.click();
+  expect(document.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')!.value).toBe("> Full comment only\n\n");
+  [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Preview")!.click();
+  expect(document.querySelector('[aria-label="Comment preview"] blockquote')!.textContent).toContain("Full comment only");
   expect((await api.board.get("terrarium")).cards.some(c => c.id === done.id)).toBe(false);
   get.mockClear();
   const event = { kind: "card", project: "terrarium", card: "TER-other", data: {} } as import("../../api/types").AgentEvent;
