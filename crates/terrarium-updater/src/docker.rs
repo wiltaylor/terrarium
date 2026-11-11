@@ -843,7 +843,9 @@ impl Engine for Docker {
                 Err(error) => Err(error),
             };
             let t = resolved.unwrap_or_else(|_| {
-                tracing::warn!("cannot resolve Compose stop grace period (values hidden); using default");
+                tracing::warn!(
+                    "cannot resolve Compose stop grace period (values hidden); using default"
+                );
                 c["Config"]["StopTimeout"]
                     .as_u64()
                     .unwrap_or(0)
@@ -1142,9 +1144,14 @@ mod tests {
                     }
                 }
             });
-            let docker = Docker { socket, target: None };
+            let docker = Docker {
+                socket,
+                target: None,
+            };
             tokio::time::timeout(Duration::from_secs(5), docker.stop("daemon"))
-                .await.unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap();
             server.await.unwrap();
         }
     }
