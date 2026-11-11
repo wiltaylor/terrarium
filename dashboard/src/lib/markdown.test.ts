@@ -3,6 +3,26 @@ import { cardOfHref, renderWiki, resolveWikilink, safeUrl, splitFrontMatter, tar
 
 const ctx = { project: "terrarium", pages: new Set(["index", "designs/runner-v2"]), cardPrefixes: new Set(["TER", "WEB"]), prefixProject: { TER: "terrarium", WEB: "webshop" } };
 
+describe("GitHub emoji", () => {
+  it("expands only known names in wiki and text bodies", () => {
+    for (const textBody of [false, true]) {
+      const html = renderWiki(":white_check_mark: :+1: :not_a_real_emoji: file.rs:143: :constructor:", { ...ctx, textBody });
+      expect(html).toContain("✅ 👍 :not_a_real_emoji: file.rs:143: :constructor:");
+    }
+  });
+  it("leaves code spans, fenced and indented code unchanged", () => {
+    const html = renderWiki("`:smile:`\n\n```\n:smile:\n```\n\n    :smile:", ctx);
+    expect(html).not.toContain("😄");
+    expect(html.match(/:smile:/g)).toHaveLength(3);
+  });
+  it("does not expand URLs, but expands link labels", () => {
+    const html = renderWiki("https://example.org/:smile: [:+1:](https://example.org/:smile:) <https://example.org/:smile:>", ctx);
+    expect(html).not.toContain("😄");
+    expect(html).toContain(">👍</a>");
+    expect(html.match(/href="https:\/\/example.org\/:smile:"/g)).toHaveLength(3);
+  });
+});
+
 describe("card and memory text", () => {
   const render = (src: string) => renderWiki(src, { ...ctx, textBody: true, cardKeys: ctx.prefixProject });
   it("keeps single newlines local to text bodies", () => {
