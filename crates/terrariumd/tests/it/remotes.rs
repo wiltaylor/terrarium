@@ -29,7 +29,8 @@ async fn remote() -> TestDaemon {
 async fn artifact_capability_serves_without_credentials_and_ends_on_logout() {
     use base64::Engine;
     let mut home = TestDaemon::start().await;
-    home.boot(Some("127.0.0.1:0"), Some("test-home-operator")).await;
+    home.boot(Some("127.0.0.1:0"), Some("test-home-operator"))
+        .await;
     let remote = remote().await;
     link(&home, &remote, false).await;
     let artifact = remote.post("/api/projects/terra/artifacts", json!({
@@ -41,36 +42,94 @@ async fn artifact_capability_serves_without_credentials_and_ends_on_logout() {
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let mint = format!("{base}/api/remotes/lab/artifacts/{id}/url");
     // A static operator token does not stand in for a session binding.
-    assert_eq!(client.post(&mint).bearer_auth("test-home-operator").send().await.unwrap().status(), StatusCode::FORBIDDEN);
-    let login = client.post(format!("{base}/api/session"))
-        .bearer_auth("test-home-operator").json(&json!({})).send().await.unwrap();
+    assert_eq!(
+        client
+            .post(&mint)
+            .bearer_auth("test-home-operator")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let login = client
+        .post(format!("{base}/api/session"))
+        .bearer_auth("test-home-operator")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(login.status(), StatusCode::OK);
-    let cookie = login.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_owned();
+    let cookie = login.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
     let login: Value = login.json().await.unwrap();
     let csrf = login["csrf"].as_str().unwrap();
-    let signed = client.post(&mint).header(header::COOKIE, &cookie)
-        .header("x-csrf-token", csrf).send().await.unwrap();
-    assert_eq!(signed.status(), StatusCode::OK, "{}", signed.text().await.unwrap());
+    let signed = client
+        .post(&mint)
+        .header(header::COOKIE, &cookie)
+        .header("x-csrf-token", csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        signed.status(),
+        StatusCode::OK,
+        "{}",
+        signed.text().await.unwrap()
+    );
     let signed: Value = signed.json().await.unwrap();
     let url = signed["url"].as_str().unwrap();
-    let url = if url.starts_with('/') { format!("{base}{url}") } else { url.to_owned() };
+    let url = if url.starts_with('/') {
+        format!("{base}{url}")
+    } else {
+        url.to_owned()
+    };
     // An unauthenticated browser on the artifact origin needs only this URL.
     let response = client.get(&url).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    assert!(response.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("sandbox"));
+    assert!(
+        response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("sandbox")
+    );
     assert!(!response.headers().contains_key(header::SET_COOKIE));
     assert!(response.text().await.unwrap().contains("remote report"));
     // Neither an invalid signature nor a suffix for another file is accepted.
     let mut bad = url.clone();
     let last = bad.len() - 2;
     bad.replace_range(last..last + 1, "z");
-    assert_eq!(client.get(&bad).send().await.unwrap().status(), StatusCode::FORBIDDEN);
-    assert_eq!(client.get(format!("{url}other.txt")).send().await.unwrap().status(), StatusCode::FORBIDDEN);
-    let logout = client.delete(format!("{base}/api/session"))
-        .header(header::COOKIE, cookie).header("x-csrf-token", csrf).send().await.unwrap();
+    assert_eq!(
+        client.get(&bad).send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        client
+            .get(format!("{url}other.txt"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let logout = client
+        .delete(format!("{base}/api/session"))
+        .header(header::COOKIE, cookie)
+        .header("x-csrf-token", csrf)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(logout.status(), StatusCode::NO_CONTENT);
-    assert_eq!(client.get(&url).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        client.get(&url).send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]

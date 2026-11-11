@@ -84,7 +84,10 @@ pub(super) async fn mint(
     check_target(&target)?;
     let exp = (Utc::now().timestamp() + 120)
         .min(minted.exp)
-        .min(session.claims.exp);
+        .min(session.claims.exp)
+        .min(session.claims.auth_time.saturating_add(
+            i64::try_from(s.web.session_max_age.as_secs()).unwrap_or(i64::MAX),
+        ));
     let cap = Capability {
         remote: r.name,
         remote_id: r.id,
