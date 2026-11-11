@@ -7,7 +7,7 @@
 //! TERRARIUM_LIVE_DB=/tmp/live.db TERRARIUM_LIVE_STATE=$PWD/state \
 //! TERRARIUM_LIVE_HOMES=claude=$PWD/config/claude,codex=$PWD/config/codex,copilot=$PWD/config/copilot,pi=$PWD/config/pi \
 //! TERRARIUM_LIVE_AGENTS=smoke/probe,smoke/probe-codex,smoke/probe-copilot \
-//!   cargo test -p terrariumd --test transcripts_live -- --ignored --nocapture
+//!   cargo test -p terrariumd --test it transcripts_live:: -- --ignored --nocapture
 //! ```
 //!
 //! It serves the API router over the copy, with the fake supervisor (no

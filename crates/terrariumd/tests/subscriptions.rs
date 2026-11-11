@@ -2281,7 +2281,7 @@ fn base64_url(s: &str) -> String {
 /// Run each probe once against the real logins of this machine
 /// (`~/.claude`, `~/.codex`, and `COPILOT_GITHUB_TOKEN`/`GH_TOKEN`). Read-only
 /// GETs; prints the window numbers, never a token.
-/// `cargo test -p terrariumd --test subscriptions -- --ignored live_probes`
+/// `cargo test -p terrariumd --test it subscriptions::live_probes -- --ignored`
 #[tokio::test]
 #[ignore = "needs real logins and the network"]
 async fn live_probes_against_real_homes() {
