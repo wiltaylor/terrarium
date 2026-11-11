@@ -28,10 +28,16 @@ const OPENAI: &str = "https://chatgpt.com/backend-api/wham/usage";
 async fn litellm_is_claude_only_and_keeps_the_key_private() {
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;
-    let sub = td.post("/api/subscriptions/lite/api-key", json!({
-        "provider": "litellm", "key": "E2E-lite-secret",
-        "base_url": "https://proxy.example.com", "models": ["team-model"]
-    })).await.ok();
+    let sub = td
+        .post(
+            "/api/subscriptions/lite/api-key",
+            json!({
+                "provider": "litellm", "key": "E2E-lite-secret",
+                "base_url": "https://proxy.example.com", "models": ["team-model"]
+            }),
+        )
+        .await
+        .ok();
     assert_eq!(sub["provider"], "litellm");
     assert_eq!(sub["display_name"], "LiteLLM");
     assert_eq!(sub["harnesses"], json!(["claude"]));
@@ -40,11 +46,16 @@ async fn litellm_is_claude_only_and_keeps_the_key_private() {
     assert_eq!(sub["no_quota"], false);
     assert!(!sub.to_string().contains("E2E-lite-secret"));
     for harness in ["pi", "codex", "copilot"] {
-        let r = td.post("/api/subscriptions", json!({
-            "name": format!("lite-{harness}"), "provider": "litellm",
-            "harnesses": [harness],
-            "selfhosted": {"api": "anthropic", "base_url": "https://proxy.example.com"}
-        })).await;
+        let r = td
+            .post(
+                "/api/subscriptions",
+                json!({
+                    "name": format!("lite-{harness}"), "provider": "litellm",
+                    "harnesses": [harness],
+                    "selfhosted": {"api": "anthropic", "base_url": "https://proxy.example.com"}
+                }),
+            )
+            .await;
         assert_eq!(r.status, 422);
     }
     let r = td.post("/api/subscriptions/lite-http/api-key", json!({

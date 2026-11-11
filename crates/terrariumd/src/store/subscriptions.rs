@@ -413,7 +413,12 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
     }
     let mut d = def.clone();
     let litellm = d.provider.trim().eq_ignore_ascii_case("litellm");
-    d.provider = if litellm { "litellm" } else { selfhosted::PROVIDER }.to_owned();
+    d.provider = if litellm {
+        "litellm"
+    } else {
+        selfhosted::PROVIDER
+    }
+    .to_owned();
     if d.plan.is_some() && !terrarium_adapter_pi::provider::is_api_key(&d) {
         return Err(ApiError::invalid(format!(
             "subscription `{}`: a self-hosted subscription has no plan",
@@ -444,7 +449,9 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
             d.harnesses = vec![HarnessId::Claude];
         }
         if d.harnesses.iter().any(|h| *h != HarnessId::Claude) {
-            return Err(ApiError::invalid("a LiteLLM subscription is for the claude harness only"));
+            return Err(ApiError::invalid(
+                "a LiteLLM subscription is for the claude harness only",
+            ));
         }
     }
     if d.harnesses.is_empty() {

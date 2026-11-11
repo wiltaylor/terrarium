@@ -1474,7 +1474,10 @@ async fn api_key(
     // one needs the server's base URL.
     let is_sh = selfhosted::is_selfhosted(&key.provider);
     match &exists {
-        Some(s) if s.is_selfhosted() != is_sh || ((s.provider == "litellm") != (key.provider == "litellm")) => {
+        Some(s)
+            if s.is_selfhosted() != is_sh
+                || ((s.provider == "litellm") != (key.provider == "litellm")) =>
+        {
             return Err(ApiError::invalid(format!(
                 "cannot store a {} key on subscription `{name}`: it is a {} subscription",
                 key.provider, s.provider
@@ -1550,7 +1553,9 @@ async fn api_key(
             base_url: key.base_url.clone().unwrap_or_default(),
             models: key.models.clone(),
             ..SelfHosted::default()
-        }.checked().map_err(ApiError::invalid)?;
+        }
+        .checked()
+        .map_err(ApiError::invalid)?;
         if !sh.base_url.to_ascii_lowercase().starts_with("https://") {
             return Err(ApiError::invalid("LiteLLM base_url must use https"));
         }
