@@ -5157,7 +5157,10 @@ mod tests {
         git_in(&s.src, &["tag", "-a", "v1.2.4", "-m", "release"]);
         git_in(&s.src, &["tag", "other"]);
         git_in(&s.src, &["update-ref", "refs/job/head", &sha]);
-        git_in(&s.src, &["bundle", "create", "-q", "../b", "refs/job/head", "--tags"]);
+        git_in(
+            &s.src,
+            &["bundle", "create", "-q", "../b", "refs/job/head", "--tags"],
+        );
         let bundle = std::fs::read(s.src.parent().unwrap().join("b")).unwrap();
         for kind in ["release", "validate", "e2e"] {
             let dir = s.src.parent().unwrap().join(kind);
@@ -5167,7 +5170,14 @@ mod tests {
                 &bundle,
             );
             assert!(ok, "{text}");
-            assert_eq!(git_in(&dir, &["tag", "--list"]), if kind == "release" { "v1.2.3\nv1.2.4" } else { "" });
+            assert_eq!(
+                git_in(&dir, &["tag", "--list"]),
+                if kind == "release" {
+                    "v1.2.3\nv1.2.4"
+                } else {
+                    ""
+                }
+            );
         }
     }
 

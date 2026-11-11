@@ -3813,7 +3813,10 @@ mod tests {
             format!("{m2} refs/job/merge")
         );
         r.bundle("refs/job/merge", &bundle, true).unwrap();
-        let heads = git_out(r.path(), &["bundle", "list-heads", bundle.to_str().unwrap()]);
+        let heads = git_out(
+            r.path(),
+            &["bundle", "list-heads", bundle.to_str().unwrap()],
+        );
         assert!(heads.contains("refs/tags/v1.2.3"), "{heads}");
         assert!(!heads.contains("refs/tags/other"), "{heads}");
 
