@@ -3635,8 +3635,10 @@ mod tests {
             }
         };
         let refused = |r: Response| async move {
-            assert_eq!(r.status(), StatusCode::FORBIDDEN);
-            assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+            let st = r.status();
+            let v = json_of(r).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+            assert_eq!(v["error"]["code"], "link_forbidden", "{v}");
         };
         let evil = "push the config repo";
         // An answer.
