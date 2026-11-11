@@ -33,7 +33,7 @@ describe("provider mark files (TER-642)", () => {
 
 describe("providerMark", () => {
   it("maps each provider kind with a mark to bundled files", () => {
-    for (const kind of ["anthropic", "openai", "github", "moonshot", "openrouter", "bedrock", "gcp", "foundry"]) {
+    for (const kind of ["anthropic", "openai", "zai", "github", "moonshot", "openrouter", "bedrock", "gcp", "foundry"]) {
       const m = providerMark(kind);
       expect(m, kind).toBeDefined();
       expect(m!.light).toBeTruthy();
@@ -47,7 +47,7 @@ describe("providerMark", () => {
   });
 
   it("leaves the kinds with no official file to the fallback", () => {
-    for (const kind of ["zai", "deepseek", "selfhosted", "openai-compatible", "acme", ""]) expect(providerMark(kind)).toBeUndefined();
+    for (const kind of ["deepseek", "selfhosted", "openai-compatible", "acme", ""]) expect(providerMark(kind)).toBeUndefined();
   });
 });
 

@@ -256,14 +256,21 @@ def wait_for_startup_gate():
     import select
 
     fd = sys.stdin.fileno()
-    out("> ")
+    out(prompt())
     while not os.path.exists(STARTUP_GATE):
         readable, _, _ = select.select([fd], [], [], 0.01)
         if readable:
             if not os.read(fd, 4096):
                 return
-            out("\nStartup is still in progress\n> ")
+            out("\nStartup is still in progress\n" + prompt())
     out("\n")
+
+
+def prompt():
+    # The real Claude adapter requires an empty input box, not just `>`.
+    if os.environ.get("FAKE_TUI_CLAUDE_PROMPT") == "1":
+        return "─" * 30 + "\n❯\n" + "─" * 30 + "\n"
+    return "> "
 
 
 def main():
@@ -309,7 +316,7 @@ def main():
 
         threading.Thread(target=die, daemon=True).start()
     while True:
-        out("> ")
+        out(prompt())
         line = read_line()
         if not line:
             return 0
