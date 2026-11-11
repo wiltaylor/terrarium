@@ -34,15 +34,17 @@ pub fn litellm_fallback(
         return Ok(false);
     }
     if sub.probe_status == "failed"
-        && sub.probe_error.as_deref().is_some_and(|e| e.contains("no spend from LiteLLM"))
+        && sub
+            .probe_error
+            .as_deref()
+            .is_some_and(|e| e.contains("no spend from LiteLLM"))
     {
         return Ok(true);
     }
     Ok(!subs::latest_windows(conn, &sub.name)?.iter().any(|w| {
         w.window == "key-spend"
-            && DateTime::parse_from_rfc3339(&w.at).is_ok_and(|at| {
-                now.signed_duration_since(at) < chrono::Duration::minutes(10)
-            })
+            && DateTime::parse_from_rfc3339(&w.at)
+                .is_ok_and(|at| now.signed_duration_since(at) < chrono::Duration::minutes(10))
     }))
 }
 
@@ -59,13 +61,11 @@ pub fn window(
         }
         sub.selfhosted.as_ref().and_then(|s| s.budget_usd)
     } else {
-        sub
-        .cloud_kind()
-        .and(sub.cloud.as_ref())
-        .and_then(|c| c.budget_usd)
+        sub.cloud_kind()
+            .and(sub.cloud.as_ref())
+            .and_then(|c| c.budget_usd)
     };
-    let Some(budget) = budget
-    else {
+    let Some(budget) = budget else {
         return Ok(None);
     };
     let spent = cloud_spend::month_spend(conn, &sub.name, &cloud::month_key(now))?;
@@ -215,6 +215,52 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[tokio::test]
+    async fn litellm_fallback_yields_to_fresh_spend_and_recovers_on_no_spend() {
+        let db = db();
+        db.write("t", |t| {
+            let mut d = def("proxy", "litellm", None);
+            d.cloud = None;
+            d.selfhosted = Some(terrarium_core::selfhosted::SelfHosted {
+                api: terrarium_core::selfhosted::Api::Anthropic,
+                base_url: "https://proxy.example".into(),
+                budget_usd: Some(100),
+                ..Default::default()
+            });
+            subs::upsert_def(t, &d, SOURCE_API)?;
+            cloud_spend::record(
+                t,
+                "a",
+                "s",
+                Some("proxy"),
+                &cloud::month_key(Utc::now()),
+                80.0,
+            )?;
+            let sub = subs::get(t, "proxy")?;
+            let now = Utc::now();
+            assert!(litellm_fallback(t, &sub, now)?);
+            assert_eq!(write_window(t, &sub, now, "link")?.unwrap().used_pct, 80.0);
+            subs::insert_sample(t, "proxy", "key-spend", 10.0, None, &json!({}))?;
+            assert!(!litellm_fallback(t, &sub, now)?);
+            assert!(window(t, &sub, now)?.is_none());
+            subs::set_probe_result(t, "proxy", Err("parse: no spend from LiteLLM"))?;
+            let mut sub = subs::get(t, "proxy")?;
+            assert!(litellm_fallback(t, &sub, now)?);
+            assert_eq!(window(t, &sub, now)?.unwrap().used_usd, 80.0);
+            sub.selfhosted.as_mut().unwrap().budget_usd = None;
+            assert!(window(t, &sub, now)?.is_none());
+            sub.probe_error = None;
+            assert!(litellm_fallback(
+                t,
+                &sub,
+                now + chrono::Duration::minutes(11)
+            )?);
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     /// The window has used, remaining, and used_pct; the 80 percent line

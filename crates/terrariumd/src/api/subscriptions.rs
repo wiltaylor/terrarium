@@ -331,16 +331,25 @@ fn view_with_key_presence(
     let now = chrono::Utc::now();
     let fallback = crate::cloud_budget::litellm_fallback(c, &sub, now)?;
     let fallback_spend_usd = if fallback {
-        Some(crate::store::cloud_spend::month_spend(c, &sub.name, &terrarium_core::cloud::month_key(now))?)
+        Some(crate::store::cloud_spend::month_spend(
+            c,
+            &sub.name,
+            &terrarium_core::cloud::month_key(now),
+        )?)
     } else {
         None
     };
     let windows: Vec<WindowView> = subs::latest_windows(c, &sub.name)?
         .into_iter()
-        .filter(|w| sub.provider != "litellm" || match w.window.as_str() {
-            "budget" => fallback && sub.selfhosted.as_ref().and_then(|s| s.budget_usd).is_some(),
-            "key-spend" => !fallback,
-            _ => true,
+        .filter(|w| {
+            sub.provider != "litellm"
+                || match w.window.as_str() {
+                    "budget" => {
+                        fallback && sub.selfhosted.as_ref().and_then(|s| s.budget_usd).is_some()
+                    }
+                    "key-spend" => !fallback,
+                    _ => true,
+                }
         })
         .map(WindowView::from)
         .collect();
