@@ -25,6 +25,12 @@ async fn api_wait_set_show_clear_and_atomic_card_writes() {
     let body = json!({"dependencies":[{"card":dep,"target":"review"}],"mode":"any","action":{"wake":true}});
     let configured = td.put(&path, body.clone()).await;
     assert_eq!(configured.ok()["dependencies"][0]["met"], false);
+    assert!(configured.ok()["generation"].is_string());
+    assert!(configured.ok()["wake_recipient"].is_string());
+    assert_eq!(configured.ok()["dependencies"][0]["hidden"], false);
+    let board = td.get("/api/projects/p/board").await;
+    let tile = board.ok()["cards"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap();
+    assert_eq!(tile["wait"], json!({"mode":"any","met":false,"deps_met":0,"deps_total":1}));
     assert_eq!(td.get(&format!("/api/cards/{id}")).await.ok()["wait"], *configured.ok());
     td.post(&format!("/api/cards/{dep}/move"), json!({"column":"review"})).await.ok();
     let met = td.get(&path).await;
@@ -43,6 +49,10 @@ async fn api_wait_set_show_clear_and_atomic_card_writes() {
     assert_eq!(td.get(&format!("/api/cards/{id}")).await.ok()["title"], "wait test");
     let conflict = td.patch(&format!("/api/cards/{id}"), json!({"depends_on":[],"wait":body})).await;
     assert_eq!(conflict.status.as_u16(), 422);
+    let pending = card(&td).await;
+    let failed = td.post("/api/projects/p/cards", json!({"title":"blocked initial move","column":"working",
+        "wait":{"dependencies":[{"card":pending}]}})).await;
+    assert_eq!(failed.status.as_u16(), 409);
 }
 
 #[tokio::test]
@@ -57,7 +67,7 @@ async fn api_wait_permissions_and_cross_project_redaction() {
     assert_eq!(td.put_as(&agent, &path, body.clone()).await.status.as_u16(), 403);
     td.put(&path, body).await.ok();
     let hidden = td.get_as(&agent, &path).await;
-    assert_eq!(hidden.ok()["dependencies"][0], json!({"card":null,"target":null,"met":null}));
+    assert_eq!(hidden.ok()["dependencies"][0], json!({"card":null,"hidden":true,"met":false}));
     assert_eq!(td.get_as(&agent, &format!("/api/cards/{secret}/wait-on")).await.status.as_u16(), 403);
     let foreign = card(&td).await;
     assert_eq!(td.put_as(&agent, &format!("/api/cards/{foreign}/wait-on"), json!({"dependencies":[{"card":own}]})).await.status.as_u16(), 403);

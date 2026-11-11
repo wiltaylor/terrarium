@@ -251,20 +251,6 @@ async fn active_cards(
     ))
 }
 
-#[derive(Deserialize)]
-struct NewCardWait {
-    wait: Option<card_waits::Wait>,
-    #[serde(flatten)]
-    card: NewCard,
-}
-
-#[derive(Deserialize)]
-struct CardPatchWait {
-    wait: Option<card_waits::Wait>,
-    #[serde(flatten)]
-    card: CardPatch,
-}
-
 async fn show_wait(
     State(state): State<Shared>, actor: Actor, Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -292,19 +278,12 @@ async fn create_card(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
-    ApiJson(body): ApiJson<NewCardWait>,
+    ApiJson(body): ApiJson<NewCard>,
 ) -> ApiResult<(StatusCode, Json<Card>)> {
     let card = state
         .db
         .write(actor.label(), move |t| {
-            if body.wait.is_some() && !body.card.depends_on.is_empty() {
-                return Err(crate::error::ApiError::invalid("wait and depends_on are mutually exclusive"));
-            }
-            let card = board::create_card(t, &actor, &name, body.card)?;
-            if let Some(wait) = body.wait {
-                card_waits::set(t, &actor, &card.id, &wait)?;
-            }
-            board::get_card(t, &card.id)
+            board::create_card(t, &actor, &name, body)
         })
         .await?;
     Ok((StatusCode::CREATED, Json(card)))
@@ -350,19 +329,12 @@ async fn update(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-    ApiJson(patch): ApiJson<CardPatchWait>,
+    ApiJson(patch): ApiJson<CardPatch>,
 ) -> ApiResult<Json<Card>> {
     let card = state
         .db
         .write(actor.label(), move |t| {
-            if patch.wait.is_some() && patch.card.depends_on.is_some() {
-                return Err(crate::error::ApiError::invalid("wait and depends_on are mutually exclusive"));
-            }
-            let card = board::update_card(t, &actor, &id, patch.card)?;
-            if let Some(wait) = patch.wait {
-                card_waits::set(t, &actor, &card.id, &wait)?;
-            }
-            board::get_card(t, &card.id)
+            board::update_card(t, &actor, &id, patch)
         })
         .await?;
     Ok(Json(card))

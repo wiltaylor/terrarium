@@ -234,6 +234,23 @@ async fn link_operator_routes_deny_by_default() {
 }
 
 #[tokio::test]
+async fn link_card_wait_routes_deny_all_methods() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state_at(dir.path());
+    seed_sysadmin(&s).await;
+    let (_, key) = paired(&s, false).await;
+    let auth = format!("Bearer {key}");
+    let h = [("authorization", auth.as_str())];
+    let (_, registry) = routes_with_registry(s.clone(), false, false);
+    for method in ["GET", "PUT", "DELETE"] {
+        assert_eq!(registry.access(&method.parse().unwrap(), "/api/cards/P-1/wait-on"), Some(link_registry::Access::OperatorOnly));
+        let response = send_body(link_app(&s), method, "/api/cards/P-1/wait-on", &h,
+            &serde_json::json!({"dependencies":[{"card":"P-2"}]})).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method}");
+    }
+}
+
+#[tokio::test]
 async fn link_unregistered_routes_never_reach_handlers() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let dir = tempfile::tempdir().unwrap();

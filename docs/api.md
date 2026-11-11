@@ -4672,6 +4672,46 @@ cards per page. Use the response body's `next_cursor` for the next page
 (null at the end). Filtering and version grouping on the Done screen apply
 to loaded pages. `PATCH board` retains its full-card response for compatibility.
 
+### Persistent card waits
+
+`GET /api/cards/{id}/wait-on` returns `null` or a configured wait:
+
+```json
+{"dependencies":[{"card":"TER-12","target":"review","met":false,"hidden":false}],
+ "mode":"all","action":{"move_to":"ready","comment":null,"wake":true},
+ "met_at":null,"generation":"opaque generation","wake_recipient":"operator"}
+```
+
+The same value appears as `wait` in `GET /api/cards/{id}`. Reads require
+card-read access before loading the configuration. Each dependency's `met`
+is its current condition, while `met_at` latches completion even if that
+dependency later moves back. A dependency the reader cannot read is exactly
+`{"card":null,"hidden":true,"met":false}` (with its actual condition boolean),
+without an ID, target, title, column or project. `wake_recipient` is the
+resolved address key: assignee, setter (excluding operator), project inbox
+recipient, then operator. `generation` changes whenever the wait is reset.
+
+`PUT /api/cards/{id}/wait-on` accepts `dependencies` (1–128 `{card,target}`
+entries), `mode` (`all` by default, or `any`) and `action` (`move_to`,
+`comment`, `wake`). Targets are column names or roles, or null for
+accepted/done. Cross-project card references use `project:CARD-ID` and
+require read access to that project. The setter must own the card or be a
+project admin. Caller-supplied `met_at` is ignored. The response is the
+read shape above. `DELETE` uses the same ownership gate, clears the wait
+and dependencies, and returns 204. Link credentials cannot use these routes.
+
+Card create and edit accept the same configuration under `wait`, atomically
+with the other changes. `wait` and `depends_on` are mutually exclusive.
+Board summaries contain only `wait:null` or
+`{"mode":"all","met":false,"deps_met":0,"deps_total":1}`, without dependency
+IDs or titles. Summary `met` is latched completion and counts are live.
+
+CLI: `card wait-on TER-9 set --on TER-12:review --on thevault:TV-3:done
+--any --move-to ready --wake`, `card wait-on TER-9 list`, and
+`card wait-on TER-9 clear`. The set options also work on `card new` and
+`card edit`. `card show` prints conditions and the action in text and JSON.
+These persistent waits are separate from the one-shot `card wait` command.
+
 A new board has the columns `backlog`, `ready`, `in_progress` (role
 `working`), `validating` (role `validating`), `review` (role `review`),
 `merge_queue` (role `merge_queue`), `accepted` (role `accepted`), `blocked`
