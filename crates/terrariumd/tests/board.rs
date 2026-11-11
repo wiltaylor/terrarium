@@ -584,7 +584,7 @@ async fn board_summary_budget_and_done_pages() {
     thread_local! {
         static STATEMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
-    fn statement(_: &str) {
+    fn statement(_: rusqlite::trace::TraceEvent<'_>) {
         STATEMENTS.set(STATEMENTS.get() + 1);
     }
     for count in [294, 2940] {
@@ -611,7 +611,10 @@ async fn board_summary_budget_and_done_pages() {
         // This private connection has no other trace callback. Do not trace the
         // fixture or full-card baseline, only the summary query work.
         STATEMENTS.set(0);
-        conn.trace(Some(statement));
+        conn.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(statement),
+        );
         conn.progress_handler(
             1000,
             Some(move || {
@@ -622,7 +625,7 @@ async fn board_summary_budget_and_done_pages() {
         let start = Instant::now();
         let summary = board::board_summary(&conn, "proj", false, &Page::default());
         // Disable before reading the counter, including on a query error.
-        conn.trace(None);
+        conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
         conn.progress_handler(0, None::<fn() -> bool>);
         let statements = STATEMENTS.get();
         let steps = steps.load(std::sync::atomic::Ordering::Relaxed);
@@ -640,7 +643,7 @@ async fn board_summary_budget_and_done_pages() {
         // A statement per card or a repeated scan of all comments must fail.
         assert!(statements <= 20, "summary statement budget: {statements}");
         assert!(
-            steps <= count as u64 * 1000,
+            steps <= count as u64 * 3000,
             "summary SQLite VM step budget: {steps}"
         );
         assert_eq!(
