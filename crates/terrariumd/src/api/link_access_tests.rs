@@ -487,3 +487,12 @@ fn link_remote_artifact_registrations_keep_their_access_classes() {
         }
     }
 }
+
+#[test]
+fn link_job_log_cleanup_registration_keeps_project_policy() {
+    let (_, registry) = routes_with_registry(state(), false, false);
+    assert_eq!(
+        registry.access(&axum::http::Method::POST, "/api/projects/p/jobs/cleanup"),
+        Some(link_registry::Access::Conditional)
+    );
+}

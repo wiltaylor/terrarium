@@ -158,6 +158,11 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             put(set_aliases),
             &[(axum::http::Method::PUT, super::link_registry::Access::Link)],
         )
+        .route(
+            "/projects/{name}/jobs/cleanup",
+            post(cleanup_logs),
+            &[(axum::http::Method::POST, super::link_registry::Access::Conditional)],
+        )
 }
 
 /// The host caps and the running jobs on each host.
@@ -423,8 +428,34 @@ async fn show(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-) -> ApiResult<Json<Job>> {
-    Ok(Json(find(&state, &actor, id).await?))
+) -> ApiResult<Json<Value>> {
+    let job = find(&state, &actor, id).await?;
+    let id = job.id.clone();
+    let logs = state
+        .db
+        .read(move |c| crate::job_logs::for_job(c, &id))
+        .await?;
+    let mut value = json!(job);
+    value["logs"] = json!(logs);
+    Ok(Json(value))
+}
+
+#[derive(Default, Deserialize)]
+struct CleanupLogs {
+    #[serde(default)]
+    after: i64,
+}
+
+async fn cleanup_logs(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(body): ApiJson<CleanupLogs>,
+) -> ApiResult<Json<Value>> {
+    policy::admin_project(&actor, &name, "cleaning retained job logs")?;
+    Ok(Json(
+        crate::job_logs::cleanup(&state, name, body.after.max(0)).await?,
+    ))
 }
 
 /// Cancel: the actor that queued the job, the card's worker, or a

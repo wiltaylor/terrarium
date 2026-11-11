@@ -879,6 +879,12 @@
     },
     {
       "source": "api/jobs.rs",
+      "registration": "\"/projects/{name}/jobs/cleanup\",post(cleanup_logs)",
+      "access": "conditional",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
       "registration": "\"/release-targets\",get(list_release_targets)",
       "access": "other",
       "cases": []
