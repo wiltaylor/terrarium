@@ -104,6 +104,15 @@ describe("App project routes", () => {
     await waitFor(() => expect(root.textContent).toContain("remote not found"));
     expect(root.textContent).not.toContain("Cards page");
   });
+
+  it("keeps remote project names, queries and hashes on legacy redirects", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ name: "lab", url: "https://lab.example", status: "online" }))));
+    const root = mount("/remote/lab/p/my%20app/board/tests/R1?filter=failed#result");
+    await waitFor(() => expect(root.textContent).toContain("Test run page"));
+    expect(window.location.pathname).toBe("/remote/lab/p/my%20app/tests/R1");
+    expect(window.location.search).toBe("?filter=failed");
+    expect(window.location.hash).toBe("#result");
+  });
   it("opens Board at the project index in the real route tree", async () => {
     const root = mount("/p/my%20app");
     await waitFor(() => expect(root.textContent).toContain("Cards page"));
