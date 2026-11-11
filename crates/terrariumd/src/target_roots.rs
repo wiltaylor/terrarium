@@ -706,7 +706,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             continue;
         }
         let key = target.clone();
-        let row = match state.db.read(move |c| targets::get(c, &key)).await {
+        let mut row = match state.db.read(move |c| targets::get(c, &key)).await {
             Ok(row) => row,
             Err(e) => {
                 refusal(state, &id, &project, &target, &e.to_string()).await?;
@@ -714,6 +714,17 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
                 continue;
             }
         };
+        // Roots are recorded against the VM's resolved SSH definition. Resolve
+        // the current VM too, so cleanup checks the same machine identity.
+        if row.def.kind == terrarium_core::config::TargetKind::Exedev {
+            match crate::exedev::exec_def(state, &row.def) {
+                Ok(def) => row.def = def,
+                Err(e) => {
+                    refusal(state, &id, &project, &target, &e.to_string()).await?;
+                    continue;
+                }
+            }
+        }
         if !same_location(&definition, &row.def) {
             refusal(
                 state,
