@@ -113,7 +113,8 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
         if !pending
             || board::is_held(c, &request.card)?
             || board::get_card(c, &request.card)?.archived
-            || board::get_card(c, &request.card)?.column != board::role_name(c, &request.project, "ready", "ready")?
+            || board::get_card(c, &request.card)?.column
+                != board::role_name(c, &request.project, "ready", "ready")?
             || spawns::open_bound(
                 c,
                 &spawns::Bound::new(crate::bound::KIND_CARD, &request.card),

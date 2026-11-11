@@ -3223,10 +3223,16 @@ async fn conflict_repair_spawns_once_and_returns_conflicts_to_live_worker() {
     // No effect is required: reconciliation alone recovers the request.
     terrariumd::conflict_fixes::pass(&state(&td)).await;
     terrariumd::conflict_fixes::pass(&state(&td)).await;
-    let errors = state(&td).db.read(|c| {
-        let mut q = c.prepare("SELECT last_error FROM conflict_fixes WHERE last_error IS NOT NULL")?;
-        Ok(q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
-    }).await.unwrap();
+    let errors = state(&td)
+        .db
+        .read(|c| {
+            let mut q =
+                c.prepare("SELECT last_error FROM conflict_fixes WHERE last_error IS NOT NULL")?;
+            Ok(q.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap();
     assert!(errors.is_empty(), "{errors:?}");
     let bound = a.clone();
     let sp = state(&td)
