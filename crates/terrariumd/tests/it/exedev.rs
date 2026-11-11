@@ -389,7 +389,9 @@ fn state(td: &TestDaemon) -> terrariumd::api::Shared {
 
 #[tokio::test]
 async fn workspace_sync_uses_exedev_work_root_and_pulls_output() {
-    let (td, _, _, _, _) = daemon().await;
+    let (td, _, _, _, ssh) = daemon().await;
+    // ssh_plan sends one shell command, whereas rsync sends a server argv.
+    std::fs::write(&ssh, "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nshift\nif [ \"$#\" = 1 ]; then exec sh -c \"$1\"; else exec \"$@\"; fi\n").unwrap();
     let base = td.dir.path().join("remote-work");
     let mut definition = target("sync", 3600);
     definition["sync_workspace"] = json!(true);
