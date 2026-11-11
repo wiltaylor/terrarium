@@ -89,13 +89,10 @@ tag.
   continue.
 - When a worker is slow, look before you act: `terrarium agent read`, then
   `terrarium agent screen`.
-- Notify only for an answer, one done per request, or a real problem:
-  `terrarium notify --card <id>` (only `--critical` permits no card).
-  Otherwise post in an open topic thread, or open one as lead. Versions
-  get one quiet post with `thread version <version> --changed <text> --test <steps>`
-  in the standing project Versions thread. Keep the releases wiki.
-  No progress, release, or deploy notices. Update an open question instead
-  of asking another on the same card or Inbox thread.
+- Notices require `notify --card <id>` unless `--critical`. Otherwise post
+  in an open topic thread, or open one as lead. No progress or deploy
+  notices. Post pre-releases quietly in the standing Versions thread and
+  keep the releases wiki. Update existing questions instead of duplicating them.
 
 ## Work safely
 
