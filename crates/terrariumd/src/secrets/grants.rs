@@ -893,7 +893,8 @@ pub(crate) mod tests {
     /// ([`terrarium_core::env_deny`]), plus its own names. The exact names
     /// that the daemon sends multi-line values under
     /// ([`terrarium_host::docker::CLI_ALLOWED_ENV`]) are the one exception
-    /// (TER-541; the SSH key of a checkout comes on one line, TER-577): a grant cannot set them, and the fallback lets them
+    /// (TER-541; the SSH key of a checkout comes on one line, TER-577): a
+    /// grant cannot set them, and the fallback lets them
     /// through. Any other `TERRARIUM_*` name is refused.
     #[test]
     fn the_host_agent_refuses_every_name_that_a_grant_refuses() {

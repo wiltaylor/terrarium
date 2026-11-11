@@ -23,12 +23,6 @@ export function bookmarkHref(value: string, origin: string): string | null {
 /** The daemon refused the value itself (422): retrying the same item cannot help. */
 const refused = (e: unknown) => e instanceof ApiError && (e.status === 400 || e.status === 422);
 
-/**
- * The bookmarks of the sidebar. With `remote`, the daemon keeps them for the
- * operator. A caller that the daemon forbids (403: not the operator) keeps
- * them in this browser instead, with no error banner on each refresh
- * (TER-257).
- */
 const bytes = (s: string) => new TextEncoder().encode(s).length;
 
 /** Why `add(title, value)` refuses a new bookmark, for the message that the page shows (TER-257). */
@@ -47,6 +41,12 @@ export function skippedReport(rows: readonly Bookmark[]): Error | null {
   return new Error(`${rows.length === 1 ? "1 old bookmark of this browser was" : `${rows.length} old bookmarks of this browser were`} not imported, the daemon refused them: ${names}.`);
 }
 
+/**
+ * The bookmarks of the sidebar. With `remote`, the daemon keeps them for the
+ * operator. A caller that the daemon forbids (403: not the operator) keeps
+ * them in this browser instead, with no error banner on each refresh
+ * (TER-257).
+ */
 export function createBookmarksStore(storage: Pick<Storage, "getItem" | "setItem"> | null, origin: string, server?: Api["bookmarks"]) {
   let remote = server;
   const initial: Bookmark[] = [];
@@ -69,7 +69,7 @@ export function createBookmarksStore(storage: Pick<Storage, "getItem" | "setItem
   let migrated = false;
   const enqueue = (work: () => Promise<void>) => {
     queue = queue.then(work).catch(async (e: unknown) => {
-      if (remote && e instanceof ApiError && e.status === 403) {
+      if (e instanceof ApiError && e.status === 403) {
         // Not the operator: the bookmarks stay in this browser.
         remote = undefined;
         save(items());
@@ -134,7 +134,7 @@ export function createBookmarksStore(storage: Pick<Storage, "getItem" | "setItem
       const r = remote;
       if (r) void enqueue(async () => {
         await migrate();
-        setItems(await r.add(title.trim(), href, previousHref));
+        if (remote) setItems(await remote.add(title.trim(), href, previousHref));
         setError(null);
       });
       return true;
@@ -146,7 +146,7 @@ export function createBookmarksStore(storage: Pick<Storage, "getItem" | "setItem
       const r = remote;
       if (r) void enqueue(async () => {
         await migrate();
-        setItems(await r.remove(href));
+        if (remote) setItems(await remote.remove(href));
         setError(null);
       });
     },

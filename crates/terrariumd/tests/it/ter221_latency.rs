@@ -312,6 +312,11 @@ async fn latency_idle() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual load measurement: saturates all available CPUs"]
 async fn latency_under_load() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("terrariumd::db_timing=debug")
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .try_init();
     let (td, cards, noise) = lab().await;
     let st = state(&td);
     let stop = Arc::new(AtomicBool::new(false));

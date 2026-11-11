@@ -10,7 +10,7 @@ import { onTestFinished, vi } from "vitest";
  * loaded merge host (TER-707). The 10 s default only slows a test that fails.
  */
 export function waitFor<T>(check: () => T | Promise<T>, timeout = 10_000): Promise<T> {
-  return vi.waitFor(check, { timeout, interval: 2 });
+  return vi.waitFor(check, { timeout, interval: 50 });
 }
 
 /**
