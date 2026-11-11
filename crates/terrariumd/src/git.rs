@@ -2705,10 +2705,13 @@ impl JobRepo {
     }
 
     /// Write a bundle of `refname` (with its whole history) to `out`.
-    pub fn bundle(&self, refname: &str, out: &Path) -> Result<(), GitError> {
+    pub fn bundle(&self, refname: &str, out: &Path, release_tags: bool) -> Result<(), GitError> {
         let o = out.to_string_lossy().into_owned();
-        self.local(&["bundle", "create", "-q", o.as_str(), refname])
-            .map(|_| ())
+        let mut args = vec!["bundle", "create", "-q", o.as_str(), refname];
+        if release_tags {
+            args.push("--glob=refs/tags/v*");
+        }
+        self.local(&args).map(|_| ())
     }
 
     /// Push the commit `sha` to `refs/heads/<branch>` of `c.url`, with the
@@ -3795,8 +3798,10 @@ mod tests {
         }
 
         r.set_ref("refs/job/merge", &m2).unwrap();
+        r.set_ref("refs/tags/v1.2.3", &next).unwrap();
+        r.set_ref("refs/tags/other", &next).unwrap();
         let bundle = dir.join("daemon/jobs/p/J1.bundle");
-        r.bundle("refs/job/merge", &bundle).unwrap();
+        r.bundle("refs/job/merge", &bundle, false).unwrap();
         let heads = Command::new("git")
             .args(["bundle", "list-heads"])
             .arg(&bundle)
@@ -3807,6 +3812,10 @@ mod tests {
             String::from_utf8_lossy(&heads.stdout).trim(),
             format!("{m2} refs/job/merge")
         );
+        r.bundle("refs/job/merge", &bundle, true).unwrap();
+        let heads = git_out(r.path(), &["bundle", "list-heads", bundle.to_str().unwrap()]);
+        assert!(heads.contains("refs/tags/v1.2.3"), "{heads}");
+        assert!(!heads.contains("refs/tags/other"), "{heads}");
 
         r.push(&m2, "next").unwrap();
         assert_eq!(git_out(&origin, &["rev-parse", "next"]), m2);
