@@ -1033,6 +1033,7 @@ helper gives the agent's proxy credential, not the forge token.
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
 | `GET /api/repos/{id}` | | `200` repo | read |
+| `DELETE /api/repos/{id}` | | `200` the removed repo; `409` while a queued or running job, `next_repos` of the delivery config, a `github` pipeline of the same `owner/name`, or an open bound agent's checkout at the repo's `path` uses it; `409 file_managed` for a repo of a project file. The clones stay. Audit and event `repo.delete` | project_admin |
 | `POST /api/repos/{id}/checkout` | below | `200` checkout result | own workspace: read; another agent's: project_admin |
 | `POST /api/repos/credential` | `{"protocol", "host", "path"?}` | `200` `{"username", "password"}` | an agent |
 | `GET /api/repos/{id}/trees...` | | the repo browser (§5.3) | read |
