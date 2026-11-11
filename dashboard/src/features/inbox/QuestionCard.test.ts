@@ -10,6 +10,8 @@ import type { Question } from "../../api/types";
 
 vi.mock("../../stores", () => ({ api: { questions: {} }, projects: { projects: () => [] } }));
 const { QuestionCard } = await import("./QuestionCard");
+const { BundleCard } = await import("./BundleCard");
+const { api } = await import("../../stores");
 
 let dispose: (() => void) | undefined;
 afterEach(() => {
@@ -46,7 +48,7 @@ function mount(q: Question, inThread = false) {
       createComponent(MemoryRouter, {
         history,
         get children() {
-          return createComponent(Route, { path: "*", component: () => createComponent(QuestionCard, { question: q, now: Date.parse("2026-11-10T00:01:00Z"), inThread, onChange: () => {} }) });
+          return createComponent(Route, { path: "*", component: () => q.kind === "bundle" ? createComponent(BundleCard, { question: q, now: Date.parse("2026-11-10T00:01:00Z"), onChange: () => {} }) : createComponent(QuestionCard, { question: q, now: Date.parse("2026-11-10T00:01:00Z"), inThread, onChange: () => {} }) });
         },
       }),
     el,
@@ -56,6 +58,37 @@ function mount(q: Question, inThread = false) {
 
 const links = (el: HTMLElement, text: string) => [...el.querySelectorAll("a")].filter((a) => a.textContent?.trim() === text);
 const buttons = (el: HTMLElement, text: string) => [...el.querySelectorAll("button")].filter((b) => b.textContent?.trim() === text);
+
+it.each([[], [0], [0, 1]])("renders and submits checkbox selections %j", async (selected) => {
+  const q = question({ multi_select: true });
+  const answer = vi.fn().mockResolvedValue({ ...q, status: "answered" });
+  api.questions.answer = answer;
+  const el = mount(q, true);
+  const checks = [...el.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+  expect(checks).toHaveLength(2);
+  expect(el.querySelector('textarea[aria-label="Answer text"]')).not.toBeNull();
+  for (const i of selected) checks[i]!.click();
+  expect(buttons(el, "Send answer")[0]!.disabled).toBe(false);
+  el.querySelector('form[aria-label="Answer"]')!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await Promise.resolve();
+  expect(answer).toHaveBeenCalledWith("Q1", { options: selected });
+});
+
+it.each([[], [0], [0, 1]])("renders and submits checkbox bundle selections %j", async (selected) => {
+  sessionStorage.clear();
+  const q = question({ kind: "bundle", items: [{ text: "Pick", options: ["A", "B"], multi_select: true }, { text: "Other", options: [], multi_select: true }] });
+  const answer = vi.fn().mockResolvedValue({ ...q, status: "answered" });
+  api.questions.answer = answer;
+  const el = mount(q);
+  const checks = [...el.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+  expect(checks).toHaveLength(2);
+  expect(el.querySelectorAll("textarea")).toHaveLength(2);
+  for (const i of selected) checks[i]!.click();
+  expect(buttons(el, "Submit all answers")[0]!.disabled).toBe(false);
+  el.querySelector('form[aria-label="Answer all items"]')!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await Promise.resolve();
+  expect(answer).toHaveBeenCalledWith("Q1", { revision: 1, items: [{ options: selected }, { options: [] }] });
+});
 
 describe("Open in thread and Show mail (GitHub #32)", () => {
   it("offers to create the thread for an open question with no thread, and links its mail thread as Show mail", () => {

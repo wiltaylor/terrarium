@@ -1170,6 +1170,9 @@ fn end_waits(t: &mut Tx<'_>, q: &Question, outcome: &str) -> ApiResult<Vec<Strin
     if let Some(o) = q.chosen() {
         result["option"] = json!(o);
     }
+    if q.multi_select {
+        result["options"] = json!(q.answer_options.iter().map(|&i| &q.options[i]).collect::<Vec<_>>());
+    }
     if q.kind == QuestionKind::Bundle && q.status == QuestionStatus::Answered {
         result["answers"] = q
             .items
@@ -1179,6 +1182,9 @@ fn end_waits(t: &mut Tx<'_>, q: &Question, outcome: &str) -> ApiResult<Vec<Strin
                 let mut a = json!({"item": i + 1, "text": item.text, "answer": item.answer});
                 if let Some(o) = item.chosen() {
                     a["option"] = json!(o);
+                }
+                if item.multi_select {
+                    a["options"] = json!(item.answer_options.iter().map(|&i| &item.options[i]).collect::<Vec<_>>());
                 }
                 a
             })
@@ -1616,7 +1622,8 @@ fn answer_comment(t: &mut Tx<'_>, q: &Question, by: &mail::Address) -> ApiResult
                 q.answer.as_deref().unwrap_or_default()
             )
         };
-        crate::store::board::system_comment(t, card, &body, None)?;
+        let selected = q.answer_options.iter().map(|&i| format!("\nChosen option: {}. {}", i + 1, q.options[i])).collect::<String>();
+        crate::store::board::system_comment(t, card, &format!("{body}{selected}"), None)?;
     }
     Ok(())
 }

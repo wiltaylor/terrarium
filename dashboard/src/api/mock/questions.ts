@@ -217,7 +217,20 @@ export function createQuestionMock(c: QuestionMockContext) {
   const wrongKind = (q: Question, what: string) => fail(409, "conflict", `${q.id} is a ${q.kind}; ${what} needs a ${q.kind === "notice" ? "question" : "notice"}`, { kind: q.kind });
 
   /** The answer and the index of one item, or `null` when it has neither. */
-  const resolveItem = (item: BundleItem, n: number, a: { answer?: string; option?: string | number } | undefined): { answer: string; index?: number } | null => {
+  const resolveItem = (item: BundleItem, n: number, a: { answer?: string; option?: string | number; options?: (string | number)[] } | undefined): { answer: string; index?: number; indices?: number[] } | null => {
+    if (item.multi_select) {
+      if (a?.option !== undefined) fail(422, "invalid", "a multi-select answer takes options, not option");
+      const indices = (a?.options ?? []).map((o) => {
+        const i = typeof o === "string" ? item.options.indexOf(o.trim()) : o;
+        if (!Number.isInteger(i) || i < 0 || i >= item.options.length) fail(422, "invalid", `item ${n} has no such option`);
+        return i;
+      });
+      if (new Set(indices).size !== indices.length) fail(422, "invalid", "an option is selected twice");
+      const text = a?.answer?.trim() ?? "";
+      if (text.length > MAX_ANSWER) fail(422, "invalid", "the answer is too long");
+      return { answer: text, indices: indices.sort((a, b) => a - b) };
+    }
+    if (a?.options?.length) fail(422, "invalid", `item ${n} is not multi-select`);
     let index: number | undefined;
     if (typeof a?.option === "number") {
       if (a.option < 0 || a.option >= item.options.length) fail(422, "invalid", `option ${a.option} is not there: item ${n} has ${item.options.length} options`);
@@ -251,7 +264,7 @@ export function createQuestionMock(c: QuestionMockContext) {
     const at = c.iso();
     q.items = items.map((item, i) => {
       const r = resolved[i]!;
-      return { ...item, answer: r.answer, ...(r.index !== undefined ? { answer_option: r.index } : {}) };
+      return { ...item, answer: r.answer, ...(r.indices ? { answer_options: r.indices } : {}), ...(r.index !== undefined ? { answer_option: r.index } : {}) };
     });
     Object.assign(q, { status: "answered", answered_by: "operator", answered_by_name: "operator", answered_at: at, updated_at: at });
     c.questionClosed(q.id, {
@@ -262,7 +275,7 @@ export function createQuestionMock(c: QuestionMockContext) {
     const parts = q.items
       .map((item, i) => {
         const label = item.answer_option != null ? item.options[item.answer_option] : undefined;
-        const chosen = label !== undefined ? `Chosen option: ${item.answer_option! + 1}. ${label}\n` : "";
+        const chosen = item.multi_select ? (item.answer_options ?? []).map((i) => `Chosen option: ${i + 1}. ${item.options[i]}\n`).join("") : label !== undefined ? `Chosen option: ${item.answer_option! + 1}. ${label}\n` : "";
         const own = item.answer !== label ? `The answer of operator:\n${quoted(item.answer!)}` : "";
         return `\nItem ${i + 1} of ${q.items!.length}:\n${quoted(shortText(item.text, 200))}${chosen}${own}`;
       })
@@ -337,13 +350,16 @@ export function createQuestionMock(c: QuestionMockContext) {
         }
         const text = body.answer?.trim();
         if (text && text.length > MAX_ANSWER) fail(422, "invalid", `the answer is longer than ${MAX_ANSWER} characters`);
-        const answer = text || (index !== undefined ? q.options[index] : undefined);
-        if (!answer) fail(422, "invalid", "an answer needs `answer` (text), `option`, or both");
+        const multiple = q.multi_select ? resolveItem(q, 1, body) : null;
+        if (!q.multi_select && body.options?.length) fail(422, "invalid", "this question is not multi-select");
+        const answer = multiple ? multiple.answer : text || (index !== undefined ? q.options[index] : undefined);
+        if (!answer && !multiple) fail(422, "invalid", "an answer needs `answer` (text), `option`, or both");
         const at = c.iso();
         Object.assign(q, { status: "answered", answer, answered_by: "operator", answered_by_name: "operator", answered_at: at, updated_at: at });
         if (index !== undefined) q.answer_option = index;
+        if (multiple) q.answer_options = multiple.indices;
         c.questionClosed(q.id, { outcome: "answered", answer, ...(index !== undefined ? { option: q.options[index] } : {}) });
-        const chosen = index !== undefined ? `\nChosen option: ${index + 1}. ${q.options[index]}\n` : "";
+        const chosen = multiple ? (q.answer_options ?? []).map((i) => `\nChosen option: ${i + 1}. ${q.options[i]}\n`).join("") : index !== undefined ? `\nChosen option: ${index + 1}. ${q.options[index]}\n` : "";
         const own = index === undefined || answer !== q.options[index] ? `\nThe answer of operator:\n${quoted(answer!)}` : "";
         c.sendMail(q.agent, "operator", `Answer: ${shortText(q.text)}`, `operator answered your question ${q.id} (revision ${q.revision}).\n\nYour question:\n${quoted(q.text)}${chosen}${own}\nRun \`terrarium question show ${q.id}\` for the details.\n`, q.thread_id);
         c.audit("question.answer", q.id, q.project, { agent: q.agent, by: "operator", option: q.answer_option ?? null });
