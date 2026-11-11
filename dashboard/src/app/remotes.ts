@@ -24,5 +24,6 @@ export function useRemotes() {
 
 export function remoteColour(name: string, storage?: Pick<Storage, "getItem"> | null) {
   const picked = storage?.getItem(`remote-colour:${name}`);
-  return picked && /^#[0-9a-f]{6}$/i.test(picked) ? picked : "#7356b8";
+  const hue = Array.from(name).reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) % 360, 0);
+  return picked && /^#[0-9a-f]{6}$/i.test(picked) ? picked : `hsl(${hue} 55% 45%)`;
 }

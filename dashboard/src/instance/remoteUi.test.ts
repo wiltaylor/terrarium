@@ -36,7 +36,7 @@ it("names the remote in confirmation controls, portal dialogs and page identity"
 });
 
 it("shows remote artifacts as external links without fetching or embedding their bytes", async () => {
-  const fetch = vi.fn(async () => new Response('{"url":"/a/A1/report.html?sig=signed","exp":123,"expires_at":""}'));
+  const fetch = vi.fn(async (_url: string) => new Response('{"url":"/a/A1/report.html?sig=signed","exp":123,"expires_at":""}'));
   vi.stubGlobal("fetch", fetch);
   const root = mount(() => createComponent(ArtifactViewer, { artifact: { id: "ART-1", uid: "A1", name: "report.html", kind: "file", content_type: "text/html", size: 10 } }));
   await waitFor(() => expect(root.querySelector("a")?.href).toBe("https://lab.example/a/A1/report.html?sig=signed"));
