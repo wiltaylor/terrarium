@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
-import { createSignal, type JSX } from "solid-js";
+import { createComponent, createSignal, type JSX } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Message } from "../api/types";
@@ -17,13 +17,13 @@ afterEach(() => { dispose?.(); document.body.replaceChildren(); });
 function mount(view: () => JSX.Element) {
   const root = document.createElement("div"); document.body.append(root);
   const history = createMemoryHistory(); history.set({ value: "/logs/mail" });
-  dispose = render(() => <MemoryRouter history={history}><Route path="*" component={view} /></MemoryRouter>, root);
+  dispose = render(() => createComponent(MemoryRouter, { history, get children() { return createComponent(Route, { path: "*", component: view }); } }), root);
   return root;
 }
 it("mail uses numbered forum posts, safe Markdown, a permalink and Quote", () => {
   const quote = vi.fn();
   const message = { id: "M1", thread_id: "T1", from_name: "lead", to_name: "worker", body: "**hello**\n<script>bad()</script>", created_at: "2026-11-11T00:00:00Z", state: "read" } as Message;
-  const el = mount(() => <MessageView message={message} number={2} onQuote={quote} />);
+  const el = mount(() => createComponent(MessageView, { message, number: 2, onQuote: quote }));
   expect(el.querySelector(".thread-post-header strong")?.textContent).toBe("lead");
   expect(el.querySelector(".prose strong")?.textContent).toBe("hello");
   expect(el.querySelector("script")).toBeNull();
@@ -33,7 +33,7 @@ it("mail uses numbered forum posts, safe Markdown, a permalink and Quote", () =>
 });
 it("card comments preserve Markdown links and session metadata and quote a selection", () => {
   const quote = vi.fn();
-  const el = mount(() => <CommentPost card="TER-1" project="terrarium" index={0} onQuote={quote} comment={{ author: "lead", body: "**first** and TER-2", created_at: "2026-11-11T00:00:00Z", session: { id: "S1", harness: "codex" } as never }} />);
+  const el = mount(() => createComponent(CommentPost, { card: "TER-1", project: "terrarium", index: 0, onQuote: quote, comment: { author: "lead", body: "**first** and TER-2", created_at: "2026-11-11T00:00:00Z", session: { id: "S1", harness: "codex" } as never } }));
   expect(el.querySelector(".thread-post-body strong")?.textContent).toBe("first");
   expect(el.querySelector('a.wikilink-card')?.getAttribute("href")).toBe("/p/terrarium/board?card=TER-2");
   expect(el.textContent).toContain("View session");
@@ -46,7 +46,10 @@ it("card comments preserve Markdown links and session metadata and quote a selec
 it("Write and Preview retain the draft and sanitize the preview", () => {
   const el = mount(() => {
     const [text, setText] = createSignal("**draft** <img src=x onerror=bad()>");
-    return <PostEditor label="Reply" project="terrarium" text={text()}><textarea value={text()} onInput={(e) => setText(e.currentTarget.value)} /></PostEditor>;
+    const textarea = document.createElement("textarea");
+    textarea.value = text();
+    textarea.oninput = () => setText(textarea.value);
+    return createComponent(PostEditor, { label: "Reply", project: "terrarium", get text() { return text(); }, children: textarea });
   });
   [...el.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Preview")!.click();
   expect(el.querySelector('[aria-label="Reply preview"] strong')?.textContent).toBe("draft");
