@@ -9,6 +9,8 @@ import githubDark from "../assets/providers/github-dark.svg";
 import githubLight from "../assets/providers/github-light.svg";
 import moonshotDark from "../assets/providers/moonshot-dark.svg";
 import moonshotLight from "../assets/providers/moonshot-light.svg";
+import openaiDark from "../assets/providers/openai-dark.svg";
+import openaiLight from "../assets/providers/openai-light.svg";
 import openrouterDark from "../assets/providers/openrouter-dark.svg";
 import openrouterLight from "../assets/providers/openrouter-light.svg";
 
@@ -23,12 +25,13 @@ export interface ProviderMark {
 const both = (src: string): ProviderMark => ({ light: src, dark: src });
 
 /**
- * The bundled mark of each provider kind. A kind that is not here (openai,
- * zai, deepseek: no mark from a brand or press page could be fetched) gets
- * the letter tile. bedrock, gcp and foundry are the cloud kinds of TER-630.
+ * The bundled mark of each provider kind. A kind that is not here (zai,
+ * deepseek: no mark from a brand or press page could be fetched) gets the
+ * letter tile. bedrock, gcp and foundry are the cloud kinds of TER-630.
  */
 export const PROVIDER_MARKS: Record<string, ProviderMark> = {
   anthropic: both(anthropic),
+  openai: { light: openaiLight, dark: openaiDark },
   github: { light: githubLight, dark: githubDark },
   moonshot: { light: moonshotLight, dark: moonshotDark },
   openrouter: { light: openrouterLight, dark: openrouterDark },
