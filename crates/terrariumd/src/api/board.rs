@@ -185,19 +185,24 @@ async fn list_cards(
     let (who, project) = (actor.clone(), name.clone());
     state
         .db
-        .read(move |c| crate::store::threads::read_card_project(c, &who, &project, None))
+        .read(move |c| crate::store::threads::read_linked_card(c, &who, &project, None))
         .await?;
     let rows = longpoll::hold(&state, wait, &["card"], || {
         let (actor, name, page, f) = (actor.clone(), name.clone(), page.clone(), f.clone());
         state.db.read(move |c| {
-            crate::store::threads::read_card_project(c, &actor, &name, None)?;
+            crate::store::threads::read_linked_card(c, &actor, &name, None)?;
             crate::store::projects::get(c, &name)?;
             let assignee = match f.assignee.as_deref() {
                 None => None,
                 Some("me") => Some(actor.address()),
                 Some(a) => Some(crate::store::mail::resolve_known(c, a, Some(&name))?.key()),
             };
-            board::list_cards(c, &name, &f, assignee.as_deref(), &page)
+            let restricted = crate::store::threads::read_card_project(c, &actor, &name, None).is_err();
+            let agent = match &actor {
+                Actor::Agent(a) if restricted => Some(a.id.as_str()),
+                _ => None,
+            };
+            board::list_cards_for_request(c, &name, &f, assignee.as_deref(), &page, agent)
         })
     })
     .await?;
@@ -266,7 +271,7 @@ async fn show(
         .db
         .read(move |c| {
             let card = board::get_card(c, &id)?;
-            crate::store::threads::read_card_project(c, &who, &card.project, None)?;
+            crate::store::threads::read_linked_card(c, &who, &card.project, Some(&card.id))?;
             Ok(card)
         })
         .await?;

@@ -1045,6 +1045,17 @@ pub fn list_cards(
     assignee: Option<&str>,
     page: &Page,
 ) -> ApiResult<Paged<Card>> {
+    list_cards_for_request(conn, project, f, assignee, page, None)
+}
+
+pub fn list_cards_for_request(
+    conn: &Connection,
+    project: &str,
+    f: &CardFilter,
+    assignee: Option<&str>,
+    page: &Page,
+    request_agent: Option<&str>,
+) -> ApiResult<Paged<Card>> {
     let limit = page.limit();
     let (after_k, after_p, after_n) = list_cursor(page.cursor());
     // A role alias (`working`, `blocked`) names the column with that role.
@@ -1054,8 +1065,8 @@ pub fn list_cards(
             .map(|k| k.name)
             .unwrap_or_else(|_| c.to_owned())
     });
-    let mut stmt = conn.prepare(
-        "SELECT c.*, k.name AS column_name, k.role AS column_role,
+    let restriction = request_agent.map(|_| format!(" AND c.id IN ({})", super::threads::REQUEST_CARDS_SQL.replace("?1", "?11").replace("?2", "?1"))).unwrap_or_else(|| " AND ?11 IS NULL".to_owned());
+    let sql = format!("SELECT c.*, k.name AS column_name, k.role AS column_role,
                 k.position AS column_position
            FROM cards c JOIN board_columns k ON k.id = c.column_id
           WHERE c.project = ?1 AND c.kind = 'card'
@@ -1065,8 +1076,9 @@ pub fn list_cards(
            AND (?5 = 0 OR c.assignee IS NULL)
            AND (?6 IS NULL OR EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?6))
            AND c.archived = ?7
-         ORDER BY k.position, c.position, c.number LIMIT ?8",
-    )?;
+         {restriction}
+         ORDER BY k.position, c.position, c.number LIMIT ?8");
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(
             params![
@@ -1079,7 +1091,8 @@ pub fn list_cards(
                 f.archived as i64,
                 (limit + 1) as i64,
                 after_p,
-                after_n
+                after_n,
+                request_agent
             ],
             |r| {
                 let place = (

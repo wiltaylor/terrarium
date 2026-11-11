@@ -386,18 +386,15 @@ pub fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
 /// (TER-146): a link never shows a card, or its project, to a reader of
 /// the thread who cannot read that project.
 pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
-    let request_project = match actor {
+    let own_request = match actor {
         Actor::Agent(a)
             if th.request
                 && th.status != ThreadStatus::Closed
                 && th.agent.as_deref() == Some(&a.id) =>
         {
-            th.report_to_name
-                .as_deref()
-                .and_then(|n| n.split_once('/'))
-                .map(|(p, _)| p.to_owned())
+            true
         }
-        _ => None,
+        _ => false,
     };
     if th.monitor.as_ref().is_some_and(|m| {
         m.split_once(':')
@@ -408,7 +405,7 @@ pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
     if let Some(cards) = th.cards.as_mut() {
         cards.retain(|c| {
             policy::read_project(actor, &c.project).is_ok()
-                || request_project.as_deref() == Some(c.project.as_str())
+                || own_request
         });
     }
     th
@@ -457,6 +454,33 @@ pub fn read_card_project(
             rusqlite::params![a.id, project, thread],
             |r| r.get(0),
         )?;
+        if allowed {
+            return Ok(());
+        }
+    }
+    Err(denied)
+}
+
+/// Read-only TER-910 exception. Start at the indexed attached-agent lookup,
+/// then the thread_cards primary key, never at a project's cards.
+pub const REQUEST_CARDS_SQL: &str = "SELECT tc.card FROM threads th
+ JOIN thread_cards tc ON tc.thread = th.id
+ WHERE th.agent = ?1 AND th.request = 1 AND th.status != 'closed'
+ AND tc.project = ?2";
+
+pub fn read_linked_card(
+    conn: &Connection,
+    actor: &Actor,
+    project: &str,
+    card: Option<&str>,
+) -> ApiResult<()> {
+    let denied = match read_card_project(conn, actor, project, None) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    if let Actor::Agent(a) = actor {
+        let sql = format!("SELECT EXISTS(SELECT 1 FROM ({REQUEST_CARDS_SQL}) WHERE ?3 IS NULL OR card = ?3)");
+        let allowed: bool = conn.query_row(&sql, rusqlite::params![a.id, project, card], |r| r.get(0))?;
         if allowed {
             return Ok(());
         }
