@@ -3,7 +3,7 @@
 use super::*;
 
 const RETAIN: u64 = 86400;
-const MAX_RUN: u64 = 86400;
+const MAX_RUN: u64 = 7 * 86400;
 
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {
@@ -68,7 +68,7 @@ pub(super) fn start(
         .unwrap_or(crate::target_roots::DEFAULT_BASE);
     crate::target_roots::check_base(root)?;
     let path = format!("{root}/.terrarium-runs/{}", saved.token);
-    let script = script(&path, &saved.cmd);
+    let script = script(&path, &saved.cmd, saved.created + (MAX_RUN + RETAIN) as i64);
     *plan
         .args
         .last_mut()
@@ -93,11 +93,11 @@ pub(super) fn start(
                 }
                 control = controls.recv() => match control {
                     Some(Control::Kill | Control::Signal(_)) => {
-                        // The remote supervisor owns this PID file and process
-                        // group. Never kill by a process name or a pattern.
+                        // Ask the still-live supervisor to signal its own
+                        // child. A stale PID file can never kill a reused PID.
                         let kill = RemoteCmd {
                             argv: vec!["sh".into(), "-c".into(), format!(
-                                "p={}; test ! -f \"$p/pid\" || kill -TERM -- -$(cat \"$p/pid\")", sh_quote(&path))],
+                                "p={}; test -f \"$p/exit\" || : > \"$p/cancel\"", sh_quote(&path))],
                             ..RemoteCmd::default()
                         };
                         if let Ok(run) = start_cmd_locked(&state, &def, &kill) {
@@ -119,6 +119,7 @@ pub(super) fn start(
                                     .map(|bytes| Ev::Data(if line[0] == b'O' { Stream::Stdout } else { Stream::Stderr }, bytes)),
                                 b'X' => std::str::from_utf8(payload).ok().and_then(|s| s.parse::<i32>().ok())
                                     .map(|code| Ev::End(End::Exit { code: Some(code), signal: None, reason: "exited".into() })),
+                                b'L' => Some(Ev::End(End::error("expired", "durable SSH output retention expired"))),
                                 _ => None,
                             };
                             if let Some(event) = event {
@@ -143,7 +144,7 @@ pub(super) fn start(
     })
 }
 
-fn script(path: &str, cmd: &RemoteCmd) -> String {
+fn script(path: &str, cmd: &RemoteCmd, expires: i64) -> String {
     let command = format!(
         "{}exec {}",
         cmd.cwd
@@ -159,18 +160,28 @@ fn script(path: &str, cmd: &RemoteCmd) -> String {
     let timeout = cmd
         .timeout_secs
         .filter(|n| *n > 0)
-        .unwrap_or(MAX_RUN)
+        .unwrap_or(86400)
         .min(MAX_RUN);
     let janitor = format!(
         r#"
 p={path}
 echo $$ > "$p/janitor"
-sleep {expiry}
-rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit" "$p/exit.part" "$p/janitor"
+n=0
+while test "$n" -lt {timeout}; do
+  test ! -f "$p/exit" || break
+  sleep 60
+  n=$((n+60))
+done
+sleep {RETAIN}
+: > "$p/expired"
+rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit" "$p/exit.part" "$p/cancel"
+left=$(({expires}-$(date +%s)+120))
+test "$left" -le 0 || sleep "$left"
+rm -f "$p/expired" "$p/janitor"
 rmdir "$p"
 "#,
         path = sh_quote(path),
-        expiry = MAX_RUN + RETAIN
+        timeout = timeout + 60
     );
     // Each logger retains at most 64 MiB and then drains the rest. Output
     // limits do not impose a file-size limit on the user's other files.
@@ -186,10 +197,10 @@ mkfifo "$p/o" "$p/e" || exit 1
 o=$!
 (head -c 67108864 > "$p/err"; cat > /dev/null) < "$p/e" &
 e=$!
-sh -c {command} > "$p/o" 2> "$p/e" &
+timeout -k 5 {timeout} sh -c {command} > "$p/o" 2> "$p/e" &
 c=$!
 trap 'kill -TERM "$c" 2>/dev/null' TERM
-(sleep {timeout}; kill -TERM -- -$$ 2>/dev/null) &
+(while test ! -f "$p/cancel"; do sleep 0.1; done; kill -TERM "$c" 2>/dev/null) &
 w=$!
 wait "$c"; code=$?
 kill "$w" 2>/dev/null
@@ -214,6 +225,7 @@ mkdir -p {parent} || exit 1
 setsid nohup sh -c {supervisor} </dev/null >/dev/null 2>&1 &
 o=0; e=0
 while :; do
+  if test -f "$p/expired"; then printf 'L\n'; exit; fi
   for stream in out err; do
     case "$stream" in out) offset=$o; tag=O;; err) offset=$e; tag=E;; esac
     if test -f "$p/$stream"; then

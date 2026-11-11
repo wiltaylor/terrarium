@@ -1173,10 +1173,33 @@ output offsets and terminal events before acknowledging them. It keeps up
 to 8 MiB and 4096 stdout/stderr events per session for replay, without
 changing the absolute resume offset. Copy file data is not tail-truncated.
 Closed execs and completed jobs remove their checkpoints. Finished helper
-sessions without a durable owner expire after five minutes. SSH and exe.dev
-run interruptions are reported as `interrupted (ssh transport)` and queue
-jobs on those transports are killed and requeued. Native jobs from an older
-daemon without continuation checkpoints also use kill/requeue.
+sessions without a durable owner expire after five minutes.
+
+SSH and exe.dev noninteractive `run` commands and queue recipes opt into a
+detached supervisor. They retain their real exit code and stdout/stderr if
+the command finishes while the daemon is down. The encrypted journal binds
+the run to a random remote claim directory before launch. Reattachment
+replays that directory, never launches a second command under the same
+identity, and resumes the existing process wait or queue phase.
+
+The remote side needs the usual POSIX shell and coreutils, including
+`setsid`, `nohup`, `timeout`, `mkfifo`, `head`, `tail`, and `base64`. No host
+installation is performed. Private spool files live under
+`<work_root>/.terrarium-runs` (the normal default root is `/src/terrarium`).
+Each stdout/stderr spool retains the first 64 MiB and drains further output.
+Commands have a maximum seven-day lifetime, with a 24-hour default when no
+timeout is supplied. An independent janitor removes the files 24 hours after
+completion, or after the timeout when completion was not recorded, with up
+to two minutes of polling slack. The empty claim and expiry marker remain
+until the checkpoint's eight-day absolute deadline, then are removed too.
+An expired checkpoint is never relaunched.
+
+PTY and shell sessions, ordinary SSH execs without `durable: true`, and
+stdin-fed queue setup/bundle transfers stay on the existing transport. They
+end as `interrupted (ssh transport)` at a restart. Jobs interrupted before
+their durable recipe starts use kill/requeue. A durable execution rejects
+PTY/shell and stdin input. Native jobs from an older daemon without
+continuation checkpoints also use kill/requeue.
 
 ## Self-update
 

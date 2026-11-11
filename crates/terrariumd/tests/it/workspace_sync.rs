@@ -64,6 +64,8 @@ impl Ssh {
             "/usr/bin/tail",
             "/usr/bin/mkfifo",
             "/usr/bin/rmdir",
+            "/usr/bin/timeout",
+            "/usr/bin/date",
         ] {
             copy_binary(&jail, binary);
         }
