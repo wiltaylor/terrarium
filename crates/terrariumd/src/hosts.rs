@@ -4,7 +4,7 @@
 //!
 //! - [`connect`] checks the bearer token against the `hosts` table before
 //!   the upgrade (`401` on a bad token), reads `hello`, and answers
-//!   `welcome` with a new resume token and the sessions it takes back.
+//!   `welcome` with a durable resume token and the sessions it takes back.
 //! - [`HostRegistry`] holds one entry per host name. Sessions live in the
 //!   entry, not in the connection, so they survive a reconnect.
 //! - [`HostRegistry::open`] starts a session with an ID from a counter for
@@ -180,6 +180,7 @@ struct Slot {
     held: bool,
     events: u64,
     terminal: bool,
+    ended_at: Option<i64>,
     restored: Option<mpsc::UnboundedReceiver<SessionEvent>>,
 }
 
@@ -189,6 +190,8 @@ struct SavedSlot {
     held: bool,
     events: u64,
     terminal: bool,
+    #[serde(default)]
+    ended_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -335,6 +338,7 @@ impl HostRegistry {
                         held: saved.held,
                         events: saved.events,
                         terminal: saved.terminal,
+                        ended_at: saved.ended_at,
                         restored: Some(rx),
                     },
                 );
@@ -383,6 +387,7 @@ impl HostRegistry {
                             held: s.held,
                             events: s.events,
                             terminal: s.terminal,
+                            ended_at: s.ended_at,
                         },
                     )
                 })
@@ -451,6 +456,48 @@ impl HostRegistry {
         Ok(())
     }
 
+    /// Discard checkpoints only after the queue stored the job's final result.
+    pub fn forget_job(&self, job: &str) -> crate::error::ApiResult<()> {
+        let Some(journal) = self.journal.get() else {
+            return Ok(());
+        };
+        let mut entries = self.lock();
+        if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ApiError::internal("host registry is stopping"));
+        }
+        let mut prefixes = vec![format!("prepare/{job}/"), format!("recipe/{job}/")];
+        let mut removed = Vec::new();
+        let mut hosts = HashMap::<String, SavedHost>::new();
+        for phase in ["recipe", "receive"] {
+            let prefix = format!("bound/{phase}/{job}/");
+            for (_, (host, id)) in journal.scan::<(String, SessionId)>(&prefix)? {
+                if !hosts.contains_key(&host)
+                    && let Some(saved) = journal.load::<SavedHost>(&format!("host/{host}"))?
+                {
+                    hosts.insert(host.clone(), saved);
+                }
+                if let Some(saved) = hosts.get_mut(&host) {
+                    saved.sessions.remove(&id);
+                }
+                prefixes.push(format!("event/{host}/{id}/"));
+                removed.push((host, id));
+            }
+            prefixes.push(prefix);
+        }
+        let mut values = Vec::new();
+        for (host, saved) in hosts {
+            values.push((format!("host/{host}"), serde_json::to_value(saved)
+                .map_err(|_| ApiError::internal("cannot encode job session cleanup"))?));
+        }
+        journal.replace(&values, &[], &prefixes)?;
+        for (host, id) in removed {
+            if let Some(entry) = entries.get_mut(&host) {
+                entry.sessions.remove(&id);
+            }
+        }
+        Ok(())
+    }
+
     /// Freeze journal writers before releasing the daemon's state lock.
     /// Close without goodbye so host children remain available for resume.
     pub fn shutdown(&self) {
@@ -499,7 +546,41 @@ impl HostRegistry {
                     registry.expire(&host, generation);
                 }
             }
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let Some(registry) = registry.upgrade() else { return };
+                if let Err(error) = registry.prune_unowned(chrono::Utc::now().timestamp() - 300) {
+                    warn!(%error, "cannot prune orphan host replay");
+                }
+            }
         })
+    }
+
+    /// Finished helper sessions have no durable owner. Keep a five-minute
+    /// grace for a fast exec to acquire its owner before removing replay.
+    fn prune_unowned(&self, before: i64) -> crate::error::ApiResult<()> {
+        let Some(journal) = self.journal.get() else { return Ok(()) };
+        let mut entries = self.lock();
+        if self.stopped.load(std::sync::atomic::Ordering::Acquire) { return Ok(()) }
+        #[derive(Deserialize)]
+        struct Binding { host_session: Option<(String, SessionId)> }
+        let mut owned: std::collections::HashSet<_> = journal.scan::<Binding>("exec/")?
+            .into_iter().filter_map(|(_, saved)| saved.host_session).collect();
+        owned.extend(journal.scan::<(String, SessionId)>("bound/")?.into_iter().map(|(_, saved)| saved));
+        for (host, entry) in entries.iter_mut() {
+            let ids: Vec<_> = entry.sessions.iter().filter(|(id, slot)|
+                slot.terminal && slot.ended_at.unwrap_or(0) <= before && !owned.contains(&(host.clone(), **id))
+            ).map(|(id, _)| *id).collect();
+            if ids.is_empty() { continue }
+            let key = format!("host/{host}");
+            let Some(mut saved) = journal.load::<SavedHost>(&key)? else { continue };
+            for id in &ids { saved.sessions.remove(id); }
+            let value = serde_json::to_value(saved).map_err(|_| ApiError::internal("cannot encode orphan cleanup"))?;
+            let prefixes: Vec<_> = ids.iter().map(|id| format!("event/{host}/{id}/")).collect();
+            journal.replace(&[(key, value)], &[], &prefixes)?;
+            for id in ids { entry.sessions.remove(&id); }
+        }
+        Ok(())
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
@@ -673,6 +754,7 @@ impl HostRegistry {
                 held: false,
                 events: 0,
                 terminal: false,
+                ended_at: None,
                 restored: None,
             },
         );
@@ -877,9 +959,12 @@ impl HostRegistry {
         if s.terminal {
             return false;
         }
-        let old = (s.received, s.held, s.events, s.terminal);
+        let old = (s.received, s.held, s.events, s.terminal, s.ended_at);
         s.events += 1;
         s.terminal = event.is_terminal();
+        if s.terminal {
+            s.ended_at = Some(chrono::Utc::now().timestamp());
+        }
         if matches!(event, SessionEvent::Started { .. }) {
             s.held = true;
         }
@@ -888,7 +973,7 @@ impl HostRegistry {
         }
         if self.persist(host, entry, Some((id, &event))).is_err() {
             let s = entry.sessions.get_mut(&id).unwrap();
-            (s.received, s.held, s.events, s.terminal) = old;
+            (s.received, s.held, s.events, s.terminal, s.ended_at) = old;
             if let Some(c) = &entry.conn {
                 let _ = c.tx.send(Outgoing::Close(None));
             }
@@ -2003,6 +2088,30 @@ mod tests {
             },
         );
         reg
+    }
+
+    #[tokio::test]
+    async fn reconnect_journal_prunes_only_expired_unowned_terminal_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&db, dir.path()).unwrap();
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore(dir.path()).unwrap();
+        let orphan = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let owned = reg.open_bound("lab1", Some("recipe/job/1"), |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        for id in [orphan.id(), owned.id()] {
+            reg.on_session_frame("lab1", HostFrame::Exit { session: id, code: Some(0), signal: None, reason: ExitReason::Exited });
+        }
+        reg.prune_unowned(chrono::Utc::now().timestamp() - 300).unwrap();
+        assert!(reg.lock()["lab1"].sessions.contains_key(&orphan.id()));
+        reg.prune_unowned(chrono::Utc::now().timestamp() + 1).unwrap();
+        assert!(!reg.lock()["lab1"].sessions.contains_key(&orphan.id()));
+        assert!(reg.lock()["lab1"].sessions.contains_key(&owned.id()));
+        reg.forget_job("job").unwrap();
+        assert!(!reg.lock()["lab1"].sessions.contains_key(&owned.id()));
+        let journal = resume::Journal::new(dir.path());
+        assert!(journal.scan::<serde_json::Value>("event/").unwrap().is_empty());
+        assert!(journal.scan::<serde_json::Value>("bound/").unwrap().is_empty());
     }
 
     #[tokio::test]

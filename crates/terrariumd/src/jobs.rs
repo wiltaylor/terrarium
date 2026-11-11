@@ -462,6 +462,25 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
             HashSet::new()
         }
     };
+    let completed: Vec<_> = checkpoints.iter().cloned().collect();
+    let completed = state.db.read(move |conn| {
+        let mut out = Vec::new();
+        for id in completed {
+            if let Ok(job) = jobs::get(conn, &id)
+                && matches!(job.state, JobState::Passed | JobState::Failed)
+            {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }).await;
+    if let Ok(completed) = completed {
+        for id in completed {
+            if let Err(error) = state.executor.hosts.forget_job(&id) {
+                warn!(job = %id, %error, "cannot clean completed job after restart");
+            }
+        }
+    }
     let since = (chrono::Utc::now() - chrono::Duration::hours(DRAIN_WINDOW_HOURS))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let found = state
@@ -1311,6 +1330,9 @@ async fn finish_job(state: &Shared, id: &str, end: JobEnd) {
         .await;
     match ended {
         Ok(Some(j)) => {
+            if let Err(error) = state.executor.hosts.forget_job(&j.id) {
+                warn!(job = %j.id, %error, "cannot clean completed job checkpoints");
+            }
             if let Err(e) = after_end(state, &j).await {
                 warn!(job = %j.id, "cannot handle the end of a job: {e}");
             }
