@@ -299,8 +299,15 @@ pub fn perform(
                 .as_ref()
                 .and_then(|e| e.data["wait_generation"].as_str())
                 .unwrap_or_default();
+            let acted = board::card_waits::act(t, actor, &card.id, generation)?;
+            if acted {
+                let moved = board::get_card(t, &card.id)?;
+                if accepted_heads::is_queue(&moved.column, moved.column_role.as_deref()) {
+                    effects.push(Effect::RecordAccepted);
+                }
+            }
             Done {
-                changed: board::card_waits::act(t, actor, &card.id, generation)?,
+                changed: acted,
                 detail: json!({"card": card.id}),
             }
         }
