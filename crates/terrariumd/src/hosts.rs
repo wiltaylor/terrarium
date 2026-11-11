@@ -338,7 +338,8 @@ impl HostRegistry {
         let saved = journal.scan::<SavedHost>("host/")?;
         let mut entries = self.lock();
         for (key, saved) in saved {
-            let host = key.strip_prefix("host/").unwrap().to_owned();
+            let host = key.strip_prefix("host/")
+                .ok_or_else(|| ApiError::internal("invalid host journal key"))?.to_owned();
             let mut entry = Entry {
                 resume_token: saved.token,
                 next_id: saved.next_id,
@@ -1007,7 +1008,8 @@ impl HostRegistry {
 
     fn on_data(&self, host: &str, f: DataFrame) {
         let mut g = self.lock();
-        let Some(s) = g.get_mut(host).and_then(|e| e.sessions.get_mut(&f.session)) else {
+        let Some(entry) = g.get_mut(host) else { return };
+        let Some(s) = entry.sessions.get_mut(&f.session) else {
             debug!(host, session = f.session, "data for an unknown session");
             return;
         };
@@ -1026,7 +1028,7 @@ impl HostRegistry {
             stream: f.stream,
             bytes: f.payload,
         };
-        self.deliver(host, g.get_mut(host).unwrap(), f.session, event);
+        self.deliver(host, entry, f.session, event);
     }
 
     /// Save before exposing output to a consumer that can acknowledge it.
@@ -1060,7 +1062,7 @@ impl HostRegistry {
             s.output_events.push_back((s.events, bytes.len()));
         }
         if self.persist(host, entry, Some((id, &event))).is_err() {
-            let s = entry.sessions.get_mut(&id).unwrap();
+            let Some(s) = entry.sessions.get_mut(&id) else { return false };
             (s.received, s.held, s.events, s.terminal, s.ended_at) = old;
             if output {
                 s.output_events.pop_back();
@@ -1075,7 +1077,7 @@ impl HostRegistry {
             );
             return false;
         }
-        let s = entry.sessions.get_mut(&id).unwrap();
+        let Some(s) = entry.sessions.get_mut(&id) else { return false };
         let prune = s.prune_count();
         s.output_events.drain(..prune);
         let _ = entry.sessions[&id].tx.send(event);
@@ -1149,8 +1151,8 @@ impl HostRegistry {
     /// The consumer dropped a session before its end: abandon it.
     fn abandon(&self, host: &str, session: SessionId) {
         let mut g = self.lock();
-        if let Some(e) = g.get_mut(host) {
-            if self.deliver(
+        if let Some(e) = g.get_mut(host)
+            && self.deliver(
                 host,
                 e,
                 session,
@@ -1160,7 +1162,6 @@ impl HostRegistry {
             ) && let Some(c) = &e.conn
             {
                 let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
-            }
         }
     }
 }
