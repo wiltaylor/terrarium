@@ -12954,6 +12954,17 @@ A batch merge:
   is the same: the tree is reset, and the card's note says why. The card
   gets `outcome: conflict` in `batch` and fails at once, as above. When
   no card merges, the job ends as a `conflict`.
+- A merge conflict onto `next` also queues one durable repair request per
+  card and job. After the existing conflict-return flow, an open bound
+  card worker receives a turn with the conflict details. Otherwise the
+  daemon spawns a bound worker using the card type's template (default
+  `card-impl`) under a non-ephemeral project admin. Normal spawn rights,
+  template grants and WIP checks apply, with no additional grants or targets.
+  The task starts from the card's branch: merge `origin/next` with a merge
+  commit, keep both sides' intended changes, run the card check and return
+  to review. No rebase or force push. Duplicate verdicts do not duplicate
+  workers. Requests survive daemon restarts and retry refusals after a minute.
+  Release and e2e jobs, and merges onto release branches, do not queue repairs.
 - Pass: each merged card moves to `accepted`.
 - Red with two or more merged cards: the batch splits into two halves (a
   half of one card is a job of one card). Both are queued at the front,

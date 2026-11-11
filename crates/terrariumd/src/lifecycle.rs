@@ -1198,6 +1198,7 @@ pub fn spawn(state: &Shared) -> Vec<JoinHandle<()>> {
             crate::trouble::pass(&state).await;
             // The lifetime and the owner of each ephemeral agent.
             crate::spawn::pass(&state).await;
+            crate::conflict_fixes::pass(&state).await;
             crate::card_dispatcher::pass(&state).await;
             crate::review_dispatcher::pass(&state).await;
         }
