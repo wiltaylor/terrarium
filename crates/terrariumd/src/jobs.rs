@@ -2170,7 +2170,11 @@ async fn run_inner(
             }
         })
         .await
-        .map_err(|_| ApiError::conflict("host reservation reconciliation did not finish within the resume grace"))?;
+        .map_err(|_| {
+            ApiError::conflict(
+                "host reservation reconciliation did not finish within the resume grace",
+            )
+        })?;
     }
     let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
     let slot = job
