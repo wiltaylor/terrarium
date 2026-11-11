@@ -480,7 +480,13 @@ pub async fn start(
                 })
                 .await;
             match closed {
-                Ok(th) if th.request && th.request_epoch == epoch && th.close_reason.as_deref() == Some("failed_start") => return Ok(th),
+                Ok(th)
+                    if th.request
+                        && th.request_epoch == epoch
+                        && th.close_reason.as_deref() == Some("failed_start") =>
+                {
+                    return Ok(th);
+                }
                 Err(c) => {
                     warn!(thread = %th.id, "cannot close the thread: {}", c.message);
                     return Err(c);
