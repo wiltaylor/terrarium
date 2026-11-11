@@ -19,7 +19,9 @@ describe("GitHub emoji", () => {
     const html = renderWiki("https://example.org/:smile: [:+1:](https://example.org/:smile:) <https://example.org/:smile:>", ctx);
     expect(html).not.toContain("😄");
     expect(html).toContain(">👍</a>");
-    expect(html.match(/href="https:\/\/example.org\/:smile:"/g)).toHaveLength(3);
+    // GFM excludes a trailing colon from a bare URL, but not an explicit link.
+    expect(html).toContain('href="https://example.org/:smile"');
+    expect(html.match(/href="https:\/\/example.org\/:smile:"/g)).toHaveLength(2);
   });
 });
 
