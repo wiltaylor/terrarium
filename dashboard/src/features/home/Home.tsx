@@ -63,8 +63,8 @@ export function Home() {
           Subscriptions
         </A>
       </PageHead>
-      <Show when={compose() === "ask"}><AskDialog onClose={() => setCompose(null)} onAsked={() => { setCompose(null); navigate("/inbox?status=asked"); }} /></Show>
-      <Show when={compose() === "message"}><MessageDialog onClose={() => setCompose(null)} onSent={() => { setCompose(null); navigate("/inbox"); }} /></Show>
+      <Show when={compose() === "ask"}><AskDialog onClose={() => setCompose(null)} onAsked={() => { setCompose(null); navigate("/inbox?status=asked"); }} onRequested={(t) => { setCompose(null); navigate(`/threads/${t.id}`); }} /></Show>
+      <Show when={compose() === "message"}><MessageDialog onClose={() => setCompose(null)} onSent={(t) => { setCompose(null); navigate(`/threads/${t.id}`); }} /></Show>
       <Show when={compose() === "thread"}><NewThreadDialog onClose={() => setCompose(null)} onOpened={(t) => { setCompose(null); navigate(threadHref(t.id)); }} /></Show>
 
       <section aria-label="Usage">

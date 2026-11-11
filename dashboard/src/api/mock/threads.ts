@@ -239,14 +239,16 @@ export function createThreadMock(c: ThreadMockContext) {
         const topic = (b.topic ?? "").trim();
         if (!topic) fail(422, "invalid", "`topic` is empty");
         if ([...topic].length > MAX_TOPIC || /[\n\r\0]/.test(topic)) fail(422, "invalid", `\`topic\` is one line of at most ${MAX_TOPIC} characters`);
-        const scope = b.scope?.trim() || GLOBAL;
+        const selected = b.report_to ? c.agent(b.report_to) : null;
+        if (selected && !selected.roles.includes("project_admin")) fail(422, "invalid", "report_to must be a project lead");
+        const scope = selected?.project ?? (b.scope?.trim() || GLOBAL);
         if (scope !== GLOBAL && !w.projects.some((p) => p.name === scope)) fail(404, "not_found", `no project \`${scope}\``);
-        const template = b.template?.trim() || null;
+        const template = selected ? "global:request" : b.template?.trim() || null;
         if (template && ([...template].length > MAX_TEMPLATE || /[\n\r\0]/.test(template))) fail(422, "invalid", `\`template\` is one line of at most ${MAX_TEMPLATE} characters`);
         const a = b.agent?.trim() ? c.agent(b.agent.trim()) : null;
         if (a && scope !== GLOBAL && a.project !== scope) fail(422, "invalid", `agent ${a.project}/${a.name} is not in project \`${scope}\`: a project thread's agent is of its project`);
         const leadProject = scope === GLOBAL ? GLOBAL_LEAD_PROJECT : scope;
-        const lead = leadOf(leadProject) ?? fail(409, "conflict", `project \`${leadProject}\` has no lead (a project_admin agent), so a \`${scope}\` thread has nobody to report to (D34)`);
+        const lead = selected ?? leadOf(leadProject) ?? fail(409, "conflict", `project \`${leadProject}\` has no lead (a project_admin agent), so a \`${scope}\` thread has nobody to report to (D34)`);
         const text = b.text !== undefined && b.text.trim() ? checkText("text", b.text, MAX_MESSAGE) : null;
         const at = c.iso();
         const t: MockThread = {

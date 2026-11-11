@@ -11125,6 +11125,56 @@ async fn rules_stored_parse_problems_are_printed_and_check_fails() {
     }
 }
 
+/// `admin link ...` (TER-61, docs/api.md §36): the pairing code alone on
+/// stdout, and the routes of rotate and revoke.
+#[tokio::test]
+async fn admin_link_prints_the_pairing_code_alone() {
+    let made = json!({"link": {"id": "L1", "label": "office", "read_only": true,
+                               "status": "pending"},
+                      "code": "tlp_abc", "code_expires_at": "2026-11-09T10:10:00Z",
+                      "instance": {"id": "01I", "name": "lab", "version": "0.1.0"},
+                      "url": null});
+    let out = ok(
+        false,
+        &["admin", "link", "new", "office", "--read-only"],
+        vec![(201, made.clone())],
+        vec![(
+            Post,
+            "/api/links",
+            vec![],
+            Some(json!({"label": "office", "read_only": true})),
+        )],
+    )
+    .await;
+    // The code is the first line (stdout); the hints follow (stderr).
+    assert_eq!(out.lines().next(), Some("tlp_abc"), "{out}");
+    assert!(
+        out.contains("one use") && out.contains("instance: 01I"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["admin", "link", "rotate", "L1"],
+        vec![(200, made)],
+        vec![req(Post, "/api/links/L1/rotate")],
+    )
+    .await;
+    // The code is the first line (stdout); the hints follow (stderr).
+    assert_eq!(out.lines().next(), Some("tlp_abc"), "{out}");
+    assert!(
+        out.contains("one use") && out.contains("instance: 01I"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["admin", "link", "revoke", "L1"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/links/L1")],
+    )
+    .await;
+    assert_eq!(out, "revoked link L1\n");
+}
+
 /// Run `args` as an agent against `mock`: the result and the output.
 async fn exec_on(args: &[&str], mock: &MockTransport) -> (anyhow::Result<()>, String) {
     let cli = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))

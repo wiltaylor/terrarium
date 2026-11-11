@@ -1713,3 +1713,164 @@ written by the author of the code; an independent review is still to do.
   container stopped or removed. The backup of the run is in the backup
   dir, and the history names it; start the old image with the deploy
   wrapper and restore it by hand (§32.3 of api.md).
+
+## 20. Link keys (2026-11-09, TER-61)
+
+A link key lets another Terrarium daemon (the home) act on this daemon
+with near-operator rights (docs/api.md §36, wiki page
+`design/linked-instances`, decisions Q1 to Q8 of 2026-11-06). This section
+is the threat model of the remote side. It is written by the author of the
+code; the lead's security review is still to do.
+
+### Assets and actors
+
+- **The link key** (`tlk_`): operator rights on this daemon minus the deny
+  list, until it is revoked. The home holds it (TER-62 seals it there).
+- **The pairing code** (`tlp_`): one use, 10 minutes; it buys a key.
+- **The attacker** is someone who got a key or a code (a leak from the home,
+  a compromised home), a prompt-injected agent on this daemon, or a
+  network peer that calls `POST /api/links/pair`.
+
+### Controls
+
+- **At rest.** The table keeps the SHA-256 of the key and of the code only
+  (`store::links`). Both are 32 random bytes from `/dev/urandom`. Neither
+  is in a log, an event, or an audit row. Tests:
+  `pair_once_then_the_key_authenticates` (no clear value in the table),
+  `a_link_key_acts_as_the_operator_minus_the_deny_list` (no key in the
+  audit or event tables).
+- **Shown once.** The code is in the answer of `POST /api/links` and of the
+  rotate only, the key in the answer of the pairing only, each with
+  `Cache-Control: no-store`. The CLI prints the code alone on stdout and
+  never sees the key.
+- **One pairing per code.** One `UPDATE ... WHERE pair_code_hash = ? AND
+  pair_expires_at > now` swaps the code for the key, so two calls with one
+  code cannot both win. Every failure is the same `401`. The code space is
+  256 bits, so the route has no rate limit of its own.
+- **Only the operator manages links.** An agent, also a sysadmin, gets
+  `403` on every `/api/links` route (`policy::operator_only`). A link key
+  cannot make, list, pair, or rotate a link: it may only end its own.
+- **The deny list** (`links::denied`) runs in the TCP auth, before the
+  router, for every link request: the credentials of this daemon, the
+  backups (a backup holds `secrets.key` and `session.key`), the
+  self-update, and the config repo push (Q3). It decodes the path, drops
+  empty and `.` segments, and ignores case, so it covers more spellings
+  than the router matches; `..` is denied. Tests:
+  `every_route_of_the_deny_list_is_refused`,
+  `spellings_of_a_denied_route_are_refused`, and the HTTP test above.
+- **No way around the deny list through a sysadmin agent** (review
+  round 1, finding 1; lead decision O1 plus O2). A sysadmin agent calls the
+  API with its own rights, and `policy::sysadmin` may push the config repo
+  and run the self-update. So a link may not grant or revoke `sysadmin`
+  (`policy::change_role`: `PUT /api/agents/{id}/roles`, an agent create, a
+  spawn), and may not drive an agent that holds `sysadmin`
+  (`links::refuse_sysadmin_agent`): no turn or raw send, no keys, no
+  answer, no PTY attach, no change of its prompt or settings (`PATCH`), no
+  `then` turn of a compact or new session, no spawn for it, and no mail to
+  it: a send, a reply, a project inbox reply, or the note of a thread resume
+  (`api::mail::refuse_link_to_sysadmin`, checked on every recipient in the
+  same transaction, so a refused reply or resume changes nothing). Each is
+  `403 link_forbidden`. Tests: `a_link_cannot_grant_or_drive_sysadmin`,
+  `a_link_cannot_mail_a_sysadmin_agent`,
+  `a_link_cannot_reach_a_sysadmin_by_inbox_reply_or_resume_note`.
+- **One delivery guard for every message** (review round 5, F9; lead
+  decision). Rounds 3 to 5 each found one more route that mailed link text
+  to a sysadmin (inbox reply, resume note, question answer, notice ack,
+  retract reason, to-thread, thread message and respond). So the check is
+  now where every message is written or delivered, `store::mail::send` and
+  the release of held mail, `store::mail::release` (review round 6; also a
+  resume without a note): when the write
+  has a link provenance (`Tx::link`, taken in `Db::write` from the request's
+  task-local `links::CALLER`, or from an actor label `link:<id>`), a
+  recipient that holds `sysadmin` fails the whole transaction with
+  `link_forbidden`. A task that the request spawns with `links::spawn` keeps
+  the provenance (the schedule runs use it). The per-route checks stay as a
+  first line. Tests:
+  `a_link_cannot_reach_a_sysadmin_through_questions_or_threads`,
+  `the_link_provenance_survives_into_a_spawned_task`,
+  `a_link_cannot_release_held_mail_to_a_sysadmin`. The guard also refuses
+  daemon notices that a link's own action would send to a sysadmin, so such
+  an action fails as a whole; that is on purpose (a notice can quote link
+  text). Work that runs later in a task of its own (an event reaction, the
+  card dispatcher) has no link provenance; that is the indirect residual
+  below.
+- **No executable automation from a link** (review round 3, F6). A schedule
+  or a board rule runs later as `system`, as its owner, or as the project
+  inbox, in a task without the link's provenance, so its turn and mail
+  actions would pass the checks above. The deny list refuses a link the
+  writes, runs, tests, redeliveries, and enables of schedules, and the writes
+  and enables of board rules. Reads, a delete, and a disable stay open. Test:
+  `a_link_cannot_make_or_run_schedules_or_write_rules`.
+- **No shared launch text from a link** (review round 4, F8). An agent's
+  system prompt comes from the system prompt library: its persona, or for a
+  sysadmin with none the entry `leader` (`prompt.rs`, loaded by
+  `runner_supervisor` at each start). A write there, followed by an allowed
+  restart, would make link text the system prompt of a sysadmin. The deny
+  list refuses a link every write of the system prompt library (also a
+  create that shadows an entry, and `replace: true`), of the skill library,
+  of the agent templates, and the accept or keep of the packaged defaults.
+  Reads stay open. Test: `a_link_cannot_write_shared_launch_text` (the
+  library text stays as it was, and the operator still writes it).
+- **Read-only links** (Q2) pass `GET` and `HEAD` only, and a WebSocket only
+  on an `.../events` route: no PTY, no target shell, no turn. Tests:
+  `read_only_reads_and_opens_only_the_event_socket`,
+  `a_read_only_link_only_reads`.
+- **Revoke is immediate.** A request takes the key's revocation signal
+  before the key lookup, so a revoke that commits after the lookup still
+  reaches it. A revoke or rotate ends a pending answer (`401`), a streamed
+  body, and the event, PTY, and target WebSockets of the key. Tests:
+  `a_revoke_closes_the_open_streams_of_the_link`,
+  `a_revoke_closes_the_event_websocket_of_the_link`,
+  `a_revoke_reaches_each_guard_and_frees_the_signal`.
+- **Audit.** Actions of a link carry the actor `link:<id>`, so this
+  daemon's operator sees what each link did; `link.forbidden` records deny
+  list hits (throttled to one a minute per link, method, and path, so a
+  hostile home cannot flood the audit table).
+- **Transport.** Link keys work on the TCP listener only. The listener is
+  plaintext; TLS comes from a reverse proxy (Q4), as for the CLI login.
+
+### Residuals
+
+- **A leaked key works from anywhere** until revoked: there is no address
+  binding (Q1). `first_used_at` and `last_used_from` show a strange use.
+  Behind a reverse proxy every peer shows as the proxy.
+- **Near-operator rights.** Outside the deny list a link can do what the
+  operator can: start and stop agents, send turns, attach a PTY, run a
+  target shell, write cards and wiki pages, change settings, and write
+  and grant secrets. The reveal route is denied, but a link can grant a
+  secret to an agent and read it through that agent's terminal, so a full
+  link reaches the values of the secrets in the end. A compromised home
+  therefore controls the agents and the secrets of each remote it links
+  to. `--read-only` links and
+  the revoke are the controls.
+- **The actor label is a task-local.** The rights check sees the operator;
+  `Actor::label()` reads the link from the task-local of the request. Work
+  that a request hands to another task (a background job, the socket task
+  of a WebSocket) records `operator`, not `link:<id>`. The deny list itself
+  does not depend on it. It holds for the link's own requests only: what a
+  link sets in motion runs with the rights of whoever runs it. A link
+  starts, stops, and sends turns to agents that are not sysadmin, and those
+  act with their own rights (a project_admin agent with the rights of a
+  project_admin). That is the near-operator intent of the design. The
+  sysadmin agents, whose rights reach the denied routes, are closed to a
+  link (above).
+- **Indirect input still reaches a sysadmin agent.** A link may still
+  write cards, card comments, wiki pages, and mail to a project inbox that a
+  sysadmin agent reads. It may also emit events (`POST /api/events`) that
+  trigger a schedule or a rule that someone else made; that automation runs
+  its own fixed action, but a template in it can carry event text to a
+  sysadmin agent. The agents treat cards, pages, and event text as data, not
+  as instructions (their system prompt). A sysadmin agent that obeys such
+  text could push the config repo for the link. Not closed in code.
+- **Config auto-sync** (review round 1, finding 2). With
+  `TERRARIUM_CONFIG_SYNC=sync`, the background loop of this daemon commits
+  and pushes the config repo as the operator. A link may change the state
+  that the config repo exports, and may call `POST /api/config/commit`; the
+  next sync then pushes it, though the link never calls a denied route. A
+  link cannot turn auto-sync on. Leave auto-sync off on a remote whose
+  config repo a link must not reach.
+- **`X-Terrarium-Link`** (the home's instance ID on each call, design D1) is
+  not checked: the home ID recorded at pairing is the record, and a thief
+  of the key could send the header too.
+- **The pairing route takes no bearer.** It is reachable by any peer of the
+  TCP port; it writes nothing unless the code matches.

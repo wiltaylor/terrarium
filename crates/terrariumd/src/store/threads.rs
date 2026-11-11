@@ -164,6 +164,12 @@ pub struct Handoff {
 /// A thread, as the API shows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thread {
+    /// Version of the agent replacement, carried through asynchronous spawn.
+    #[serde(default)]
+    pub request_epoch: i64,
+    /// A request mediated by a request agent, rather than direct mail.
+    #[serde(default)]
+    pub request: bool,
     pub id: String,
     /// The outcome of an agent that ended while this thread was open.
     #[serde(default)]
@@ -308,6 +314,8 @@ fn row_named(r: &Row<'_>, mut name: impl FnMut(&str) -> String) -> rusqlite::Res
     let agent: Option<String> = r.get("agent")?;
     let report_to: Option<String> = r.get("report_to")?;
     Ok(Thread {
+        request_epoch: r.get("request_epoch")?,
+        request: r.get("request")?,
         id: r.get("id")?,
         agent_end_outcome: r.get("agent_end_outcome")?,
         topic: r.get("topic")?,
@@ -1091,6 +1099,84 @@ fn insert_message(
     Ok(id)
 }
 
+/// Replace an ended request agent. Keep every message and linked card.
+pub fn restart_request(
+    t: &mut Tx<'_>,
+    id: &str,
+    by: &str,
+    reason: &str,
+    template: &str,
+    reopening: bool,
+    expected: (i64, Option<&str>),
+) -> ApiResult<Thread> {
+    let (epoch, card) = expected;
+    let th = get_bare(t, id)?;
+    if !th.request || (th.status == ThreadStatus::Closed) != reopening {
+        return Err(ApiError::conflict("the request status changed"));
+    }
+    let current: i64 = t.query_row(
+        "SELECT request_epoch FROM threads WHERE id = ?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    if current != epoch {
+        return Err(ApiError::conflict("another request agent replacement won"));
+    }
+    let reason = check_text("reason", reason, MAX_MESSAGE)?;
+    let reason = t.redact_string(reason);
+    let at = now();
+    let verb = if reopening {
+        "Reopened"
+    } else {
+        "Agent replaced"
+    };
+    if let Some(handoff) = &th.handoff {
+        insert_message(
+            t,
+            id,
+            "system",
+            "message",
+            &format!(
+                "Previous close handoff (quoted data):\n{}",
+                serde_json::to_string(handoff).map_err(|e| ApiError::invalid(e.to_string()))?
+            ),
+            &at,
+        )?;
+    }
+    insert_message(t, id, by, "message", &format!("{verb}: {reason}"), &at)?;
+    t.execute(
+        "UPDATE threads SET status = 'waiting_agent', template = ?2, agent = NULL,
+         agent_end_outcome = NULL, close_proposal = NULL, handoff = NULL, closed_at = NULL,
+         closed_by = NULL, close_reason = NULL, reminded_at = NULL, updated_at = ?3,
+         request_epoch = request_epoch + 1 WHERE id = ?1",
+        params![id, template, at],
+    )?;
+    if let Some(card) = card {
+        let c = board::get_card(t, card)?;
+        if c.archived {
+            return Err(ApiError::invalid(
+                "an archived card cannot reopen a request",
+            ));
+        }
+        t.execute("INSERT OR IGNORE INTO thread_cards (thread, project, card, linked_by, linked_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![id, c.project, c.id, by, at])?;
+        t.audit(
+            "thread.card_link",
+            id,
+            Some(&c.project),
+            json!({"card": c.id, "by": by}),
+        )?;
+    }
+    let th = get(t, id)?;
+    t.audit(
+        "thread.restart",
+        id,
+        th.project(),
+        json!({"by": by, "reopening": reopening, "template": template}),
+    )?;
+    emit(t, &th, "restarted")?;
+    Ok(th)
+}
+
 /// One message of thread `thread` by its ID.
 pub fn message(conn: &Connection, thread: &str, id: &str) -> ApiResult<ThreadMessage> {
     messages(conn, thread)?
@@ -1633,6 +1719,11 @@ pub fn propose_close(
 /// The operator confirms the agent's close proposal: the thread closes
 /// with the proposed handoff. No proposal is `409 conflict`.
 pub fn confirm_close(t: &mut Tx<'_>, id: &str) -> ApiResult<Thread> {
+    confirm_close_by(t, id, "operator")
+}
+
+/// Confirm a proposal, retaining who actually confirmed it in the audit.
+pub fn confirm_close_by(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
     not_closed(&th, "a confirm")?;
     let Some(p) = th.close_proposal else {
@@ -1645,7 +1736,7 @@ pub fn confirm_close(t: &mut Tx<'_>, id: &str) -> ApiResult<Thread> {
     close_as(
         t,
         &th.id,
-        "operator",
+        by,
         &p.by,
         CloseReason::Confirmed,
         Some(&p.summary),
@@ -1871,7 +1962,7 @@ pub fn emit(t: &mut Tx<'_>, th: &Thread, change: &str) -> ApiResult<()> {
 /// the new message) and `author`, which the thread agent driver reads
 /// ([`crate::thread_agent`]).
 fn emit_with(t: &mut Tx<'_>, th: &Thread, change: &str, extra: Value) -> ApiResult<()> {
-    let mut data: Value = json!({"change": change, "id": th.id, "scope": th.scope,
+    let mut data: Value = json!({"change": change, "id": th.id, "scope": th.scope, "agent": th.agent,
                                  "status": th.status});
     if let (Some(d), Value::Object(x)) = (data.as_object_mut(), extra) {
         d.extend(x);
