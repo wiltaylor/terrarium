@@ -7402,8 +7402,10 @@ it. This uses the same SSH credential, port and host-key policy as exec.
 
 Before exec, run or cp, Terrarium mirrors the caller's workspace to the same
 absolute path on the target, creating it if needed.
-On exe.dev the mirror is `<work_root>/<project>/<agent>`, or
-`<remote home>/<project>/<agent>` when no `work_root` is set. Workspace
+On exe.dev the mirror is `<owned root>/workspace`. Card agents prepare the
+owned root (including its ownership marker) before mirroring, and root cleanup
+also removes the mirror. Other agents use `<work_root>/<project>/<agent>/workspace`,
+or `<remote home>/<project>/<agent>/workspace` without `work_root`. Workspace
 paths in cwd, command arguments, environment values and copy paths are
 translated to that mirror for exec, run and checkout. Remote error text
 contains remote paths, which differ from the sandbox paths. On SSH targets
