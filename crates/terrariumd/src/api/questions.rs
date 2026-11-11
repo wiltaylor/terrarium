@@ -20,11 +20,11 @@
 //!   question or notice into a new Inbox thread with its agent (GitHub
 //!   #30); the question becomes `in_thread`.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 
@@ -41,15 +41,58 @@ use crate::store::questions::{
 use crate::store::waits::{self, NewWait, Wait, WaitKind};
 use crate::waits as rt;
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/agents/{id}/questions", get(list_of).post(ask))
-        .route("/questions", get(list_all))
-        .route("/questions/{id}", get(show).patch(update))
-        .route("/questions/{id}/answer", post(answer))
-        .route("/questions/{id}/ack", post(ack))
-        .route("/questions/{id}/retract", post(retract))
-        .route("/questions/{id}/to-thread", post(to_thread))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/agents/{id}/questions",
+            get(list_of).post(ask),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/questions",
+            get(list_all),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/questions/{id}",
+            get(show).patch(update),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/questions/{id}/answer",
+            post(answer),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/questions/{id}/ack",
+            post(ack),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/questions/{id}/retract",
+            post(retract),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/questions/{id}/to-thread",
+            post(to_thread),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
 }
 
 async fn find_agent(state: &Shared, actor: &Actor, key: String) -> ApiResult<AgentView> {

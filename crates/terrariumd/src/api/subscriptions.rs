@@ -1,11 +1,11 @@
 //! `/api/subscriptions/...`: plans, quota samples, probes, login sessions,
 //! and API keys (PLAN §16, §17).
 
+use axum::Json;
 use axum::extract::{FromRequestParts, Path, Request, State, ws::WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -43,34 +43,190 @@ struct KeySave {
 use crate::store::usage as ustore;
 use terrarium_core::selfhosted::{self, Api, SelfHosted};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/subscriptions", get(list).post(create))
-        .route("/subscriptions/detect", get(detect))
-        .route("/subscriptions/fetch-models", post(fetch_models))
-        .route("/subscriptions/login", post(login_start))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/subscriptions",
+            get(list).post(create),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::Conditional,
+                ),
+                (
+                    axum::http::Method::POST,
+                    super::link_registry::Access::Conditional,
+                ),
+            ],
+        )
+        .route(
+            "/subscriptions/detect",
+            get(detect),
+            &[(
+                axum::http::Method::GET,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/subscriptions/fetch-models",
+            post(fetch_models),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/subscriptions/login",
+            post(login_start),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
         .route(
             "/subscriptions/login/{id}",
             get(login_show).delete(login_cancel),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+            ],
         )
-        .route("/subscriptions/login/{id}/input", post(login_input))
-        .route("/subscriptions/login/{id}/pty", get(login_pty))
+        .route(
+            "/subscriptions/login/{id}/input",
+            post(login_input),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/subscriptions/login/{id}/pty",
+            get(login_pty),
+            &[(
+                axum::http::Method::GET,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
         .route(
             "/subscriptions/{name}",
             get(show).delete(remove).patch(update),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::Conditional,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Conditional,
+                ),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Conditional,
+                ),
+            ],
         )
-        .route("/subscriptions/{name}/enable", post(enable))
-        .route("/subscriptions/{name}/disable", post(disable))
-        .route("/subscriptions/{name}/stop-all", post(stop_all))
-        .route("/subscriptions/{name}/quota", get(quota))
-        .route("/subscriptions/{name}/models", get(models))
-        .route("/subscriptions/{name}/probe", post(probe))
-        .route("/subscriptions/{name}/verify", post(verify))
-        .route("/subscriptions/{name}/logout", post(logout))
-        .route("/subscriptions/{name}/default", post(make_default))
-        .route("/subscriptions/{name}/api-key", post(api_key))
-        .route("/subscriptions/{name}/cloud", axum::routing::put(set_cloud))
-        .route("/subscriptions/{name}/label", axum::routing::put(set_label))
+        .route(
+            "/subscriptions/{name}/enable",
+            post(enable),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/disable",
+            post(disable),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/stop-all",
+            post(stop_all),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/quota",
+            get(quota),
+            &[(
+                axum::http::Method::GET,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/models",
+            get(models),
+            &[(
+                axum::http::Method::GET,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/probe",
+            post(probe),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/verify",
+            post(verify),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/logout",
+            post(logout),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/default",
+            post(make_default),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/api-key",
+            post(api_key),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/cloud",
+            axum::routing::put(set_cloud),
+            &[(
+                axum::http::Method::PUT,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/subscriptions/{name}/label",
+            axum::routing::put(set_label),
+            &[(
+                axum::http::Method::PUT,
+                super::link_registry::Access::Conditional,
+            )],
+        )
 }
 
 /// The newest sample of one window, for lists.

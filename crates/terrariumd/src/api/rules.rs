@@ -15,10 +15,10 @@
 //! reads the context under the lock, parses on a blocking thread
 //! (`rules::check`, `rules::with_rules`), then writes.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use terrarium_core::rules_file;
@@ -29,13 +29,40 @@ use crate::error::{ApiError, ApiResult};
 use crate::policy;
 use crate::store::rules::{self, Rules};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/rules/schema", get(schema))
-        .route("/projects/{name}/rules", get(show).put(put).delete(remove))
-        .route("/projects/{name}/rules/check", post(check))
-        .route("/projects/{name}/rules/dry-run", post(dry_run))
-        .route("/projects/{name}/rules/runs", get(runs))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/rules/schema",
+            get(schema),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/rules",
+            get(show).put(put).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/projects/{name}/rules/check",
+            post(check),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/rules/dry-run",
+            post(dry_run),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/rules/runs",
+            get(runs),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
 }
 
 /// `GET /api/rules/schema`: the schema that the daemon checks each rules

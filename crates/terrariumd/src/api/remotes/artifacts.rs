@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Extension, Json, Router};
+use axum::{Extension, Json};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use rusqlite::OptionalExtension;
@@ -198,10 +198,20 @@ pub(super) async fn mint(
     }))
 }
 
-pub(crate) fn serving_routes() -> Router<Shared> {
-    Router::new()
-        .route("/ra/{cap}/{exp}/{sig}/", get(root))
-        .route("/ra/{cap}/{exp}/{sig}/{*path}", get(asset))
+pub(crate) fn serving_routes() -> crate::api::link_registry::RegisteredRouter {
+    use crate::api::link_registry::{Access, RegisteredRouter};
+    use axum::http::Method;
+    RegisteredRouter::new()
+        .route(
+            "/ra/{cap}/{exp}/{sig}/",
+            get(root),
+            &[(Method::GET, Access::PublicDenied)],
+        )
+        .route(
+            "/ra/{cap}/{exp}/{sig}/{*path}",
+            get(asset),
+            &[(Method::GET, Access::PublicDenied)],
+        )
 }
 
 async fn root(

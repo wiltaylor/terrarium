@@ -19,13 +19,13 @@
 //! `sandbox` and `default-src 'none'`. An `<img>` of the dashboard still
 //! shows an image (an SVG in an `<img>` runs no script).
 
+use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
@@ -40,20 +40,38 @@ use crate::store::card_files::{self, AddOutcome, CardFile, FileVersion, Limits};
 pub const FILE_CSP: &str =
     "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'";
 
-pub fn routes() -> Router<Shared> {
+pub fn routes() -> super::link_registry::RegisteredRouter {
     let limits = Limits::from_env();
     // The largest file as base64 in JSON or in a multipart body, with room
     // for the rest. A bigger body is a `413` from the handler.
     let body_limit = usize::try_from(limits.max_file / 3 * 4 + 1024 * 1024).unwrap_or(usize::MAX);
-    Router::new()
+    super::link_registry::RegisteredRouter::new()
         .route(
             "/cards/{id}/files",
             get(list)
                 .post(upload)
                 .layer(DefaultBodyLimit::max(body_limit)),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
         )
-        .route("/cards/{id}/files/{name}", get(download).delete(remove))
-        .route("/cards/{id}/files/{name}/versions", get(versions))
+        .route(
+            "/cards/{id}/files/{name}",
+            get(download).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/cards/{id}/files/{name}/versions",
+            get(versions),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
 }
 
 /// The card, after the read right of its project.
