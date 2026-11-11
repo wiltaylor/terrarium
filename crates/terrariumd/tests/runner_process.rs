@@ -1048,12 +1048,22 @@ async fn hot_swap_mid_turn_preserves_wait_and_target_run() {
         {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
-    td.post("/api/targets", Some(json!({"name":"box", "kind":"host", "host":"lab1"}))).await;
+    })
+    .await
+    .unwrap();
+    td.post(
+        "/api/targets",
+        Some(json!({"name":"box", "kind":"host", "host":"lab1"})),
+    )
+    .await;
     let bob = td.agent("bob", json!({"policy":{"targets":["box"]}})).await;
     td.post(&format!("/api/agents/{bob}/start"), None).await;
     td.wait_status(&bob, "idle").await;
-    td.post(&format!("/api/agents/{bob}/send"), Some(json!({"text":"/hold"}))).await;
+    td.post(
+        &format!("/api/agents/{bob}/send"),
+        Some(json!({"text":"/hold"})),
+    )
+    .await;
     td.wait_status(&bob, "working").await;
     let old_pid = td.runner_pid(&bob).unwrap();
     let mark = last_seq(&td, &bob).await;
@@ -1068,62 +1078,113 @@ async fn hot_swap_mid_turn_preserves_wait_and_target_run() {
                 .args(["-p", "demo", "--json"])
                 .args(args)
                 .kill_on_drop(true)
-                .output().await.unwrap();
-            assert!(out.status.success(), "CLI: {}", String::from_utf8_lossy(&out.stderr));
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "CLI: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             serde_json::from_slice::<Value>(&out.stdout).unwrap()
         }
     };
-    let wait = cli(vec!["wait".into(), "time".into(), "--for".into(), "1h".into()]).await;
+    let wait = cli(vec![
+        "wait".into(),
+        "time".into(),
+        "--for".into(),
+        "1h".into(),
+    ])
+    .await;
     let gate = td.dir.path().join("finish-run");
     let started = td.dir.path().join("run-started");
     let script = format!(
         "echo before; touch '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; echo after",
-        started.display(), gate.display()
+        started.display(),
+        gate.display()
     );
-    let run = cli(vec!["run".into(), "box".into(), "--name".into(), "proof".into(),
-        "--".into(), "sh".into(), "-c".into(), script]).await;
+    let run = cli(vec![
+        "run".into(),
+        "box".into(),
+        "--name".into(),
+        "proof".into(),
+        "--".into(),
+        "sh".into(),
+        "-c".into(),
+        script,
+    ])
+    .await;
     let wid = wait["id"].as_str().unwrap();
     let rid = run["wait"]["id"].as_str().unwrap();
     timeout(WAIT, async {
         while !started.exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     for id in [wid, rid] {
         assert_eq!(td.get(&format!("/api/waits/{id}")).await["state"], "open");
     }
 
-    terrariumd::agent_rpc::drain(&state, Duration::from_secs(2)).await.unwrap();
+    terrariumd::agent_rpc::drain(&state, Duration::from_secs(2))
+        .await
+        .unwrap();
     let held = tokio::spawn(cli(vec!["whoami".into()]));
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!held.is_finished(), "CLI waits rather than reporting a tunnel error");
+    assert!(
+        !held.is_finished(),
+        "CLI waits rather than reporting a tunnel error"
+    );
     listener.abort();
     td.shutdown();
-    td.upgrade = Upgrade { version: Some("0.0.0+0000000".into()), limit: Some(3), runner: None };
+    td.upgrade = Upgrade {
+        version: Some("0.0.0+0000000".into()),
+        limit: Some(3),
+        runner: None,
+    };
     td.boot().await;
-    let (listener, _) = terrariumd::hosts::serve(
-        td.daemon.as_ref().unwrap().state.clone(), &addr.to_string()
-    ).await.unwrap();
+    let (listener, _) =
+        terrariumd::hosts::serve(td.daemon.as_ref().unwrap().state.clone(), &addr.to_string())
+            .await
+            .unwrap();
     timeout(WAIT, held).await.unwrap().unwrap();
-    td.wait_events(&bob, "system", |events| events.iter().any(|e|
-        e["data"]["message"].as_str().is_some_and(|m| m.starts_with("restart_scheduled (reason upgrade)"))
-    )).await;
-    assert_eq!(td.runner_pid(&bob), Some(old_pid), "still in the original turn");
+    td.wait_events(&bob, "system", |events| {
+        events.iter().any(|e| {
+            e["data"]["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("restart_scheduled (reason upgrade)"))
+        })
+    })
+    .await;
+    assert_eq!(
+        td.runner_pid(&bob),
+        Some(old_pid),
+        "still in the original turn"
+    );
     assert_eq!(td.events(&bob, "session_started").await.len(), 1);
     for id in [wid, rid] {
         assert_eq!(td.get(&format!("/api/waits/{id}")).await["state"], "open");
     }
-    td.post(&format!("/api/agents/{bob}/send"), Some(json!({"text":"go", "raw":true}))).await;
+    td.post(
+        &format!("/api/agents/{bob}/send"),
+        Some(json!({"text":"go", "raw":true})),
+    )
+    .await;
     restarted_after_turn(&td, &bob, mark, 2, old_pid).await;
     assert!(td.events(&bob, "error").await.is_empty());
     std::fs::write(&gate, "").unwrap();
     let resolved = timeout(WAIT, async {
         loop {
             let w = td.get(&format!("/api/waits/{rid}")).await;
-            if w["state"] == "resolved" { break w; }
+            if w["state"] == "resolved" {
+                break w;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     assert_eq!(resolved["result"]["exit_code"], 0);
     assert_eq!(resolved["result"]["stdout_tail"], "before\nafter\n");
     assert_eq!(td.get(&format!("/api/waits/{wid}")).await["state"], "open");
