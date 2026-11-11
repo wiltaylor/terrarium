@@ -33,7 +33,7 @@ describe("provider mark files (TER-642)", () => {
 
 describe("providerMark", () => {
   it("maps each provider kind with a mark to bundled files", () => {
-    for (const kind of ["anthropic", "github", "moonshot", "openrouter", "bedrock", "gcp", "foundry"]) {
+    for (const kind of ["anthropic", "openai", "github", "moonshot", "openrouter", "bedrock", "gcp", "foundry"]) {
       const m = providerMark(kind);
       expect(m, kind).toBeDefined();
       expect(m!.light).toBeTruthy();
@@ -43,11 +43,11 @@ describe("providerMark", () => {
   });
 
   it("gives a light and a dark file for the marks that need one", () => {
-    for (const kind of ["github", "moonshot", "openrouter"]) expect(PROVIDER_MARKS[kind]!.light).not.toBe(PROVIDER_MARKS[kind]!.dark);
+    for (const kind of ["openai", "github", "moonshot", "openrouter"]) expect(PROVIDER_MARKS[kind]!.light).not.toBe(PROVIDER_MARKS[kind]!.dark);
   });
 
   it("leaves the kinds with no official file to the fallback", () => {
-    for (const kind of ["openai", "zai", "deepseek", "selfhosted", "openai-compatible", "acme", ""]) expect(providerMark(kind)).toBeUndefined();
+    for (const kind of ["zai", "deepseek", "selfhosted", "openai-compatible", "acme", ""]) expect(providerMark(kind)).toBeUndefined();
   });
 });
 
@@ -65,5 +65,6 @@ describe("providerLabel", () => {
     expect(isSelfHostedKind("selfhosted")).toBe(true);
     expect(isSelfHostedKind("openai-compatible")).toBe(true);
     expect(isSelfHostedKind("openai")).toBe(false);
+    expect(providerMark("OpenAI")).toBe(PROVIDER_MARKS.openai);
   });
 });
