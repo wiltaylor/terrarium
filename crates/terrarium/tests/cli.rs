@@ -327,6 +327,52 @@ fn run(socket: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn update_jobs_drain_reports_timeout_and_resumes_against_daemon_api() {
+    let dir = temp_dir("update-jobs");
+    let socket = dir.join("api.sock");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let drained = seen.clone();
+    let resumed = seen.clone();
+    let app = axum::Router::new()
+        .route("/api/system/update/drain", post(move |Json(body): Json<Value>| {
+            let seen = drained.clone();
+            async move {
+                seen.lock().unwrap().push(body);
+                Json(json!({"busy":["agent/still-working"], "jobs":["job-123"]}))
+            }
+        }))
+        .route("/api/system/update/resume", post(move || {
+            let seen = resumed.clone();
+            async move {
+                seen.lock().unwrap().push(json!("resume"));
+                Json(json!({"jobs":[]}))
+            }
+        }));
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = std::thread::spawn(move || {
+        tokio::runtime::Runtime::new().unwrap().block_on(async move {
+            let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async { let _ = stopped.await; })
+                .await.unwrap();
+        });
+    });
+    let out = run(&socket, &["admin", "update", "drain-jobs", "--wait", "0", "--json"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["timed_out"], true);
+    assert_eq!(value["jobs"], json!(["job-123"]));
+    let out = run(&socket, &["admin", "update", "resume"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(*seen.lock().unwrap(), vec![json!({"jobs_only":true}), json!("resume")]);
+    stop.send(()).unwrap();
+    server.join().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn claim_and_eta_print_similar_card_history() {
     let dir = temp_dir("eta-history");
     let socket = serve_unix(&dir);

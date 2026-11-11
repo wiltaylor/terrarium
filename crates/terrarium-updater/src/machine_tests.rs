@@ -197,7 +197,12 @@ impl Engine for Fake {
             let stdout = if what == "backup" {
                 format!(r#"{{"name": "terrarium-backup-1.zip", "path": "{BACKUP}"}}"#)
             } else if what == "drain-jobs" {
-                self.0.lock().unwrap().jobs_output.clone().unwrap_or_else(|| r#"{"jobs":[]}"#.into())
+                self.0
+                    .lock()
+                    .unwrap()
+                    .jobs_output
+                    .clone()
+                    .unwrap_or_else(|| r#"{"jobs":[]}"#.into())
             } else {
                 String::new()
             };
@@ -412,14 +417,20 @@ fn rig() -> Rig {
 async fn missing_jobs_endpoint_warns_without_exposing_values_and_continues() {
     let r = rig();
     r.fake.fail("drain-jobs");
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Succeeded);
     let step = run.steps.iter().find(|s| s.name == "drain-jobs").unwrap();
     assert_eq!(step.state, StepState::Failed);
     assert!(step.detail.contains("values hidden"));
     assert!(!step.detail.contains("broke"));
     let calls = r.fake.calls();
-    assert!(calls.iter().position(|c| c == "drain-jobs c0").unwrap() < calls.iter().position(|c| c == "stop c0").unwrap());
+    assert!(
+        calls.iter().position(|c| c == "drain-jobs c0").unwrap()
+            < calls.iter().position(|c| c == "stop c0").unwrap()
+    );
     assert_eq!(calls.last().unwrap(), "resume c1");
 }
 
@@ -427,9 +438,19 @@ async fn missing_jobs_endpoint_warns_without_exposing_values_and_continues() {
 async fn jobs_wait_expiry_records_remaining_jobs_and_continues() {
     let r = rig();
     r.fake.0.lock().unwrap().jobs_output = Some(r#"{"timed_out":true,"jobs":["job-123"]}"#.into());
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Succeeded);
-    assert!(run.steps.iter().find(|s| s.name == "drain-jobs").unwrap().detail.contains("job-123"));
+    assert!(
+        run.steps
+            .iter()
+            .find(|s| s.name == "drain-jobs")
+            .unwrap()
+            .detail
+            .contains("job-123")
+    );
 }
 
 #[tokio::test]
@@ -437,7 +458,12 @@ async fn hung_jobs_drain_has_an_outer_deadline() {
     let mut r = rig();
     Arc::get_mut(&mut r.updater).unwrap().cfg.drain_wait = Duration::ZERO;
     r.fake.0.lock().unwrap().jobs_hang = true;
-    let run = tokio::time::timeout(Duration::from_secs(7), r.updater.run_now(RunKind::Update, "latest", "operator")).await.unwrap();
+    let run = tokio::time::timeout(
+        Duration::from_secs(7),
+        r.updater.run_now(RunKind::Update, "latest", "operator"),
+    )
+    .await
+    .unwrap();
     assert_eq!(run.outcome, Outcome::Succeeded);
     assert!(steps(&run).contains(&"!drain-jobs".into()));
 }
