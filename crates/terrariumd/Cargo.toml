@@ -108,6 +108,9 @@ tokio-tungstenite.workspace = true
 seccompiler.workspace = true
 
 [dev-dependencies]
+syn = { version = "2.0.119", features = ["full", "visit"] }
+quote = "1.0"
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
 rusqlite = { workspace = true, features = ["hooks", "trace"] }
 # The integration tests use the fake supervisor.
 terrariumd = { path = ".", features = ["fake-supervisor"] }

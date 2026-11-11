@@ -1,10 +1,12 @@
 // The inventory is a reviewed classification, not a generated allow list.
 // New registrations, methods, handlers, and operator comparisons must be
 // classified before this test passes. The HTTP walk consumes the same data.
+include!("link_inventory_syntax.rs");
 #[derive(serde::Deserialize)]
 struct LinkRouteInventory {
     routes: Vec<LinkRouteEntry>,
     gates: std::collections::BTreeMap<String, Vec<String>>,
+    compositions: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -46,6 +48,7 @@ fn link_inventory_sources(
             link_inventory_sources(&path, root, out);
         } else if path.extension().is_some_and(|e| e == "rs")
             && path.file_name().unwrap() != "link_access_tests.rs"
+            && path.file_name().unwrap() != "link_inventory_syntax.rs"
         {
             let source = std::fs::read_to_string(&path).unwrap();
             out.insert(
@@ -53,55 +56,16 @@ fn link_inventory_sources(
                     .unwrap()
                     .to_string_lossy()
                     .into_owned(),
-                source.split("#[cfg(test)]").next().unwrap().to_owned(),
+                link_production_source(&source),
             );
         }
     }
 }
 
 fn link_registration_expressions(source: &str) -> Vec<String> {
-    assert!(
-        !source.contains(".route_service("),
-        "classify service routes before adding a new registration form"
-    );
-    let mut result = Vec::new();
-    let mut rest = source;
-    // Capture the whole registration, including its method chain and handler
-    // names. Constants as paths are included too, not silently skipped.
-    while let Some(start) = rest.find(".route(") {
-        let call = &rest[start + 7..];
-        let (mut depth, mut quoted, mut escaped) = (1, false, false);
-        let mut end = None;
-        for (i, c) in call.char_indices() {
-            if quoted {
-                if escaped {
-                    escaped = false;
-                } else if c == '\\' {
-                    escaped = true;
-                } else if c == '"' {
-                    quoted = false;
-                }
-            } else {
-                match c {
-                    '"' => quoted = true,
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = Some(i);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let end = end.expect("unparsed route registration");
-        result.push(call[..end].chars().filter(|c| !c.is_whitespace()).collect());
-        rest = &call[end + 1..];
-    }
-    result
+    link_syntax_inventory(source).0
 }
+
 
 fn link_gate_lines(source: &str) -> Vec<String> {
     let mut result: Vec<_> = source
@@ -109,11 +73,10 @@ fn link_gate_lines(source: &str) -> Vec<String> {
         .filter(|line| {
             !line.trim_start().starts_with("//")
                 && [
-                    "Actor::Operator",
-                    "Address::Operator",
-                    "operator_only(",
-                    "operator_only_with_provenance(",
-                    ".is_operator()",
+                    "Operator",
+                    "operator_only",
+                    "is_operator",
+                    "\"operator\"",
                 ]
                 .iter()
                 .any(|needle| line.contains(needle))
@@ -133,6 +96,17 @@ fn link_route_inventory_is_complete() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut sources = std::collections::BTreeMap::new();
     link_inventory_sources(&root, &root, &mut sources);
+    if std::env::var_os("TERRARIUM_DUMP_LINK_INVENTORY").is_some() {
+        let gates: std::collections::BTreeMap<_, _> = sources.iter().filter_map(|(name, source)| {
+            let lines = link_gate_lines(source);
+            (!lines.is_empty()).then(|| (name.clone(), lines))
+        }).collect();
+        let compositions: std::collections::BTreeMap<_, _> = sources.iter().filter_map(|(name, source)| {
+            let calls = link_syntax_inventory(source).1;
+            (!calls.is_empty()).then(|| (name.clone(), calls))
+        }).collect();
+        println!("INVENTORY_DUMP={}", serde_json::json!({"gates": gates, "compositions": compositions}));
+    }
     let inventory = link_inventory();
     let actual: std::collections::BTreeSet<_> = sources
         .iter()
@@ -184,6 +158,14 @@ fn link_route_inventory_is_complete() {
         gates, inventory.gates,
         "review new operator comparisons and conditional gates, then update their route classes and HTTP cases"
     );
+    let compositions: std::collections::BTreeMap<_, _> = sources
+        .iter()
+        .filter_map(|(name, source)| {
+            let calls = link_syntax_inventory(source).1;
+            (!calls.is_empty()).then(|| (name.clone(), calls))
+        })
+        .collect();
+    assert_eq!(compositions, inventory.compositions, "review router composition before changing the mounted endpoint set");
 }
 
 async fn link_approval_fixtures(
