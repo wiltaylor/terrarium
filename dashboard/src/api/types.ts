@@ -2341,6 +2341,8 @@ export interface SubscriptionAgentRef {
 
 /** docs/api.md §16.1. */
 export interface Subscription {
+  cloud?: CloudSettings;
+  month_spend_usd?: number;
   session_period?: { since: string; until: string };
   sessions?: Array<{ id: string; agent: string; project: string; harness: string; started_at: string; model?: string; card?: string; input_tokens?: number; output_tokens?: number }>;
   name: string;
@@ -2568,11 +2570,20 @@ export interface StartLogin {
 }
 
 /** `POST /api/subscriptions/{name}/api-key`. Write-only: no endpoint returns the key. */
+export interface CloudSettings {
+  budget_usd?: number | null;
+  region?: string;
+  project_id?: string;
+  resource?: string;
+  base_url?: string;
+  models?: Record<string, string>;
+}
+
 export interface ApiKeyInput {
   provider: string;
   key: string;
   key_id?: string;
-  cloud?: { region?: string; project_id?: string; models?: Record<string, string> };
+  cloud?: CloudSettings;
   test_connection?: boolean;
   /**
    * `zai`: `coding` (GLM Coding Plan, the default) or `api` (pay as you go).

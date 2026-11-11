@@ -4766,6 +4766,12 @@ pub struct SubscriptionNewArgs {
 /// `terrarium admin subscription set`.
 #[derive(Debug, Args)]
 pub struct SubscriptionSetArgs {
+    /// Monthly cloud budget in whole USD. Sends mail only, never holds agents
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub budget_usd: Option<u32>,
+    /// Remove the monthly cloud budget
+    #[arg(long, conflicts_with = "budget_usd")]
+    pub clear_budget_usd: bool,
     /// The subscription name
     pub name: String,
     /// A harness that may spend it (repeat; replaces the list). A
