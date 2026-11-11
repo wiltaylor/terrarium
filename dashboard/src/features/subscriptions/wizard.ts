@@ -132,6 +132,7 @@ export const takesCode = (k: WizardLogin): boolean => k === "claude";
 export const KEY_PROVIDERS: { id: string; env: string; label: string; harnesses?: string[] }[] = [
   { id: "litellm", env: "ANTHROPIC_AUTH_TOKEN", label: "LiteLLM (Claude Code)", harnesses: ["claude"] },
   { id: "gcp", env: "GOOGLE_APPLICATION_CREDENTIALS (0600 JSON file)", label: "Google Cloud Vertex AI (Claude Code)", harnesses: ["claude"] },
+  { id: "foundry", env: "ANTHROPIC_FOUNDRY_API_KEY", label: "Microsoft Foundry (Claude Code)", harnesses: ["claude"] },
   { id: "bedrock", env: "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY", label: "Amazon Bedrock (Claude Code)", harnesses: ["claude"] },
   { id: "anthropic", env: "ANTHROPIC_API_KEY", label: "Anthropic" },
   { id: "openai", env: "OPENAI_API_KEY", label: "OpenAI" },
@@ -174,6 +175,7 @@ export const defaultPlan = (provider: string): string => KEY_PLANS[provider]?.[0
 /** Where to get the key, for the providers that need a word of help. */
 export const KEY_HELP: Record<string, string> = {
   gcp: "Enable the Vertex AI API and Claude models in Model Garden. Use a service-account JSON key with the Vertex AI User role (roles/aiplatform.user) on the request project. The sandbox receives a 0600 file, not JSON in an env var. Saving tests Haiku with a paid, one-output-token call before storing anything. Defaults: Opus 5.5, Sonnet 4.6, Haiku 4.5. Model access varies by region.",
+  foundry: "Deploy Claude models in Microsoft Foundry and use the resource API key. Defaults: claude-opus-5-5, claude-sonnet-4-6, claude-haiku-4-5. Override these if your deployment names differ. Saving a resource tests Haiku with a paid, one-output-token call before storing anything. A custom base URL is saved without a test call.",
   bedrock: "Use an IAM access key pair with bedrock:InvokeModel and bedrock:InvokeModelWithResponseStream on your permitted models and inference profiles. Saving tests the haiku profile with a paid, one-output-token call to the regional Bedrock endpoint before storing the key. US inference profiles are the defaults. For other geographies, enter profile IDs or ARNs for all three models. Gateway subscriptions with cloud.base_url cannot be tested here: save via the API without test_connection instead.",
   selfhosted: "The key of a self-hosted server that needs one. Add a new server with the Self-hosted model path: it sets the API style, the models, and the limits.",
   zai: "Make a key at z.ai/manage-apikey/apikey-list. The GLM Coding Plan and pay as you go use the same key; the plan picks the endpoint. Agents run on Claude Code and pi.",
@@ -185,7 +187,12 @@ export const KEY_HELP: Record<string, string> = {
 export const takesPlan = (provider: string): boolean => provider in KEY_PLANS;
 
 /** The body of `POST /api/subscriptions/{name}/api-key` from the form fields. */
-export function apiKeyBody(f: { provider: string; key: string; plan?: string; baseUrl?: string; models?: string; keyId?: string; region?: string; projectId?: string; cloudModels?: Record<string, string> }): ApiKeyInput {
+export function apiKeyBody(f: { provider: string; key: string; plan?: string; baseUrl?: string; models?: string; keyId?: string; region?: string; projectId?: string; resource?: string; cloudModels?: Record<string, string> }): ApiKeyInput {
+  if (f.provider === "foundry") return {
+    provider: "foundry", key: f.key,
+    cloud: { ...(f.baseUrl?.trim() ? { base_url: f.baseUrl.trim() } : { resource: f.resource?.trim() }), models: Object.fromEntries(Object.entries(f.cloudModels ?? {}).filter(([, v]) => v.trim()).map(([k, v]) => [k, v.trim()])) },
+    test_connection: !f.baseUrl?.trim(),
+  };
   if (f.provider === "gcp") return {
     provider: "gcp", key: f.key,
     cloud: { region: f.region?.trim() || "us-east5", project_id: f.projectId?.trim(), models: Object.fromEntries(Object.entries(f.cloudModels ?? {}).filter(([, v]) => v.trim()).map(([k, v]) => [k, v.trim()])) },

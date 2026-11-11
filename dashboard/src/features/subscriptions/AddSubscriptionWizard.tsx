@@ -351,6 +351,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
   const [keyId, setKeyId] = createSignal("");
   const [region, setRegion] = createSignal(props.setup.provider === "gcp" ? "us-east5" : "us-east-1");
   const [projectId, setProjectId] = createSignal("");
+  const [resource, setResource] = createSignal("");
   const [cloudModels, setCloudModels] = createSignal<Record<string, string>>({});
   const [baseUrl, setBaseUrl] = createSignal("");
   const [plan, setPlan] = createSignal(defaultPlan(props.setup.provider ?? "openrouter"));
@@ -364,7 +365,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
     setBusy(true);
     try {
       const n = name().trim();
-      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models(), keyId: keyId(), region: region(), projectId: projectId(), cloudModels: cloudModels() }));
+      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models(), keyId: keyId(), region: region(), projectId: projectId(), resource: resource(), cloudModels: cloudModels() }));
       setKey("");
       setKeyId("");
       props.onSaved(n);
@@ -398,6 +399,8 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
               setKeyId("");
               setRegion(e.currentTarget.value === "gcp" ? "us-east5" : "us-east-1");
               setProjectId("");
+              setResource("");
+              setBaseUrl("");
               setCloudModels({});
               setPlan(defaultPlan(e.currentTarget.value));
               if (!fixedName) setName(`${e.currentTarget.value}-key`);
@@ -441,6 +444,19 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
           </label>
         )}</For>
       </Show>
+      <Show when={provider() === "foundry"}>
+        <label>Foundry resource name (or enter a base URL below)
+          <input value={resource()} onInput={(e) => setResource(e.currentTarget.value)} placeholder="my-resource" required={!baseUrl().trim()} disabled={!!baseUrl().trim()} />
+        </label>
+        <label>Foundry base URL (optional, no test call)
+          <input type="url" value={baseUrl()} onInput={(e) => setBaseUrl(e.currentTarget.value)} placeholder="https://my-resource.services.ai.azure.com/anthropic" />
+        </label>
+        <For each={["opus", "sonnet", "haiku"]}>{(tier) => (
+          <label>{tier} Foundry deployment name (optional override)
+            <input value={cloudModels()[tier] ?? ""} onInput={(e) => setCloudModels({ ...cloudModels(), [tier]: e.currentTarget.value })} />
+          </label>
+        )}</For>
+      </Show>
       <Show when={provider() === "bedrock"}>
         <label>AWS access key ID
           <input type="password" value={keyId()} onInput={(e) => setKeyId(e.currentTarget.value)} autocomplete="off" required />
@@ -473,7 +489,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
           <input type="url" value={baseUrl()} onInput={(e) => setBaseUrl(e.currentTarget.value)} placeholder={provider() === "litellm" ? "https://litellm.example.com" : "http://gpu.lan:8000/v1"} required />
         </label>
       </Show>
-      <Show when={provider() !== "bedrock"}><label>
+      <Show when={!["bedrock", "gcp", "foundry"].includes(provider())}><label>
         Models (comma separated, optional)
         <input value={models()} onInput={(e) => setModels(e.currentTarget.value)} />
       </label></Show>
@@ -489,7 +505,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
       </Show>
       <div>
         <button class="primary" type="submit" disabled={busy() || !key() || !name().trim()}>
-          {provider() === "bedrock" ? busy() ? "Testing Bedrock…" : "Test and save key" : "Save key"}
+          {provider() === "bedrock" || (provider() === "foundry" && !baseUrl().trim()) ? busy() ? "Testing connection…" : "Test and save key" : "Save key"}
         </button>
       </div>
     </form>
