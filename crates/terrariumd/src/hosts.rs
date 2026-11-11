@@ -349,6 +349,16 @@ impl HostRegistry {
         entry: &Entry,
         event: Option<(SessionId, &SessionEvent)>,
     ) -> crate::error::ApiResult<()> {
+        self.persist_bound(host, entry, event, None)
+    }
+
+    fn persist_bound(
+        &self,
+        host: &str,
+        entry: &Entry,
+        event: Option<(SessionId, &SessionEvent)>,
+        binding: Option<(&str, SessionId)>,
+    ) -> crate::error::ApiResult<()> {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
@@ -384,6 +394,9 @@ impl HostRegistry {
                     .map_err(|_| ApiError::internal("cannot encode host session event"))?,
             ));
         }
+        if let Some((key, id)) = binding {
+            values.push((format!("bound/{key}"), json!((host, id))));
+        }
         journal.save_many(&values)
     }
 
@@ -404,6 +417,21 @@ impl HostRegistry {
             finished: false,
             consumed: 0,
             acked: 0,
+        })
+    }
+
+    pub fn spawn_resume_grace(self: &Arc<Self>) -> JoinHandle<()> {
+        let hosts: Vec<_> = self.lock().iter()
+            .map(|(host, entry)| (host.clone(), entry.generation)).collect();
+        let registry = Arc::downgrade(self);
+        let grace = self.resume_grace;
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            if let Some(registry) = registry.upgrade() {
+                for (host, generation) in hosts {
+                    registry.expire(&host, generation);
+                }
+            }
         })
     }
 
@@ -529,6 +557,15 @@ impl HostRegistry {
         host: &str,
         make: impl FnOnce(SessionId) -> DaemonFrame,
     ) -> Result<HostSession, HostError> {
+        self.open_bound(host, None, make)
+    }
+
+    pub fn open_bound(
+        self: &Arc<Self>,
+        host: &str,
+        binding: Option<&str>,
+        make: impl FnOnce(SessionId) -> DaemonFrame,
+    ) -> Result<HostSession, HostError> {
         let mut g = self.lock();
         let e = g
             .get_mut(host)
@@ -556,7 +593,7 @@ impl HostRegistry {
                 restored: None,
             },
         );
-        if self.persist(host, e, None).is_err() {
+        if self.persist_bound(host, e, None, binding.map(|key| (key, id))).is_err() {
             e.sessions.remove(&id);
             return Err(HostError::Persistence);
         }

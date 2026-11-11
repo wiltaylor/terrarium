@@ -414,6 +414,8 @@ pub fn pump_process(
 /// (a value can be a secret, TER-142).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RemoteCmd {
+    /// Durable queue-step identity, bound atomically to a host session.
+    pub resume_key: Option<String>,
     /// The program and its arguments. Empty with `shell`.
     pub argv: Vec<String>,
     pub cwd: Option<String>,
@@ -1944,7 +1946,7 @@ pub(crate) fn start_cmd_locked(
             )?;
             let shell = caps.and_then(|c| c.shell);
             let make = host_frame(def, shell.as_deref(), cmd, limits)?;
-            Ok(pump_host(ex.hosts.open(host, make)?))
+            Ok(pump_host(ex.hosts.open_bound(host, cmd.resume_key.as_deref(), make)?))
         }
     }
 }
