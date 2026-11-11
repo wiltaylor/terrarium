@@ -787,7 +787,7 @@ pub fn mail_to(sender: &AgentActor, to: &Address) -> ApiResult<()> {
 /// or the operator.
 pub fn own_waits(actor: &Actor, owner: &str, what: &str) -> ApiResult<()> {
     match actor {
-        Actor::Operator => Ok(()),
+        Actor::Operator => operator_only(actor, what),
         Actor::Agent(a) if a.id == owner => Ok(()),
         Actor::Agent(_) => Err(ApiError::forbidden(format!(
             "{what}: an agent manages only its own waits and watches"

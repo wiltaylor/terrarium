@@ -398,7 +398,7 @@ async fn close(
     } else {
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
     };
-    if b.confirm {
+    if b.confirm || matches!(actor, Actor::Operator) {
         // Refuse link provenance before looking up the thread, but keep the
         // existing not-found/conflict precedence for ordinary agent calls.
         crate::links::operator_only("confirming a thread close")?;

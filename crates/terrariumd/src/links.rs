@@ -80,10 +80,16 @@ pub fn operator_route_allowed(method: &Method, path: &str) -> bool {
 /// allowed this route. No request context (including a spawned task) fails
 /// closed for links.
 pub fn operator_only(what: &str) -> ApiResult<()> {
-    if OPERATOR_ROUTE.try_with(|allowed| *allowed).unwrap_or(false) {
+    operator_only_with_provenance(is_link_call(), what)
+}
+
+/// Store transactions also retain provenance in `Tx::link`, including when
+/// the caller passed an audit label after leaving the original request task.
+pub fn operator_only_with_provenance(link: bool, what: &str) -> ApiResult<()> {
+    if !link || OPERATOR_ROUTE.try_with(|allowed| *allowed).unwrap_or(false) {
         Ok(())
     } else {
-        refuse_for_link(what)
+        Err(ApiError::new(crate::error::Code::LinkForbidden, format!("a link key may not {what}")))
     }
 }
 

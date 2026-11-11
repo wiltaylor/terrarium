@@ -1,0 +1,3017 @@
+{
+  "routes": [
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}\",get(show).patch(update).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/start\",post(start)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/stop\",post(stop)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/restart\",post(restart)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/pause\",post(pause)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/unpause\",post(unpause)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/compact\",post(compact)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/new-session\",post(new_session)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/send\",post(send)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/keys\",post(keys)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/interrupt\",post(interrupt)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/answer\",post(answer)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/events\",get(streams::agent_events)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/pty\",get(streams::pty)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/roles\",get(roles).put(set_roles)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/subscription\",post(swap)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/queued\",get(queued)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/queued/{turn}\",axum::routing::delete(remove_queued),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/projects/{name}/artifacts\",get(list).post(upload).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/projects/{name}/artifacts/usage\",get(usage)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/artifacts/prune\",post(prune)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/artifacts/{id}\",get(show).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/artifacts/{id}/links\",post(link)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/artifacts/{id}/url\",post(mint_url)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/a/{id}\",get(serve_root)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/a/{id}/\",get(serve_root)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/a/{id}/{*path}\",get(serve_path)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/attachments.rs",
+      "registration": "\"/agents/{id}/attachments\",post(upload).layer(DefaultBodyLimit::max(BODY_LIMIT)),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/backups.rs",
+      "registration": "\"/backups\",get(list).post(create)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/backups",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "POST",
+          "path": "/api/backups",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/backups",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/backups.rs",
+      "registration": "\"/backups/{name}\",get(download)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/backups/x",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/backups/x",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/projects/{name}/board\",get(show_board).patch(patch_board)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/projects/{name}/cards\",get(list_cards).post(create_card)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/projects/p/cards",
+          "body": {
+            "title": "GitHub #2: untrusted"
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/projects/{name}/github-issues/import\",post(import_issue)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/cards\",get(active_cards)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/cards/{id}\",get(show).patch(update).delete(archive)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "PATCH",
+          "path": "/api/cards/$card",
+          "body": {
+            "remove_labels": [
+              "hold"
+            ]
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/cards/{id}/move\",post(move_card)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/cards/$card/move",
+          "body": {
+            "column": "backlog"
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/cards/{id}/assign\",post(assign)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/cards/$card/assign",
+          "body": {
+            "assignee": "p/dev"
+          }
+        }
+      ]
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/cards/{id}/claim\",post(claim)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/cards/{id}/comments\",get(comments).post(comment)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/cards/{id}/links\",post(link)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/cards/{id}/events\",get(card_events)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/bookmarks.rs",
+      "registration": "\"/bookmarks\",get(list).put(add).delete(remove)",
+      "access": "link-allowed-read",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/bookmarks",
+          "body": {
+            "title": "x",
+            "href": "https://example.com"
+          },
+          "allowed": true
+        },
+        {
+          "method": "PUT",
+          "path": "/api/bookmarks",
+          "body": {
+            "title": "x",
+            "href": "https://example.com"
+          },
+          "allowed": false
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/bookmarks",
+          "body": {
+            "href": "https://example.com"
+          },
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/bookmarks",
+          "body": {
+            "title": "x",
+            "href": "https://example.com"
+          },
+          "allowed": true
+        }
+      ]
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar\",get(combined)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/global\",get(global_view)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/global/events\",post(create_global)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/global/watches\",get(global_watches).post(global_watch),",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/calendar/global/watches",
+          "body": {},
+          "approval": false
+        },
+        {
+          "method": "POST",
+          "path": "/api/calendar/global/watches",
+          "body": {
+            "watcher": "operator"
+          },
+          "approval": false
+        },
+        {
+          "method": "GET",
+          "path": "/api/calendar/global/watches",
+          "allowed": true
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/calendar/global/watches",
+          "allowed": true
+        }
+      ]
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/global/watches/{watcher}\",axum::routing::delete(global_unwatch),",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "DELETE",
+          "path": "/api/calendar/global/watches/operator",
+          "body": {},
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/events/{id}\",get(show).patch(update).delete(remove),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/events/{id}/skip\",post(skip)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/events/{id}/unskip\",post(unskip)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/events/{id}/assignees/{agent}\",put(assign).delete(unassign),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/events/{id}/notices\",get(notices)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/projects/{name}/calendar\",get(project_view)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/projects/{name}/calendar/events\",post(create_project)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/projects/{name}/calendar/watches\",get(project_watches).post(project_watch),",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/projects/p/calendar/watches",
+          "body": {},
+          "approval": false
+        },
+        {
+          "method": "GET",
+          "path": "/api/projects/p/calendar/watches",
+          "allowed": true
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/projects/p/calendar/watches",
+          "allowed": true
+        }
+      ]
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/projects/{name}/calendar/watches/{watcher}\",axum::routing::delete(project_unwatch),",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "DELETE",
+          "path": "/api/projects/p/calendar/watches/operator",
+          "body": {},
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/projects/{name}/calendar/grants\",get(grants)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/projects/{name}/calendar/grants/{agent}\",put(grant).delete(revoke),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/card_files.rs",
+      "registration": "\"/cards/{id}/files\",get(list).post(upload).layer(DefaultBodyLimit::max(body_limit)),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/card_files.rs",
+      "registration": "\"/cards/{id}/files/{name}\",get(download).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/card_files.rs",
+      "registration": "\"/cards/{id}/files/{name}/versions\",get(versions)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/status\",get(status)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/diff\",get(diff)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/log\",get(log)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/commit\",post(commit)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/pull\",post(pull)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/config/pull",
+          "body": {
+            "approve_grants": true
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/push\",post(push)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/sync\",post(sync)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/config/sync",
+          "body": {
+            "approve_grants": true
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/abort\",post(abort)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/remote\",axum::routing::put(remote_set).delete(remote_clear),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/defaults\",get(defaults_pending)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/defaults/accept\",post(defaults_accept)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/defaults/keep\",post(defaults_keep)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/event_sources.rs",
+      "registration": "\"/event-sources\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/event_sources.rs",
+      "registration": "\"/event-sources/{id}\",get(show).patch(update).delete(remove),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/event_sources.rs",
+      "registration": "\"/event-sources/{id}/rotate\",post(rotate)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/fleet.rs",
+      "registration": "\"/fleet\",get(list)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/fleet.rs",
+      "registration": "\"/fleet/validate\",post(validate)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/fleet.rs",
+      "registration": "\"/fleet/plan\",post(plan)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/fleet.rs",
+      "registration": "\"/fleet/apply\",post(apply)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/fleet.rs",
+      "registration": "\"/fleet/export\",get(export)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/fleet.rs",
+      "registration": "\"/fleet/{name}\",get(show)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/home.rs",
+      "registration": "\"/home/{kind}\",get(list)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/hosts.rs",
+      "registration": "\"/hosts\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/hosts.rs",
+      "registration": "\"/hosts/{name}\",get(show).delete(revoke)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/hosts.rs",
+      "registration": "\"/hosts/{name}/rotate\",axum::routing::post(rotate)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/hosts.rs",
+      "registration": "\"/hosts/{name}/metrics\",get(metrics)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/inbox.rs",
+      "registration": "\"/inbox\",get(list)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/inbox",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/inbox",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/inbox.rs",
+      "registration": "\"/inbox/counts\",get(counts)",
+      "access": "link-allowed-read",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/inbox/counts",
+          "body": {},
+          "allowed": true
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/inbox/counts",
+          "body": {},
+          "allowed": true
+        }
+      ]
+    },
+    {
+      "source": "api/inbox.rs",
+      "registration": "\"/inbox/mail/{id}/ack\",post(ack_mail)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/inbox/mail/x/ack",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/inbox.rs",
+      "registration": "\"/inbox/asks\",post(ask)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/inbox/asks",
+          "body": {
+            "to": "p/dev",
+            "text": "x"
+          },
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/inbox.rs",
+      "registration": "\"/inbox/watches/{thread}\",delete(cancel_watch)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "DELETE",
+          "path": "/api/inbox/watches/x",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/install.rs",
+      "registration": "SCRIPT_PATH,get(script)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/install.rs",
+      "registration": "BINARY_PATH,get(binary)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/install.rs",
+      "registration": "CHECKSUM_PATH,get(checksum)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/projects/{name}/delivery\",get(show_delivery).put(set_delivery),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/projects/{name}/jobs\",get(list)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/projects/{name}/jobs/stats\",get(stats)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/jobs/{id}\",get(show).delete(cancel)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/cards/{id}/validate\",post(validate)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/cards/{id}/merge\",post(merge)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/cards/{id}/e2e\",post(e2e)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/cards/{id}/release\",post(release)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/release-targets\",get(list_release_targets)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/release-targets/{name}\",delete(retire_release_target)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "DELETE",
+          "path": "/api/release-targets/x",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/merges\",post(merge_batch)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/job-hosts\",get(list_hosts)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/job-hosts/{host}\",put(set_host).delete(clear_host)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/job-hosts/{host}/aliases\",put(set_aliases)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/links.rs",
+      "registration": "\"/system/instance\",get(instance)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/links.rs",
+      "registration": "\"/links\",get(list).post(create)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/links",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "POST",
+          "path": "/api/links",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/links",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/links.rs",
+      "registration": "\"/links/pair\",post(pair)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/links.rs",
+      "registration": "\"/links/self\",delete(end_self)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/links.rs",
+      "registration": "\"/links/{id}\",get(show).delete(revoke)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/links/x",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/links/x",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/links/x",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/links.rs",
+      "registration": "\"/links/{id}/rotate\",post(rotate)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/links/x/rotate",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/mail\",get(list).post(send)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/mail/{id}\",get(show)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/mail/{id}/read\",post(read)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/mail/{id}/reply\",post(reply)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/mail/{id}/release\",post(release)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/mail/x/release",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/mail/threads/{thread}/resume\",post(resume)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/mail/threads/x/resume",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/projects/{name}/inbox\",get(inbox_list).post(inbox_send)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/projects/{name}/inbox/{id}\",get(inbox_show)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/projects/{name}/inbox/{id}/read\",post(inbox_read)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/projects/{name}/inbox/{id}/reply\",post(inbox_reply)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/memory.rs",
+      "registration": "\"/projects/{name}/memories\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/memory.rs",
+      "registration": "\"/memories/{id}\",get(show).patch(update).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/memory.rs",
+      "registration": "\"/memories/{id}/graph\",get(graph)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/memory.rs",
+      "registration": "\"/memories/{id}/links\",post(link).delete(unlink)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/memory.rs",
+      "registration": "\"/memories/{id}/supersede\",post(supersede)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/health\",get(system::health)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/system/version\",get(system::version)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/harnesses\",get(system::harnesses)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/harnesses/update\",post(system::harness_update_all)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/harnesses/{name}/update\",post(system::harness_update)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/harnesses/check\",post(system::harness_check)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/harnesses/{name}/pin\",post(system::harness_pin)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/harnesses/{name}/unpin\",post(system::harness_unpin)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/reload\",post(system::reload)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/audit\",get(system::audit)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/events\",get(streams::firehose).post(event_sources::emit)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/events/latest\",get(streams::latest)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/session\",get(session::current).post(session::create).delete(session::delete),",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/session",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/session",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/sessions\",axum::routing::delete(session::delete_all)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "DELETE",
+          "path": "/api/sessions",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/auth/password\",axum::routing::put(session::set_password)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "PUT",
+          "path": "/api/auth/password",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "terrarium_host::protocol::CONNECT_PATH,get(crate::hosts::connect),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/projects/{name}/monitors\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/projects/{name}/monitors/test\",post(test_run)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/projects/{name}/eta-accuracy\",get(eta_accuracy)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/projects/{name}/dashboard\",get(dashboard).put(put_dashboard),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/monitors/{id}\",get(show).patch(update).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/monitors/{id}/run\",post(run_now)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/monitors/{id}/results\",get(results)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/pins.rs",
+      "registration": "\"/pins\",get(list)",
+      "access": "link-allowed-read",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/pins",
+          "body": {},
+          "allowed": true
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/pins",
+          "body": {},
+          "allowed": true
+        }
+      ]
+    },
+    {
+      "source": "api/pins.rs",
+      "registration": "\"/pins/{agent}\",axum::routing::put(pin).delete(unpin)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "PUT",
+          "path": "/api/pins/x",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/pins/x",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/pipelines.rs",
+      "registration": "\"/projects/{name}/pipelines\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/pipelines.rs",
+      "registration": "\"/projects/{name}/pipelines/test\",post(test_poll)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/pipelines.rs",
+      "registration": "\"/pipelines/{id}\",get(show).patch(update).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/pipelines.rs",
+      "registration": "\"/pipelines/{id}/refresh\",post(refresh)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/pipelines.rs",
+      "registration": "\"/pipelines/{id}/runs\",get(runs)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/pipelines.rs",
+      "registration": "\"/pipelines/{id}/runs/{run}\",get(run_detail)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/preferences.rs",
+      "registration": "\"/preferences\",get(read).put(update)",
+      "access": "link-allowed-read",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/preferences",
+          "body": {},
+          "allowed": true
+        },
+        {
+          "method": "PUT",
+          "path": "/api/preferences",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/preferences",
+          "body": {},
+          "allowed": true
+        }
+      ]
+    },
+    {
+      "source": "api/project_folders.rs",
+      "registration": "\"/project-folders\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/project_folders.rs",
+      "registration": "\"/project-folders/{id}\",patch(update).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/project_folders.rs",
+      "registration": "\"/projects/{name}/folder\",put(place)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/projects.rs",
+      "registration": "\"/projects\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/projects.rs",
+      "registration": "\"/projects/{name}\",get(show).patch(update).delete(remove)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "PATCH",
+          "path": "/api/projects/p",
+          "body": {
+            "github_authors": []
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/projects.rs",
+      "registration": "\"/projects/{name}/agents\",get(list_agents)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/projects.rs",
+      "registration": "\"/projects/{name}/counts\",get(counts)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/projects.rs",
+      "registration": "\"/projects/{name}/targets\",get(list_targets)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/projects.rs",
+      "registration": "\"/projects/{name}/target-grants\",get(list_grants).post(add_grant),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/projects.rs",
+      "registration": "\"/projects/{name}/target-grants/{target}/{purpose}\",delete(remove_grant),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/projects.rs",
+      "registration": "\"/projects/{name}/repos\",get(list_repos).post(attach_repo)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/questions.rs",
+      "registration": "\"/agents/{id}/questions\",get(list_of).post(ask)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/questions.rs",
+      "registration": "\"/questions\",get(list_all)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/questions.rs",
+      "registration": "\"/questions/{id}\",get(show).patch(update)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/questions.rs",
+      "registration": "\"/questions/{id}/answer\",post(answer)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/questions/$tool/answer",
+          "body": {
+            "option": 0
+          },
+          "approval": true
+        },
+        {
+          "method": "POST",
+          "path": "/api/questions/$hold/answer",
+          "body": {
+            "option": 0
+          },
+          "approval": true
+        }
+      ]
+    },
+    {
+      "source": "api/questions.rs",
+      "registration": "\"/questions/{id}/ack\",post(ack)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/questions.rs",
+      "registration": "\"/questions/{id}/retract\",post(retract)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/questions.rs",
+      "registration": "\"/questions/{id}/to-thread\",post(to_thread)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/questions/x/to-thread",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/records.rs",
+      "registration": "\"/projects/{name}/db/types\",get(list_types).post(create_type),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/records.rs",
+      "registration": "\"/projects/{name}/db/types/{type}\",get(show_type).patch(update_type).delete(delete_type),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/records.rs",
+      "registration": "\"/projects/{name}/db/records\",axum::routing::post(create_record),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/records.rs",
+      "registration": "\"/projects/{name}/db/records/{id}\",get(show_record).patch(update_record).delete(delete_record),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/records.rs",
+      "registration": "\"/projects/{name}/db/query\",get(query)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/remotes.rs",
+      "registration": "\"/remotes\",get(list).post(add)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/remotes",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "POST",
+          "path": "/api/remotes",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/remotes",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/remotes.rs",
+      "registration": "\"/remotes/{name}\",get(show).delete(remove)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/remotes/x",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/remotes/x",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/remotes/x",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/remotes.rs",
+      "registration": "\"/remotes/{name}/repin\",post(repin)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/remotes/x/repin",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/remotes.rs",
+      "registration": "\"/remotes/{name}/pair\",post(repair)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/remotes/x/pair",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/remotes.rs",
+      "registration": "\"/remotes/{name}/proxy/{*rest}\",any(proxy)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/remotes/x/proxy/agents",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/remotes/x/proxy/agents",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "POST",
+          "path": "/api/remotes/x/proxy/agents",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "PUT",
+          "path": "/api/remotes/x/proxy/agents",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/remotes/x/proxy/agents",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/remotes/x/proxy/agents",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/repo_trees.rs",
+      "registration": "\"/repos/{id}/trees\",get(trees)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repo_trees.rs",
+      "registration": "\"/repos/{id}/trees/{tree}/files\",get(files)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repo_trees.rs",
+      "registration": "\"/repos/{id}/trees/{tree}/file\",get(file)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repo_trees.rs",
+      "registration": "\"/repos/{id}/trees/{tree}/diff\",get(diff)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repo_trees.rs",
+      "registration": "\"/repos/{id}/trees/{tree}/commits\",get(commits)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repo_trees.rs",
+      "registration": "\"/repos/{id}/trees/{tree}/commits/{sha}\",get(commit)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repos.rs",
+      "registration": "\"/repos/credential\",post(credential_helper)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repos.rs",
+      "registration": "\"/repos/{id}\",get(show).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repos.rs",
+      "registration": "\"/repos/{id}/checkout\",post(checkout)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/reservations.rs",
+      "registration": "\"/hosts/{host}/capacity\",get(capacity).put(configure)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/reservations.rs",
+      "registration": "\"/hosts/{host}/reservations\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/reservations.rs",
+      "registration": "\"/reservations/{id}\",get(show).patch(extend).delete(retract),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/reservations.rs",
+      "registration": "\"/reservations/{id}/cancel\",post(cancel)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/rules.rs",
+      "registration": "\"/rules/schema\",get(schema)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/rules.rs",
+      "registration": "\"/projects/{name}/rules\",get(show).put(put).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/rules.rs",
+      "registration": "\"/projects/{name}/rules/check\",post(check)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/rules.rs",
+      "registration": "\"/projects/{name}/rules/dry-run\",post(dry_run)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/rules.rs",
+      "registration": "\"/projects/{name}/rules/runs\",get(runs)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/rules_tools.rs",
+      "registration": "\"/projects/{name}/rules/effective\",get(effective)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/rules_tools.rs",
+      "registration": "\"/projects/{name}/rules/lint\",post(lint)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/rules_tools.rs",
+      "registration": "\"/projects/{name}/rules/migrate\",post(migrate)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/rules_tools.rs",
+      "registration": "\"/projects/{name}/rules/{rule}/enable\",post(enable)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/rules_tools.rs",
+      "registration": "\"/projects/{name}/rules/{rule}/disable\",post(disable)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
+      "registration": "\"/schedules\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
+      "registration": "\"/schedules/{id}\",get(show).patch(update).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
+      "registration": "\"/schedules/{id}/run\",post(run_now)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
+      "registration": "\"/schedules/{id}/enable\",post(enable)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
+      "registration": "\"/schedules/{id}/disable\",post(disable)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
+      "registration": "\"/schedules/{id}/runs\",get(runs)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
+      "registration": "\"/schedules/{id}/deliveries\",get(deliveries)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
+      "registration": "\"/schedules/{id}/deliveries/{delivery}/redeliver\",post(redeliver),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
+      "registration": "\"/schedules/{id}/test\",post(test_run)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/screen.rs",
+      "registration": "\"/agents/{id}/screen\",get(screen)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secret_grants.rs",
+      "registration": "\"/secrets/{scope}/{name}/grants\",get(list).post(create).delete(revoke),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secret_grants.rs",
+      "registration": "\"/agent/secrets\",get(mine)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secret_grants.rs",
+      "registration": "\"/agent/secrets/{name}/get\",post(read_value)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secret_grants.rs",
+      "registration": "\"/agent/secrets/env\",post(launch_env)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secrets.rs",
+      "registration": "\"/secrets\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secrets.rs",
+      "registration": "\"/secrets/{scope}/{name}\",get(show).put(replace).delete(remove),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secrets.rs",
+      "registration": "\"/secrets/{scope}/{name}/reveal\",post(reveal)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secrets.rs",
+      "registration": "\"/credentials\",get(list_credentials).post(put_credential)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secrets.rs",
+      "registration": "\"/credentials/{name}\",delete(delete_credential)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secrets_generate.rs",
+      "registration": "\"/secrets/{scope}/{name}/generate\",post(generate)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/session_links.rs",
+      "registration": "\"/sessions/{id}\",get(show)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/session_links.rs",
+      "registration": "\"/sessions/{id}/transcript\",get(transcript)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/session_links.rs",
+      "registration": "\"/cards/{id}/sessions\",get(card_sessions)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/skills.rs",
+      "registration": "\"/skills\",get(list).post(create).layer(limit)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/skills.rs",
+      "registration": "\"/skills/{name}\",get(show).put(update).delete(remove).layer(limit),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/skills.rs",
+      "registration": "\"/skills/{name}/usage\",get(usage)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/spawns.rs",
+      "registration": "\"/agents/{id}/spawn\",post(spawn)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/spawns.rs",
+      "registration": "\"/agents/{id}/spawned\",get(spawned)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/agents/operator/spawned",
+          "body": {},
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/spawns.rs",
+      "registration": "\"/agents/{id}/done\",post(done)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/spawns.rs",
+      "registration": "\"/agents/{id}/cancel\",post(cancel)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/spawns.rs",
+      "registration": "\"/spawns/{id}\",get(show)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/spawns/$spawn",
+          "body": {},
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/system_prompts.rs",
+      "registration": "\"/system-prompts\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/system_prompts.rs",
+      "registration": "\"/system-prompts/{name}\",get(show).put(update).delete(remove),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/system_update.rs",
+      "registration": "\"/system/update\",get(status).post(update)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/system/update",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "POST",
+          "path": "/api/system/update",
+          "body": {},
+          "allowed": false
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/system/update",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/system_update.rs",
+      "registration": "\"/system/update/check\",post(check)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/system/update/check",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/system_update.rs",
+      "registration": "\"/system/update/rollback\",post(rollback)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/system/update/rollback",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/system_update.rs",
+      "registration": "\"/system/update/drain\",post(drain)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/system/update/drain",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/system_update.rs",
+      "registration": "\"/system/update/resume\",post(resume)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/system/update/resume",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}\",get(show).patch(update).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/test\",post(test)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/up\",post(up)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/recreate\",post(recreate)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/targets/x/recreate",
+          "body": {
+            "force": true
+          },
+          "approval": false
+        },
+        {
+          "method": "POST",
+          "path": "/api/targets/x/recreate",
+          "body": {
+            "discard_volumes": [
+              "x"
+            ]
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/down\",post(down)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/snapshot\",post(snapshot)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/restore\",post(restore)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/status\",post(status)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/snapshots\",get(snapshots_list)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/snapshots/{snap}\",axum::routing::delete(snapshot_delete),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/exec\",post(exec)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/cp\",post(cp)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/sessions/{id}\",get(session_show).delete(session_close),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/sessions/{id}/input\",post(session_input)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/sessions/{id}/output\",get(session_output)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/sessions/{id}/ws\",get(session_ws)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/display/info\",get(display_info).post(display_info_post),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/display/{op}\",post(display_op)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/leases\",get(leases_of_target).post(grant)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/leases/{agent}\",axum::routing::patch(extend).delete(revoke),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/agents/{id}/leases\",get(leases_of_agent)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/exedev/sweep\",post(exedev_sweep)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/exedev/sweep",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/templates.rs",
+      "registration": "\"/templates\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/templates.rs",
+      "registration": "\"/templates/{id}\",get(show).patch(update).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/templates.rs",
+      "registration": "\"/templates/{id}/resolve\",get(resolve)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/templates.rs",
+      "registration": "\"/templates/{id}/wcl\",get(wcl)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/templates.rs",
+      "registration": "\"/templates/from-agent/{agent}\",post(from_agent)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/test_runs.rs",
+      "registration": "\"/projects/{name}/test-runs\",get(list).post(upload).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/test_runs.rs",
+      "registration": "\"/test-runs/{id}\",get(show).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/test_runs.rs",
+      "registration": "\"/test-runs/{id}/raw\",get(raw)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/test_runs.rs",
+      "registration": "\"/test-runs/{id}/compare\",get(compare)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/test_runs.rs",
+      "registration": "\"/test-runs/{id}/links\",axum::routing::patch(links)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads\",get(list).post(open)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/threads",
+          "body": {
+            "topic": "x",
+            "report_to": "p/dev"
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}\",get(show)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/messages\",post(post_message)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/respond\",post(respond)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/threads/x/respond",
+          "body": {
+            "text": "x"
+          },
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/close\",post(close)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/threads/x/close",
+          "body": {
+            "confirm": true
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/track\",post(track)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/status\",post(set_status)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/cards\",post(link_card)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/projects/{project}/version-thread/messages\",post(post_version),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/reopen\",post(reopen)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/swap\",post(swap)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/tools.rs",
+      "registration": "\"/tools\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/tools.rs",
+      "registration": "\"/tools/{name}\",get(show).patch(update).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/tools.rs",
+      "registration": "\"/tools/{name}/grants\",get(grants_list).post(grant).delete(revoke),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/tools.rs",
+      "registration": "\"/tools/{name}/run\",post(run)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/tools.rs",
+      "registration": "\"/tools/sessions/{id}\",axum::routing::delete(session_close)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/tools.rs",
+      "registration": "\"/tools/sessions/{id}/output\",get(session_output)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/tools.rs",
+      "registration": "\"/tools/sessions/{id}/input\",post(session_input)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/transcripts.rs",
+      "registration": "\"/agents/{id}/sessions\",get(sessions)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/transcripts.rs",
+      "registration": "\"/agents/{id}/sessions/{session}/transcript\",get(transcript),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/transcripts.rs",
+      "registration": "\"/agents/{id}/sessions/{session}/transcript/stream\",get(stream),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/usage.rs",
+      "registration": "\"/usage\",get(series)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/usage.rs",
+      "registration": "\"/usage/me\",get(me)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/usage.rs",
+      "registration": "\"/usage/project\",get(project)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/usage.rs",
+      "registration": "\"/cards/{id}/usage\",get(card_usage)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/usage.rs",
+      "registration": "\"/projects/{name}/trouble\",get(trouble_settings).put(update_trouble_settings),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/usage.rs",
+      "registration": "\"/agents/{id}/status\",post(self_report)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/version_groups.rs",
+      "registration": "\"/projects/{project}/version-groups/{key}/built\",post(built),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/version_groups.rs",
+      "registration": "\"/projects/{project}/version-groups/{key}/status\",post(status),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/version_groups.rs",
+      "registration": "\"/projects/{project}/version-groups/{key}/remove\",post(remove),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/version_groups.rs",
+      "registration": "\"/projects/{project}/version-groups/{key}/add\",post(add)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/waits.rs",
+      "registration": "\"/agents/{id}/waits\",get(list).post(create)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/agents/$dev/waits",
+          "body": {
+            "kind": "time",
+            "for": "1m"
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/waits.rs",
+      "registration": "\"/agents/{id}/run\",post(run)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/waits.rs",
+      "registration": "\"/agents/{id}/watches\",get(watch_list).post(watch_create)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/agents/$dev/watches",
+          "body": {
+            "on": [
+              "idle"
+            ]
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/waits.rs",
+      "registration": "\"/waits/{id}\",get(show).delete(cancel)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/waits.rs",
+      "registration": "\"/waits/{id}/log\",get(log)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/waits.rs",
+      "registration": "\"/watches\",get(watches_by)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/watches",
+          "body": {},
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/waits.rs",
+      "registration": "\"/watches/{id}\",axum::routing::delete(watch_remove)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "DELETE",
+          "path": "/api/watches/$watch",
+          "body": {},
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/projects/{name}/wiki\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}\",get(show).put(save).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/section\",post(section)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/append\",post(append)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/revisions\",get(revisions)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/revisions/{rev}\",get(revision)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/diff\",get(diff)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/restore\",post(restore)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/move\",post(move_page)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/backlinks\",get(backlinks)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/review\",post(review)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "git_proxy/mod.rs",
+      "registration": "\"/git/{project}/{repo}/info/refs\",get(info_refs)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "git_proxy/mod.rs",
+      "registration": "\"/git/{project}/{repo}/git-upload-pack\",post(upload_pack)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "git_proxy/mod.rs",
+      "registration": "\"/git/{project}/{repo}/git-receive-pack\",post(receive_pack)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "hosts.rs",
+      "registration": "terrarium_host::protocol::CONNECT_PATH,axum::routing::get(connect),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "ingest.rs",
+      "registration": "\"/hooks/{project}/{source}\",post(hook)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "ingest.rs",
+      "registration": "\"/healthz\",get(healthz)",
+      "access": "other",
+      "cases": []
+    }
+  ],
+  "gates": {
+    "actor.rs": [
+      "_=>Actor::Operator,",
+      "matches!(self,Self::Operator)&&crate::links::operator_only(\"actastheoperator\").is_ok()"
+    ],
+    "api/backups.rs": [
+      "policy::operator_only(&actor,\"downloadingabackup\")?;",
+      "policy::operator_only(&actor,\"listingthebackups\")?;",
+      "policy::operator_only(&actor,\"makingabackup\")?;"
+    ],
+    "api/board.rs": [
+      "Actor::Operator=>None,"
+    ],
+    "api/bookmarks.rs": [
+      "policy::operator_only(&actor,\"bookmarks\")?;",
+      "policy::operator_only(&actor,\"bookmarks\")?;",
+      "policy::operator_only(&actor,\"bookmarks\")?;"
+    ],
+    "api/calendar.rs": [
+      "(None,Actor::Operator)=>Filter::All,",
+      "Actor::Operator=>\"operator\".into(),",
+      "ifmatches!(actor,Actor::Operator){",
+      "policy::operator_only(actor,\"watchingacalendarfortheoperatorInbox\")?;",
+      "policy::operator_only(actor,\"watchingacalendarfortheoperatorInbox\")?;"
+    ],
+    "api/config.rs": [
+      "crate::policy::operator_only(actor,\"approvingthegrantsofaconfigimport\")?;",
+      "run_sync(&state,&Actor::Operator,SyncBodyIn::default()).await"
+    ],
+    "api/event_sources.rs": [
+      "(Actor::Operator,None)=>None,",
+      "(Actor::Operator,Some(p))=>p.filter(|p|!p.is_empty()),"
+    ],
+    "api/fleet.rs": [
+      "Actor::Operator=>true,"
+    ],
+    "api/inbox.rs": [
+      "Some(body)=>mail::reply(t,&m,&Address::Operator,None,body)?,",
+      "policy::operator_only(actor,\"theInbox\").map_err(|_|{"
+    ],
+    "api/jobs.rs": [
+      "board::move_card(t,&Actor::Operator,&card.id,&validating,None,None)?;",
+      "board::update_card(t,&Actor::Operator,&c.card,patch)?;",
+      "board::update_card(t,&Actor::Operator,&card.id,patch)?;",
+      "board::update_card(t,&Actor::Operator,&card.id,patch)?;",
+      "policy::operator_only(&actor,\"retiringaprotectedreleasetarget\")?;"
+    ],
+    "api/links.rs": [
+      "policy::operator_only(&actor,\"listingthelinks\")?;",
+      "policy::operator_only(&actor,\"makingalink\")?;",
+      "policy::operator_only(&actor,\"readingalink\")?;",
+      "policy::operator_only(&actor,\"revokingalink\")?;",
+      "policy::operator_only(&actor,\"rotatingalink\")?;"
+    ],
+    "api/mail.rs": [
+      "Actor::Operator=>true,",
+      "if!actor.is_operator()&&!mail::is_participant(t,th,from)?{",
+      "policy::operator_only(&actor,\"releasingheldmail\")?;",
+      "policy::operator_only(&actor,\"resumingapausedthread\")?;"
+    ],
+    "api/pins.rs": [
+      "policy::operator_only(&actor,\"pinnedconversations\")?;",
+      "policy::operator_only(&actor,\"pinnedconversations\")?;",
+      "policy::operator_only(&actor,\"pinnedconversations\")?;"
+    ],
+    "api/preferences.rs": [
+      "policy::operator_only(&actor,\"operatorpreferences\")?;",
+      "policy::operator_only(&actor,\"operatorpreferences\")?;"
+    ],
+    "api/projects.rs": [
+      "policy::operator_only(&actor,\"settinggithub_authors(theGitHubauthorgate)\")?;"
+    ],
+    "api/questions.rs": [
+      "Actor::Operator=>q.project.clone().filter(|p|!p.is_empty()),",
+      "crate::links::operator_only(\"movingaquestionintoathread\")?;",
+      "crate::policy::operator_only(&actor,\"movingaquestionintoathread\")?;",
+      "matches!(actor,Actor::Operator)||actor.agent().is_some_and(|a|a.reads_all());"
+    ],
+    "api/remotes.rs": [
+      "crate::policy::operator_only(actor,\"usingremotes\")"
+    ],
+    "api/repos.rs": [
+      "(Actor::Operator,None)=>{"
+    ],
+    "api/schedules.rs": [
+      ".unwrap_or(Address::Operator)",
+      "Actor::Operator=>\"system\".into(),",
+      "_=>Actor::Operator,",
+      "_=>Address::Operator,",
+      "crate::webhooks::check_write(t,&Actor::Operator,project,spec,a)?;"
+    ],
+    "api/secrets.rs": [
+      "Actor::Operator=>Ok(None),"
+    ],
+    "api/session.rs": [
+      "crate::policy::operator_only(actor,\"managingthelogin\")",
+      "fnoperator_only(actor:&Actor)->ApiResult<()>{",
+      "operator_only(&actor)?;",
+      "operator_only(&actor)?;"
+    ],
+    "api/spawns.rs": [
+      "policy::operator_only(&actor,\"readingaspawnoftheoperator\")?;",
+      "policy::operator_only(&actor,\"readingtheephemeralagentsoftheoperator\")?;"
+    ],
+    "api/system.rs": [
+      "Actor::Operator=>Ok(None),"
+    ],
+    "api/system_prompts.rs": [
+      "Actor::Operator=>Ok(()),"
+    ],
+    "api/system_update.rs": [
+      "policy::operator_only(&actor,WHAT)?;",
+      "policy::operator_only(&actor,WHAT)?;"
+    ],
+    "api/targets.rs": [
+      "(Actor::Operator,_)|(_,None)=>true,",
+      "Actor::Operator=>Some(\"operator\"),",
+      "crate::store::jobs::check_release_write(conn,actor.is_operator(),def,what)",
+      "if!actor.is_operator(){",
+      "policy::operator_only(&actor,\"overridingDockerrecreationsafetychecks\")?;",
+      "policy::operator_only(&actor,\"runningtheexe.devsweep\")?;"
+    ],
+    "api/templates.rs": [
+      "Actor::Operator=>true,"
+    ],
+    "api/threads.rs": [
+      "Actor::Operator=>threads::close(",
+      "Actor::Operator=>threads::set_by_agent(t,&th.id,&by,status)",
+      "Actor::Operator=>true,",
+      "Actor::Operatorifb.confirm=>{",
+      "crate::links::operator_only(\"confirmingathreadclose\")?;",
+      "crate::policy::operator_only(&actor,\"openingarequest\")?;",
+      "crate::policy::operator_only(&actor,\"respondingtoathread\")?;",
+      "ifb.confirm||matches!(actor,Actor::Operator){"
+    ],
+    "api/usage.rs": [
+      "(Actor::Operator,_)=>{"
+    ],
+    "api/waits.rs": [
+      "(Actor::Operator,None|Some(\"operator\"))=>\"operator\".to_owned(),",
+      "(Actor::Operator,None|Some(\"operator\"))=>\"operator\".to_owned(),",
+      "(Actor::Operator,Some(key))=>find(&state,&actor,key.to_owned())",
+      "(Actor::Operator,_)=>true,",
+      "Actor::Operator=>{",
+      "ifmatches!(actor,Actor::Operator){",
+      "policy::operator_only(&actor,\"creatingawatchforanothercaller\")?;",
+      "policy::operator_only(&actor,\"listingoperatorwatches\")?;",
+      "policy::operator_only(&actor,\"removinganoperatorwatch\")?;"
+    ],
+    "backup/schedule.rs": [
+      "to:&Address::Operator,"
+    ],
+    "display.rs": [
+      "Actor::Operator=>true,"
+    ],
+    "executor.rs": [
+      "Actor::Operator=>terrarium_core::redact::View::All,",
+      "Actor::Operator=>true,",
+      "Actor::Operator=>true,",
+      "cmd.operator=actor.is_operator();",
+      "cmd.operator=actor.is_operator();",
+      "cmd.operator=actor.is_operator();"
+    ],
+    "exedev.rs": [
+      "None=>crate::store::mail::Address::Operator,"
+    ],
+    "fleet.rs": [
+      "&Actor::Operator,",
+      "actor.is_operator(),",
+      "actor.is_operator(),",
+      "actor.is_operator(),",
+      "actor.is_operator(),"
+    ],
+    "harness_auto_update.rs": [
+      "to:&Address::Operator,"
+    ],
+    "idle_alert.rs": [
+      "to.push(Address::Operator);"
+    ],
+    "input_watchdog.rs": [
+      "to.push(Address::Operator);"
+    ],
+    "jobs.rs": [
+      "matchboard::update_card(t,&Actor::Operator,card,patch){"
+    ],
+    "links.rs": [
+      "operator_only_with_provenance(is_link_call(),what)",
+      "pubfnoperator_only(what:&str)->ApiResult<()>{",
+      "pubfnoperator_only_with_provenance(link:bool,what:&str)->ApiResult<()>{"
+    ],
+    "monitors/mod.rs": [
+      "returnOk(Some(Actor::Operator));"
+    ],
+    "owner.rs": [
+      "to:&Address::Operator,"
+    ],
+    "policy.rs": [
+      "Actor::Operator=>Err(ApiError::forbidden(",
+      "Actor::Operator=>Err(ApiError::forbidden(",
+      "Actor::Operator=>Err(ApiError::forbidden(format!(",
+      "Actor::Operator=>Err(ApiError::forbidden(format!(",
+      "Actor::Operator=>Ok(()),",
+      "Actor::Operator=>Ok(()),",
+      "Actor::Operator=>Ok(()),",
+      "Actor::Operator=>Ok(()),",
+      "Actor::Operator=>Ok(()),",
+      "Actor::Operator=>Ok(()),",
+      "Actor::Operator=>Ok(()),",
+      "Actor::Operator=>Ok(()),",
+      "Actor::Operator=>Ok(()),",
+      "Actor::Operator=>Ok(()),",
+      "Actor::Operator=>Ok(true),",
+      "Actor::Operator=>operator_only(actor,what),",
+      "Actor::Operator=>true,",
+      "Address::Operator|Address::Project(_)=>returnOk(()),",
+      "Reach::Mail(Address::Operator)=>Ok(()),",
+      "Role::Sysadmin|Role::Architectifactor.is_operator()=>Ok(()),",
+      "crate::links::operator_only(what)?;",
+      "ifactor.is_operator(){",
+      "operator_only(actor,\"revealingasecret\")",
+      "operator_only(actor,what)",
+      "pubfnoperator_only(actor:&Actor,what:&str)->ApiResult<()>{"
+    ],
+    "question_guard.rs": [
+      "to.push(Address::Operator);"
+    ],
+    "quota_notices.rs": [
+      "to:&Address::Operator,"
+    ],
+    "quota_policy.rs": [
+      "to:&Address::Operator,"
+    ],
+    "secrets/redact.rs": [
+      "Actor::Operator=>View::All,"
+    ],
+    "self_update.rs": [
+      "to:&Address::Operator,"
+    ],
+    "spawn.rs": [
+      "&&!who.is_operator()",
+      "Noneifactor.is_operator()=>None,",
+      "Some(mail::Address::Operator)",
+      "if!actor.is_operator()&&!sp.allows(t){",
+      "ifactor.is_operator()",
+      "ifbound.is_some()&&!actor.is_operator()&&rules.as_ref().is_some_and(|sp|!sp.bound){",
+      "letselection_operator=actor.is_operator();",
+      "policy::operator_only(actor,\"spawninganephemeralagentoftheoperator\")?;"
+    ],
+    "spawn_rights.rs": [
+      "returnOk(Actor::Operator);"
+    ],
+    "store/board.rs": [
+      "Actor::Operator=>true,",
+      "Actor::Operator=>{",
+      "Actor::Operatorift.actor!=\"operator\"=>\"system\".to_owned(),",
+      "apply_move(t,&Actor::Operator,&row,&backlog,None,Some(&comment))?;",
+      "crate::links::operator_only_with_provenance(t.link.is_some(),\"assigningaGitHub-heldcard\")?;",
+      "crate::links::operator_only_with_provenance(t.link.is_some(),\"movingaGitHub-heldcard\")?;",
+      "if!actor.is_operator(){",
+      "ifto.id!=card.column_id&&!actor.is_operator()&&card_is_held(card){",
+      "ifto.is_some()&&!actor.is_operator()&&card_is_held(&card){",
+      "letmutto=vec![Address::Operator];",
+      "policy::operator_only(actor,\"bypassingtheGitHubauthorgateoncreation\")?;",
+      "recipients.push(Address::Operator);"
+    ],
+    "store/calendar.rs": [
+      "returnOk(Some(Address::Operator));"
+    ],
+    "store/inbox.rs": [
+      "(mail::Address::Agent{id,..},mail::Address::Operator)if*id==w.agent=>\"closed\",",
+      "(mail::Address::Operator,mail::Address::Agent{id,..})if*id==w.agent=>\"opened\",",
+      "from:&mail::Address::Operator,"
+    ],
+    "store/mail.rs": [
+      ".filter(|p|to_operator||*p!=Address::Operator)",
+      "Address::Operator",
+      "crate::actor::Actor::Operator=>Self::Operator,",
+      "from:&Address::Operator,",
+      "if*m.to==Address::Operator&&!is_pause_notice(m.from,m.subject){",
+      "ifmatches!(to,Address::Operator|Address::System){",
+      "letoperator=Address::Operator.key();",
+      "returnOk(Address::Operator);",
+      "to:&Address::Operator,"
+    ],
+    "store/questions.rs": [
+      "crate::links::operator_only_with_provenance(t.link.is_some(),\"answeringaGitHubholdquestion\")?;",
+      "crate::links::operator_only_with_provenance(t.link.is_some(),\"approvingatoolrun\")?;",
+      "from:&mail::Address::Operator,",
+      "from:&mail::Address::Operator,",
+      "if*by!=mail::Address::Operator{",
+      "if*by!=mail::Address::Operator{",
+      "matchthreads::link_card(t,&crate::actor::Actor::Operator,&th.id,card){"
+    ],
+    "store/records/tests.rs": [
+      "constOP:Actor=Actor::Operator;"
+    ],
+    "store/schedules.rs": [
+      "to:&Address::Operator,"
+    ],
+    "store/subscriptions.rs": [
+      "to:&crate::store::mail::Address::Operator,"
+    ],
+    "store/threads.rs": [
+      "Actor::Operator=>Ok(th),",
+      "from:&super::mail::Address::Operator,"
+    ],
+    "store/version_groups.rs": [
+      ".unwrap_or(mail::Address::Operator);"
+    ],
+    "store/waits.rs": [
+      "mail::Address::Operator"
+    ],
+    "store/webhooks.rs": [
+      "to:&Address::Operator,"
+    ],
+    "thread_agent.rs": [
+      "crate::actor::Actor::Operator"
+    ],
+    "thread_close.rs": [
+      "to:&Address::Operator,"
+    ],
+    "tool_run.rs": [
+      "(Some(r),Actor::Operator)=>r,",
+      "Actor::Operator=>(None,None),",
+      "Actor::Operator=>terrarium_core::redact::View::All,"
+    ],
+    "usage_limit.rs": [
+      "to:&Address::Operator,"
+    ],
+    "webhooks/mod.rs": [
+      "Actor::Operator=>returnOk(()),",
+      "returnOk(Some(Actor::Operator));"
+    ]
+  }
+}

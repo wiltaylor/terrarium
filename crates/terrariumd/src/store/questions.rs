@@ -1438,15 +1438,21 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
     if !q.status.unsettled() {
         return Err(not_open(&q, "an answer"));
     }
-    if q.kind == QuestionKind::ToolRun && *by != mail::Address::Operator {
-        return Err(ApiError::forbidden(
-            "only the operator approves a tool run; no agent answers this question",
-        ));
+    if q.kind == QuestionKind::ToolRun {
+        crate::links::operator_only_with_provenance(t.link.is_some(), "approving a tool run")?;
+        if *by != mail::Address::Operator {
+            return Err(ApiError::forbidden(
+                "only the operator approves a tool run; no agent answers this question",
+            ));
+        }
     }
-    if q.hold_card.is_some() && *by != mail::Address::Operator {
-        return Err(ApiError::forbidden(
-            "only the operator answers a hold question of the GitHub author gate",
-        ));
+    if q.hold_card.is_some() {
+        crate::links::operator_only_with_provenance(t.link.is_some(), "answering a GitHub hold question")?;
+        if *by != mail::Address::Operator {
+            return Err(ApiError::forbidden(
+                "only the operator answers a hold question of the GitHub author gate",
+            ));
+        }
     }
     if let Some(r) = a.revision.filter(|r| *r != q.revision) {
         return Err(ApiError::conflict(format!(
