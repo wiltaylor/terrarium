@@ -82,6 +82,7 @@ use tracing::{error, info, warn};
 pub use artifacts::{artifact_router, run_prune, sweep_orphans};
 pub use config::spawn_config_sync;
 pub use links::this_instance;
+pub use remotes::spawn_checks as spawn_remote_checks;
 pub use schedules::{run_schedule, run_triggered};
 pub use subscriptions::settle_defaults as settle_account_defaults;
 pub use system::{DefinitionCounts, Health, VersionInfo};

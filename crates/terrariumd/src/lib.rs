@@ -528,6 +528,7 @@ async fn activate(
     // The webhook deliveries (docs/api.md §19.5): the pending rows of the
     // old daemon are due again.
     tasks.push(webhooks::spawn(state.clone()));
+    tasks.push(api::spawn_remote_checks(state.clone()));
     tasks.extend(waits::spawn(&state));
     // The job queue (TER-71): fails the runs that the last daemon lost.
     tasks.push(jobs::spawn(&state));

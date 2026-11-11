@@ -1,6 +1,7 @@
 //! Network policy shared by pairing and every upstream HTTP/SSE/WS connection.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, Method, header};
@@ -298,6 +299,20 @@ pub struct Limits {
     requests: Arc<Semaphore>,
     streams: Arc<Semaphore>,
     pub closed: watch::Sender<bool>,
+    pub events: tokio::sync::Mutex<Option<Arc<EventFeed>>>,
+}
+
+pub struct EventFeed {
+    pub frames: tokio::sync::broadcast::Sender<Arc<String>>,
+    pub alive: AtomicBool,
+    pub last_seq: AtomicI64,
+}
+
+impl Default for EventFeed {
+    fn default() -> Self {
+        Self { frames: tokio::sync::broadcast::channel(32).0,
+            alive: AtomicBool::new(true), last_seq: AtomicI64::new(0) }
+    }
 }
 
 impl Default for Limits {
@@ -306,6 +321,7 @@ impl Default for Limits {
             requests: Arc::new(Semaphore::new(64)),
             streams: Arc::new(Semaphore::new(8)),
             closed: watch::channel(false).0,
+            events: tokio::sync::Mutex::default(),
         }
     }
 }

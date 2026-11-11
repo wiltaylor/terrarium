@@ -11,5 +11,7 @@ CREATE TABLE remotes (
     created_at TEXT NOT NULL,
     last_ok_at TEXT,
     last_error TEXT,
-    status TEXT NOT NULL DEFAULT 'offline'
+    status TEXT NOT NULL DEFAULT 'offline',
+    calls_day TEXT,
+    calls_today INTEGER NOT NULL DEFAULT 0
 );

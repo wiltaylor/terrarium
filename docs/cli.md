@@ -2451,6 +2451,26 @@ terrarium --json card ls --unassigned --column ready | jq -r '.[0].id'
 column, the top first. `POS` is the place in the column, from 0. So the first
 line of `card ls --unassigned --column ready` is the top card of `ready`.
 
+## Linked instances (operator only)
+
+`terrarium remote ls` lists the home's remotes. To pair one, compare its
+instance ID and TLS leaf SHA-256 on the remote's Links screen, then run:
+
+```sh
+terrarium remote add lab https://lab.example --instance-id <confirmed-id> --pin-sha256 <confirmed-sha256>
+```
+
+Paste the one-time pairing code on stdin. It is not an argument and the
+long-lived key is never printed. `--ca-file roots.pem` supplies trust roots.
+Without a pin or a CA file, HTTPS uses system roots. `--label` sets a display
+label. Plain HTTP is allowed only to loopback.
+
+`terrarium remote pair lab` reads a replacement pairing code from stdin.
+`terrarium remote repin lab --pin-sha256 <confirmed-sha256>` installs a new
+confirmed leaf pin. Repin without a pin or CA file selects system roots.
+`terrarium remote rm lab` removes the home row and attempts to revoke the
+remote link. If `revoke_on_remote` is true, revoke it on the remote too.
+
 ## 8. Limits
 
 - Through the tunnel, the runner refuses a line longer than 4 MiB

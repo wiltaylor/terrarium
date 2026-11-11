@@ -19,9 +19,10 @@ pub struct Remote {
     pub last_ok_at: Option<String>,
     pub last_error: Option<String>,
     pub status: String,
+    pub calls_today: i64,
 }
 
-const COLUMNS: &str = "id,name,url,instance_id,pin_sha256,ca_pem,label,read_only,created_at,last_ok_at,last_error,status";
+const COLUMNS: &str = "id,name,url,instance_id,pin_sha256,ca_pem,label,read_only,created_at,last_ok_at,last_error,status,CASE WHEN calls_day=date('now') THEN calls_today ELSE 0 END";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Remote> {
     Ok(Remote {
@@ -37,6 +38,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Remote> {
         last_ok_at: r.get(9)?,
         last_error: r.get(10)?,
         status: r.get(11)?,
+        calls_today: r.get(12)?,
     })
 }
 
@@ -80,4 +82,9 @@ pub fn mark(t: &Tx<'_>, id: &str, status: &str) -> ApiResult<()> {
 
 pub fn aad(id: &str) -> Vec<u8> {
     format!("remote:{id}").into_bytes()
+}
+
+pub fn count_call(t: &Tx<'_>, id: &str) -> ApiResult<()> {
+    t.execute("UPDATE remotes SET calls_today=CASE WHEN calls_day=date('now') THEN calls_today+1 ELSE 1 END,calls_day=date('now') WHERE id=?1",[id])?;
+    Ok(())
 }

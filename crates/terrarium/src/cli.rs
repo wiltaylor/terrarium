@@ -4974,7 +4974,7 @@ pub struct EventsArgs {
 pub fn hide_for_mode(cmd: clap::Command, agent_mode: bool) -> clap::Command {
     let hidden: &[&str] = if agent_mode {
         &[
-            "daemon", "events", "audit", "hook", "exec-env", "login", "logout",
+            "daemon", "events", "audit", "hook", "exec-env", "login", "logout", "remote",
         ]
     } else {
         &["admin", "status", "exec", "shell", "cp", "hook", "exec-env"]
