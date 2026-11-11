@@ -450,9 +450,7 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
         if sh.api != selfhosted::Api::Anthropic {
             return Err(ApiError::invalid("LiteLLM needs the anthropic API style"));
         }
-        if !sh.base_url.to_ascii_lowercase().starts_with("https://") {
-            return Err(ApiError::invalid("LiteLLM base_url must use https"));
-        }
+        crate::probes::litellm::check_base_url(&sh.base_url).map_err(ApiError::invalid)?;
         if d.harnesses.is_empty() {
             d.harnesses = vec![HarnessId::Claude];
         }

@@ -1787,9 +1787,7 @@ async fn api_key(
             sh.models = key.models.clone();
         }
         let sh = sh.checked().map_err(ApiError::invalid)?;
-        if !sh.base_url.to_ascii_lowercase().starts_with("https://") {
-            return Err(ApiError::invalid("LiteLLM base_url must use https"));
-        }
+        crate::probes::litellm::check_base_url(&sh.base_url).map_err(ApiError::invalid)?;
     }
     let dir = state.state_dir.clone();
     // The file keeps the secrets; the settings go to the definition.
