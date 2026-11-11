@@ -310,6 +310,9 @@ async fn remove(
 }
 
 async fn mark(s: &Shared, r: &Remote, status: &str) -> ApiResult<()> {
+    if matches!(status, "mismatch" | "pin_mismatch" | "auth_failed") {
+        s.remotes.close(&r.id);
+    }
     let r = r.clone();
     let status = status.to_owned();
     s.db.write("operator", move |t| {
@@ -515,9 +518,9 @@ async fn forward(
             .max_frame_size(net::JSON_MAX)
             .on_upgrade(move |socket| async move {
                 let _permits = (permit, stream_permit);
-                let mut cfg = tungstenite::protocol::WebSocketConfig::default();
-                cfg.max_message_size = Some(net::JSON_MAX);
-                cfg.max_frame_size = Some(net::JSON_MAX);
+                let cfg = tungstenite::protocol::WebSocketConfig::default()
+                    .max_message_size(Some(net::JSON_MAX))
+                    .max_frame_size(Some(net::JSON_MAX));
                 let upstream = tokio_tungstenite::WebSocketStream::from_raw_socket(
                     upstream,
                     Role::Client,

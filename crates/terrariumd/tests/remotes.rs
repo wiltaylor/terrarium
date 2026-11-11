@@ -197,10 +197,11 @@ async fn read_only_and_sysadmin_home_are_refused() {
     home.post_as(id, "/api/remotes", json!({"name":"no"}))
         .await
         .err(403, "forbidden");
-    assert_eq!(home.delete("/api/remotes/lab").await.ok()["revoked"], true);
+    // P1 intentionally refuses DELETE /links/self for read-only links.
+    assert_eq!(home.delete("/api/remotes/lab").await.ok()["revoked"], false);
     assert_eq!(
         remote.get("/api/links?revoked=true").await.ok()[0]["status"],
-        "revoked"
+        "active"
     );
 }
 
@@ -538,7 +539,7 @@ async fn event_websocket_and_sse_stream_and_removal() {
             .unwrap()
             .is_some()
     );
-    home.delete("/api/remotes/lab").await.ok();
+    assert_eq!(home.delete("/api/remotes/lab").await.ok()["revoked"], true);
     let end = tokio::time::timeout(Duration::from_secs(10), ws.next())
         .await
         .unwrap();

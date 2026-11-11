@@ -13346,6 +13346,9 @@ HTML are refused or discarded. Responses carry `X-Terrarium-Remote`, the
 home API CSP and `nosniff`. Connection errors use fixed text, with
 `502 remote_unreachable` or `502 remote_mismatch`. Revoked keys give 401 and
 set `auth_failed`. No upstream error containing credentials is logged.
+Read-only links cannot call `DELETE /api/links/self` under the P1 policy.
+Removing one therefore returns `revoke_on_remote: true` and leaves revocation
+to the remote operator. The home does not widen that policy.
 
 Limits per remote are 64 upstream requests and 8 upstream streams, a 30 s
 connect timeout, 60 s ordinary request timeout, 5 min stream idle timeout,

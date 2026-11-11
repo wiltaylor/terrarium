@@ -2470,6 +2470,8 @@ label. Plain HTTP is allowed only to loopback.
 confirmed leaf pin. Repin without a pin or CA file selects system roots.
 `terrarium remote rm lab` removes the home row and attempts to revoke the
 remote link. If `revoke_on_remote` is true, revoke it on the remote too.
+Read-only links cannot revoke themselves, so removing one always requires
+revocation on the remote. This preserves the P1 read-only restrictions.
 
 ## 8. Limits
 
