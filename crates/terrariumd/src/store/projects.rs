@@ -26,6 +26,7 @@ pub fn fleet_source(name: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
+    pub home_board_columns: super::home::HomeBoardColumns,
     #[serde(default)]
     pub card_dispatcher: Option<String>,
     #[serde(default)]
@@ -61,6 +62,10 @@ pub struct Project {
 
 fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
+        home_board_columns: r
+            .get::<_, Option<String>>("home_board_columns")?
+            .map(|s| crate::store::json_col(&s))
+            .unwrap_or_default(),
         card_dispatcher: r.get("card_dispatcher")?,
         review_dispatcher: r.get("review_dispatcher")?,
         human_comment_notifications: r.get("human_comment_notifications")?,
@@ -243,6 +248,8 @@ pub fn create(t: &mut Tx<'_>, p: &NewProject, source: &str) -> ApiResult<Project
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectPatch {
+    #[serde(default)]
+    pub home_board_columns: Option<super::home::HomeBoardColumns>,
     /// Project admin name to dispatch ready cards, or `off` to disable.
     #[serde(default)]
     pub card_dispatcher: Option<String>,
@@ -271,6 +278,13 @@ pub struct ProjectPatch {
 /// no cards, so card IDs stay stable.
 pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Project> {
     let before = get(t, name)?;
+    if let Some(columns) = &patch.home_board_columns {
+        columns.validate()?;
+        t.execute(
+            "UPDATE projects SET home_board_columns = ?2 WHERE name = ?1",
+            params![name, serde_json::to_string(columns)?],
+        )?;
+    }
     if let Some(owner) = &patch.review_dispatcher {
         set_review_dispatcher(t, name, owner)?;
     }
@@ -337,6 +351,7 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
         Some(name),
         json!({"description": patch.description, "card_prefix": patch.card_prefix,
                "idle_alert": patch.idle_alert, "github_authors": patch.github_authors,
+               "home_board_columns": patch.home_board_columns,
                "board_flow": patch.board_flow, "card_dispatcher": patch.card_dispatcher,
                "review_dispatcher": patch.review_dispatcher,
                "human_comment_notifications": patch.human_comment_notifications}),

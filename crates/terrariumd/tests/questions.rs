@@ -10,6 +10,107 @@ use common::TestDaemon;
 use serde_json::{Value, json};
 use terrariumd::waits::Tuning;
 
+#[tokio::test]
+async fn stale_revision_checkbox_answers_are_rejected_without_changing_the_answer() {
+    let World { td, lead, .. } = setup().await;
+    let q = ask(
+        &td,
+        &lead,
+        json!({"text": "Choose any", "multi_select": true, "options": ["A", "B"]}),
+    )
+    .await;
+    let path = format!("/api/questions/{}", id(&q));
+    let updated = td
+        .patch_as(&lead, &path, json!({"options": ["B", "A"]}))
+        .await;
+    assert_eq!(updated.ok()["revision"], 2);
+    let stale = td
+        .post(
+            &format!("{path}/answer"),
+            json!({"options": [0], "revision": 1}),
+        )
+        .await;
+    stale.err(409, "conflict");
+    assert_eq!(td.get(&path).await.ok()["status"], "open");
+    let result = td
+        .post(
+            &format!("{path}/answer"),
+            json!({"options": [1], "revision": 2}),
+        )
+        .await;
+    assert_eq!(result.ok()["answer_options"], json!([1]));
+}
+
+#[tokio::test]
+async fn checkbox_questions_and_bundle_items_accept_zero_one_and_several() {
+    let World { td, lead, .. } = setup().await;
+    for selected in [json!([]), json!([1]), json!([0, 2])] {
+        let q = ask(
+            &td,
+            &lead,
+            json!({"text": "Choose any", "multi_select": true, "options": ["A", "B", "C"]}),
+        )
+        .await;
+        let result = td
+            .post(
+                &format!("/api/questions/{}/answer", id(&q)),
+                json!({"options": selected, "answer": ""}),
+            )
+            .await;
+        let answered = result.ok();
+        assert_eq!(answered["status"], "answered");
+        assert_eq!(answered["multi_select"], true);
+        assert_eq!(answered["answer_options"], selected);
+        assert_eq!(answered["answer"], "");
+        let bundle = ask(
+            &td,
+            &lead,
+            json!({"kind": "bundle", "text": "Choose together", "items": [
+                {"text": "Choose any", "multi_select": true, "options": ["A", "B", "C"]},
+                {"text": "Anything else?", "multi_select": true}
+            ]}),
+        )
+        .await;
+        let result = td
+            .post(
+                &format!("/api/questions/{}/answer", id(&bundle)),
+                json!({"items": [{"options": selected, "answer": "notes"}, {}]}),
+            )
+            .await;
+        let answered = result.ok();
+        assert_eq!(answered["items"][0]["answer_options"], selected);
+        assert_eq!(answered["items"][0]["answer"], "notes");
+        assert_eq!(answered["items"][1]["answer_options"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn checkbox_answers_reject_invalid_duplicate_and_single_option_fields() {
+    let World { td, lead, .. } = setup().await;
+    let q = ask(
+        &td,
+        &lead,
+        json!({"text": "Choose any", "multi_select": true, "options": ["A", "B"]}),
+    )
+    .await;
+    for body in [
+        json!({"options": [2]}),
+        json!({"options": [0, "A"]}),
+        json!({"option": 0}),
+    ] {
+        td.post(&format!("/api/questions/{}/answer", id(&q)), body)
+            .await
+            .err(422, "invalid");
+    }
+    let result = td
+        .post(
+            &format!("/api/questions/{}/answer", id(&q)),
+            json!({"options": ["B", "A"], "answer": "notes"}),
+        )
+        .await;
+    assert_eq!(result.ok()["answer_options"], json!([0, 1]));
+}
+
 fn id(v: &Value) -> String {
     v["id"].as_str().unwrap().to_owned()
 }
@@ -169,7 +270,7 @@ async fn inbox_noise_requires_notice_context_and_allows_questions_per_card() {
         .post_as(&lead, &path, json!({"kind": "notice", "text": "Progress"}))
         .await;
     r.err(422, "invalid");
-    for flag in ["--card", "--reply-to", "--urgent"] {
+    for flag in ["--card", "--critical", "thread post"] {
         assert!(r.body["error"]["message"].as_str().unwrap().contains(flag));
     }
     let card = id(td
@@ -182,7 +283,13 @@ async fn inbox_noise_requires_notice_context_and_allows_questions_per_card() {
         json!({"kind": "notice", "text": "Done", "card": card}),
     )
     .await;
-    for priority in ["urgent", "critical"] {
+    for body in [
+        json!({"kind": "notice", "text": "Urgent", "priority": "urgent"}),
+        json!({"kind": "notice", "text": "Reply", "reply_to": "missing"}),
+    ] {
+        td.post_as(&lead, &path, body).await.err(422, "invalid");
+    }
+    for priority in ["critical"] {
         ask(
             &td,
             &lead,
@@ -222,7 +329,7 @@ async fn inbox_noise_requires_notice_context_and_allows_questions_per_card() {
     ask(
         &td,
         &lead,
-        json!({"kind": "notice", "text": "Your answer", "reply_to": qid}),
+        json!({"kind": "notice", "text": "Your answer", "reply_to": qid, "card": card}),
     )
     .await;
     td.post_as(
@@ -294,7 +401,7 @@ async fn inbox_noise_updates_and_operator_mail_replies() {
     ] {
         td.patch_as(&lead, &path, patch).await.err(422, "invalid");
     }
-    td.patch_as(&lead, &path, json!({"card": null, "priority": "urgent"}))
+    td.patch_as(&lead, &path, json!({"card": null, "priority": "critical"}))
         .await
         .ok();
     td.patch_as(&lead, &path, json!({"priority": "normal"}))
@@ -311,7 +418,7 @@ async fn inbox_noise_updates_and_operator_mail_replies() {
     let reply = ask(
         &td,
         &lead,
-        json!({"kind": "notice", "text": "Answer to your mail", "reply_to": mid}),
+        json!({"kind": "notice", "text": "Answer to your mail", "reply_to": mid, "card": card}),
     )
     .await;
     td.patch_as(

@@ -142,6 +142,10 @@ impl QuestionKind {
 /// `text`, `options`, and `context` are the agent's own words.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct BundleItem {
+    #[serde(default)]
+    pub multi_select: bool,
+    #[serde(default)]
+    pub answer_options: Vec<usize>,
     pub text: String,
     #[serde(default)]
     pub options: Vec<String>,
@@ -214,6 +218,10 @@ impl QuestionStatus {
 /// are the agent's own words: untrusted data for every reader.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Question {
+    #[serde(default)]
+    pub multi_select: bool,
+    #[serde(default)]
+    pub answer_options: Vec<usize>,
     pub id: String,
     /// `question` or `notice`.
     #[serde(default)]
@@ -306,6 +314,9 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Question> {
     let items: Option<String> = r.get("items")?;
     let tool_run: Option<String> = r.get("tool_run")?;
     Ok(Question {
+        multi_select: r.get("multi_select")?,
+        answer_options: serde_json::from_str(&r.get::<_, String>("answer_options")?)
+            .unwrap_or_default(),
         id: r.get("id")?,
         kind: QuestionKind::parse(&kind).unwrap_or_default(),
         agent: r.get("agent")?,
@@ -636,6 +647,8 @@ fn check_items(kind: QuestionKind, items: &[BundleItem]) -> ApiResult<Vec<Bundle
             &format!("item {n}: the `context`"),
         )?;
         out.push(BundleItem {
+            multi_select: item.multi_select,
+            answer_options: Vec::new(),
             text,
             options,
             context,
@@ -696,6 +709,7 @@ fn same_text(a: &str, b: &str) -> bool {
 /// A new question. The API layer checks the rights.
 #[derive(Debug, Clone, Default)]
 pub struct NewQuestion {
+    pub multi_select: bool,
     /// A notice answering an operator message or an answered question.
     pub reply_to: Option<String>,
     /// The asking agent's ULID.
@@ -719,6 +733,11 @@ pub struct NewQuestion {
 /// Write a new question: check the limits, refuse a copy of an open
 /// question of the same agent (409), emit the event, write the audit row.
 pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
+    if n.multi_select && n.kind != QuestionKind::Question {
+        return Err(ApiError::invalid(
+            "multi_select is for a question or a bundle item",
+        ));
+    }
     let a = agents::get(t, &n.agent)?;
     let project = a.agent.project.clone();
     let noun = n.kind.as_str();
@@ -745,9 +764,9 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
                 ));
             }
         }
-        if card.is_none() && n.reply_to.is_none() && !n.priority.at_least_urgent() {
+        if card.is_none() && n.priority != Priority::Critical {
             return Err(ApiError::invalid(
-                "notify requires --card, --reply-to or --urgent: only answers to the operator, one done per request, or real problems belong in the Inbox",
+                "notify requires --card unless --critical: otherwise post in an open thread on the topic with `terrarium thread post`",
             ));
         }
     } else if n.reply_to.is_some() {
@@ -801,8 +820,8 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     t.execute(
         "INSERT INTO questions (id, agent, project, text, options, context, card, priority,
                                 status, thread_id, created_at, updated_at, revision, kind, items,
-                                thread, hold_card)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9, ?10, ?10, 1, ?11, ?12, ?13, ?14)",
+                                thread, hold_card, multi_select)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9, ?10, ?10, 1, ?11, ?12, ?13, ?14, ?15)",
         params![
             id,
             n.agent,
@@ -817,7 +836,8 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
             n.kind.as_str(),
             items_json(n.kind, &items),
             in_thread,
-            n.hold_card
+            n.hold_card,
+            n.multi_select
         ],
     )?;
     let q = get(t, &id)?;
@@ -1019,19 +1039,10 @@ fn check_update_context(
     priority: Priority,
 ) -> ApiResult<()> {
     check_work_context(q.kind, card, q.thread.as_deref())?;
-    if q.kind == QuestionKind::Notice && card.is_none() && !priority.at_least_urgent() {
-        // reply_to is recorded on creation, not mutable through an update.
-        let has_reply: bool = t.query_row(
-            "SELECT EXISTS(SELECT 1 FROM audit WHERE action = 'question.ask' AND target = ?1
-                AND json_extract(detail, '$.reply_to') IS NOT NULL)",
-            [&q.id],
-            |r| r.get(0),
-        )?;
-        if !has_reply {
-            return Err(ApiError::invalid(
-                "notify requires --card, --reply-to or --urgent: only answers to the operator, one done per request, or real problems belong in the Inbox",
-            ));
-        }
+    if q.kind == QuestionKind::Notice && card.is_none() && priority != Priority::Critical {
+        return Err(ApiError::invalid(
+            "notify requires --card unless --critical: otherwise post in an open thread on the topic with `terrarium thread post`",
+        ));
     }
     if matches!(q.kind, QuestionKind::Question | QuestionKind::Bundle) {
         let open = list(
@@ -1096,6 +1107,8 @@ fn redact_items(t: &Tx<'_>, items: Vec<BundleItem>) -> Vec<BundleItem> {
     items
         .into_iter()
         .map(|i| BundleItem {
+            multi_select: i.multi_select,
+            answer_options: i.answer_options,
             text: t.redact_string(i.text),
             options: i.options.into_iter().map(|o| t.redact_string(o)).collect(),
             context: i.context.map(|c| t.redact_string(c)),
@@ -1138,6 +1151,14 @@ fn end_waits(t: &mut Tx<'_>, q: &Question, outcome: &str) -> ApiResult<Vec<Strin
     if let Some(o) = q.chosen() {
         result["option"] = json!(o);
     }
+    if q.multi_select {
+        result["options"] = json!(
+            q.answer_options
+                .iter()
+                .map(|&i| &q.options[i])
+                .collect::<Vec<_>>()
+        );
+    }
     if q.kind == QuestionKind::Bundle && q.status == QuestionStatus::Answered {
         result["answers"] = q
             .items
@@ -1147,6 +1168,14 @@ fn end_waits(t: &mut Tx<'_>, q: &Question, outcome: &str) -> ApiResult<Vec<Strin
                 let mut a = json!({"item": i + 1, "text": item.text, "answer": item.answer});
                 if let Some(o) = item.chosen() {
                     a["option"] = json!(o);
+                }
+                if item.multi_select {
+                    a["options"] = json!(
+                        item.answer_options
+                            .iter()
+                            .map(|&i| &item.options[i])
+                            .collect::<Vec<_>>()
+                    );
                 }
                 a
             })
@@ -1183,6 +1212,8 @@ pub enum OptionRef {
 #[serde(deny_unknown_fields)]
 pub struct ItemAnswer {
     #[serde(default)]
+    pub options: Vec<OptionRef>,
+    #[serde(default)]
     pub answer: Option<String>,
     #[serde(default)]
     pub option: Option<OptionRef>,
@@ -1193,6 +1224,7 @@ pub struct ItemAnswer {
 /// option, or both.
 #[derive(Debug, Clone, Default)]
 pub struct Answer {
+    pub options: Vec<OptionRef>,
     pub text: Option<String>,
     pub option: Option<OptionRef>,
     pub items: Option<Vec<ItemAnswer>>,
@@ -1243,6 +1275,36 @@ fn resolve(
     })
 }
 
+/// Resolve a checkbox answer without imposing a minimum selection or text.
+fn resolve_multiple(
+    labels: &[String],
+    text: Option<&str>,
+    option: Option<&OptionRef>,
+    options: &[OptionRef],
+    what: &str,
+) -> ApiResult<(String, Vec<usize>)> {
+    if option.is_some() {
+        return Err(ApiError::invalid(
+            "a multi-select answer takes `options`, not `option`",
+        ));
+    }
+    let text = resolve(labels, text, None, what)?
+        .map(|(t, _)| t)
+        .unwrap_or_default();
+    let mut indices = Vec::new();
+    for option in options {
+        let Some((_, Some(index))) = resolve(labels, None, Some(option), what)? else {
+            return Err(ApiError::invalid("the selected option has no index"));
+        };
+        if indices.contains(&index) {
+            return Err(ApiError::invalid("an option is selected twice"));
+        }
+        indices.push(index);
+    }
+    indices.sort_unstable();
+    Ok((text, indices))
+}
+
 /// "1, 3, and 4": a list of numbers for a message.
 fn and_list(n: &[usize]) -> String {
     let s: Vec<String> = n.iter().map(usize::to_string).collect();
@@ -1271,6 +1333,25 @@ fn bundle_answers(q: &Question, given: Option<&[ItemAnswer]>) -> ApiResult<Vec<B
     for (i, item) in q.items.iter().enumerate() {
         let a = given.get(i).cloned().unwrap_or_default();
         let what = format!("item {}", i + 1);
+        if item.multi_select {
+            let (text, indices) = resolve_multiple(
+                &item.options,
+                a.answer.as_deref(),
+                a.option.as_ref(),
+                &a.options,
+                &what,
+            )?;
+            out.push(BundleItem {
+                answer: Some(text),
+                answer_option: None,
+                answer_options: indices,
+                ..item.clone()
+            });
+            continue;
+        }
+        if !a.options.is_empty() {
+            return Err(ApiError::invalid(format!("{what} is not multi-select")));
+        }
         match resolve(&item.options, a.answer.as_deref(), a.option.as_ref(), &what)? {
             Some((answer, index)) => out.push(BundleItem {
                 answer: Some(answer),
@@ -1315,6 +1396,13 @@ fn bundle_mail(q: &Question, who: &str, ended: &[String]) -> String {
             body.push_str(&format!(
                 "Chosen option: {}. {label}\n",
                 item.answer_option.unwrap_or(0) + 1
+            ));
+        }
+        for &index in &item.answer_options {
+            body.push_str(&format!(
+                "Chosen option: {}. {}\n",
+                index + 1,
+                item.options[index]
             ));
         }
         if let Some(a) = item.answer.as_deref().filter(|a| item.chosen() != Some(*a)) {
@@ -1374,7 +1462,7 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
         .with_details(json!({"revision": q.revision, "kind": q.kind})));
     }
     if q.kind == QuestionKind::Bundle {
-        if a.text.is_some() || a.option.is_some() {
+        if a.text.is_some() || a.option.is_some() || !a.options.is_empty() {
             return Err(ApiError::invalid(
                 "a bundle takes `items`: one entry `{answer?, option?}` for each item, not \
                  `answer` or `option`",
@@ -1387,13 +1475,31 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
             "a question takes `answer`, `option`, or both; `items` is for a bundle",
         ));
     }
-    let Some((answer, index)) = resolve(
-        &q.options,
-        a.text.as_deref(),
-        a.option.as_ref(),
-        "the question",
-    )?
-    else {
+    let (multiple_text, indices) = if q.multi_select {
+        resolve_multiple(
+            &q.options,
+            a.text.as_deref(),
+            a.option.as_ref(),
+            &a.options,
+            "the question",
+        )?
+    } else {
+        if !a.options.is_empty() {
+            return Err(ApiError::invalid("this question is not multi-select"));
+        }
+        (String::new(), Vec::new())
+    };
+    let resolved = if q.multi_select {
+        Some((multiple_text, None))
+    } else {
+        resolve(
+            &q.options,
+            a.text.as_deref(),
+            a.option.as_ref(),
+            "the question",
+        )?
+    };
+    let Some((answer, index)) = resolved else {
         return Err(ApiError::invalid(
             "an answer needs `answer` (text), `option`, or both",
         ));
@@ -1401,14 +1507,15 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
     let at = now();
     t.execute(
         "UPDATE questions SET status = 'answered', answer = ?2, answer_option = ?3,
-                answered_by = ?4, answered_at = ?5, updated_at = ?5
+                answered_by = ?4, answered_at = ?5, updated_at = ?5, answer_options = ?6
          WHERE id = ?1 AND status IN ('open', 'in_thread')",
         params![
             q.id,
             t.redact(&answer),
             index.and_then(|i| i64::try_from(i).ok()),
             by.key(),
-            at
+            at,
+            json!(indices).to_string()
         ],
     )?;
     let q = get(t, &q.id)?;
@@ -1435,6 +1542,13 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
             body.push_str(&format!(
                 "\nChosen option: {}. {label}\n",
                 q.answer_option.unwrap_or(0) + 1
+            ));
+        }
+        for &index in &q.answer_options {
+            body.push_str(&format!(
+                "\nChosen option: {}. {}\n",
+                index + 1,
+                q.options[index]
             ));
         }
         if q.chosen() != Some(answer.as_str()) {
@@ -1532,7 +1646,12 @@ fn answer_comment(t: &mut Tx<'_>, q: &Question, by: &mail::Address) -> ApiResult
                 q.answer.as_deref().unwrap_or_default()
             )
         };
-        crate::store::board::system_comment(t, card, &body, None)?;
+        let selected = q
+            .answer_options
+            .iter()
+            .map(|&i| format!("\nChosen option: {}. {}", i + 1, q.options[i]))
+            .collect::<String>();
+        crate::store::board::system_comment(t, card, &format!("{body}{selected}"), None)?;
     }
     Ok(())
 }
@@ -2361,6 +2480,8 @@ mod tests {
 
     fn bundle() -> Question {
         Question {
+            multi_select: false,
+            answer_options: Vec::new(),
             id: "Q1".into(),
             kind: QuestionKind::Bundle,
             agent: "A1".into(),
@@ -2399,6 +2520,7 @@ mod tests {
     fn a_bundle_answer_needs_every_item() {
         let q = bundle();
         let a = |answer: Option<&str>, option: Option<OptionRef>| ItemAnswer {
+            options: Vec::new(),
             answer: answer.map(str::to_owned),
             option,
         };

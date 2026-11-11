@@ -13,6 +13,7 @@ const MAX_TEXT = 8000;
 
 /** The answer in progress for one item: the chosen option (0-based) and the text. */
 export interface ItemDraft {
+  options?: number[];
   option: number | null;
   text: string;
   skip?: boolean;
@@ -36,7 +37,7 @@ export const answeredCount = (draft: BundleDraft): number => draft.filter(itemDo
 export function missingItems(q: Pick<Question, "items">, draft: BundleDraft): number[] {
   return itemsOf(q)
     .map((_, i) => i + 1)
-    .filter((n) => !itemDone(draft[n - 1]));
+    .filter((n) => !(itemsOf(q)[n - 1]!.multi_select && !draft[n - 1]?.skip) && !itemDone(draft[n - 1]));
 }
 
 /** Can the form send: is the bundle open, and does every item have an answer? */
@@ -61,7 +62,13 @@ export function bundleAnswerBody(q: Pick<Question, "items" | "status" | "revisio
   if (missing.length) return { error: `Answer ${missing.length === 1 ? "item" : "items"} ${andList(missing)} first. The bundle goes in one step.` };
   const out: QuestionAnswer["items"] = [];
   for (const [i, item] of items.entries()) {
-    const d = draft[i]!;
+    const d = draft[i] ?? { option: null, text: "" };
+    if (item.multi_select) {
+      const result = answerBody({ status: q.status, options: item.options, multi_select: true }, d.text, null, d.skip, d.options ?? []);
+      if ("error" in result) return { error: `Item ${i + 1}: ${result.error}` };
+      out.push(result.body);
+      continue;
+    }
     if (d.skip) {
       const result = answerBody({ status: q.status, options: item.options }, d.text, null, true);
       if ("error" in result) return { error: `Item ${i + 1}: ${result.error}` };
@@ -93,9 +100,10 @@ export function parseDraft(q: Pick<Question, "items">, raw: string | null): Bund
   const out: BundleDraft = [];
   for (const [i, e] of v.entries()) {
     if (!e || typeof e !== "object") return null;
-    const { option, text, skip } = e as Record<string, unknown>;
+    const { option, text, skip, options } = e as Record<string, unknown>;
+    const selected = Array.isArray(options) ? [...new Set(options.filter((n): n is number => Number.isInteger(n) && n >= 0 && n < items[i]!.options.length))] : [];
     const opt = typeof option === "number" && Number.isInteger(option) && option >= 0 && option < items[i]!.options.length ? option : null;
-    out.push({ option: skip === true ? null : opt, text: typeof text === "string" ? text : "", ...(skip === true ? { skip: true } : {}) });
+    out.push({ option: skip === true ? null : opt, text: typeof text === "string" ? text : "", ...(items[i]!.multi_select ? { options: selected } : {}), ...(skip === true ? { skip: true } : {}) });
   }
   return out;
 }
@@ -125,7 +133,7 @@ export function loadDraft(store: DraftStorage | null, q: Pick<Question, "id" | "
 export function saveDraft(store: DraftStorage | null, q: Pick<Question, "id" | "revision">, draft: BundleDraft): void {
   try {
     if (!store) return;
-    if (answeredCount(draft) === 0 && draft.every((d) => !d.text && !d.skip)) store.removeItem(draftKey(q));
+    if (answeredCount(draft) === 0 && draft.every((d) => !d.text && !d.skip && !d.options?.length)) store.removeItem(draftKey(q));
     else store.setItem(draftKey(q), JSON.stringify(draft));
   } catch {
     /* a full or blocked storage: the draft stays in the page only */
@@ -141,7 +149,7 @@ export function clearDraft(store: DraftStorage | null, q: Pick<Question, "id" | 
   }
 }
 
-const sameItem = (a: BundleItem, b: BundleItem) => a.text === b.text && a.options.length === b.options.length && a.options.every((o, i) => o === b.options[i]);
+const sameItem = (a: BundleItem, b: BundleItem) => !!a.multi_select === !!b.multi_select && a.text === b.text && a.options.length === b.options.length && a.options.every((o, i) => o === b.options[i]);
 
 /**
  * The draft for a new revision of a bundle: an item whose text and options
@@ -162,4 +170,4 @@ export function carryDraft(before: Pick<Question, "items">, draft: BundleDraft, 
 
 /** The label of the chosen option of an answered item, if any. */
 export const chosenItemLabel = (item: BundleItem): string | null =>
-  item.answer_option !== null && item.answer_option !== undefined ? (item.options[item.answer_option] ?? null) : null;
+  item.multi_select ? (item.answer_options?.map((i) => item.options[i]).join(", ") || null) : item.answer_option !== null && item.answer_option !== undefined ? (item.options[item.answer_option] ?? null) : null;

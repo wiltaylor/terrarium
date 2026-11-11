@@ -3269,6 +3269,24 @@ one step, and the agent gets all answers in one mail. A bundle is a row of
 the same table, with the rights, limits, and endpoints of a question,
 except for the differences in "Bundles" below.
 
+**Checkbox questions.** Set `multi_select: true` when asking a question,
+or on an individual bundle item. It defaults to false and cannot be set
+on notices, tool approvals, or the bundle summary. The CLI flags are
+`question ask --multi-select` and `thread ask --multi-select`. For bundles,
+use `"multi_select": true` on each desired item in `--items-file`.
+
+Answer a checkbox question with `{"options": [0, 2], "answer": "notes"}`.
+Each entry is a 0-based index or an exact option label. Duplicate and
+unknown entries are rejected. `option` (singular) is only for single-choice
+questions. Both the list and text may be empty, including `{"options": []}`
+or `{}`. Bundle answers use the same fields on each entry in `items`.
+The response retains the text in `answer` and the sorted selected indices
+in `answer_options`. The answer mail and CLI show both choices and text.
+The dashboard renders checkboxes and a text box in every question view.
+CLI answers use repeatable `--select <label|number-from-1>` or `options`
+arrays in `--answers-file` (numbers there are also from 1). With no text or
+`--select`, `admin question answer <id> --select-none` submits an empty checkbox answer.
+
 ```json
 {"id":"01JQ...","agent":"01M5...","agent_name":"demo/lead","project":"demo",
  "text":"Ship v2 on Friday?","options":["yes","no"],"context":"**CI** is green.",
@@ -3321,9 +3339,22 @@ The rights:
 
 The rules:
 
-- A notice needs `card`, `reply_to`, or an urgent (or critical) `priority`.
-  Otherwise it is `422 invalid`: only answers, one done per request, and
-  real problems belong in the Inbox. `reply_to` (notices only) names an
+- A notice needs `card`, except when `priority` is `critical`.
+  Otherwise it is `422 invalid`, including urgent notices and replies.
+  Post in an open topic thread instead, or a lead opens one.
+  The default Inbox lists only open questions and critical notices. Explicit
+  kind and status queries remain available for history and diagnostics,
+  reached only by an explicit UI filter, never by default.
+  `POST /api/projects/{project}/version-thread/messages` takes
+  `{"version", "changed", "test"}` and requires project admin rights.
+  It creates or reuses the project's standing Versions thread and posts one
+  quiet update (no Threads badge), with the lead's changes and test guidance.
+  All three fields must be nonempty. A repeated version is `409 conflict`.
+  The standing Versions thread cannot be closed, including by admins:
+  closing or proposing its close is `409 conflict` naming the thread.
+  Post at each pre-release publish, alongside the releases wiki row.
+  Version group completion posts nothing.
+  `reply_to` (notices only) names an
   operator mail or Inbox-thread message to the sender, or an answered
   question owned by the sender. Invalid references are `422 invalid`.
   The reply reference is recorded in the ask audit event.
@@ -4876,6 +4907,68 @@ card position; at most 500. Each card is a card with more fields:
   Without that event, `updated_at` and the newest comment. The dashboard
   home lists them with `?columns=blocked`.
 
+### Home board and Needs attention (TER-689)
+
+The Home projections are separate from the legacy `/api/cards` list:
+
+| Method and path | Query | Response |
+|---|---|---|
+| `GET /api/home/cards` | `column=in_progress` (default), `review`, `accepted`, or `blocked` | A page of compact cards for that Home column |
+| `GET /api/home/monitors` | | A page of monitors whose latest result is `warn`, `crit`, or `unknown` |
+| `GET /api/home/pipelines` | | A page of pipelines whose newest run is `failed` |
+
+All three accept optional `project`, `limit` (1–100, default 100), and `cursor`.
+The operator, sysadmins and architects read across projects. Other agents read
+only their own project, including project admins. An explicit unreadable project
+returns `403`. These are the same read rights as the cross-project cards API.
+
+Each response is `{"items": [...], "next": "cursor-or-null"}`. Pages examine
+at most 100 indexed candidates, in ID order. Filtering can yield fewer items
+than `limit`, including zero. **Follow `next` even after an empty page**, until
+it is `null`. Cursors belong to the same endpoint, column and project filter.
+Concurrent changes are not a snapshot. Archived cards are excluded.
+
+Card items have `id`, `title`, `labels`, `project`, `column`, `home_column`,
+`assignee`, `assignee_name`, `assignee_status`, and `eta_at`. Nullable fields
+are `null` when unset. Labels include type labels unchanged. In the `blocked`
+Home column, `blocked_reason` is the first line of the card's newest move's
+comment, only when that move targets its current board column. Otherwise it is
+`null`, including cards created in blocked without a move. No earlier move or
+unrelated comment is used. This also applies to custom Home column selectors.
+The full card can be opened with
+`GET /api/cards/{id}`. No bodies or comment histories are loaded in this list.
+
+Monitor and pipeline items have `id`, `project`, `name`, `status`, and `link`
+(the project's dashboard or pipelines page). Monitors appear independently of
+dashboard layout membership. A monitor with no results is `unknown`. A pipeline
+with no runs is not failed. A later successful run removes an earlier failure
+from this list. Run ordering is the same as the pipeline runs API. A polling
+error alone is not a failed run.
+
+**Home board columns** is a project setting returned as `home_board_columns`.
+Project admins change it through `PATCH /api/projects/{name}`. File-managed
+projects retain the existing API edit restriction. The value replaces all four
+arrays. Empty arrays hide a Home column for that project. Selectors resolve by
+role first, then by case-insensitive column name. Missing columns are ignored.
+Legacy names `in_progress` and `In Progress` also match `working` when no working
+role or working-named column exists. Defaults, including for existing projects:
+
+```json
+{
+  "in_progress": ["working", "research"],
+  "review": ["review", "merge_queue"],
+  "accepted": ["accepted"],
+  "blocked": ["blocked"]
+}
+```
+
+Each array accepts at most 32 nonempty selectors, each at most 128 bytes.
+The CLI accepts the same object:
+
+```sh
+terrarium project set alpha --home-board-columns '{"in_progress":["working","research"],"review":["review","merge_queue"],"accepted":["accepted"],"blocked":["blocked"]}'
+```
+
 **Card patch.** Every field is optional:
 `title`, `body`, `labels`, `add_labels`, `remove_labels`, `repo`, `branch`,
 `depends_on`, `column`, `position`, `assignee`, `comment`, `eta_at`.
@@ -6254,6 +6347,17 @@ every agent whose `subscription` has `env_var`
 the adapter's env. The start log and `terrariumd sandbox-dry-run` show the
 value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
 `<redacted>`.
+
+For Bedrock, `test_connection: true` makes a paid one-output-token test of
+the haiku inference profile before any write. The wizard always requests
+this. On failure the endpoint returns a safe diagnostic and saves nothing.
+API callers may omit it to store credentials without making a paid call.
+The test only connects to `https://bedrock-runtime.<region>.amazonaws.com`.
+It refuses regions outside `^[a-z]{2}(-[a-z]+)+-[0-9]+$` before signing.
+When `cloud.base_url` is set, the test is refused without connecting: save
+without `test_connection` instead. A gateway URL only reaches the sandbox.
+Missing Bedrock region defaults to `us-east-1`; missing model tiers get
+the US inference profiles listed in `docs/compat.md`. Explicit entries win.
 
 **Cloud providers (Claude Code only).** `provider` `bedrock` (Amazon
 Bedrock), `gcp` (Google Cloud Vertex AI), or `foundry` (Microsoft

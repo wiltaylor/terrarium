@@ -46,7 +46,7 @@ export const PATHS: { path: WizardPath; title: string; detail: string }[] = [
   { path: "claude", title: "Claude Code", detail: "Anthropic plan. Runs claude auth login; paste the code back." },
   { path: "codex", title: "Codex", detail: "ChatGPT plan. Device code with codex login --device-auth." },
   { path: "copilot", title: "Copilot", detail: "GitHub plan. Device code with copilot login --device-code." },
-  { path: "api_key", title: "API key", detail: "Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, Z.ai (GLM), Moonshot, or a GitHub PAT. pi uses API keys only." },
+  { path: "api_key", title: "API key", detail: "Amazon Bedrock (Claude Code), Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, Z.ai (GLM), Moonshot, or a GitHub PAT. pi uses API keys only." },
   { path: "selfhosted", title: "Self-hosted model", detail: "Your own model server (vLLM, Ollama, llama.cpp, SGLang): OpenAI or Anthropic API style, the models, and the limits." },
   { path: "define", title: "Define only", detail: "Write the definition now; log in or add a key later." },
 ];
@@ -342,6 +342,9 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
   const [provider, setProvider] = createSignal(props.setup.provider ?? "openrouter");
   const [name, setName] = createSignal(props.setup.name ?? `${props.setup.provider ?? "openrouter"}-key`);
   const [key, setKey] = createSignal("");
+  const [keyId, setKeyId] = createSignal("");
+  const [region, setRegion] = createSignal("us-east-1");
+  const [cloudModels, setCloudModels] = createSignal<Record<string, string>>({});
   const [baseUrl, setBaseUrl] = createSignal("");
   const [plan, setPlan] = createSignal(defaultPlan(props.setup.provider ?? "openrouter"));
   const [models, setModels] = createSignal("");
@@ -354,8 +357,9 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
     setBusy(true);
     try {
       const n = name().trim();
-      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models() }));
+      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models(), keyId: keyId(), region: region(), cloudModels: cloudModels() }));
       setKey("");
+      setKeyId("");
       props.onSaved(n);
     } catch (err) {
       setError(err);
@@ -383,6 +387,8 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
             value={provider()}
             onChange={(e) => {
               setProvider(e.currentTarget.value);
+              setKey("");
+              setKeyId("");
               setPlan(defaultPlan(e.currentTarget.value));
               if (!fixedName) setName(`${e.currentTarget.value}-key`);
             }}
@@ -396,9 +402,22 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
         </label>
       </div>
       <label>
-        {provider() === "github" ? "Fine-grained PAT (Copilot Requests permission)" : "API key"}
+        {provider() === "bedrock" ? "AWS secret access key" : provider() === "github" ? "Fine-grained PAT (Copilot Requests permission)" : "API key"}
         <input type="password" value={key()} onInput={(e) => setKey(e.currentTarget.value)} autocomplete="off" required />
       </label>
+      <Show when={provider() === "bedrock"}>
+        <label>AWS access key ID
+          <input type="password" value={keyId()} onInput={(e) => setKeyId(e.currentTarget.value)} autocomplete="off" required />
+        </label>
+        <label>AWS region
+          <input value={region()} onInput={(e) => setRegion(e.currentTarget.value)} placeholder="us-east-1" required />
+        </label>
+        <For each={["opus", "sonnet", "haiku"]}>{(tier) => (
+          <label>{tier} inference profile (optional override)
+            <input value={cloudModels()[tier] ?? ""} onInput={(e) => setCloudModels({ ...cloudModels(), [tier]: e.currentTarget.value })} />
+          </label>
+        )}</For>
+      </Show>
       <Show when={takesPlan(provider())}>
         <label>
           Plan
@@ -418,10 +437,10 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
           <input type="url" value={baseUrl()} onInput={(e) => setBaseUrl(e.currentTarget.value)} placeholder="http://gpu.lan:8000/v1" />
         </label>
       </Show>
-      <label>
+      <Show when={provider() !== "bedrock"}><label>
         Models (comma separated, optional)
         <input value={models()} onInput={(e) => setModels(e.currentTarget.value)} />
-      </label>
+      </label></Show>
       <p class="muted small" style={{ margin: 0 }}>
         The daemon stores the key with mode 0600 and gives it to the agents on this subscription as <code>{env()}</code>. No endpoint returns it, and this page never shows it again.
       </p>
@@ -434,7 +453,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
       </Show>
       <div>
         <button class="primary" type="submit" disabled={busy() || !key() || !name().trim()}>
-          Save key
+          {provider() === "bedrock" ? busy() ? "Testing Bedrock…" : "Test and save key" : "Save key"}
         </button>
       </div>
     </form>

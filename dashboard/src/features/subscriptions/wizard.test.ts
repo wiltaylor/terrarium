@@ -151,3 +151,13 @@ describe("wizardFromQuery", () => {
     expect(wizardFromQuery(undefined)).toBeNull();
   });
 });
+describe("Bedrock setup", () => {
+  it("offers Claude Code only and tests a key pair before saving", () => {
+    expect(KEY_PROVIDERS.find((p) => p.id === "bedrock")?.harnesses).toEqual(["claude"]);
+    expect(KEY_HELP.bedrock).toContain("bedrock:InvokeModel");
+    expect(apiKeyBody({ provider: "bedrock", key: "secret", keyId: " id ", region: " eu-west-1 ", cloudModels: { opus: " eu.profile ", haiku: "" }, models: "ignored" })).toEqual({
+      provider: "bedrock", key: "secret", key_id: "id", cloud: { region: "eu-west-1", models: { opus: "eu.profile" } }, test_connection: true,
+    });
+    expect(apiKeyBody({ provider: "bedrock", key: "s", keyId: "i" }).cloud?.region).toBe("us-east-1");
+  });
+});

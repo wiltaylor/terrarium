@@ -482,6 +482,7 @@ async fn activate(
     let mut owned = ActivationTasks(Vec::new());
     let tasks = &mut owned.0;
     tasks.push(spawn_pump(state.clone()));
+    tasks.push(git_identity::spawn_refresh(state.clone()));
     tasks.push(usage_collector::spawn(state.clone()));
     tasks.push(tool_run::spawn_sweep(state.clone()));
     tasks.extend(question_guard::spawn(state.clone()));
@@ -1182,13 +1183,8 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
             // An idle stop and a pause give the `stopped` status their
             // reason (`crate::lifecycle`).
             let ev = state.lifecycle.with_stop_reason(ev);
-            let provenance_agent = matches!(
-                &ev.kind,
-                SupervisorEventKind::NewSession { .. }
-                    | SupervisorEventKind::Status { .. }
-                    | SupervisorEventKind::Harness(Event::SessionStarted { .. })
-            )
-            .then_some(ev.agent);
+            let provenance_agent =
+                matches!(&ev.kind, SupervisorEventKind::NewSession { .. }).then_some(ev.agent);
             let ended = matches!(
                 &ev.kind,
                 SupervisorEventKind::Status {
@@ -1204,10 +1200,13 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
             if let Err(e) = result {
                 warn!("cannot record a supervisor event: {e}");
             }
-            if let Some(id) = provenance_agent
-                && let Err(e) = git_identity::refresh(&state, &id.to_string()).await
-            {
-                warn!(agent = %id, "cannot refresh git provenance: {e}");
+            if let Some(id) = provenance_agent {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = git_identity::refresh(&state, &id.to_string()).await {
+                        warn!(agent = %id, "cannot refresh git provenance: {e}");
+                    }
+                });
             }
             // A parked agent that stops frees its owner's place (TER-111).
             if let Some(agent) = ended {

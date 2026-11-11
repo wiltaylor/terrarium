@@ -8,8 +8,7 @@ import { api, events, projects, subscriptions } from "../../stores";
 import { usageLabel } from "./labels";
 import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
 import { HostCards } from "./HostCards";
-import { ActiveCards } from "./ActiveCards";
-import { BlockedCards } from "./BlockedCards";
+import { HomeBoard } from "./HomeBoard";
 import { AskDialog } from "../inbox/AskDialog";
 import { MessageDialog } from "../inbox/MessageDialog";
 import { NewThreadDialog } from "../inbox/NewThreadDialog";
@@ -67,6 +66,8 @@ export function Home() {
       <Show when={compose() === "message"}><MessageDialog onClose={() => setCompose(null)} onSent={(t) => { setCompose(null); navigate(`/threads/${t.id}`); }} /></Show>
       <Show when={compose() === "thread"}><NewThreadDialog onClose={() => setCompose(null)} onOpened={(t) => { setCompose(null); navigate(threadHref(t.id)); }} /></Show>
 
+      <HomeBoard now={now()} />
+
       <section aria-label="Usage">
         <div class="usage-strip">
           <For
@@ -89,10 +90,6 @@ export function Home() {
           </For>
         </div>
       </section>
-
-      <BlockedCards now={now()} />
-
-      <ActiveCards now={now()} />
 
       <HostCards now={now()} />
 

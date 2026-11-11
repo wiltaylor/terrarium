@@ -210,11 +210,15 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
             idle_alert,
             github_author,
             github_authors_clear,
+            home_board_columns,
         } => {
             let name = ctx.project_or(name.as_deref()).await?;
             let mut body = json!({});
             set_opt(&mut body, "description", description.clone());
             set_opt(&mut body, "card_prefix", prefix.clone());
+            if let Some(columns) = home_board_columns {
+                body["home_board_columns"] = serde_json::from_str(columns)?;
+            }
             match idle_alert.as_deref().map(str::trim) {
                 Some("default") => body["idle_alert"] = Value::Null,
                 Some(v) => body["idle_alert"] = v.into(),

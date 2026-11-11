@@ -5,6 +5,81 @@ use rusqlite::params;
 use std::time::{Duration, Instant};
 
 #[tokio::test]
+async fn default_inbox_pages_do_not_hydrate_excluded_or_unselected_questions() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let agent = td.agent("p", "lead", serde_json::json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let db = &td.daemon.as_ref().unwrap().state.db;
+    db.write("test", move |t| {
+        for i in 0..4000 {
+            // The malformed typed field is a hydration sentinel: reading one
+            // of these bodies as a Question fails rather than silently passing.
+            t.execute(
+                "INSERT INTO questions (id,agent,project,text,thread_id,created_at,updated_at,kind,priority,answer_option)
+                 VALUES (?1,?2,'p',?3,?1,'2026-11-08T00:00:00Z','2026-11-08T00:00:00Z','notice',?4,'must not hydrate')",
+                params![format!("ordinary-{i}"), agent, "Notice body. ".repeat(300), if i % 2 == 0 { "normal" } else { "urgent" }],
+            )?;
+        }
+        t.execute("INSERT INTO threads (id,topic,scope,opened_by,agent,status,created_at,updated_at)
+            VALUES ('topic','Topic','p','operator',?1,'waiting_operator','a','a')", [&agent])?;
+        for (id, kind, priority, at, thread, answer) in [
+            ("critical", "notice", "critical", "2026-11-08T00:00:01Z", None, None),
+            ("fresh", "question", "normal", "2026-11-08T00:00:02Z", None, None),
+            ("deferred", "question", "normal", "2026-11-08T00:00:00Z", None, Some("must not hydrate")),
+            ("threaded", "question", "critical", "2026-11-08T00:00:03Z", Some("topic"), Some("must not hydrate")),
+        ] {
+            t.execute("INSERT INTO questions (id,agent,project,text,thread_id,created_at,updated_at,kind,priority,thread,answer_option)
+                VALUES (?1,?2,'p','Selected body',?1,?3,?3,?4,?5,?6,?7)", params![id, agent, at, kind, priority, thread, answer])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    db.read(|c| {
+        assert!(terrariumd::store::questions::get(c, "ordinary-0").is_err());
+        assert!(terrariumd::store::questions::get(c, "deferred").is_err());
+        Ok(())
+    })
+    .await
+    .unwrap();
+    // Success proves both SQL filtering and LIMIT happened before hydration.
+    let page = td.get("/api/inbox?project=p&limit=2").await;
+    assert_eq!(page.headers["x-inbox-open"], "3");
+    let rows = page.ok().as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["notice:critical", "question:fresh"]
+    );
+    let counts = td.get("/api/inbox/counts?project=p").await;
+    assert_eq!(counts.ok()["question"], 2);
+    assert_eq!(counts.body["notice"], 1);
+    db.write("test", |t| {
+        t.execute(
+            "UPDATE questions SET answer_option = NULL WHERE id = 'deferred'",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    db.read(|c| {
+        use terrariumd::store::inbox::{self, Filter};
+        let cursor =
+            serde_json::to_string(&(true, false, false, "2026-11-08T00:00:02Z", "question:fresh"))
+                .unwrap();
+        let rows = inbox::page(c, &Filter::default(), Some(&cursor), 2)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "question:deferred");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn inbox_pages_reach_every_item_across_projects() {
     use terrariumd::store::inbox::{self, Filter};
     let td = TestDaemon::start().await;
@@ -32,7 +107,7 @@ async fn inbox_pages_reach_every_item_across_projects() {
         Ok(())
     }).await.unwrap();
     let response = td.get("/api/inbox?project=p&limit=37").await;
-    assert_eq!(response.headers["x-inbox-open"], "1450");
+    assert_eq!(response.headers["x-inbox-open"], "250");
     assert_eq!(response.ok().as_array().unwrap().len(), 37);
     assert_eq!(response.body[0]["critical"], true);
     td.get("/api/inbox?limit=0").await.err(422, "invalid");
@@ -66,7 +141,7 @@ async fn inbox_pages_reach_every_item_across_projects() {
                 c.execute("DELETE FROM messages WHERE id = ?1", [&m.id])?;
             }
         }
-        assert_eq!(ids.len(), 1450);
+        assert_eq!(ids.len(), 250);
         Ok(())
     })
     .await
@@ -159,6 +234,6 @@ async fn inbox_live_and_tenfold_load() {
         assert_eq!(counts["mail"], 257 * scale);
         assert_eq!(counts["thread"], 100 * scale);
         // The threads have their own badge (TER-466): `open` leaves them out.
-        assert_eq!(counts["open"], (257 + 30) * scale - 10);
+        assert_eq!(counts["open"], 20 * scale - 5);
     }
 }

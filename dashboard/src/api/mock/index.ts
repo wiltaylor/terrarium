@@ -17,6 +17,7 @@
 // the cookie is good.
 
 import type { Api } from "../client";
+import { defaultHomeColumns } from "../home";
 import { mockDisplayName } from "./displayName";
 import { ApiError, AuthError, isMutating, type Page } from "../http";
 import { createWsEventStream, type EventStream, type RawSocket, type SocketEvent } from "../sockets";
@@ -2405,6 +2406,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             p.card_prefix = patch.card_prefix;
           }
           if (patch.description !== undefined) p.description = patch.description;
+          if (patch.home_board_columns !== undefined) {
+            for (const values of Object.values(patch.home_board_columns)) {
+              if (values.length > 32 || values.some(s => !s.trim() || s.length > 128)) fail(422, "invalid", "Invalid Home column selectors");
+            }
+            p.home_board_columns = structuredClone(patch.home_board_columns);
+          }
           p.updated_at = iso();
           audit("project.update", name, name, { ...patch });
           return p;
@@ -2965,6 +2972,42 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         }),
     },
 
+    home: {
+      cards: (q) => reply(() => {
+        const rows = w.cards.filter(c => !c.archived && (!q.project || c.project === q.project))
+          .filter(c => (project(c.project).home_board_columns ?? defaultHomeColumns)[q.column].some(selector => {
+            const cols = w.columns[c.project] ?? [];
+            const selected = cols.find(col => col.role === selector) ?? cols.find(col => col.name.toLowerCase() === selector.toLowerCase())
+              ?? (selector === "working" ? cols.find(col => ["in progress", "in_progress"].includes(col.name.toLowerCase())) : undefined);
+            return selected?.name === c.column;
+          }))
+          .sort((a, b) => a.id.localeCompare(b.id));
+        const start = Number(q.cursor ?? 0), end = start + (q.limit ?? 100);
+        return { items: rows.slice(start, end).map(c => {
+          const agent = w.agents.find(a => a.id === c.assignee);
+          const move = w.events.filter(e => e.card === c.id && e.kind === "card" && e.data.change === "moved").at(-1);
+          return { id: c.id, title: c.title, project: c.project, column: c.column, home_column: q.column, labels: c.labels,
+            assignee: c.assignee ?? null, assignee_name: agent?.name ?? null, assignee_status: agent?.status ?? null,
+            eta_at: c.eta_at ?? null, blocked_reason: q.column === "blocked" && move?.data.to === c.column && typeof move.data.comment === "string" ? move.data.comment.split("\n")[0] ?? null : null };
+        }), next: end < rows.length ? String(end) : null };
+      }),
+      monitors: async (q = {}) => {
+        const rows = (await Promise.all(w.projects.filter(p => !q.project || p.name === q.project).map(p => monitorMock.api.list(p.name)))).flat();
+        const items = rows.filter(m => m.last?.status !== "ok").map(m => ({ id: m.id, project: m.project, name: m.name, status: m.last?.status ?? "unknown", link: `/p/${encodeURIComponent(m.project)}/dashboard` }));
+        const start = Number(q.cursor ?? 0), end = start + (q.limit ?? 100);
+        return { items: items.slice(start, end), next: end < items.length ? String(end) : null };
+      },
+      pipelines: async (q = {}) => {
+        const rows = (await Promise.all(w.projects.filter(p => !q.project || p.name === q.project).map(p => pipelineMock.api.list(p.name)))).flat();
+        const items = [];
+        for (const p of rows) {
+          const runs = await pipelineMock.api.runs(p.id, 1);
+          if (runs[0]?.status === "failed") items.push({ id: p.id, project: p.project, name: p.name, status: "failed", link: `/p/${encodeURIComponent(p.project)}/pipelines` });
+        }
+        const start = Number(q.cursor ?? 0), end = start + (q.limit ?? 100);
+        return { items: items.slice(start, end), next: end < items.length ? String(end) : null };
+      },
+    },
     cards: {
       list: (proj, q = {}) =>
         reply(() => {

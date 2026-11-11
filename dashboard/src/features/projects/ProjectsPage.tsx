@@ -2,6 +2,7 @@ import { A, useNavigate } from "@solidjs/router";
 import { createSignal, For, Show } from "solid-js";
 import { Empty, ErrorBanner, Modal, PageHead } from "../../components/ui";
 import type { Project } from "../../api/types";
+import { defaultHomeColumns, type HomeColumn } from "../../api/home";
 import { ProjectDot } from "../../components/ProjectDot";
 import { ago } from "../../lib/format";
 import { projectHealth, projectHealthLabel } from "../../lib/projectHealth";
@@ -11,6 +12,7 @@ export function ProjectForm(props: { project?: Project; onClose: () => void; onS
   const [name, setName] = createSignal(props.project?.name ?? "");
   const [description, setDescription] = createSignal(props.project?.description ?? "");
   const [prefix, setPrefix] = createSignal(props.project?.card_prefix ?? "");
+  const [homeColumns, setHomeColumns] = createSignal(props.project?.home_board_columns ?? defaultHomeColumns);
   const [error, setError] = createSignal<unknown>(null);
   return (
     <Modal title={props.project ? `Edit ${props.project.name}` : "New project"} onClose={() => props.onClose()}>
@@ -23,6 +25,7 @@ export function ProjectForm(props: { project?: Project; onClose: () => void; onS
             const p = props.project
               ? await api.projects.update(props.project.name, {
                   description: description(),
+                  home_board_columns: homeColumns(),
                   ...(prefix().trim() && prefix().trim() !== props.project.card_prefix ? { card_prefix: prefix().trim() } : {}),
                 })
               : await api.projects.create({ name: name().trim(), description: description() || undefined, card_prefix: prefix().trim() || undefined });
@@ -47,6 +50,14 @@ export function ProjectForm(props: { project?: Project; onClose: () => void; onS
           <input value={prefix()} onInput={(e) => setPrefix(e.currentTarget.value.toUpperCase())} pattern="[A-Z][A-Z0-9]{0,9}" placeholder="OPS" />
         </label>
         <Show when={props.project}>
+          <fieldset disabled={props.project?.source === "file"}>
+            <legend>Home board columns</legend>
+            <p class="small muted">Comma-separated board roles or column names. Empty hides that column for this project.</p>
+            <For each={Object.keys(defaultHomeColumns) as HomeColumn[]}>{key => <label>
+              {({ in_progress: "In progress", review: "Review", accepted: "Accepted", blocked: "Blocked" })[key]}
+              <input value={homeColumns()[key].join(", ")} onChange={e => setHomeColumns({ ...homeColumns(), [key]: e.currentTarget.value.split(",").map(s => s.trim()).filter(Boolean) })} />
+            </label>}</For>
+          </fieldset>
           <p class="muted small" style={{ margin: 0 }}>
             The prefix cannot change after the first card.
           </p>

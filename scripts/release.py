@@ -160,8 +160,29 @@ def git(ctx: Ctx, *args: str) -> str:
     ).stdout
 
 
+def ensure_tags(ctx: Ctx) -> None:
+    """The release job clones its commit from a bundle with no tags and no
+    remote (TER-754), so the version step would find no last tag and number
+    the release from 0. Fetch the v* tags from the repo's public URL (or
+    TERRARIUM_RELEASE_TAG_REMOTE, for tests) when the clone has none, and
+    refuse to go on when there is still no v* tag."""
+    if git(ctx, "tag", "--list", "v*").strip():
+        return
+    remote = ctx.environ.get("TERRARIUM_RELEASE_TAG_REMOTE") or f"https://github.com/{ctx.gh_repo}.git"
+    proc = subprocess.run(
+        ["git", "fetch", "-q", "--no-recurse-submodules", remote, "+refs/tags/v*:refs/tags/v*"],
+        cwd=ctx.repo_dir, env=ctx.base_env(), capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise ReleaseError(f"the clone has no v* tag and the fetch of the tags from {remote} failed: "
+                           + proc.stderr.strip()[-300:])
+    if not git(ctx, "tag", "--list", "v*").strip():
+        raise ReleaseError(f"no v* tag in the clone or on {remote}: refusing to number the release from 0")
+
+
 # 1 ---------------------------------------------------------------------------
 def step_version(ctx: Ctx) -> dict[str, str]:
+    ensure_tags(ctx)
     values = release_version.calc(str(ctx.repo_dir))
     ctx.summary["version"] = values
     ctx.save()
@@ -690,7 +711,10 @@ def gh_env(ctx: Ctx) -> dict[str, str]:
 
 def notes(ctx: Ctx, version: str, digest: str) -> str:
     image = ctx.image
-    return f"""## Image
+    gate = ctx.summary.get("gate", {})
+    cut = (f"Tested at cut: {gate['runs']}\n\n"
+           if gate.get("reason") == "tested-at-cut" else "")
+    return cut + f"""## Image
 
 `{image}:{version}` (digest `{digest}`)
 
@@ -773,7 +797,13 @@ def release(ctx: Ctx) -> int:
             check_secrets(ctx)
             registry_login(ctx)
         step_check(ctx, version)
-        if ctx.run_gate:
+        if values.get("tested_at_cut") == "true":
+            ctx.summary["gate"] = {
+                "skipped": True, "reason": "tested-at-cut",
+                "runs": release_version.trailer(str(ctx.repo_dir), "tested-at-cut"),
+            }
+            ctx.save()
+        elif ctx.run_gate:
             step_gate(ctx, commit)
         else:
             ctx.summary["gate"] = {"skipped": True}
