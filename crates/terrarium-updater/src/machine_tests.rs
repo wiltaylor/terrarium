@@ -483,7 +483,11 @@ async fn hot_swap_keeps_container_and_commits_only_after_health() {
             .iter()
             .any(|c| c.starts_with("drain ") || c.starts_with("remove") || c.starts_with("stop"))
     );
-    assert_eq!(calls.last().unwrap(), "hot:ready");
+    assert_eq!(calls.last().unwrap(), "resume c0");
+    assert!(
+        calls.iter().position(|c| c == "hot:ready").unwrap()
+            < calls.iter().position(|c| c == "resume c0").unwrap()
+    );
     assert!(
         calls.iter().position(|c| c == "hot:pause").unwrap()
             < calls.iter().position(|c| c == "offline-backup").unwrap()
@@ -941,7 +945,7 @@ async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
     let tail: Vec<&str> = calls
         .iter()
         .rev()
-        .take(4)
+        .take(5)
         .rev()
         .map(String::as_str)
         .collect();
@@ -952,6 +956,7 @@ async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
             &format!("restore {OLD} {BACKUP}"),
             &format!("create:{OLD} new"),
             &format!("status:{OLD} c2"),
+            "resume c2",
         ]
     );
     assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
