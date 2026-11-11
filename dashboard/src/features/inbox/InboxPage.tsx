@@ -59,7 +59,7 @@ function InboxScreen() {
   const setList = (next: InboxItem[] | ((cur: InboxItem[]) => InboxItem[])) => {
     const rows = typeof next === "function" ? next(items.list) : next;
     // Keep every mounted card mounted when a new item is inserted above it.
-    const mounted = new Set(visible().map((i) => i.id));
+    const mounted = new Set(visible().flatMap((g) => g.items.map((i) => i.id)));
     const last = rows.reduce((n, i, index) => mounted.has(i.id) ? index + 1 : n, 0);
     setVisibleCount((n) => Math.max(n, last));
     keepView(() => setItems("list", reconcile(rows, { key: "id", merge: true })));
@@ -240,7 +240,7 @@ function InboxScreen() {
         <div class="stack" ref={listEl}>
           <For each={visible()}>
             {(group) => <section class="stack" aria-label={group.card ? `Questions for ${group.card}` : undefined}>
-              <Show when={group.card}>{(card) => <h2 class="small"><A href={cardHref(group.items[0].project, card())}>{card()}</A> · {group.items.length} open question{group.items.length === 1 ? "" : "s"}</h2>}</Show>
+              <Show when={group.card}>{(card) => <h2 class="small"><A href={cardHref(group.items[0]?.project ?? "", card())}>{card()}</A> · {group.items.length} open question{group.items.length === 1 ? "" : "s"}</h2>}</Show>
               <For each={group.items}>
             {(item) => (
               <div id={inboxItemDomId(item.id)} classList={{ "inbox-target": params.item === item.id }}>

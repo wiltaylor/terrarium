@@ -11,7 +11,7 @@ it("groups questions and bundles by card and project without losing item order o
   const rows = [item("urgent", "P-1"), item("mail", undefined, "mail"), item("bundle", "P-1", "bundle"), item("other", "P-2"), item("peer", "P-1", "question", true, "q")];
   const groups = groupCardQuestions(rows);
   expect(groups.map(g => g.items.map(i => i.id))).toEqual([["urgent", "bundle"], ["mail"], ["other"], ["peer"]]);
-  expect(groups[0].card).toBe("P-1");
+  expect(groups[0]?.card).toBe("P-1");
 });
 
 it("leaves notices, settled questions and cardless questions ungrouped", () => {
