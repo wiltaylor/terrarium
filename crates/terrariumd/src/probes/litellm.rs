@@ -77,7 +77,12 @@ async fn harness_env_with_resolver(
         let mut url = reqwest::Url::parse(&base).map_err(|_| "invalid LiteLLM URL")?;
         url.set_ip_host(addr.ip())
             .map_err(|_| "invalid LiteLLM host")?;
-        let ip = addr.ip().to_string();
+        // Proxy implementations differ on whether an IPv6 hostname retains
+        // its URL brackets. Cover both spellings, without a port restriction.
+        let ip = match addr.ip() {
+            std::net::IpAddr::V4(ip) => ip.to_string(),
+            std::net::IpAddr::V6(ip) => format!("{ip},[{ip}]"),
+        };
         Ok(vec![
             ("ANTHROPIC_BASE_URL".into(), url.to_string()),
             ("NO_PROXY".into(), ip.clone()),
@@ -385,6 +390,8 @@ mod tests {
         );
         let env = harness_env("http://[::1]:8000/prefix").await.unwrap();
         assert_eq!(env[0].1, "http://[::1]:8000/prefix");
+        assert_eq!(env[1].1, "::1,[::1]");
+        assert_eq!(env[2].1, "::1,[::1]");
         assert!(
             harness_env("https://private.invalid")
                 .await
