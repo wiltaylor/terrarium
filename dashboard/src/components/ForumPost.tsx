@@ -1,5 +1,5 @@
-import { Show, type JSX } from "solid-js";
-import { A } from "../instance/navigation";
+import { createEffect, Show, type JSX } from "solid-js";
+import { A, useLocation } from "../instance/navigation";
 import { ago } from "../lib/format";
 
 /** The shared header strip and full-width body for every conversation. */
@@ -10,6 +10,10 @@ export function ForumPost(props: {
   onQuote?: (post: HTMLElement) => void;
 }) {
   let post!: HTMLElement;
+  const location = useLocation();
+  createEffect(() => {
+    if (location.hash === `#${props.id}`) queueMicrotask(() => post.scrollIntoView?.({ block: "start" }));
+  });
   return <article ref={post} id={props.id} class={`thread-post post-${props.label.toLowerCase().replaceAll(" ", "-")}`}>
     <header class="thread-post-header">
       {props.icon}<strong>{props.author}</strong><span class="chip">{props.label}</span>

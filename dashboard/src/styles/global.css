@@ -2269,7 +2269,7 @@ a.chip.card-link:hover {
 .post-response { border-color: var(--info); }
 .post-close-proposal { border-color: var(--st-restarting); }
 .post-handoff { border-color: var(--accent); }
-.thread-page textarea { width: 100%; box-sizing: border-box; }
+.thread-page textarea, .post-editor textarea { width: 100%; box-sizing: border-box; }
 /* The linked cards of a thread (TER-147): a mini kanban, one row per project with its board columns. An empty column is narrow. */
 .tracked-cards > summary {
   cursor: pointer;
