@@ -6173,8 +6173,7 @@ cloud settings object (`region`, `models`, `budget_usd`, and the other
 provider fields), not a `{cloud: ...}` wrapper. Omitted optional fields are
 cleared. The operator-only endpoint checks the settings and returns the
 subscription without reading or changing its key file. File-managed and
-non-cloud subscriptions return `422 invalid`. Raising or removing the budget
-ends a cloud-budget hold at the next budget check.
+non-cloud subscriptions return `422 invalid`. Budgets send mail only.
 
 `POST /api/subscriptions/{name}/api-key` stores the key in
 `<state>/credentials/subscriptions/<name>.json`, mode `0600` (the
@@ -6431,11 +6430,10 @@ price of the tokens, not the cloud bill). The subscription shows a
 `budget` window with `used_pct`, `resets_at` (the start of the next month),
 and `balance` (`total` the budget, `used`, `remaining`, `currency` `USD`).
 The quota notices of §16.6 mail the operator at `alert_at` (default 80),
-90, and 100 percent. At 100 percent, new turns of the agents on the
-subscription wait: a hold with the cause `cloud-budget:<name>` until the
-start of the next month (`quota.blocked`). A raised or removed budget ends
-the hold at the next check (after each new session total, and on each
-policy tick).
+90, and 100 percent. Budgets send mail only, even at 100 percent. Agents
+keep their turns. Checks run after each new session total and on each
+policy tick. Existing cloud-budget holds end at daemon startup with a
+`quota.resumed` event.
 
 ### 16.6 The quota policy
 
@@ -6506,9 +6504,10 @@ policy tick).
   ```
 
   A budget has two lines: its `alert_at` and 100. Each line sends one mail
-  to the operator and one `quota.alert` in a UTC day. The hold applies,
-  with the cause `budget:project:<p>[/<sub>]` and the next UTC midnight as
-  the reset.
+  to the operator and one `quota.alert` in a UTC day. No turns are held.
+  Existing holds with cause `budget:project:<p>[/<sub>]` end at daemon
+  startup with a `quota.resumed` event. Vendor-refusal holds
+  (`limit:<subscription>`) and auto-swap are unchanged.
 
 `POST /api/agents/{id}/status` (`terrarium status set`) is the agent's own
 word: `status` is `idle`, `working`, or `blocked`; `note` is up to 500

@@ -2759,9 +2759,10 @@ Policy hooks:
 
   An operator, a project admin, or a sysadmin agent can also move an agent
   with `terrarium admin agent swap <agent> <subscription>`.
-- Per-project budgets are optional: a cap on tokens or turns per day on a
-  given subscription. At 100 percent the daemon holds new turns of the
-  agents of the project until the next UTC midnight. The lead template
+- Per-project budgets are optional: a mail threshold on tokens or turns per day on a
+  given subscription. At 100 percent the daemon sends mail without holding
+  turns, as for cloud monthly budgets. Existing budget holds end at daemon
+  startup with audited `quota.resumed` events. The lead template
   reads the numbers through `terrarium usage` and plans around resets.
 
 Agent CLI:
@@ -4302,7 +4303,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | Login flow output changes and the wizard cannot parse the URL or code | The embedded terminal always shows the raw flow, so the operator can finish it by hand. Parsers are per-harness, pinned, and tested against captured output. |
 | API keys or OAuth codes leak through the dashboard | Keys are write-only through the API, stored 0600, injected as env only into the agents on that subscription. The login PTY is operator-only, short-lived, and audited. |
 | Provider usage endpoints are undocumented and change | Treat probes as best-effort with a last-success time. Local accounting is always present. Each probe is a small isolated module with a test fixture. |
-| A plan hits its limit mid-task and agents thrash | Pause at 100 percent, mark `blocked` with the reset time, resume after reset. Alert at a threshold so the operator or a sysadmin agent can move agents to another subscription first. |
+| A plan hits its limit mid-task and agents thrash | Only a vendor refusal triggers auto-swap or a hold until reset. Budget and probe thresholds send mail only. |
 | An uploaded HTML artifact attacks the dashboard | Separate serving origin, signed short-lived URLs, sandboxed iframes without same-origin, sniffed content types, no script access to the API. With the artifact listener on (the default), the dashboard port does not serve `/a/...`; the viewer shows a badge when artifacts share the dashboard origin (F5 below). |
 | Artifact storage grows without bound | Content-hash dedupe, per-project quotas, retention tied to released versions and live pages, pruning with a day's warning. |
 | Wiki goes stale and misleads | Review status on pages. Backlinks show what depends on a page. The lead template includes a periodic wiki review. |

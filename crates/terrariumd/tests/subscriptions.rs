@@ -882,7 +882,7 @@ async fn a_restart_ends_a_usage_limit_hold() {
 }
 
 /// A hold of an older version from a probe window at 100 percent (cause
-/// `quota:...`) ends at the start; a budget hold stays.
+/// `quota:...`) and budget holds end at the start. Vendor holds stay.
 #[tokio::test]
 async fn old_probe_holds_end_at_the_start() {
     let env = boot(
@@ -918,12 +918,18 @@ async fn old_probe_holds_end_at_the_start() {
     terrariumd::quota_policy::hold(&state, &b, "budget:project:p", until, "budget")
         .await
         .unwrap();
+    terrariumd::quota_policy::hold(&state, &w, "cloud-budget:removed", None, "budget")
+        .await
+        .unwrap();
+    terrariumd::quota_policy::hold(&state, &b, "limit:anthropic-max", until, "vendor")
+        .await
+        .unwrap();
     td.wait_status(&w, "blocked").await;
 
     // The start.
-    assert_eq!(terrariumd::quota_policy::reapply(&state).await.unwrap(), 2);
+    assert_eq!(terrariumd::quota_policy::reapply(&state).await.unwrap(), 4);
     td.wait_status(&w, "idle").await;
-    assert_eq!(events_of(td, "quota.resumed").await.len(), 2);
+    assert_eq!(events_of(td, "quota.resumed").await.len(), 4);
     let holds = |id: String| async move {
         td.get_as(&id, "/api/usage/me").await.ok()["holds"]
             .as_array()
@@ -933,7 +939,7 @@ async fn old_probe_holds_end_at_the_start() {
             .collect::<Vec<_>>()
     };
     assert!(holds(w.clone()).await.is_empty());
-    assert_eq!(holds(b.clone()).await, ["budget:project:p"]);
+    assert_eq!(holds(b.clone()).await, ["limit:anthropic-max"]);
     td.wait_status(&b, "blocked").await;
     // A second start finds none.
     assert_eq!(terrariumd::quota_policy::reapply(&state).await.unwrap(), 0);
@@ -1302,7 +1308,7 @@ async fn collector_ends_a_copilot_compaction_before_the_first_prompt() {
 }
 
 #[tokio::test]
-async fn budgets_hold_a_project() {
+async fn budgets_mail_without_holding_a_project() {
     let env = boot(
         |c| write(c, "projects/p.toml", "[budget]\ntokens_per_day = 10\n"),
         |_, _| {},
@@ -1322,9 +1328,18 @@ async fn budgets_hold_a_project() {
         json!({"harness_session": "s", "transcript_path": file}),
     )
     .await;
-    td.wait_status(&id, "blocked").await;
-    let b = events_of(td, "quota.blocked").await;
-    assert_eq!(b[0]["data"]["cause"], "budget:project:p");
+    wait_for("the budget notices", || async {
+        events_of(td, "quota.alert").await.len() == 2
+    })
+    .await;
+    td.wait_status(&id, "idle").await;
+    assert!(events_of(td, "quota.blocked").await.is_empty());
+    assert_eq!(td.get_as(&id, "/api/usage/me").await.ok()["holds"], json!([]));
+    let mail = td.get("/api/mail?to=operator").await;
+    assert!(mail.ok().as_array().unwrap().iter().any(|m| {
+        m["subject"].as_str().unwrap().starts_with("Budget:")
+            && m["body"].as_str().unwrap().contains("Agents keep their turns.")
+    }));
     let levels: Vec<Value> = events_of(td, "quota.alert")
         .await
         .iter()
@@ -3075,10 +3090,9 @@ async fn openai_compatible_rows_become_selfhosted() {
 
 /// TER-630: a cloud subscription with a monthly budget. The key endpoint
 /// stores the key and the `[cloud]` settings; the answer and the window
-/// have no secret. At 100 percent of the budget, the agents on it are held
-/// until the next month; a raised budget ends the hold at the next check.
+/// have no secret. At 100 percent the operator gets mail, not a hold.
 #[tokio::test]
-async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
+async fn a_used_up_cloud_budget_mails_without_holding_turns() {
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;
     td.project("p").await;
@@ -3126,7 +3140,7 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
     td.wait_status(&id, "idle").await;
 
-    // 12 USD of a 10 USD budget: used up, the turns wait.
+    // 12 USD of a 10 USD budget: used up, the turns continue.
     let state = td.daemon.as_ref().unwrap().state.clone();
     let month = terrarium_core::cloud::month_key(chrono::Utc::now());
     let (agent, m) = (id.clone(), month.clone());
@@ -3140,12 +3154,16 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     terrariumd::cloud_budget::check(&state, "aws")
         .await
         .unwrap();
-    td.wait_status(&id, "blocked").await;
+    td.wait_status(&id, "idle").await;
     let blocked = events_of(td, "quota.blocked").await;
-    assert_eq!(blocked.len(), 1, "{blocked:?}");
-    assert_eq!(blocked[0]["data"]["cause"], "cloud-budget:aws");
-    let until = blocked[0]["data"]["until"].as_str().unwrap();
-    assert!(until.ends_with("-01T00:00:00Z"), "{until}");
+    assert!(blocked.is_empty(), "{blocked:?}");
+    let alerts = events_of(td, "quota.alert").await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["data"]["level"], "exhausted");
+    let mail = td.get("/api/mail?to=operator").await;
+    assert!(mail.ok().as_array().unwrap().iter().any(|m| {
+        m["body"].as_str().unwrap().contains("100%")
+    }));
     let win = td.get("/api/subscriptions/aws").await.ok().clone();
     let budget = win["windows"]
         .as_array()
@@ -3163,9 +3181,10 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     terrariumd::cloud_budget::check(&state, "aws")
         .await
         .unwrap();
-    assert_eq!(events_of(td, "quota.blocked").await.len(), 1);
+    assert!(events_of(td, "quota.blocked").await.is_empty());
+    assert_eq!(events_of(td, "quota.alert").await.len(), 1);
 
-    // The operator raises the budget: the next check ends the hold.
+    // The operator can still raise the budget.
     td.put(
         "/api/subscriptions/aws/cloud",
         json!({"region": "us-east-1", "budget_usd": 50,
@@ -3218,10 +3237,7 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     terrariumd::cloud_budget::check(&state, "aws")
         .await
         .unwrap();
-    wait_for("the release", || async {
-        events_of(td, "quota.resumed").await.len() == 1
-    })
-    .await;
+    assert!(events_of(td, "quota.resumed").await.is_empty());
     td.wait_status(&id, "idle").await;
 }
 
