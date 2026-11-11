@@ -3817,18 +3817,20 @@ mod tests {
         };
         let events = |s: Shared| async move {
             s.db.read(|c| {
-                Ok(c.query_row(
-                    "SELECT count(*) FROM events WHERE kind = 'mail'",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )?)
+                Ok(
+                    c.query_row("SELECT count(*) FROM events WHERE kind = 'mail'", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                )
             })
             .await
             .unwrap()
         };
         let resumes = |s: Shared| async move {
             s.db.read(|c| {
-                Ok(c.query_row("SELECT count(*) FROM thread_resumes", [], |r| r.get::<_, i64>(0))?)
+                Ok(c.query_row("SELECT count(*) FROM thread_resumes", [], |r| {
+                    r.get::<_, i64>(0)
+                })?)
             })
             .await
             .unwrap()
@@ -3841,7 +3843,10 @@ mod tests {
         };
         let (one, _) = held(s.clone(), dev.clone(), sys.clone()).await;
         let (two, thread) = held(s.clone(), dev.clone(), sys.clone()).await;
-        let (st1, st2) = (state_of(s.clone(), one.clone()).await, state_of(s.clone(), two.clone()).await);
+        let (st1, st2) = (
+            state_of(s.clone(), one.clone()).await,
+            state_of(s.clone(), two.clone()).await,
+        );
         let (e0, r0) = (events(s.clone()).await, resumes(s.clone()).await);
         // A single release.
         let path = format!("/api/mail/{one}/release");
