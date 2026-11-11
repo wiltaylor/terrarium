@@ -53,7 +53,7 @@ export function MessageView(props: { message: Message; number?: number; project?
         </Show>
         <StateChips message={props.message} />
       </div>
-      <SafeHtml class="prose" html={renderMarkdown(props.message.body, props.project ?? "")} />
+      <SafeHtml class="prose" html={renderMarkdown(props.message.body, props.project ?? "", { textBody: true })} />
     </ForumPost>
   );
 }

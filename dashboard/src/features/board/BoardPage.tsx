@@ -1006,7 +1006,7 @@ function CardDrawer(props: {
             }
           }}
         >
-          <PostEditor label="Comment" text={comment()} project={props.card.project}>
+          <PostEditor label="Comment" text={comment()} project={props.card.project} textBody>
           <textarea ref={commentInput} value={comment()} onInput={(e) => setComment(e.currentTarget.value)} placeholder="Comment as operator" aria-label="Comment" />
           </PostEditor>
           <EmojiPicker onPick={(code) => {
