@@ -3444,7 +3444,7 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
 
 /// The end of a job in one write: a `job.verdict` event for each card,
 /// then the coded card flow (the move, the rerun, or the split).
-fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+pub(crate) fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     if j.kind == JobKind::E2e {
         let group = crate::store::groups::get(t, &j.card)?;
         let state = if j.state == jobs::JobState::Passed {

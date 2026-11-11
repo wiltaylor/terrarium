@@ -364,6 +364,10 @@ async fn cancel(
         .db
         .write(actor.label(), move |t| {
             let j = jobs::cancel(t, &jid)?;
+            if j.kind == JobKind::E2e {
+                rt::on_end(t, &j)?;
+                return Ok(j);
+            }
             rt::emit_verdicts(t, &j)?;
             // With `board_flow = rules` the pack clears them (TER-170).
             if rt::code_flow(t, &j.project)? {
