@@ -95,7 +95,7 @@ it.each([
 ] as const)("keeps deferred writes in %s after switching to %s", async (from, to) => {
   let resolveList!: (response: Response) => void;
   const pendingList = new Promise<Response>((resolve) => { resolveList = resolve; });
-  const fetch = vi.fn((url: string) => url.endsWith("/api/agents")
+  const fetch = vi.fn((url: string) => url.endsWith("/api/agents?limit=1000")
     ? pendingList
     : Promise.resolve(new Response('{"accepted":true}')));
   vi.stubGlobal("fetch", fetch);
@@ -134,7 +134,7 @@ it.each([
   expect(b.agents.state.loading).toBe(false);
   const base = from === undefined ? "" : `/api/remotes/${from}/proxy`;
   expect(fetch.mock.calls.map(([url]) => url)).toEqual([
-    `${base}/api/agents`,
+    `${base}/api/agents?limit=1000`,
     `${base}/api/agents/same-agent-id/send`,
   ]);
 });
