@@ -946,12 +946,7 @@ async fn release(
                     planned_secs,
                 },
             )?;
-            board::system_comment(
-                t,
-                &card.id,
-                &rt::queue_comment(&job, &card.id),
-                None,
-            )?;
+            board::system_comment(t, &card.id, &rt::queue_comment(&job, &card.id), None)?;
             let place = jobs::place(t, &job)?;
             Ok((job, place))
         })
