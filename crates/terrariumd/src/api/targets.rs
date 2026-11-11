@@ -519,7 +519,9 @@ async fn update(
     }
     let r = r?;
     if r.def.host.is_none() {
-        crate::jobs::prepare_hosts(&state.db, r.def.address.clone()).await?;
+        if let Err(error) = crate::jobs::prepare_hosts(&state.db, r.def.address.clone()).await {
+            tracing::warn!(target = %r.def.name, %error, "target update stored but host pin preparation failed");
+        }
     }
     Ok(Json(
         with_credential(&state, view(&state, &actor, r, &[])).await?,

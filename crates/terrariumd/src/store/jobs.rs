@@ -2856,6 +2856,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_alias_retry_cannot_steal_another_agents_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        db.write("operator", |t| {
+            hosts::create(t, "first", false)?;
+            hosts::create(t, "second", false)?;
+            set_host_aliases(t, "first", &["192.0.2.1".into()])?;
+            set_host_aliases(t, "second", &["retry.invalid".into()])?;
+            pin_hosts(t, vec![("retry.invalid".into(), "retry.invalid".into())])?;
+            pin_hosts(t, vec![("retry.invalid".into(), "192.0.2.1".into())])?;
+            let key: String = t.query_row(
+                "SELECT host_key FROM job_host_keys WHERE hostname = 'retry.invalid'",
+                [], |r| r.get(0),
+            )?;
+            assert_eq!(key, "retry.invalid");
+            assert_eq!(canonical_key(t, "192.0.2.1")?, hosts::get(t, "first")?.id);
+            assert_eq!(unresolved_hosts(t, None)?, ["retry.invalid"]);
+            pin_hosts(t, vec![("retry.invalid".into(), "192.0.2.2".into())])?;
+            assert_eq!(canonical_key(t, "192.0.2.2")?, hosts::get(t, "second")?.id);
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn failed_job_host_and_alias_pins_can_recover() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::Db::new(

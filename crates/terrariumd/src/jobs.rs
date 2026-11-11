@@ -1146,7 +1146,7 @@ fn note_long_waits(t: &mut Tx<'_>) -> ApiResult<()> {
 /// projects, so the host counts hold. A job whose host agent is offline,
 /// or whose ssh target waits for its next try, stays queued (TER-160).
 pub async fn tick(state: &Shared) -> ApiResult<()> {
-    prepare_hosts(&state.db, None).await?;
+    prepare_hosts_mode(&state.db, None, true).await?;
     // A deploy drains the daemon first: no job starts, and the running
     // ones go on (TER-123, P5). The end of the drain kicks the queue. A
     // drain of the job slots only (TER-614 R4) does the same for jobs.
@@ -1254,10 +1254,21 @@ async fn finish_job(state: &Shared, id: &str, end: JobEnd) {
     }
 }
 
-/// Resolve only unpinned names, on the blocking pool and outside DB closures.
-/// The persisted first answer (including failures) keeps counts and caps stable.
+pub(crate) type HostRetries = std::collections::HashMap<String, (Instant, Duration)>;
+
+/// Resolve new names outside DB closures. API calls neither retry failed pins
+/// nor wait behind scheduler DNS work. Successful pins stay fixed. The scheduler
+/// retries failures after one minute, doubling up to fifteen minutes.
 pub async fn prepare_hosts(db: &crate::db::Db, extra: Option<String>) -> ApiResult<()> {
-    prepare_hosts_with(db, extra, |hostname| {
+    prepare_hosts_mode(db, extra, false).await
+}
+
+async fn prepare_hosts_mode(
+    db: &crate::db::Db,
+    extra: Option<String>,
+    retry: bool,
+) -> ApiResult<()> {
+    prepare_hosts_with(db, extra, retry, |hostname| {
         use std::net::ToSocketAddrs;
         let mut ips: Vec<_> = (hostname, 22)
             .to_socket_addrs()
@@ -1274,10 +1285,38 @@ pub async fn prepare_hosts(db: &crate::db::Db, extra: Option<String>) -> ApiResu
 async fn prepare_hosts_with(
     db: &crate::db::Db,
     extra: Option<String>,
+    retry: bool,
     resolve: impl Fn(&str) -> String + Send + Sync + 'static,
 ) -> ApiResult<()> {
-    let _prepare = db.host_pins().lock().await;
-    let names = db.read(move |c| jobs::unresolved_hosts(c, extra)).await?;
+    let mut retries = if retry {
+        db.host_pins().lock().await
+    } else {
+        let Ok(guard) = db.host_pins().try_lock() else {
+            return Ok(());
+        };
+        guard
+    };
+    let names = db.read(move |c| {
+        let names = jobs::unresolved_hosts(c, extra)?;
+        let mut selected = Vec::new();
+        for name in names {
+            if !retry {
+                // An indexed point lookup, not a scan of historical pins.
+                let exists: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)", [&name], |r| r.get(0))?;
+                if exists {
+                    continue;
+                }
+            }
+            selected.push(name);
+        }
+        Ok(selected)
+    }).await?;
+    if retry {
+        retries.retain(|name, _| names.binary_search(name).is_ok());
+    }
+    let names: Vec<_> = names.into_iter().filter(|name| {
+        retries.get(name).is_none_or(|(deadline, _)| Instant::now() >= *deadline)
+    }).collect();
     if names.is_empty() {
         return Ok(());
     }
@@ -1305,6 +1344,10 @@ async fn prepare_hosts_with(
             continue;
         }
         let guard = Lookup(name.clone());
+        let delay = retries.get(&name).map_or(Duration::from_secs(60), |(_, delay)| {
+            (*delay * 2).min(Duration::from_secs(15 * 60))
+        });
+        retries.insert(name.clone(), (Instant::now() + delay, delay));
         let resolve = resolve.clone();
         let task = tokio::task::spawn_blocking(move || {
             let key = resolve(&guard.0);
@@ -1319,6 +1362,9 @@ async fn prepare_hosts_with(
         });
     }
     let keys = futures_util::future::join_all(pending).await;
+    if keys.is_empty() {
+        return Ok(());
+    }
     db.write("system", move |t| jobs::pin_hosts(t, keys)).await
 }
 
@@ -5959,6 +6005,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_resolution_backoff_doubles_and_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        for seconds in [60, 120, 240, 480, 900, 900] {
+            prepare_hosts_with(&db, Some("backoff.invalid".into()), true, str::to_owned)
+                .await.unwrap();
+            prepare_hosts_with(&db, Some("backoff.invalid".into()), true, |_| {
+                panic!("not due yet")
+            }).await.unwrap();
+            let mut retries = db.host_pins().lock().await;
+            let (deadline, delay) = retries.get_mut("backoff.invalid").unwrap();
+            assert_eq!(*delay, Duration::from_secs(seconds));
+            *deadline = Instant::now();
+        }
+    }
+
+    #[tokio::test]
     async fn host_resolution_timeout_pins_once_and_address_reset_clears_it() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::Db::new(
@@ -5981,7 +6047,7 @@ mod tests {
         let ready = started.clone();
         let other = db.clone();
         let first = tokio::spawn(async move {
-            prepare_hosts_with(&other, None, move |_| {
+            prepare_hosts_with(&other, None, false, move |_| {
                 ready.notify_one();
                 wait.lock().unwrap().recv().unwrap();
                 "192.0.2.2".into()
@@ -5990,7 +6056,7 @@ mod tests {
             .unwrap();
         });
         started.notified().await;
-        prepare_hosts_with(&db, Some("slow.invalid".into()), |_| {
+        prepare_hosts_with(&db, Some("slow.invalid".into()), false, |_| {
             panic!("parallel kick must not look up the name twice")
         })
         .await
@@ -6018,7 +6084,7 @@ mod tests {
         })
         .await
         .unwrap();
-        prepare_hosts_with(&db, None, |_| {
+        prepare_hosts_with(&db, None, false, |_| {
             panic!("timed out libc lookup is still in flight")
         })
         .await
@@ -6043,6 +6109,7 @@ mod tests {
             prepare_hosts_with(
                 &resolver_db,
                 Some("round-robin.invalid".into()),
+                false,
                 move |_| {
                     ready.notify_one();
                     wait.lock().unwrap().recv().unwrap();
@@ -6067,7 +6134,7 @@ mod tests {
             crate::db::open(&path).unwrap(),
             crate::events::EventHub::default(),
         );
-        prepare_hosts_with(&reopened, Some("ROUND-ROBIN.INVALID:2222".into()), |_| {
+        prepare_hosts_with(&reopened, Some("ROUND-ROBIN.INVALID:2222".into()), false, |_| {
             panic!("must not resolve again")
         })
         .await
@@ -6083,10 +6150,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(key, "192.0.2.1");
-        prepare_hosts_with(&reopened, Some("failed.invalid".into()), str::to_owned)
+        prepare_hosts_with(&reopened, Some("failed.invalid".into()), false, str::to_owned)
             .await
             .unwrap();
-        prepare_hosts_with(&reopened, Some("FAILED.INVALID".into()), |_| {
+        prepare_hosts_with(&reopened, Some("FAILED.INVALID".into()), false, |_| {
+            panic!("API calls must not retry failed pins")
+        })
+        .await
+        .unwrap();
+        prepare_hosts_with(&reopened, Some("failed.invalid".into()), true, |_| {
+            panic!("scheduler must respect backoff")
+        })
+        .await
+        .unwrap();
+        {
+            let mut retries = reopened.host_pins().lock().await;
+            let (deadline, delay) = retries.get_mut("failed.invalid").unwrap();
+            assert_eq!(*delay, Duration::from_secs(60));
+            *deadline = Instant::now();
+        }
+        prepare_hosts_with(&reopened, Some("FAILED.INVALID".into()), true, |_| {
             "192.0.2.3".into()
         })
         .await
