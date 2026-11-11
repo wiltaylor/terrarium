@@ -1536,7 +1536,6 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
     // A tool run approval: the agent's CLI waits on the question, no mail.
     if q.kind != QuestionKind::ToolRun
         && let Ok(to) = mail::resolve(t, &q.agent, None)
-        && to != mail::Address::System
     {
         let who = by.display();
         let mut body = format!(
@@ -1700,6 +1699,7 @@ pub fn retract(
     if !by_owner
         && q.kind != QuestionKind::ToolRun
         && let Ok(to) = mail::resolve(t, &q.agent, None)
+        && to != mail::Address::System
     {
         let noun = q.noun();
         let need = match q.kind {
