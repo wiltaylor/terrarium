@@ -336,26 +336,31 @@ fn check_freeze(conn: &Connection, project: &str) -> ApiResult<()> {
             "SELECT id FROM calendar_events WHERE project IS ?1 ORDER BY start_at, id LIMIT ?2",
         )?;
         let ids = stmt
-            .query_map(params![scope, calendar::MAX_EVENTS + 1], |r| r.get::<_, String>(0))?
+            .query_map(params![scope, calendar::MAX_EVENTS + 1], |r| {
+                r.get::<_, String>(0)
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         if ids.len() > calendar::MAX_EVENTS {
-            return Err(ApiError::conflict("calendar freeze check exceeds event limit"));
+            return Err(ApiError::conflict(
+                "calendar freeze check exceeds event limit",
+            ));
         }
         for id in ids {
             let event = calendar::get(conn, &id)?;
             if event.kind != "freeze" {
                 continue;
             }
-            let (occurrences, cut) = calendar::expand(
-                &[event],
-                at,
-                at + chrono::Duration::milliseconds(1),
-            );
-            if cut || occurrences.iter().any(|o| {
-                calendar::parse_utc(&o.start).is_some_and(|start| start <= at)
-                    && calendar::parse_utc(&o.end).is_some_and(|end| at < end)
-            }) {
-                return Err(ApiError::conflict(format!("calendar freeze `{id}` prevents automatic move")));
+            let (occurrences, cut) =
+                calendar::expand(&[event], at, at + chrono::Duration::milliseconds(1));
+            if cut
+                || occurrences.iter().any(|o| {
+                    calendar::parse_utc(&o.start).is_some_and(|start| start <= at)
+                        && calendar::parse_utc(&o.end).is_some_and(|end| at < end)
+                })
+            {
+                return Err(ApiError::conflict(format!(
+                    "calendar freeze `{id}` prevents automatic move"
+                )));
             }
         }
     }
