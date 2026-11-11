@@ -1377,15 +1377,8 @@ mod tests {
 
     #[test]
     fn branch_observation_queries_are_indexed_and_bounded() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(
-            "CREATE TABLE cards(id TEXT PRIMARY KEY, project TEXT, repo TEXT, branch TEXT,
-                archived INTEGER, column_id INTEGER);
-             CREATE TABLE board_columns(id INTEGER PRIMARY KEY, project TEXT, role TEXT, name TEXT);",
-        )
-        .unwrap();
-        c.execute_batch(include_str!("../migrations/ter-370-card-branch-head.sql"))
-            .unwrap();
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
         let plan = |sql: &str, args: usize| -> Vec<String> {
             let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             let args = vec!["x"; args];
