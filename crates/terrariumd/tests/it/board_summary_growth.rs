@@ -20,9 +20,12 @@ async fn board_summary_sqlite_work_grows_near_linearly() {
     let mut measured = Vec::new();
     for count in [294, 2940] {
         let td = TestDaemon::start().await;
-        td.post("/api/projects", json!({"name": "proj", "card_prefix": "TER"}))
-            .await
-            .ok();
+        td.post(
+            "/api/projects",
+            json!({"name": "proj", "card_prefix": "TER"}),
+        )
+        .await
+        .ok();
         let mut conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
         let tx = conn.transaction().unwrap();
         for n in 1..=count {
@@ -38,13 +41,21 @@ async fn board_summary_sqlite_work_grows_near_linearly() {
         tx.commit().unwrap();
         // Exercise both empty dependency lists and populated lists. Done
         // dependencies remain in depends_on but must not appear in blocked_by.
-        conn.execute("INSERT INTO card_deps(card, depends_on) VALUES ('TER-3', 'TER-1'), ('TER-3', 'TER-6')", []).unwrap();
+        conn.execute(
+            "INSERT INTO card_deps(card, depends_on) VALUES ('TER-3', 'TER-1'), ('TER-3', 'TER-6')",
+            [],
+        )
+        .unwrap();
         let steps = Cell::new(0_u64);
         // SAFETY: no await or connection sharing occurs while the callback is
         // installed, and steps outlives its removal, even on a query error.
         unsafe {
-            ffi::sqlite3_progress_handler(conn.handle(), 100, Some(progress),
-                (&steps as *const Cell<u64>).cast_mut().cast());
+            ffi::sqlite3_progress_handler(
+                conn.handle(),
+                100,
+                Some(progress),
+                (&steps as *const Cell<u64>).cast_mut().cast(),
+            );
         }
         let result = board::board_summary(&conn, "proj", false, &Page::default());
         // SAFETY: remove the callback before steps goes out of scope.

@@ -1,9 +1,9 @@
 //! Shared integration binary. Keep module sources beside the standalone tests.
 //! Run a module with: cargo test -p terrariumd --test it board::
 
+mod board_summary_growth;
 #[path = "../common/mod.rs"]
 mod common;
-mod board_summary_growth;
 mod exedev;
 mod remotes;
 mod ter221_latency;
