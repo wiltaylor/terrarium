@@ -3619,8 +3619,10 @@ mod tests {
                     &serde_json::json!({"kind": kind, "text": "Deploy?"}),
                 )
                 .await;
-                assert_eq!(r.status(), StatusCode::CREATED);
-                json_of(r).await["id"].as_str().unwrap().to_owned()
+                let st = r.status();
+                let v = json_of(r).await;
+                assert_eq!(st, StatusCode::CREATED, "{kind}: {v}");
+                v["id"].as_str().unwrap().to_owned()
             }
         };
         let refused = |r: Response| async move {
