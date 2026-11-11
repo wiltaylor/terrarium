@@ -25,6 +25,95 @@ async fn remote() -> TestDaemon {
     d
 }
 
+fn test_tls_config(cert: &terrarium_host::tls::SelfSigned) -> Arc<rustls::ServerConfig> {
+    let dir = tempfile::tempdir().unwrap();
+    let pem = dir.path().join("cert.pem");
+    let key = dir.path().join("key.pem");
+    std::fs::write(&pem, &cert.cert_pem).unwrap();
+    std::fs::write(&key, &cert.key_pem).unwrap();
+    terrarium_host::tls::server_config(&pem, &key).unwrap().0
+}
+
+async fn pinned_server(
+    body: String,
+) -> (Server, String, Arc<std::sync::Mutex<Arc<rustls::ServerConfig>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let cert = terrarium_host::tls::self_signed(&["localhost".into()]).unwrap();
+    let config = test_tls_config(&cert);
+    let config = Arc::new(std::sync::Mutex::new(config));
+    let current = config.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let acceptor = tokio_rustls::TlsAcceptor::from(current.lock().unwrap().clone());
+            let body = body.clone();
+            tokio::spawn(async move {
+                if let Ok(mut tls) = acceptor.accept(tcp).await {
+                    let mut request = [0; 8192];
+                    let n = tls.read(&mut request).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&request[..n]).to_ascii_lowercase();
+                    // Only the API probe may carry a remote credential.
+                    if !body.starts_with('{') {
+                        assert!(!request.contains("authorization:"));
+                        assert!(!request.contains("cookie:"));
+                    }
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = tls.write_all(response.as_bytes()).await;
+                    let _ = tls.shutdown().await;
+                }
+            });
+        }
+    });
+    (Server { url: format!("https://{addr}"), task }, cert.fingerprint, config)
+}
+
+#[tokio::test]
+async fn separate_artifact_pin_requires_operator_confirmation_and_rotation() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let mut home = TestDaemon::start().await;
+    home.boot(Some("127.0.0.1:0"), Some("test-home-operator")).await;
+    let remote = remote().await;
+    let row = link(&home, &remote, false).await;
+    let (artifact, pin, config) = pinned_server("artifact bytes".into()).await;
+    let (api, api_pin, _) = pinned_server(json!({
+        "id": row["instance_id"], "version": env!("CARGO_PKG_VERSION"),
+        "artifact_origin": artifact.url,
+    }).to_string()).await;
+    let db = rusqlite::Connection::open(home.state.join("terrarium.db")).unwrap();
+    db.execute("UPDATE remotes SET url=?1,pin_sha256=?2 WHERE name='lab'",
+        rusqlite::params![format!("{}/", api.url), api_pin]).unwrap();
+    let base = format!("http://{}", home.daemon.as_ref().unwrap().tcp_addr.unwrap());
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let endpoint = format!("{base}/api/remotes/lab/artifact-repin");
+    let ctx = terrariumd::store::artifacts::context(&home.state, &home.config).unwrap();
+    let exp = chrono::Utc::now().timestamp() + 120;
+    let cap = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({
+        "remote":"lab", "remote_id":row["id"], "instance":row["instance_id"],
+        "target":format!("{}/a/probe", artifact.url), "artifact_origin":artifact.url,
+        "sid":"test-session", "jti":"test-token", "pv":0
+    })).unwrap());
+    let sig = ctx.sign(&format!("remote-artifact.v1.{cap}"), exp);
+    let url = format!("{base}/ra/{cap}/{exp}/{sig}/");
+    assert!(!client.get(&url).send().await.unwrap().status().is_success());
+    let body = json!({"origin":artifact.url,"pin_sha256":pin});
+    assert!(!client.post(&endpoint).json(&body).send().await.unwrap().status().is_success());
+    assert_eq!(client.post(&endpoint).bearer_auth("test-home-operator").json(&body)
+        .send().await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(client.get(&url).send().await.unwrap().text().await.unwrap(), "artifact bytes");
+
+    let rotated = terrarium_host::tls::self_signed(&["localhost".into()]).unwrap();
+    *config.lock().unwrap() = test_tls_config(&rotated);
+    assert!(!client.get(&url).send().await.unwrap().status().is_success());
+    // The old pin cannot be reconfirmed after rotation.
+    assert!(!client.post(&endpoint).bearer_auth("test-home-operator").json(&body)
+        .send().await.unwrap().status().is_success());
+    let body = json!({"origin":artifact.url,"pin_sha256":rotated.fingerprint});
+    assert_eq!(client.post(&endpoint).bearer_auth("test-home-operator").json(&body)
+        .send().await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(client.get(&url).send().await.unwrap().text().await.unwrap(), "artifact bytes");
+}
+
 #[tokio::test]
 async fn artifact_capability_serves_without_credentials_and_ends_on_logout() {
     use base64::Engine;
