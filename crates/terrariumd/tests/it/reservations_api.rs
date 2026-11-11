@@ -194,7 +194,9 @@ async fn setup_opts(
         });
     }
     let client = tokio::spawn(Client::new(options).run());
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // A precondition, not a timing check: under load the link and the
+    // admission of a new host agent took over 10 s (TER-674).
+    tokio::time::timeout(crate::common::WAIT, async {
         while !state.executor.hosts.is_online("h")
             || (!live && state.executor.resource_pending("h"))
         {
@@ -862,12 +864,15 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
     let (td, server, client) = setup().await;
     let state = td.daemon.as_ref().unwrap().state.clone();
     let directory = td.dir.path();
-    // TER-526: the held pull must not outlive the test.
+    // TER-526: the held pull must not outlive the test. The guard kills
+    // it, so its gate can be longer than the test: with a 120 s gate the
+    // pull ended under merge-job load before the checks of the held `Up`
+    // below (TER-674).
     let fixtures = crate::common::FixtureGuard::new(directory);
     std::fs::write(directory.join("reservation-docker"), format!(
         "#!/bin/sh\ncase $1 in\ninspect) echo '[]'; echo 'Error: No such object' >&2; exit 1;;\nrun) touch '{0}/pull-entered'; {1};;\nupdate) exit 0;;\nesac\n",
         directory.display(),
-        crate::common::gate_wait(&directory.join("pull-release"), Duration::from_secs(120))
+        crate::common::gate_wait(&directory.join("pull-release"), Duration::from_secs(900))
     )).unwrap();
     let (server_b, address) = terrariumd::hosts::serve(state.clone(), "127.0.0.1:0")
         .await
@@ -884,7 +889,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         .into_owned();
     options.capabilities = state.executor.hosts.capabilities("h").unwrap();
     let client_b = tokio::spawn(Client::new(options).run());
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(crate::common::WAIT, async {
         while !state.executor.hosts.is_online("other-host")
             || state.executor.resource_pending("other-host")
         {
@@ -919,7 +924,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(crate::common::WAIT, async {
         while !directory.join("pull-entered").exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

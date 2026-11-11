@@ -535,6 +535,43 @@ async fn two_concurrent_up_calls_make_one_vm() {
     assert_eq!(f.names(), vec![vm_of(&td, "ex").unwrap()]);
 }
 
+/// TER-651: `target test` on an exedev target logs in to its VM through
+/// the ssh target of the VM. With no VM, or a VM with no ssh host yet, it
+/// is `409` with a message that says to bring the VM up.
+#[tokio::test]
+async fn target_test_on_an_exedev_target_logs_in_to_its_vm() {
+    let (td, _fake, ssh_log, _, _) = daemon().await;
+    td.post("/api/targets", target("ex", 8 * 3600)).await.ok();
+
+    let r = td.post_empty("/api/targets/ex/test").await;
+    assert_eq!(r.status.as_u16(), 409, "{}", r.body);
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("has no exe.dev VM"), "{msg}");
+    assert!(msg.contains("terrarium admin target verb ex up"), "{msg}");
+
+    insert_record(&td, "vm-nohost", "ex", None, 0);
+    let r = td.post_empty("/api/targets/ex/test").await;
+    assert_eq!(r.status.as_u16(), 409, "{}", r.body);
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("has no ssh host yet"), "{msg}");
+    db(&td)
+        .execute("DELETE FROM exedev_vms WHERE target = 'ex'", [])
+        .unwrap();
+
+    td.post_empty("/api/targets/ex/up").await.ok();
+    let vm = vm_of(&td, "ex").unwrap();
+    let r = td.post_empty("/api/targets/ex/test").await;
+    let b = r.ok().clone();
+    assert_eq!(b["result"], "ok", "{b}");
+    assert_eq!(b["target"], "ex", "{b}");
+    assert_eq!(b["kind"], "exedev", "{b}");
+    let addr = format!("exedev@{vm}.exe.xyz");
+    assert_eq!(b["address"], addr.as_str(), "{b}");
+    assert_eq!(b["credential"], "vmkey", "{b}");
+    let log = std::fs::read_to_string(&ssh_log).unwrap();
+    assert!(log.contains(&addr), "{log}");
+}
+
 /// Finding 4: an agent start makes the VM and the agent stop removes it
 /// (`executor::on_agent_start` and `on_agent_stop`, as the supervisor
 /// calls them).

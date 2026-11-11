@@ -674,6 +674,7 @@ pub fn suggested_def(st: &LoginStatus, name: Option<&str>) -> SubscriptionDef {
         },
         alert_at: 80,
         selfhosted: None,
+        cloud: None,
     }
 }
 
@@ -1503,6 +1504,38 @@ pub struct ApiKey {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    /// `bedrock`: the AWS access key ID that goes with the secret access
+    /// key in `key`. Without it, `key` is an Amazon Bedrock API key. A
+    /// secret like the key: never in a log or an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// `bedrock`, `gcp`, `foundry`: the `[cloud]` settings of the
+    /// subscription (`terrarium_core::cloud::CloudSettings`), given with
+    /// the key. The endpoint writes them to the definition; the file does
+    /// not keep them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<terrarium_core::cloud::CloudSettings>,
+}
+
+impl ApiKey {
+    /// The secret values of the key file, for the redaction matcher: the
+    /// key, the AWS access key ID, and for a GCP service-account JSON its
+    /// `private_key` and `private_key_id`.
+    pub fn secret_values(&self) -> Vec<String> {
+        let mut out = vec![self.key.clone()];
+        out.extend(self.key_id.clone());
+        if terrarium_core::cloud::kind(&self.provider) == Some(terrarium_core::cloud::Kind::Gcp)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&self.key)
+        {
+            for f in ["private_key", "private_key_id"] {
+                if let Some(s) = v.get(f).and_then(serde_json::Value::as_str) {
+                    out.push(s.to_owned());
+                }
+            }
+        }
+        out.retain(|s| !s.is_empty());
+        out
+    }
 }
 
 impl std::fmt::Debug for ApiKey {
@@ -1510,8 +1543,10 @@ impl std::fmt::Debug for ApiKey {
         f.debug_struct("ApiKey")
             .field("provider", &self.provider)
             .field("key", &"<redacted>")
+            .field("key_id", &self.key_id.as_ref().map(|_| "<redacted>"))
             .field("plan", &self.plan)
             .field("base_url", &self.base_url)
+            .field("cloud", &self.cloud)
             .finish()
     }
 }
@@ -1536,6 +1571,13 @@ pub fn env_var_for(provider: &str) -> Option<(&'static str, Option<&'static str>
         // pi only. The plan picks the base URL; a Kimi Code plan also gets
         // `KIMI_API_KEY` ([`credential_env_for`]).
         "moonshot" => (terrarium_core::moonshot::KEY_ENV, None),
+        // Claude Code only (`terrarium_core::cloud`). Bedrock with an
+        // access key ID uses `AWS_SECRET_ACCESS_KEY`
+        // (`terrarium_core::cloud::Kind::key_var`). GCP: the var of the
+        // JSON file.
+        "bedrock" => (terrarium_core::cloud::AWS_BEARER_TOKEN_BEDROCK, None),
+        "gcp" => (terrarium_core::cloud::GOOGLE_APPLICATION_CREDENTIALS, None),
+        "foundry" => (terrarium_core::cloud::ANTHROPIC_FOUNDRY_API_KEY, None),
         _ => return None,
     })
 }
@@ -1604,6 +1646,13 @@ pub fn stored_key(state_dir: &Path, name: &str) -> Option<String> {
 /// `KIMI_API_KEY` for a Kimi Code plan, because pi's `kimi-coding`
 /// provider reads that var. Never an Anthropic var.
 ///
+/// A cloud key (`terrarium_core::cloud`, Claude Code only) gives the env
+/// of [`terrarium_core::cloud::claude_env`]: the switch
+/// (`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`), the region, project,
+/// or resource of the `[cloud]` settings, the key vars, and the
+/// `ANTHROPIC_DEFAULT_*_MODEL` vars of the model map. The GCP JSON is not
+/// a var: [`credential_files_for`] gives it.
+///
 /// Call sites: `POST /api/agent/secrets/env`, which gives the vars to
 /// `terrarium exec-env` inside the sandbox just before the harness starts,
 /// and [`credential_vars_for`], which gives the launch the names only
@@ -1616,6 +1665,11 @@ pub fn credential_env_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, 
     let Some(k) = read_key(state_dir, &sub.name) else {
         return Vec::new();
     };
+    if let Some(kind) = sub.cloud_kind() {
+        let settings = sub.cloud.clone().unwrap_or_default();
+        return terrarium_core::cloud::claude_env(kind, &settings, &k.key, k.key_id.as_deref())
+            .vars;
+    }
     let mut out = vec![(var.to_owned(), k.key.clone())];
     if sub.is_selfhosted() {
         // Claude Code reads the key of an Anthropic-style server from
@@ -1644,11 +1698,28 @@ pub fn credential_env_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, 
     out
 }
 
-/// The names of [`credential_env_for`], for the launch. The values are
-/// zeroed here.
+/// The credential files of an agent on `sub`: `(var, content)`. `terrarium
+/// exec-env` writes each content to a file with mode 0600 in the sandbox
+/// and sets the var to its path. Today only a GCP subscription has one: the
+/// service-account JSON for `GOOGLE_APPLICATION_CREDENTIALS`. The content
+/// is a secret, with the same rules as [`credential_env_for`].
+pub fn credential_files_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, String)> {
+    let (Some(kind), Some(_)) = (sub.cloud_kind(), sub.env_var.as_deref()) else {
+        return Vec::new();
+    };
+    let Some(k) = read_key(state_dir, &sub.name) else {
+        return Vec::new();
+    };
+    let settings = sub.cloud.clone().unwrap_or_default();
+    terrarium_core::cloud::claude_env(kind, &settings, &k.key, k.key_id.as_deref()).files
+}
+
+/// The names of [`credential_env_for`] and [`credential_files_for`], for
+/// the launch. The values are zeroed here.
 pub fn credential_vars_for(state_dir: &Path, sub: &Subscription) -> Vec<String> {
     credential_env_for(state_dir, sub)
         .into_iter()
+        .chain(credential_files_for(state_dir, sub))
         .map(|(k, v)| {
             drop(zeroize::Zeroizing::new(v));
             k
@@ -1786,6 +1857,8 @@ mod tests {
             plan: None,
             base_url: Some("https://llm.example/v1".into()),
             models: vec!["m".into()],
+            key_id: None,
+            cloud: None,
         };
         assert!(!format!("{key:?}").contains("sk-test"));
         store_key(tmp.path(), "local", &key).unwrap();
@@ -1846,6 +1919,8 @@ mod tests {
             plan: Some("coding".into()),
             base_url: None,
             models: vec![],
+            key_id: None,
+            cloud: None,
         };
         store_key(tmp.path(), "glm", &key).unwrap();
         let mut sub: Subscription = serde_json::from_value(json!({
@@ -1881,6 +1956,8 @@ mod tests {
             plan: Some("coding".into()),
             base_url: None,
             models: vec![],
+            key_id: None,
+            cloud: None,
         };
         store_key(tmp.path(), "kimi", &key).unwrap();
         let mut sub: Subscription = serde_json::from_value(json!({

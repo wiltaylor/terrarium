@@ -364,6 +364,13 @@ struct EnvAnswer {
     /// of its plan account (Copilot). `terrarium exec-env` sets each one,
     /// over a var of the same name.
     credentials: BTreeMap<String, EnvValue>,
+    /// The credential files of the harness
+    /// ([`crate::login_session::credential_files_for`]): var to content.
+    /// `terrarium exec-env` writes each content to a file with mode 0600
+    /// and sets the var to its path. Left out when empty, so an older
+    /// `exec-env` sees the answer it knows.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    credential_files: BTreeMap<String, EnvValue>,
 }
 
 /// One value of [`EnvAnswer`]. Zeroed on drop (PLAN §16b.2); the
@@ -403,7 +410,7 @@ async fn launch_env(State(state): State<Shared>, actor: Actor) -> ApiResult<Resp
     let answer = state
         .db
         .write(actor.label(), move |t| {
-            let credentials = credential_env(t, &state_dir, &me.id)?;
+            let (credentials, credential_files) = credential_env(t, &state_dir, &me.id)?;
             let use_only = crate::git_proxy::use_only_secrets(t, proxy_on)?;
             let l = grants::launch(t, &key, &me.id, &me.project, &use_only)?;
             let vars: BTreeMap<String, EnvValue> = l
@@ -413,14 +420,19 @@ async fn launch_env(State(state): State<Shared>, actor: Actor) -> ApiResult<Resp
                 .map(|(k, v)| (k, EnvValue(v)))
                 .collect();
             let names: Vec<&String> = vars.keys().collect();
-            let credential_names: Vec<&String> = credentials.keys().collect();
+            let credential_names: Vec<&String> =
+                credentials.keys().chain(credential_files.keys()).collect();
             t.audit(
                 "secret.env",
                 &format!("agent:{}", me.id),
                 Some(&me.project),
                 json!({"agent": me.id, "names": names, "credentials": credential_names}),
             )?;
-            Ok(EnvAnswer { vars, credentials })
+            Ok(EnvAnswer {
+                vars,
+                credentials,
+                credential_files,
+            })
         })
         .await?;
     let mut resp = Json(answer).into_response();
@@ -434,12 +446,14 @@ async fn launch_env(State(state): State<Shared>, actor: Actor) -> ApiResult<Resp
 /// account that the launch picked), then the subscription's stored API
 /// key ([`crate::login_session::credential_env_for`]) over them, as the
 /// launch put them before. A subscription that the harness cannot spend
-/// gives nothing (the start refuses it).
+/// gives nothing (the start refuses it). The second map is the credential
+/// files of the subscription ([`crate::login_session::credential_files_for`]).
+#[allow(clippy::type_complexity)]
 fn credential_env(
     conn: &rusqlite::Connection,
     state_dir: &std::path::Path,
     agent_id: &str,
-) -> ApiResult<BTreeMap<String, EnvValue>> {
+) -> ApiResult<(BTreeMap<String, EnvValue>, BTreeMap<String, EnvValue>)> {
     let agent = crate::store::agents::get(conn, agent_id)?.agent;
     let mut out = BTreeMap::new();
     let account = crate::runner_supervisor::launched_account(state_dir, agent.id);
@@ -450,12 +464,17 @@ fn credential_env(
         Some(n) => crate::store::subscriptions::find(conn, n)?,
         None => None,
     };
+    let mut files = BTreeMap::new();
     if let Some(sub) = sub.filter(|s| s.harnesses.contains(&agent.harness)) {
         for (k, v) in crate::login_session::credential_env_for(state_dir, &sub) {
             out.insert(k, EnvValue(zeroize::Zeroizing::new(v)));
         }
+        for (k, v) in crate::login_session::credential_files_for(state_dir, &sub) {
+            out.remove(&k);
+            files.insert(k, EnvValue(zeroize::Zeroizing::new(v)));
+        }
     }
-    Ok(out)
+    Ok((out, files))
 }
 
 /// The granted `token` or `github_token` secret for a git host, for the

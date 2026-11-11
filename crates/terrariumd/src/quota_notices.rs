@@ -342,6 +342,7 @@ mod tests {
                     probe: None,
                     alert_at,
                     selfhosted: None,
+                    cloud: None,
                 },
                 "api",
             )
