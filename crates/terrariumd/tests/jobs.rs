@@ -27,6 +27,103 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(300);
 
+#[tokio::test]
+async fn release_e2e_rejects_card_branches_members_and_missing_docker_config() {
+    use terrariumd::store::groups;
+    let lab = lab(1).await;
+    let card = lab.card("ordinary", "ordinary").await;
+    let path = format!("/api/cards/{card}/e2e");
+    let response = lab
+        .td
+        .post_as(&lab.lead, &path, json!({"branch":"ter-719"}))
+        .await;
+    assert_eq!(response.status, 422, "{}", response.body);
+    let response = lab
+        .td
+        .post_as(&lab.lead, &path, json!({"branch":"release/1.2.3"}))
+        .await;
+    assert!(!response.status.is_success(), "{}", response.body);
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let header = state
+        .db
+        .write("system", |t| {
+            groups::open(
+                t,
+                groups::Open {
+                    project: "p",
+                    rule: "version-cut",
+                    key: "version:test",
+                    title: "Version test",
+                    column: "accepted",
+                    done_when: "done",
+                    eta: None,
+                    close_after: None,
+                },
+            )?;
+            Ok(groups::by_key(t, "p", "version:test")?.unwrap().id)
+        })
+        .await
+        .unwrap();
+    let response = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{header}/e2e"),
+            json!({"branch":"release/1.2.3"}),
+        )
+        .await;
+    assert_eq!(response.status, 422, "{}", response.body);
+    assert!(response.body.to_string().contains("Docker CI"));
+    let response = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{header}/e2e"),
+            json!({"branch":"release/1.2.3"}),
+        )
+        .await;
+    assert_eq!(response.status, 403, "{}", response.body);
+    // Queue without a recipe run to exercise cancellation without a Docker VM.
+    let group_id = header.clone();
+    let job = state
+        .db
+        .write("operator", move |t| {
+            use terrariumd::store::jobs::{self, JobKind, NewJob};
+            jobs::create(
+                t,
+                NewJob {
+                    project: "p".into(),
+                    card: group_id,
+                    kind: JobKind::E2e,
+                    repo: "app".into(),
+                    branch: "release/1.2.3".into(),
+                    commit: None,
+                    by_agent: None,
+                    batch: Vec::new(),
+                    planned_secs: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    lab.td.delete(&format!("/api/jobs/{}", job.id)).await.ok();
+    let group = state
+        .db
+        .read(move |c| groups::get(c, &header))
+        .await
+        .unwrap();
+    assert_eq!(group.column, "accepted");
+    assert_eq!(
+        group
+            .steps
+            .iter()
+            .find(|s| s.name == "version branch e2e")
+            .unwrap()
+            .state,
+        "failed"
+    );
+}
+
 /// A wait on the queue or a card that fails after [`DEADLINE`] without
 /// progress, or after two of them in all. Under merge-job load (load 39,
 /// IO pressure 40%) a queue that still moved took longer than
@@ -1053,6 +1150,7 @@ impl Lab {
             &["checkout", "-q", "-B", name, &format!("origin/{base}")],
         );
         for (f, text) in files {
+            std::fs::create_dir_all(self.work.join(f).parent().unwrap()).unwrap();
             std::fs::write(self.work.join(f), text).unwrap();
         }
         git(&self.work, &["add", "-A"]);
@@ -2536,7 +2634,7 @@ fn daemon_trace_capture() -> TraceCapture {
 }
 
 #[tokio::test]
-async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
+async fn e2e_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
     use std::os::unix::fs::PermissionsExt;
     // The failed resets are infra failures that run once more after
     // `INFRA_RETRY`: 5 min by default, which only another test of this
@@ -2636,7 +2734,29 @@ while True:
         marker.display()
     );
     let mut config = json!({"target":"p-box", "recipe":recipe, "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm", "DOCKER_CI_RESET_KEY":"@secret:reset"}, "docker_ci":{"destination":"root@test-vm", "port":2250, "known_hosts":"test-vm ssh-ed25519 public-test-pin\n", "reset_destination":"reset@test-host", "reset_port":22,"reset_known_hosts":"test-host ssh-ed25519 public-test-pin\n"}});
-    for (branch, status, expected) in [
+    // Ordinary jobs cannot request the relay, even with delivery run grants.
+    let mut ordinary_config = config.clone();
+    ordinary_config["recipe"] =
+        json!("test -z \"${TERRARIUM_DOCKER_HOST:-}${DOCKER_CI_KEY:-}${DOCKER_CI_RESET_KEY:-}\"");
+    lab.td
+        .put("/api/projects/p/delivery", ordinary_config)
+        .await
+        .ok();
+    for kind in ["merge", "validate"] {
+        lab.branch(kind, "next", &[(kind, "yes\n")]);
+        let card = lab.card(kind, kind).await;
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/{kind}"), json!({}))
+            .await
+            .ok();
+        let jobs = lab.until_idle().await;
+        assert_eq!(
+            jobs.iter().find(|j| j["card"] == card).unwrap()["state"],
+            "passed"
+        );
+        assert!(!fixtures.path().join("order").exists());
+    }
+    for (index, (branch, status, expected)) in [
         ("secret-ok", 0, true),
         ("secret-reset-failed", 1, false),
         ("secret-reset-busy", 75, true),
@@ -2644,7 +2764,10 @@ while True:
         ("secret-reset-unknown-pin", 255, false),
         ("secret-reset-wrong-pin", 256, false),
         ("secret-revoked", 0, false),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         std::fs::write(fixtures.path().join("status"), status.to_string()).unwrap();
         let order_before = std::fs::read_to_string(fixtures.path().join("order"))
             .unwrap_or_default()
@@ -2665,10 +2788,45 @@ while True:
                 .await
                 .ok();
         }
-        lab.branch(branch, "next", &[(branch, "yes\n")]);
-        let card = lab.card(branch, branch).await;
+        let release_branch = format!("release/0.0.{index}");
+        let script = format!(
+            "import subprocess\nraise SystemExit(subprocess.call(['sh', '-c', {}]))\n",
+            serde_json::to_string(&recipe).unwrap()
+        );
+        lab.branch(
+            &release_branch,
+            "next",
+            &[("scripts/docker_ci.py", &script)],
+        );
+        let state = lab.td.daemon.as_ref().unwrap().state.clone();
+        let key = format!("version:{branch}");
+        let card = state
+            .db
+            .write("system", move |t| {
+                use terrariumd::store::groups;
+                groups::open(
+                    t,
+                    groups::Open {
+                        project: "p",
+                        rule: "version-cut",
+                        key: &key,
+                        title: &key,
+                        column: "accepted",
+                        done_when: "done",
+                        eta: None,
+                        close_after: None,
+                    },
+                )?;
+                Ok(groups::by_key(t, "p", &key)?.unwrap().id)
+            })
+            .await
+            .unwrap();
         lab.td
-            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .post_as(
+                &lab.lead,
+                &format!("/api/cards/{card}/e2e"),
+                json!({"branch":release_branch}),
+            )
             .await
             .ok();
         let jobs = lab.until_idle().await;
@@ -2722,6 +2880,8 @@ while True:
                 "OLDPWD",
                 "SHLVL",
                 "_",
+                "RESULTS_DIR",
+                "TERRARIUM_DOCKER_CI",
             ];
             let added: Vec<_> = env
                 .keys()

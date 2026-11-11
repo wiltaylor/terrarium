@@ -69,11 +69,11 @@ It runs, in this order, the same parts as the GitHub CI `check` job
 The merge queue (a batch merge job) runs it on the merged result. Run it
 yourself only when your change touches the build (see above).
 
-Merge jobs enter through `ci::validate-affected` and `ci::merge`. The merge
-gate is opt-in with `TERRARIUM_DOCKER_CI=1` in the delivery recipe. Off by
-default, it runs only `ci::validate` and needs neither a key nor Docker.
-The switch controls only the recipe gate. Whenever merge secrets are configured,
-the daemon resets the VM and opens the tunnel, even if the recipe gate is off.
+Merge jobs enter through `ci::validate-affected` and `ci::merge`. Only the
+cut-time `e2e` job may enter the Docker gate. Merge and validate jobs never
+reset the VM or receive its relay, whatever their recipe sets. For an e2e
+job, the daemon uses the legacy-named merge secret references to provision
+the reset and tunnel.
 The daemon consumes the configured `DOCKER_CI_KEY` and
 `DOCKER_CI_RESET_KEY` references
 from a `delivery:terrarium` run grant. The recipe receives only

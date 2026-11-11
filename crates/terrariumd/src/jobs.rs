@@ -1885,10 +1885,13 @@ async fn run_inner(
         .target
         .clone()
         .ok_or_else(|| ApiError::invalid("the project has no delivery target"))?;
-    let recipe = def
-        .recipe
-        .clone()
-        .ok_or_else(|| ApiError::invalid("the project has no delivery recipe"))?;
+    let recipe = if job.kind == JobKind::E2e {
+        "RESULTS_DIR=\"$PWD/results\" TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py".to_owned()
+    } else {
+        def.recipe
+            .clone()
+            .ok_or_else(|| ApiError::invalid("the project has no delivery recipe"))?
+    };
     let (project, repo_name, t_name) = (job.project.clone(), job.repo.clone(), target.clone());
     let kind = job.kind;
     let (repo, row) = state
@@ -3062,13 +3065,13 @@ async fn steps(
     }
 }
 
-/// Resolve only the project's delivery principal, only at a merge boundary.
+/// Resolve only the project's delivery principal, only for cut-time e2e.
 async fn merge_secrets(
     state: &Shared,
     job: &Job,
     delivery: &DeliveryDef,
 ) -> ApiResult<Vec<secrets::run_env::Injected>> {
-    if job.kind != JobKind::Merge || delivery.merge_secrets.is_empty() {
+    if job.kind != JobKind::E2e || delivery.merge_secrets.is_empty() {
         return Ok(Vec::new());
     }
     check_merge_refs(delivery)?;
@@ -3830,7 +3833,7 @@ pub(crate) fn failure_block(j: &Job) -> String {
 /// pack (`job.queue_comment`, TER-170).
 pub fn queue_comment(j: &Job, card: &str) -> String {
     match j.kind {
-        JobKind::Validate => format!(
+        JobKind::Validate | JobKind::E2e => format!(
             "Job queue: validate job {} queued. Repo {}, branch {}, commit {}.",
             j.id,
             j.repo,
@@ -3981,7 +3984,24 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
 
 /// The end of a job in one write: a `job.verdict` event for each card,
 /// then the coded card flow (the move, the rerun, or the split).
-fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+pub(crate) fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    if j.kind == JobKind::E2e {
+        let group = crate::store::groups::get(t, &j.card)?;
+        let state = if j.state == jobs::JobState::Passed {
+            "done"
+        } else {
+            "failed"
+        };
+        crate::store::groups::step(
+            t,
+            &group,
+            "version branch e2e",
+            Some(state),
+            Some(&end_comment(j, state)),
+            None,
+        )?;
+        return Ok(());
+    }
     emit_verdicts(t, j)?;
     if j.kind == JobKind::Release {
         return release_end(t, j);
@@ -4254,7 +4274,9 @@ pub fn card_view(j: &Job, c: &BatchCard) -> Job {
 fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
     let to = match j.kind {
-        JobKind::Validate => board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?,
+        JobKind::Validate | JobKind::E2e => {
+            board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?
+        }
         JobKind::Merge => board::role_name(t, &j.project, board::ACCEPTED, COL_ACCEPTED)?,
         // [`on_end`] ends a release in [`release_end`].
         JobKind::Release => return release_end(t, j),
@@ -6270,6 +6292,63 @@ mod tests {
         // The coded flow: C1 and C3 merged and the batch is red, so it
         // splits into two halves of one card each.
         assert_eq!(queued, 2);
+    }
+
+    #[tokio::test]
+    async fn release_e2e_records_outcome_without_moving_version_group() {
+        use crate::store::{groups, projects};
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        let db = crate::db::Db::new(c, crate::events::EventHub::default());
+        db.write("system", |t| {
+            projects::create(
+                t,
+                &projects::NewProject {
+                    name: "p".into(),
+                    ..Default::default()
+                },
+                projects::SOURCE_API,
+            )?;
+            groups::open(
+                t,
+                groups::Open {
+                    project: "p",
+                    rule: "version-cut",
+                    key: "version:test",
+                    title: "Version test",
+                    column: "review",
+                    done_when: "done",
+                    eta: None,
+                    close_after: None,
+                },
+            )?;
+            let g = groups::by_key(t, "p", "version:test")?.unwrap();
+            for (state, expected) in [
+                (jobs::JobState::Passed, "done"),
+                (jobs::JobState::Failed, "failed"),
+                (jobs::JobState::Cancelled, "failed"),
+            ] {
+                let mut j = ended(JobKind::E2e, state, None);
+                j.card = g.id.clone();
+                j.project = "p".into();
+                on_end(t, &j)?;
+                let after = groups::get(t, &g.id)?;
+                assert_eq!(after.column, g.column);
+                assert_eq!(after.members, g.members);
+                assert_eq!(
+                    after
+                        .steps
+                        .iter()
+                        .find(|s| s.name == "version branch e2e")
+                        .unwrap()
+                        .state,
+                    expected
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     /// TER-137: the job queue writes its comments and its moves with the
