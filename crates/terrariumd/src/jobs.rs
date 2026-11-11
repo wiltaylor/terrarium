@@ -2070,6 +2070,8 @@ fn cleanup_job_files(root: &std::path::Path) -> std::io::Result<()> {
                 let entry = entry?;
                 let path = entry.path();
                 let kind = entry.file_type()?;
+                #[cfg(test)]
+                tests::cleanup_fault(&path)?;
                 if kind.is_dir() && (depth == 0 || (depth == 1 && entry.file_name() == "repos")) {
                     visit(&path, depth + 1, error);
                 } else if depth == 1
@@ -2743,6 +2745,8 @@ async fn steps(
         let (result, damaged) = x
             .daemon(move |r| {
                 let _guard = prepare_guard;
+                #[cfg(test)]
+                tests::prepare_fault(r);
                 let result = prepare(r, &j, &bundle);
                 let damaged = matches!(result, Prepared::End(_)) && r.needs_rebuild();
                 (result, damaged)
@@ -4633,6 +4637,8 @@ printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    include!("jobs_cache_tests.rs");
 
     /// TER-623 F1: the release recipe runs in a new private HOME, with no
     /// global git config, and the HOME is gone after it; the exit code is
