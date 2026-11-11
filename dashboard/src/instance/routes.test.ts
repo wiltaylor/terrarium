@@ -4,6 +4,7 @@ import { createComponent, type Component } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { createAuthStore } from "../stores/auth";
+import type { Agent } from "../api/types";
 import { createInstance, type Instance } from "./create";
 import { waitFor } from "../test/wait";
 
@@ -86,4 +87,54 @@ it("captures the instance for delayed actions, and scopes links and navigation",
   expect(fetch).toHaveBeenCalledWith("/api/remotes/lab/proxy/api/agents/same-agent-id/send", expect.anything());
   navigate("/p/demo/tests");
   await waitFor(() => expect(history.get()).toBe("/remote/lab/p/demo/tests"));
+});
+
+it.each([
+  [undefined, "lab"],
+  ["lab", undefined],
+] as const)("keeps deferred writes in %s after switching to %s", async (from, to) => {
+  let resolveList!: (response: Response) => void;
+  const pendingList = new Promise<Response>((resolve) => { resolveList = resolve; });
+  const fetch = vi.fn((url: string) => url.endsWith("/api/agents")
+    ? pendingList
+    : Promise.resolve(new Response('{"accepted":true}')));
+  vi.stubGlobal("fetch", fetch);
+  const a = createInstance({ name: from, auth: createAuthStore() });
+  const b = createInstance({ name: to, auth: createAuthStore() });
+  instances.push(a, b);
+  const agent = (name: string) => ({ id: "same-agent-id", name, project: "demo" }) as Agent;
+  a.agents.upsert(agent("A before"));
+  b.agents.upsert(agent("B untouched"));
+  let captured!: () => Promise<void>;
+  let firstRequest!: Promise<void>;
+  function Consumer() {
+    const { api, agents } = useInstance();
+    captured = async () => {
+      await api.agents.send("same-agent-id", "captured in A");
+      agents.upsert(agent("A callback"));
+    };
+    firstRequest = agents.refresh();
+    return null;
+  }
+  mount(a, Consumer, "*", a.href("/p/demo/board"));
+  expect(a.agents.state.loading).toBe(true);
+  // Switch the mounted context, but retain A's stores and pending work.
+  dispose!();
+  let current!: Instance["key"];
+  mount(b, () => { current = useInstance().key; return null; }, "*", b.href("/p/demo/board"));
+  expect(current).toBe(b.key);
+  await captured();
+  expect(a.agents.byId("same-agent-id")?.name).toBe("A callback");
+  expect(b.agents.byId("same-agent-id")?.name).toBe("B untouched");
+  resolveList(new Response(JSON.stringify([agent("A response")])));
+  await firstRequest;
+  expect(a.agents.byId("same-agent-id")?.name).toBe("A response");
+  expect(b.agents.byId("same-agent-id")?.name).toBe("B untouched");
+  expect(a.agents.state.loading).toBe(false);
+  expect(b.agents.state.loading).toBe(false);
+  const base = from === undefined ? "" : `/api/remotes/${from}/proxy`;
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+    `${base}/api/agents`,
+    `${base}/api/agents/same-agent-id/send`,
+  ]);
 });
