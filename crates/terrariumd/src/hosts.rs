@@ -280,6 +280,7 @@ pub struct HostRegistry {
     pub resume_grace: Duration,
     journal: OnceLock<resume::Journal>,
     online_changed: tokio::sync::Notify,
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 impl Default for HostRegistry {
@@ -305,6 +306,7 @@ impl HostRegistry {
             resume_grace,
             journal: OnceLock::new(),
             online_changed: tokio::sync::Notify::new(),
+            stopped: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -361,6 +363,9 @@ impl HostRegistry {
         event: Option<(SessionId, &SessionEvent)>,
         binding: Option<(&str, SessionId)>,
     ) -> crate::error::ApiResult<()> {
+        if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ApiError::internal("host registry is stopping"));
+        }
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
@@ -413,6 +418,9 @@ impl HostRegistry {
         }
         let key = format!("exec/{id}");
         let mut entries = self.lock();
+        if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ApiError::internal("host registry is stopping"));
+        }
         let binding = journal.load::<Binding>(&key)?;
         let mut values = Vec::new();
         let mut prefixes = Vec::new();
@@ -441,6 +449,18 @@ impl HostRegistry {
             }
         }
         Ok(())
+    }
+
+    /// Freeze journal writers before releasing the daemon's state lock.
+    /// Close without goodbye so host children remain available for resume.
+    pub fn shutdown(&self) {
+        let entries = self.lock();
+        self.stopped.store(true, std::sync::atomic::Ordering::Release);
+        for entry in entries.values() {
+            if let Some(conn) = &entry.conn {
+                let _ = conn.tx.send(Outgoing::Close(None));
+            }
+        }
     }
 
     /// Claim the replay channel of a session from the previous daemon.

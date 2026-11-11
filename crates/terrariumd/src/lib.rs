@@ -169,6 +169,7 @@ impl Daemon {
     /// connects to them again; in-process harnesses end, and the next start
     /// launches them again.
     pub fn shutdown(self) {
+        self.state.executor.hosts.shutdown();
         for t in &self.tasks {
             t.abort();
         }
@@ -184,6 +185,7 @@ impl Daemon {
     /// an aborted task ends at its next await, but a database call that it
     /// started runs on to its end on the blocking pool (TER-646).
     pub async fn shutdown_and_wait(mut self) {
+        self.state.executor.hosts.shutdown();
         let tasks = std::mem::take(&mut self.tasks);
         for t in &tasks {
             t.abort();
