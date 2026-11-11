@@ -4165,7 +4165,7 @@ mod tests {
                         _ => Ok("held".into()),
                     }
                 },
-                || std::future::pending::<Value>(),
+                std::future::pending::<Value>,
             )
             .await;
             assert!(result.unwrap().contains("/slot.lock"));
