@@ -2161,6 +2161,16 @@ async fn run_inner(
                 "host did not reconnect within the resume grace",
             ));
         }
+        // An offline recipe can already be finished at reconnect. Its
+        // replay is available before reservation enforcement is restored,
+        // but reading the retained log requires admission for a new session.
+        tokio::time::timeout(state.executor.hosts.resume_grace, async {
+            while state.executor.resource_pending(host) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|_| ApiError::conflict("host reservation reconciliation did not finish within the resume grace"))?;
     }
     let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
     let slot = job
