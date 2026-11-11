@@ -154,7 +154,10 @@ async fn agent_exec_overrides_git_identity_and_supplies_provenance() {
     })).await;
     let (out, err) = drain(&lab.td, Some(&lab.w1), &sid).await;
     assert!(err.is_empty(), "{err}");
-    assert!(out.starts_with("Terrarium\nterrarium@localhost\nTerrarium\nterrarium@localhost\n"), "{out}");
+    assert!(
+        out.starts_with("Terrarium\nterrarium@localhost\nTerrarium\nterrarium@localhost\n"),
+        "{out}"
+    );
     assert!(out.contains("Terrarium-Agent: p/w1"), "{out}");
     assert!(!out.contains("wrong"), "{out}");
 }
