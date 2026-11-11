@@ -42,7 +42,10 @@ it("shows status widgets independently of layout membership", async () => {
   home.monitors.mockResolvedValue({ items: [{ id: "m", name: "No result", project: "one", status: "unknown", link: "/p/one/dashboard" }], next: null });
   home.pipelines.mockResolvedValue({ items: [{ id: "p", name: "Build", project: "two", status: "failed", link: "/p/two/pipelines" }], next: null });
   mount(); await settle();
-  expect(document.querySelectorAll(".home-status")).toHaveLength(2);
+  expect(document.body.textContent).toContain("No result");
+  expect(document.body.textContent).toContain("Build");
+  expect(document.body.textContent).toContain("unknown");
+  expect(document.body.textContent).toContain("failed");
   expect(document.body.textContent).not.toContain("All Systems Nominal");
 });
 it("shows labels, project, agent, ETA and blocked reason, and opens the sidebar", async () => {

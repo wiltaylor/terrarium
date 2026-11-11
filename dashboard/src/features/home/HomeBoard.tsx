@@ -26,7 +26,7 @@ export function HomeBoard(props: { now: number }) {
   onMount(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const off = events.on(e => {
-      if (timer || !["card", "status", "monitor", "pipeline", "project"].includes(e.kind)) return;
+      if (timer || !(["card", "status", "project"].includes(e.kind) || e.kind.startsWith("monitor.") || e.kind.startsWith("pipeline."))) return;
       timer = setTimeout(() => { timer = undefined; setTick(n => n + 1); }, 2_000);
     });
     const interval = setInterval(() => setTick(n => n + 1), 60_000);

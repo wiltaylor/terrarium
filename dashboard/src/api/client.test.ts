@@ -41,6 +41,18 @@ function recorder(opts: HttpApiOptions = {}, answer: unknown = undefined) {
 }
 
 describe("createHttpApi", () => {
+  it("reads Home JSON pages with the column, project and cursor", async () => {
+    const answer = { items: [], next: "after" };
+    const { api, calls } = recorder({}, answer);
+    expect(await api.home.cards({ column: "review", project: "demo", cursor: "before" })).toEqual(answer);
+    await api.home.monitors({ cursor: "m" });
+    await api.home.pipelines({ project: "demo" });
+    expect(calls).toEqual([
+      { method: "GET", path: "/api/home/cards", opts: { query: { column: "review", project: "demo", cursor: "before" } } },
+      { method: "GET", path: "/api/home/monitors", opts: { query: { cursor: "m" } } },
+      { method: "GET", path: "/api/home/pipelines", opts: { query: { project: "demo" } } },
+    ]);
+  });
   it("maps the transcript calls (docs/api.md §6): a page with after and limit, and the SSE stream with after", async () => {
     const { api, calls } = recorder();
     await api.agents.transcript("terrarium/lead", "01SES", { after: 734, limit: 500 });
