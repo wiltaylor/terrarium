@@ -79,6 +79,76 @@ fn bodies(items: &[Value]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn held_turns_are_redacted_stable_and_removable_by_the_lead() {
+    use terrariumd::supervisor::{Supervisor, TurnHold};
+    let (td, w) = setup().await;
+    td.post(
+        "/api/secrets",
+        json!({"name": "held-test", "kind": "token",
+        "fields": {"value": "held-test-secret-value"}}),
+    )
+    .await
+    .ok();
+    td.post(&format!("/api/agents/{w}/unpause"), json!({}))
+        .await
+        .ok();
+    td.wait_status(&w, "idle").await;
+    td.sup
+        .hold_turns(
+            aid(&w),
+            Some(TurnHold {
+                until: None,
+                reason: "limit:sub".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    for text in ["first held", "held-test-secret-value", "third held"] {
+        td.sup
+            .send_turn(aid(&w), format!("[User] {text}"))
+            .await
+            .unwrap();
+    }
+    let response = td
+        .get_as("p/w1", &format!("/api/agents/{w}/queued"))
+        .await
+        .ok()
+        .clone();
+    assert!(!response.to_string().contains("held-test-secret-value"));
+    let held: Vec<_> = response["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["source"] == "hold")
+        .collect();
+    assert_eq!(held.len(), 3);
+    let id = held[1]["id"].as_str().unwrap();
+    let path = format!("/api/agents/{w}/queued/{id}?source=hold");
+    td.req(Method::DELETE, &path, None, Some("p/w1"))
+        .await
+        .err(403, "forbidden");
+    td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await;
+    td.req(Method::DELETE, &path, None, Some("p/sys"))
+        .await
+        .err(403, "forbidden");
+    assert_eq!(
+        td.req(Method::DELETE, &path, None, Some("p/lead"))
+            .await
+            .status,
+        204
+    );
+    assert_eq!(td.delete(&path).await.status, 404);
+    let remaining: Vec<_> = queued(&td, &w)
+        .await
+        .into_iter()
+        .filter(|t| t["source"] == "hold")
+        .collect();
+    assert_eq!(bodies(&remaining), ["first held", "third held"]);
+    assert_eq!(remaining[0]["id"], held[0]["id"]);
+    assert_eq!(remaining[1]["id"], held[2]["id"]);
+}
+
+#[tokio::test]
 async fn runner_list_errors_preserve_store_items_with_a_marker() {
     for (unsupported, expected) in [(true, "unsupported"), (false, "unavailable")] {
         let (td, w) = setup().await;

@@ -3724,7 +3724,7 @@ async fn held_queued_turn(td: &Td) -> (String, i64) {
     let q = td.get(&format!("/api/agents/{id}/queued")).await;
     let items = q["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "the turn shows once: {q}");
-    assert_eq!(items[0]["source"], "store", "{q}");
+    assert_eq!(items[0]["source"], "hold", "{q}");
     let row = items[0]["id"].as_i64().unwrap();
     (id, row)
 }
@@ -3770,7 +3770,7 @@ async fn a_removed_held_queued_turn_does_not_go_out() {
     let td = Td::start().await;
     let (id, row) = held_queued_turn(&td).await;
     let agent: AgentId = id.parse().unwrap();
-    let path = format!("/api/agents/{id}/queued/{row}?source=store");
+    let path = format!("/api/agents/{id}/queued/{row}?source=hold");
     assert_eq!(td.req(Method::DELETE, &path, None, None).await.0, 204);
     td.sup.hold_turns(agent, None).await.unwrap();
     td.wait_status(&id, "idle").await;
@@ -3813,7 +3813,7 @@ async fn held_turn_of_a_running_agent(td: &Td) -> String {
     let q = td.get(&format!("/api/agents/{id}/queued")).await;
     let items = q["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "the turn shows once: {q}");
-    assert_eq!(items[0]["source"], "store", "{q}");
+    assert_eq!(items[0]["source"], "hold", "{q}");
     id
 }
 

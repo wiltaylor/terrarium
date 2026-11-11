@@ -310,6 +310,39 @@ async fn hook(
         SourceKind::Generic => (None, header_str(&headers, &["x-terrarium-delivery"])),
     };
     let delivery = delivery.map(|d| ci::clean(d, 200));
+    if source.kind == SourceKind::Github
+        && event_header == Some("issues")
+        && matches!(payload["action"].as_str(), Some("opened" | "reopened"))
+    {
+        let Some(project) = source.project.clone() else {
+            return rejected(
+                &state,
+                &source,
+                StatusCode::BAD_REQUEST,
+                "issue imports need a project-scoped source",
+            );
+        };
+        let id = source.id.clone();
+        let result = state
+            .db
+            .write(source.actor(), move |t| {
+                if let Some(d) = &delivery
+                    && !event_sources::record_delivery(t, &id, d)?
+                {
+                    event_sources::mark_seen(t, &id, false)?;
+                    return Ok(None);
+                }
+                let card = crate::github_issues::import_webhook(t, &project, payload)?;
+                event_sources::mark_seen(t, &id, true)?;
+                Ok(Some(card))
+            })
+            .await;
+        return match result {
+            Ok(Some(card)) => answer("accepted", json!({"card": card.id})),
+            Ok(None) => answer("duplicate", json!({})),
+            Err(e) => rejected(&state, &source, StatusCode::BAD_REQUEST, &e.message),
+        };
+    }
     let event = match source.kind {
         SourceKind::Generic => match generic_event(payload) {
             Ok(e) => e,
