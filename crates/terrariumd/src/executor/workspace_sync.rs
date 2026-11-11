@@ -163,7 +163,10 @@ pub(super) struct Sync {
 }
 
 fn supported_rsync(version: &str) -> bool {
-    let Some(version) = version.strip_prefix("rsync  version ").and_then(|s| s.split_whitespace().next()) else {
+    let Some(version) = version
+        .strip_prefix("rsync  version ")
+        .and_then(|s| s.split_whitespace().next())
+    else {
         return false;
     };
     let parts: Vec<_> = version.split('.').map(str::parse::<u32>).collect();
@@ -173,10 +176,14 @@ fn supported_rsync(version: &str) -> bool {
 #[test]
 fn rsync_version_floor() {
     for version in ["3.4.0", "3.4.1", "4.0.0"] {
-        assert!(supported_rsync(&format!("rsync  version {version}  protocol version 32\n")));
+        assert!(supported_rsync(&format!(
+            "rsync  version {version}  protocol version 32\n"
+        )));
     }
     for version in ["3.3.0", "3.2.7", "2.6.9", "3.4", "3.4.x", ""] {
-        assert!(!supported_rsync(&format!("rsync  version {version}  protocol version 32\n")));
+        assert!(!supported_rsync(&format!(
+            "rsync  version {version}  protocol version 32\n"
+        )));
     }
     assert!(!supported_rsync("unrecognized output"));
 }
@@ -189,7 +196,9 @@ async fn check_rsync() -> ApiResult<()> {
         .map_err(|_| ApiError::invalid("local rsync version check timed out"))?
         .map_err(|_| ApiError::invalid("workspace sync requires local rsync 3.4.0 or newer"))?;
     if !output.status.success() || !supported_rsync(&String::from_utf8_lossy(&output.stdout)) {
-        return Err(ApiError::invalid("workspace sync requires local rsync 3.4.0 or newer (CVE-2024-12086/12087)"));
+        return Err(ApiError::invalid(
+            "workspace sync requires local rsync 3.4.0 or newer (CVE-2024-12086/12087)",
+        ));
     }
     Ok(())
 }
@@ -287,9 +296,12 @@ pub(super) async fn prepare(
         .map_err(|_| ApiError::invalid("workspace sync already in progress for this agent"))?;
     // The state directory is daemon-private, unlike the agent workspace.
     // Keep the mirror across sessions so rsync copies only changed files.
-    let basis = state.state_dir.join("workspace-bases").join(
-        terrarium_host::protocol::hex(&Sha256::digest(root.as_os_str().as_encoded_bytes())),
-    );
+    let basis = state
+        .state_dir
+        .join("workspace-bases")
+        .join(terrarium_host::protocol::hex(&Sha256::digest(
+            root.as_os_str().as_encoded_bytes(),
+        )));
     crate::secrets::private_dir(&state.state_dir.join("workspace-bases"))?;
     crate::secrets::private_dir(&basis)?;
     let key = if let Some(name) = &def.credential {
