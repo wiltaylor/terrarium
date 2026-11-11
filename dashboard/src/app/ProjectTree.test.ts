@@ -70,6 +70,21 @@ const mount = (path: string) => {
 const projectRow = (el: HTMLElement, name: string) => el.querySelector<HTMLElement>(`[role="treeitem"][data-key="p:${name}"]`)!;
 
 describe("ProjectTree", () => {
+  it("keeps the bookmarks cog out of Tab order and opens management with F2", async () => {
+    const el = mount("/projects");
+    const row = el.querySelector<HTMLElement>('[data-key="/bookmarks"]')!;
+    const cog = row.querySelector<HTMLAnchorElement>("a.tree-cog")!;
+    expect(cog.tabIndex).toBe(-1);
+    expect(cog.classList.contains("active")).toBe(false);
+    row.focus();
+    expect(Array.from(el.querySelectorAll<HTMLElement>('a, button, [tabindex]')).filter((e) => e.tabIndex === 0)).toEqual([row]);
+    expect(row.getAttribute("aria-keyshortcuts")).toBe("F2");
+    row.dispatchEvent(new KeyboardEvent("keydown", { key: "F2", bubbles: true, cancelable: true }));
+    await waitFor(() => expect(lastHistory.get()).toBe("/bookmarks"));
+    expect(cog.classList.contains("active")).toBe(true);
+    expect(cog.getAttribute("aria-current")).toBe("page");
+  });
+
   it.each(["Enter", "name link", "row"])("opens an encoded project URL with %s", async (activation) => {
     const el = mount("/projects");
     const row = el.querySelector<HTMLElement>('[role="treeitem"][data-project="my app"][data-key^="p:"]')!;
