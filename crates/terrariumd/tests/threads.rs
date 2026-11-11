@@ -81,6 +81,8 @@ async fn multiple_open_questions_and_bundles_per_thread_and_notice_replies() {
         json!({"text": "Choose B?", "thread": tid}),
         json!({"kind": "bundle", "text": "Choices", "thread": tid,
             "items": [{"text": "C?"}, {"text": "D?"}]}),
+        json!({"kind": "bundle", "text": "More choices", "thread": tid,
+            "items": [{"text": "G?"}, {"text": "H?"}]}),
     ] {
         let r = lab.td.post_as(&lab.p_lead, &path, body).await;
         assert_eq!(r.status, 201, "{}", r.body);
@@ -549,7 +551,7 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
         .await
         .ok();
     assert_eq!(
-        lab.thread(&tid).await["questions"][2]["status"],
+        lab.thread(&tid).await["questions"][3]["status"],
         "retracted"
     );
 

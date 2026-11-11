@@ -239,9 +239,7 @@ async fn inbox_noise_requires_notice_context_and_allows_questions_per_card() {
         "items": [{"text": "C?"}, {"text": "D?"}]}),
     )
     .await;
-    td.post_as(&lead, &path, json!({"text": "Follow up?", "card": card}))
-        .await
-        .err(409, "conflict");
+    ask(&td, &lead, json!({"text": "Follow up?", "card": card})).await;
     let bid = id(&bundle);
     td.post_as(
         &lead,
