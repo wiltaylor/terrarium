@@ -684,7 +684,9 @@ pub async fn report(state: &Shared) -> Report {
         .as_ref()
         .and_then(|s| s.running.clone().or_else(|| s.history.first().cloned()));
     Report {
-        current: crate::api::VersionInfo::current(),
+        current: crate::api::system::version_for(state)
+            .await
+            .unwrap_or_else(|_| crate::api::VersionInfo::current()),
         policy: cfg.policy,
         channel: cfg.channel,
         update_available: latest

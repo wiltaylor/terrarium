@@ -115,6 +115,28 @@ fn bedrock_default_profiles_reach_claude_env() {
 /// Foundry: the API key.
 pub const ANTHROPIC_FOUNDRY_API_KEY: &str = "ANTHROPIC_FOUNDRY_API_KEY";
 
+/// Foundry deployment names. Users may override these for renamed deployments.
+pub fn foundry_models() -> BTreeMap<String, String> {
+    [
+        ("opus", "claude-opus-5-5"),
+        ("sonnet", "claude-sonnet-4-6"),
+        ("haiku", "claude-haiku-4-5"),
+    ]
+    .into_iter()
+    .map(|(tier, id)| (tier.into(), id.into()))
+    .collect()
+}
+
+/// A single Azure resource DNS label, never a host or URL.
+pub fn foundry_resource_ok(resource: &str) -> bool {
+    (2..=64).contains(&resource.len())
+        && resource
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && resource.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && resource.ends_with(|c: char| c.is_ascii_alphanumeric())
+}
+
 /// A cloud provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -277,7 +299,7 @@ pub fn check(kind: Kind, s: &CloudSettings) -> Result<(), String> {
         (Kind::Foundry, Some(_), true) => {
             return Err("give `cloud.resource` or `cloud.base_url`, not both".into());
         }
-        (Kind::Foundry, Some(r), false) if !word_ok(r) || r.contains(['.', '/', ':']) => {
+        (Kind::Foundry, Some(r), false) if !foundry_resource_ok(r) => {
             return Err(format!(
                 "`cloud.resource` `{r}` must be the Foundry resource name alone, not a URL or host"
             ));
@@ -631,6 +653,7 @@ mod tests {
     fn foundry_env_with_a_resource_or_a_base_url() {
         let s = CloudSettings {
             resource: Some("my-res".into()),
+            models: foundry_models(),
             ..Default::default()
         };
         let env = claude_env(Kind::Foundry, &s, "fk", None);
@@ -638,6 +661,18 @@ mod tests {
         assert_eq!(get(&env.vars, "ANTHROPIC_FOUNDRY_RESOURCE"), Some("my-res"));
         assert_eq!(get(&env.vars, "ANTHROPIC_FOUNDRY_API_KEY"), Some("fk"));
         assert_eq!(get(&env.vars, "ANTHROPIC_FOUNDRY_BASE_URL"), None);
+        assert_eq!(s.models.len(), 3);
+        for (tier, id) in [
+            ("opus", "claude-opus-5-5"),
+            ("sonnet", "claude-sonnet-4-6"),
+            ("haiku", "claude-haiku-4-5"),
+        ] {
+            assert_eq!(model_for(&s.models, Some(tier)).as_deref(), Some(id));
+        }
+        for pair in tier_env(&s.models) {
+            assert!(env.vars.contains(&pair));
+        }
+        assert!(env.files.is_empty());
         let s = CloudSettings {
             base_url: Some("https://r.services.ai.azure.com/anthropic".into()),
             ..Default::default()

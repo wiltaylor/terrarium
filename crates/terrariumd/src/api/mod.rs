@@ -1234,7 +1234,9 @@ mod tests {
         let (status, body) = get(router(state()), "/api/system/version", None).await;
         assert_eq!(status, StatusCode::OK);
         let v: VersionInfo = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v, VersionInfo::current());
+        let mut expected = VersionInfo::current();
+        expected.missing_templates = vec!["global:request".into()];
+        assert_eq!(v, expected);
         assert_eq!(v.version, terrarium_version::FULL);
         assert_eq!(v.cargo_version, terrarium_core::VERSION);
         assert_eq!(
@@ -2358,6 +2360,73 @@ mod tests {
     }
 
     // ---- password login, JWT sessions, renewal ----
+
+    #[tokio::test]
+    async fn foundry_save_route_tests_before_writing_and_keeps_errors_secret() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for status in [200, 401, 403, 404, 429, 500, 302] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = state_at(dir.path());
+            let path = crate::login_session::key_path(dir.path(), "foundry-route");
+            let old: crate::login_session::ApiKey = serde_json::from_value(
+                serde_json::json!({"provider": "foundry", "key": "E2E-old-foundry"}),
+            )
+            .unwrap();
+            crate::login_session::store_key(dir.path(), "foundry-route", &old).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = calls.clone();
+            let unsaved = path.clone();
+            let mock = Router::new().route(
+                "/",
+                axum::routing::post(
+                    move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                        let seen = seen.clone();
+                        let unsaved = unsaved.clone();
+                        async move {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                            assert!(
+                                !std::fs::read_to_string(unsaved)
+                                    .unwrap()
+                                    .contains("E2E-new-foundry")
+                            );
+                            assert_eq!(headers["x-api-key"], "E2E-new-foundry");
+                            assert_eq!(headers["anthropic-version"], "2023-06-01");
+                            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            assert_eq!(request["model"], "custom-haiku");
+                            assert_eq!(request["max_tokens"], 1);
+                            (
+                                StatusCode::from_u16(status).unwrap(),
+                                [("location", "http://127.0.0.1:1/secret")],
+                                "E2E-new-foundry upstream secret",
+                            )
+                        }
+                    },
+                ),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+            let response = subscriptions::FOUNDRY_MOCK_URL.scope(url, send_body(
+                router(state), "POST", "/api/subscriptions/foundry-route/api-key", &[],
+                &serde_json::json!({"provider": "foundry", "key": "E2E-new-foundry", "test_connection": true,
+                    "cloud": {"resource": "route-resource", "models": {"haiku": "custom-haiku"}}}),
+            )).await;
+            server.abort();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(response.status().is_success(), status == 200);
+            let body = json_of(response).await;
+            let text = body.to_string();
+            assert!(!text.contains("E2E-") && !text.contains("upstream secret"));
+            let stored = crate::login_session::read_key(dir.path(), "foundry-route").unwrap();
+            if status == 200 {
+                assert_eq!(stored.key, "E2E-new-foundry");
+                assert_eq!(body["cloud"]["models"]["opus"], "claude-opus-5-5");
+            } else {
+                assert_eq!(stored.key, "E2E-old-foundry");
+                assert!(text.contains("Nothing was saved"));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn vertex_save_route_checks_signed_credentials_before_persisting() {

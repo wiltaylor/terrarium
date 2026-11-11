@@ -847,6 +847,8 @@ pub fn board_summary(
     let limit = page.limit().min(100);
     // All correlated lookups use existing card/agent primary keys or the
     // card_comments(card, created_at), card_deps(card), spawns_bound_open indexes.
+    // CROSS JOIN keeps blocked_by driven by this card's dependencies. Letting
+    // SQLite start at active cards scans the board once per visible card.
     let mut stmt = conn.prepare(
         "SELECT json_object(
           'id', c.id, 'kind', c.kind, 'project', c.project, 'column', k.name,
@@ -875,7 +877,7 @@ pub fn board_summary(
           'last_comment_at', (SELECT max(created_at) FROM card_comments WHERE card = c.id),
           'depends_on', (SELECT json_group_array(depends_on) FROM card_deps WHERE card = c.id),
           'blocked_by', (SELECT json_group_array(d.depends_on) FROM card_deps d
-            JOIN cards dc ON dc.id = d.depends_on JOIN board_columns dk ON dk.id = dc.column_id
+            CROSS JOIN cards dc ON dc.id = d.depends_on JOIN board_columns dk ON dk.id = dc.column_id
             WHERE d.card = c.id AND dc.archived = 0
               AND coalesce(dk.role, dk.name) NOT IN ('accepted', 'done')))
          FROM cards c JOIN board_columns k ON k.id = c.column_id
