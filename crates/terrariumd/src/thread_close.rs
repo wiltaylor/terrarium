@@ -285,16 +285,29 @@ pub async fn sweep(state: &Shared) {
             Ok(st.query_map([read_cut], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
         }).await;
         match ids {
-            Ok(ids) => for id in ids {
-                let cut = cut.clone();
-                if let Err(e) = state.db.write("system", move |t| {
-                    let th = threads::get(t, &id)?;
-                    if th.request && th.status == ThreadStatus::WaitingOperator && th.close_proposal.is_some() && th.updated_at < cut && th.cards.as_deref().unwrap_or_default().is_empty() {
-                        threads::confirm_close(t, &id)?;
+            Ok(ids) => {
+                for id in ids {
+                    let cut = cut.clone();
+                    if let Err(e) = state
+                        .db
+                        .write("system", move |t| {
+                            let th = threads::get(t, &id)?;
+                            if th.request
+                                && th.status == ThreadStatus::WaitingOperator
+                                && th.close_proposal.is_some()
+                                && th.updated_at < cut
+                                && th.cards.as_deref().unwrap_or_default().is_empty()
+                            {
+                                threads::confirm_close(t, &id)?;
+                            }
+                            Ok(())
+                        })
+                        .await
+                    {
+                        warn!("cannot auto-confirm a request close: {e}");
                     }
-                    Ok(())
-                }).await { warn!("cannot auto-confirm a request close: {e}"); }
-            },
+                }
+            }
             Err(e) => warn!("cannot read proposed request closes: {e}"),
         }
     }

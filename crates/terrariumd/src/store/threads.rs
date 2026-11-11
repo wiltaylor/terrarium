@@ -1096,7 +1096,14 @@ fn insert_message(
 }
 
 /// Replace an ended request agent. Keep every message and linked card.
-pub fn restart_request(t: &mut Tx<'_>, id: &str, by: &str, reason: &str, template: &str, reopening: bool) -> ApiResult<Thread> {
+pub fn restart_request(
+    t: &mut Tx<'_>,
+    id: &str,
+    by: &str,
+    reason: &str,
+    template: &str,
+    reopening: bool,
+) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
     if !th.request || (th.status == ThreadStatus::Closed) != reopening {
         return Err(ApiError::conflict("the request status changed"));
@@ -1104,9 +1111,23 @@ pub fn restart_request(t: &mut Tx<'_>, id: &str, by: &str, reason: &str, templat
     let reason = check_text("reason", reason, MAX_MESSAGE)?;
     let reason = t.redact_string(reason);
     let at = now();
-    let verb = if reopening { "Reopened" } else { "Agent replaced" };
+    let verb = if reopening {
+        "Reopened"
+    } else {
+        "Agent replaced"
+    };
     if let Some(handoff) = &th.handoff {
-        insert_message(t, id, "system", "message", &format!("Previous close handoff (quoted data):\n{}", serde_json::to_string(handoff).map_err(|e| ApiError::invalid(e.to_string()))?), &at)?;
+        insert_message(
+            t,
+            id,
+            "system",
+            "message",
+            &format!(
+                "Previous close handoff (quoted data):\n{}",
+                serde_json::to_string(handoff).map_err(|e| ApiError::invalid(e.to_string()))?
+            ),
+            &at,
+        )?;
     }
     insert_message(t, id, by, "message", &format!("{verb}: {reason}"), &at)?;
     t.execute(
@@ -1116,7 +1137,12 @@ pub fn restart_request(t: &mut Tx<'_>, id: &str, by: &str, reason: &str, templat
         params![id, template, at],
     )?;
     let th = get(t, id)?;
-    t.audit("thread.restart", id, th.project(), json!({"by": by, "reopening": reopening, "template": template}))?;
+    t.audit(
+        "thread.restart",
+        id,
+        th.project(),
+        json!({"by": by, "reopening": reopening, "template": template}),
+    )?;
     emit(t, &th, "restarted")?;
     Ok(th)
 }

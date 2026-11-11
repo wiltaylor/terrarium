@@ -100,16 +100,22 @@ async fn open(
     let th = state
         .db
         .write(actor.label(), move |t| {
-            let lead = b.report_to.as_deref().map(|key| {
-                let a = agents::find(t, key, None)?.agent;
-                if !a.roles.contains(&terrarium_core::Role::ProjectAdmin) {
-                    return Err(ApiError::invalid("report_to must be a project lead"));
-                }
-                Ok(a)
-            }).transpose()?;
+            let lead = b
+                .report_to
+                .as_deref()
+                .map(|key| {
+                    let a = agents::find(t, key, None)?.agent;
+                    if !a.roles.contains(&terrarium_core::Role::ProjectAdmin) {
+                        return Err(ApiError::invalid("report_to must be a project lead"));
+                    }
+                    Ok(a)
+                })
+                .transpose()?;
             let scope = lead.as_ref().map_or(scope, |a| a.project.clone());
             if lead.is_some() && (b.agent.is_some() || b.template.is_some()) {
-                return Err(ApiError::invalid("a request uses global:request and no named agent"));
+                return Err(ApiError::invalid(
+                    "a request uses global:request and no named agent",
+                ));
             }
             let project = (scope != threads::GLOBAL).then_some(scope.as_str());
             let agent = match b.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
@@ -124,14 +130,21 @@ async fn open(
                 NewThread {
                     topic: b.topic,
                     scope,
-                    template: if lead.is_some() { Some("global:request".into()) } else { b.template },
+                    template: if lead.is_some() {
+                        Some("global:request".into())
+                    } else {
+                        b.template
+                    },
                     opened_by: opener.map_or_else(|| "operator".into(), |a| a.id),
                     agent: agent.map(|a| a.id.to_string()),
                     text: b.text,
                 },
             )?;
             if let Some(lead) = lead {
-                t.execute("UPDATE threads SET report_to = ?2, request = 1 WHERE id = ?1", rusqlite::params![th.id, lead.id.to_string()])?;
+                t.execute(
+                    "UPDATE threads SET report_to = ?2, request = 1 WHERE id = ?1",
+                    rusqlite::params![th.id, lead.id.to_string()],
+                )?;
             }
             threads::get(t, &th.id)
         })
@@ -548,23 +561,47 @@ struct RestartBody {
     template: Option<String>,
 }
 
-async fn reopen(State(state): State<Shared>, actor: Actor, Path(id): Path<String>, ApiJson(b): ApiJson<RestartBody>) -> ApiResult<Json<Thread>> {
+async fn reopen(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(b): ApiJson<RestartBody>,
+) -> ApiResult<Json<Thread>> {
     if b.template.is_some() {
         return Err(ApiError::invalid("reopen uses a new global:request agent"));
     }
     restart(&state, actor, id, b, true).await.map(Json)
 }
 
-async fn swap(State(state): State<Shared>, actor: Actor, Path(id): Path<String>, ApiJson(b): ApiJson<RestartBody>) -> ApiResult<Json<Thread>> {
+async fn swap(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(b): ApiJson<RestartBody>,
+) -> ApiResult<Json<Thread>> {
     restart(&state, actor, id, b, false).await.map(Json)
 }
 
-async fn restart(state: &Shared, actor: Actor, id: String, b: RestartBody, reopening: bool) -> ApiResult<Thread> {
-    if b.reason.trim().is_empty() || b.reason.chars().count() > threads::MAX_MESSAGE || b.reason.contains('\0') {
-        return Err(ApiError::invalid("reason is required and must fit a thread message"));
+async fn restart(
+    state: &Shared,
+    actor: Actor,
+    id: String,
+    b: RestartBody,
+    reopening: bool,
+) -> ApiResult<Thread> {
+    if b.reason.trim().is_empty()
+        || b.reason.chars().count() > threads::MAX_MESSAGE
+        || b.reason.contains('\0')
+    {
+        return Err(ApiError::invalid(
+            "reason is required and must fit a thread message",
+        ));
     }
-    let template = if reopening { "global:request".to_owned() } else {
-        b.template.ok_or_else(|| ApiError::invalid("swap requires an architect template"))?
+    let template = if reopening {
+        "global:request".to_owned()
+    } else {
+        b.template
+            .ok_or_else(|| ApiError::invalid("swap requires an architect template"))?
     };
     crate::template_files::refresh_quiet(state).await;
     let (key, who, tp) = (id.clone(), actor.clone(), template.clone());
@@ -596,12 +633,27 @@ async fn restart(state: &Shared, actor: Actor, id: String, b: RestartBody, reope
     // close event must only close its original agent, never this replacement.
     if let Some(old) = old {
         let key = old.clone();
-        let running = state.db.read(move |c| Ok(crate::store::spawns::get(c, &key).is_ok_and(|s| s.running()))).await?;
+        let running = state
+            .db
+            .read(move |c| Ok(crate::store::spawns::get(c, &key).is_ok_and(|s| s.running())))
+            .await?;
         if running {
-            crate::spawn::close(state, &old, crate::store::spawns::DONE, Some("request agent replaced".into()), false).await?;
+            crate::spawn::close(
+                state,
+                &old,
+                crate::store::spawns::DONE,
+                Some("request agent replaced".into()),
+                false,
+            )
+            .await?;
         }
     }
     let by = actor.address();
-    let th = state.db.write(actor.label(), move |t| threads::restart_request(t, &id, &by, &b.reason, &template, reopening)).await?;
+    let th = state
+        .db
+        .write(actor.label(), move |t| {
+            threads::restart_request(t, &id, &by, &b.reason, &template, reopening)
+        })
+        .await?;
     crate::thread_agent::start(state, th, super::skills::library_opt(state)).await
 }

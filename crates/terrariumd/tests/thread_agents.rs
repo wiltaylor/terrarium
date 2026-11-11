@@ -74,7 +74,9 @@ async fn lab() -> Lab {
     }
     td.agent("meta", "lead", json!({"roles": ["project_admin"]}))
         .await;
-    let q_lead = id(&td.agent("q", "lead", json!({"roles": ["project_admin"]})).await);
+    let q_lead = id(&td
+        .agent("q", "lead", json!({"roles": ["project_admin"]}))
+        .await);
     let p_lead = id(&td
         .agent("p", "lead", json!({"roles": ["project_admin"]}))
         .await);
@@ -95,15 +97,28 @@ async fn lab() -> Lab {
     let w = id(&td
         .agent("p", "w", json!({"policy": {"thread_open": true}}))
         .await);
-    Lab { td, p_lead, q_lead, w }
+    Lab {
+        td,
+        p_lead,
+        q_lead,
+        w,
+    }
 }
 
 /// META-136 supplies the real template. These tests exercise the daemon
 /// contract with a fake harness, without starting a model or changing code.
 async fn request(l: &Lab) -> Value {
-    let r = l.td.post("/api/templates", json!({"name": "request", "spec": {"harness": "claude"}})).await;
+    let r =
+        l.td.post(
+            "/api/templates",
+            json!({"name": "request", "spec": {"harness": "claude"}}),
+        )
+        .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    l.open(json!({"report_to": "p/lead", "topic": "A request", "text": "Please explain the result."})).await
+    l.open(
+        json!({"report_to": "p/lead", "topic": "A request", "text": "Please explain the result."}),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -121,9 +136,16 @@ async fn request_opens_with_selected_lead_and_handoff_task() {
     assert!(task.contains("Mail p/lead"));
     assert!(task.contains("Do not change code"));
     assert!(task.contains("24 hours"));
-    let bad = l.td.post("/api/threads", json!({"report_to": "p/w", "topic": "bad"})).await;
+    let bad =
+        l.td.post("/api/threads", json!({"report_to": "p/w", "topic": "bad"}))
+            .await;
     assert_eq!(bad.status, 422);
-    let bad = l.td.post("/api/threads", json!({"report_to": "p/lead", "topic": "bad", "agent": "p/w"})).await;
+    let bad =
+        l.td.post(
+            "/api/threads",
+            json!({"report_to": "p/lead", "topic": "bad", "agent": "p/w"}),
+        )
+        .await;
     assert_eq!(bad.status, 422);
 }
 
@@ -133,16 +155,45 @@ async fn request_close_confirm_and_reopen_with_history_and_new_agent() {
     let th = request(&l).await;
     let tid = id(&th);
     let old = th["agent"].as_str().unwrap();
-    let proposed = l.td.post_as(old, &format!("/api/threads/{tid}/close"), json!({"summary": "Here is the answer."})).await;
+    let proposed =
+        l.td.post_as(
+            old,
+            &format!("/api/threads/{tid}/close"),
+            json!({"summary": "Here is the answer."}),
+        )
+        .await;
     assert_eq!(proposed.status, 200, "{}", proposed.body);
     assert_eq!(proposed.body["status"], "waiting_operator");
-    let closed = l.td.post(&format!("/api/threads/{tid}/close"), json!({"confirm": true})).await;
+    let closed =
+        l.td.post(
+            &format!("/api/threads/{tid}/close"),
+            json!({"confirm": true}),
+        )
+        .await;
     assert_eq!(closed.status, 200, "{}", closed.body);
-    let refused = l.td.post_as(&l.w, &format!("/api/threads/{tid}/reopen"), json!({"reason": "Related result"})).await;
+    let refused =
+        l.td.post_as(
+            &l.w,
+            &format!("/api/threads/{tid}/reopen"),
+            json!({"reason": "Related result"}),
+        )
+        .await;
     assert_eq!(refused.status, 403);
-    let empty = l.td.post_as(&l.p_lead, &format!("/api/threads/{tid}/reopen"), json!({"reason": " "})).await;
+    let empty =
+        l.td.post_as(
+            &l.p_lead,
+            &format!("/api/threads/{tid}/reopen"),
+            json!({"reason": " "}),
+        )
+        .await;
     assert_eq!(empty.status, 422);
-    let reopened = l.td.post_as(&l.p_lead, &format!("/api/threads/{tid}/reopen"), json!({"reason": "Related result"})).await;
+    let reopened =
+        l.td.post_as(
+            &l.p_lead,
+            &format!("/api/threads/{tid}/reopen"),
+            json!({"reason": "Related result"}),
+        )
+        .await;
     assert_eq!(reopened.status, 200, "{}", reopened.body);
     assert_eq!(reopened.body["status"], "waiting_agent");
     assert_ne!(reopened.body["agent"], old);
@@ -152,8 +203,16 @@ async fn request_close_confirm_and_reopen_with_history_and_new_agent() {
     assert!(task.contains("Please explain the result."));
     // A delayed close event for the first agent must not end its replacement.
     tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(l.spawn_row(reopened.body["agent"].as_str().unwrap()).await["finished_at"], Value::Null);
-    let closed = l.td.post(&format!("/api/threads/{tid}/close"), json!({"summary": "Operator closes any time"})).await;
+    assert_eq!(
+        l.spawn_row(reopened.body["agent"].as_str().unwrap()).await["finished_at"],
+        Value::Null
+    );
+    let closed =
+        l.td.post(
+            &format!("/api/threads/{tid}/close"),
+            json!({"summary": "Operator closes any time"}),
+        )
+        .await;
     assert_eq!(closed.status, 200);
 }
 
@@ -162,13 +221,36 @@ async fn request_lead_swaps_to_architect_in_same_thread() {
     let l = lab().await;
     let th = request(&l).await;
     let tid = id(&th);
-    let made = l.td.post("/api/templates", json!({"name": "design", "spec": {"harness": "claude", "roles": ["architect"]}})).await;
+    let made =
+        l.td.post(
+            "/api/templates",
+            json!({"name": "design", "spec": {"harness": "claude", "roles": ["architect"]}}),
+        )
+        .await;
     assert_eq!(made.status, 201, "{}", made.body);
-    let bad = l.td.post_as(&l.w, &format!("/api/threads/{tid}/swap"), json!({"template": "global:design", "reason": "Needs design"})).await;
+    let bad =
+        l.td.post_as(
+            &l.w,
+            &format!("/api/threads/{tid}/swap"),
+            json!({"template": "global:design", "reason": "Needs design"}),
+        )
+        .await;
     assert_eq!(bad.status, 403);
-    let bad = l.td.post_as(&l.p_lead, &format!("/api/threads/{tid}/swap"), json!({"template": "global:request", "reason": "Needs design"})).await;
+    let bad =
+        l.td.post_as(
+            &l.p_lead,
+            &format!("/api/threads/{tid}/swap"),
+            json!({"template": "global:request", "reason": "Needs design"}),
+        )
+        .await;
     assert_eq!(bad.status, 422);
-    let swapped = l.td.post_as(&l.p_lead, &format!("/api/threads/{tid}/swap"), json!({"template": "global:design", "reason": "Needs design"})).await;
+    let swapped =
+        l.td.post_as(
+            &l.p_lead,
+            &format!("/api/threads/{tid}/swap"),
+            json!({"template": "global:design", "reason": "Needs design"}),
+        )
+        .await;
     assert_eq!(swapped.status, 200, "{}", swapped.body);
     assert_eq!(swapped.body["id"], tid);
     assert_ne!(swapped.body["agent"], th["agent"]);
@@ -182,25 +264,55 @@ async fn request_answer_only_auto_confirms_after_24h_but_reply_withdraws() {
     let th = request(&l).await;
     let tid = id(&th);
     let agent = th["agent"].as_str().unwrap();
-    l.td.post_as(agent, &format!("/api/threads/{tid}/close"), json!({"summary": "The answer"})).await.ok();
+    l.td.post_as(
+        agent,
+        &format!("/api/threads/{tid}/close"),
+        json!({"summary": "The answer"}),
+    )
+    .await
+    .ok();
     // Not before 24 hours.
     terrariumd::thread_close::sweep(&state(&l.td)).await;
     assert_eq!(l.thread(&tid).await["status"], "waiting_operator");
     let key = tid.clone();
-    state(&l.td).db.write("system", move |t| {
-        let at = (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        t.execute("UPDATE threads SET updated_at = ?2 WHERE id = ?1", [&key, &at])?;
-        Ok(())
-    }).await.unwrap();
+    state(&l.td)
+        .db
+        .write("system", move |t| {
+            let at = (chrono::Utc::now() - chrono::Duration::hours(25))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            t.execute(
+                "UPDATE threads SET updated_at = ?2 WHERE id = ?1",
+                [&key, &at],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     terrariumd::thread_close::sweep(&state(&l.td)).await;
     let closed = l.thread(&tid).await;
     assert_eq!(closed["status"], "closed");
     assert_eq!(closed["handoff"]["summary"], "The answer");
-    let reopened = l.td.post(&format!("/api/threads/{tid}/reopen"), json!({"reason": "More context"})).await;
+    let reopened =
+        l.td.post(
+            &format!("/api/threads/{tid}/reopen"),
+            json!({"reason": "More context"}),
+        )
+        .await;
     assert_eq!(reopened.status, 200, "{}", reopened.body);
     let agent = reopened.body["agent"].as_str().unwrap();
-    l.td.post_as(agent, &format!("/api/threads/{tid}/close"), json!({"summary": "New answer"})).await.ok();
-    let reply = l.td.post(&format!("/api/threads/{tid}/messages"), json!({"text": "Please clarify"})).await;
+    l.td.post_as(
+        agent,
+        &format!("/api/threads/{tid}/close"),
+        json!({"summary": "New answer"}),
+    )
+    .await
+    .ok();
+    let reply =
+        l.td.post(
+            &format!("/api/threads/{tid}/messages"),
+            json!({"text": "Please clarify"}),
+        )
+        .await;
     assert_eq!(reply.status, 201, "{}", reply.body);
     assert!(reply.body["close_proposal"].is_null());
     terrariumd::thread_close::sweep(&state(&l.td)).await;
@@ -212,19 +324,40 @@ async fn request_tracks_lead_cards_and_linked_lead_can_reopen() {
     let l = lab().await;
     let th = request(&l).await;
     let tid = id(&th);
-    let made = l.td.post("/api/projects/q/cards", json!({"title": "Related work"})).await;
+    let made =
+        l.td.post("/api/projects/q/cards", json!({"title": "Related work"}))
+            .await;
     assert_eq!(made.status, 201, "{}", made.body);
     let card = made.body["id"].as_str().unwrap();
     // The operator links across projects, then the chosen lead can track
     // its own cards through the existing handoff path.
-    let linked = l.td.post(&format!("/api/threads/{tid}/cards"), json!({"card": format!("q:{card}")})).await;
+    let linked =
+        l.td.post(
+            &format!("/api/threads/{tid}/cards"),
+            json!({"card": format!("q:{card}")}),
+        )
+        .await;
     assert_eq!(linked.status, 200, "{}", linked.body);
     assert_eq!(linked.body["cards"].as_array().unwrap().len(), 1);
-    let tracked = l.td.post_as(th["agent"].as_str().unwrap(), &format!("/api/threads/{tid}/track"), json!({})).await;
+    let tracked =
+        l.td.post_as(
+            th["agent"].as_str().unwrap(),
+            &format!("/api/threads/{tid}/track"),
+            json!({}),
+        )
+        .await;
     assert_eq!(tracked.status, 200, "{}", tracked.body);
     assert_eq!(tracked.body["status"], "tracking");
-    l.td.post(&format!("/api/threads/{tid}/close"), json!({})).await.ok();
-    let reopened = l.td.post_as(&l.q_lead, &format!("/api/threads/{tid}/reopen"), json!({"reason": "The linked card needs follow-up"})).await;
+    l.td.post(&format!("/api/threads/{tid}/close"), json!({}))
+        .await
+        .ok();
+    let reopened =
+        l.td.post_as(
+            &l.q_lead,
+            &format!("/api/threads/{tid}/reopen"),
+            json!({"reason": "The linked card needs follow-up"}),
+        )
+        .await;
     assert_eq!(reopened.status, 200, "{}", reopened.body);
     assert_eq!(reopened.body["cards"].as_array().unwrap().len(), 1);
 }
