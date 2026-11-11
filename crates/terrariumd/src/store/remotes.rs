@@ -25,21 +25,37 @@ const COLUMNS: &str = "id,name,url,instance_id,pin_sha256,ca_pem,label,read_only
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Remote> {
     Ok(Remote {
-        id: r.get(0)?, name: r.get(1)?, url: r.get(2)?, instance_id: r.get(3)?,
-        pin_sha256: r.get(4)?, ca_pem: r.get(5)?, label: r.get(6)?,
-        read_only: r.get(7)?, created_at: r.get(8)?, last_ok_at: r.get(9)?,
-        last_error: r.get(10)?, status: r.get(11)?,
+        id: r.get(0)?,
+        name: r.get(1)?,
+        url: r.get(2)?,
+        instance_id: r.get(3)?,
+        pin_sha256: r.get(4)?,
+        ca_pem: r.get(5)?,
+        label: r.get(6)?,
+        read_only: r.get(7)?,
+        created_at: r.get(8)?,
+        last_ok_at: r.get(9)?,
+        last_error: r.get(10)?,
+        status: r.get(11)?,
     })
 }
 
 pub fn list(c: &Connection) -> ApiResult<Vec<Remote>> {
-    Ok(c.prepare(&format!("SELECT {COLUMNS} FROM remotes ORDER BY name"))?
-        .query_map([], row)?.collect::<rusqlite::Result<_>>()?)
+    Ok(
+        c.prepare(&format!("SELECT {COLUMNS} FROM remotes ORDER BY name"))?
+            .query_map([], row)?
+            .collect::<rusqlite::Result<_>>()?,
+    )
 }
 
 pub fn get(c: &Connection, name: &str) -> ApiResult<Remote> {
-    c.query_row(&format!("SELECT {COLUMNS} FROM remotes WHERE name=?1"), [name], row)
-        .optional()?.ok_or_else(|| ApiError::not_found("remote not found"))
+    c.query_row(
+        &format!("SELECT {COLUMNS} FROM remotes WHERE name=?1"),
+        [name],
+        row,
+    )
+    .optional()?
+    .ok_or_else(|| ApiError::not_found("remote not found"))
 }
 
 pub fn sealed(c: &Connection, id: &str) -> ApiResult<Vec<u8>> {
@@ -62,4 +78,6 @@ pub fn mark(t: &Tx<'_>, id: &str, status: &str) -> ApiResult<()> {
     Ok(())
 }
 
-pub fn aad(id: &str) -> Vec<u8> { format!("remote:{id}").into_bytes() }
+pub fn aad(id: &str) -> Vec<u8> {
+    format!("remote:{id}").into_bytes()
+}

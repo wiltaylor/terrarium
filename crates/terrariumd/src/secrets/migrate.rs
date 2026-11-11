@@ -360,21 +360,33 @@ fn sealed_rows(conn: &Connection) -> ApiResult<Vec<Row>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut remotes = conn.prepare("SELECT id,sealed FROM remotes ORDER BY id")?;
-    rows.extend(remotes.query_map([], |r| Ok(Row {
-        id: r.get(0)?, sealed: r.get(1)?, scope: String::new(),
-        name: String::new(), kind: String::new(), remote: true,
-    }))?.collect::<rusqlite::Result<Vec<_>>>()?);
+    rows.extend(
+        remotes
+            .query_map([], |r| {
+                Ok(Row {
+                    id: r.get(0)?,
+                    sealed: r.get(1)?,
+                    scope: String::new(),
+                    name: String::new(),
+                    kind: String::new(),
+                    remote: true,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+    );
     Ok(rows)
 }
 
 fn row_aad(r: &Row) -> Vec<u8> {
-    if r.remote { crate::store::remotes::aad(&r.id) }
-    else { crypto::aad(&r.id, &r.scope, &r.name, &r.kind) }
+    if r.remote {
+        crate::store::remotes::aad(&r.id)
+    } else {
+        crypto::aad(&r.id, &r.scope, &r.name, &r.kind)
+    }
 }
 
 fn opens(key: &MasterKey, r: &Row) -> bool {
-    key.open(&r.sealed, &row_aad(r))
-        .is_some()
+    key.open(&r.sealed, &row_aad(r)).is_some()
 }
 
 /// A rotation that stopped after its commit and before the rename left
@@ -425,8 +437,11 @@ pub fn rotate_key(conn: &mut Connection, state_dir: &Path) -> anyhow::Result<usi
                 .seal(&plain, &aad)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             tx.execute(
-                if r.remote { "UPDATE remotes SET sealed = ?2 WHERE id = ?1" }
-                else { "UPDATE secrets SET sealed = ?2 WHERE id = ?1" },
+                if r.remote {
+                    "UPDATE remotes SET sealed = ?2 WHERE id = ?1"
+                } else {
+                    "UPDATE secrets SET sealed = ?2 WHERE id = ?1"
+                },
                 params![r.id, sealed],
             )?;
         }

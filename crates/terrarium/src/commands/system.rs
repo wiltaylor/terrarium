@@ -886,28 +886,62 @@ pub async fn remotes(ctx: &Ctx, cmd: &RemoteCmd) -> anyhow::Result<()> {
         Ok(line.trim().to_owned())
     }
     fn ca(file: &Option<std::path::PathBuf>) -> anyhow::Result<Option<String>> {
-        file.as_ref().map(std::fs::read_to_string).transpose().map_err(Into::into)
+        file.as_ref()
+            .map(std::fs::read_to_string)
+            .transpose()
+            .map_err(Into::into)
     }
     let v = match cmd {
         RemoteCmd::Ls => ctx.api.get("/api/remotes", vec![]).await?,
-        RemoteCmd::Add { name, url, instance_id, pin_sha256, ca_file, label } => {
-            ctx.api.post("/api/remotes", Some(json!({
-                "name": name, "url": url, "instance_id": instance_id,
-                "pin_sha256": pin_sha256, "ca_pem": ca(ca_file)?, "label": label,
-                "code": code()?,
-            }))).await?
+        RemoteCmd::Add {
+            name,
+            url,
+            instance_id,
+            pin_sha256,
+            ca_file,
+            label,
+        } => {
+            ctx.api
+                .post(
+                    "/api/remotes",
+                    Some(json!({
+                        "name": name, "url": url, "instance_id": instance_id,
+                        "pin_sha256": pin_sha256, "ca_pem": ca(ca_file)?, "label": label,
+                        "code": code()?,
+                    })),
+                )
+                .await?
         }
-        RemoteCmd::Rm { name } => ctx.api.delete(&format!("/api/remotes/{}", crate::transport::encode(name)), vec![]).await?,
-        RemoteCmd::Repin { name, pin_sha256, ca_file } => {
-            ctx.api.post(&format!("/api/remotes/{}/repin", crate::transport::encode(name)),
-                Some(json!({"pin_sha256": pin_sha256, "ca_pem": ca(ca_file)?}))).await?
+        RemoteCmd::Rm { name } => {
+            ctx.api
+                .delete(
+                    &format!("/api/remotes/{}", crate::transport::encode(name)),
+                    vec![],
+                )
+                .await?
+        }
+        RemoteCmd::Repin {
+            name,
+            pin_sha256,
+            ca_file,
+        } => {
+            ctx.api
+                .post(
+                    &format!("/api/remotes/{}/repin", crate::transport::encode(name)),
+                    Some(json!({"pin_sha256": pin_sha256, "ca_pem": ca(ca_file)?})),
+                )
+                .await?
         }
         RemoteCmd::Pair { name } => {
-            ctx.api.post(&format!("/api/remotes/{}/pair", crate::transport::encode(name)),
-                Some(json!({"code": code()?}))).await?
+            ctx.api
+                .post(
+                    &format!("/api/remotes/{}/pair", crate::transport::encode(name)),
+                    Some(json!({"code": code()?})),
+                )
+                .await?
         }
     };
-    ctx.emit(&v, |c,v| print_generic(c, v, "no remotes"))
+    ctx.emit(&v, |c, v| print_generic(c, v, "no remotes"))
 }
 
 pub async fn links(ctx: &Ctx, cmd: &LinkCmd) -> anyhow::Result<()> {
