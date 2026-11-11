@@ -22,12 +22,14 @@ use crate::store::projects::SOURCE_API;
 use crate::store::subscriptions::{self as subs, QuotaSample, Subscription};
 
 mod bedrock;
+mod foundry;
 mod vertex;
 
 #[cfg(test)]
 tokio::task_local! {
     // Scoped to one route-test task, never process-wide or production-configurable.
     pub(super) static VERTEX_MOCK_URL: String;
+    pub(super) static FOUNDRY_MOCK_URL: String;
 }
 
 #[derive(Deserialize)]
@@ -1399,9 +1401,9 @@ async fn api_key(
         key,
         test_connection,
     } = save;
-    if test_connection && !matches!(key.provider.as_str(), "bedrock" | "gcp") {
+    if test_connection && !matches!(key.provider.as_str(), "bedrock" | "gcp" | "foundry") {
         return Err(ApiError::invalid(
-            "test_connection is for bedrock and gcp only",
+            "test_connection is for bedrock, gcp, and foundry only",
         ));
     }
     if key.key.trim().is_empty() {
@@ -1540,6 +1542,11 @@ async fn api_key(
                 settings.models = models;
                 settings.region.get_or_insert_with(|| "us-east5".into());
             }
+            if kind == terrarium_core::cloud::Kind::Foundry {
+                let mut models = terrarium_core::cloud::foundry_models();
+                models.extend(settings.models);
+                settings.models = models;
+            }
             terrarium_core::cloud::check(kind, &settings)
                 .map_err(|e| ApiError::invalid(format!("subscription `{name}`: {e}")))?;
             Some(settings)
@@ -1554,6 +1561,7 @@ async fn api_key(
             .ok_or_else(|| ApiError::invalid("missing cloud settings"))?;
         match cloud_kind {
             Some(terrarium_core::cloud::Kind::Gcp) => vertex::test(&key, settings).await?,
+            Some(terrarium_core::cloud::Kind::Foundry) => foundry::test(&key, settings).await?,
             _ => bedrock::test(&key, settings).await?,
         }
     }

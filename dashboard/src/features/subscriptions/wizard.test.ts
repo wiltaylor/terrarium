@@ -13,6 +13,20 @@ const session = (over: Partial<LoginSession> = {}): LoginSession => ({
 });
 const run = (s: WizardState, ...actions: WizardAction[]) => actions.reduce(wizardReduce, s);
 
+describe("Foundry setup", () => {
+  it("uses Claude Code and tests a resource before saving", () => {
+    expect(KEY_PROVIDERS.find((p) => p.id === "foundry")).toMatchObject({ env: "ANTHROPIC_FOUNDRY_API_KEY", harnesses: ["claude"] });
+    expect(apiKeyBody({ provider: "foundry", key: "fake-key", resource: " my-resource ", cloudModels: { haiku: " custom-haiku ", opus: "" } })).toEqual({
+      provider: "foundry", key: "fake-key", cloud: { resource: "my-resource", models: { haiku: "custom-haiku" } }, test_connection: true,
+    });
+  });
+  it("saves a custom base URL without a network test or resource", () => {
+    expect(apiKeyBody({ provider: "foundry", key: "fake-key", resource: "ignored", baseUrl: " https://gateway.invalid/anthropic " })).toEqual({
+      provider: "foundry", key: "fake-key", cloud: { base_url: "https://gateway.invalid/anthropic", models: {} }, test_connection: false,
+    });
+  });
+});
+
 describe("wizard state machine", () => {
   it("goes pick -> setup -> starting -> live -> done", () => {
     let s = run(initialWizard(), { type: "pick", path: "codex" });
