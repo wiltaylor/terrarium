@@ -1,10 +1,10 @@
 //! `/api/projects/{name}/db/...`: the DB of a project (PLAN §15.4).
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
 use serde::Deserialize;
 
 use super::{ApiJson, ApiQuery, Shared, paged};
@@ -15,25 +15,56 @@ use crate::store::records::{
     self, DbType, NewRecord, NewType, QueryResult, Record, RecordPatch, TypePatch,
 };
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
         .route(
             "/projects/{name}/db/types",
             get(list_types).post(create_type),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
         )
         .route(
             "/projects/{name}/db/types/{type}",
             get(show_type).patch(update_type).delete(delete_type),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
         )
         .route(
             "/projects/{name}/db/records",
             axum::routing::post(create_record),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
         )
         .route(
             "/projects/{name}/db/records/{id}",
             get(show_record).patch(update_record).delete(delete_record),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
         )
-        .route("/projects/{name}/db/query", get(query))
+        .route(
+            "/projects/{name}/db/query",
+            get(query),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
 }
 
 async fn list_types(

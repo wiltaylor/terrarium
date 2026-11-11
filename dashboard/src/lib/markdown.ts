@@ -213,6 +213,51 @@ export function renderWiki(src: string, opts: RenderOptions): string {
       ...(opts.cardKeys ? [cardKeyExtension(opts.cardKeys)] : []),
     ],
     renderer: {
+      blockquote(token: Tokens.Blockquote) {
+        const match = /^\[!(CHAT|EMAIL)\][ \t]*(.*)(?:\n|$)/.exec(token.text);
+        if (!match) return `<blockquote>\n${this.parser.parse(token.tokens)}</blockquote>\n`;
+        const kind = match[1]!.toLowerCase();
+        const content = token.text.slice(match[0].length);
+        const renderBody = (text: string) => renderWiki(text, { ...opts, textBody: true });
+        const stateOf = (text: string) => /^(draft|sent|received)$/i.test(text.trim()) ? text.trim().toLowerCase() : "received";
+        const stateLabel = (state: string) => state === "draft" ? "Draft, not sent" : state === "sent" ? "Sent" : "Received";
+        let items = "";
+        if (kind === "chat") {
+          let author = "", time = "", state = "received", lines: string[] = [];
+          let active = false;
+          const flush = () => {
+            if (!active && !lines.some((line) => line.trim())) return;
+            items += `<div class="comm-item comm-${state}"><div class="comm-meta"><strong>${esc(author)}</strong>${time ? ` · ${esc(time)}` : ""} · ${stateLabel(state)}</div>${renderBody(lines.join("\n"))}</div>`;
+          };
+          for (const line of content.split("\n")) {
+            const header = /^\*\*(.+?)\*\*(?:\s*·\s*(.*))?$/.exec(line);
+            if (!header) { lines.push(line); continue; }
+            flush();
+            const parts = (header[2] ?? "").split("·").map((part) => part.trim()).filter(Boolean);
+            author = header[1]!;
+            const last = parts.at(-1) ?? "";
+            state = stateOf(last);
+            if (/^(draft|sent|received)$/i.test(last)) parts.pop();
+            time = parts.join(" · ");
+            lines = [];
+            active = true;
+          }
+          flush();
+        } else {
+          for (const mail of content.split(/^---[ \t]*$/m)) {
+            const lines = mail.trim().split("\n");
+            let headers = "", state = "received", index = 0;
+            for (; index < lines.length; index++) {
+              const header = /^(From|To|Cc|Subject|Date|Status):[ \t]*(.*)$/i.exec(lines[index]!);
+              if (!header) break;
+              if (header[1]!.toLowerCase() === "status") state = stateOf(header[2]!);
+              else headers += `<div><strong>${esc(header[1]!)}:</strong> ${esc(header[2]!)}</div>`;
+            }
+            items += `<div class="comm-item comm-${state}"><div class="comm-meta">${headers}<div>${stateLabel(state)}</div></div>${renderBody(lines.slice(index).join("\n"))}</div>`;
+          }
+        }
+        return `<div class="comm-block comm-${kind}"><div class="comm-title">${esc(match[2] || (kind === "chat" ? "Chat" : "Email"))}</div>${items}</div>\n`;
+      },
       html(token: Tokens.HTML | Tokens.Tag) {
         return esc(token.text);
       },

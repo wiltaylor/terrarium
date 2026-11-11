@@ -4,10 +4,10 @@
 //! browser. Only the operator and a sysadmin read or write them: folders
 //! order the sidebar and change no right, scope, or name.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, patch, put};
-use axum::{Json, Router};
 
 use super::{ApiJson, Shared};
 use crate::actor::Actor;
@@ -17,11 +17,35 @@ use crate::store::project_folders::{self, Folder, FolderPatch, NewFolder, Place,
 
 const WHAT: &str = "project folders";
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/project-folders", get(list).post(create))
-        .route("/project-folders/{id}", patch(update).delete(remove))
-        .route("/projects/{name}/folder", put(place))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/project-folders",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/project-folders/{id}",
+            patch(update).delete(remove),
+            &[
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/projects/{name}/folder",
+            put(place),
+            &[(axum::http::Method::PUT, super::link_registry::Access::Link)],
+        )
 }
 
 /// `GET /api/project-folders`: every folder and every placed project.
