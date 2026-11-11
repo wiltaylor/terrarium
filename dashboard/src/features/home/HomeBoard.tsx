@@ -1,6 +1,6 @@
 import { A } from "@solidjs/router";
 import { createResource, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { allHome, type HomeColumn } from "../../api/home";
+import { allHome, type HomeColumn, type HomeAttention, type HomeCard } from "../../api/home";
 import { Empty, ErrorBanner } from "../../components/ui";
 import { span } from "../../lib/eta";
 import { api, cardPeek, events, projects } from "../../stores";
@@ -21,13 +21,13 @@ function stableRows<T extends { id: string; project: string }>(rows: T[], previo
 export function HomeBoard(props: { now: number; children?: JSX.Element }) {
   const [project, setProject] = createSignal("");
   const [tick, setTick] = createSignal(0);
-  const [attention] = createResource(tick, async (_, { value }) => {
+  const [attention] = createResource<(HomeAttention & { kind: string })[], number>(tick, async (_, { value }) => {
     const [monitors, pipelines] = await Promise.all([
       allHome(cursor => api.home.monitors({ cursor })), allHome(cursor => api.home.pipelines({ cursor })),
     ]);
     return stableRows([...monitors.map(m => ({ ...m, kind: "Monitor" })), ...pipelines.map(p => ({ ...p, kind: "Pipeline" }))], value);
   });
-  const [cards] = createResource(() => [project(), tick()] as const, async ([project], { value }) =>
+  const [cards] = createResource<HomeCard[], readonly [string, number]>(() => [project(), tick()] as const, async ([project], { value }) =>
     stableRows((await Promise.all(columns.map(c => allHome(cursor => api.home.cards({ column: c.id, project: project || undefined, cursor }))))).flat(), value));
   onMount(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
