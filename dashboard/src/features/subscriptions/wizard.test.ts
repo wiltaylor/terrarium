@@ -168,3 +168,15 @@ describe("Bedrock setup", () => {
     expect(apiKeyBody({ provider: "bedrock", key: "s", keyId: "i" }).cloud?.region).toBe("us-east-1");
   });
 });
+
+describe("Vertex setup", () => {
+  it("offers Claude Code with the service-account role and a paid save check", () => {
+    expect(KEY_PROVIDERS.find((p) => p.id === "gcp")?.harnesses).toEqual(["claude"]);
+    expect(KEY_HELP.gcp).toContain("roles/aiplatform.user");
+    const key = '{"type":"service_account","private_key":"fake"}';
+    expect(apiKeyBody({ provider: "gcp", key, projectId: " project-1 ", region: " global ", cloudModels: { opus: " claude-opus-5-5 ", haiku: "" }, keyId: "ignored", baseUrl: "https://ignored.invalid", plan: "ignored" })).toEqual({
+      provider: "gcp", key, cloud: { project_id: "project-1", region: "global", models: { opus: "claude-opus-5-5" } }, test_connection: true,
+    });
+    expect(apiKeyBody({ provider: "gcp", key, projectId: "project-1" }).cloud?.region).toBe("us-east5");
+  });
+});

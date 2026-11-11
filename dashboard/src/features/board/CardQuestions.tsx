@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The questions, bundles, and notices linked to one card, in the card
 // drawer (docs/api.md §6.8 `GET /api/questions?card=`). The same components
 // as the Inbox, so the operator answers, acknowledges, or retracts here. The
@@ -7,13 +8,14 @@
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Card, Question } from "../../api/types";
 import { ErrorBanner, useNow } from "../../components/ui";
-import { api, events, inbox } from "../../stores";
+
 import { BundleCard } from "../inbox/BundleCard";
 import { QuestionCard } from "../inbox/QuestionCard";
 import { putQuestion, shortQuestion } from "../inbox/questions";
 import { isCardQuestionEvent, splitCardQuestions } from "./questions";
 
 export function CardQuestions(props: { card: Card; linkable: Question[]; onChanged: () => void }) {
+  const { api, events, inbox } = useInstance();
   const now = useNow(30_000);
   const [list, setList] = createSignal<Question[]>([]);
   const [loaded, setLoaded] = createSignal(false);

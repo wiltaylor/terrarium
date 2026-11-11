@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The login of a target (PLAN §16b.6a, docs/api.md §17.2): a select of the
 // secrets that the target can use. An ssh target takes an `ssh_key`; a vnc
 // or rdp target takes a `login`. A project target takes its project's
@@ -10,7 +11,7 @@
 
 import { createResource, createSignal, For, Show } from "solid-js";
 import type { Secret } from "../../api/types";
-import { api } from "../../stores";
+
 import { credentialChoices, credentialKinds, GLOBAL, NEEDS_GRANT_HINT, type CredentialUse } from "./model";
 import { GenerateKeyForm } from "./GenerateKey";
 import { PublicKey } from "./PublicKey";
@@ -29,6 +30,7 @@ export function CredentialSelect(props: {
   /** The name of the target, for the name of a new key. */
   targetName?: string;
 }) {
+  const { api } = useInstance();
   const [secrets, { refetch }] = createResource(
     () => (props.scope && credentialKinds(props.kind).length ? { scope: props.scope } : null),
     async (v): Promise<Secret[]> => {

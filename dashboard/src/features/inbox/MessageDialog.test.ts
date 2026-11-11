@@ -12,10 +12,10 @@ import type { Thread } from "../../api/types";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const target = api.world.agents.find((a) => !a.ephemeral && a.roles.includes("project_admin"))!;
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api,
   agents: { state: { agents: [...api.world.agents, { id: "E1", project: "demo", name: "tmp", ephemeral: true }] } },
-}));
+})); });
 
 const { MessageDialog } = await import("./MessageDialog");
 const { messageBody } = await import("./model");

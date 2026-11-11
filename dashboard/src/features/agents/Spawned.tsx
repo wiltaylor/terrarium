@@ -1,11 +1,12 @@
+import { useInstance } from "../../instance";
 // Ephemeral agents on the agent page (docs/api.md §6.10): the Spawned tab
 // of an owner, the line on the page of an ephemeral agent, and the Spawn
 // rights fields of the agent form.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { Agent, Spawn, SpawnPolicy } from "../../api/types";
-import { api, events } from "../../stores";
+
 import { ago } from "../../lib/format";
 import { ConfirmButton, Drawer, ErrorBanner, useNow } from "../../components/ui";
 import { durationText, lifetimeLeft, newSpawnPolicy, orderSpawns, resultPreview, spawnChip, spawnDuration, SPAWN_DEFAULT_CONCURRENT, SPAWN_DEFAULT_LIFETIME, templateChoices } from "./spawn";
@@ -20,6 +21,7 @@ const SPAWN_EVENTS = new Set(["agent.spawned", "agent.finished", "agent_removed"
  * after the finish while the archive keeps the file.
  */
 export function SpawnedPanel(props: { owner: Agent }) {
+  const { api, events } = useInstance();
   const [error, setError] = createSignal<unknown>(null);
   const [open, setOpen] = createSignal<Spawn | null>(null);
   const [rows, { refetch }] = createResource(
@@ -219,6 +221,7 @@ export function EphemeralLine(props: { agent: Agent }) {
  * sysadmin and the operator.
  */
 export function SpawnRightsFields(props: { project: string; value: SpawnPolicy | null | undefined; onChange: (v: SpawnPolicy | null) => void }) {
+  const { api } = useInstance();
   const [templates] = createResource(() => api.templates.list().catch(() => []));
   const sp = () => props.value ?? null;
   const set = (patch: Partial<SpawnPolicy>) => {

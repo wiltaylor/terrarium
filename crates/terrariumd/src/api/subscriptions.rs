@@ -22,6 +22,13 @@ use crate::store::projects::SOURCE_API;
 use crate::store::subscriptions::{self as subs, QuotaSample, Subscription};
 
 mod bedrock;
+mod vertex;
+
+#[cfg(test)]
+tokio::task_local! {
+    // Scoped to one route-test task, never process-wide or production-configurable.
+    pub(super) static VERTEX_MOCK_URL: String;
+}
 
 #[derive(Deserialize)]
 struct KeySave {
@@ -1392,8 +1399,10 @@ async fn api_key(
         key,
         test_connection,
     } = save;
-    if test_connection && key.provider != "bedrock" {
-        return Err(ApiError::invalid("test_connection is for bedrock only"));
+    if test_connection && !matches!(key.provider.as_str(), "bedrock" | "gcp") {
+        return Err(ApiError::invalid(
+            "test_connection is for bedrock and gcp only",
+        ));
     }
     if key.key.trim().is_empty() {
         return Err(ApiError::invalid("the key is empty"));
@@ -1528,22 +1537,28 @@ async fn api_key(
                 settings.models = models;
                 settings.region.get_or_insert_with(|| "us-east-1".into());
             }
+            if kind == terrarium_core::cloud::Kind::Gcp {
+                let mut models = terrarium_core::cloud::vertex_models();
+                models.extend(settings.models);
+                settings.models = models;
+                settings.region.get_or_insert_with(|| "us-east5".into());
+            }
             terrarium_core::cloud::check(kind, &settings)
                 .map_err(|e| ApiError::invalid(format!("subscription `{name}`: {e}")))?;
             Some(settings)
         }
         None => None,
     };
-    // Before any key or definition write. Never return an AWS response body,
+    // Before any key or definition write. Never return an upstream response body,
     // request error, URL, signature or credential in the diagnostic.
     if test_connection {
-        bedrock::test(
-            &key,
-            cloud_settings
-                .as_ref()
-                .ok_or_else(|| ApiError::invalid("missing cloud settings"))?,
-        )
-        .await?;
+        let settings = cloud_settings
+            .as_ref()
+            .ok_or_else(|| ApiError::invalid("missing cloud settings"))?;
+        match cloud_kind {
+            Some(terrarium_core::cloud::Kind::Gcp) => vertex::test(&key, settings).await?,
+            _ => bedrock::test(&key, settings).await?,
+        }
     }
     let source = exists.as_ref().map(|s| s.source.clone());
     // Validate before writing the credential file, which is outside the DB transaction.

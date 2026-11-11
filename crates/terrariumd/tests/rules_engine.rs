@@ -129,30 +129,35 @@ async fn ping(td: &TestDaemon, project: &str, card: &str, n: i64) -> i64 {
         .unwrap()
 }
 
-/// The engine's cursor, the last event `seq`, and the pending rows.
-async fn engine_state(td: &TestDaemon) -> (i64, i64, i64) {
+/// The engine's cursor, last event `seq`, pending rows, and ended rows.
+async fn engine_state(td: &TestDaemon) -> (i64, i64, i64, i64) {
     state(td)
         .db
         .read(|c| {
             let cursor = rules_engine::cursor(c)?.unwrap_or(0);
             let last = terrariumd::events::last_seq(c)?;
-            let pending: i64 = c.query_row(
-                "SELECT count(*) FROM rule_runs WHERE state = 'pending'",
+            let (pending, ended): (i64, i64) = c.query_row(
+                "SELECT count(*) FILTER (WHERE state = 'pending'),
+                        count(*) FILTER (WHERE state != 'pending') FROM rule_runs",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            Ok((cursor, last, pending))
+            Ok((cursor, last, pending, ended))
         })
         .await
         .unwrap()
 }
 
 /// Wait until the engine read the whole log and ran every pending row,
-/// twice in a row (a run writes events that the engine reads again).
+/// three times in a row (a run writes events that the engine reads again).
+/// Bound time without progress, not the total drain time: a stopped lane
+/// can leave hundreds of serialized actions to finish under load (TER-765).
 async fn settle(td: &TestDaemon) {
     let mut quiet = 0;
-    for _ in 0..1000 {
-        let (cursor, last, pending) = engine_state(td).await;
+    let mut seen = (i64::MIN, i64::MIN);
+    let mut moved = std::time::Instant::now();
+    loop {
+        let (cursor, last, pending, ended) = engine_state(td).await;
         if cursor >= last && pending == 0 {
             quiet += 1;
             if quiet >= 3 {
@@ -161,12 +166,18 @@ async fn settle(td: &TestDaemon) {
         } else {
             quiet = 0;
         }
+        // Pending can stay constant while planning and running overlap.
+        // New events alone do not prove that the engine is moving.
+        if (cursor, ended) != seen {
+            seen = (cursor, ended);
+            moved = std::time::Instant::now();
+        }
+        assert!(
+            moved.elapsed() < Duration::from_secs(120),
+            "the rule engine did not settle: no progress for 120s: cursor={cursor} last={last} pending={pending} ended={ended}"
+        );
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
-    panic!(
-        "the rule engine did not settle: {:?}",
-        engine_state(td).await
-    );
 }
 
 async fn put_rules(td: &TestDaemon, project: &str, text: &str) {

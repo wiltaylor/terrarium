@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Targets (docs/api.md §17): kind, scope, host, state, the lifecycle verbs,
 // the leases, and an exec console. A target is global, or one project owns
 // it (§17.2). `POST .../up|down|snapshot|restore|status` (§17.3), `POST
@@ -16,7 +17,7 @@ import { Terminal } from "../../components/Terminal";
 import { ConfirmButton, Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";
 import type { SnapshotScope, Target, TargetReport, TargetSnapshotList, TargetVerbBody } from "../../api/types";
 import type { TargetAction } from "../../api/client";
-import { agents, api, leases as holds, projects } from "../../stores";
+
 import { filterByScope, groupByScope, SCOPE_FILTERS, scopeLabel, type ScopeFilter } from "../../lib/target-scope";
 import { capError, capSentence, holderRows, instanceActions, labSource, sourceLabel, workspacePath, type CapError } from "../../lib/target-runtime";
 import { STATE_CHIP, targetActions } from "./actions";
@@ -38,6 +39,7 @@ const COLS = 7;
  * project in the sidebar; `?scope=project|global` sets the filter.
  */
 export default function TargetsPage() {
+  const { projects, api } = useInstance();
   const [search, setSearch] = useSearchParams<{ project?: string; all?: string; scope?: string }>();
   // A link from a project page: select the project, then keep the URL short.
   createEffect(() => {
@@ -358,6 +360,7 @@ function TargetRuntimePanel(props: {
   act: (id: string, a: TargetAction, body?: TargetVerbBody, who?: string) => void;
   onSnapshots: (agent: string, who: string) => void;
 }) {
+  const { leases: holds, agents } = useInstance();
   const holderIds = () =>
     Object.entries(holds.holds())
       .filter(([, byTarget]) => byTarget[props.target.name])
@@ -448,6 +451,7 @@ function TargetRuntimePanel(props: {
  * with `snapshot_before_task` sends `force`).
  */
 function TargetSnapshots(props: { target: Target; agent?: string; who?: string; onNotice: (s: string) => void; onChanged: () => void; onClose: () => void }) {
+  const { api } = useInstance();
   const scopes = () => snapshotScopes(props.target);
   const [scope, setScope] = createSignal<SnapshotScope>(scopes()[0]!);
   const [error, setError] = createSignal<unknown>(null);
@@ -608,6 +612,7 @@ function TargetSnapshots(props: { target: Target; agent?: string; who?: string; 
 
 /** The leases on one target (docs/api.md §17.7): the active ones, or the history; Grant, Extend, Revoke. */
 function TargetLeases(props: { target: Target; onNotice: (s: string) => void }) {
+  const { api, leases: holds } = useInstance();
   const list = useLeaseList({
     key: () => props.target.name,
     fetch: (name, all) => api.targets.leases(name, { all }),
@@ -653,6 +658,7 @@ function TargetLeases(props: { target: Target; onNotice: (s: string) => void }) 
 
 /** A login shell on the target: `POST .../exec {shell, pty}`, then the session WebSocket. Closing kills the run. */
 function ExecConsole(props: { target: string; onClose: () => void }) {
+  const { api } = useInstance();
   const [error, setError] = createSignal<unknown>(null);
   const [session] = createResource(
     () => props.target,

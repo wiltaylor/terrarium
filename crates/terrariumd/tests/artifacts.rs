@@ -160,6 +160,34 @@ fn header<'a>(r: &'a Raw, name: &str) -> &'a str {
 }
 
 #[tokio::test]
+async fn signed_url_resolves_project_and_checks_read_access() {
+    let td = setup().await;
+    upload(&td, "proj/w1", "own.txt", b"own").await;
+    td.post_as(
+        "other/x",
+        "/api/projects/other/artifacts",
+        json!({"name": "other.txt", "data_base64": b64(b"other")}),
+    )
+    .await
+    .ok();
+
+    let own = mint(&td, "ART-1", None).await;
+    assert_eq!(fetch(&td, &own).await.body, b"own");
+    td.post_empty_as("proj/w1", "/api/artifacts/other%2FART-1/url")
+        .await
+        .err(403, "forbidden");
+
+    td.put(
+        "/api/agents/proj%2Fw1/roles",
+        json!({"roles": ["sysadmin"]}),
+    )
+    .await
+    .ok();
+    let other = mint(&td, "other%2FART-1", None).await;
+    assert_eq!(fetch(&td, &other).await.body, b"other");
+}
+
+#[tokio::test]
 async fn upload_dedupe_sniff_and_serve_files() {
     let td = setup().await;
     let a = upload(&td, "proj/w1", "notes.txt", b"hello world").await;

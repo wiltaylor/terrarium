@@ -312,12 +312,28 @@ async fn review_owner_error_keeps_the_verdict_and_records_the_reason() {
 async fn dispatch_candidate_query_uses_only_indexed_searches() {
     let td = setup(2, 4, 20).await;
     enabled(&td).await;
-    card(&td, "small").await;
+    let first = card(&td, "small").await;
+    let second = card(&td, "impl").await;
+    state(&td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i + 1 FROM n WHERE i < 2048)
+            INSERT INTO conflict_fixes(job, card, project, template, task, done, retry_at)
+            SELECT 'job-' || i, CASE WHEN i % 2 = 0 THEN ?1 ELSE ?2 END,
+                'p', 'card-impl', 'repair', i % 3 = 0,
+                CASE WHEN i % 4 = 0 THEN unixepoch() + 3600 ELSE i % 16 END FROM n",
+                rusqlite::params![first, second],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let plan = state(&td)
         .db
         .read(|c| {
             let mut plan = Vec::new();
-            let queries: [(&str, &[&dyn rusqlite::ToSql]); 2] = [
+            let queries: [(&str, &[&dyn rusqlite::ToSql]); 3] = [
                 (
                     terrariumd::card_dispatcher::CANDIDATES,
                     rusqlite::params![
@@ -333,6 +349,7 @@ async fn dispatch_candidate_query_uses_only_indexed_searches() {
                     terrariumd::card_dispatcher::WORKING_WIP,
                     rusqlite::params!["p"],
                 ),
+                (terrariumd::conflict_fixes::PENDING, &[]),
             ];
             for (sql, params) in queries {
                 let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
@@ -343,8 +360,19 @@ async fn dispatch_candidate_query_uses_only_indexed_searches() {
         })
         .await
         .unwrap();
-    assert!(plan.iter().any(|s| s.contains("cards_column")), "{plan:?}");
+    assert!(
+        plan.iter().any(|s| s.contains("cards_dispatch_order")),
+        "{plan:?}"
+    );
     assert!(plan.iter().all(|s| !s.contains("SCAN")), "{plan:?}");
+    assert!(plan.iter().all(|s| !s.contains("TEMP B-TREE")), "{plan:?}");
+    for index in ["conflict_fixes_card_pending", "conflict_fixes_pending"] {
+        assert!(
+            plan.iter()
+                .any(|s| s.contains("SEARCH") && s.contains(index)),
+            "{index}: {plan:?}"
+        );
+    }
 }
 
 async fn ready_card(td: &TestDaemon, body: Value) -> String {

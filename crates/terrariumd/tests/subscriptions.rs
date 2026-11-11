@@ -92,6 +92,69 @@ async fn litellm_is_claude_only_and_keeps_the_key_private() {
 }
 
 #[tokio::test]
+async fn vertex_save_defaults_and_failed_test_leave_credentials_unchanged() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    let old = r#"{"type":"service_account","private_key":"E2E-old-vertex-key"}"#;
+    let response = td
+        .post(
+            "/api/subscriptions/vertex-setup/api-key",
+            json!({
+                "provider": "gcp", "key": old,
+                "cloud": {"project_id": "project-1", "models": {"opus": "custom-opus"}}
+            }),
+        )
+        .await;
+    let sub = response.ok();
+    assert_eq!(sub["cloud"]["region"], "us-east5");
+    assert_eq!(sub["cloud"]["models"]["opus"], "custom-opus");
+    assert_eq!(sub["cloud"]["models"]["sonnet"], "claude-sonnet-4-6");
+    assert_eq!(sub["cloud"]["models"]["haiku"], "claude-haiku-4-5@20251001");
+    assert!(!sub.to_string().contains("E2E-"));
+    let state_dir = td.daemon.as_ref().unwrap().state.state_dir.clone();
+    let path = terrariumd::login_session::key_path(&state_dir, "vertex-setup");
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("https://{}", listener.local_addr().unwrap());
+    for name in ["vertex-setup", "vertex-new"] {
+        let response = td.post(&format!("/api/subscriptions/{name}/api-key"), json!({
+            "provider": "gcp", "key": r#"{"type":"service_account","private_key":"E2E-new-vertex-key"}"#,
+            "test_connection": true, "cloud": {"project_id": "project-2", "base_url": endpoint}
+        })).await;
+        response.err(422, "invalid");
+        let text = response.body.to_string();
+        assert!(text.contains("Nothing was saved"), "{text}");
+        assert!(!text.contains("E2E-") && !text.contains(&endpoint));
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    }
+    let response = td.post("/api/subscriptions/vertex-setup/api-key", json!({
+        "provider": "gcp", "key": r#"{"type":"service_account","private_key":"E2E-new-vertex-key"}"#,
+        "test_connection": true, "cloud": {"project_id": "project-2"}
+    })).await;
+    response.err(422, "invalid");
+    assert!(
+        response
+            .body
+            .to_string()
+            .contains("client_email and private_key")
+    );
+    assert!(!response.body.to_string().contains("E2E-"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let saved = td.get("/api/subscriptions/vertex-setup").await;
+    assert_eq!(saved.ok()["cloud"]["project_id"], "project-1");
+    assert_eq!(saved.ok()["cloud"]["models"]["opus"], "custom-opus");
+    td.get("/api/subscriptions/vertex-new")
+        .await
+        .err(404, "not_found");
+    assert!(!terrariumd::login_session::key_path(&state_dir, "vertex-new").exists());
+}
+
+#[tokio::test]
 async fn bedrock_save_defaults_and_failed_test_leave_credentials_unchanged() {
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;
@@ -949,7 +1012,7 @@ async fn a_restart_ends_a_usage_limit_hold() {
 }
 
 /// A hold of an older version from a probe window at 100 percent (cause
-/// `quota:...`) ends at the start; a budget hold stays.
+/// `quota:...`) and budget holds end at the start. Vendor holds stay.
 #[tokio::test]
 async fn old_probe_holds_end_at_the_start() {
     let env = boot(
@@ -985,12 +1048,18 @@ async fn old_probe_holds_end_at_the_start() {
     terrariumd::quota_policy::hold(&state, &b, "budget:project:p", until, "budget")
         .await
         .unwrap();
+    terrariumd::quota_policy::hold(&state, &w, "cloud-budget:removed", None, "budget")
+        .await
+        .unwrap();
+    terrariumd::quota_policy::hold(&state, &b, "limit:anthropic-max", until, "vendor")
+        .await
+        .unwrap();
     td.wait_status(&w, "blocked").await;
 
     // The start.
-    assert_eq!(terrariumd::quota_policy::reapply(&state).await.unwrap(), 2);
+    assert_eq!(terrariumd::quota_policy::reapply(&state).await.unwrap(), 4);
     td.wait_status(&w, "idle").await;
-    assert_eq!(events_of(td, "quota.resumed").await.len(), 2);
+    assert_eq!(events_of(td, "quota.resumed").await.len(), 4);
     let holds = |id: String| async move {
         td.get_as(&id, "/api/usage/me").await.ok()["holds"]
             .as_array()
@@ -1000,7 +1069,7 @@ async fn old_probe_holds_end_at_the_start() {
             .collect::<Vec<_>>()
     };
     assert!(holds(w.clone()).await.is_empty());
-    assert_eq!(holds(b.clone()).await, ["budget:project:p"]);
+    assert_eq!(holds(b.clone()).await, ["limit:anthropic-max"]);
     td.wait_status(&b, "blocked").await;
     // A second start finds none.
     assert_eq!(terrariumd::quota_policy::reapply(&state).await.unwrap(), 0);
@@ -1369,7 +1438,7 @@ async fn collector_ends_a_copilot_compaction_before_the_first_prompt() {
 }
 
 #[tokio::test]
-async fn budgets_hold_a_project() {
+async fn budgets_mail_without_holding_a_project() {
     let env = boot(
         |c| write(c, "projects/p.toml", "[budget]\ntokens_per_day = 10\n"),
         |_, _| {},
@@ -1389,9 +1458,24 @@ async fn budgets_hold_a_project() {
         json!({"harness_session": "s", "transcript_path": file}),
     )
     .await;
-    td.wait_status(&id, "blocked").await;
-    let b = events_of(td, "quota.blocked").await;
-    assert_eq!(b[0]["data"]["cause"], "budget:project:p");
+    wait_for("the budget notices", || async {
+        events_of(td, "quota.alert").await.len() == 2
+    })
+    .await;
+    td.wait_status(&id, "idle").await;
+    assert!(events_of(td, "quota.blocked").await.is_empty());
+    assert_eq!(
+        td.get_as(&id, "/api/usage/me").await.ok()["holds"],
+        json!([])
+    );
+    let mail = td.get("/api/mail?to=operator").await;
+    assert!(mail.ok().as_array().unwrap().iter().any(|m| {
+        m["subject"].as_str().unwrap().starts_with("Budget:")
+            && m["body"]
+                .as_str()
+                .unwrap()
+                .contains("Agents keep their turns.")
+    }));
     let levels: Vec<Value> = events_of(td, "quota.alert")
         .await
         .iter()
@@ -3142,10 +3226,9 @@ async fn openai_compatible_rows_become_selfhosted() {
 
 /// TER-630: a cloud subscription with a monthly budget. The key endpoint
 /// stores the key and the `[cloud]` settings; the answer and the window
-/// have no secret. At 100 percent of the budget, the agents on it are held
-/// until the next month; a raised budget ends the hold at the next check.
+/// have no secret. At 100 percent the operator gets mail, not a hold.
 #[tokio::test]
-async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
+async fn a_used_up_cloud_budget_mails_without_holding_turns() {
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;
     td.project("p").await;
@@ -3193,7 +3276,7 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
     td.wait_status(&id, "idle").await;
 
-    // 12 USD of a 10 USD budget: used up, the turns wait.
+    // 12 USD of a 10 USD budget: used up, the turns continue.
     let state = td.daemon.as_ref().unwrap().state.clone();
     let month = terrarium_core::cloud::month_key(chrono::Utc::now());
     let (agent, m) = (id.clone(), month.clone());
@@ -3207,12 +3290,20 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     terrariumd::cloud_budget::check(&state, "aws")
         .await
         .unwrap();
-    td.wait_status(&id, "blocked").await;
+    td.wait_status(&id, "idle").await;
     let blocked = events_of(td, "quota.blocked").await;
-    assert_eq!(blocked.len(), 1, "{blocked:?}");
-    assert_eq!(blocked[0]["data"]["cause"], "cloud-budget:aws");
-    let until = blocked[0]["data"]["until"].as_str().unwrap();
-    assert!(until.ends_with("-01T00:00:00Z"), "{until}");
+    assert!(blocked.is_empty(), "{blocked:?}");
+    let alerts = events_of(td, "quota.alert").await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["data"]["level"], "exhausted");
+    let mail = td.get("/api/mail?to=operator").await;
+    assert!(mail.ok().as_array().unwrap().iter().any(|m| {
+        m["subject"] == "Quota: aws budget window is used up"
+            && m["body"]
+                .as_str()
+                .unwrap()
+                .contains("The agents keep their turns.")
+    }));
     let win = td.get("/api/subscriptions/aws").await.ok().clone();
     let budget = win["windows"]
         .as_array()
@@ -3230,9 +3321,10 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     terrariumd::cloud_budget::check(&state, "aws")
         .await
         .unwrap();
-    assert_eq!(events_of(td, "quota.blocked").await.len(), 1);
+    assert!(events_of(td, "quota.blocked").await.is_empty());
+    assert_eq!(events_of(td, "quota.alert").await.len(), 1);
 
-    // The operator raises the budget: the next check ends the hold.
+    // The operator can still raise the budget.
     td.put(
         "/api/subscriptions/aws/cloud",
         json!({"region": "us-east-1", "budget_usd": 50,
@@ -3285,10 +3377,7 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     terrariumd::cloud_budget::check(&state, "aws")
         .await
         .unwrap();
-    wait_for("the release", || async {
-        events_of(td, "quota.resumed").await.len() == 1
-    })
-    .await;
+    assert!(events_of(td, "quota.resumed").await.is_empty());
     td.wait_status(&id, "idle").await;
 }
 

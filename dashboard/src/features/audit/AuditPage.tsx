@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Audit tab of the Logs screen: who did what, newest first, with
 // filters by actor, action, and project. New rows come in on top from the
 // `audit` frames of the event stream (docs/api.md §9.1), in the live mode
@@ -10,10 +11,11 @@ import { SessionLink } from "../../components/SessionLink";
 import { Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";
 import type { AuditEntry, AuditQuery } from "../../api/types";
 import { ago } from "../../lib/format";
-import { agents, api, events, projects } from "../../stores";
+
 
 /** `agent:<ulid>` reads better as `project/name`. */
 export function actorName(actor: string): string {
+  const { agents } = useInstance();
   if (!actor.startsWith("agent:")) return actor;
   const a = agents.byId(actor.slice(6));
   return a ? `${a.project}/${a.name}` : actor;
@@ -44,6 +46,7 @@ export const auditMatches = (e: AuditEntry, q: Pick<AuditQuery, "actor" | "actio
   (!q.actor || e.actor === q.actor) && (!q.action || e.action === q.action) && (!q.project || e.project === q.project);
 
 export default function AuditPage() {
+  const { api, events, projects, agents } = useInstance();
   const [actor, setActor] = createSignal("");
   const [action, setAction] = createSignal("");
   const [project, setProject] = createSignal("");

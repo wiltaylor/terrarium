@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Events tab of the Logs screen: the event history in the live mode of
 // the log tabs (components/Live.tsx), with filters by kind and agent. `/logs/events` can show every project or
 // the selected one. `/p/:project/logs/events` shows the project of the URL
@@ -9,9 +10,10 @@ import { EventHistory } from "../../components/EventHistory";
 import { createLive, LiveControl } from "../../components/Live";
 import { PageHead } from "../../components/ui";
 import { EVENT_KINDS, type EventKind } from "../../api/types";
-import { agents, api, projects } from "../../stores";
+
 
 export default function EventsPage() {
+  const { projects, agents, api } = useInstance();
   const route = useParams<{ project?: string }>();
   const [kind, setKind] = createSignal<EventKind | "">("");
   const [scope, setScope] = createSignal<"all" | "project">("all");

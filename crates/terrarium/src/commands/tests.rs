@@ -2395,6 +2395,22 @@ async fn a_stale_wiki_edit_prints_the_diff() {
 }
 
 #[tokio::test]
+async fn artifact_url_uses_explicit_project() {
+    for args in [
+        vec!["-p", "other", "artifact", "url", "ART-1"],
+        vec!["artifact", "url", "ART-1", "-p", "other"],
+    ] {
+        ok(
+            true,
+            &args,
+            vec![(200, json!({"url": "http://a/other", "exp": 1}))],
+            vec![req(Post, "/api/artifacts/other%2FART-1/url")],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn artifacts_and_labels() {
     let dir = std::env::temp_dir().join(format!("terrarium-push-{}", ulid::Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();

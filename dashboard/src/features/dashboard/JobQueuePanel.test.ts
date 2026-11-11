@@ -9,7 +9,7 @@ import type { AgentEvent, JobStats } from "../../api/types";
 
 const stats = vi.fn();
 let listeners: ((e: AgentEvent) => void)[] = [];
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api: { jobs: { stats } },
   events: {
     on: (fn: (e: AgentEvent) => void) => {
@@ -17,7 +17,7 @@ vi.mock("../../stores", () => ({
       return () => (listeners = listeners.filter((l) => l !== fn));
     },
   },
-}));
+})); });
 
 const { JobQueuePanel, JOB_REFRESH_MS } = await import("./JobQueuePanel");
 

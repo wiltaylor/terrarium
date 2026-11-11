@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The linked cards of an Inbox thread on its page (TER-147, M1-M3): a mini
 // kanban, one row per project with that project's own board columns in board
 // order. A tile shows project:ID, the title, the assignee, the ETA, and the
@@ -7,17 +8,17 @@
 //
 // Card titles and names are untrusted: text nodes only.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Board, CardSummary as Card, Thread, ThreadCard } from "../../api/types";
 import { cardState } from "../../lib/cardState";
 import { countdown } from "../../lib/eta";
-import { api, events } from "../../stores";
+
 import { cardHref } from "./questions";
 import { cardProgress, kanbanRows, linkedProjects, progressChip } from "./trackedCards";
 
 /** The boards of `projects`; a board that does not load is absent (no read right, or an error). */
-export async function loadBoards(projects: readonly string[], links: readonly ThreadCard[] = []): Promise<Record<string, Board | undefined>> {
+export async function loadBoards(projects: readonly string[], links: readonly ThreadCard[] = [], api = useInstance().api): Promise<Record<string, Board | undefined>> {
   const got = await Promise.allSettled(projects.map((p) => api.board.get(p)));
   const out: Record<string, Board | undefined> = {};
   projects.forEach((p, i) => {
@@ -52,6 +53,7 @@ export function ProgressChip(props: { thread: Thread; boards: Record<string, Boa
 
 /** The mini kanban of the linked cards; nothing when the thread links no card. */
 export function TrackedCards(props: { thread: Thread; now: number }) {
+  const { events, api } = useInstance();
   const links = () => props.thread.cards ?? [];
   const projects = () => linkedProjects(links());
   const [boards, setBoards] = createSignal<Record<string, Board | undefined>>({});
@@ -61,7 +63,7 @@ export function TrackedCards(props: { thread: Thread; now: number }) {
     const mine = ++gen;
     const ps = projects();
     if (!ps.length) return;
-    const b = await loadBoards(ps, links());
+    const b = await loadBoards(ps, links(), api);
     if (mine !== gen) return;
     setBoards(b);
     setLoaded(true);

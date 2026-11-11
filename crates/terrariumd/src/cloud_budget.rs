@@ -9,12 +9,8 @@
 //! `month`. The quota notices ([`crate::quota_notices`]) mail the operator
 //! at `alert_at` (default 80), 90, and 100 percent, once each per month.
 //!
-//! At 100 percent, new turns of the agents on the subscription wait: a
-//! hold with the cause `cloud-budget:<subscription>` until the start of
-//! the next month ([`crate::quota_policy::hold`]). The hold ends at the
-//! month's roll-over ([`crate::quota_policy::release_expired`]), or at the
-//! next check after the operator raises (or removes) the budget. The
-//! collector checks after each new total, and the policy timer checks
+//! Budgets send mail only, including at 100 percent. The collector
+//! checks after each new total, and the policy timer checks
 //! every cloud subscription on each tick ([`check_all`]).
 
 use chrono::{DateTime, Utc};
@@ -27,15 +23,6 @@ use crate::db::Tx;
 use crate::error::ApiResult;
 use crate::store::cloud_spend;
 use crate::store::subscriptions::{self as subs, Subscription};
-use crate::store::usage as ustore;
-
-/// The cause prefix of a budget hold.
-pub const CAUSE_PREFIX: &str = "cloud-budget:";
-
-/// The hold cause of `subscription`.
-pub fn cause(subscription: &str) -> String {
-    format!("{CAUSE_PREFIX}{subscription}")
-}
 
 /// The spend of `sub` in the month of `now` against its budget. `None`
 /// when it is not a cloud subscription or has no budget.
@@ -106,58 +93,24 @@ pub fn write_window(
     Ok(Some(w))
 }
 
-/// Check the budget of subscription `name`: the window, the notices, and
-/// the hold of its agents at 100 percent (or the end of the hold under
-/// it).
+/// Check the budget of subscription `name`: the window and the notices.
 pub async fn check(state: &Shared, name: &str) -> ApiResult<()> {
     let now = Utc::now();
     let link = crate::quota_policy::subscriptions_link(&state.web);
     let key = name.to_owned();
-    let found = state
+    state
         .db
         .write("system", move |t| {
             let Some(sub) = subs::find(t, &key)? else {
-                return Ok(None);
+                return Ok(());
             };
             if sub.cloud_kind().is_none() {
-                return Ok(None);
+                return Ok(());
             }
-            let w = write_window(t, &sub, now, &link)?;
-            let agents = cloud_spend::agents_on(t, &key)?;
-            Ok(Some((w, agents)))
+            write_window(t, &sub, now, &link)?;
+            Ok(())
         })
-        .await?;
-    let Some((w, agents)) = found else {
-        return Ok(());
-    };
-    let cause = cause(name);
-    if w.is_some_and(|w| w.exhausted()) {
-        let until = cloud::next_month_start(now);
-        let reason = format!(
-            "the monthly budget of cloud subscription `{name}` is used up; raise `cloud.budget_usd` \
-             or wait for the next month"
-        );
-        for a in &agents {
-            crate::quota_policy::hold(state, a, &cause, Some(until), &reason).await?;
-        }
-        return Ok(());
-    }
-    // Under the budget (raised, removed, or a new month): end the holds.
-    let c = cause.clone();
-    let held: Vec<String> = state
-        .db
-        .read(move |conn| {
-            Ok(ustore::holds(conn)?
-                .into_iter()
-                .filter(|h| h.cause == c)
-                .map(|h| h.agent)
-                .collect())
-        })
-        .await?;
-    for a in held {
-        crate::quota_policy::release(state, &a, &cause).await?;
-    }
-    Ok(())
+        .await
 }
 
 /// Check every cloud subscription ([`check`]), after the prune of the
