@@ -20,6 +20,10 @@ try {
     page.on("pageerror", (error) => console.error(error.message));
     await page.addInitScript((theme) => localStorage.setItem("terrarium.theme", theme), theme);
     await page.goto(`${origin}/p/terrarium/board`);
+    // Only the public mock fixture, never a real daemon credential.
+    const password = await page.evaluate(async () => (await import("/src/api/mock/ws.ts")).MOCK_PASSWORD);
+    await page.locator('input[name="password"]').fill(password);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.locator('[data-card="TER-14"]').waitFor();
     await page.screenshot({ path: `${output}/board-${theme}.png`, fullPage: true });
     await page.locator('[data-card="TER-14"]').click();
