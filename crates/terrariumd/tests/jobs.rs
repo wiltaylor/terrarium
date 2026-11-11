@@ -1961,7 +1961,7 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
     if flow == "rules" {
         // The accepted card move can precede the recipe boundary's group
         // writes. Wait for that step to finish, not for the card or job row.
-        let deadline = Instant::now() + DEADLINE;
+        let mut progress = stall(Value::Null);
         let g = loop {
             let key = group_key.clone();
             let g = lab
@@ -1978,10 +1978,14 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
             if recipe.state == "done" {
                 break g;
             }
-            assert!(
-                Instant::now() < deadline,
-                "e2e recipe boundary did not finish: {recipe:?}"
-            );
+            if progress.due() {
+                let jobs = lab.jobs().await;
+                let mark = json!({"steps": g.steps, "jobs": jobs});
+                assert!(
+                    progress.moved(mark),
+                    "e2e recipe boundary did not finish ({progress}); group: {g:?}; jobs: {jobs:#?}"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
         let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
@@ -5193,10 +5197,17 @@ async fn the_next_job_recovers_a_damaged_daemon_repo() {
 #[tokio::test]
 async fn a_validation_passes_while_a_merge_runs() {
     let lab = lab(1).await;
+    let gate = lab._dirs.path().join("merge-gate");
+    // Hold merges until validation passes. A sleep only makes overlap
+    // likely and can expire before validation starts on a loaded host.
+    let recipe = format!(
+        "test -f OK && if [ \"$TERRARIUM_JOB_KIND\" = merge ]; then {}; fi",
+        common::gate_wait(&gate, 2 * DEADLINE)
+    );
     lab.td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "p-box", "recipe": "test -f OK && sleep 2", "slots": 1,
+            json!({"target": "p-box", "recipe": recipe, "slots": 1,
                    "next_repos": ["app"],
                    "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
         )
@@ -5241,6 +5252,28 @@ async fn a_validation_passes_while_a_merge_runs() {
     // The merges do not count against the one slot.
     assert_eq!(r.body["queue"]["position"], 1, "{}", r.body);
     assert_eq!(r.body["queue"]["running"], 0, "{}", r.body);
+    let mut progress = stall(Value::Null);
+    loop {
+        let jobs = lab.jobs().await;
+        let validation = jobs.iter().find(|j| j["card"] == cv).unwrap();
+        if validation["state"] == "passed" {
+            assert!(
+                jobs.iter().any(|j| j["card"] == cm1 && j["state"] == "running"),
+                "validation must pass beside the held merge: {jobs:#?}"
+            );
+            break;
+        }
+        assert!(
+            !matches!(validation["state"].as_str(), Some("failed" | "cancelled")),
+            "validation failed beside the held merge: {jobs:#?}"
+        );
+        if progress.due() {
+            let mark = json!(jobs.iter().map(|j| (&j["id"], &j["state"], &j["tail"])).collect::<Vec<_>>());
+            assert!(progress.moved(mark), "validation stalled ({progress}): {jobs:#?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    std::fs::write(&gate, "go").unwrap();
     let jobs = lab.until_idle().await;
     let of = |c: &str| jobs.iter().find(|j| j["card"] == c).unwrap().clone();
     let (m1, v, m2) = (of(&cm1), of(&cv), of(&cm2));
