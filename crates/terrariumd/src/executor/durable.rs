@@ -81,6 +81,9 @@ pub(super) fn start(
     let state = state.clone();
     let def = saved.def;
     tokio::spawn(async move {
+        // Keep the local SSH client's control owner alive. Capturing just
+        // raw.events would drop raw.ctl and pump_process would kill SSH.
+        let _transport_control = raw.ctl;
         let mut pending = Vec::new();
         let mut ended = false;
         loop {
