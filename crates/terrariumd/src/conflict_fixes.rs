@@ -26,7 +26,12 @@ pub fn enqueue(t: &mut crate::db::Tx<'_>, j: &crate::store::jobs::Job) -> ApiRes
     {
         return Ok(());
     }
-    let card = board::get_card(t, &j.card)?;
+    let card = match board::get_card(t, &j.card) {
+        Ok(card) if !card.archived => card,
+        Ok(_) => return Ok(()),
+        Err(error) if error.code == crate::error::Code::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
     let template =
         crate::card_dispatcher::template(&card.labels).unwrap_or_else(|| "card-impl".into());
     let task = format!(
