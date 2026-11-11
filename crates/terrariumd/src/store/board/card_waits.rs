@@ -270,6 +270,7 @@ fn act_inner(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiRe
         if let Some(to) = action.move_to {
             // check_move runs before writes, so a refusal leaves the move untouched.
             let checked = column(t, &row.project, &to).and_then(|destination| {
+                check_freeze(t, &row.project)?;
                 check_move(t, actor, &row, &destination, action.comment.as_deref())?;
                 Ok(destination)
             });
@@ -323,4 +324,45 @@ fn act_inner(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiRe
         )?;
     }
     Ok(true)
+}
+
+/// Calendar scopes are capped at MAX_EVENTS. Read only the two relevant scopes
+/// through the project index, including recurring events and their exceptions.
+fn check_freeze(conn: &Connection, project: &str) -> ApiResult<()> {
+    use crate::store::calendar;
+    let at = chrono::Utc::now();
+    for scope in [Some(project), None] {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM calendar_events WHERE project IS ?1 ORDER BY start_at, id LIMIT ?2",
+        )?;
+        let ids = stmt
+            .query_map(params![scope, calendar::MAX_EVENTS + 1], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if ids.len() > calendar::MAX_EVENTS {
+            return Err(ApiError::conflict(
+                "calendar freeze check exceeds event limit",
+            ));
+        }
+        for id in ids {
+            let event = calendar::get(conn, &id)?;
+            if event.kind != "freeze" {
+                continue;
+            }
+            let (occurrences, cut) =
+                calendar::expand(&[event], at, at + chrono::Duration::milliseconds(1));
+            if cut
+                || occurrences.iter().any(|o| {
+                    calendar::parse_utc(&o.start).is_some_and(|start| start <= at)
+                        && calendar::parse_utc(&o.end).is_some_and(|end| at < end)
+                })
+            {
+                return Err(ApiError::conflict(format!(
+                    "calendar freeze `{id}` prevents automatic move"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
