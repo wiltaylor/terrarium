@@ -2216,7 +2216,7 @@ async fn start_exec_secrets(
             .map(|(label, value)| (label.clone(), value.to_string()))
             .collect(),
     };
-    state.hosts.save_exec(&sess.id, &saved)?;
+    state.executor.hosts.save_exec(&sess.id, &saved)?;
     drop(secrets);
     workspace_sync::finish_with(&sess, sync);
     tokio::spawn(attach(run, sess.clone(), ctl, false, false));
