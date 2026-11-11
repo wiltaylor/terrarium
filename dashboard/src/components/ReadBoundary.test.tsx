@@ -8,7 +8,7 @@ const visit = vi.fn();
 vi.mock("../instance", () => ({ useInstance: () => ({ api: { readPositions: { visit } } }) }));
 const { firstUnread, ReadBoundary, useReadBoundary } = await import("./ReadBoundary");
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); document.body.innerHTML = ""; window.location.hash = ""; vi.restoreAllMocks(); visit.mockReset(); });
+afterEach(() => { dispose?.(); document.body.replaceChildren(); window.location.hash = ""; vi.restoreAllMocks(); visit.mockReset(); });
 
 it("compares timestamps, excluding an equal position and first visits", () => {
   expect(firstUnread(["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"], "2026-01-01T00:00:00.000Z")).toBe(1);
