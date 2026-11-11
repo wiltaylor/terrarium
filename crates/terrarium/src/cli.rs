@@ -465,6 +465,10 @@ pub enum ProjectCmd {
         /// Empty the GitHub author gate (operator only): no gate
         #[arg(long = "github-authors-clear", conflicts_with = "github_author")]
         github_authors_clear: bool,
+        /// Home board columns as a JSON object with in_progress, review,
+        /// accepted and blocked arrays of roles or column names
+        #[arg(long)]
+        home_board_columns: Option<String>,
     },
     /// Delete a project (sysadmin)
     Rm {

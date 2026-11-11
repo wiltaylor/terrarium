@@ -4889,6 +4889,68 @@ card position; at most 500. Each card is a card with more fields:
   Without that event, `updated_at` and the newest comment. The dashboard
   home lists them with `?columns=blocked`.
 
+### Home board and Needs attention (TER-689)
+
+The Home projections are separate from the legacy `/api/cards` list:
+
+| Method and path | Query | Response |
+|---|---|---|
+| `GET /api/home/cards` | `column=in_progress` (default), `review`, `accepted`, or `blocked` | A page of compact cards for that Home column |
+| `GET /api/home/monitors` | | A page of monitors whose latest result is `warn`, `crit`, or `unknown` |
+| `GET /api/home/pipelines` | | A page of pipelines whose newest run is `failed` |
+
+All three accept optional `project`, `limit` (1–100, default 100), and `cursor`.
+The operator, sysadmins and architects read across projects. Other agents read
+only their own project, including project admins. An explicit unreadable project
+returns `403`. These are the same read rights as the cross-project cards API.
+
+Each response is `{"items": [...], "next": "cursor-or-null"}`. Pages examine
+at most 100 indexed candidates, in ID order. Filtering can yield fewer items
+than `limit`, including zero. **Follow `next` even after an empty page**, until
+it is `null`. Cursors belong to the same endpoint, column and project filter.
+Concurrent changes are not a snapshot. Archived cards are excluded.
+
+Card items have `id`, `title`, `labels`, `project`, `column`, `home_column`,
+`assignee`, `assignee_name`, `assignee_status`, and `eta_at`. Nullable fields
+are `null` when unset. Labels include type labels unchanged. In the `blocked`
+Home column, `blocked_reason` is the first line of the card's newest move's
+comment, only when that move targets its current board column. Otherwise it is
+`null`, including cards created in blocked without a move. No earlier move or
+unrelated comment is used. This also applies to custom Home column selectors.
+The full card can be opened with
+`GET /api/cards/{id}`. No bodies or comment histories are loaded in this list.
+
+Monitor and pipeline items have `id`, `project`, `name`, `status`, and `link`
+(the project's dashboard or pipelines page). Monitors appear independently of
+dashboard layout membership. A monitor with no results is `unknown`. A pipeline
+with no runs is not failed. A later successful run removes an earlier failure
+from this list. Run ordering is the same as the pipeline runs API. A polling
+error alone is not a failed run.
+
+**Home board columns** is a project setting returned as `home_board_columns`.
+Project admins change it through `PATCH /api/projects/{name}`. File-managed
+projects retain the existing API edit restriction. The value replaces all four
+arrays. Empty arrays hide a Home column for that project. Selectors resolve by
+role first, then by case-insensitive column name. Missing columns are ignored.
+Legacy names `in_progress` and `In Progress` also match `working` when no working
+role or working-named column exists. Defaults, including for existing projects:
+
+```json
+{
+  "in_progress": ["working", "research"],
+  "review": ["review", "merge_queue"],
+  "accepted": ["accepted"],
+  "blocked": ["blocked"]
+}
+```
+
+Each array accepts at most 32 nonempty selectors, each at most 128 bytes.
+The CLI accepts the same object:
+
+```sh
+terrarium project set alpha --home-board-columns '{"in_progress":["working","research"],"review":["review","merge_queue"],"accepted":["accepted"],"blocked":["blocked"]}'
+```
+
 **Card patch.** Every field is optional:
 `title`, `body`, `labels`, `add_labels`, `remove_labels`, `repo`, `branch`,
 `depends_on`, `column`, `position`, `assignee`, `comment`, `eta_at`.
