@@ -1435,7 +1435,12 @@ pub enum CardCmd {
     /// Bodies use GitHub-flavored Markdown: tables for results, fenced blocks
     /// for output and code, and [label](url) links. Emoji are status marks only
     /// (pass, fail, warning, blocked) in card bodies and comments, nowhere else.
-    /// For quoted chat and email syntax, see docs/cli.md (Card Markdown).
+    /// Quote every line with >. Start chat with [!CHAT], then
+    /// **Author** · time · draft|sent|received and the message body.
+    /// Start email with [!EMAIL], then From:/To:/Subject:/Status: headers,
+    /// a blank line and a Markdown body. Separate emails with a quoted ---.
+    /// Status defaults to received. Use draft for unsent text.
+    /// See docs/cli.md (Card Markdown) for examples.
     New(Box<CardNewArgs>),
     /// Change a card
     Edit(Box<CardEditArgs>),
@@ -1540,7 +1545,12 @@ pub enum CardCmd {
     /// Use GitHub-flavored Markdown: tables for results, fenced blocks for
     /// output and code, and [label](url) links. Emoji are status marks only
     /// (pass, fail, warning, blocked) in card bodies and comments, nowhere else.
-    /// For quoted chat and email syntax, see docs/cli.md (Card Markdown).
+    /// Quote every line with >. Start chat with [!CHAT], then
+    /// **Author** · time · draft|sent|received and the message body.
+    /// Start email with [!EMAIL], then From:/To:/Subject:/Status: headers,
+    /// a blank line and a Markdown body. Separate emails with a quoted ---.
+    /// Status defaults to received. Use draft for unsent text.
+    /// See docs/cli.md (Card Markdown) for examples.
     Comment {
         id: String,
         /// Reply to this comment ID. Replies to human comments reach the Inbox.
