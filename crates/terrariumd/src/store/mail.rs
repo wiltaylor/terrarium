@@ -359,7 +359,7 @@ pub struct MailFilter {
 
 /// The durable, non-ephemeral admin responsible for a project inbox.
 /// Prefer the named lead, otherwise the oldest admin.
-fn inbox_recipient(conn: &Connection, project: &str) -> ApiResult<Option<Address>> {
+pub(crate) fn inbox_recipient(conn: &Connection, project: &str) -> ApiResult<Option<Address>> {
     Ok(conn
         .query_row(
             "SELECT id, name, project FROM agents a

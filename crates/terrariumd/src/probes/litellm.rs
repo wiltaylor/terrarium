@@ -10,6 +10,42 @@ use super::{Credentials, HttpRequest, ProbeError, QuotaProbe, QuotaWindow};
 pub const NAME: &str = "litellm-key-spend";
 const NO_SPEND: &str = "no spend from LiteLLM";
 
+/// HTTP is deliberately limited to literal private addresses. No DNS lookup
+/// or environment proxy may move an unencrypted credential to another host.
+pub fn check_base_url(base: &str) -> Result<(), String> {
+    let base = terrarium_core::selfhosted::check_http_url("base_url", base, false)?;
+    let url = reqwest::Url::parse(&base).map_err(|_| "invalid LiteLLM base URL")?;
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+    let private = match url.host() {
+        Some(url::Host::Ipv4(ip)) => private_ip(ip.into()),
+        Some(url::Host::Ipv6(ip)) => private_ip(ip.into()),
+        _ => {
+            return Err(
+                "LiteLLM HTTP needs a private literal IP address; hostnames require HTTPS".into(),
+            );
+        }
+    };
+    if private {
+        Ok(())
+    } else {
+        Err("LiteLLM HTTP needs a private network address; public and link-local addresses require HTTPS".into())
+    }
+}
+
+fn private_ip(ip: std::net::IpAddr) -> bool {
+    // Reuse the network address classification, but allow only D1's ranges.
+    // Mapped IPv6 is not one of those ranges.
+    if let std::net::IpAddr::V6(v6) = ip {
+        return v6.is_loopback() || v6.segments()[0] & 0xfe00 == 0xfc00;
+    }
+    matches!(
+        crate::webhooks::net::private_reason(ip),
+        Some("loopback" | "private (RFC 1918)" | "shared (CGNAT)" | "unique-local (ULA)")
+    )
+}
+
 pub struct LiteLlmKeySpend {
     url: String,
 }
@@ -22,9 +58,7 @@ impl LiteLlmKeySpend {
     pub fn new(base: &str) -> Result<Self, ProbeError> {
         let base = terrarium_core::selfhosted::check_http_url("base_url", base, false)
             .map_err(|_| unavailable())?;
-        if !base.starts_with("https://") {
-            return Err(unavailable());
-        }
+        check_base_url(&base).map_err(|_| unavailable())?;
         Ok(Self {
             url: format!("{}/key/info", base.trim_end_matches('/')),
         })
@@ -97,14 +131,15 @@ impl QuotaProbe for LiteLlmKeySpend {
     }
 }
 
-/// A separate client: no redirects, HTTPS only, and a 1 MiB response cap.
+/// A separate client: no redirects or proxies, and a 1 MiB response cap.
 pub async fn fetch(
     probe: &LiteLlmKeySpend,
     creds: &Credentials,
 ) -> Result<Vec<QuotaWindow>, ProbeError> {
     creds.check_fresh(Utc::now())?;
+    check_base_url(&probe.url).map_err(|_| unavailable())?;
     let client = reqwest::Client::builder()
-        .https_only(true)
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(20))
         .build()
@@ -132,6 +167,84 @@ pub async fn fetch(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_http_ranges_and_edges() {
+        for ip in [
+            "10.0.0.0",
+            "10.255.255.255",
+            "172.16.0.0",
+            "172.31.255.255",
+            "192.168.0.0",
+            "192.168.255.255",
+            "127.0.0.0",
+            "127.255.255.255",
+            "100.64.0.0",
+            "100.127.255.255",
+            "[::1]",
+            "[fc00::]",
+            "[fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]",
+        ] {
+            assert!(check_base_url(&format!("http://{ip}:8000")).is_ok(), "{ip}");
+        }
+        for ip in [
+            "9.255.255.255",
+            "11.0.0.0",
+            "172.15.255.255",
+            "172.32.0.0",
+            "192.167.255.255",
+            "192.169.0.0",
+            "126.255.255.255",
+            "128.0.0.0",
+            "100.63.255.255",
+            "100.128.0.0",
+            "169.254.1.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "[::]",
+            "[fbff::]",
+            "[fe00::]",
+            "[fe80::1]",
+            "[::ffff:127.0.0.1]",
+            "[64:ff9b::a00:1]",
+            "[2002:a00:1::]",
+            "private.lan",
+            "localhost",
+            "public.example",
+        ] {
+            assert!(check_base_url(&format!("http://{ip}")).is_err(), "{ip}");
+        }
+        assert!(check_base_url("https://public.example").is_ok());
+    }
+
+    #[tokio::test]
+    async fn probe_private_http() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let probe =
+            LiteLlmKeySpend::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let n = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..n]);
+            assert!(request.starts_with("GET /key/info "));
+            assert!(request.contains("Bearer test-key"));
+            let body = r#"{"info":{"spend":2,"max_budget":10}}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let windows = fetch(&probe, &Credentials::new("test-key")).await.unwrap();
+        assert_eq!(windows[0].used_pct, 20.0);
+        server.await.unwrap();
+    }
     #[test]
     fn budget_and_reset() {
         let p = LiteLlmKeySpend::new("https://proxy.example/prefix/").unwrap();

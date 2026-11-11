@@ -10,6 +10,7 @@ import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
 import { TextMarkdown } from "../../components/TextMarkdown";
+import { CardWaitDetails, WaitChip } from "./CardWait";
 import { EmojiPicker } from "../../components/EmojiPicker";
 import type { Card, CardSummary, Column, NewCard, Question } from "../../api/types";
 import { ago, compact } from "../../lib/format";
@@ -535,7 +536,8 @@ function KCard(props: {
               </span>
             )}
           </Show>
-          <Show when={(props.card.blocked_by ?? []).length}>
+          <WaitChip wait={props.card.wait} />
+          <Show when={!props.card.wait && (props.card.blocked_by ?? []).length}>
             <span class="chip warn" title={`Waiting on ${props.card.blocked_by.join(", ")}`}>
               waits on {props.card.blocked_by.length}
             </span>
@@ -899,8 +901,8 @@ function CardDrawer(props: {
         <dd>{props.card.labels.join(", ") || "—"}</dd>
         <dt>Depends on</dt>
         <dd>
-          {props.card.depends_on.join(", ") || "—"}
-          <Show when={(props.card.blocked_by ?? []).length}>
+          {props.card.wait ? "See wait conditions below" : props.card.depends_on.join(", ") || "—"}
+          <Show when={!props.card.wait && (props.card.blocked_by ?? []).length}>
             {" "}
             <span class="chip warn">not done: {props.card.blocked_by.join(", ")}</span>
           </Show>
@@ -972,6 +974,7 @@ function CardDrawer(props: {
         </Show>
       </dl>
 
+      <CardWaitDetails wait={props.card.wait} project={props.card.project} />
       <CardFiles card={props.card} />
 
       <CardQuestions card={props.card} linkable={props.linkable} onChanged={() => props.onQuestionsChanged()} />

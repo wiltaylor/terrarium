@@ -1766,7 +1766,18 @@ export interface CardFileUploaded extends CardFile {
   outcome: "added" | "replaced" | "unchanged";
 }
 
+/** Reader-filtered wait state supplied by the daemon, never inferred from the board. */
+export interface CardWait {
+  dependencies: { card: string | null; target?: string; met: boolean; hidden: boolean }[];
+  mode: "all" | "any";
+  action: { move_to?: string | null; comment?: string | null; wake: boolean };
+  met_at?: string | null;
+  generation?: string;
+  wake_recipient?: string | null;
+}
+
 export interface Card {
+  wait?: CardWait | null;
   kind?: "card" | "group";
   group?: BoardGroup;
   id: string;
@@ -1911,7 +1922,16 @@ export interface ActiveCard extends Card {
 }
 
 /** List-only card. Fetch cards.get(id) before displaying or editing details. */
-export type CardSummary = Omit<Card, "body" | "comments" | "links"> & {
+export interface CardWaitSummary {
+  mode: "all" | "any";
+  met: boolean;
+  deps_met: number;
+  deps_total: number;
+}
+
+export type CardSummary = Omit<Card, "body" | "comments" | "links" | "wait"> & {
+  /** Board reads are compact. The board store also merges full card mutation responses. */
+  wait?: CardWaitSummary | CardWait | null;
   comment_count?: number;
   last_comment_at?: string | null;
 };
