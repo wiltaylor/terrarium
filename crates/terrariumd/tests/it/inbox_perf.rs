@@ -5,6 +5,85 @@ use rusqlite::params;
 use std::time::{Duration, Instant};
 
 #[tokio::test]
+async fn done_and_all_pages_cover_questions_and_notices_without_hydrating_the_tail() {
+    use terrariumd::store::inbox::{self, Filter, Status};
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let agent = td.agent("p", "lead", serde_json::json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let db = &td.daemon.as_ref().unwrap().state.db;
+    db.write("test", move |t| {
+        for i in 0..51 {
+            let kind = if i % 2 == 0 { "question" } else { "notice" };
+            let status = if i < 10 { "open" } else if kind == "notice" { "acknowledged" } else { "answered" };
+            t.execute("INSERT INTO questions (id,agent,project,text,thread_id,created_at,updated_at,kind,status,priority,answer_option)
+                VALUES (?1,?2,'p','Body',?1,'a','a',?3,?4,?5,?6)",
+                params![format!("filtered-{i:03}"), agent, kind, status,
+                    if i % 3 == 0 { "critical" } else { "normal" },
+                    if i == 10 { Some("unselected sentinel") } else { None }])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    db.read(|c| {
+        for status in [Status::Done, Status::All] {
+            let f = Filter {
+                status,
+                project: Some("p".into()),
+                ..Filter::default()
+            };
+            // The malformed field on the last done row must not be hydrated.
+            assert_eq!(inbox::page(c, &f, None, 7)?.len(), 7);
+        }
+        c.execute(
+            "UPDATE questions SET answer_option = NULL WHERE id = 'filtered-010'",
+            [],
+        )?;
+        for status in [Status::Done, Status::All] {
+            let f = Filter {
+                status,
+                project: Some("p".into()),
+                ..Filter::default()
+            };
+            let mut cursor = None;
+            let mut ids = std::collections::HashSet::new();
+            let mut saw_done = false;
+            loop {
+                let rows = inbox::page(c, &f, cursor.as_deref(), 7)?;
+                if rows.is_empty() {
+                    break;
+                }
+                assert!(rows.len() <= 7);
+                for row in &rows {
+                    assert!(ids.insert(row.id.clone()), "duplicate {}", row.id);
+                    if !row.open {
+                        saw_done = true;
+                    }
+                    assert!(!saw_done || !row.open);
+                    assert!(row.question.is_some());
+                }
+                let last = rows.last().unwrap();
+                cursor = Some(
+                    serde_json::to_string(&(
+                        last.open,
+                        last.critical,
+                        last.urgent,
+                        &last.at,
+                        &last.id,
+                    ))
+                    .unwrap(),
+                );
+            }
+            assert_eq!(ids.len(), if status == Status::Done { 41 } else { 51 });
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn default_inbox_pages_do_not_hydrate_excluded_or_unselected_questions() {
     let td = TestDaemon::start().await;
     td.project("p").await;

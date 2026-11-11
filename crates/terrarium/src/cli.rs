@@ -3101,7 +3101,7 @@ pub enum AdminQuestionCmd {
 #[derive(Debug, Subcommand)]
 pub enum AdminInboxCmd {
     /// The open items: questions, notices, mail to you, and paused threads,
-    /// urgent first (the project with `-p`)
+    /// urgent first (the project with `-p`). Shows at most 200 items.
     Ls {
         /// The open and the done items
         #[arg(long, conflicts_with = "done")]
@@ -4361,6 +4361,13 @@ pub enum AdminTargetCmd {
         name: String,
         /// `up`, `down`, `snapshot`, `restore`, `status`, or `recreate`
         verb: String,
+        /// Operator only: recreate even with a running container or live sessions
+        #[arg(long)]
+        force: bool,
+        /// Operator only: exact volume name whose attachment recreation may drop.
+        /// Repeat for each volume. Volume data is not deleted.
+        #[arg(long)]
+        discard_volumes: Vec<String>,
         /// The snapshot name for `snapshot` and `restore`
         #[arg(long)]
         snapshot: Option<String>,

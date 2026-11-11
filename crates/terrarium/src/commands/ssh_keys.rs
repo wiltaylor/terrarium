@@ -95,6 +95,12 @@ pub async fn show(ctx: &Ctx, name: &str) -> anyhow::Result<()> {
         }
         rows.push(("source", field(t, "source")));
         rows.push(("state", field(t, "state")));
+        if t["runtime"]["recreate_required"] == true {
+            rows.push(("recreate", "pending".to_owned()));
+            if let Some(note) = t["recreate_note"].as_str() {
+                rows.push(("warning", note.to_owned()));
+            }
+        }
         let li = &t["limits_info"];
         if let Some(sum) = li["summary"].as_str() {
             let per = match li["per"].as_str() {

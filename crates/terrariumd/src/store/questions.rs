@@ -399,11 +399,6 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
     list_with_limit(conn, f, LIST_MAX as i64)
 }
 
-/// Inbox pagination applies its limit after merging all kinds by urgency.
-pub fn list_inbox(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
-    list_with_limit(conn, f, -1)
-}
-
 fn list_with_limit(conn: &Connection, f: &Filter, limit: i64) -> ApiResult<Vec<Question>> {
     let (sql, args) = list_query(f, limit);
     let mut st = conn.prepare(&sql)?;

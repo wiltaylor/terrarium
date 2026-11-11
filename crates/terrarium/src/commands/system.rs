@@ -251,6 +251,7 @@ const TARGET_COLS: &[(&str, &str)] = &[
     ("HOST", "host"),
     ("ADDRESS", "address"),
     ("STATE", "state"),
+    ("RECREATE", "recreate_pending"),
     ("ONLINE", "online"),
     ("KEY", "key"),
 ];
@@ -294,6 +295,7 @@ const AGENT_TARGET_COLS: &[(&str, &str)] = &[
     ("SCOPE", "scope"),
     ("HOST", "host"),
     ("STATE", "state"),
+    ("RECREATE", "recreate_pending"),
     ("ONLINE", "online"),
     ("ACCESS", "access"),
     ("EXCLUSIVE", "exclusive"),
@@ -354,7 +356,7 @@ pub async fn targets(ctx: &Ctx) -> anyhow::Result<()> {
     let v = Value::Array(items);
     let agent = ctx.is_agent();
     ctx.emit(&v, |c, v| {
-        let rows = with_online(as_items(v));
+        let rows = with_recreate_pending(with_online(as_items(v)));
         if agent {
             print_table(c, &with_access(rows), AGENT_TARGET_COLS, "no targets");
         } else {
@@ -378,9 +380,24 @@ pub async fn admin_targets(ctx: &Ctx) -> anyhow::Result<()> {
     let items = ctx.api.list(&path, vec![], None).await?;
     let v = Value::Array(items);
     ctx.emit(&v, |c, v| {
-        let rows = with_access(with_online(as_items(v)));
+        let rows = with_access(with_recreate_pending(with_online(as_items(v))));
         print_table(c, &rows, AGENT_TARGET_COLS, "no targets");
     })
+}
+
+fn with_recreate_pending(items: Vec<Value>) -> Vec<Value> {
+    items
+        .into_iter()
+        .map(|mut t| {
+            t["recreate_pending"] = if t["runtime"]["recreate_required"] == true {
+                "pending"
+            } else {
+                "-"
+            }
+            .into();
+            t
+        })
+        .collect()
 }
 
 const LEASE_COLS: &[(&str, &str)] = &[
@@ -721,7 +738,14 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             verb,
             snapshot,
             agent,
+            force,
+            discard_volumes,
         } => {
+            if (*force || !discard_volumes.is_empty()) && verb != "recreate" {
+                return Err(crate::api::CliError::usage(
+                    "--force and --discard-volumes require recreate",
+                ));
+            }
             if !["up", "down", "snapshot", "restore", "status", "recreate"].contains(&verb.as_str())
             {
                 return Err(crate::api::CliError::usage(format!(
@@ -732,6 +756,12 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             let mut body = json!({});
             set_opt(&mut body, "name", snapshot.clone());
             set_opt(&mut body, "agent", agent.clone());
+            if *force {
+                body["force"] = true.into();
+            }
+            if !discard_volumes.is_empty() {
+                body["discard_volumes"] = json!(discard_volumes);
+            }
             let body = (body != json!({})).then_some(body);
             let v = ctx.api.post(&path, body).await?;
             ctx.emit(&v, |c, v| {
