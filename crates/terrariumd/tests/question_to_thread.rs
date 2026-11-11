@@ -30,7 +30,11 @@ async fn lab() -> Lab {
 }
 
 impl Lab {
-    async fn ask(&self, body: Value) -> Value {
+    async fn ask(&self, mut body: Value) -> Value {
+        if body.get("card").is_none() && body.get("thread").is_none() {
+            body["card"] = self.td.post("/api/projects/p/cards",
+                json!({"title": "Decision"})).await.ok()["id"].clone();
+        }
         let r = self
             .td
             .post_as(

@@ -178,9 +178,19 @@ async fn show(
     let card = state.db.read(move |c| board::get_card(c, &id)).await?;
     policy::read_project(&actor, &card.project)?;
     let id = card.id.clone();
-    let questions = state.db.read(move |c| crate::store::questions::list(c,
-        &crate::store::questions::Filter { card: Some(id), ..Default::default() }
-    )).await?;
+    let mut questions = state
+        .db
+        .read(move |c| {
+            crate::store::questions::list(
+                c,
+                &crate::store::questions::Filter {
+                    card: Some(id),
+                    ..Default::default()
+                },
+            )
+        })
+        .await?;
+    questions.retain(|q| policy::read_questions(&actor, &q.agent, &q.project).is_ok());
     let mut result = serde_json::json!(card);
     result["questions"] = serde_json::json!(questions);
     Ok(Json(result))

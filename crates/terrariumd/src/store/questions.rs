@@ -1522,7 +1522,10 @@ fn answer_comment(t: &mut Tx<'_>, q: &Question, by: &mail::Address) -> ApiResult
         } else {
             format!(
                 "{} answered question {}: {}\n\n{}",
-                by.display(), q.id, q.text, q.answer.as_deref().unwrap_or_default()
+                by.display(),
+                q.id,
+                q.text,
+                q.answer.as_deref().unwrap_or_default()
             )
         };
         crate::store::board::system_comment(t, card, &body, None)?;

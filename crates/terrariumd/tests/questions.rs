@@ -60,13 +60,17 @@ async fn setup() -> World {
 async fn ask(td: &TestDaemon, agent: &str, mut body: Value) -> Value {
     // Independent decisions need independent work cards. Tests of missing
     // context use the API directly, not this successful-creation helper.
-    if body.get("card").is_none() && body.get("thread").is_none()
-        && body["kind"] != "notice"
-    {
+    if body.get("card").is_none() && body.get("thread").is_none() && body["kind"] != "notice" {
         let project = td.get(&format!("/api/agents/{agent}")).await.ok()["project"]
-            .as_str().unwrap().to_owned();
-        let card = td.post(&format!("/api/projects/{project}/cards"),
-            json!({"title": "Question decision"})).await;
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let card = td
+            .post(
+                &format!("/api/projects/{project}/cards"),
+                json!({"title": "Question decision"}),
+            )
+            .await;
         body["card"] = card.ok()["id"].clone();
     }
     let r = td
@@ -88,21 +92,41 @@ async fn questions_require_work_context_and_save_answers_on_the_card() {
             }
             let r = td.post_as(&lead, &path, body).await;
             r.err(422, "invalid");
-            assert!(r.body["error"]["message"].as_str().unwrap().contains("--card"));
+            assert!(
+                r.body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("--card")
+            );
         }
     }
-    let card = id(td.post("/api/projects/p/cards", json!({"title": "Decision"})).await.ok());
+    let card = id(td
+        .post("/api/projects/p/cards", json!({"title": "Decision"}))
+        .await
+        .ok());
     let q = ask(&td, &lead, json!({"text": "Proceed?", "card": card})).await;
     let qid = id(&q);
     let shown = td.get(&format!("/api/cards/{card}")).await;
     assert_eq!(shown.body["questions"][0]["id"], qid);
-    td.post(&format!("/api/questions/{qid}/answer"), json!({"answer": "Proceed"})).await.ok();
+    td.post(
+        &format!("/api/questions/{qid}/answer"),
+        json!({"answer": "Proceed"}),
+    )
+    .await
+    .ok();
     let shown = td.get(&format!("/api/cards/{card}")).await;
     assert_eq!(shown.body["questions"][0]["status"], "answered");
     let comments = shown.body["comments"].as_array().unwrap();
     assert_eq!(comments.len(), 1);
     assert!(comments[0]["body"].as_str().unwrap().contains("Proceed"));
-    assert!(td.get("/api/questions?status=open").await.ok().as_array().unwrap().is_empty());
+    assert!(
+        td.get("/api/questions?status=open")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -223,7 +247,7 @@ async fn inbox_noise_updates_and_operator_mail_replies() {
         assert_eq!(r.body["error"]["details"]["question"], first["id"]);
         let unchanged = td.get(&path).await;
         assert_eq!(unchanged.body["revision"], 1);
-        assert_eq!(unchanged.body["card"], Value::Null);
+        assert_eq!(unchanged.body["card"], second["card"]);
         assert_eq!(unchanged.body["text"], "Second?");
     }
     td.patch_as(&lead, &path, json!({"text": "Valid follow-up?"}))
@@ -484,7 +508,7 @@ async fn limits_updates_and_retracts() {
     let qid = id(&q);
     // The same question again: a conflict that names the open one.
     let r = td
-        .post_as(&lead, &path, json!({"text": "use postgres?"}))
+        .post_as(&lead, &path, json!({"text": "use postgres?", "card": q["card"]}))
         .await;
     r.err(409, "conflict");
     assert_eq!(r.body["error"]["details"]["question"], qid.as_str());
@@ -619,7 +643,7 @@ async fn at_most_fifty_open_questions() {
         .post_as(
             &lead,
             &format!("/api/agents/{lead}/questions"),
-            json!({"text": "one more"}),
+            json!({"text": "one more", "card": "P-1"}),
         )
         .await;
     r.err(429, "rate_limited");
@@ -912,7 +936,7 @@ async fn a_bundle_is_asked_with_its_items_and_checked() {
     td.post_as(
         &lead,
         &path,
-        json!({"kind": "bundle", "text": "release plan for v0.3", "items": items(2)}),
+        json!({"kind": "bundle", "text": "release plan for v0.3", "items": items(2), "card": q["card"]}),
     )
     .await
     .err(409, "conflict");

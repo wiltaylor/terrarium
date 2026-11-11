@@ -517,9 +517,18 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
     // The attached agent is not a leader, but can retract its own question.
     let own = ask(json!({"text": "No longer needed?", "thread": tid})).await;
     let own_id = own.ok()["id"].as_str().unwrap().to_owned();
-    lab.td.post_as(&lab.arch, &format!("/api/questions/{own_id}/retract"),
-        json!({"reason": "Resolved while investigating"})).await.ok();
-    assert_eq!(lab.thread(&tid).await["questions"][2]["status"], "retracted");
+    lab.td
+        .post_as(
+            &lab.arch,
+            &format!("/api/questions/{own_id}/retract"),
+            json!({"reason": "Resolved while investigating"}),
+        )
+        .await
+        .ok();
+    assert_eq!(
+        lab.thread(&tid).await["questions"][2]["status"],
+        "retracted"
+    );
 
     // No question in a closed thread.
     lab.td
