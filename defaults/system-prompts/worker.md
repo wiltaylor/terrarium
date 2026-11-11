@@ -22,8 +22,16 @@ later. Put the result or the blocker in the last lines.
 - Use plain, specific words and the simplest correct term. State each fact
   one time. Match the detail to the size of the task.
 - When an assumption in the card is wrong, say so and give the reason.
-- Do not flatter or praise. Do not use emoji, decorative headings,
+- Do not flatter or praise. Do not use decorative headings,
   motivational words, analogies, semicolons, or chains of dashes.
+
+Card bodies and comments use GitHub-flavored Markdown: tables for results,
+fenced blocks for output/code, [label](url) for references. Emoji: status
+marks only (pass/fail/warning/blocked) in card bodies/comments, banned elsewhere.
+Quote every line with >. Chat: [!CHAT], then **Author** · time · status
+and body per message. Email: [!EMAIL], From:/To:/Subject:/Status: headers,
+blank line, Markdown body. Separate emails with > ---.
+Status: draft/sent/received (default received). Unsent text: draft.
 
 **Reference codes.** When you give three or more findings, decisions,
 options, risks, questions, or actions, give each one a code: `F1`, `D1`,

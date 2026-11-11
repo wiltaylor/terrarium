@@ -1431,6 +1431,16 @@ pub enum CardCmd {
     /// Body, comments, links, and dependencies
     Show { id: String },
     /// Create a card
+    ///
+    /// Bodies use GitHub-flavored Markdown: tables for results, fenced blocks
+    /// for output and code, and [label](url) links. Emoji are status marks only
+    /// (pass, fail, warning, blocked) in card bodies and comments, nowhere else.
+    /// Quote every line with >. Start chat with [!CHAT], then
+    /// **Author** · time · draft|sent|received and the message body.
+    /// Start email with [!EMAIL], then From:/To:/Subject:/Status: headers,
+    /// a blank line and a Markdown body. Separate emails with a quoted ---.
+    /// Status defaults to received. Use draft for unsent text.
+    /// See docs/cli.md (Card Markdown) for examples.
     New(Box<CardNewArgs>),
     /// Change a card
     Edit(Box<CardEditArgs>),
@@ -1531,6 +1541,16 @@ pub enum CardCmd {
     /// Assign a card: an agent, `operator`, `me`, or `none`
     Assign { id: String, agent: String },
     /// Comment on a card: `card comment <id> <text>`, `-b <text>`, or `-m <text>`
+    ///
+    /// Use GitHub-flavored Markdown: tables for results, fenced blocks for
+    /// output and code, and [label](url) links. Emoji are status marks only
+    /// (pass, fail, warning, blocked) in card bodies and comments, nowhere else.
+    /// Quote every line with >. Start chat with [!CHAT], then
+    /// **Author** · time · draft|sent|received and the message body.
+    /// Start email with [!EMAIL], then From:/To:/Subject:/Status: headers,
+    /// a blank line and a Markdown body. Separate emails with a quoted ---.
+    /// Status defaults to received. Use draft for unsent text.
+    /// See docs/cli.md (Card Markdown) for examples.
     Comment {
         id: String,
         /// Reply to this comment ID. Replies to human comments reach the Inbox.
@@ -1639,7 +1659,7 @@ pub enum CardFilesCmd {
 pub struct CardNewArgs {
     /// The title. `--from-mail` can give it.
     pub title: Option<String>,
-    /// The body, or `-` for stdin
+    /// The GitHub-flavored Markdown body, or `-` for stdin
     #[arg(long, short = 'b', allow_hyphen_values = true)]
     pub body: Option<String>,
     #[arg(long, short = 'c')]

@@ -97,4 +97,12 @@ Do not `sleep` for more than 60 seconds.
 Your text shows in a terminal as GitHub Markdown. Write short paragraphs
 and lists. Put paths, commands, and identifiers in code spans. Link a file
 as `[app.py](/abs/path/app.py:12)`. Do not use `file://` links or line
-ranges. Do not use emoji.
+ranges.
+
+Card bodies and comments use GitHub-flavored Markdown: tables for results,
+fenced blocks for output/code, [label](url) for references. Emoji: status
+marks only (pass/fail/warning/blocked) in card bodies/comments, banned elsewhere.
+Quote every line with >. Chat: [!CHAT], then **Author** · time · status
+and body per message. Email: [!EMAIL], From:/To:/Subject:/Status: headers,
+blank line, Markdown body. Separate emails with > ---.
+Status: draft/sent/received (default received). Unsent text: draft.
