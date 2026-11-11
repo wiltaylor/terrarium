@@ -73,7 +73,7 @@ async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
         .post_as(&lead, &path, json!({"kind": "notice", "text": "Progress"}))
         .await;
     r.err(422, "invalid");
-    for flag in ["--card", "--reply-to", "--urgent"] {
+    for flag in ["--card", "--critical", "thread post"] {
         assert!(r.body["error"]["message"].as_str().unwrap().contains(flag));
     }
     let card = id(td
@@ -86,7 +86,13 @@ async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
         json!({"kind": "notice", "text": "Done", "card": card}),
     )
     .await;
-    for priority in ["urgent", "critical"] {
+    for body in [
+        json!({"kind": "notice", "text": "Urgent", "priority": "urgent"}),
+        json!({"kind": "notice", "text": "Reply", "reply_to": "missing"}),
+    ] {
+        td.post_as(&lead, &path, body).await.err(422, "invalid");
+    }
+    for priority in ["critical"] {
         ask(
             &td,
             &lead,
@@ -133,7 +139,7 @@ async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
     ask(
         &td,
         &lead,
-        json!({"kind": "notice", "text": "Your answer", "reply_to": qid}),
+        json!({"kind": "notice", "text": "Your answer", "reply_to": qid, "card": card}),
     )
     .await;
     td.post_as(
@@ -207,7 +213,7 @@ async fn inbox_noise_updates_and_operator_mail_replies() {
     ] {
         td.patch_as(&lead, &path, patch).await.err(422, "invalid");
     }
-    td.patch_as(&lead, &path, json!({"card": null, "priority": "urgent"}))
+    td.patch_as(&lead, &path, json!({"card": null, "priority": "critical"}))
         .await
         .ok();
     td.patch_as(&lead, &path, json!({"priority": "normal"}))
@@ -224,7 +230,7 @@ async fn inbox_noise_updates_and_operator_mail_replies() {
     let reply = ask(
         &td,
         &lead,
-        json!({"kind": "notice", "text": "Answer to your mail", "reply_to": mid}),
+        json!({"kind": "notice", "text": "Answer to your mail", "reply_to": mid, "card": card}),
     )
     .await;
     td.patch_as(

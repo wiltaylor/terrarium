@@ -554,7 +554,10 @@ pub fn on_thread_mail(
 }
 
 fn wants(f: &Filter, kind: InboxKind) -> bool {
-    f.kind.is_none_or(|k| k == kind)
+    f.kind.map_or(
+        f.status != Status::Open || matches!(kind, InboxKind::Question | InboxKind::Notice),
+        |k| k == kind,
+    )
 }
 
 fn in_project(f: &Filter, item: &InboxItem) -> bool {
@@ -595,6 +598,11 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
     Ok(out
         .into_iter()
         .filter(|q| q.thread.is_none())
+        .filter(|q| {
+            f.kind.is_some() || f.status != Status::Open
+                || (q.status == QuestionStatus::Open
+                    && (q.kind != QuestionKind::Notice || q.priority == Priority::Critical))
+        })
         .map(question_item)
         .collect())
 }
@@ -788,7 +796,7 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
     let r = questions::inbox_open_total(conn, project, Some(QuestionKind::ToolRun))?;
     let n = questions::inbox_open_total(conn, project, Some(QuestionKind::Notice))?;
     // A bundle counts once, as a question; so does a tool run approval.
-    let (question, notice) = (q.open + b.open + r.open, n.open);
+    let (question, notice) = (q.open + b.open + r.open, n.critical);
     let f = Filter {
         status: Status::Open,
         kind: None,
@@ -808,8 +816,8 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
         .count();
     let (thread, thread_urgent, thread_critical) = threads::inbox_counts(conn, project)?;
     Ok(Counts {
-        open: question + notice + mail + system,
-        urgent: q.urgent + b.urgent + r.urgent + n.urgent,
+        open: question + n.critical,
+        urgent: q.urgent + b.urgent + r.urgent + n.critical,
         critical: q.critical + b.critical + r.critical + n.critical,
         question,
         notice,

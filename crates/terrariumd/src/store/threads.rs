@@ -1036,7 +1036,18 @@ pub fn open(t: &mut Tx<'_>, n: NewThread) -> ApiResult<Thread> {
         .transpose()?
         .map(|s| t.redact_string(s));
     let topic = t.redact_string(topic);
-    let status = if n.opened_by == "operator" && text.is_some() {
+    let status = if template.as_deref() == Some("versions") {
+        let exists: bool = t.query_row(
+            "SELECT EXISTS(SELECT 1 FROM threads WHERE scope = ?1
+             AND template = 'versions' AND status <> 'closed')",
+            [&scope],
+            |r| r.get(0),
+        )?;
+        if exists {
+            return Err(ApiError::conflict("the project already has a Versions thread"));
+        }
+        ThreadStatus::Tracking
+    } else if n.opened_by == "operator" && text.is_some() {
         ThreadStatus::WaitingAgent
     } else {
         ThreadStatus::WaitingOperator
@@ -1072,6 +1083,37 @@ pub fn open(t: &mut Tx<'_>, n: NewThread) -> ApiResult<Thread> {
     )?;
     emit(t, &th, "opened")?;
     Ok(th)
+}
+
+/// One standing project thread for quiet version updates. Posting in tracking
+/// keeps the update off the Threads badge, without hiding its history.
+pub fn version_post(t: &mut Tx<'_>, project: &str, text: &str) -> ApiResult<Thread> {
+    let lead = lead_of(t, project)?
+        .ok_or_else(|| ApiError::conflict("a version thread needs a project lead"))?;
+    let existing: Option<String> = t
+        .query_row(
+            "SELECT id FROM threads WHERE scope = ?1 AND template = 'versions'
+             AND status <> 'closed' ORDER BY created_at, id LIMIT 1",
+            [project],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let id = match existing {
+        Some(id) => id,
+        None => open(
+            t,
+            NewThread {
+                topic: "Versions".to_owned(),
+                scope: project.to_owned(),
+                template: Some("versions".to_owned()),
+                opened_by: lead.clone(),
+                agent: Some(lead.clone()),
+                text: None,
+            },
+        )?
+        .id,
+    };
+    post(t, &id, &lead, text, Some(ThreadStatus::Tracking))
 }
 
 fn insert_message(

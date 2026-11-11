@@ -75,7 +75,10 @@ export function matchesTabs(i: InboxItem, tab: InboxTab, status: InboxStatusTab,
   // Asked lists the waiting asks whatever the kind tab.
   if (status === "asked") return i.kind === "watch" && i.open;
   if (tab !== "all" && i.kind !== tab) return false;
-  if (status === "open") return i.open && i.kind !== "watch";
+  if (status === "open") {
+    if (tab === "all") return i.open && (i.kind === "question" || (i.kind === "notice" && isCritical(i)));
+    return i.open && i.kind !== "watch";
+  }
   return !i.open && i.kind !== "system";
 }
 

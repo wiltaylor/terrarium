@@ -3279,9 +3279,14 @@ The rights:
 
 The rules:
 
-- A notice needs `card`, `reply_to`, or an urgent (or critical) `priority`.
-  Otherwise it is `422 invalid`: only answers, one done per request, and
-  real problems belong in the Inbox. `reply_to` (notices only) names an
+- A notice needs `card`, except when `priority` is `critical`.
+  Otherwise it is `422 invalid`, including urgent notices and replies.
+  Post in an open topic thread instead, or a lead opens one.
+  The default Inbox lists only open questions and critical notices. Explicit
+  kind and history queries remain available. Version group completion posts
+  one quiet update to the project's standing Versions thread (no Threads
+  badge), with changed cards and test guidance. Keep the releases wiki.
+  `reply_to` (notices only) names an
   operator mail or Inbox-thread message to the sender, or an answered
   question owned by the sender. Invalid references are `422 invalid`.
   The reply reference is recorded in the ask audit event.

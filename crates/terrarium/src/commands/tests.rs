@@ -7511,12 +7511,12 @@ async fn follow_up_questions_report_the_open_question() {
 async fn notify_and_the_admin_inbox() {
     let r = exec(true, &["notify", "Unsolicited update"], vec![], None).await;
     let error = r.result.unwrap_err().to_string();
-    for flag in ["--card", "--reply-to", "--urgent"] {
+    for flag in ["--card", "--critical", "thread post"] {
         assert!(error.contains(flag), "{error}");
     }
     ok(
         true,
-        &["notify", "Your answer", "--reply-to", "M1"],
+        &["notify", "Your answer", "--reply-to", "M1", "--card", "TER-1"],
         vec![(
             201,
             json!({"id": "N1", "priority": "normal", "thread_id": "T1"}),
@@ -7525,7 +7525,7 @@ async fn notify_and_the_admin_inbox() {
             Post,
             Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()),
             vec![],
-            Some(json!({"kind": "notice", "text": "Your answer", "reply_to": "M1"})),
+            Some(json!({"kind": "notice", "text": "Your answer", "reply_to": "M1", "card": "TER-1"})),
         )],
     )
     .await;
@@ -7565,6 +7565,8 @@ async fn notify_and_the_admin_inbox() {
             "notify",
             "v2 is deployed.",
             "--urgent",
+            "--card",
+            "TER-1",
             "--wait",
             "--timeout",
             "1h",
@@ -7575,7 +7577,7 @@ async fn notify_and_the_admin_inbox() {
             mine(),
             vec![],
             Some(
-                json!({"kind": "notice", "text": "v2 is deployed.", "priority": "urgent",
+                json!({"kind": "notice", "text": "v2 is deployed.", "priority": "urgent", "card": "TER-1",
                         "wait": true, "timeout": "1h"}),
             ),
         )],
