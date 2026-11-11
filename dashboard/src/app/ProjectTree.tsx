@@ -220,7 +220,8 @@ export function ProjectTree() {
       const key = target.dataset.key;
       if (!key) return null;
       if (key === BOOKMARKS_KEY) return {
-        key, parent: ROOT_KEY, button: true, open: expanded.isOpen(BOOKMARKS_KEY),
+        key, parent: ROOT_KEY, button: true, edit: true, open: expanded.isOpen(BOOKMARKS_KEY),
+        onRename: () => navigate("/bookmarks"),
         onOpen: () => expanded.open(BOOKMARKS_KEY), onClose: () => expanded.close(BOOKMARKS_KEY), onActivate: () => expanded.toggle(BOOKMARKS_KEY),
       };
       if (key.startsWith("bookmark:")) return { key, parent: BOOKMARKS_KEY };
