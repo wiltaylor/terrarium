@@ -9,7 +9,9 @@ async fn default_inbox_pages_do_not_hydrate_excluded_or_unselected_questions() {
     let td = TestDaemon::start().await;
     td.project("p").await;
     let agent = td.agent("p", "lead", serde_json::json!({})).await["id"]
-        .as_str().unwrap().to_owned();
+        .as_str()
+        .unwrap()
+        .to_owned();
     let db = &td.daemon.as_ref().unwrap().state.db;
     db.write("test", move |t| {
         for i in 0..4000 {
@@ -38,27 +40,41 @@ async fn default_inbox_pages_do_not_hydrate_excluded_or_unselected_questions() {
         assert!(terrariumd::store::questions::get(c, "ordinary-0").is_err());
         assert!(terrariumd::store::questions::get(c, "deferred").is_err());
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     // Success proves both SQL filtering and LIMIT happened before hydration.
     let page = td.get("/api/inbox?project=p&limit=2").await;
     assert_eq!(page.headers["x-inbox-open"], "3");
     let rows = page.ok().as_array().unwrap();
-    assert_eq!(rows.iter().map(|r| r["id"].as_str().unwrap()).collect::<Vec<_>>(), ["notice:critical", "question:fresh"]);
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["notice:critical", "question:fresh"]
+    );
     let counts = td.get("/api/inbox/counts?project=p").await;
     assert_eq!(counts.ok()["question"], 2);
     assert_eq!(counts.body["notice"], 1);
     db.write("test", |t| {
-        t.execute("UPDATE questions SET answer_option = NULL WHERE id = 'deferred'", [])?;
+        t.execute(
+            "UPDATE questions SET answer_option = NULL WHERE id = 'deferred'",
+            [],
+        )?;
         Ok(())
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     db.read(|c| {
         use terrariumd::store::inbox::{self, Filter};
-        let cursor = serde_json::to_string(&(true, false, false, "2026-11-08T00:00:02Z", "question:fresh")).unwrap();
+        let cursor =
+            serde_json::to_string(&(true, false, false, "2026-11-08T00:00:02Z", "question:fresh"))
+                .unwrap();
         let rows = inbox::page(c, &Filter::default(), Some(&cursor), 2)?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "question:deferred");
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
 }
 
 #[tokio::test]

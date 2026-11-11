@@ -174,7 +174,12 @@ async fn version_posts_reuse_a_quiet_project_thread_without_a_badge() {
                 Some(actor) => td.post_as(actor, &close_path, close).await,
             };
             r.err(409, "conflict");
-            assert!(r.body["error"]["message"].as_str().unwrap().contains(&thread));
+            assert!(
+                r.body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&thread)
+            );
         }
     }
     td.post_as(&lead, path, body).await.err(409, "conflict");

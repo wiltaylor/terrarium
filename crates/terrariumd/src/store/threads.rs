@@ -1741,7 +1741,8 @@ fn agent_session(conn: &Connection, th: &Thread) -> ApiResult<Option<String>> {
 pub fn check_close(th: &Thread) -> ApiResult<()> {
     if th.template.as_deref() == Some("versions") {
         return Err(ApiError::conflict(format!(
-            "standing Versions thread {} cannot be closed", th.id
+            "standing Versions thread {} cannot be closed",
+            th.id
         )));
     }
     Ok(())
