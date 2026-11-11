@@ -1,5 +1,20 @@
 import { movedTo } from "../app/nav";
 import type { Instance } from "./create";
+import { remoteImageSource } from "../lib/sanitize";
+
+/** Only the selected remote's origin or relative paths, never arbitrary hosts. */
+export function remoteImagePath(raw: string, page: URL, instance: Pick<Instance, "key" | "path" | "remoteOrigin">): string | undefined {
+  const name = instance.key.startsWith("remote:") ? instance.key.slice(7) : "";
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(name) || /[\\\s]/.test(raw)) return;
+  try {
+    const target = new URL(raw, page);
+    if (!/^https?:$/.test(target.protocol) || target.username || target.password) return;
+    if (target.origin !== page.origin && target.origin !== instance.remoteOrigin) return;
+    const path = instance.path(target.pathname);
+    if (!/^\/(?:api|a)\//.test(path) || /%(?:2f|5c|25|2e|00)/i.test(path)) return;
+    return `/api/remotes/${name}/proxy/image${path}${target.search}`;
+  } catch { return; }
+}
 
 /** Fail closed for same-origin paths which are not dashboard pages. */
 function dashboardPath(path: string): boolean {
@@ -20,7 +35,7 @@ function dashboardPath(path: string): boolean {
 }
 
 /** Transform only an inert sanitized fragment, before any nodes reach the live DOM. */
-export function scopeRemoteHtml(el: DocumentFragment, instance: Pick<Instance, "href" | "path">, pageUrl = window.location.href) {
+export function scopeRemoteHtml(el: DocumentFragment, instance: Pick<Instance, "href" | "path"> & Partial<Pick<Instance, "key" | "remoteOrigin">>, pageUrl = window.location.href) {
   const page = new URL(pageUrl);
   el.querySelectorAll<HTMLAnchorElement>("a").forEach((a) => {
     const block = () => {
@@ -48,6 +63,9 @@ export function scopeRemoteHtml(el: DocumentFragment, instance: Pick<Instance, "
     } catch { block(); }
   });
   el.querySelectorAll("img").forEach((img) => {
+    const raw = remoteImageSource(img);
+    const src = raw && instance.key ? remoteImagePath(raw, page, { ...instance, key: instance.key }) : undefined;
+    if (src) { img.setAttribute("src", src); img.setAttribute("referrerpolicy", "no-referrer"); return; }
     const placeholder = document.createElement("span");
     placeholder.className = "small muted";
     placeholder.textContent = `[Image blocked${img.getAttribute("alt") ? `: ${img.getAttribute("alt")}` : ""}]`;

@@ -56,6 +56,9 @@ const CLASS_TOKEN = /^(?:wikilink|wikilink-(?:page|card|memory|version)|missing|
 /** The query of a `db` block (lib/markdown DB_QUERY_MAX). Any text: the page reads it with `dataset`, never as HTML. */
 const DB_QUERY_MAX = 2000;
 const ARTIFACT_ID = /^ART-\d+$/;
+const remoteImages = new WeakMap<Node, string>();
+let captureImages = false;
+export const remoteImageSource = (node: Node): string | undefined => remoteImages.get(node);
 
 /**
  * Browsers drop ASCII whitespace and C0 controls around a URL and inside its
@@ -96,7 +99,10 @@ function addHooks(p: Purifier) {
     const tag = node.nodeName.toLowerCase();
     let keep = true;
     if (name === "href") keep = tag === "a" && isSafeHref(value);
-    else if (name === "src") keep = tag === "img" && isSafeImageSrc(value);
+    else if (name === "src") {
+      keep = tag === "img" && isSafeImageSrc(value);
+      if (captureImages && keep) remoteImages.set(node, value);
+    }
     else if (name === "data-artifact" || name === "data-artifact-link") keep = ARTIFACT_ID.test(value);
     else if (name === "data-db-query") keep = tag === "div" && value.length <= DB_QUERY_MAX;
     else if (name === "class") {
@@ -152,7 +158,10 @@ function purifier(): Purifier {
 
 /** Sanitize to a fragment. Appending a fragment avoids a second HTML parse (mXSS). */
 export function sanitizeToFragment(html: string, blockImages = false): DocumentFragment {
-  return purifier().sanitize(html, { ...PURIFY_CONFIG, FORBID_ATTR: [...PURIFY_CONFIG.FORBID_ATTR!, ...(blockImages ? ["src"] : [])], RETURN_DOM_FRAGMENT: true });
+  captureImages = blockImages;
+  try {
+    return purifier().sanitize(html, { ...PURIFY_CONFIG, FORBID_ATTR: [...PURIFY_CONFIG.FORBID_ATTR!, ...(blockImages ? ["src"] : [])], RETURN_DOM_FRAGMENT: true });
+  } finally { captureImages = false; }
 }
 
 /** Sanitize to a string. For tests and for places that only compare output. */

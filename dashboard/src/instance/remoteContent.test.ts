@@ -93,10 +93,20 @@ describe.each([["Markdown", Markdown], ["SafeHtml", SafeHtml]] as const)("remote
       }
       return replace.apply(this, nodes);
     });
-    const { root } = mount(component, '<img src="https://remote.example/tracker" alt="remote"><img src="/api/remotes" alt="home"><img src="../../../../api/remotes" alt="relative"><img src="data:image/png;base64,AAAA" alt="data"><img srcset="https://remote.example/large 2x" style="background:url(/api/remotes)" alt="css">');
+    const { root } = mount(component, '<img src="https://remote.example/tracker" alt="remote"><img src="/settings" alt="home"><img src="../../../../settings" alt="relative"><img src="data:image/png;base64,AAAA" alt="data"><img srcset="https://remote.example/large 2x" style="background:url(/api/remotes)" alt="css">');
     expect(inserted.length).toBeGreaterThan(0);
     expect(root.querySelector("img, [src], [srcset], [style]")).toBeNull();
     for (const alt of ["remote", "home", "relative", "data", "css"]) expect(root.textContent).toContain(`[Image blocked: ${alt}]`);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("inserts only home image-proxy URLs for relative remote API and artifact images", () => {
+    const { root } = mount(component, '<img src="/api/images/one?size=small" alt="api"><img src="/a/signed/photo.png?sig=remote" alt="artifact"><img src="/api/%252e%252e/secret" alt="encoded">');
+    const images = root.querySelectorAll("img");
+    expect([...images].map((img) => img.getAttribute("src"))).toEqual([
+      "/api/remotes/lab/proxy/image/api/images/one?size=small",
+      "/api/remotes/lab/proxy/image/a/signed/photo.png?sig=remote",
+    ]);
+    expect(root.textContent).toContain("[Image blocked: encoded]");
   });
 });

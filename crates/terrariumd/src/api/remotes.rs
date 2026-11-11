@@ -356,7 +356,13 @@ async fn proxy(
         .headers()
         .get(header::UPGRADE)
         .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
-    net::check_path(req.method(), &path, ws, r.read_only)?;
+    let image = path.strip_prefix("/image");
+    if let Some(path) = image {
+        net::check_image_path(req.method(), path)?;
+        if ws { return Err(ApiError::bad_request("image WebSocket is not supported")); }
+    } else {
+        net::check_path(req.method(), &path, ws, r.read_only)?;
+    }
     let browser = if ws {
         match s.remotes.acquire_browser() {
             Ok(permit) => Some(permit),
@@ -382,7 +388,13 @@ async fn proxy(
     }
     let result = tokio::select! {
         _ = closed.changed() => Err(net::unreachable()),
-        result = tokio::time::timeout(net::PLAIN,forward(&s, &r, actor, path, ws, req,browser)) => result.unwrap_or_else(|_| Err(net::unreachable())),
+        result = tokio::time::timeout(net::PLAIN, async {
+            if let Some(path) = image {
+                forward_image(&s, &r, path, req.uri().query()).await
+            } else {
+                forward(&s, &r, actor, path.clone(), ws, req, browser).await
+            }
+        }) => result.unwrap_or_else(|_| Err(net::unreachable())),
     };
     if let Err(e) = &result {
         mark(&s, &r, failure_status(e)).await?;
@@ -395,6 +407,32 @@ async fn proxy(
         "x-terrarium-remote",
         r.name.parse().map_err(|_| net::unreachable())?,
     );
+    Ok(response)
+}
+
+/// Buffer completely before releasing any bytes or upstream headers to the browser.
+async fn forward_image(s: &Shared, r: &Remote, path: &str, query: Option<&str>) -> ApiResult<Response> {
+    let limits = s.remotes.get(&r.id);
+    let _permit = limits.acquire(false)?;
+    let c = net::client(r, &own_ports(s)).await?;
+    let headers = net::request_headers(&HeaderMap::new(), &key(s, r).await?, &s.links.instance_id(&s.state_dir)?)?;
+    net::instance(&c, r, &headers).await?;
+    let mut url = url::Url::parse(&r.url).map_err(|_| net::unreachable())?;
+    url.set_path(path);
+    url.set_query(net::query(query).as_deref());
+    let mut request = c.get(url);
+    // Signed artifact URLs need no link credential. API images use only the link key.
+    if path.starts_with("/api/") { request = request.headers(headers); }
+    let resp = request.send().await.map_err(net::connection_error)?;
+    if resp.status() != StatusCode::OK { return Err(net::unreachable()); }
+    let content_type = net::image_content_type(resp.headers())?;
+    let body = net::limited(resp, net::IMAGE_MAX, net::PLAIN).await?;
+    let mut response = Response::new(Body::from(body));
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, content_type.parse().map_err(|_| net::unreachable())?);
+    headers.insert(header::CACHE_CONTROL, "no-store".parse().map_err(|_| net::unreachable())?);
+    headers.insert("x-content-type-options", "nosniff".parse().map_err(|_| net::unreachable())?);
+    headers.insert(header::CONTENT_SECURITY_POLICY, "default-src 'none'; sandbox".parse().map_err(|_| net::unreachable())?);
     Ok(response)
 }
 
