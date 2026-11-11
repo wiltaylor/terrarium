@@ -5,6 +5,7 @@ mod board_summary_growth;
 #[path = "../common/mod.rs"]
 mod common;
 mod exedev;
+mod host_restart;
 mod read_positions;
 mod remotes;
 mod ter221_latency;

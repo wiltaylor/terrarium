@@ -262,6 +262,11 @@ struct Shared {
     remotes: Arc<crate::display::remote::Remotes>,
     /// A self-update runs (only one at a time).
     updating: std::sync::atomic::AtomicBool,
+    /// A verified update is staged. Refuse new sessions until the swap,
+    /// so a busy host can eventually reach idle without killing work.
+    draining: std::sync::atomic::AtomicBool,
+    /// Serialize staging the drain with admission and session insertion.
+    admission: tokio::sync::Mutex<()>,
     /// The helper answered with enforcement at the last `hello`
     /// (`capabilities.native_gpu.enforced`). Native routing follows it,
     /// not the config.
@@ -287,6 +292,9 @@ pub struct SelfUpdateOptions {
     pub supervised: bool,
     /// How often to look for a moment with no session.
     pub idle_poll: Duration,
+    /// Maximum admission drain per attempt. Expiry keeps the staged binary
+    /// and reopens admission before retrying after `idle_poll`.
+    pub drain_timeout: Duration,
 }
 
 /// The host agent's client. Cheap to clone.
@@ -304,6 +312,8 @@ impl Client {
             bearer: Mutex::new(opts.token.clone()),
             remotes: crate::display::remote::Remotes::new(opts.display.rdp_known_hosts_path()),
             updating: std::sync::atomic::AtomicBool::new(false),
+            draining: std::sync::atomic::AtomicBool::new(false),
+            admission: tokio::sync::Mutex::new(()),
             native_enforced: std::sync::atomic::AtomicBool::new(
                 opts.capabilities
                     .native_gpu
@@ -520,6 +530,10 @@ impl Client {
             match client.self_update(&su, &offer).await {
                 Ok(()) => client.shared.restart.notify_one(),
                 Err(e) => {
+                    client
+                        .shared
+                        .draining
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                     tracing::error!(offered = %version, error = %e, "self-update failed; this binary keeps running");
                     client.refuse_update(&version);
                     client
@@ -562,20 +576,39 @@ impl Client {
         let sha = u::verify(&data, offer)?;
         u::stage(&su.binary, &data, &offer.version).await?;
         tracing::info!(sha256 = %sha, bytes = data.len(), "self-update: the new binary checks out");
-        let mut said = false;
-        while self.session_count() > 0 {
-            if !said {
-                tracing::info!(
-                    sessions = self.session_count(),
-                    "self-update: waiting until no session runs"
-                );
-                said = true;
-            }
-            tokio::time::sleep(su.idle_poll).await;
-        }
+        self.drain_for_update(su).await;
         u::swap(&su.binary, &offer.version)?;
         tracing::info!(version = %offer.version, binary = %su.binary.display(), "self-update: installed");
         Ok(())
+    }
+
+    async fn drain_for_update(&self, su: &SelfUpdateOptions) {
+        loop {
+            let _admission = self.shared.admission.lock().await;
+            self.shared
+                .draining
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            drop(_admission);
+            let drained = tokio::time::timeout(su.drain_timeout, async {
+                while self.session_count() > 0 {
+                    tokio::time::sleep(su.idle_poll).await;
+                }
+            })
+            .await;
+            if drained.is_ok() {
+                return;
+            }
+            let _admission = self.shared.admission.lock().await;
+            self.shared
+                .draining
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            drop(_admission);
+            tracing::info!(
+                sessions = self.session_count(),
+                "self-update: drain expired; admission reopened, staged update will retry"
+            );
+            tokio::time::sleep(su.idle_poll).await;
+        }
     }
 
     /// One connection, from dial to drop. `Ok` means the daemon welcomed us.
@@ -828,6 +861,7 @@ impl Client {
     }
 
     async fn on_text(&self, text: &str, tx: &Link) -> Result<(), ClientError> {
+        let _admission = self.shared.admission.lock().await;
         let frame: DaemonFrame = match decode_control(text) {
             Ok(f) => f,
             Err(e) => {
@@ -1188,6 +1222,19 @@ impl Client {
     fn admit(&self, session: SessionId, tx: &Link) -> bool {
         if session == 0 {
             send_error(tx, 0, ErrorCode::BadRequest, "session 0 is reserved".into());
+            return false;
+        }
+        if self
+            .shared
+            .draining
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            send_error(
+                tx,
+                session,
+                ErrorCode::Busy,
+                "host is draining sessions for a staged self-update".into(),
+            );
             return false;
         }
         let sessions = self.sessions();
@@ -1650,6 +1697,109 @@ pub fn ensure_crypto_provider() {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn staged_update_drain_expires_reopens_and_retries_without_discarding_stage() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("host");
+        let staged = crate::selfupdate::stage(
+            &binary,
+            b"#!/bin/sh\necho 'terrarium-host 0.3.0+bbbbbbb'\n",
+            "0.3.0+bbbbbbb",
+        )
+        .await
+        .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        client.sessions().insert(
+            1,
+            Entry {
+                outbox: client.new_outbox(1, &tx),
+                input: None,
+                push: None,
+                detached_since: None,
+            },
+        );
+        let su = SelfUpdateOptions {
+            binary,
+            enabled: true,
+            supervised: true,
+            idle_poll: Duration::from_millis(50),
+            drain_timeout: Duration::from_millis(20),
+        };
+        let worker = client.clone();
+        let task = tokio::spawn(async move { worker.drain_for_update(&su).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !client
+                .shared
+                .draining
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                tokio::task::yield_now().await;
+            }
+            while client
+                .shared
+                .draining
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(client.admit(2, &tx));
+        assert_eq!(
+            client.session_count(),
+            1,
+            "drain expiry must not kill sessions"
+        );
+        assert!(!task.is_finished());
+        assert!(staged.exists(), "staged binary retained");
+        client.sessions().remove(&1);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            client
+                .shared
+                .draining
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_update_refuses_new_sessions_but_keeps_control_frames() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(client.admit(1, &tx));
+        client
+            .shared
+            .draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!client.admit(2, &tx));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Outgoing::Control(HostFrame::Error {
+                session: 2,
+                code: ErrorCode::Busy,
+                ..
+            }))
+        ));
+        client
+            .on_text(r#"{"type":"ping","nonce":7}"#, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(Outgoing::Control(HostFrame::Pong { .. }))
+        ));
+        client
+            .shared
+            .draining
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(client.admit(3, &tx));
+    }
 
     /// Write the 0700 fake `nvidia-smi` script that the product execs.
     /// `gpu::sample_with` runs `nvidia_smi_bin` directly (`Command::new`)

@@ -88,6 +88,9 @@ pub struct Config {
     /// it (docs/host-protocol.md, "Self-update"). Default: true.
     #[serde(default = "default_true")]
     pub auto_update: bool,
+    /// Maximum seconds to close admission for one staged update attempt.
+    #[serde(default = "default_auto_update_drain_secs")]
+    pub auto_update_drain_secs: u64,
     /// Target displays (`[display]`): the opt-in for `desktop` targets.
     #[serde(default)]
     pub display: DisplayConfig,
@@ -195,6 +198,10 @@ pub const DEFAULT_MAX_RUNNING_TARGETS: u32 = 4;
 fn default_max_running_targets() -> u32 {
     DEFAULT_MAX_RUNNING_TARGETS
 }
+fn default_auto_update_drain_secs() -> u64 {
+    600
+}
+
 fn default_true() -> bool {
     true
 }
@@ -310,6 +317,7 @@ impl Default for Config {
             repos_dir: None,
             max_running_targets: default_max_running_targets(),
             auto_update: true,
+            auto_update_drain_secs: default_auto_update_drain_secs(),
             display: DisplayConfig::default(),
             native_gpu: NativeGpuConfig::default(),
         }
