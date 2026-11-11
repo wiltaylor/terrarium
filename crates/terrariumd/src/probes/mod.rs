@@ -25,6 +25,7 @@
 pub mod anthropic;
 pub mod github;
 pub mod kimi;
+pub mod litellm;
 pub mod moonshot;
 pub mod openai;
 pub mod openrouter;
@@ -252,6 +253,7 @@ pub fn all() -> Vec<Arc<dyn QuotaProbe>> {
         Arc::new(github::CopilotQuota),
         Arc::new(zai::ZaiUsage),
         Arc::new(openrouter::OpenRouterCredits),
+        Arc::new(litellm::registered()),
         Arc::new(moonshot::GLOBAL),
         Arc::new(moonshot::CHINA),
         Arc::new(kimi::KimiCodeUsage),
@@ -276,6 +278,7 @@ pub fn for_provider(provider: &str) -> Option<&'static str> {
         "anthropic" => Some(anthropic::NAME),
         "openai" | "openai-codex" => Some(openai::NAME),
         "github" | "github-copilot" | "copilot" => Some(github::NAME),
+        "litellm" => Some(litellm::NAME),
         _ => None,
     }
 }
@@ -373,13 +376,26 @@ pub async fn run_subscription(state: &Shared, name: &str) -> ApiResult<ProbeOutc
             windows: Vec::new(),
         });
     };
-    let result = match by_name(&probe_name) {
+    let result = if probe_name == litellm::NAME {
+        async {
+            if sub.provider != "litellm" {
+                return Err(litellm::unavailable());
+            }
+            let settings = sub.selfhosted.as_ref().ok_or_else(litellm::unavailable)?;
+            let probe = Arc::new(litellm::LiteLlmKeySpend::new(&settings.base_url)?)
+                as Arc<dyn QuotaProbe>;
+            let creds = credentials_for(state, &probe, &sub.name).await
+                .map_err(|_| litellm::unavailable())?;
+            let scoped = litellm::LiteLlmKeySpend::new(&settings.base_url)?;
+            litellm::fetch(&scoped, &creds).await
+        }.await
+    } else { match by_name(&probe_name) {
         None => Err(ProbeError::Unknown(probe_name.clone())),
         Some(probe) => match credentials_for(state, &probe, &sub.name).await {
             Err(e) => Err(e),
             Ok(creds) => probe.run(state.usage.config.http.as_ref(), &creds).await,
         },
-    };
+    }};
     let name = sub.name.clone();
     let outcome = match result {
         Ok(windows) => {
