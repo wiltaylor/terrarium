@@ -32,8 +32,10 @@ access class together with the axum registration. Nesting prefixes the
 registry entries as well as the router. The outer TCP authentication layer
 checks the registry before routing. An undeclared method/path or an
 operator-only entry gets `403 link_forbidden`, including routes added by
-plain axum, macros, helpers or conditional compilation. Shared operator
-gates and the link deny list remain additional restrictions. The HTTP walk
+plain axum, macros, helpers or conditional compilation.
+The actual axum matched pattern is checked before the handler too, so a new
+static route cannot inherit a grant from a dynamic pattern it shadows.
+Shared operator gates and the link deny list remain additional restrictions. The HTTP walk
 iterates the actual registry's operator-only entries. Additional conditional
 and real approval cases in `tests/fixtures/link-route-access.json` verify
 denied approvals change no state and the ordinary operator can answer them.

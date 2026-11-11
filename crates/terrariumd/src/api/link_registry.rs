@@ -26,6 +26,7 @@ pub struct Entry {
 #[derive(Default)]
 pub struct Registry {
     matcher: matchit::Router<HashMap<Method, Access>>,
+    patterns: HashMap<String, HashMap<Method, Access>>,
     pub entries: Vec<Entry>,
 }
 
@@ -45,16 +46,20 @@ impl Registry {
             );
         }
         let mut matcher = matchit::Router::new();
-        for (path, methods) in paths {
+        for (path, methods) in &paths {
             matcher
-                .insert(path, methods)
+                .insert(path.clone(), methods.clone())
                 .expect("link patterns must match axum's syntax");
         }
-        Self { matcher, entries }
+        Self { matcher, patterns: paths, entries }
     }
 
     pub fn access(&self, method: &Method, path: &str) -> Option<Access> {
         self.matcher.at(path).ok()?.value.get(method).copied()
+    }
+
+    pub fn pattern_access(&self, method: &Method, pattern: &str) -> Option<Access> {
+        self.patterns.get(pattern)?.get(method).copied()
     }
 }
 

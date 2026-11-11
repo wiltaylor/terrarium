@@ -1136,7 +1136,8 @@ pub fn tcp_router_with(state: Shared, mut auth: TokenAuth, serve_artifacts: bool
 }
 
 fn authenticated_router(state: Shared, app: Router, auth: TokenAuth) -> Router {
-    let mut app = app.layer(Extension(Transport::Tcp));
+    let mut app = app.layer(middleware::from_fn_with_state(auth.registry.clone(), registered_endpoint))
+        .layer(Extension(Transport::Tcp));
     if let Some(s) = &auth.sessions {
         app = app.layer(Extension(s.clone()));
     }
@@ -1149,6 +1150,23 @@ fn authenticated_router(state: Shared, app: Router, auth: TokenAuth) -> Router {
             require_token,
         ))
         .layer(middleware::from_fn_with_state(state, security_headers))
+}
+
+// Check the actual axum pattern too: a new plain static route must not
+// inherit a registry grant for an existing dynamic path that it shadows.
+async fn registered_endpoint(
+    State(registry): State<Arc<link_registry::Registry>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if crate::links::is_link_call() {
+        let access = req.extensions().get::<axum::extract::MatchedPath>()
+            .and_then(|path| registry.pattern_access(req.method(), path.as_str()));
+        if matches!(access, None | Some(link_registry::Access::OperatorOnly)) {
+            return ApiError::new(Code::LinkForbidden, "a link key may not call an unregistered endpoint").into_response();
+        }
+    }
+    next.run(req).await
 }
 
 /// Bind the Unix socket and serve on it in the background.

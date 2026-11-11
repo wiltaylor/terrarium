@@ -242,6 +242,7 @@ async fn link_unregistered_routes_never_reach_handlers() {
     let called = Arc::new(AtomicUsize::new(0));
     let app = || {
         let called = called.clone();
+        let shadow_called = called.clone();
         // No registration helper: this could equally come from a macro,
         // a cfg'd helper, or a nested/merged axum router.
         let plain = Router::new().route(
@@ -257,7 +258,11 @@ async fn link_unregistered_routes_never_reach_handlers() {
             runtime: s.links.clone(),
         });
         auth.registry = registry;
-        authenticated_router(s.clone(), real.nest("/api/unregistered", plain), auth)
+        let real = real.nest("/api/unregistered", plain).route("/api/agents/shadow", axum::routing::get(move || async move {
+            shadow_called.fetch_add(1, Ordering::SeqCst);
+            StatusCode::OK
+        }));
+        authenticated_router(s.clone(), real, auth)
     };
     let bearer = format!("Bearer {key}");
     let response = send(
@@ -267,6 +272,9 @@ async fn link_unregistered_routes_never_reach_handlers() {
         &[("authorization", &bearer)],
     )
     .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    let response = send(app(), "GET", "/api/agents/shadow", &[("authorization", &bearer)]).await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(called.load(Ordering::SeqCst), 0);
     let response = send(
@@ -294,19 +302,46 @@ async fn link_hidden_methods_in_helpers_are_not_registered() {
             called.fetch_add(1, Ordering::SeqCst);
             StatusCode::OK
         });
-        let child = link_registry::RegisteredRouter::new().route("/declared", methods,
-            &[(axum::http::Method::GET, link_registry::Access::Link)]);
-        let (router, registry) = link_registry::RegisteredRouter::new().nest("/api", child).into_parts();
-        let mut auth = TokenAuth::new("t".into(), false).with_links(LinkAuth { db: s.db.clone(), runtime: s.links.clone() });
+        let child = link_registry::RegisteredRouter::new().route(
+            "/declared",
+            methods,
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        );
+        let (router, registry) = link_registry::RegisteredRouter::new()
+            .nest("/api", child)
+            .into_parts();
+        let mut auth = TokenAuth::new("t".into(), false).with_links(LinkAuth {
+            db: s.db.clone(),
+            runtime: s.links.clone(),
+        });
         auth.registry = Arc::new(registry);
         authenticated_router(s.clone(), router.with_state(s.clone()), auth)
     };
     let bearer = format!("Bearer {key}");
     let h = [("authorization", bearer.as_str())];
-    assert_eq!(send(app(), "GET", "/api/declared", &h).await.status(), StatusCode::OK);
-    assert_eq!(send(app(), "HEAD", "/api/declared", &h).await.status(), StatusCode::OK);
-    assert_eq!(send(app(), "POST", "/api/declared", &h).await.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        send(app(), "GET", "/api/declared", &h).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(app(), "HEAD", "/api/declared", &h).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(app(), "POST", "/api/declared", &h).await.status(),
+        StatusCode::FORBIDDEN
+    );
     assert_eq!(called.load(Ordering::SeqCst), 0);
-    assert_eq!(send(app(), "POST", "/api/declared", &[("authorization", "Bearer t")]).await.status(), StatusCode::OK);
+    assert_eq!(
+        send(
+            app(),
+            "POST",
+            "/api/declared",
+            &[("authorization", "Bearer t")]
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
     assert_eq!(called.load(Ordering::SeqCst), 1);
 }
