@@ -501,8 +501,7 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
         assert!(held, "the slow dry run did not take its slot");
         tokio::join!(refused, engine)
     };
-    let (slow_body, ((busy, refused_in), (c, slow_had_returned))) =
-        tokio::join!(slow_run, others);
+    let (slow_body, ((busy, refused_in), (c, slow_had_returned))) = tokio::join!(slow_run, others);
     settle(&td).await;
 
     let plan = &busy["plans"][0];
