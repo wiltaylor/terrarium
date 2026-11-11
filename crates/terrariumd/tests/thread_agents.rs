@@ -486,23 +486,71 @@ async fn request_cross_project_card_rights_end_at_close() {
     let th = request(&l).await;
     let tid = id(&th);
     let agent = th["agent"].as_str().unwrap();
-    let made = l.td.post("/api/projects/p/cards", json!({"title": "Lead work"})).await;
+    let made =
+        l.td.post("/api/projects/p/cards", json!({"title": "Lead work"}))
+            .await;
     let card = id(made.ok());
     let path = format!("/api/cards/{card}");
     assert_eq!(l.td.get_as(agent, &path).await.status, 200);
-    assert_eq!(l.td.get_as(agent, "/api/projects/p/cards").await.status, 200);
-    assert_eq!(l.td.patch_as(agent, &path, json!({"title": "No"})).await.status, 403);
-    assert_eq!(l.td.post_as(agent, &format!("{path}/comments"), json!({"body": "No"})).await.status, 403);
-    let other = l.td.post("/api/projects/q/cards", json!({"title": "Other work"})).await;
+    assert_eq!(
+        l.td.get_as(agent, "/api/projects/p/cards").await.status,
+        200
+    );
+    assert_eq!(
+        l.td.patch_as(agent, &path, json!({"title": "No"}))
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        l.td.post_as(agent, &format!("{path}/comments"), json!({"body": "No"}))
+            .await
+            .status,
+        403
+    );
+    let other =
+        l.td.post("/api/projects/q/cards", json!({"title": "Other work"}))
+            .await;
     let other_card = id(other.ok());
-    assert_eq!(l.td.get_as(agent, &format!("/api/cards/{other_card}")).await.status, 403);
-    assert_eq!(l.td.post_as(agent, &format!("/api/threads/{tid}/cards"), json!({"card": format!("q:{other_card}")})).await.status, 404);
+    assert_eq!(
+        l.td.get_as(agent, &format!("/api/cards/{other_card}"))
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        l.td.post_as(
+            agent,
+            &format!("/api/threads/{tid}/cards"),
+            json!({"card": format!("q:{other_card}")})
+        )
+        .await
+        .status,
+        404
+    );
     let second = l.open(json!({"scope": "p", "topic": "Other thread"})).await;
-    assert_eq!(l.td.post_as(agent, &format!("/api/threads/{}/cards", id(&second)), json!({"card": format!("p:{card}")})).await.status, 404);
-    let tracked = l.td.post_as(agent, &format!("/api/threads/{tid}/track"), json!({"cards": [format!("p:{card}")]})).await;
+    assert_eq!(
+        l.td.post_as(
+            agent,
+            &format!("/api/threads/{}/cards", id(&second)),
+            json!({"card": format!("p:{card}")})
+        )
+        .await
+        .status,
+        404
+    );
+    let tracked =
+        l.td.post_as(
+            agent,
+            &format!("/api/threads/{tid}/track"),
+            json!({"cards": [format!("p:{card}")]}),
+        )
+        .await;
     assert_eq!(tracked.status, 200, "{}", tracked.body);
     assert_eq!(tracked.body["cards"][0]["card"], card);
-    l.td.post(&format!("/api/threads/{tid}/close"), json!({})).await.ok();
+    l.td.post(&format!("/api/threads/{tid}/close"), json!({}))
+        .await
+        .ok();
     assert_ne!(l.td.get_as(agent, &path).await.status, 200);
 }
 

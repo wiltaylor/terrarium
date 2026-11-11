@@ -387,7 +387,16 @@ pub fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
 /// the thread who cannot read that project.
 pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
     let request_project = match actor {
-        Actor::Agent(a) if th.request && th.status != ThreadStatus::Closed && th.agent.as_deref() == Some(&a.id) => th.report_to_name.as_deref().and_then(|n| n.split_once('/')).map(|(p, _)| p.to_owned()),
+        Actor::Agent(a)
+            if th.request
+                && th.status != ThreadStatus::Closed
+                && th.agent.as_deref() == Some(&a.id) =>
+        {
+            th.report_to_name
+                .as_deref()
+                .and_then(|n| n.split_once('/'))
+                .map(|(p, _)| p.to_owned())
+        }
         _ => None,
     };
     if th.monitor.as_ref().is_some_and(|m| {
@@ -397,7 +406,10 @@ pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
         th.monitor = None;
     }
     if let Some(cards) = th.cards.as_mut() {
-        cards.retain(|c| policy::read_project(actor, &c.project).is_ok() || request_project.as_deref() == Some(c.project.as_str()));
+        cards.retain(|c| {
+            policy::read_project(actor, &c.project).is_ok()
+                || request_project.as_deref() == Some(c.project.as_str())
+        });
     }
     th
 }
@@ -432,7 +444,12 @@ fn cards_of(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadCard>> {
 /// it is. Writes the audit row `thread.card_link` under the card's project.
 /// Emits a `thread` event `card_linked`, which wakes no agent. The thread
 /// with the cards that `actor` may read.
-pub fn read_card_project(conn: &Connection, actor: &Actor, project: &str, thread: Option<&str>) -> ApiResult<()> {
+pub fn read_card_project(
+    conn: &Connection,
+    actor: &Actor,
+    project: &str,
+    thread: Option<&str>,
+) -> ApiResult<()> {
     let denied = match policy::read_project(actor, project) {
         Ok(()) => return Ok(()),
         Err(e) => e,
@@ -442,9 +459,12 @@ pub fn read_card_project(conn: &Connection, actor: &Actor, project: &str, thread
             "SELECT EXISTS(SELECT 1 FROM threads th JOIN agents lead ON lead.id = th.report_to
              WHERE th.request = 1 AND th.agent = ?1 AND th.status != 'closed'
              AND lead.project = ?2 AND (?3 IS NULL OR th.id = ?3))",
-            rusqlite::params![a.id, project, thread], |r| r.get(0),
+            rusqlite::params![a.id, project, thread],
+            |r| r.get(0),
         )?;
-        if allowed { return Ok(()); }
+        if allowed {
+            return Ok(());
+        }
     }
     Err(denied)
 }
