@@ -371,7 +371,7 @@ fn view_with_key_presence(
         agents,
         default_models: crate::models::default_models(&sub),
         local_estimate_only: sub.probe.is_none(),
-        no_quota: sub.is_selfhosted(),
+        no_quota: sub.is_selfhosted() && sub.provider != "litellm",
         streams: streams.usage(&sub.name),
         status_url: terrarium_core::providers::status_url_of(
             &sub.provider,
@@ -1485,7 +1485,10 @@ async fn api_key(
     // one needs the server's base URL.
     let is_sh = selfhosted::is_selfhosted(&key.provider);
     match &exists {
-        Some(s) if s.is_selfhosted() != is_sh => {
+        Some(s)
+            if s.is_selfhosted() != is_sh
+                || ((s.provider == "litellm") != (key.provider == "litellm")) =>
+        {
             return Err(ApiError::invalid(format!(
                 "cannot store a {} key on subscription `{name}`: it is a {} subscription",
                 key.provider, s.provider
@@ -1566,6 +1569,26 @@ async fn api_key(
         }
     }
     let source = exists.as_ref().map(|s| s.source.clone());
+    // Validate before writing the credential file, which is outside the DB transaction.
+    if key.provider == "litellm" {
+        let mut sh = exists
+            .as_ref()
+            .and_then(|s| s.selfhosted.clone())
+            .unwrap_or_else(|| SelfHosted {
+                api: Api::Anthropic,
+                ..SelfHosted::default()
+            });
+        if let Some(url) = &key.base_url {
+            sh.base_url = url.clone();
+        }
+        if !key.models.is_empty() {
+            sh.models = key.models.clone();
+        }
+        let sh = sh.checked().map_err(ApiError::invalid)?;
+        if !sh.base_url.to_ascii_lowercase().starts_with("https://") {
+            return Err(ApiError::invalid("LiteLLM base_url must use https"));
+        }
+    }
     let dir = state.state_dir.clone();
     // The file keeps the secrets; the settings go to the definition.
     let k = ApiKey {
@@ -1639,13 +1662,13 @@ async fn api_key(
                 // a self-hosted OpenAI-style server.
                 let def = SubscriptionDef {
                     name: n.clone(),
-                    provider: selfhosted::PROVIDER.into(),
+                    provider: if provider == "litellm" { "litellm" } else { selfhosted::PROVIDER }.into(),
                     plan: None,
                     harnesses: Vec::new(),
                     probe: None,
                     alert_at: 80,
                     selfhosted: Some(SelfHosted {
-                        api: Api::Openai,
+                        api: if provider == "litellm" { Api::Anthropic } else { Api::Openai },
                         base_url: base_url.clone().unwrap_or_default(),
                         models: models.clone(),
                         ..SelfHosted::default()

@@ -147,7 +147,9 @@ pub struct SelfHosted {
 /// True when `provider` is `selfhosted` or its alias `openai-compatible`.
 pub fn is_selfhosted(provider: &str) -> bool {
     let p = provider.trim();
-    p.eq_ignore_ascii_case(PROVIDER) || p.eq_ignore_ascii_case(ALIAS_OPENAI_COMPATIBLE)
+    p.eq_ignore_ascii_case(PROVIDER)
+        || p.eq_ignore_ascii_case(ALIAS_OPENAI_COMPATIBLE)
+        || p.eq_ignore_ascii_case("litellm")
 }
 
 /// True when `provider` is the old word `openai-compatible`.

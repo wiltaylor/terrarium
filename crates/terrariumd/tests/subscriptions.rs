@@ -25,6 +25,73 @@ const ANTHROPIC: &str = "https://api.anthropic.com/api/oauth/usage";
 const OPENAI: &str = "https://chatgpt.com/backend-api/wham/usage";
 
 #[tokio::test]
+async fn litellm_is_claude_only_and_keeps_the_key_private() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    let sub = td
+        .post(
+            "/api/subscriptions/lite/api-key",
+            json!({
+                "provider": "litellm", "key": "E2E-lite-secret",
+                "base_url": "https://proxy.example.com", "models": ["team-model"]
+            }),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(sub["provider"], "litellm");
+    assert_eq!(sub["display_name"], "LiteLLM");
+    assert_eq!(sub["harnesses"], json!(["claude"]));
+    assert_eq!(sub["selfhosted"]["api"], "anthropic");
+    assert_eq!(sub["selfhosted"]["models"], json!(["team-model"]));
+    assert_eq!(sub["no_quota"], false);
+    assert!(!sub.to_string().contains("E2E-lite-secret"));
+    let r = td
+        .post(
+            "/api/subscriptions/lite/api-key",
+            json!({"provider": "litellm", "key": "E2E-rejected-key", "base_url": "http://proxy.example.com"}),
+        )
+        .await;
+    assert_eq!(r.status, 422);
+    let r = td
+        .patch(
+            "/api/subscriptions/lite",
+            json!({"selfhosted": {"base_url": "http://proxy.example.com"}}),
+        )
+        .await;
+    assert_eq!(r.status, 422);
+    let r = td.get("/api/subscriptions/lite").await;
+    assert_eq!(
+        r.ok()["selfhosted"]["base_url"],
+        "https://proxy.example.com"
+    );
+    // Rotating the key without supplying a URL validates the stored endpoint.
+    td.post(
+        "/api/subscriptions/lite/api-key",
+        json!({"provider": "litellm", "key": "E2E-rotated-key"}),
+    )
+    .await
+    .ok();
+    for harness in ["pi", "codex", "copilot"] {
+        let r = td
+            .post(
+                "/api/subscriptions",
+                json!({
+                    "name": format!("lite-{harness}"), "provider": "litellm",
+                    "harnesses": [harness],
+                    "selfhosted": {"api": "anthropic", "base_url": "https://proxy.example.com"}
+                }),
+            )
+            .await;
+        assert_eq!(r.status, 422);
+    }
+    let r = td.post("/api/subscriptions/lite-http/api-key", json!({
+        "provider": "litellm", "key": "E2E-lite-secret", "base_url": "http://proxy.example.com"
+    })).await;
+    assert_eq!(r.status, 422);
+}
+
+#[tokio::test]
 async fn vertex_save_defaults_and_failed_test_leave_credentials_unchanged() {
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;
