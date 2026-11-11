@@ -2185,6 +2185,7 @@ async fn start_exec_secrets(
         actor,
         &def,
         cmd.agent.as_deref().or(cmd.holder.as_deref()),
+        row.def.kind == TargetKind::Exedev,
     )
     .await?;
     let resources = state.executor.target_resource_lock(&def).lock_owned().await;
@@ -2651,7 +2652,14 @@ pub async fn start_cp(
     check_cap(state, actor)?;
     no_exec(&row.def)?;
     let def = resolved_def(state, &row, Some(actor), body.agent.as_deref()).await?;
-    let sync = workspace_sync::prepare(state, actor, &def, body.agent.as_deref()).await?;
+    let sync = workspace_sync::prepare(
+        state,
+        actor,
+        &def,
+        body.agent.as_deref(),
+        row.def.kind == TargetKind::Exedev,
+    )
+    .await?;
     let push = body.direction == CpDirection::Push;
     let (sess, ctl) = ExecSession::new(
         name,

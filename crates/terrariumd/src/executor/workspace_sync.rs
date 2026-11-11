@@ -271,11 +271,11 @@ pub(super) async fn prepare(
     actor: &Actor,
     def: &TargetDef,
     selected: Option<&str>,
+    exedev: bool,
 ) -> ApiResult<Option<Sync>> {
     if !def.sync_workspace {
         return Ok(None);
     }
-    check_rsync().await?;
     // An exedev target comes here as the ssh target of its VM
     // (`executor::resolved_def`).
     if def.kind != TargetKind::Ssh {
@@ -354,8 +354,16 @@ pub(super) async fn prepare(
     .collect(4096)
     .await;
     if !mkdir.end().success() {
+        if exedev {
+            return Err(ApiError::invalid(
+                "could not create remote workspace on exe.dev: the exe.dev user cannot write the sandbox workspace path; set sync_workspace = false until workspace remapping under work_root is available (TER-873)",
+            ));
+        }
         return Err(ApiError::invalid("could not create remote workspace"));
     }
+    // Diagnose remote path permissions before checking transfer dependencies.
+    // The patched rsync requirement still gates every file transfer.
+    check_rsync().await?;
     let before = scan(&root).await?;
     let address = def
         .address
