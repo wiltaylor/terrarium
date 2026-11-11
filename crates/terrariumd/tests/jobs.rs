@@ -2735,14 +2735,24 @@ while True:
     let mut config = json!({"target":"p-box", "recipe":recipe, "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm", "DOCKER_CI_RESET_KEY":"@secret:reset"}, "docker_ci":{"destination":"root@test-vm", "port":2250, "known_hosts":"test-vm ssh-ed25519 public-test-pin\n", "reset_destination":"reset@test-host", "reset_port":22,"reset_known_hosts":"test-host ssh-ed25519 public-test-pin\n"}});
     // Ordinary jobs cannot request the relay, even with delivery run grants.
     let mut ordinary_config = config.clone();
-    ordinary_config["recipe"] = json!("test -z \"${TERRARIUM_DOCKER_HOST:-}${DOCKER_CI_KEY:-}${DOCKER_CI_RESET_KEY:-}\"");
-    lab.td.put("/api/projects/p/delivery", ordinary_config).await.ok();
+    ordinary_config["recipe"] =
+        json!("test -z \"${TERRARIUM_DOCKER_HOST:-}${DOCKER_CI_KEY:-}${DOCKER_CI_RESET_KEY:-}\"");
+    lab.td
+        .put("/api/projects/p/delivery", ordinary_config)
+        .await
+        .ok();
     for kind in ["merge", "validate"] {
         lab.branch(kind, "next", &[("ordinary", "yes\n")]);
         let card = lab.card(kind, kind).await;
-        lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/{kind}"), json!({})).await.ok();
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/{kind}"), json!({}))
+            .await
+            .ok();
         let jobs = lab.until_idle().await;
-        assert_eq!(jobs.iter().find(|j| j["card"] == card).unwrap()["state"], "passed");
+        assert_eq!(
+            jobs.iter().find(|j| j["card"] == card).unwrap()["state"],
+            "passed"
+        );
         assert!(!fixtures.path().join("order").exists());
     }
     for (index, (branch, status, expected)) in [
@@ -2753,7 +2763,10 @@ while True:
         ("secret-reset-unknown-pin", 255, false),
         ("secret-reset-wrong-pin", 256, false),
         ("secret-revoked", 0, false),
-    ].into_iter().enumerate() {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         std::fs::write(fixtures.path().join("status"), status.to_string()).unwrap();
         let order_before = std::fs::read_to_string(fixtures.path().join("order"))
             .unwrap_or_default()
@@ -2775,18 +2788,44 @@ while True:
                 .ok();
         }
         let release_branch = format!("release/0.0.{index}");
-        let script = format!("import subprocess\nraise SystemExit(subprocess.call(['sh', '-c', {}]))\n", serde_json::to_string(&recipe).unwrap());
-        lab.branch(&release_branch, "next", &[("scripts/docker_ci.py", &script)]);
+        let script = format!(
+            "import subprocess\nraise SystemExit(subprocess.call(['sh', '-c', {}]))\n",
+            serde_json::to_string(&recipe).unwrap()
+        );
+        lab.branch(
+            &release_branch,
+            "next",
+            &[("scripts/docker_ci.py", &script)],
+        );
         let state = lab.td.daemon.as_ref().unwrap().state.clone();
         let key = format!("version:{branch}");
-        let card = state.db.write("system", move |t| {
-            use terrariumd::store::groups;
-            groups::open(t, groups::Open { project: "p", rule: "version-cut", key: &key, title: &key,
-                column: "accepted", done_when: "done", eta: None, close_after: None })?;
-            Ok(groups::by_key(t, "p", &key)?.unwrap().id)
-        }).await.unwrap();
+        let card = state
+            .db
+            .write("system", move |t| {
+                use terrariumd::store::groups;
+                groups::open(
+                    t,
+                    groups::Open {
+                        project: "p",
+                        rule: "version-cut",
+                        key: &key,
+                        title: &key,
+                        column: "accepted",
+                        done_when: "done",
+                        eta: None,
+                        close_after: None,
+                    },
+                )?;
+                Ok(groups::by_key(t, "p", &key)?.unwrap().id)
+            })
+            .await
+            .unwrap();
         lab.td
-            .post_as(&lab.lead, &format!("/api/cards/{card}/e2e"), json!({"branch":release_branch}))
+            .post_as(
+                &lab.lead,
+                &format!("/api/cards/{card}/e2e"),
+                json!({"branch":release_branch}),
+            )
             .await
             .ok();
         let jobs = lab.until_idle().await;
