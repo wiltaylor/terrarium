@@ -68,9 +68,7 @@ async fn bedrock_save_defaults_and_failed_test_leave_credentials_unchanged() {
         assert!(text.contains("Nothing was saved"), "{text}");
         assert!(text.contains("save without test_connection"), "{text}");
         assert!(!text.contains("E2E-") && !text.contains(&endpoint));
-        assert!(
-            matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
-        );
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
     }
     let response = td
         .post(
