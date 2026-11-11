@@ -133,6 +133,9 @@ impl From<QuotaSample> for WindowView {
 /// A subscription as the API shows it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SubscriptionView {
+    /// Local monthly session spend when LiteLLM cannot report spend. No percent without a budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_spend_usd: Option<f64>,
     pub session_period: SessionPeriod,
     pub sessions: Vec<crate::store::session_refs::SubscriptionSession>,
     #[serde(flatten)]
@@ -325,8 +328,20 @@ fn view_with_key_presence(
     streams: &crate::stream_limit::StreamGate,
     has_api_key: bool,
 ) -> ApiResult<SubscriptionView> {
+    let now = chrono::Utc::now();
+    let fallback = crate::cloud_budget::litellm_fallback(c, &sub, now)?;
+    let fallback_spend_usd = if fallback {
+        Some(crate::store::cloud_spend::month_spend(c, &sub.name, &terrarium_core::cloud::month_key(now))?)
+    } else {
+        None
+    };
     let windows: Vec<WindowView> = subs::latest_windows(c, &sub.name)?
         .into_iter()
+        .filter(|w| sub.provider != "litellm" || match w.window.as_str() {
+            "budget" => fallback && sub.selfhosted.as_ref().and_then(|s| s.budget_usd).is_some(),
+            "key-spend" => !fallback,
+            _ => true,
+        })
         .map(WindowView::from)
         .collect();
     let session_period = session_period(&windows, chrono::Utc::now());
@@ -362,6 +377,7 @@ fn view_with_key_presence(
         .map(|(id, name, project)| AgentOn { id, name, project })
         .collect();
     Ok(SubscriptionView {
+        fallback_spend_usd,
         session_period,
         sessions,
         display_name,
@@ -609,6 +625,8 @@ where
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelfHostedPatch {
+    #[serde(default, deserialize_with = "nullable")]
+    budget_usd: Option<Option<u32>>,
     #[serde(default)]
     api: Option<Api>,
     #[serde(default)]
@@ -629,6 +647,9 @@ struct SelfHostedPatch {
 
 impl SelfHostedPatch {
     fn apply(self, mut s: SelfHosted) -> SelfHosted {
+        if let Some(v) = self.budget_usd {
+            s.budget_usd = v;
+        }
         if let Some(v) = self.api {
             s.api = v;
         }

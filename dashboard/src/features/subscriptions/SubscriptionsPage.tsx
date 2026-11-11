@@ -217,6 +217,9 @@ export default function SubscriptionsPage() {
                         Probe error: {s.probe_error}
                       </div>
                     </Show>
+                    <Show when={s.fallback_spend_usd != null && !s.windows.some((w) => w.window === "budget")}>
+                      <div class="muted small">Local monthly spend: ${s.fallback_spend_usd?.toFixed(2)} USD</div>
+                    </Show>
                     <Show when={s.windows.length}>
                       <div class="muted small">
                         {orderWindows(s.windows).map((w) => `${windowLabel(w.window)} ${w.balance ? balanceText(w.balance) : `${Math.round(w.used_pct)}%`}${w.balance ? "" : w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`).join(" · ")}

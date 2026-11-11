@@ -24,6 +24,28 @@ use crate::error::ApiResult;
 use crate::store::cloud_spend;
 use crate::store::subscriptions::{self as subs, Subscription};
 
+/// Use local accounting only when LiteLLM has no fresh authoritative spend.
+pub fn litellm_fallback(
+    conn: &rusqlite::Connection,
+    sub: &Subscription,
+    now: DateTime<Utc>,
+) -> ApiResult<bool> {
+    if sub.provider != "litellm" {
+        return Ok(false);
+    }
+    if sub.probe_status == "failed"
+        && sub.probe_error.as_deref().is_some_and(|e| e.contains("no spend from LiteLLM"))
+    {
+        return Ok(true);
+    }
+    Ok(!subs::latest_windows(conn, &sub.name)?.iter().any(|w| {
+        w.window == "key-spend"
+            && DateTime::parse_from_rfc3339(&w.at).is_ok_and(|at| {
+                now.signed_duration_since(at) < chrono::Duration::minutes(10)
+            })
+    }))
+}
+
 /// The spend of `sub` in the month of `now` against its budget. `None`
 /// when it is not a cloud subscription or has no budget.
 pub fn window(
@@ -31,10 +53,18 @@ pub fn window(
     sub: &Subscription,
     now: DateTime<Utc>,
 ) -> ApiResult<Option<BudgetWindow>> {
-    let Some(budget) = sub
+    let budget = if sub.provider == "litellm" {
+        if !litellm_fallback(conn, sub, now)? {
+            return Ok(None);
+        }
+        sub.selfhosted.as_ref().and_then(|s| s.budget_usd)
+    } else {
+        sub
         .cloud_kind()
         .and(sub.cloud.as_ref())
         .and_then(|c| c.budget_usd)
+    };
+    let Some(budget) = budget
     else {
         return Ok(None);
     };
@@ -104,7 +134,7 @@ pub async fn check(state: &Shared, name: &str) -> ApiResult<()> {
             let Some(sub) = subs::find(t, &key)? else {
                 return Ok(());
             };
-            if sub.cloud_kind().is_none() {
+            if sub.cloud_kind().is_none() && sub.provider != "litellm" {
                 return Ok(());
             }
             write_window(t, &sub, now, &link)?;
@@ -120,7 +150,7 @@ pub async fn check_all(state: &Shared) {
     let names = match state.db.read(subs::list).await {
         Ok(all) => all
             .into_iter()
-            .filter(|s| s.cloud_kind().is_some())
+            .filter(|s| s.cloud_kind().is_some() || s.provider == "litellm")
             .map(|s| s.name)
             .collect::<Vec<_>>(),
         Err(e) => {

@@ -64,6 +64,7 @@ pub fn pick(
         }
         let used = subs::latest_windows(conn, name)?
             .iter()
+            .filter(|w| sub.provider != "litellm" || w.window != "budget")
             .map(|w| crate::quota_policy::effective_pct(w.used_pct, w.resets_at.as_deref(), now))
             .fold(0.0, f64::max);
         // A cloud subscription: room up to its used-up budget.

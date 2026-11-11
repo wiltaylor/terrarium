@@ -118,6 +118,9 @@ impl std::str::FromStr for Api {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SelfHosted {
+    /// Optional monthly USD fallback budget for LiteLLM, counted from session costs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<u32>,
     #[serde(default)]
     pub api: Api,
     /// `http` or `https`. A LAN host or `localhost` is fine.
