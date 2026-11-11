@@ -64,7 +64,7 @@ export function scopeRemoteHtml(el: DocumentFragment, instance: Pick<Instance, "
   });
   el.querySelectorAll("img").forEach((img) => {
     const raw = remoteImageSource(img);
-    const src = raw && instance.key ? remoteImagePath(raw, page, { ...instance, key: instance.key }) : undefined;
+    const src = raw && instance.key ? remoteImagePath(raw, page, { key: instance.key, path: instance.path, remoteOrigin: instance.remoteOrigin }) : undefined;
     if (src) { img.setAttribute("src", src); img.setAttribute("referrerpolicy", "no-referrer"); return; }
     const placeholder = document.createElement("span");
     placeholder.className = "small muted";
