@@ -2290,10 +2290,18 @@ mod tests {
         let q = queues(&[("a", 3, "h")]);
         for kind in [JobKind::Merge, JobKind::E2e] {
             let run = [running(job("0", "a", kind, "app", "release/1.2.3"), "h")];
-            let queued = vec![job("1", "a", JobKind::E2e, "app", "release/1.2.3"), job("2", "a", JobKind::Merge, "app", "t2")];
+            let queued = vec![
+                job("1", "a", JobKind::E2e, "app", "release/1.2.3"),
+                job("2", "a", JobKind::Merge, "app", "t2"),
+            ];
             assert!(pick(queued, &run, &q, &HashMap::new()).is_empty());
         }
-        let picked = pick(vec![job("1", "a", JobKind::E2e, "app", "release/1.2.3")], &[], &q, &HashMap::new());
+        let picked = pick(
+            vec![job("1", "a", JobKind::E2e, "app", "release/1.2.3")],
+            &[],
+            &q,
+            &HashMap::new(),
+        );
         assert_eq!(picked[0].0.slot, Some(MERGE_SLOT));
     }
 

@@ -5661,11 +5661,33 @@ mod tests {
         crate::db::migrate(&mut c).unwrap();
         let db = crate::db::Db::new(c, crate::events::EventHub::default());
         db.write("system", |t| {
-            projects::create(t, &projects::NewProject { name: "p".into(), ..Default::default() }, projects::SOURCE_API)?;
-            groups::open(t, groups::Open { project: "p", rule: "version-cut", key: "version:test", title: "Version test",
-                column: "review", done_when: "done", eta: None, close_after: None })?;
+            projects::create(
+                t,
+                &projects::NewProject {
+                    name: "p".into(),
+                    ..Default::default()
+                },
+                projects::SOURCE_API,
+            )?;
+            groups::open(
+                t,
+                groups::Open {
+                    project: "p",
+                    rule: "version-cut",
+                    key: "version:test",
+                    title: "Version test",
+                    column: "review",
+                    done_when: "done",
+                    eta: None,
+                    close_after: None,
+                },
+            )?;
             let g = groups::by_key(t, "p", "version:test")?.unwrap();
-            for (state, expected) in [(jobs::JobState::Passed, "done"), (jobs::JobState::Failed, "failed"), (jobs::JobState::Cancelled, "failed")] {
+            for (state, expected) in [
+                (jobs::JobState::Passed, "done"),
+                (jobs::JobState::Failed, "failed"),
+                (jobs::JobState::Cancelled, "failed"),
+            ] {
                 let mut j = ended(JobKind::E2e, state, None);
                 j.card = g.id.clone();
                 j.project = "p".into();
@@ -5673,10 +5695,20 @@ mod tests {
                 let after = groups::get(t, &g.id)?;
                 assert_eq!(after.column, g.column);
                 assert_eq!(after.members, g.members);
-                assert_eq!(after.steps.iter().find(|s| s.name == "version branch e2e").unwrap().state, expected);
+                assert_eq!(
+                    after
+                        .steps
+                        .iter()
+                        .find(|s| s.name == "version branch e2e")
+                        .unwrap()
+                        .state,
+                    expected
+                );
             }
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     /// TER-137: the job queue writes its comments and its moves with the
