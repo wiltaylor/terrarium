@@ -952,7 +952,10 @@ pub async fn observe_remote_heads_from(state: &Shared, cursor: &mut String) {
             return;
         }
     };
-    let seen = read_remote_heads(cards, cursor, async |card| remote_head(state, card).await).await;
+    let seen = read_remote_heads(cards, cursor, |card| async move {
+        remote_head(state, &card).await
+    })
+    .await;
     if seen.is_empty() {
         return;
     }
@@ -970,10 +973,10 @@ pub async fn observe_remote_heads_from(state: &Shared, cursor: &mut String) {
     }
 }
 
-async fn read_remote_heads(
+async fn read_remote_heads<F: std::future::Future<Output = Option<Option<String>>>>(
     cards: Vec<BranchCard>,
     cursor: &mut String,
-    read_head: impl for<'a> AsyncFn(&'a BranchCard) -> Option<Option<String>>,
+    mut read_head: impl FnMut(BranchCard) -> F,
 ) -> Vec<(BranchCard, Option<String>, String)> {
     let deadline = tokio::time::Instant::now() + OBSERVE_PASS_CAP;
     let mut seen = Vec::new();
@@ -982,7 +985,7 @@ async fn read_remote_heads(
             tracing::warn!("card branch watch: pass cap reached at {}", card.id);
             break;
         }
-        let Ok(read) = tokio::time::timeout_at(deadline, read_head(&card)).await else {
+        let Ok(read) = tokio::time::timeout_at(deadline, read_head(card.clone())).await else {
             tracing::warn!(
                 "card branch watch: pass cap reached while reading {}",
                 card.id
@@ -1461,7 +1464,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let mut cursor = String::new();
-        let seen = read_remote_heads(cards(), &mut cursor, async |card| {
+        let seen = read_remote_heads(cards(), &mut cursor, |card| async move {
             if card.id == "P-2" {
                 tokio::time::sleep(OBSERVE_PASS_CAP * 2).await;
             }
@@ -1472,7 +1475,7 @@ mod tests {
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0.id, "P-1");
         let remaining = cards().into_iter().filter(|c| c.id > cursor).collect();
-        let seen = read_remote_heads(remaining, &mut cursor, async |_| Some(None)).await;
+        let seen = read_remote_heads(remaining, &mut cursor, |_| async { Some(None) }).await;
         assert_eq!(seen[0].0.id, "P-2");
         assert_eq!(seen.len(), 2);
         assert_eq!(cursor, "P-3");
