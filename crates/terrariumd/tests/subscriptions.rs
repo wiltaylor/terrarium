@@ -49,7 +49,7 @@ async fn litellm_live_claude_and_fallback_mail_only() {
         .timeout(Duration::from_secs(150))
         .build()
         .unwrap();
-    let info: Value = client
+    let info = client
         .get(format!("{base}/key/info"))
         .bearer_auth(key)
         .send()
@@ -57,9 +57,10 @@ async fn litellm_live_claude_and_fallback_mail_only() {
         .unwrap()
         .error_for_status()
         .unwrap()
-        .json()
+        .bytes()
         .await
         .unwrap();
+    let info: Value = serde_json::from_slice(&info).unwrap();
     assert_eq!(info["info"]["max_budget"], 100.0);
     assert!(info["info"]["budget_reset_at"].is_string());
 
@@ -84,11 +85,20 @@ async fn litellm_live_claude_and_fallback_mail_only() {
     // only by this fixture client and Claude, so this exercises real failure.
     let probe = td.post_empty("/api/subscriptions/live-lite/probe").await;
     assert_eq!(probe.ok()["probe_status"], "failed");
-    assert!(probe.body["error"].as_str().unwrap().contains("no spend from LiteLLM"));
+    assert!(
+        probe.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("no spend from LiteLLM")
+    );
     assert_eq!(probe.body["windows"], json!([]));
     td.project("live").await;
     let agent = td
-        .agent("live", "worker", json!({"harness": "claude", "subscription": "live-lite"}))
+        .agent(
+            "live",
+            "worker",
+            json!({"harness": "claude", "subscription": "live-lite"}),
+        )
         .await;
     let id = agent["id"].as_str().unwrap();
     let state = td.daemon.as_ref().unwrap().state.clone();
@@ -97,25 +107,42 @@ async fn litellm_live_claude_and_fallback_mail_only() {
         .read(|c| terrariumd::store::subscriptions::get(c, "live-lite"))
         .await
         .unwrap();
-    let mut vars: std::collections::BTreeMap<String, String> =
-        sub.selfhosted.as_ref().unwrap().claude_env(None).into_iter().collect();
-    vars.extend(terrariumd::login_session::credential_env_for(&td.state, &sub));
+    let mut vars: std::collections::BTreeMap<String, String> = sub
+        .selfhosted
+        .as_ref()
+        .unwrap()
+        .claude_env(None)
+        .into_iter()
+        .collect();
+    vars.extend(terrariumd::login_session::credential_env_for(
+        &td.state, &sub,
+    ));
     vars.retain(|k, _| k == "ANTHROPIC_BASE_URL" || k == "ANTHROPIC_AUTH_TOKEN");
-    let launched: Value = client
+    let launched = client
         .post(format!("{base}/_fixture/run"))
         .bearer_auth(connection["control"].as_str().unwrap())
-        .json(&vars)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_vec(&vars).unwrap())
         .send()
         .await
         .unwrap()
         .error_for_status()
         .unwrap()
-        .json()
+        .bytes()
         .await
         .unwrap();
-    assert_eq!(launched["exit_code"], 0, "Claude fixture failed, output suppressed");
+    let launched: Value = serde_json::from_slice(&launched).unwrap();
+    assert_eq!(
+        launched["exit_code"], 0,
+        "Claude fixture failed, output suppressed"
+    );
     assert_eq!(launched["result"]["is_error"], false);
-    assert!(launched["result"]["result"].as_str().unwrap().contains("TER798_MOCK_OK"));
+    assert!(
+        launched["result"]["result"]
+            .as_str()
+            .unwrap()
+            .contains("TER798_MOCK_OK")
+    );
     let cost = launched["result"]["total_cost_usd"].as_f64().unwrap();
     assert!(cost > 0.0 && cost < 80.0);
     let session = launched["result"]["session_id"].as_str().unwrap();
@@ -123,33 +150,80 @@ async fn litellm_live_claude_and_fallback_mail_only() {
     std::fs::write(&file, launched["transcript"].as_str().unwrap()).unwrap();
     // Normalize the real CLI's returned total for versions whose on-disk
     // transcript does not yet include cost-state records.
-    let mut transcript = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
-    writeln!(transcript, "{}", json!({"type": "cost-state", "sessionId": session,
-                                    "totalCostUSD": cost})).unwrap();
-    emit(td, &agent, "turn_start", json!({"prompt": "live mock proof"})).await;
-    emit(td, &agent, "session_started", json!({"harness_session": session,
+    let mut transcript = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    writeln!(
+        transcript,
+        "{}",
+        json!({"type": "cost-state", "sessionId": session,
+                                    "totalCostUSD": cost})
+    )
+    .unwrap();
+    emit(
+        td,
+        &agent,
+        "turn_start",
+        json!({"prompt": "live mock proof"}),
+    )
+    .await;
+    emit(
+        td,
+        &agent,
+        "session_started",
+        json!({"harness_session": session,
         "transcript_path": format!("/home/agent/.claude/projects/-home-agent-work/{session}.jsonl"),
-        "source": "startup"})).await;
+        "source": "startup"}),
+    )
+    .await;
     wait_for("real Claude cost in fallback", || async {
-        td.get("/api/subscriptions/live-lite").await.body["fallback_spend_usd"].as_f64() == Some(cost)
-    }).await;
+        td.get("/api/subscriptions/live-lite").await.body["fallback_spend_usd"].as_f64()
+            == Some(cost)
+    })
+    .await;
     // Controlled transcript totals, NOT billed provider spend. This runs the
     // actual collector, monthly accounting, notice deduplication and policy.
     for (total, mails) in [(80.0, 1), (90.0, 2), (100.0, 3), (100.0, 3)] {
-        writeln!(transcript, "{}", json!({"type": "cost-state", "sessionId": session,
-                                        "totalCostUSD": total})).unwrap();
+        writeln!(
+            transcript,
+            "{}",
+            json!({"type": "cost-state", "sessionId": session,
+                                        "totalCostUSD": total})
+        )
+        .unwrap();
         emit(td, &agent, "turn_end", json!({})).await;
         wait_for("controlled fallback total", || async {
-            td.get("/api/subscriptions/live-lite").await.body["fallback_spend_usd"].as_f64() == Some(total)
-        }).await;
-        terrariumd::cloud_budget::check(&state, "live-lite").await.unwrap();
-        terrariumd::quota_policy::evaluate_subscription(&state, "live-lite").await.unwrap();
-        let count: i64 = state.db.read(|c| {
-            Ok(c.query_row("SELECT count(*) FROM messages WHERE subject LIKE '%live-lite%'",
-                           [], |r| r.get(0))?)
-        }).await.unwrap();
+            td.get("/api/subscriptions/live-lite").await.body["fallback_spend_usd"].as_f64()
+                == Some(total)
+        })
+        .await;
+        terrariumd::cloud_budget::check(&state, "live-lite")
+            .await
+            .unwrap();
+        terrariumd::quota_policy::evaluate_subscription(&state, "live-lite")
+            .await
+            .unwrap();
+        let count: i64 = state
+            .db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM messages WHERE subject LIKE '%live-lite%'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
         assert_eq!(count, mails);
-        assert!(state.db.read(terrariumd::store::usage::holds).await.unwrap().is_empty());
+        assert!(
+            state
+                .db
+                .read(terrariumd::store::usage::holds)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let shown = td.get("/api/subscriptions/live-lite").await;
         assert_eq!(shown.ok()["windows"][0]["window"], "budget");
         assert_eq!(shown.body["windows"][0]["used_pct"], total);
@@ -158,7 +232,10 @@ async fn litellm_live_claude_and_fallback_mail_only() {
     for path in ["/api/subscriptions", "/api/events", "/api/audit"] {
         assert!(!td.get(path).await.body.to_string().contains(key));
     }
-    println!("Live LiteLLM/Postgres virtual key, {} via mock model, real CLI cost {cost} USD; controlled 80/90/100 totals: 3 mails, no holds", launched["version"].as_str().unwrap());
+    println!(
+        "Live LiteLLM/Postgres virtual key, {} via mock model, real CLI cost {cost} USD; controlled 80/90/100 totals: 3 mails, no holds",
+        launched["version"].as_str().unwrap()
+    );
 }
 
 #[tokio::test]
