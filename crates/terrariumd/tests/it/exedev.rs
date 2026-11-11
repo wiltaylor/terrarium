@@ -398,6 +398,26 @@ async fn workspace_sync_uses_exedev_home_without_work_root() {
 }
 
 async fn workspace_sync_roundtrip(work_root: bool) {
+    // These round trips use real rsync on both sides of the fake SSH transport.
+    // Keep the production security floor, but allow hosts with older rsync to
+    // run the rest of the exe.dev tests with their default PATH.
+    let version_output = tokio::process::Command::new("rsync")
+        .arg("--version")
+        .output()
+        .await;
+    let supported = version_output.is_ok_and(|output| {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let version = stdout
+            .strip_prefix("rsync  version ")
+            .and_then(|s| s.split_whitespace().next())
+            .map(|s| s.split('.').map(str::parse::<u32>).collect::<Vec<_>>());
+        output.status.success()
+            && matches!(version.as_deref(), Some([Ok(major), Ok(minor), Ok(patch)]) if (*major, *minor, *patch) >= (3, 4, 0))
+    });
+    if !supported {
+        eprintln!("SKIP: exe.dev workspace sync round trip requires rsync >= 3.4.0 on PATH");
+        return;
+    }
     let (td, _, _, _, ssh) = daemon().await;
     let base = td.dir.path().join("remote-work");
     // ssh_plan sends one shell command, whereas rsync sends a server argv.
