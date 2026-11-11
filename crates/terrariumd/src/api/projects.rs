@@ -161,10 +161,8 @@ async fn update(
     policy::admin_project(&actor, &name, "changing a project")?;
     // The GitHub author gate (TER-85) holds work back from agents: no
     // agent changes its allow list, a sysadmin neither.
-    if patch.github_authors.is_some() && !matches!(actor, Actor::Operator) {
-        return Err(ApiError::forbidden(
-            "only the operator sets github_authors (the GitHub author gate)",
-        ));
+    if patch.github_authors.is_some() {
+        policy::operator_only(&actor, "setting github_authors (the GitHub author gate)")?;
     }
     let p = state
         .db

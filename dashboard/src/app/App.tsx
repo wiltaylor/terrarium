@@ -7,6 +7,7 @@ import { isMock } from "../api";
 import { escapeMalformedPath } from "../lib/url";
 
 import { Layout } from "./Layout";
+import { RemoteScope } from "./RemoteScope";
 import { MOVED_ROUTES, movedTo, withQuery } from "./nav";
 import { LoginScreen } from "./LoginScreen";
 import { Home } from "../features/home/Home";
@@ -93,7 +94,18 @@ export function App() {
         <LoginScreen />
       </Match>
       <Match when={true}>
-      <Router root={Layout}>
+      <Router>
+        <Route path="/remote/:remote" component={RemoteScope}>{instanceRoutes()}</Route>
+        <Route path="/" component={Layout}>{instanceRoutes()}</Route>
+      </Router>
+      </Match>
+    </Switch>
+  );
+}
+
+/** One route table for home and every remote, including legacy redirects. */
+function instanceRoutes() {
+  return <>
         <Route path="/" component={Home} />
         <Route path="/projects" component={ProjectsPage} />
         <Route path="/bookmarks" component={ManageBookmarks} />
@@ -171,8 +183,5 @@ export function App() {
         {/* A redirect keeps the query and the hash: an old `/subscriptions?add=api_key` link still opens the wizard. */}
         <For each={MOVED_ROUTES}>{(r) => <Route path={r.path} component={() => <Navigate href={({ location }) => `${withQuery(movedTo(location.pathname) ?? r.to, location.search)}${location.hash}`} />} />}</For>
         <Route path="*" component={NotFound} />
-      </Router>
-      </Match>
-    </Switch>
-  );
+  </>;
 }

@@ -13,6 +13,7 @@ import { createEffect, createSignal, on, onCleanup, onMount, Show } from "solid-
 import { backoffDelay, ptyInput, ptyResize, type PtySocket } from "../api/sockets";
 import { createKeyPadState, KeyPad, keyError } from "./KeyPad";
 import { typedKeys } from "./terminalKeys";
+import { useInstance } from "../instance";
 
 export interface TerminalProps {
   /** Open a socket. Called on mount and on every reconnect. */
@@ -40,6 +41,7 @@ export interface TerminalProps {
 const OPEN = 1;
 
 export function Terminal(props: TerminalProps) {
+  const { key: instanceKey } = useInstance();
   let host!: HTMLDivElement;
   const [readOnly, setReadOnly] = createSignal(!props.interactive);
   const [state, setState] = createSignal<"connecting" | "open" | "closed" | "waiting">("connecting");
@@ -215,7 +217,7 @@ export function Terminal(props: TerminalProps) {
     <div class="terminal-wrap">
       <div class="terminal-bar">
         <span class="row">
-          <strong>{props.title ?? "Terminal"}</strong>
+          <strong>{props.title ?? "Terminal"}{instanceKey === "local" ? "" : ` · Remote: ${instanceKey.slice(7)}`}</strong>
           <span class={`chip ${state() === "open" ? "ok" : state() === "connecting" ? "info" : "bad"}`}>{label()}</span>
           <span class="muted mono small">
             {size().cols}×{size().rows}

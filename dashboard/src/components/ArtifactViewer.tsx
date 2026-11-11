@@ -38,11 +38,18 @@ export function previewKind(a: Pick<Artifact, "content_type" | "kind" | "name"> 
 }
 
 export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolean }) {
-  const { api } = useInstance();
+  const { api, key, remoteOrigin } = useInstance();
   const kind = () => previewKind(props.artifact);
   // The uid is unique across projects, so it is the safest key.
   const [signed] = createResource(() => props.artifact.uid || props.artifact.id, (key) => api.artifacts.url(key));
-  const url = () => signed()?.url;
+  const url = () => {
+    const raw = signed()?.url;
+    if (!raw || key === "local") return raw;
+    try {
+      const target = new URL(raw, remoteOrigin);
+      return ["http:", "https:"].includes(target.protocol) ? target.href : undefined;
+    } catch { return undefined; }
+  };
   const origin = () => {
     const u = url();
     return u ? artifactOriginKind(u, location.origin) : null;
@@ -55,10 +62,16 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
     return o === artifactOrigin ? null : o;
   };
   const [text] = createResource(
-    () => (kind() === "markdown" || kind() === "text" ? url() : null),
+    () => (key === "local" && (kind() === "markdown" || kind() === "text") ? url() : null),
     (u) => api.artifacts.text(u),
   );
-  return (
+  return <Show when={key === "local"} fallback={<div class="stack">
+    <strong>{props.artifact.name}</strong>
+    <p>Remote artifact. Opens externally on the remote artifact origin, not in this dashboard.</p>
+    <Show when={signed.error}><ErrorBanner error={signed.error} /></Show>
+    <Show when={url()}>{(u) => <a href={u()} target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open remote artifact (external)</a>}</Show>
+  </div>}>
+  {(
     <div class="stack" style={{ gap: "8px" }}>
       <Show when={!props.compact}>
         <div class="spread small">
@@ -130,5 +143,6 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
         )}
       </Show>
     </div>
-  );
+  )}
+  </Show>;
 }

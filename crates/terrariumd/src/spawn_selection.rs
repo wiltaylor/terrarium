@@ -92,6 +92,10 @@ fn cloud_refusal(
     named: Option<&str>,
     fallback: bool,
 ) -> Option<&'static str> {
+    if sub.provider == "litellm" {
+        return (fallback || named != Some(sub.name.as_str()))
+            .then_some("LiteLLM subscription, used only when named, never as automatic fallback");
+    }
     sub.cloud_kind()?;
     if fallback {
         return Some("cloud subscription, never taken by the automatic -alt fallback");

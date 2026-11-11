@@ -25,6 +25,74 @@ const ANTHROPIC: &str = "https://api.anthropic.com/api/oauth/usage";
 const OPENAI: &str = "https://chatgpt.com/backend-api/wham/usage";
 
 #[tokio::test]
+async fn litellm_is_claude_only_and_keeps_the_key_private() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    let sub = td
+        .post(
+            "/api/subscriptions/lite/api-key",
+            json!({
+                "provider": "litellm", "key": "E2E-lite-secret",
+                "base_url": "https://proxy.example.com", "models": ["team-model"]
+            }),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(sub["provider"], "litellm");
+    assert_eq!(sub["display_name"], "LiteLLM");
+    assert_eq!(sub["harnesses"], json!(["claude"]));
+    assert_eq!(sub["selfhosted"]["api"], "anthropic");
+    assert_eq!(sub["selfhosted"]["models"], json!(["team-model"]));
+    assert_eq!(sub["no_quota"], false);
+    assert_eq!(sub["probe"], "litellm-key-spend");
+    assert!(!sub.to_string().contains("E2E-lite-secret"));
+    let r = td
+        .post(
+            "/api/subscriptions/lite/api-key",
+            json!({"provider": "litellm", "key": "E2E-rejected-key", "base_url": "http://proxy.example.com"}),
+        )
+        .await;
+    assert_eq!(r.status, 422);
+    let r = td
+        .patch(
+            "/api/subscriptions/lite",
+            json!({"selfhosted": {"base_url": "http://proxy.example.com"}}),
+        )
+        .await;
+    assert_eq!(r.status, 422);
+    let r = td.get("/api/subscriptions/lite").await;
+    assert_eq!(
+        r.ok()["selfhosted"]["base_url"],
+        "https://proxy.example.com"
+    );
+    // Rotating the key without supplying a URL validates the stored endpoint.
+    td.post(
+        "/api/subscriptions/lite/api-key",
+        json!({"provider": "litellm", "key": "E2E-rotated-key"}),
+    )
+    .await
+    .ok();
+    for harness in ["pi", "codex", "copilot"] {
+        let r = td
+            .post(
+                "/api/subscriptions",
+                json!({
+                    "name": format!("lite-{harness}"), "provider": "litellm",
+                    "harnesses": [harness],
+                    "selfhosted": {"api": "anthropic", "base_url": "https://proxy.example.com"}
+                }),
+            )
+            .await;
+        assert_eq!(r.status, 422);
+    }
+    let r = td.post("/api/subscriptions/lite-http/api-key", json!({
+        "provider": "litellm", "key": "E2E-lite-secret", "base_url": "http://proxy.example.com"
+    })).await;
+    assert_eq!(r.status, 422);
+}
+
+#[tokio::test]
 async fn vertex_save_defaults_and_failed_test_leave_credentials_unchanged() {
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;
@@ -3339,6 +3407,39 @@ async fn cloud_settings_response_never_reads_the_key_file() {
         .await;
     assert_eq!(r.ok()["has_api_key"], true);
     assert_eq!(r.body["cloud"]["region"], "us-west-2");
+    assert_eq!(r.body["month_spend_usd"], 0.0);
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    state
+        .db
+        .write("t", |t| {
+            terrariumd::store::cloud_spend::record(
+                t,
+                "estimate-agent",
+                "s1",
+                Some("aws"),
+                &terrarium_core::cloud::month_key(chrono::Utc::now()),
+                12.5,
+            )
+        })
+        .await
+        .unwrap();
+    let unbudgeted = td.get("/api/subscriptions/aws").await;
+    assert_eq!(unbudgeted.ok()["month_spend_usd"], 12.5);
+    let r = td
+        .put(
+            "/api/subscriptions/aws/cloud",
+            json!({"region": "us-west-2", "budget_usd": 50}),
+        )
+        .await;
+    assert_eq!(r.ok()["cloud"]["budget_usd"], 50);
+    let r = td
+        .put(
+            "/api/subscriptions/aws/cloud",
+            json!({"region": "us-west-2", "budget_usd": null}),
+        )
+        .await;
+    assert!(r.ok()["cloud"]["budget_usd"].is_null());
+    assert_eq!(r.body["month_spend_usd"], 12.5);
     assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
 
     // Reading this FIFO blocks until the writer closes. A metadata-only

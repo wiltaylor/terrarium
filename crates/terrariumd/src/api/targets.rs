@@ -82,11 +82,7 @@ pub fn routes() -> Router<Shared> {
 /// `POST /api/exedev/sweep`: run the exe.dev sweep now (TER-294). The
 /// operator only. The answer lists the removed VMs and the errors.
 async fn exedev_sweep(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Value>> {
-    if !actor.is_operator() {
-        return Err(ApiError::forbidden(
-            "only the operator runs the exe.dev sweep",
-        ));
-    }
+    policy::operator_only(&actor, "running the exe.dev sweep")?;
     let out = crate::exedev::sweep(&state).await?;
     let detail = out.clone();
     state
@@ -660,7 +656,6 @@ async fn recreate(
 ) -> ApiResult<Json<Value>> {
     let opts = opts.unwrap_or_default();
     if opts.force || !opts.discard_volumes.is_empty() {
-        crate::links::refuse_for_link("override Docker recreation safety checks")?;
         policy::operator_only(&actor, "overriding Docker recreation safety checks")?;
     }
     let r = load(&state, &actor, name).await?;

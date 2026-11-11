@@ -638,13 +638,9 @@ async fn to_thread(
     body: axum::body::Bytes,
 ) -> ApiResult<Response> {
     let b: ToThreadBody = optional_body(&body)?;
+    crate::links::operator_only("moving a question into a thread")?;
     let q = find(&state, &actor, id).await?;
-    if !matches!(actor, Actor::Operator) {
-        return Err(ApiError::forbidden(
-            "only the operator moves a question into a thread: the thread is between the \
-             operator and the asking agent",
-        ));
-    }
+    crate::policy::operator_only(&actor, "moving a question into a thread")?;
     let qid = q.id.clone();
     let (q, th) = state
         .db

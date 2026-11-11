@@ -143,6 +143,9 @@ fn yes() -> bool {
 /// an OpenAI-style server), and a harness other than Claude Code on a
 /// cloud subscription (`terrarium_core::cloud`).
 pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
+    if sub.provider == "litellm" && harness != HarnessId::Claude {
+        return Some("a LiteLLM subscription is for the claude harness only".into());
+    }
     if sub.cloud_kind().is_some() {
         return terrarium_core::cloud::harness_refusal(&[harness])
             .map(|why| format!("subscription `{}`: {why}", sub.name));
@@ -201,6 +204,9 @@ pub const REASON_DISABLED: &str = "subscription_disabled";
 /// written before the probe existed get it too.
 pub fn default_probe(provider: &str, plan: Option<&str>) -> Option<String> {
     use terrarium_core::zai;
+    if provider == "litellm" {
+        return Some(crate::probes::litellm::NAME.to_owned());
+    }
     if zai::is_zai(provider) && zai::plan_or_default(plan) == zai::Plan::Coding {
         return Some(crate::probes::zai::NAME.to_owned());
     }
@@ -409,7 +415,13 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
         return Ok(def.clone());
     }
     let mut d = def.clone();
-    d.provider = selfhosted::PROVIDER.to_owned();
+    let litellm = d.provider.trim().eq_ignore_ascii_case("litellm");
+    d.provider = if litellm {
+        "litellm"
+    } else {
+        selfhosted::PROVIDER
+    }
+    .to_owned();
     if d.plan.is_some() && !terrarium_adapter_pi::provider::is_api_key(&d) {
         return Err(ApiError::invalid(format!(
             "subscription `{}`: a self-hosted subscription has no plan",
@@ -429,6 +441,22 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
             )));
         }
     };
+    if litellm {
+        if sh.api != selfhosted::Api::Anthropic {
+            return Err(ApiError::invalid("LiteLLM needs the anthropic API style"));
+        }
+        if !sh.base_url.to_ascii_lowercase().starts_with("https://") {
+            return Err(ApiError::invalid("LiteLLM base_url must use https"));
+        }
+        if d.harnesses.is_empty() {
+            d.harnesses = vec![HarnessId::Claude];
+        }
+        if d.harnesses.iter().any(|h| *h != HarnessId::Claude) {
+            return Err(ApiError::invalid(
+                "a LiteLLM subscription is for the claude harness only",
+            ));
+        }
+    }
     if d.harnesses.is_empty() {
         d.harnesses = sh.api.harnesses().to_vec();
     }

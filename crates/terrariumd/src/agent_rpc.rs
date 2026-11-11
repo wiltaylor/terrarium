@@ -180,7 +180,7 @@ async fn drain_active(
         // them, even if their side effect happened before this process exited.
         db.write("system", |t| {
             let rows: Vec<(String, String)> = t
-                .prepare("SELECT agent, request_id FROM agent_rpc_answers WHERE answer IS NULL")?
+                .prepare("SELECT agent, request_id FROM agent_rpc_answers WHERE answer IS NULL AND compacted = 0")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<Result<_, _>>()?;
             for (agent, id) in rows {
@@ -501,7 +501,7 @@ async fn journaled(
         .map_err(|e| RpcError::new("internal", e.to_string()))?;
     db.write(format!("agent:{agent}"), move |t| {
         t.execute(
-            "UPDATE agent_rpc_answers SET answer = ?3 WHERE agent = ?1 AND request_id = ?2",
+            "UPDATE agent_rpc_answers SET answer = ?3 WHERE agent = ?1 AND request_id = ?2 AND compacted = 0",
             rusqlite::params![agent, id, stored],
         )?;
         Ok(())
@@ -512,30 +512,30 @@ async fn journaled(
 }
 
 /// How long a write answer stays for a replay. A runner retries within
-/// seconds, so a day is a wide margin. After it, a retry with the same
-/// request ID runs the write again.
+/// seconds, so a day is a wide margin. After it, a retry remains refused
+/// by the durable admission key, but its answer is indeterminate.
 pub const ANSWER_MAX_AGE: chrono::Duration = chrono::Duration::hours(24);
 
-/// The rows that one prune write deletes. Each batch is its own write, so
+/// The rows that one prune write compacts. Each batch is its own write, so
 /// the prune never holds the database lock for long (TER-394).
 pub const PRUNE_BATCH: i64 = 500;
 
-/// Delete at most `limit` answers admitted before `cutoff` (unix seconds),
-/// on the `created_at` index. Returns the number of deleted rows.
+/// Compact at most `limit` answers admitted before `cutoff` (unix seconds).
+/// The partial index excludes tombstones, keeping each batch bounded.
 pub fn prune_answers_batch(
     t: &crate::db::Tx<'_>,
     cutoff: i64,
     limit: i64,
 ) -> crate::error::ApiResult<usize> {
     Ok(t.execute(
-        "DELETE FROM agent_rpc_answers WHERE rowid IN (
-             SELECT rowid FROM agent_rpc_answers WHERE created_at < ?1 LIMIT ?2)",
+        "UPDATE agent_rpc_answers SET answer = NULL, compacted = 1 WHERE rowid IN (
+             SELECT rowid FROM agent_rpc_answers WHERE compacted = 0 AND created_at < ?1 LIMIT ?2)",
         rusqlite::params![cutoff, limit],
     )?)
 }
 
-/// Delete the answers older than [`ANSWER_MAX_AGE`] in batches of
-/// [`PRUNE_BATCH`], one write per batch. Returns the number of deleted rows.
+/// Compact answers older than [`ANSWER_MAX_AGE`] in batches of
+/// [`PRUNE_BATCH`], one write per batch. Returns the number compacted.
 pub async fn prune_answers(
     db: &crate::db::Db,
     now: chrono::DateTime<chrono::Utc>,
@@ -555,11 +555,10 @@ pub async fn prune_answers(
     }
 }
 
-/// The agent `id` is deleted: its answers go with it. The primary key
-/// starts with the agent, so this is an indexed delete of one agent's rows,
-/// and the age prune keeps that at most a day of writes.
-pub fn on_agent_deleted(t: &crate::db::Tx<'_>, id: &str) -> crate::error::ApiResult<()> {
-    t.execute("DELETE FROM agent_rpc_answers WHERE agent = ?1", [id])?;
+/// Deletion does not erase admission keys. Old credentials or a restored
+/// agent ID must never make a request executable again. The normal bounded
+/// age prune removes payloads, including those belonging to deleted agents.
+pub fn on_agent_deleted(_t: &crate::db::Tx<'_>, _id: &str) -> crate::error::ApiResult<()> {
     Ok(())
 }
 
@@ -665,7 +664,16 @@ mod tests {
             prune_answers(&db, now).await.unwrap() as i64,
             n_old - PRUNE_BATCH
         );
-        assert_eq!(answer_rows(&db, "old").await, 0);
+        assert_eq!(answer_rows(&db, "old").await, n_old);
+        let payloads: i64 = db
+            .read(|c| {
+                Ok(c.query_row(
+            "SELECT count(*) FROM agent_rpc_answers WHERE agent = 'old' AND answer IS NOT NULL",
+            [], |r| r.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(payloads, 0);
         assert_eq!(answer_rows(&db, "fresh").await, 1);
         assert_eq!(prune_answers(&db, now).await.unwrap(), 0);
     }
@@ -689,7 +697,26 @@ mod tests {
         db.write("test", move |t| on_agent_deleted(t, agent))
             .await
             .unwrap();
-        assert_eq!(answer_rows(&db, agent).await, 0);
+        assert_eq!(answer_rows(&db, agent).await, 1);
+        assert_eq!(
+            prune_answers(
+                &db,
+                chrono::Utc::now() + ANSWER_MAX_AGE + chrono::Duration::seconds(2)
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        let replay = journaled(
+            &db,
+            &crash_context(),
+            "kept".into(),
+            &crash_params(),
+            async { panic!("compacted request must never execute") },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(replay.code, "indeterminate");
     }
 
     #[tokio::test]

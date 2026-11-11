@@ -108,6 +108,7 @@ tokio-tungstenite.workspace = true
 seccompiler.workspace = true
 
 [dev-dependencies]
+rusqlite = { workspace = true, features = ["hooks", "trace"] }
 # The integration tests use the fake supervisor.
 terrariumd = { path = ".", features = ["fake-supervisor"] }
 # The guard that ends the runner processes of a test.
