@@ -31,6 +31,32 @@ it("does not announce nominal before both lists finish", async () => {
   finish({ items: [], next: null }); await settle();
   expect(document.body.textContent).toContain("All Systems Nominal");
 });
+it.each([["same", "same"], ["a", "b", "a"]])("rejects repeated cursors %j", async (...cursors) => {
+  const page = vi.fn();
+  for (const next of cursors) page.mockResolvedValueOnce({ items: [], next });
+  await expect(allHome(page)).rejects.toThrow("repeated cursor");
+  expect(page).toHaveBeenCalledTimes(cursors.length);
+});
+it("stops after 500 pages with distinct continuation cursors", async () => {
+  let calls = 0;
+  const page = vi.fn(async () => ({ items: [], next: String(++calls) }));
+  await expect(allHome(page)).rejects.toThrow("500-page limit");
+  expect(page).toHaveBeenCalledTimes(500);
+});
+it("allows a terminal 500th page", async () => {
+  let calls = 0;
+  const page = vi.fn(async () => ({ items: [1], next: ++calls === 500 ? null : String(calls) }));
+  expect(await allHome(page)).toHaveLength(500);
+  expect(page).toHaveBeenCalledTimes(500);
+});
+it("shows pagination errors on the widget", async () => {
+  home.monitors.mockResolvedValue({ items: [], next: "same" });
+  home.pipelines.mockResolvedValue({ items: [], next: null });
+  mount(); await settle();
+  expect(document.body.textContent).toContain("repeated cursor");
+  expect(document.body.textContent).not.toContain("All Systems Nominal");
+  expect(home.monitors).toHaveBeenCalledTimes(2);
+});
 it("does not announce nominal on an error", async () => {
   home.monitors.mockRejectedValue(new Error("offline"));
   home.pipelines.mockResolvedValue({ items: [], next: null });
