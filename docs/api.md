@@ -12520,7 +12520,9 @@ sysadmin agent. A refused reply or resume changes nothing. Beyond these
 routes, every message that a link request writes is checked where it is
 delivered (`store::mail::send`): a question answer, a notice ack text, a
 retract reason, a to-thread message, a thread message or response, and any
-notice that the request makes. A message to a sysadmin agent (also through a
+notice that the request makes. The release of a held message
+(`POST /api/mail/{id}/release`, and a resume with or without a note) is a
+delivery too, checked in `store::mail::release` before any change. A message to a sysadmin agent (also through a
 project inbox whose admin is one) fails the whole request with
 `403 link_forbidden`, and nothing of it is kept. So a link may not move a
 card or end a thread when that mails a sysadmin agent. Reads, start, stop, pause, and interrupt of such an

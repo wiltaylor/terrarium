@@ -1769,7 +1769,9 @@ code; the lead's security review is still to do.
   decision). Rounds 3 to 5 each found one more route that mailed link text
   to a sysadmin (inbox reply, resume note, question answer, notice ack,
   retract reason, to-thread, thread message and respond). So the check is
-  now where every message is written, `store::mail::send`: when the write
+  now where every message is written or delivered, `store::mail::send` and
+  the release of held mail, `store::mail::release` (review round 6; also a
+  resume without a note): when the write
   has a link provenance (`Tx::link`, taken in `Db::write` from the request's
   task-local `links::CALLER`, or from an actor label `link:<id>`), a
   recipient that holds `sysadmin` fails the whole transaction with
@@ -1777,7 +1779,8 @@ code; the lead's security review is still to do.
   the provenance (the schedule runs use it). The per-route checks stay as a
   first line. Tests:
   `a_link_cannot_reach_a_sysadmin_through_questions_or_threads`,
-  `the_link_provenance_survives_into_a_spawned_task`. The guard also refuses
+  `the_link_provenance_survives_into_a_spawned_task`,
+  `a_link_cannot_release_held_mail_to_a_sysadmin`. The guard also refuses
   daemon notices that a link's own action would send to a sysadmin, so such
   an action fails as a whole; that is on purpose (a notice can quote link
   text). Work that runs later in a task of its own (an event reaction, the

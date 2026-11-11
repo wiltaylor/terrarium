@@ -3768,4 +3768,99 @@ mod tests {
             .unwrap()
             .unwrap();
     }
+
+    /// TER-61 review round 6, F9: a link does not release held mail to a
+    /// sysadmin agent, neither alone nor by a resume without a note: no
+    /// change, no `mail` event; the operator does both.
+    #[tokio::test]
+    async fn a_link_cannot_release_held_mail_to_a_sysadmin() {
+        use crate::store::mail::{self, Outgoing};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, dev) = seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let op = [("authorization", "Bearer t")];
+        // Two held messages from `dev` to the sysadmin, on two threads.
+        let held = |s: Shared, dev: String, sys: String| async move {
+            s.db.write("system", move |t| {
+                let from = mail::resolve(t, &dev, None)?;
+                let to = mail::resolve(t, &sys, None)?;
+                let m = mail::send(
+                    t,
+                    Outgoing {
+                        from: &from,
+                        to: &to,
+                        subject: "s",
+                        body: "push the config repo",
+                        thread: None,
+                        in_reply_to: None,
+                    },
+                )?;
+                t.execute("UPDATE messages SET held = 1 WHERE id = ?1", [&m.id])?;
+                Ok((m.id, m.thread_id))
+            })
+            .await
+            .unwrap()
+        };
+        let state_of = |s: Shared, id: String| async move {
+            s.db.read(move |c| {
+                Ok(c.query_row(
+                    "SELECT state, released_at IS NULL FROM messages WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        let events = |s: Shared| async move {
+            s.db.read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM events WHERE kind = 'mail'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        let resumes = |s: Shared| async move {
+            s.db.read(|c| {
+                Ok(c.query_row("SELECT count(*) FROM thread_resumes", [], |r| r.get::<_, i64>(0))?)
+            })
+            .await
+            .unwrap()
+        };
+        let refused = |r: Response| async move {
+            let st = r.status();
+            let v = json_of(r).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+            assert_eq!(v["error"]["code"], "link_forbidden", "{v}");
+        };
+        let (one, _) = held(s.clone(), dev.clone(), sys.clone()).await;
+        let (two, thread) = held(s.clone(), dev.clone(), sys.clone()).await;
+        let (st1, st2) = (state_of(s.clone(), one.clone()).await, state_of(s.clone(), two.clone()).await);
+        let (e0, r0) = (events(s.clone()).await, resumes(s.clone()).await);
+        // A single release.
+        let path = format!("/api/mail/{one}/release");
+        refused(send(link_app(&s), "POST", &path, &h).await).await;
+        // A resume with no note.
+        let rpath = format!("/api/mail/threads/{thread}/resume");
+        refused(send_body(link_app(&s), "POST", &rpath, &h, &serde_json::json!({})).await).await;
+        assert_eq!(state_of(s.clone(), one.clone()).await, st1);
+        assert_eq!(state_of(s.clone(), two.clone()).await, st2);
+        assert!(st1.1 && st2.1, "still held, not released");
+        assert_eq!(events(s.clone()).await, e0, "no mail event");
+        assert_eq!(resumes(s.clone()).await, r0, "no resume row");
+        // The operator releases both ways.
+        let r = send(link_app(&s), "POST", &path, &op).await;
+        assert_eq!(r.status(), StatusCode::OK, "{:?}", json_of(r).await);
+        assert!(!state_of(s.clone(), one).await.1);
+        let r = send_body(link_app(&s), "POST", &rpath, &op, &serde_json::json!({})).await;
+        assert_eq!(r.status(), StatusCode::OK, "{:?}", json_of(r).await);
+        assert!(!state_of(s.clone(), two).await.1);
+        assert!(events(s.clone()).await > e0);
+    }
 }
