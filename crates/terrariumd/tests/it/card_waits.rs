@@ -343,33 +343,70 @@ async fn stale_generation_cannot_act_on_replacement() {
 #[tokio::test]
 async fn pack_action_and_latch_survive_daemon_restart() {
     let mut td = setup().await;
-    td.patch("/api/projects/p", json!({"board_flow":"rules"})).await.ok();
+    td.patch("/api/projects/p", json!({"board_flow":"rules"}))
+        .await
+        .ok();
     let a = card(&td).await;
     let b = card(&td).await;
-    set(&td, &b, wait(&[(&a, Some("review"))], Mode::All, Action {
-        move_to: Some("ready".into()), wake: true, ..Action::default()
-    })).await;
+    set(
+        &td,
+        &b,
+        wait(
+            &[(&a, Some("review"))],
+            Mode::All,
+            Action {
+                move_to: Some("ready".into()),
+                wake: true,
+                ..Action::default()
+            },
+        ),
+    )
+    .await;
     move_to(&td, &a, "review").await;
     td.daemon.take().unwrap().shutdown();
     td.boot(None, None).await;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        if td.get(&format!("/api/cards/{b}")).await.ok()["column"] == "ready" { break }
-        assert!(std::time::Instant::now() < deadline, "pack action did not move the card");
+        if td.get(&format!("/api/cards/{b}")).await.ok()["column"] == "ready" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pack action did not move the card"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     td.daemon.take().unwrap().shutdown();
     td.boot(None, None).await;
     assert!(met(&td, &b).await);
     let mail = td.get("/api/mail?to=p/lead").await;
-    assert_eq!(mail.ok().as_array().unwrap().iter().filter(|m| m["subject"].as_str().is_some_and(|s| s.contains("wait met"))).count(), 1);
+    assert_eq!(
+        mail.ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["subject"]
+                .as_str()
+                .is_some_and(|s| s.contains("wait met")))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn legacy_dependencies_complete_at_accepted_and_stay_unblocked() {
     let td = setup().await;
     let a = card(&td).await;
-    let b = td.post("/api/projects/p/cards", json!({"title":"legacy", "depends_on":[a]})).await.ok()["id"].as_str().unwrap().to_owned();
+    let b = td
+        .post(
+            "/api/projects/p/cards",
+            json!({"title":"legacy", "depends_on":[a]}),
+        )
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(!met(&td, &b).await);
     move_to(&td, &a, "accepted").await;
     assert!(met(&td, &b).await);
@@ -381,19 +418,48 @@ async fn legacy_dependencies_complete_at_accepted_and_stay_unblocked() {
 async fn wip_refusal_does_not_move_and_assignee_receives_wake() {
     let td = setup().await;
     td.agent("p", "worker", json!({})).await;
-    td.patch("/api/projects/p/board", json!({"columns":[
-        {"name":"backlog"},{"name":"ready","wip_limit":1},
-        {"name":"in_progress","role":"working"},{"name":"done"}
-    ]})).await.ok();
+    td.patch(
+        "/api/projects/p/board",
+        json!({"columns":[
+            {"name":"backlog"},{"name":"ready","wip_limit":1},
+            {"name":"in_progress","role":"working"},{"name":"done"}
+        ]}),
+    )
+    .await
+    .ok();
     let occupied = card(&td).await;
     move_to(&td, &occupied, "ready").await;
     let a = card(&td).await;
     let b = card(&td).await;
-    td.post(&format!("/api/cards/{b}/assign"), json!({"assignee":"worker"})).await.ok();
-    set(&td, &b, wait(&[(&a, Some("working"))], Mode::All, Action { move_to:Some("ready".into()), ..Action::default() })).await;
+    td.post(
+        &format!("/api/cards/{b}/assign"),
+        json!({"assignee":"worker"}),
+    )
+    .await
+    .ok();
+    set(
+        &td,
+        &b,
+        wait(
+            &[(&a, Some("working"))],
+            Mode::All,
+            Action {
+                move_to: Some("ready".into()),
+                ..Action::default()
+            },
+        ),
+    )
+    .await;
     move_to(&td, &a, "working").await;
     assert!(met(&td, &b).await);
-    assert_eq!(td.get(&format!("/api/cards/{b}")).await.ok()["column"], "backlog");
+    assert_eq!(
+        td.get(&format!("/api/cards/{b}")).await.ok()["column"],
+        "backlog"
+    );
     let mail = td.get("/api/mail?to=p/worker").await;
-    assert!(mail.ok().as_array().unwrap().iter().any(|m| m["subject"].as_str().is_some_and(|s| s.contains("WIP limit"))));
+    assert!(mail.ok().as_array().unwrap().iter().any(|m| {
+        m["subject"]
+            .as_str()
+            .is_some_and(|s| s.contains("WIP limit"))
+    }));
 }
