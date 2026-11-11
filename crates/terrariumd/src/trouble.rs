@@ -1342,13 +1342,11 @@ mod tests {
         let events = history(&c, "P-1").unwrap();
         assert_eq!(events.len(), 4, "only one prior status and post-entry rows");
         assert_eq!(events.iter().filter(|e| e.kind == "status").count(), 2);
-        c.execute_batch("CREATE TABLE test_runs(pk INTEGER PRIMARY KEY, name TEXT, commit_sha TEXT, failed INTEGER, errored INTEGER, created_by TEXT);
-            CREATE TABLE card_branch_heads(card TEXT PRIMARY KEY, head TEXT, working_seconds INTEGER, checked_at TEXT);
-            CREATE TABLE test_run_cards(run INTEGER, card TEXT, PRIMARY KEY(run, card));
-            CREATE INDEX test_run_cards_card ON test_run_cards(card, run);
-            CREATE TABLE project_trouble(project TEXT PRIMARY KEY, settings TEXT);
-            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
-            INSERT INTO test_runs SELECT x, 'check', 'sha', 0, 0, 'worker' FROM n;
+        c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+            INSERT INTO test_runs (pk, id, project, name, format, passed, failed, errored, skipped, total,
+                commit_sha, file_name, raw_size, raw_gz, created_by, created_at)
+            SELECT x, 'run-'||x, 'p', 'check', 'libtest-json', 1, 0, 0, 0, 1,
+                'sha', 'test.json', 0, X'', 'worker', '2026-11-01T00:00:00Z' FROM n;
             INSERT INTO test_run_cards SELECT pk, CASE WHEN pk%1000=0 THEN 'P-1' ELSE 'other-'||(pk%999) END FROM test_runs;
             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
             INSERT INTO project_trouble SELECT 'project-'||x, '{}' FROM n;
