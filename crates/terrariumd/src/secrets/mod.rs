@@ -417,7 +417,7 @@ pub fn ensure_key(conn: &Connection, state_dir: &Path) -> anyhow::Result<bool> {
         return Ok(false);
     }
     let sealed: i64 = conn.query_row(
-        "SELECT count(*) FROM secrets WHERE sealed IS NOT NULL",
+        "SELECT (SELECT count(*) FROM secrets WHERE sealed IS NOT NULL) + (SELECT count(*) FROM remotes)",
         [],
         |r| r.get(0),
     )?;

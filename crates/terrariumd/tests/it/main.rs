@@ -4,6 +4,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 mod exedev;
+mod remotes;
 mod ter221_latency;
 #[path = "../trouble.rs"]
 mod trouble;

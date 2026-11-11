@@ -340,13 +340,14 @@ struct Row {
     name: String,
     kind: String,
     sealed: Vec<u8>,
+    remote: bool,
 }
 
 fn sealed_rows(conn: &Connection) -> ApiResult<Vec<Row>> {
     let mut stmt = conn.prepare(
         "SELECT id, scope, name, kind, sealed FROM secrets WHERE sealed IS NOT NULL ORDER BY id",
     )?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map([], |r| {
             Ok(Row {
                 id: r.get(0)?,
@@ -354,15 +355,38 @@ fn sealed_rows(conn: &Connection) -> ApiResult<Vec<Row>> {
                 name: r.get(2)?,
                 kind: r.get(3)?,
                 sealed: r.get(4)?,
+                remote: false,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut remotes = conn.prepare("SELECT id,sealed FROM remotes ORDER BY id")?;
+    rows.extend(
+        remotes
+            .query_map([], |r| {
+                Ok(Row {
+                    id: r.get(0)?,
+                    sealed: r.get(1)?,
+                    scope: String::new(),
+                    name: String::new(),
+                    kind: String::new(),
+                    remote: true,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+    );
     Ok(rows)
 }
 
+fn row_aad(r: &Row) -> Vec<u8> {
+    if r.remote {
+        crate::store::remotes::aad(&r.id)
+    } else {
+        crypto::aad(&r.id, &r.scope, &r.name, &r.kind)
+    }
+}
+
 fn opens(key: &MasterKey, r: &Row) -> bool {
-    key.open(&r.sealed, &crypto::aad(&r.id, &r.scope, &r.name, &r.kind))
-        .is_some()
+    key.open(&r.sealed, &row_aad(r)).is_some()
 }
 
 /// A rotation that stopped after its commit and before the rename left
@@ -401,7 +425,7 @@ pub fn rotate_key(conn: &mut Connection, state_dir: &Path) -> anyhow::Result<usi
         let tx = conn.transaction()?;
         let rows = sealed_rows(&tx).map_err(|e| anyhow::anyhow!(e.message))?;
         for r in &rows {
-            let aad = crypto::aad(&r.id, &r.scope, &r.name, &r.kind);
+            let aad = row_aad(r);
             let plain = old.open(&r.sealed, &aad).ok_or_else(|| {
                 anyhow::anyhow!(
                     "secret `{}/{}` does not open with the current key; nothing changed",
@@ -413,7 +437,11 @@ pub fn rotate_key(conn: &mut Connection, state_dir: &Path) -> anyhow::Result<usi
                 .seal(&plain, &aad)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             tx.execute(
-                "UPDATE secrets SET sealed = ?2 WHERE id = ?1",
+                if r.remote {
+                    "UPDATE remotes SET sealed = ?2 WHERE id = ?1"
+                } else {
+                    "UPDATE secrets SET sealed = ?2 WHERE id = ?1"
+                },
                 params![r.id, sealed],
             )?;
         }

@@ -250,8 +250,15 @@ fn fake_tool(tool: &str, dir: &Path) -> String {
             r#"for a in "$@"; do c=$a; done
 if [ "$1" = run ]; then prev=; for a in "$@"; do if [ "$prev" = --name ]; then c=$a; fi; prev=$a; done; fi
 f='{s}'.$c
+if [ "$1" = run ] && [ -f '{mounts}.fail-run' ]; then
+  echo 'image pull failed' >&2; exit 1
+fi
+if [ "$1" = inspect ] && [ -f '{mounts}.race' ]; then
+  n=$(cat '{mounts}.race'); n=$((n + 1)); printf '%s' "$n" > '{mounts}.race'
+  if [ "$n" -eq 3 ]; then cp '{mounts}.next' '{mounts}'; fi
+fi
 case "$1" in
-  inspect) if [ -f "$f" ]; then st=$(cat "$f"); mounts='[]'; image=alpine:3; hc='{{}}'; if [ -f '{mounts}' ]; then mounts=$(cat '{mounts}'); fi; if [ -f '{image}' ]; then image=$(cat '{image}'); fi; if [ -f '{hc}' ]; then hc=$(cat '{hc}'); fi; echo "[{{\"Id\":\"abc\",\"Name\":\"/terrarium-dbox\",\"Config\":{{\"Image\":\"$image\"}},\"HostConfig\":$hc,\"Mounts\":$mounts,\"State\":{{\"Status\":\"$st\"}}}}]"; else echo '[]'; echo 'Error: No such object' >&2; exit 1; fi ;;
+  inspect) if [ -f "$f" ]; then st=$(cat "$f"); mounts='[]'; image=alpine:3; hc='{{}}'; if [ -f '{mounts}' ]; then mounts=$(cat '{mounts}'); fi; if [ -f '{image}' ]; then image=$(cat '{image}'); fi; if [ -f '{hc}' ]; then hc=$(cat '{hc}'); fi; echo "[{{\"Id\":\"$c\",\"Name\":\"/terrarium-dbox\",\"Config\":{{\"Image\":\"$image\"}},\"HostConfig\":$hc,\"Mounts\":$mounts,\"State\":{{\"Status\":\"$st\"}}}}]"; else echo '[]'; echo 'Error: No such object' >&2; exit 1; fi ;;
   run) echo running > "$f"; echo abc123 ;;
   start) echo running > "$f"; echo "$2" ;;
   stop) echo exited > "$f"; echo "$4" ;;
@@ -4694,6 +4701,254 @@ async fn docker_recreate_requires_admin_and_refuses_live_sessions() {
 }
 
 #[tokio::test]
+async fn docker_recreate_link_key_cannot_override_safety() {
+    use terrariumd::api::{LinkAuth, TokenAuth, tcp_router_with};
+    use tower::ServiceExt;
+
+    let lab = Lab::start().await;
+    let _host = lab.host("lab1").await;
+    lab.target(json!({"name":"dbox","kind":"docker","host":"lab1","image":"alpine:3"}))
+        .await;
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    let link = lab
+        .td
+        .post("/api/links", json!({"label":"home","read_only":false}))
+        .await
+        .ok()
+        .clone();
+    let paired = lab
+        .td
+        .post(
+            "/api/links/pair",
+            json!({
+                "code": link["code"],
+                "home_instance_id": ulid::Ulid::new().to_string(),
+                "home_name":"home",
+            }),
+        )
+        .await
+        .ok()
+        .clone();
+    let key = paired["key"].as_str().unwrap();
+    assert!(key.starts_with("tlk_"));
+    let state = lab.state();
+    let app = tcp_router_with(
+        state.clone(),
+        TokenAuth::new("operator-test-token".into(), false).with_links(LinkAuth {
+            db: state.db.clone(),
+            runtime: state.links.clone(),
+        }),
+        false,
+    );
+    let before = lab.log();
+    for body in [
+        json!({"force":true}),
+        json!({"discard_volumes":["data"]}),
+        json!({"force":true,"discard_volumes":["data"]}),
+    ] {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/targets/dbox/recreate")
+            .header("authorization", format!("Bearer {key}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+    assert_eq!(lab.log(), before, "link overrides must not reach Docker");
+    assert!(!lab.log().contains("docker rm"));
+}
+
+#[tokio::test]
+async fn docker_recreate_audits_discard_when_replacement_fails() {
+    let lab = Lab::start().await;
+    let _host = lab.host("lab1").await;
+    lab.target(json!({"name":"dbox","kind":"docker","host":"lab1","image":"alpine:3"}))
+        .await;
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    std::fs::write(
+        lab.bins.path().join("docker.mounts"),
+        json!([
+            {"Type":"volume","Name":"data","Destination":"/data"}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(lab.bins.path().join("docker.mounts.fail-run"), "").unwrap();
+    let result = lab
+        .td
+        .post(
+            "/api/targets/dbox/recreate",
+            json!({"discard_volumes":["data"]}),
+        )
+        .await;
+    assert!(!result.status.is_success(), "{}", result.body);
+    assert!(lab.log().contains("docker rm terrarium-dbox"));
+    assert!(!lab.bins.path().join("docker.state.terrarium-dbox").exists());
+    let removed = lab
+        .td
+        .get("/api/audit?action=target.recreate.removed")
+        .await
+        .ok()
+        .clone();
+    assert_eq!(removed.as_array().unwrap().len(), 1);
+    assert_eq!(removed[0]["actor"], "operator");
+    assert_eq!(removed[0]["detail"]["outcome"], "removed");
+    assert_eq!(removed[0]["detail"]["discarded_volumes"], json!(["data"]));
+    let finished = lab
+        .td
+        .get("/api/audit?action=target.recreate")
+        .await
+        .ok()
+        .clone();
+    assert_eq!(finished.as_array().unwrap().len(), 1);
+    assert_eq!(finished[0]["detail"]["outcome"], "failed");
+    assert_eq!(finished[0]["detail"]["discarded_volumes"], json!(["data"]));
+    assert!(
+        finished[0]["detail"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("docker.run failed")
+    );
+}
+
+#[tokio::test]
+async fn docker_recreate_exact_discard_consent_and_force() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let admin = lab
+        .td
+        .agent("terra", "lead", json!({"roles":["project_admin"]}))
+        .await;
+    let worker = lab.td.agent("terra", "worker", json!({})).await;
+    lab.target(
+        json!({"name":"terra-dbox","kind":"docker","host":"lab1","image":"alpine:3","project":"terra"}),
+    )
+    .await;
+    lab.td.post_empty("/api/targets/terra-dbox/up").await.ok();
+    let mounts = json!([
+        {"Type":"volume","Name":"data","Destination":"/data"},
+        {"Type":"volume","Name":"cache","Destination":"/cache"}
+    ]);
+    std::fs::write(lab.bins.path().join("docker.mounts"), mounts.to_string()).unwrap();
+    for actor in [
+        admin["id"].as_str().unwrap(),
+        worker["id"].as_str().unwrap(),
+    ] {
+        for body in [
+            json!({"force":true}),
+            json!({"discard_volumes":["data","cache"]}),
+        ] {
+            lab.td
+                .req(
+                    hyper::Method::POST,
+                    "/api/targets/terra-dbox/recreate",
+                    Some(body),
+                    Some(actor),
+                )
+                .await
+                .err(403, "forbidden");
+        }
+    }
+    // Running containers still refuse without explicit force, even with consent.
+    lab.td
+        .post(
+            "/api/targets/terra-dbox/recreate",
+            json!({"discard_volumes":["data","cache"]}),
+        )
+        .await
+        .err(409, "conflict");
+    lab.td.post_empty("/api/targets/terra-dbox/down").await.ok();
+    let refused = lab.td.post_empty("/api/targets/terra-dbox/recreate").await;
+    refused.err(409, "conflict");
+    assert!(
+        refused.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("/data")
+    );
+    assert!(
+        refused.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("/cache")
+    );
+    for names in [
+        json!(["data"]),
+        json!(["data", "cache", "extra"]),
+        json!(["data", "cache", "data"]),
+    ] {
+        lab.td
+            .post(
+                "/api/targets/terra-dbox/recreate",
+                json!({"discard_volumes":names}),
+            )
+            .await
+            .err(409, "conflict");
+    }
+    assert!(!lab.log().contains("docker rm"));
+    // The volume set changes between the consent inspect and final recheck.
+    std::fs::write(lab.bins.path().join("docker.mounts.race"), "0").unwrap();
+    std::fs::write(
+        lab.bins.path().join("docker.mounts.next"),
+        json!([
+            {"Type":"volume","Name":"surprise","Destination":"/data"}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    lab.td
+        .post(
+            "/api/targets/terra-dbox/recreate",
+            json!({"discard_volumes":["data","cache"]}),
+        )
+        .await
+        .err(409, "conflict");
+    assert!(!lab.log().contains("docker rm"));
+    std::fs::remove_file(lab.bins.path().join("docker.mounts.race")).unwrap();
+    std::fs::write(lab.bins.path().join("docker.mounts"), mounts.to_string()).unwrap();
+    let recreated = lab
+        .td
+        .post(
+            "/api/targets/terra-dbox/recreate",
+            json!({"discard_volumes":["cache","data"]}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(recreated["discarded_volumes"], json!(["cache", "data"]));
+    assert!(lab.log().contains("docker rm terrarium-terra-dbox"));
+    assert!(!lab.log().contains("docker rm -v"));
+    // Force does not bypass bind validation or unknown metadata.
+    std::fs::write(
+        lab.bins.path().join("docker.mounts"),
+        json!([{"Type":"bind","Source":"/etc","Destination":"/data"}]).to_string(),
+    )
+    .unwrap();
+    lab.td
+        .post("/api/targets/terra-dbox/recreate", json!({"force":true}))
+        .await
+        .err(409, "conflict");
+    std::fs::write(lab.bins.path().join("docker.mounts"), "null").unwrap();
+    lab.td
+        .post("/api/targets/terra-dbox/recreate", json!({"force":true}))
+        .await
+        .err(409, "conflict");
+    std::fs::write(lab.bins.path().join("docker.mounts"), "[]").unwrap();
+    let sid = exec(&lab.td, "terra-dbox", json!({"cmd":["sleeper"]})).await;
+    lab.td
+        .post("/api/targets/terra-dbox/recreate", json!({"force":true}))
+        .await
+        .ok();
+    assert!(lab.log().contains("docker rm -f terrarium-terra-dbox"));
+    std::fs::write(lab.bins.path().join("sleeper.end"), "").unwrap();
+    drain(&lab.td, "terra-dbox", &sid).await;
+}
+
+#[tokio::test]
 async fn docker_recreate_refuses_mounts_and_unknown_mount_metadata() {
     let lab = Lab::start().await;
     let _h = lab.host("lab1").await;
@@ -4844,6 +5099,26 @@ async fn docker_absent_edits_need_only_up_and_attach_holder_workspaces() {
     assert_eq!(run.len(), 1);
     assert!(run[0].contains(":/work/terra/worker"), "{run:?}");
     assert!(run[0].contains("alpine:3.21"), "{run:?}");
+}
+
+#[tokio::test]
+async fn docker_legacy_edit_refuses_missing_offline_baseline() {
+    let lab = Lab::start().await;
+    let host = lab.host("lab1").await;
+    lab.target(json!({"name":"dbox","kind":"docker","host":"lab1","image":"alpine:3"}))
+        .await;
+    // Legacy container: no runtime baseline, with a state that is not running
+    // or stopped. Offline edits must not silently adopt the new definition.
+    host.abort();
+    lab.wait_online("lab1", false).await;
+    let before = lab.td.get("/api/targets/dbox").await.ok().clone();
+    lab.td
+        .patch("/api/targets/dbox", json!({"image":"alpine:latest"}))
+        .await
+        .err(409, "conflict");
+    let after = lab.td.get("/api/targets/dbox").await.ok().clone();
+    assert_eq!(before["image"], after["image"]);
+    assert_eq!(before["runtime"], after["runtime"]);
 }
 
 #[tokio::test]
