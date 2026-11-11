@@ -21,8 +21,17 @@ use crate::probes::{self, ProbeOutcome};
 use crate::store::projects::SOURCE_API;
 use crate::store::subscriptions::{self as subs, QuotaSample, Subscription};
 
-#[cfg(test)]
 mod vertex;
+mod bedrock;
+
+#[derive(Deserialize)]
+struct KeySave {
+    #[serde(flatten)]
+    key: ApiKey,
+    /// Opt-in because a test invocation bills tokens. The wizard requests it.
+    #[serde(default)]
+    test_connection: bool,
+}
 use crate::store::usage as ustore;
 use terrarium_core::selfhosted::{self, Api, SelfHosted};
 
@@ -1377,9 +1386,16 @@ async fn api_key(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
-    ApiJson(key): ApiJson<ApiKey>,
+    ApiJson(save): ApiJson<KeySave>,
 ) -> ApiResult<Json<SubscriptionView>> {
     policy::operator_only(&actor, "storing an API key")?;
+    let KeySave {
+        key,
+        test_connection,
+    } = save;
+    if test_connection && !matches!(key.provider.as_str(), "bedrock" | "gcp") {
+        return Err(ApiError::invalid("test_connection is for bedrock and gcp only"));
+    }
     if key.key.trim().is_empty() {
         return Err(ApiError::invalid("the key is empty"));
     }
@@ -1493,7 +1509,7 @@ async fn api_key(
             }
             // A body without `models` keeps the stored model map.
             let stored = exists.as_ref().and_then(|s| s.cloud.clone());
-            let settings = match key.cloud.clone() {
+            let mut settings = match key.cloud.clone() {
                 Some(mut c) => {
                     if c.models.is_empty()
                         && let Some(st) = &stored
@@ -1504,12 +1520,34 @@ async fn api_key(
                 }
                 None => stored.unwrap_or_default(),
             };
+            if kind == terrarium_core::cloud::Kind::Bedrock {
+                let mut models = terrarium_core::cloud::bedrock_models();
+                models.extend(settings.models);
+                settings.models = models;
+                settings.region.get_or_insert_with(|| "us-east-1".into());
+            }
+            if kind == terrarium_core::cloud::Kind::Gcp {
+                let mut models = terrarium_core::cloud::vertex_models();
+                models.extend(settings.models);
+                settings.models = models;
+                settings.region.get_or_insert_with(|| "us-east5".into());
+            }
             terrarium_core::cloud::check(kind, &settings)
                 .map_err(|e| ApiError::invalid(format!("subscription `{name}`: {e}")))?;
             Some(settings)
         }
         None => None,
     };
+    // Before any key or definition write. Never return an upstream response body,
+    // request error, URL, signature or credential in the diagnostic.
+    if test_connection {
+        let settings = cloud_settings.as_ref()
+            .ok_or_else(|| ApiError::invalid("missing cloud settings"))?;
+        match cloud_kind {
+            Some(terrarium_core::cloud::Kind::Gcp) => vertex::test(&key, settings).await?,
+            _ => bedrock::test(&key, settings).await?,
+        }
+    }
     let source = exists.as_ref().map(|s| s.source.clone());
     let dir = state.state_dir.clone();
     // The file keeps the secrets; the settings go to the definition.

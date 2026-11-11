@@ -51,6 +51,19 @@ pub const AWS_ACCESS_KEY_ID: &str = "AWS_ACCESS_KEY_ID";
 pub const AWS_SECRET_ACCESS_KEY: &str = "AWS_SECRET_ACCESS_KEY";
 /// Bedrock: an Amazon Bedrock API key (a bearer token).
 pub const AWS_BEARER_TOKEN_BEDROCK: &str = "AWS_BEARER_TOKEN_BEDROCK";
+
+/// Pinned US cross-region inference profiles. Explicit entries override these.
+/// Other geographies can supply their own profile IDs or ARNs.
+pub fn bedrock_models() -> BTreeMap<String, String> {
+    [
+        ("opus", "us.anthropic.claude-opus-5-5"),
+        ("sonnet", "us.anthropic.claude-sonnet-4-6"),
+        ("haiku", "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.into(), v.into()))
+    .collect()
+}
 /// GCP: the path of the service-account JSON.
 pub const GOOGLE_APPLICATION_CREDENTIALS: &str = "GOOGLE_APPLICATION_CREDENTIALS";
 
@@ -64,6 +77,40 @@ pub fn vertex_models() -> BTreeMap<String, String> {
     .into_iter()
     .map(|(tier, id)| (tier.into(), id.into()))
     .collect()
+}
+
+#[test]
+fn bedrock_default_profiles_reach_claude_env() {
+    let models = bedrock_models();
+    assert_eq!(models.len(), 3);
+    for (tier, profile) in [
+        ("opus", "us.anthropic.claude-opus-5-5"),
+        ("sonnet", "us.anthropic.claude-sonnet-4-6"),
+        ("haiku", "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+    ] {
+        assert_eq!(model_for(&models, Some(tier)).as_deref(), Some(profile));
+    }
+    let env = claude_env(
+        Kind::Bedrock,
+        &CloudSettings {
+            region: Some("us-east-1".into()),
+            models: models.clone(),
+            ..Default::default()
+        },
+        "secret",
+        Some("id"),
+    );
+    for (k, v) in [
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_REGION", "us-east-1"),
+        ("AWS_ACCESS_KEY_ID", "id"),
+        ("AWS_SECRET_ACCESS_KEY", "secret"),
+    ] {
+        assert!(env.vars.contains(&(k.into(), v.into())));
+    }
+    for pair in tier_env(&models) {
+        assert!(env.vars.contains(&pair));
+    }
 }
 /// Foundry: the API key.
 pub const ANTHROPIC_FOUNDRY_API_KEY: &str = "ANTHROPIC_FOUNDRY_API_KEY";

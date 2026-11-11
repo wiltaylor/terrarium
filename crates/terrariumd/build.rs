@@ -19,7 +19,8 @@ fn main() {
     let dist = if test_build {
         out.join("empty-dashboard")
     } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../dashboard/dist")
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../dashboard/dist")
     };
     if !dist.exists()
         && let Err(e) = std::fs::create_dir_all(&dist)
@@ -46,7 +47,10 @@ fn main() {
 /// Write `named_migrations.rs`: each `migrations/*.sql` file, sorted by name,
 /// as `(name, include_str!(path))`.
 fn write_named_migrations(out: &std::path::Path) {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    // Cargo can reuse this build-script executable across checkouts sharing
+    // a target directory. Resolve the active checkout when the script runs.
+    let dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("migrations");
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("read migrations/")
         .map(|e| e.expect("read migrations/ entry").path())

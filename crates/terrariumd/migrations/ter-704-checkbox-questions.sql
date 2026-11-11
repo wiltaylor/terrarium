@@ -1,0 +1,2 @@
+ALTER TABLE questions ADD COLUMN multi_select INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE questions ADD COLUMN answer_options TEXT NOT NULL DEFAULT '[]';
