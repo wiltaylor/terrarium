@@ -23,12 +23,6 @@ export function bookmarkHref(value: string, origin: string): string | null {
 /** The daemon refused the value itself (422): retrying the same item cannot help. */
 const refused = (e: unknown) => e instanceof ApiError && (e.status === 400 || e.status === 422);
 
-/**
- * The bookmarks of the sidebar. With `remote`, the daemon keeps them for the
- * operator. A caller that the daemon forbids (403: not the operator) keeps
- * them in this browser instead, with no error banner on each refresh
- * (TER-257).
- */
 const bytes = (s: string) => new TextEncoder().encode(s).length;
 
 /** Why `add(title, value)` refuses a new bookmark, for the message that the page shows (TER-257). */
@@ -47,6 +41,12 @@ export function skippedReport(rows: readonly Bookmark[]): Error | null {
   return new Error(`${rows.length === 1 ? "1 old bookmark of this browser was" : `${rows.length} old bookmarks of this browser were`} not imported, the daemon refused them: ${names}.`);
 }
 
+/**
+ * The bookmarks of the sidebar. With `remote`, the daemon keeps them for the
+ * operator. A caller that the daemon forbids (403: not the operator) keeps
+ * them in this browser instead, with no error banner on each refresh
+ * (TER-257).
+ */
 export function createBookmarksStore(storage: Pick<Storage, "getItem" | "setItem"> | null, origin: string, server?: Api["bookmarks"]) {
   let remote = server;
   const initial: Bookmark[] = [];
