@@ -10,7 +10,7 @@ import { setSafeHtml } from "../lib/sanitize";
 import { ArtifactViewer, type ArtifactLike } from "./ArtifactViewer";
 import { DbEmbed } from "./DbEmbed";
 import { useInstance } from "../instance";
-import { scopeHtmlLinks } from "../instance/html";
+import { scopeRemoteHtml } from "../instance/html";
 
 /** `project`: the project of the page. A `db` block queries the DB of this project only. */
 export function Markdown(props: { html: string; artifacts?: Record<string, ArtifactLike>; project?: string }) {
@@ -20,8 +20,7 @@ export function Markdown(props: { html: string; artifacts?: Record<string, Artif
   let disposers: (() => void)[] = [];
 
   createEffect(() => {
-    setSafeHtml(el, props.html);
-    scopeHtmlLinks(el, instance.href);
+    setSafeHtml(el, props.html, instance.key === "local" ? undefined : { blockImages: true, transform: (fragment) => scopeRemoteHtml(fragment, instance) });
     disposers.forEach((d) => d());
     disposers = [];
     el.querySelectorAll<HTMLElement>(".artifact-embed").forEach((slot) => {
