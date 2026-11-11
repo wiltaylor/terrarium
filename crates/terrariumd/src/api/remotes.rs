@@ -38,7 +38,6 @@ async fn operator_guard(actor: Actor, req: Request, next: axum::middleware::Next
 }
 
 fn operator(actor: &Actor) -> ApiResult<()> {
-    crate::links::refuse_for_link("use remotes")?;
     crate::policy::operator_only(actor, "using remotes")
 }
 

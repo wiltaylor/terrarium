@@ -13,6 +13,37 @@ const session = (over: Partial<LoginSession> = {}): LoginSession => ({
 });
 const run = (s: WizardState, ...actions: WizardAction[]) => actions.reduce(wizardReduce, s);
 
+it("sends optional whole USD budgets for all cloud providers", () => {
+  for (const provider of ["bedrock", "gcp", "foundry"]) {
+    expect(apiKeyBody({ provider, key: "test", budgetUsd: " 50 " }).cloud?.budget_usd).toBe(50);
+    expect(apiKeyBody({ provider, key: "test", budgetUsd: "" }).cloud?.budget_usd).toBeUndefined();
+    for (const budgetUsd of ["0", "-1", "1.5", "NaN", "4294967296"]) {
+      expect(() => apiKeyBody({ provider, key: "test", budgetUsd })).toThrow("Monthly budget");
+    }
+  }
+});
+
+it("builds a Claude-only LiteLLM key request with the proxy and models", () => {
+  expect(KEY_PROVIDERS.find((p) => p.id === "litellm")?.harnesses).toEqual(["claude"]);
+  expect(apiKeyBody({ provider: "litellm", key: "test-key", baseUrl: " https://proxy.example.com ", models: "a, b" })).toEqual({
+    provider: "litellm", key: "test-key", base_url: "https://proxy.example.com", models: ["a", "b"],
+  });
+});
+
+describe("Foundry setup", () => {
+  it("uses Claude Code and tests a resource before saving", () => {
+    expect(KEY_PROVIDERS.find((p) => p.id === "foundry")).toMatchObject({ env: "ANTHROPIC_FOUNDRY_API_KEY", harnesses: ["claude"] });
+    expect(apiKeyBody({ provider: "foundry", key: "fake-key", resource: " my-resource ", cloudModels: { haiku: " custom-haiku ", opus: "" } })).toEqual({
+      provider: "foundry", key: "fake-key", cloud: { resource: "my-resource", models: { haiku: "custom-haiku" } }, test_connection: true,
+    });
+  });
+  it("saves a custom base URL without a network test or resource", () => {
+    expect(apiKeyBody({ provider: "foundry", key: "fake-key", resource: "ignored", baseUrl: " https://gateway.invalid/anthropic " })).toEqual({
+      provider: "foundry", key: "fake-key", cloud: { base_url: "https://gateway.invalid/anthropic", models: {} }, test_connection: false,
+    });
+  });
+});
+
 describe("wizard state machine", () => {
   it("goes pick -> setup -> starting -> live -> done", () => {
     let s = run(initialWizard(), { type: "pick", path: "codex" });

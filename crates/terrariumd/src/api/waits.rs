@@ -724,6 +724,9 @@ async fn watch_create(
         once: b.once,
         debounce: b.debounce.unwrap_or(true),
     };
+    if matches!(actor, Actor::Operator) {
+        policy::operator_only(&actor, "creating a watch for another caller")?;
+    }
     let w = state
         .db
         .write(actor.label(), move |t| waits::create_watch(t, new))
@@ -759,6 +762,9 @@ async fn watches_by(
             id
         }
     };
+    if key == "operator" {
+        policy::operator_only(&actor, "listing operator watches")?;
+    }
     Ok(Json(
         state.db.read(move |c| waits::watches_by(c, &key)).await?,
     ))
@@ -772,6 +778,9 @@ async fn watch_remove(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let w = state.db.read(move |c| waits::get_watch(c, &id)).await?;
+    if w.watcher == "operator" {
+        policy::operator_only(&actor, "removing an operator watch")?;
+    }
     let allowed = match (&actor, w.watcher.as_str()) {
         (Actor::Operator, _) => true,
         (Actor::Agent(_), "operator") => false,

@@ -47,3 +47,9 @@ These kinds show the letter tile until an official file is added:
 
 To add a mark: download it from the vendor's brand page, clean it with the
 rules above, add a row to this table, and add the kind to `PROVIDER_MARKS`.
+# LiteLLM
+
+LiteLLM uses the generated letter tile, not a vendor mark. Source reference:
+https://github.com/BerriAI/litellm (MIT software license). No separate trademark
+permission for a bundled official mark was verified, so no logo is copied.
+

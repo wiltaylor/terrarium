@@ -847,6 +847,8 @@ pub fn board_summary(
     let limit = page.limit().min(100);
     // All correlated lookups use existing card/agent primary keys or the
     // card_comments(card, created_at), card_deps(card), spawns_bound_open indexes.
+    // CROSS JOIN keeps blocked_by driven by this card's dependencies. Letting
+    // SQLite start at active cards scans the board once per visible card.
     let mut stmt = conn.prepare(
         "SELECT json_object(
           'id', c.id, 'kind', c.kind, 'project', c.project, 'column', k.name,
@@ -875,7 +877,7 @@ pub fn board_summary(
           'last_comment_at', (SELECT max(created_at) FROM card_comments WHERE card = c.id),
           'depends_on', (SELECT json_group_array(depends_on) FROM card_deps WHERE card = c.id),
           'blocked_by', (SELECT json_group_array(d.depends_on) FROM card_deps d
-            JOIN cards dc ON dc.id = d.depends_on JOIN board_columns dk ON dk.id = dc.column_id
+            CROSS JOIN cards dc ON dc.id = d.depends_on JOIN board_columns dk ON dk.id = dc.column_id
             WHERE d.card = c.id AND dc.archived = 0
               AND coalesce(dk.role, dk.name) NOT IN ('accepted', 'done')))
          FROM cards c JOIN board_columns k ON k.id = c.column_id
@@ -1678,7 +1680,10 @@ fn check_move(
     // The GitHub author gate (TER-85): only the operator moves a held
     // card, whatever the role of its column. The role of a column can
     // change (`set_columns`), so the lock does not depend on it.
-    if to.id != card.column_id && !matches!(actor, Actor::Operator) && card_is_held(card) {
+    if to.id != card.column_id && card_is_held(card) {
+        crate::links::operator_only_with_provenance(t.link.is_some(), "moving a GitHub-held card")?;
+    }
+    if to.id != card.column_id && !actor.is_operator() && card_is_held(card) {
         return Err(ApiError::forbidden(format!(
             "{} is held by the GitHub author gate; only the operator moves it out of `{}`",
             card.id, card.column
@@ -1937,7 +1942,13 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
         .transpose()?;
     // The GitHub author gate (TER-85): only the operator assigns a held
     // card. Unassigning stays open: it gives no one the card.
-    if to.is_some() && !matches!(actor, Actor::Operator) && card_is_held(&card) {
+    if to.is_some() && card_is_held(&card) {
+        crate::links::operator_only_with_provenance(
+            t.link.is_some(),
+            "assigning a GitHub-held card",
+        )?;
+    }
+    if to.is_some() && !actor.is_operator() && card_is_held(&card) {
         return Err(ApiError::forbidden(format!(
             "{} is held by the GitHub author gate; only the operator assigns it",
             card.id
@@ -2168,7 +2179,14 @@ pub(crate) fn create_card_with_author(
                 && !github_gate::allowed(&list, verified_author))
             .then(|| a.clone())
         }
-        Actor::Operator => None,
+        Actor::Operator => {
+            if github_gate::is_github(&title, &new.labels)
+                && !github_gate::authors(t, project)?.is_empty()
+            {
+                policy::operator_only(actor, "bypassing the GitHub author gate on creation")?;
+            }
+            None
+        }
     };
     if held_for.is_some() {
         github_gate::hold_labels(&mut new.labels);
@@ -2422,7 +2440,7 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
         if let Some(title) = &p.title {
             check_title(title)?;
         }
-        if !matches!(actor, Actor::Operator) {
+        if !actor.is_operator() {
             gate_edit(t, &card, p.title.as_deref(), p.labels.as_deref())?;
         }
         t.execute(

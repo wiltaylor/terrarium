@@ -346,11 +346,8 @@ fn holds_grants(report: &SecretsReport) -> bool {
 /// `approve_grants` is for the operator only: a sysadmin agent cannot
 /// approve the grants of a config import (S8).
 fn check_approve(actor: &Actor, approve: bool) -> ApiResult<()> {
-    if approve && !matches!(actor, Actor::Operator) {
-        return Err(ApiError::forbidden(
-            "`approve_grants` is for the operator only: an agent cannot approve the grants of \
-             a config import",
-        ));
+    if approve {
+        crate::policy::operator_only(actor, "approving the grants of a config import")?;
     }
     Ok(())
 }

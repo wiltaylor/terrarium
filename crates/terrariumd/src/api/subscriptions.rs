@@ -22,12 +22,14 @@ use crate::store::projects::SOURCE_API;
 use crate::store::subscriptions::{self as subs, QuotaSample, Subscription};
 
 mod bedrock;
+mod foundry;
 mod vertex;
 
 #[cfg(test)]
 tokio::task_local! {
     // Scoped to one route-test task, never process-wide or production-configurable.
     pub(super) static VERTEX_MOCK_URL: String;
+    pub(super) static FOUNDRY_MOCK_URL: String;
 }
 
 #[derive(Deserialize)]
@@ -131,6 +133,9 @@ impl From<QuotaSample> for WindowView {
 /// A subscription as the API shows it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SubscriptionView {
+    /// Local costUSD estimate for the current UTC month, even without a budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub month_spend_usd: Option<f64>,
     pub session_period: SessionPeriod,
     pub sessions: Vec<crate::store::session_refs::SubscriptionSession>,
     #[serde(flatten)]
@@ -325,6 +330,10 @@ fn view_with_key_presence(
 ) -> ApiResult<SubscriptionView> {
     let windows: Vec<WindowView> = subs::latest_windows(c, &sub.name)?
         .into_iter()
+        .filter(|w| {
+            w.window != terrarium_core::cloud::BUDGET_WINDOW
+                || sub.cloud.as_ref().and_then(|s| s.budget_usd).is_some()
+        })
         .map(WindowView::from)
         .collect();
     let session_period = session_period(&windows, chrono::Utc::now());
@@ -369,7 +378,7 @@ fn view_with_key_presence(
         agents,
         default_models: crate::models::default_models(&sub),
         local_estimate_only: sub.probe.is_none(),
-        no_quota: sub.is_selfhosted(),
+        no_quota: sub.is_selfhosted() && sub.provider != "litellm",
         streams: streams.usage(&sub.name),
         status_url: terrarium_core::providers::status_url_of(
             &sub.provider,
@@ -378,6 +387,15 @@ fn view_with_key_presence(
         has_api_key,
         windows,
         held_agents,
+        month_spend_usd: if sub.cloud_kind().is_some() {
+            Some(crate::store::cloud_spend::month_spend(
+                c,
+                &sub.name,
+                &terrarium_core::cloud::month_key(chrono::Utc::now()),
+            )?)
+        } else {
+            None
+        },
         sub,
     })
 }
@@ -1399,9 +1417,9 @@ async fn api_key(
         key,
         test_connection,
     } = save;
-    if test_connection && !matches!(key.provider.as_str(), "bedrock" | "gcp") {
+    if test_connection && !matches!(key.provider.as_str(), "bedrock" | "gcp" | "foundry") {
         return Err(ApiError::invalid(
-            "test_connection is for bedrock and gcp only",
+            "test_connection is for bedrock, gcp, and foundry only",
         ));
     }
     if key.key.trim().is_empty() {
@@ -1483,7 +1501,10 @@ async fn api_key(
     // one needs the server's base URL.
     let is_sh = selfhosted::is_selfhosted(&key.provider);
     match &exists {
-        Some(s) if s.is_selfhosted() != is_sh => {
+        Some(s)
+            if s.is_selfhosted() != is_sh
+                || ((s.provider == "litellm") != (key.provider == "litellm")) =>
+        {
             return Err(ApiError::invalid(format!(
                 "cannot store a {} key on subscription `{name}`: it is a {} subscription",
                 key.provider, s.provider
@@ -1540,6 +1561,11 @@ async fn api_key(
                 settings.models = models;
                 settings.region.get_or_insert_with(|| "us-east5".into());
             }
+            if kind == terrarium_core::cloud::Kind::Foundry {
+                let mut models = terrarium_core::cloud::foundry_models();
+                models.extend(settings.models);
+                settings.models = models;
+            }
             terrarium_core::cloud::check(kind, &settings)
                 .map_err(|e| ApiError::invalid(format!("subscription `{name}`: {e}")))?;
             Some(settings)
@@ -1554,10 +1580,31 @@ async fn api_key(
             .ok_or_else(|| ApiError::invalid("missing cloud settings"))?;
         match cloud_kind {
             Some(terrarium_core::cloud::Kind::Gcp) => vertex::test(&key, settings).await?,
+            Some(terrarium_core::cloud::Kind::Foundry) => foundry::test(&key, settings).await?,
             _ => bedrock::test(&key, settings).await?,
         }
     }
     let source = exists.as_ref().map(|s| s.source.clone());
+    // Validate before writing the credential file, which is outside the DB transaction.
+    if key.provider == "litellm" {
+        let mut sh = exists
+            .as_ref()
+            .and_then(|s| s.selfhosted.clone())
+            .unwrap_or_else(|| SelfHosted {
+                api: Api::Anthropic,
+                ..SelfHosted::default()
+            });
+        if let Some(url) = &key.base_url {
+            sh.base_url = url.clone();
+        }
+        if !key.models.is_empty() {
+            sh.models = key.models.clone();
+        }
+        let sh = sh.checked().map_err(ApiError::invalid)?;
+        if !sh.base_url.to_ascii_lowercase().starts_with("https://") {
+            return Err(ApiError::invalid("LiteLLM base_url must use https"));
+        }
+    }
     let dir = state.state_dir.clone();
     // The file keeps the secrets; the settings go to the definition.
     let k = ApiKey {
@@ -1631,13 +1678,13 @@ async fn api_key(
                 // a self-hosted OpenAI-style server.
                 let def = SubscriptionDef {
                     name: n.clone(),
-                    provider: selfhosted::PROVIDER.into(),
+                    provider: if provider == "litellm" { "litellm" } else { selfhosted::PROVIDER }.into(),
                     plan: None,
                     harnesses: Vec::new(),
                     probe: None,
                     alert_at: 80,
                     selfhosted: Some(SelfHosted {
-                        api: Api::Openai,
+                        api: if provider == "litellm" { Api::Anthropic } else { Api::Openai },
                         base_url: base_url.clone().unwrap_or_default(),
                         models: models.clone(),
                         ..SelfHosted::default()

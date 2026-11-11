@@ -112,6 +112,8 @@ pub struct VersionInfo {
     pub dirty: bool,
     /// The build time, RFC 3339 UTC.
     pub build_time: String,
+    #[serde(default)]
+    pub missing_templates: Vec<String>,
 }
 
 impl VersionInfo {
@@ -123,13 +125,20 @@ impl VersionInfo {
             git_ref: terrarium_version::GIT_REF.into(),
             dirty: terrarium_version::DIRTY,
             build_time: terrarium_version::BUILD_TIME.into(),
+            missing_templates: Vec::new(),
         }
     }
 }
 
 /// `GET /api/system/version`: any caller that passes auth.
-pub async fn version() -> Json<VersionInfo> {
-    Json(VersionInfo::current())
+pub async fn version(State(state): State<Shared>) -> ApiResult<Json<VersionInfo>> {
+    Ok(Json(version_for(&state).await?))
+}
+
+pub async fn version_for(state: &Shared) -> ApiResult<VersionInfo> {
+    let mut version = VersionInfo::current();
+    version.missing_templates = state.db.read(crate::required_templates::missing).await?;
+    Ok(version)
 }
 
 /// The query of `GET /api/harnesses`.

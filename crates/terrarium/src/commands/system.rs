@@ -240,6 +240,13 @@ pub async fn version(ctx: &Ctx) -> anyhow::Result<()> {
                  {daemon_version}). Install the CLI of the daemon's build"
             ));
         }
+        if let Some(missing) = v["daemon"]["missing_templates"].as_array() {
+            for key in missing.iter().filter_map(Value::as_str) {
+                c.line(format!(
+                    "warning: required daemon template {key} is missing"
+                ));
+            }
+        }
     })
 }
 
@@ -1216,6 +1223,14 @@ pub async fn subscriptions(ctx: &Ctx, cmd: &SubscriptionCmd) -> anyhow::Result<(
             } else {
                 ctx.api.get(&sub_path(&a.name, ""), vec![]).await?
             };
+            if a.budget_usd.is_some() || a.clear_budget_usd {
+                let mut cloud = v["cloud"].clone();
+                if !cloud.is_object() {
+                    cloud = json!({});
+                }
+                cloud["budget_usd"] = json!(a.budget_usd);
+                v = ctx.api.put(&sub_path(&a.name, "/cloud"), cloud).await?;
+            }
             if let Some(k) = key {
                 v = store_key(ctx, &a.name, &v, k).await?;
             }

@@ -2597,7 +2597,7 @@ impl Db {
         F: FnOnce(&Connection) -> ApiResult<T> + Send + 'static,
     {
         let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::links::spawn_blocking(move || {
             let guard = match conn.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -2634,7 +2634,7 @@ impl Db {
         let link = crate::links::current_link_id()
             .or_else(|| actor.strip_prefix("link:").map(str::to_owned));
         let handle = self.redactor.clone();
-        let (value, events, audits) = tokio::task::spawn_blocking(move || {
+        let (value, events, audits) = crate::links::spawn_blocking(move || {
             let mut guard = match conn.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -3516,12 +3516,13 @@ mod tests {
     #[test]
     fn agent_rpc_answer_age_counts_old_rows_from_the_upgrade() {
         const AGE: &str = "ter-555-agent-rpc-answers-age.sql";
+        const COMPACTION: &str = "ter-555b-agent-rpc-compaction.sql";
         let mut conn = Connection::open_in_memory().unwrap();
         migrate_with(&mut conn, MIGRATIONS).unwrap();
         let before: Vec<_> = NAMED_MIGRATIONS
             .iter()
             .copied()
-            .filter(|(name, _)| *name != AGE)
+            .filter(|(name, _)| *name != AGE && *name != COMPACTION)
             .collect();
         migrate_named(&mut conn, &before).unwrap();
         conn.execute(
@@ -3530,7 +3531,7 @@ mod tests {
         )
         .unwrap();
         let start = chrono::Utc::now().timestamp();
-        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        assert_eq!(migrate(&mut conn).unwrap(), 2);
         let created: i64 = conn
             .query_row("SELECT created_at FROM agent_rpc_answers", [], |row| {
                 row.get(0)

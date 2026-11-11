@@ -580,7 +580,17 @@ async fn board_summary_keeps_tile_and_eta_metadata() {
 async fn board_summary_budget_and_done_pages() {
     use std::time::Instant;
     use terrariumd::store::{Page, board};
-    for count in [294, 2940] {
+
+    thread_local! {
+        static STATEMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    fn statement(_: rusqlite::trace::TraceEvent<'_>) {
+        STATEMENTS.set(STATEMENTS.get() + 1);
+    }
+    // Measured with bundled SQLite: 14 statements and about 443k / 40.77m
+    // instructions respectively. Keep roughly 2x headroom, independent of
+    // scheduler load. The existing query is not linear in fixture size.
+    for (count, step_budget) in [(294, 900_000), (2940, 82_000_000)] {
         let td = setup().await;
         let mut conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
         let tx = conn.transaction().unwrap();
@@ -599,18 +609,46 @@ async fn board_summary_budget_and_done_pages() {
         let start = Instant::now();
         let before = serde_json::to_vec(&board::get_board(&conn, "proj").unwrap()).unwrap();
         let before_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let steps = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counter = steps.clone();
+        // This private connection has no other trace callback. Do not trace the
+        // fixture or full-card baseline, only the summary query work.
+        STATEMENTS.set(0);
+        conn.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(statement),
+        );
+        conn.progress_handler(
+            1000,
+            Some(move || {
+                counter.fetch_add(1000, std::sync::atomic::Ordering::Relaxed);
+                false
+            }),
+        );
         let start = Instant::now();
-        let summary = board::board_summary(&conn, "proj", false, &Page::default()).unwrap();
+        let summary = board::board_summary(&conn, "proj", false, &Page::default());
+        // Disable before reading the counter, including on a query error.
+        conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        conn.progress_handler(0, None::<fn() -> bool>);
+        let statements = STATEMENTS.get();
+        let steps = steps.load(std::sync::atomic::Ordering::Relaxed);
+        let summary = summary.unwrap();
         let after = serde_json::to_vec(&summary).unwrap();
         let after_ms = start.elapsed().as_secs_f64() * 1000.0;
         println!(
-            "board count={count}: before={} bytes {before_ms:.2}ms after={} bytes {after_ms:.2}ms",
+            "board count={count}: before={} bytes {before_ms:.2}ms after={} bytes {after_ms:.2}ms statements={statements} steps~={steps}",
             before.len(),
             after.len()
         );
         assert!(after.len() < count as usize * 400, "summary size budget");
         assert!(after.len() * 10 < before.len(), "at least 90% smaller");
-        assert!(after_ms < 2000.0, "board query and serialization budget");
+        // Bound database work rather than scheduler time on a shared target.
+        // A statement per card or a repeated scan of all comments must fail.
+        assert!(statements <= 20, "summary statement budget: {statements}");
+        assert!(
+            steps <= step_budget,
+            "summary SQLite VM step budget: {steps}"
+        );
         assert_eq!(
             summary["cards"].as_array().unwrap().len(),
             count as usize / 3

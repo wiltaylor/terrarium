@@ -635,7 +635,11 @@ async fn require_token(
     // `session::delete` checks a cookie and a CLI token itself: with no
     // cookie, a logout needs no proof; with a session cookie, it needs
     // `X-CSRF-Token`.
-    if session_path && req.method() == axum::http::Method::DELETE {
+    if session_path
+        && req.method() == axum::http::Method::DELETE
+        && !session::bearer_value(req.headers())
+            .is_some_and(|t| t.starts_with(crate::store::links::KEY_PREFIX))
+    {
         return next.run(req).await;
     }
     let header_token = session::bearer_value(req.headers()).map(str::to_owned);
@@ -880,12 +884,16 @@ async fn link_request(
     req.extensions_mut().insert(caller.clone());
     req.extensions_mut().insert(guard.clone());
     let g = guard.clone();
-    let run = CALLER.scope(caller, async move {
-        tokio::select! {
-            r = next.run(req) => Some(r),
-            () = g.revoked() => None,
-        }
-    });
+    let operator_route = crate::links::operator_route_allowed(&method, &path);
+    let run = CALLER.scope(
+        caller,
+        crate::links::OPERATOR_ROUTE.scope(operator_route, async move {
+            tokio::select! {
+                r = next.run(req) => Some(r),
+                () = g.revoked() => None,
+            }
+        }),
+    );
     let Some(mut resp) = run.await else {
         return unauthorized("the link was revoked");
     };
@@ -1226,7 +1234,9 @@ mod tests {
         let (status, body) = get(router(state()), "/api/system/version", None).await;
         assert_eq!(status, StatusCode::OK);
         let v: VersionInfo = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v, VersionInfo::current());
+        let mut expected = VersionInfo::current();
+        expected.missing_templates = vec!["global:request".into()];
+        assert_eq!(v, expected);
         assert_eq!(v.version, terrarium_version::FULL);
         assert_eq!(v.cargo_version, terrarium_core::VERSION);
         assert_eq!(
@@ -2352,6 +2362,73 @@ mod tests {
     // ---- password login, JWT sessions, renewal ----
 
     #[tokio::test]
+    async fn foundry_save_route_tests_before_writing_and_keeps_errors_secret() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for status in [200, 401, 403, 404, 429, 500, 302] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = state_at(dir.path());
+            let path = crate::login_session::key_path(dir.path(), "foundry-route");
+            let old: crate::login_session::ApiKey = serde_json::from_value(
+                serde_json::json!({"provider": "foundry", "key": "E2E-old-foundry"}),
+            )
+            .unwrap();
+            crate::login_session::store_key(dir.path(), "foundry-route", &old).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = calls.clone();
+            let unsaved = path.clone();
+            let mock = Router::new().route(
+                "/",
+                axum::routing::post(
+                    move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                        let seen = seen.clone();
+                        let unsaved = unsaved.clone();
+                        async move {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                            assert!(
+                                !std::fs::read_to_string(unsaved)
+                                    .unwrap()
+                                    .contains("E2E-new-foundry")
+                            );
+                            assert_eq!(headers["x-api-key"], "E2E-new-foundry");
+                            assert_eq!(headers["anthropic-version"], "2023-06-01");
+                            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            assert_eq!(request["model"], "custom-haiku");
+                            assert_eq!(request["max_tokens"], 1);
+                            (
+                                StatusCode::from_u16(status).unwrap(),
+                                [("location", "http://127.0.0.1:1/secret")],
+                                "E2E-new-foundry upstream secret",
+                            )
+                        }
+                    },
+                ),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+            let response = subscriptions::FOUNDRY_MOCK_URL.scope(url, send_body(
+                router(state), "POST", "/api/subscriptions/foundry-route/api-key", &[],
+                &serde_json::json!({"provider": "foundry", "key": "E2E-new-foundry", "test_connection": true,
+                    "cloud": {"resource": "route-resource", "models": {"haiku": "custom-haiku"}}}),
+            )).await;
+            server.abort();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(response.status().is_success(), status == 200);
+            let body = json_of(response).await;
+            let text = body.to_string();
+            assert!(!text.contains("E2E-") && !text.contains("upstream secret"));
+            let stored = crate::login_session::read_key(dir.path(), "foundry-route").unwrap();
+            if status == 200 {
+                assert_eq!(stored.key, "E2E-new-foundry");
+                assert_eq!(body["cloud"]["models"]["opus"], "claude-opus-5-5");
+            } else {
+                assert_eq!(stored.key, "E2E-old-foundry");
+                assert!(text.contains("Nothing was saved"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn vertex_save_route_checks_signed_credentials_before_persisting() {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
         use rsa::pkcs8::{EncodePrivateKey, LineEnding};
@@ -3161,6 +3238,66 @@ mod tests {
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         (v["link_id"].as_str().unwrap().to_owned(), key)
     }
+
+    #[tokio::test]
+    async fn link_operator_gate_survives_database_and_spawn_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let caller = crate::links::LinkCaller {
+            id: "L1".into(),
+            label: "home".into(),
+            read_only: false,
+            key_hash: "h".into(),
+        };
+        crate::links::CALLER
+            .scope(caller, async {
+                // A new operator-only action is closed without changing any
+                // route deny list. Both helpers must agree.
+                assert!(
+                    crate::policy::operator_only(&crate::actor::Actor::Operator, "new feature")
+                        .is_err()
+                );
+                assert!(!crate::actor::Actor::Operator.is_operator());
+                assert!(
+                    !s.db
+                        .read(|_| Ok(crate::actor::Actor::Operator.is_operator()))
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    !s.db
+                        .write("operator", |_| Ok(
+                            crate::actor::Actor::Operator.is_operator()
+                        ))
+                        .await
+                        .unwrap()
+                );
+                crate::links::OPERATOR_ROUTE
+                    .scope(true, async {
+                        assert!(crate::actor::Actor::Operator.is_operator());
+                        assert!(
+                            s.db.read(|_| Ok(crate::actor::Actor::Operator.is_operator()))
+                                .await
+                                .unwrap()
+                        );
+                        // Spawned work does not inherit a read route exception.
+                        assert!(
+                            !crate::links::spawn(async {
+                                crate::actor::Actor::Operator.is_operator()
+                            })
+                            .await
+                            .unwrap()
+                        );
+                    })
+                    .await;
+                assert!(!crate::actor::Actor::Operator.is_operator());
+            })
+            .await;
+        // No leaked task-local restriction on ordinary operator requests.
+        assert!(crate::actor::Actor::Operator.is_operator());
+    }
+
+    include!("link_access_tests.rs");
 
     #[tokio::test]
     async fn a_link_key_acts_as_the_operator_minus_the_deny_list() {

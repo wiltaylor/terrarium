@@ -57,6 +57,7 @@ pub mod quota_notices;
 pub mod quota_policy;
 pub mod remotes;
 pub mod repo_browse;
+pub mod required_templates;
 pub mod research_helpers;
 pub mod reservations;
 pub mod reset;

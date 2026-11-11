@@ -122,6 +122,102 @@ async fn request(l: &Lab) -> Value {
 }
 
 #[tokio::test]
+async fn request_failed_starts_deliver_mail_and_visible_reason() {
+    for missing_template in [true, false] {
+        let l = lab().await;
+        if !missing_template {
+            // A valid saved template whose skill library is unavailable at start.
+            let r =
+                l.td.post(
+                    "/api/templates",
+                    json!({"name": "request", "spec": {
+                        "harness": "claude"
+                    }}),
+                )
+                .await;
+            assert_eq!(r.status, 201, "{}", r.body);
+            // Simulate a skill disappearing after the template was saved.
+            state(&l.td).db.write("system", |t| {
+                t.execute("UPDATE agent_templates SET spec = json_set(spec, '$.skills', json('[\"unavailable-request-skill\"]')) WHERE name = 'request' AND project IS NULL", [])?;
+                Ok(())
+            }).await.unwrap();
+        }
+        let th = l
+            .open(json!({"report_to": "p/lead", "topic": "Never lose this",
+            "text": "Please preserve every word.\nSecond line."}))
+            .await;
+        assert_eq!(th["close_reason"], "failed_start", "{th}");
+        let summary = th["handoff"]["summary"].as_str().unwrap();
+        assert!(summary.contains("fallback"), "{summary}");
+        assert!(summary.contains("p/lead"), "{summary}");
+        assert!(summary.contains("Reason:"), "{summary}");
+        let mail =
+            l.td.get(&format!("/api/mail?to={}&from=operator", l.p_lead))
+                .await;
+        let messages = mail.ok().as_array().unwrap();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0]["body"]
+                .as_str()
+                .unwrap()
+                .contains("Please preserve every word.\nSecond line.")
+        );
+        let s = state(&l.td);
+        terrariumd::thread_agent::recover_failed_requests(&s)
+            .await
+            .unwrap();
+        let mail =
+            l.td.get(&format!("/api/mail?to={}&from=operator", l.p_lead))
+                .await;
+        assert_eq!(mail.ok().as_array().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn request_upgrade_recovers_stored_messages_once() {
+    let l = lab().await;
+    let tid = unstarted(&l, "operator", "global:request").await;
+    let s = state(&l.td);
+    let key = tid.clone();
+    let lead = l.p_lead.clone();
+    s.db.write("system", move |t| {
+        t.execute(
+            "UPDATE threads SET request = 1, report_to = ?2 WHERE id = ?1",
+            [&key, &lead],
+        )?;
+        terrariumd::store::threads::close(
+            t,
+            &key,
+            "system",
+            terrariumd::store::threads::CloseReason::FailedStart,
+            Some("The thread agent did not start: missing template"),
+            Vec::new(),
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        terrariumd::thread_agent::recover_failed_requests(&s)
+            .await
+            .unwrap();
+    }
+    let mail =
+        l.td.get(&format!("/api/mail?to={}&from=operator", l.p_lead))
+            .await;
+    let messages = mail.ok().as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0]["body"].as_str().unwrap().contains("Go on."));
+    let full = l.thread(&tid).await;
+    assert!(
+        full["handoff"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("fallback")
+    );
+}
+
+#[tokio::test]
 async fn request_opens_with_selected_lead_and_handoff_task() {
     let l = lab().await;
     let th = request(&l).await;
@@ -478,6 +574,113 @@ async fn request_tracks_lead_cards_and_linked_lead_can_reopen() {
     assert_eq!(reopened.status, 200, "{}", reopened.body);
     assert_eq!(reopened.body["cards"].as_array().unwrap().len(), 1);
     assert_eq!(reopened.body["cards"][0]["project"], "q");
+}
+
+#[tokio::test]
+async fn request_cross_project_card_rights_end_at_close() {
+    let l = lab().await;
+    // Model a global request agent in meta reporting to p/lead.
+    let th = l.open(json!({"scope": "global", "template": "global:helper", "topic": "Cross-project request"})).await;
+    let tid = id(&th);
+    let (thread, lead) = (tid.clone(), l.p_lead.clone());
+    state(&l.td)
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE threads SET request = 1, report_to = ?2 WHERE id = ?1",
+                rusqlite::params![thread, lead],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let agent = th["agent"].as_str().unwrap();
+    let made =
+        l.td.post("/api/projects/p/cards", json!({"title": "Lead work"}))
+            .await;
+    let card = id(made.ok());
+    let path = format!("/api/cards/{card}");
+    assert_eq!(l.td.get_as(agent, &path).await.status, 200);
+    assert_eq!(
+        l.td.get_as(agent, "/api/projects/p/cards").await.status,
+        200
+    );
+    assert_eq!(
+        l.td.patch_as(agent, &path, json!({"title": "No"}))
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        l.td.post_as(agent, &format!("{path}/comments"), json!({"body": "No"}))
+            .await
+            .status,
+        403
+    );
+    let other =
+        l.td.post("/api/projects/q/cards", json!({"title": "Other work"}))
+            .await;
+    let other_card = id(other.ok());
+    assert_eq!(
+        l.td.get_as(agent, &format!("/api/cards/{other_card}"))
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        l.td.post_as(
+            agent,
+            &format!("/api/threads/{tid}/cards"),
+            json!({"card": format!("q:{other_card}")})
+        )
+        .await
+        .status,
+        404
+    );
+    let second = l.open(json!({"scope": "p", "topic": "Other thread"})).await;
+    // The caller can read this thread as its opener, but is not its
+    // attached agent. Refusal must come from the own-request link gate.
+    let (other_thread, opener) = (id(&second), agent.to_owned());
+    state(&l.td)
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE threads SET opened_by = ?2 WHERE id = ?1",
+                rusqlite::params![other_thread, opener],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        l.td.get_as(agent, &format!("/api/threads/{}", id(&second)))
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        l.td.post_as(
+            agent,
+            &format!("/api/threads/{}/cards", id(&second)),
+            json!({"card": format!("p:{card}")})
+        )
+        .await
+        .status,
+        404
+    );
+    let tracked =
+        l.td.post_as(
+            agent,
+            &format!("/api/threads/{tid}/track"),
+            json!({"cards": [format!("p:{card}")]}),
+        )
+        .await;
+    assert_eq!(tracked.status, 200, "{}", tracked.body);
+    assert_eq!(tracked.body["cards"][0]["card"], card);
+    l.td.post(&format!("/api/threads/{tid}/close"), json!({}))
+        .await
+        .ok();
+    assert_ne!(l.td.get_as(agent, &path).await.status, 200);
 }
 
 #[tokio::test]

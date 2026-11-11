@@ -101,10 +101,15 @@ async fn list_cards(
     ApiQuery(f): ApiQuery<CardFilter>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> ApiResult<Response> {
-    policy::read_project(&actor, &name)?;
+    let (who, project) = (actor.clone(), name.clone());
+    state
+        .db
+        .read(move |c| crate::store::threads::read_card_project(c, &who, &project, None))
+        .await?;
     let rows = longpoll::hold(&state, wait, &["card"], || {
         let (actor, name, page, f) = (actor.clone(), name.clone(), page.clone(), f.clone());
         state.db.read(move |c| {
+            crate::store::threads::read_card_project(c, &actor, &name, None)?;
             crate::store::projects::get(c, &name)?;
             let assignee = match f.assignee.as_deref() {
                 None => None,
@@ -175,8 +180,15 @@ async fn show(
     actor: Actor,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let card = state.db.read(move |c| board::get_card(c, &id)).await?;
-    policy::read_project(&actor, &card.project)?;
+    let who = actor.clone();
+    let card = state
+        .db
+        .read(move |c| {
+            let card = board::get_card(c, &id)?;
+            crate::store::threads::read_card_project(c, &who, &card.project, None)?;
+            Ok(card)
+        })
+        .await?;
     let id = card.id.clone();
     let mut questions = state
         .db
