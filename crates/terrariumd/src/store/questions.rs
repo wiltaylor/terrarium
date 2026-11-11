@@ -315,7 +315,8 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Question> {
     let tool_run: Option<String> = r.get("tool_run")?;
     Ok(Question {
         multi_select: r.get("multi_select")?,
-        answer_options: serde_json::from_str(&r.get::<_, String>("answer_options")?).unwrap_or_default(),
+        answer_options: serde_json::from_str(&r.get::<_, String>("answer_options")?)
+            .unwrap_or_default(),
         id: r.get("id")?,
         kind: QuestionKind::parse(&kind).unwrap_or_default(),
         agent: r.get("agent")?,
@@ -733,7 +734,9 @@ pub struct NewQuestion {
 /// question of the same agent (409), emit the event, write the audit row.
 pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     if n.multi_select && n.kind != QuestionKind::Question {
-        return Err(ApiError::invalid("multi_select is for a question or a bundle item"));
+        return Err(ApiError::invalid(
+            "multi_select is for a question or a bundle item",
+        ));
     }
     let a = agents::get(t, &n.agent)?;
     let project = a.agent.project.clone();
@@ -1171,7 +1174,12 @@ fn end_waits(t: &mut Tx<'_>, q: &Question, outcome: &str) -> ApiResult<Vec<Strin
         result["option"] = json!(o);
     }
     if q.multi_select {
-        result["options"] = json!(q.answer_options.iter().map(|&i| &q.options[i]).collect::<Vec<_>>());
+        result["options"] = json!(
+            q.answer_options
+                .iter()
+                .map(|&i| &q.options[i])
+                .collect::<Vec<_>>()
+        );
     }
     if q.kind == QuestionKind::Bundle && q.status == QuestionStatus::Answered {
         result["answers"] = q
@@ -1184,7 +1192,12 @@ fn end_waits(t: &mut Tx<'_>, q: &Question, outcome: &str) -> ApiResult<Vec<Strin
                     a["option"] = json!(o);
                 }
                 if item.multi_select {
-                    a["options"] = json!(item.answer_options.iter().map(|&i| &item.options[i]).collect::<Vec<_>>());
+                    a["options"] = json!(
+                        item.answer_options
+                            .iter()
+                            .map(|&i| &item.options[i])
+                            .collect::<Vec<_>>()
+                    );
                 }
                 a
             })
@@ -1293,9 +1306,13 @@ fn resolve_multiple(
     what: &str,
 ) -> ApiResult<(String, Vec<usize>)> {
     if option.is_some() {
-        return Err(ApiError::invalid("a multi-select answer takes `options`, not `option`"));
+        return Err(ApiError::invalid(
+            "a multi-select answer takes `options`, not `option`",
+        ));
     }
-    let text = resolve(labels, text, None, what)?.map(|(t, _)| t).unwrap_or_default();
+    let text = resolve(labels, text, None, what)?
+        .map(|(t, _)| t)
+        .unwrap_or_default();
     let mut indices = Vec::new();
     for option in options {
         let (_, index) = resolve(labels, None, Some(option), what)?.expect("an option resolves");
@@ -1338,8 +1355,19 @@ fn bundle_answers(q: &Question, given: Option<&[ItemAnswer]>) -> ApiResult<Vec<B
         let a = given.get(i).cloned().unwrap_or_default();
         let what = format!("item {}", i + 1);
         if item.multi_select {
-            let (text, indices) = resolve_multiple(&item.options, a.answer.as_deref(), a.option.as_ref(), &a.options, &what)?;
-            out.push(BundleItem { answer: Some(text), answer_option: None, answer_options: indices, ..item.clone() });
+            let (text, indices) = resolve_multiple(
+                &item.options,
+                a.answer.as_deref(),
+                a.option.as_ref(),
+                &a.options,
+                &what,
+            )?;
+            out.push(BundleItem {
+                answer: Some(text),
+                answer_option: None,
+                answer_options: indices,
+                ..item.clone()
+            });
             continue;
         }
         if !a.options.is_empty() {
@@ -1392,7 +1420,11 @@ fn bundle_mail(q: &Question, who: &str, ended: &[String]) -> String {
             ));
         }
         for &index in &item.answer_options {
-            body.push_str(&format!("Chosen option: {}. {}\n", index + 1, item.options[index]));
+            body.push_str(&format!(
+                "Chosen option: {}. {}\n",
+                index + 1,
+                item.options[index]
+            ));
         }
         if let Some(a) = item.answer.as_deref().filter(|a| item.chosen() != Some(*a)) {
             body.push_str(&format!("The answer of {who}:\n{}", quoted(a)));
@@ -1465,21 +1497,30 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
         ));
     }
     let (multiple_text, indices) = if q.multi_select {
-        resolve_multiple(&q.options, a.text.as_deref(), a.option.as_ref(), &a.options, "the question")?
+        resolve_multiple(
+            &q.options,
+            a.text.as_deref(),
+            a.option.as_ref(),
+            &a.options,
+            "the question",
+        )?
     } else {
         if !a.options.is_empty() {
             return Err(ApiError::invalid("this question is not multi-select"));
         }
         (String::new(), Vec::new())
     };
-    let resolved = if q.multi_select { Some((multiple_text, None)) } else { resolve(
-        &q.options,
-        a.text.as_deref(),
-        a.option.as_ref(),
-        "the question",
-    )? };
-    let Some((answer, index)) = resolved
-    else {
+    let resolved = if q.multi_select {
+        Some((multiple_text, None))
+    } else {
+        resolve(
+            &q.options,
+            a.text.as_deref(),
+            a.option.as_ref(),
+            "the question",
+        )?
+    };
+    let Some((answer, index)) = resolved else {
         return Err(ApiError::invalid(
             "an answer needs `answer` (text), `option`, or both",
         ));
@@ -1525,7 +1566,11 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
             ));
         }
         for &index in &q.answer_options {
-            body.push_str(&format!("\nChosen option: {}. {}\n", index + 1, q.options[index]));
+            body.push_str(&format!(
+                "\nChosen option: {}. {}\n",
+                index + 1,
+                q.options[index]
+            ));
         }
         if q.chosen() != Some(answer.as_str()) {
             body.push_str(&format!("\nThe answer of {who}:\n{}", quoted(&answer)));
@@ -1622,7 +1667,11 @@ fn answer_comment(t: &mut Tx<'_>, q: &Question, by: &mail::Address) -> ApiResult
                 q.answer.as_deref().unwrap_or_default()
             )
         };
-        let selected = q.answer_options.iter().map(|&i| format!("\nChosen option: {}. {}", i + 1, q.options[i])).collect::<String>();
+        let selected = q
+            .answer_options
+            .iter()
+            .map(|&i| format!("\nChosen option: {}. {}", i + 1, q.options[i]))
+            .collect::<String>();
         crate::store::board::system_comment(t, card, &format!("{body}{selected}"), None)?;
     }
     Ok(())

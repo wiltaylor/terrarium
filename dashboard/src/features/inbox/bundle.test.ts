@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Question } from "../../api/types";
 
-it.each([[], [1], [0, 2]])("checkbox bundle items accept any selection %j", (options) => {
+it.each([[], [1], [0, 2]].map((options) => ({ options })))("checkbox bundle items accept any selection $options", ({ options }) => {
   const q = bundle({ items: [{ text: "Pick", options: ["A", "B", "C"], multi_select: true }, { text: "Other", options: [], multi_select: true }] });
   const draft = [{ option: null, text: "notes", options }, { option: null, text: "" }];
   expect(isComplete(q, draft)).toBe(true);

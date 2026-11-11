@@ -787,16 +787,47 @@ fn fake_runner(dir: &Path, answer: fn(&Value) -> Value) -> (PathBuf, Arc<Mutex<V
 #[test]
 fn checkbox_question_and_thread_flags_reach_the_api() {
     let dir = temp_dir("checkbox-ask");
-    let (socket, seen) = fake_runner(&dir, |_| json!({"status": 201, "headers": {}, "body": {"id": "Q1"}}));
+    let (socket, seen) = fake_runner(
+        &dir,
+        |_| json!({"status": 201, "headers": {}, "body": {"id": "Q1"}}),
+    );
     for args in [
-        vec!["question", "ask", "Choose", "--card", "TER-1", "--multi-select", "-o", "A", "-o", "B"],
-        vec!["thread", "ask", "TH1", "Choose", "--multi-select", "-o", "A"],
+        vec![
+            "question",
+            "ask",
+            "Choose",
+            "--card",
+            "TER-1",
+            "--multi-select",
+            "-o",
+            "A",
+            "-o",
+            "B",
+        ],
+        vec![
+            "thread",
+            "ask",
+            "TH1",
+            "Choose",
+            "--multi-select",
+            "-o",
+            "A",
+        ],
     ] {
-        let o = bin().env("TERRARIUM_AGENT", "01AGENT").env("TERRARIUM_SOCKET", &socket).args(args).output().unwrap();
+        let o = bin()
+            .env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .args(args)
+            .output()
+            .unwrap();
         assert!(o.status.success(), "{}", text(&o.stderr));
     }
     let requests = seen.lock().unwrap();
-    let sent: Vec<_> = requests.iter().filter(|r| r["method"] == "http").map(|r| &r["params"]["body"]).collect();
+    let sent: Vec<_> = requests
+        .iter()
+        .filter(|r| r["method"] == "http")
+        .map(|r| &r["params"]["body"])
+        .collect();
     assert_eq!(sent.len(), 2);
     assert!(sent.iter().all(|b| b["multi_select"] == true));
     assert_eq!(sent[1]["thread"], "TH1");
@@ -812,13 +843,21 @@ fn checkbox_cli_answers_send_zero_one_and_several_selections() {
     });
     for selected in [vec![], vec!["B"], vec!["A", "C"]] {
         let mut c = bin();
-        c.env("TERRARIUM_AGENT", "01AGENT").env("TERRARIUM_SOCKET", &socket).args(["admin", "question", "answer", "Q1"]);
-        for label in selected { c.args(["--select", label]); }
+        c.env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .args(["admin", "question", "answer", "Q1"]);
+        for label in selected {
+            c.args(["--select", label]);
+        }
         let o = c.output().unwrap();
         assert!(o.status.success(), "{}", text(&o.stderr));
     }
     let requests = seen.lock().unwrap();
-    let sent: Vec<_> = requests.iter().filter(|r| r["method"] == "http" && r["params"]["method"] == "POST").map(|r| r["params"]["body"]["options"].clone()).collect();
+    let sent: Vec<_> = requests
+        .iter()
+        .filter(|r| r["method"] == "http" && r["params"]["method"] == "POST")
+        .map(|r| r["params"]["body"]["options"].clone())
+        .collect();
     assert_eq!(sent, vec![json!([]), json!(["B"]), json!(["A", "C"])]);
 }
 

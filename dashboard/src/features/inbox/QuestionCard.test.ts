@@ -59,7 +59,7 @@ function mount(q: Question, inThread = false) {
 const links = (el: HTMLElement, text: string) => [...el.querySelectorAll("a")].filter((a) => a.textContent?.trim() === text);
 const buttons = (el: HTMLElement, text: string) => [...el.querySelectorAll("button")].filter((b) => b.textContent?.trim() === text);
 
-it.each([[], [0], [0, 1]])("renders and submits checkbox selections %j", async (selected) => {
+it.each([[], [0], [0, 1]].map((selected) => ({ selected })))("renders and submits checkbox selections $selected", async ({ selected }) => {
   const q = question({ multi_select: true });
   const answer = vi.fn().mockResolvedValue({ ...q, status: "answered" });
   api.questions.answer = answer;
@@ -74,7 +74,7 @@ it.each([[], [0], [0, 1]])("renders and submits checkbox selections %j", async (
   expect(answer).toHaveBeenCalledWith("Q1", { options: selected });
 });
 
-it.each([[], [0], [0, 1]])("renders and submits checkbox bundle selections %j", async (selected) => {
+it.each([[], [0], [0, 1]].map((selected) => ({ selected })))("renders and submits checkbox bundle selections $selected", async ({ selected }) => {
   sessionStorage.clear();
   const q = question({ kind: "bundle", items: [{ text: "Pick", options: ["A", "B"], multi_select: true }, { text: "Other", options: [], multi_select: true }] });
   const answer = vi.fn().mockResolvedValue({ ...q, status: "answered" });

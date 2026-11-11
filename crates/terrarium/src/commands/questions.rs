@@ -145,14 +145,21 @@ fn answers_value(ctx: &Ctx, arg: &str, bundle: &Value) -> anyhow::Result<Value> 
                         .map_err(|e| CliError::usage(format!("item {}: {e}", i + 1)))?;
                 }
                 if let Some(options) = o.get("options").and_then(Value::as_array) {
-                    let selected = options.iter().map(|o| {
-                        let label = match o {
-                            Value::String(s) => s.clone(),
-                            Value::Number(n) => n.to_string(),
-                            _ => return Err(CliError::usage("a checked option must be a label or number")),
-                        };
-                        option_ref(&item, &label)
-                    }).collect::<anyhow::Result<Vec<_>>>()?;
+                    let selected = options
+                        .iter()
+                        .map(|o| {
+                            let label = match o {
+                                Value::String(s) => s.clone(),
+                                Value::Number(n) => n.to_string(),
+                                _ => {
+                                    return Err(CliError::usage(
+                                        "a checked option must be a label or number",
+                                    ));
+                                }
+                            };
+                            option_ref(&item, &label)
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
                     entry["options"] = json!(selected);
                 }
             }
@@ -626,7 +633,11 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
                 });
             }
             let q = ctx.api.get(&path(id), vec![]).await?;
-            if text.is_none() && option.is_none() && selected.is_empty() && q["multi_select"] != true {
+            if text.is_none()
+                && option.is_none()
+                && selected.is_empty()
+                && q["multi_select"] != true
+            {
                 return Err(CliError::usage(
                     "give the answer as text, --option <label|n>, or both; answer a bundle \
                      with --answers-file",
@@ -634,7 +645,12 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
             }
             let mut body = json!({});
             if q["multi_select"] == true || !selected.is_empty() {
-                body["options"] = json!(selected.iter().map(|o| option_ref(&q, o)).collect::<anyhow::Result<Vec<_>>>()?);
+                body["options"] = json!(
+                    selected
+                        .iter()
+                        .map(|o| option_ref(&q, o))
+                        .collect::<anyhow::Result<Vec<_>>>()?
+                );
             }
             if let Some(t) = text {
                 body["answer"] = json!(ctx.text(t)?);

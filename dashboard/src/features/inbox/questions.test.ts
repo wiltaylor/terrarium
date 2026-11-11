@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentEvent, Question } from "../../api/types";
 import { ackText, answerBody, chosenLabel, isQuestionEvent, putQuestion, shortQuestion, sortQuestions, statusChip } from "./questions";
 
-it.each([[], [1], [0, 2]])("checkbox answers accept any selection %j", (selected) => {
+it.each([[], [1], [0, 2]].map((selected) => ({ selected })))("checkbox answers accept any selection $selected", ({ selected }) => {
   expect(answerBody({ status: "open", options: ["A", "B", "C"], multi_select: true }, "", null, false, selected)).toEqual({ body: { options: selected } });
 });
 
