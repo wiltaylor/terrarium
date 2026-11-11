@@ -35,6 +35,10 @@ operator-only entry gets `403 link_forbidden`, including routes added by
 plain axum, macros, helpers or conditional compilation.
 The actual axum matched pattern is checked before the handler too, so a new
 static route cannot inherit a grant from a dynamic pattern it shadows.
+Link credentials are detected before the non-API public-path bypass. Installer,
+artifact and static/fallback routes are explicitly `PublicDenied`: anonymous
+and operator access is unchanged, while a link credential is authenticated and
+refused there, preserving the existing `/api`-only link policy.
 Shared operator gates and the link deny list remain additional restrictions. The HTTP walk
 iterates the actual registry's operator-only entries. Additional conditional
 and real approval cases in `tests/fixtures/link-route-access.json` verify

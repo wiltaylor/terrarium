@@ -445,21 +445,21 @@ fn routes_with_registry(
                 .layer(middleware::from_fn_with_state(state.clone(), resolve_actor))
         });
     // The host installer: outside /api, so no token (docs/api.md §17.9).
-    let (mut app, registry) = link_registry::RegisteredRouter::new()
+    let mut app = link_registry::RegisteredRouter::new()
         .nest("/api", api)
-        .merge(install::routes())
-        .into_parts();
+        .merge(install::registered_routes());
     if serve_artifacts {
-        app = app.merge(artifacts::serving_routes(&state));
+        app = app.merge(artifacts::registered_serving_routes(&state));
     }
     if host_connect {
         app = app.route(
             terrarium_host::protocol::CONNECT_PATH,
             get(crate::hosts::connect),
+            &[(axum::http::Method::GET, link_registry::Access::PublicDenied)],
         );
     }
+    let (app, registry) = app.fallback(crate::assets::serve).into_parts();
     let app = app
-        .fallback(crate::assets::serve)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             upgrade_probation,
@@ -717,6 +717,24 @@ async fn require_token(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // Select link credentials before the public-path bypass. Public assets
+    // stay anonymous, but a link bearer never becomes an anonymous request.
+    let selected = session::bearer_value(req.headers()).map(|key| (None, key.to_owned()))
+        .or_else(|| is_websocket(&req).then(|| protocol_token(&req)).flatten().map(|(proto, key)| (Some(proto), key)));
+    if let Some((echo, key)) = selected.as_ref()
+        && key.starts_with(crate::store::links::KEY_PREFIX)
+        && !token_matches(key.as_bytes(), auth.token.as_bytes())
+    {
+        return match &auth.links {
+            Some(links) => link_request(links, &auth.registry, key, req, next, echo.clone()).await,
+            None => unauthorized("missing or wrong bearer token"),
+        };
+    }
+    if selected.is_none() && is_websocket(&req)
+        && query_token(&req).is_some_and(|key| key.starts_with(crate::store::links::KEY_PREFIX))
+    {
+        return unauthorized("a link key uses a bearer header or WebSocket subprotocol, not a query parameter");
+    }
     if !req.uri().path().starts_with("/api") {
         return next.run(req).await;
     }
@@ -928,7 +946,7 @@ async fn link_request(
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let access = registry.access(&method, &path);
-    let registry_denied = matches!(access, None | Some(link_registry::Access::OperatorOnly))
+    let registry_denied = matches!(access, None | Some(link_registry::Access::OperatorOnly | link_registry::Access::PublicDenied))
         .then_some("an unregistered or operator-only endpoint");
     if let Some(why) = registry_denied
         .or_else(|| crate::links::denied(&method, &path, websocket, caller.read_only))
@@ -1168,7 +1186,7 @@ async fn registered_endpoint(
             .extensions()
             .get::<axum::extract::MatchedPath>()
             .and_then(|path| registry.pattern_access(req.method(), path.as_str()));
-        if matches!(access, None | Some(link_registry::Access::OperatorOnly)) {
+        if matches!(access, None | Some(link_registry::Access::OperatorOnly | link_registry::Access::PublicDenied)) {
             return ApiError::new(
                 Code::LinkForbidden,
                 "a link key may not call an unregistered endpoint",

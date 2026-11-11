@@ -87,11 +87,17 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
 /// The serving routes, to merge into a router that has the state, with
 /// the CORS answer for the dashboard origin.
 pub fn serving_routes(state: &Shared) -> axum::Router<Shared> {
-    axum::Router::new()
-        .route("/a/{id}", get(serve_root))
-        .route("/a/{id}/", get(serve_root))
-        .route("/a/{id}/{*path}", get(serve_path))
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), cors))
+    registered_serving_routes(state).into_parts().0
+}
+
+pub(super) fn registered_serving_routes(state: &Shared) -> super::link_registry::RegisteredRouter {
+    use super::link_registry::{Access, RegisteredRouter};
+    use axum::http::Method;
+    RegisteredRouter::new()
+        .route("/a/{id}", get(serve_root), &[(Method::GET, Access::PublicDenied)])
+        .route("/a/{id}/", get(serve_root), &[(Method::GET, Access::PublicDenied)])
+        .route("/a/{id}/{*path}", get(serve_path), &[(Method::GET, Access::PublicDenied)])
+        .map_router(|router| router.route_layer(axum::middleware::from_fn_with_state(state.clone(), cors)))
 }
 
 /// The serving routes alone, for a listener of their own (port 8081).

@@ -243,6 +243,7 @@ async fn link_unregistered_routes_never_reach_handlers() {
     let app = || {
         let called = called.clone();
         let shadow_called = called.clone();
+        let outside_called = called.clone();
         // No registration helper: this could equally come from a macro,
         // a cfg'd helper, or a nested/merged axum router.
         let plain = Router::new().route(
@@ -265,6 +266,10 @@ async fn link_unregistered_routes_never_reach_handlers() {
                 StatusCode::OK
             }),
         );
+        let real = real.route("/outside", axum::routing::get(move || async move {
+            outside_called.fetch_add(1, Ordering::SeqCst);
+            StatusCode::OK
+        }));
         authenticated_router(s.clone(), real, auth)
     };
     let bearer = format!("Bearer {key}");
@@ -295,6 +300,49 @@ async fn link_unregistered_routes_never_reach_handlers() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert_eq!(send(app(), "GET", "/outside", &[("authorization", &bearer)]).await.status(), StatusCode::FORBIDDEN);
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert_eq!(ws(app(), "/outside", &[("sec-websocket-protocol", &format!("bearer.{key}"))]).await.status(), StatusCode::FORBIDDEN);
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert_eq!(send(app(), "GET", "/outside", &[]).await.status(), StatusCode::OK);
+    assert_eq!(send(app(), "GET", "/outside", &[("authorization", "Bearer t")]).await.status(), StatusCode::OK);
+    assert_eq!(called.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn link_credentials_do_not_bypass_public_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state_at(dir.path());
+    seed_sysadmin(&s).await;
+    let (_, key) = paired(&s, false).await;
+    let app = || tcp_router_with(s.clone(), TokenAuth::new("t".into(), false).with_links(LinkAuth {
+        db: s.db.clone(), runtime: s.links.clone(),
+    }), true);
+    let op = [("authorization", "Bearer t")];
+    let upload = send_body(app(), "POST", "/api/projects/p/artifacts", &op,
+        &serde_json::json!({"name":"public.txt", "content_type":"text/plain", "data_base64":"cHVibGlj"})).await;
+    assert_eq!(upload.status(), StatusCode::CREATED);
+    let artifact = json_of(upload).await;
+    let mint = send_body(app(), "POST", &format!("/api/artifacts/{}/url", artifact["id"].as_str().unwrap()), &op, &serde_json::json!({})).await;
+    assert_eq!(mint.status(), StatusCode::OK);
+    let signed = json_of(mint).await;
+    let uri: axum::http::Uri = signed["url"].as_str().unwrap().parse().unwrap();
+    let artifact_path = uri.path_and_query().unwrap().as_str();
+    let bearer = format!("Bearer {key}");
+    for path in ["/install/host.sh", "/install/terrarium-host", "/install/terrarium-host.sha256", "/", "/favicon.svg", "/agents/dashboard", "/missing.js", artifact_path] {
+        let anonymous = send(app(), "GET", path, &[]).await;
+        let status = anonymous.status();
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "public control {path}");
+        assert_eq!(send(app(), "GET", path, &op).await.status(), status, "operator control {path}");
+        for method in ["GET", "HEAD"] {
+            let response = send(app(), method, path, &[("authorization", &bearer)]).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
+    assert_eq!(send(app(), "GET", artifact_path, &[]).await.status(), StatusCode::OK);
+    assert_eq!(send(app(), "GET", "/", &[]).await.status(), StatusCode::OK);
+    assert_eq!(send(app(), "GET", "/install/host.sh", &[]).await.status(), StatusCode::OK);
+    assert_eq!(send(app(), "GET", "/", &[("authorization", "Bearer tlk_wrong")]).await.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

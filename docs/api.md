@@ -13377,6 +13377,11 @@ routing or handlers. Unregistered methods/paths and operator-only entries
 return `403 link_forbidden`. Plain axum routes, nested mounts, macros, helpers
 and cfg'd routes do not gain link access without a registry declaration.
 The shared operator gate and the deny list below are additional restrictions.
+Link credentials are detected before the public-path bypass, including on
+WebSocket upgrades. Installer, artifact-serving, static-file and SPA fallback
+entries have the explicit `PublicDenied` class: they remain public for anonymous
+and ordinary operator requests, but a link-key request gets the link 403.
+This preserves the rule that a link key's authority covers only `/api`.
 
 A link key is `Authorization: Bearer tlk_...` (on a WebSocket upgrade also
 the subprotocol `bearer.tlk_...`). For the rules the caller is the operator,

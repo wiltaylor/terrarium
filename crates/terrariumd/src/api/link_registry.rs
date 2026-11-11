@@ -14,6 +14,8 @@ pub enum Access {
     Link,
     Conditional,
     OperatorRead,
+    /// Public without credentials, but not part of a link's API authority.
+    PublicDenied,
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +144,22 @@ impl RegisteredRouter {
 
     pub fn into_parts(self) -> (Router<Shared>, Registry) {
         (self.router, Registry::new(self.entries))
+    }
+
+    pub fn fallback<H, T>(mut self, handler: H) -> Self
+    where
+        H: axum::handler::Handler<T, Shared>,
+        T: 'static,
+    {
+        self.router = self.router.fallback(handler);
+        // The dashboard's files and SPA fallback are public. Supplying a
+        // link credential must not turn public routing into an auth bypass.
+        for path in ["/", "/{*path}"] {
+            for method in [Method::GET, Method::HEAD] {
+                self.entries.push(Entry { method, path: path.into(), access: Access::PublicDenied });
+            }
+        }
+        self
     }
 }
 
