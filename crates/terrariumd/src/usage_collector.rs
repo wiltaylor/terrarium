@@ -1078,7 +1078,7 @@ impl Collector {
                 .db
                 .write("system", move |tx| {
                     let cloud = crate::store::subscriptions::find(tx, &name)?
-                        .is_some_and(|s| s.cloud_kind().is_some());
+                        .is_some_and(|s| s.cloud_kind().is_some() || s.provider == "litellm");
                     if cloud {
                         crate::store::cloud_spend::record(
                             tx,

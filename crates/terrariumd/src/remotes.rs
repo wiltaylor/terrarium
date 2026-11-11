@@ -14,6 +14,60 @@ use crate::store::remotes::Remote;
 use crate::webhooks::net::{self, PrivateMode};
 
 pub const JSON_MAX: usize = 16 * 1024 * 1024;
+pub const IMAGE_MAX: usize = 8 * 1024 * 1024;
+
+pub fn image_body_type(body: &[u8]) -> ApiResult<&'static str> {
+    if body.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Ok("image/png")
+    } else if body.starts_with(b"\xff\xd8\xff") {
+        Ok("image/jpeg")
+    } else if body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a") {
+        Ok("image/gif")
+    } else if body.starts_with(b"RIFF") && body.get(8..12) == Some(b"WEBP") {
+        Ok("image/webp")
+    } else {
+        Err(unreachable())
+    }
+}
+
+pub fn image_content_type(headers: &HeaderMap) -> ApiResult<&'static str> {
+    match headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image/png" => Ok("image/png"),
+        "image/jpeg" => Ok("image/jpeg"),
+        "image/gif" => Ok("image/gif"),
+        "image/webp" => Ok("image/webp"),
+        _ => Err(unreachable()),
+    }
+}
+
+pub fn check_image_path(method: &Method, path: &str) -> ApiResult<()> {
+    if *method != Method::GET {
+        return Err(ApiError::bad_request("images require GET"));
+    }
+    // Only the file-serving /a/{artifact-ULID}/{path} route, never JSON APIs.
+    // Reuse the strict ambiguity checks before validating the whole route.
+    let rest = path
+        .strip_prefix("/a/")
+        .ok_or_else(|| ApiError::bad_request("not an image endpoint"))?;
+    check_path(method, &format!("/api/{rest}"), false, true)?;
+    let (id, file) = rest
+        .split_once('/')
+        .ok_or_else(|| ApiError::bad_request("missing artifact file"))?;
+    if id.len() != 26 || id.parse::<ulid::Ulid>().is_err() || file.is_empty() {
+        return Err(ApiError::bad_request("invalid artifact path"));
+    }
+    Ok(())
+}
 pub const UPLOAD_MAX: usize = 256 * 1024 * 1024;
 pub const CONNECT: Duration = Duration::from_secs(30);
 pub const PLAIN: Duration = Duration::from_secs(60);
@@ -219,14 +273,20 @@ pub fn response_headers(input: &HeaderMap, name: &str, empty: bool) -> ApiResult
 
 /// Resolve once, pin the address, disable environment proxies and redirects.
 pub async fn client(remote: &Remote, own_ports: &[u16]) -> ApiResult<Client> {
+    client_with_policy(remote, own_ports, PrivateMode::from_env()).await
+}
+
+/// An explicit destination policy, independent of webhook environment settings.
+pub async fn client_with_policy(
+    remote: &Remote,
+    own_ports: &[u16],
+    mode: PrivateMode,
+) -> ApiResult<Client> {
     let u = check_url(&remote.url)?;
-    let addr = tokio::time::timeout(
-        CONNECT,
-        net::resolve(&u, PrivateMode::from_env(), own_ports, None),
-    )
-    .await
-    .map_err(|_| unreachable())?
-    .map_err(|_| unreachable())?;
+    let addr = tokio::time::timeout(CONNECT, net::resolve(&u, mode, own_ports, None))
+        .await
+        .map_err(|_| unreachable())?
+        .map_err(|_| unreachable())?;
     if u.scheme() == "http" && !addr.ip().is_loopback() {
         return Err(unreachable());
     }
@@ -265,6 +325,8 @@ pub async fn client(remote: &Remote, own_ports: &[u16]) -> ApiResult<Client> {
 pub struct Instance {
     pub id: String,
     pub version: String,
+    #[serde(default)]
+    pub artifact_origin: Option<String>,
 }
 
 pub async fn limited(

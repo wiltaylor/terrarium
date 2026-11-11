@@ -529,6 +529,9 @@ pub fn update(
     }
     let at = stamp(now);
     let restart = def.schedule != old.def.schedule || (def.enabled && !old.def.enabled);
+    if def.name != old.def.name {
+        super::threads::on_monitor_missing(t, &old.project, &old.def.name)?;
+    }
     let reruns = def.script != old.def.script || def.target != old.def.target;
     t.execute(
         "UPDATE monitors SET name = ?2, kind = ?3, enabled = ?4, def = ?5, updated_at = ?6,
@@ -630,6 +633,7 @@ pub fn disable(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<Monitor> {
 pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<Monitor> {
     let m = get(t, id)?;
     t.execute("DELETE FROM monitors WHERE id = ?1", [id])?;
+    super::threads::on_monitor_missing(t, &m.project, &m.def.name)?;
     let (mut l, meta) = layout_of(t, &m.project)?;
     if layout::drop_monitor(&mut l, id) {
         let by = meta.map(|(_, by)| by).unwrap_or_else(|| "system".into());

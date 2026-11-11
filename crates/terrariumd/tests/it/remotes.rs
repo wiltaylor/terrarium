@@ -25,6 +25,333 @@ async fn remote() -> TestDaemon {
     d
 }
 
+fn test_tls_config(cert: &terrarium_host::tls::SelfSigned) -> Arc<rustls::ServerConfig> {
+    let dir = tempfile::tempdir().unwrap();
+    let pem = dir.path().join("cert.pem");
+    let key = dir.path().join("key.pem");
+    std::fs::write(&pem, &cert.cert_pem).unwrap();
+    std::fs::write(&key, &cert.key_pem).unwrap();
+    terrarium_host::tls::server_config(&pem, &key).unwrap().0
+}
+
+async fn pinned_server(
+    body: String,
+) -> (
+    Server,
+    String,
+    Arc<std::sync::Mutex<Arc<rustls::ServerConfig>>>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let cert = terrarium_host::tls::self_signed(&["localhost".into()]).unwrap();
+    let config = test_tls_config(&cert);
+    let config = Arc::new(std::sync::Mutex::new(config));
+    let current = config.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let acceptor = tokio_rustls::TlsAcceptor::from(current.lock().unwrap().clone());
+            let body = body.clone();
+            tokio::spawn(async move {
+                if let Ok(mut tls) = acceptor.accept(tcp).await {
+                    let mut request = [0; 8192];
+                    let n = tls.read(&mut request).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&request[..n]).to_ascii_lowercase();
+                    // Only the API probe may carry a remote credential.
+                    if !body.starts_with('{') {
+                        assert!(!request.contains("authorization:"));
+                        assert!(!request.contains("cookie:"));
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = tls.write_all(response.as_bytes()).await;
+                    let _ = tls.shutdown().await;
+                }
+            });
+        }
+    });
+    (
+        Server {
+            url: format!("https://{addr}"),
+            task,
+        },
+        cert.fingerprint,
+        config,
+    )
+}
+
+#[tokio::test]
+async fn separate_artifact_pin_requires_operator_confirmation_and_rotation() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let mut home = TestDaemon::start().await;
+    home.boot(Some("127.0.0.1:0"), Some("test-home-operator"))
+        .await;
+    let remote = remote().await;
+    let row = link(&home, &remote, false).await;
+    let (artifact, pin, config) = pinned_server("artifact bytes".into()).await;
+    let (api, api_pin, _) = pinned_server(
+        json!({
+            "id": row["instance_id"], "version": env!("CARGO_PKG_VERSION"),
+            "artifact_origin": artifact.url,
+        })
+        .to_string(),
+    )
+    .await;
+    let db = rusqlite::Connection::open(home.state.join("terrarium.db")).unwrap();
+    db.execute(
+        "UPDATE remotes SET url=?1,pin_sha256=?2 WHERE name='lab'",
+        rusqlite::params![format!("{}/", api.url), api_pin],
+    )
+    .unwrap();
+    let base = format!("http://{}", home.daemon.as_ref().unwrap().tcp_addr.unwrap());
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let endpoint = format!("{base}/api/remotes/lab/artifact-repin");
+    let ctx = terrariumd::store::artifacts::context(&home.state, &home.config).unwrap();
+    let exp = chrono::Utc::now().timestamp() + 120;
+    let cap = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&json!({
+            "remote":"lab", "remote_id":row["id"], "instance":row["instance_id"],
+            "target":format!("{}/a/probe", artifact.url), "artifact_origin":artifact.url,
+            "sid":"test-session", "jti":"test-token", "pv":0
+        }))
+        .unwrap(),
+    );
+    let sig = ctx.sign(&format!("remote-artifact.v1.{cap}"), exp);
+    let url = format!("{base}/ra/{cap}/{exp}/{sig}/");
+    assert!(!client.get(&url).send().await.unwrap().status().is_success());
+    let body = json!({"origin":artifact.url,"pin_sha256":pin});
+    assert!(
+        !client
+            .post(&endpoint)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .bearer_auth("test-home-operator")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        client.get(&url).send().await.unwrap().text().await.unwrap(),
+        "artifact bytes"
+    );
+
+    let rotated = terrarium_host::tls::self_signed(&["localhost".into()]).unwrap();
+    *config.lock().unwrap() = test_tls_config(&rotated);
+    assert!(!client.get(&url).send().await.unwrap().status().is_success());
+    // The old pin cannot be reconfirmed after rotation.
+    assert!(
+        !client
+            .post(&endpoint)
+            .bearer_auth("test-home-operator")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let body = json!({"origin":artifact.url,"pin_sha256":rotated.fingerprint});
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .bearer_auth("test-home-operator")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        client.get(&url).send().await.unwrap().text().await.unwrap(),
+        "artifact bytes"
+    );
+}
+
+#[tokio::test]
+async fn artifact_capability_serves_without_credentials_and_ends_on_logout() {
+    use base64::Engine;
+    let mut home = TestDaemon::start().await;
+    home.boot(Some("127.0.0.1:0"), Some("test-home-operator"))
+        .await;
+    let remote = remote().await;
+    link(&home, &remote, false).await;
+    let artifact = remote.post("/api/projects/terra/artifacts", json!({
+        "name":"report.html", "content_type":"text/html",
+        "data_base64":base64::engine::general_purpose::STANDARD.encode(b"<!doctype html><p>remote report</p>")
+    })).await.ok().clone();
+    let id = artifact["uid"].as_str().unwrap();
+    let base = format!("http://{}", home.daemon.as_ref().unwrap().tcp_addr.unwrap());
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mint = format!("{base}/api/remotes/lab/artifacts/{id}/url");
+    // A static operator token does not stand in for a session binding.
+    assert_eq!(
+        client
+            .post(&mint)
+            .bearer_auth("test-home-operator")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let login = client
+        .post(format!("{base}/api/session"))
+        .bearer_auth("test-home-operator")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::CREATED);
+    let cookie = login.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let login: Value = serde_json::from_slice(&login.bytes().await.unwrap()).unwrap();
+    let csrf = login["csrf"].as_str().unwrap();
+    let signed = client
+        .post(&mint)
+        .header(header::COOKIE, &cookie)
+        .header("x-csrf-token", csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        signed.status(),
+        StatusCode::OK,
+        "{}",
+        signed.text().await.unwrap()
+    );
+    let signed: Value = serde_json::from_slice(&signed.bytes().await.unwrap()).unwrap();
+    let url = signed["url"].as_str().unwrap();
+    let url = if url.starts_with('/') {
+        format!("{base}{url}")
+    } else {
+        url.to_owned()
+    };
+    // An unauthenticated browser on the artifact origin needs only this URL.
+    let response = client.get(&url).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(
+        response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("sandbox")
+    );
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    assert!(response.text().await.unwrap().contains("remote report"));
+    // Neither an invalid signature nor a suffix for another file is accepted.
+    let mut bad = url.clone();
+    let last = bad.len() - 2;
+    bad.replace_range(last..last + 1, "z");
+    assert_eq!(
+        client.get(&bad).send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        client
+            .get(format!("{url}other.txt"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let logout = client
+        .delete(format!("{base}/api/session"))
+        .header(header::COOKIE, cookie)
+        .header("x-csrf-token", csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        client.get(&url).send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn artifact_public_remote_cannot_fetch_loopback_even_with_a_signed_capability() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let mut home = TestDaemon::start().await;
+    home.boot(Some("127.0.0.1:0"), Some("test-home-operator"))
+        .await;
+    let remote = remote().await;
+    let row = link(&home, &remote, false).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let seen = connections.clone();
+    let probe = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            seen.fetch_add(1, Ordering::SeqCst);
+            drop(socket);
+        }
+    });
+    let db = rusqlite::Connection::open(home.state.join("terrarium.db")).unwrap();
+    db.execute(
+        "UPDATE remotes SET url='https://public.example/',pin_sha256=NULL WHERE name='lab'",
+        [],
+    )
+    .unwrap();
+    let ctx = terrariumd::store::artifacts::context(&home.state, &home.config).unwrap();
+    let base = format!("http://{}", home.daemon.as_ref().unwrap().tcp_addr.unwrap());
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    // Make a valid home capability as if a malicious public remote had returned
+    // this target. No-pin HTTP used to bypass the artifact TLS guard entirely.
+    for scheme in ["http", "https"] {
+        if scheme == "https" {
+            db.execute(
+                "UPDATE remotes SET pin_sha256=?1 WHERE name='lab'",
+                ["00".repeat(32)],
+            )
+            .unwrap();
+        }
+        let exp = chrono::Utc::now().timestamp() + 120;
+        let cap = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "remote":"lab", "remote_id":row["id"], "instance":row["instance_id"],
+                "target":format!("{scheme}://{addr}/a/probe"),
+                "artifact_origin":format!("{scheme}://{addr}/"),
+                "sid":"test-session", "jti":"test-token", "pv":0
+            }))
+            .unwrap(),
+        );
+        let sig = ctx.sign(&format!("remote-artifact.v1.{cap}"), exp);
+        let response = client
+            .get(format!("{base}/ra/{cap}/{exp}/{sig}/"))
+            .send()
+            .await
+            .unwrap();
+        assert!(!response.status().is_success(), "{scheme}");
+        assert_eq!(connections.load(Ordering::SeqCst), 0, "{scheme}");
+    }
+    probe.abort();
+}
+
 #[tokio::test]
 async fn browser_admission_is_retained_until_socket_close_and_has_retry_after() {
     let home = TestDaemon::start().await;
@@ -521,6 +848,15 @@ async fn read_only_and_sysadmin_home_are_refused() {
     home.post_as(id, "/api/remotes", json!({"name":"no"}))
         .await
         .err(403, "forbidden");
+    home.post_as(
+        id,
+        "/api/remotes/lab/artifact-repin",
+        json!({
+            "origin":"https://example.test/", "pin_sha256":"00".repeat(32)
+        }),
+    )
+    .await
+    .err(403, "forbidden");
     // P1 intentionally refuses DELETE /links/self for read-only links.
     assert_eq!(home.delete("/api/remotes/lab").await.ok()["revoked"], false);
     assert_eq!(
@@ -806,6 +1142,141 @@ async fn hostile_http_headers_redirects_html_and_instance_mismatch() {
 }
 
 #[tokio::test]
+async fn image_proxy_rejects_active_types_redirects_and_oversized_bodies() {
+    let home = TestDaemon::start().await;
+    let id = ulid::Ulid::new().to_string();
+    let instance = id.clone();
+    let app = Router::new()
+        .route(
+            "/api/system/instance",
+            get(move || {
+                let id = instance.clone();
+                async move { Json(json!({"id":id,"version":terrarium_version::VERSION})) }
+            }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/good",
+            get(|headers: HeaderMap| async move {
+                assert!(!headers.contains_key("cookie"));
+                assert!(!headers.contains_key("authorization"));
+                (
+                    [("content-type", "image/png"), ("set-cookie", "evil=1")],
+                    b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x04\x00\x00\x00\xb5\x1c\x0c\x02\x00\x00\x00\x0bIDAT\x78\xda\x63\x64\xf8\x0f\x00\x01\x05\x01\x01\x27\x18\xe3\x66\x00\x00\x00\x00IEND\xaeB\x60\x82".as_slice(),
+                )
+            }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/svg",
+            get(|| async { ([("content-type", "image/svg+xml")], "<svg/>") }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/html",
+            get(|| async { ([("content-type", "text/html")], "<html/>") }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/redirect",
+            get(|| async {
+                (
+                    StatusCode::FOUND,
+                    [("location", "https://evil.example/image")],
+                )
+            }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/large",
+            get(|| async {
+                (
+                    [("content-type", "image/jpeg")],
+                    vec![0u8; net::IMAGE_MAX + 1],
+                )
+            }),
+        );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let app = app
+        .route(
+            "/api/agents",
+            get(move || {
+                seen.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!([])) }
+            }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-svg",
+            get(|| async { ([("content-type", "image/png")], "<svg/>") }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-html",
+            get(|| async { ([("content-type", "image/png")], "<html/>") }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-bytes",
+            get(|| async { ([("content-type", "image/png")], "png") }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/mismatch",
+            get(|| async { ([("content-type", "image/png")], "GIF89a") }),
+        );
+    let _server = fake(&home, app, &id).await;
+    home.get("/api/remotes/lab/proxy/image/api/agents")
+        .await
+        .err(400, "bad_request");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let good = home
+        .get("/api/remotes/lab/proxy/image/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/good")
+        .await;
+    assert_eq!(good.status, StatusCode::OK);
+    assert_eq!(good.headers["content-type"], "image/png");
+    assert_eq!(good.headers["x-content-type-options"], "nosniff");
+    assert_eq!(good.headers["cache-control"], "no-store");
+    assert!(!good.headers.contains_key("set-cookie"));
+    for path in [
+        "svg",
+        "html",
+        "redirect",
+        "large",
+        "fake-svg",
+        "fake-html",
+        "fake-bytes",
+        "mismatch",
+    ] {
+        home.get(&format!(
+            "/api/remotes/lab/proxy/image/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/{path}"
+        ))
+        .await
+        .err(502, "remote_unreachable");
+    }
+    assert!(net::check_image_path(&Method::POST, "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/good").is_err());
+    for path in [
+        "/api/%252e/foo",
+        "/a/../secret",
+        "//evil.example/a/good",
+        "/api/remotes",
+        "/api/agents",
+        "/a/not-an-id/file.png",
+    ] {
+        assert!(net::check_image_path(&Method::GET, path).is_err(), "{path}");
+    }
+    for ct in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_TYPE, ct.parse().unwrap());
+        assert_eq!(net::image_content_type(&h).unwrap(), ct);
+    }
+    for (body, expected) in [
+        (b"\x89PNG\r\n\x1a\n".as_slice(), "image/png"),
+        (b"\xff\xd8\xff".as_slice(), "image/jpeg"),
+        (b"GIF87a".as_slice(), "image/gif"),
+        (b"GIF89a".as_slice(), "image/gif"),
+        (b"RIFF1234WEBP".as_slice(), "image/webp"),
+    ] {
+        assert_eq!(net::image_body_type(body).unwrap(), expected);
+        for end in 0..body.len() {
+            assert!(net::image_body_type(&body[..end]).is_err());
+        }
+    }
+}
+
+#[tokio::test]
 async fn event_websocket_and_sse_stream_and_removal() {
     let home = TestDaemon::start().await;
     let remote = remote().await;
@@ -915,6 +1386,8 @@ async fn tls_leaf_pin_is_checked_on_every_http_sse_and_ws_connection_before_key(
         url: format!("https://{addr}/"),
         instance_id: "id".into(),
         pin_sha256: Some(certificate.fingerprint),
+        artifact_origin: None,
+        artifact_pin_sha256: None,
         ca_pem: None,
         label: "lab".into(),
         read_only: false,

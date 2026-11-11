@@ -48,6 +48,41 @@ fn repository(url: &str) -> ApiResult<String> {
     Ok(path.to_ascii_lowercase())
 }
 
+/// Called only after the ingest listener verifies the source's signature.
+/// A source can import only repositories registered in its own project.
+pub(crate) fn import_webhook(
+    t: &mut Tx<'_>,
+    project: &str,
+    payload: serde_json::Value,
+) -> ApiResult<board::Card> {
+    let url = payload["repository"]["html_url"]
+        .as_str()
+        .ok_or_else(|| ApiError::invalid("missing GitHub repository URL"))?;
+    let target = repository(url)?;
+    let issue: Issue = serde_json::from_value(payload["issue"].clone())
+        .map_err(|_| ApiError::invalid("invalid GitHub issue"))?;
+    if issue.number == 0 || issue.pull_request.is_some() || issue.user.login.is_empty() {
+        return Err(ApiError::invalid("not a GitHub issue"));
+    }
+    let mut page = crate::store::Page::default();
+    loop {
+        let repos = repos::list_repos(t, project, &page)?;
+        for repo in repos.items {
+            if repository(&repo.url).ok().as_deref() == Some(target.as_str()) {
+                return import_verified(t, &Actor::Operator, project, &repo.name, &target, issue);
+            }
+        }
+        match repos.next {
+            Some(cursor) => page.cursor = Some(cursor),
+            None => {
+                return Err(ApiError::invalid(
+                    "GitHub repository is not registered in this project",
+                ));
+            }
+        }
+    }
+}
+
 /// Reusable importer. Credentials and the repository come from daemon config,
 /// never from an arbitrary URL in the request. Failed fetches create no card.
 pub async fn import(
@@ -181,7 +216,8 @@ pub(crate) fn import_verified(
                 issue
                     .title
                     .chars()
-                    .filter(|c| !c.is_control())
+                    .filter(|c| !matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+                    .map(|c| if c.is_control() { ' ' } else { c })
                     .take(200)
                     .collect::<String>()
             )),
@@ -335,6 +371,27 @@ mod tests {
         let held = import_verified(&mut t, &actor, "p", "repo", "o/r", issue(2, "eve")).unwrap();
         assert_eq!(held.column, "blocked");
         assert!(held.labels.contains(&"hold".into()));
+        let operator_held = import_verified(
+            &mut t,
+            &Actor::Operator,
+            "p",
+            "repo",
+            "o/r",
+            issue(20, "eve"),
+        )
+        .unwrap();
+        assert_eq!(operator_held.column, "blocked");
+        assert!(operator_held.labels.contains(&"hold".into()));
+        let operator_allowed = import_verified(
+            &mut t,
+            &Actor::Operator,
+            "p",
+            "repo",
+            "o/r",
+            issue(21, "wiltaylor"),
+        )
+        .unwrap();
+        assert_eq!(operator_allowed.column, "backlog");
         let again =
             import_verified(&mut t, &actor, "p", "repo", "o/r", issue(2, "wiltaylor")).unwrap();
         assert_eq!(again.id, held.id);
@@ -365,10 +422,14 @@ mod tests {
         )
         .unwrap();
         let mut malicious = issue(4, "wiltaylor");
-        malicious.title = format!("bad\n\r\u{1b}{}", "x".repeat(1000));
+        malicious.title = format!(
+            "bad\n\r\u{1b}\u{061c}\u{200e}\u{200f}\u{202e}\u{2066}{}",
+            "x".repeat(1000)
+        );
         let imported = import_verified(&mut t, &actor, "p", "repo", "o/r", malicious).unwrap();
         assert_ne!(imported.id, forged.id);
         assert!(!imported.title.chars().any(char::is_control));
+        assert!(imported.title.starts_with("GitHub #4: bad   xxx"));
         assert!(imported.title.chars().count() <= 230);
         assert!(
             board::add_link(

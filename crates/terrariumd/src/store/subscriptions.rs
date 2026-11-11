@@ -442,6 +442,11 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
         }
     };
     if litellm {
+        if sh.budget_usd == Some(0) {
+            return Err(ApiError::invalid(
+                "selfhosted.budget_usd must be at least 1; omit it for no budget",
+            ));
+        }
         if sh.api != selfhosted::Api::Anthropic {
             return Err(ApiError::invalid("LiteLLM needs the anthropic API style"));
         }
@@ -457,6 +462,11 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
             ));
         }
     }
+    if !litellm && sh.budget_usd.is_some() {
+        return Err(ApiError::invalid(
+            "selfhosted.budget_usd is only for LiteLLM",
+        ));
+    }
     if d.harnesses.is_empty() {
         d.harnesses = sh.api.harnesses().to_vec();
     }
@@ -466,7 +476,7 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
             d.name
         )));
     }
-    if d.probe.is_some() {
+    if d.probe.is_some() && !(litellm && d.probe.as_deref() == Some(crate::probes::litellm::NAME)) {
         return Err(ApiError::invalid(format!(
             "subscription `{}`: a self-hosted server has no quota probe",
             d.name

@@ -650,6 +650,14 @@ fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
 /// Link only monitors in a project the caller can read. The API transaction
 /// rolls back the link if tracking or another link fails.
 pub fn link_monitor(t: &mut Tx<'_>, actor: &Actor, id: &str, key: &str) -> ApiResult<()> {
+    // An explicit empty reference unlinks even a renamed/deleted monitor.
+    if key.is_empty() {
+        t.execute(
+            "UPDATE threads SET monitor = NULL, monitor_done = 0 WHERE id = ?1",
+            [id],
+        )?;
+        return Ok(());
+    }
     let (project, name) = key
         .split_once(':')
         .filter(|(p, n)| !p.is_empty() && !n.is_empty())
@@ -660,6 +668,33 @@ pub fn link_monitor(t: &mut Tx<'_>, actor: &Actor, id: &str, key: &str) -> ApiRe
         "UPDATE threads SET monitor = ?2, monitor_done = 0 WHERE id = ?1 AND monitor IS NOT ?2",
         params![id, key],
     )?;
+    Ok(())
+}
+
+/// A renamed/deleted reference is unknown, not ready. Leave the reference
+/// for diagnosis and wake its agent so it can replace or unlink it.
+pub fn on_monitor_missing(t: &mut Tx<'_>, project: &str, name: &str) -> ApiResult<()> {
+    let key = format!("{project}:{name}");
+    let ids: Vec<String> = {
+        let mut st =
+            t.prepare("SELECT id FROM threads WHERE monitor = ?1 AND status != 'closed'")?;
+        st.query_map([&key], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for id in ids {
+        t.execute("UPDATE threads SET monitor_done = 0 WHERE id = ?1", [&id])?;
+        insert_message(
+            t,
+            &id,
+            "system",
+            "message",
+            "The linked monitor is missing (unknown). Replace it or unlink it with thread track --monitor ''.",
+            &now(),
+        )?;
+        if get_bare(t, &id)?.tracking_at.is_some() {
+            wake(t, &id, "monitor_missing")?;
+        }
+    }
     Ok(())
 }
 
@@ -803,6 +838,9 @@ fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
 
 /// Deliver each held reason once, after the operator wait ends. Keep the
 /// reason even if the card moved again: it is an event, not a status poll.
+/// Rowid order preserves first arrival for blocked/review too, rather than
+/// sorting those held TER-148 reasons by name. Monitor reasons are moved
+/// to their latest position when coalesced, so the latest state is last.
 fn flush_pending_wakes(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     let th = get_bare(t, id)?;
     if th.status == ThreadStatus::WaitingOperator {

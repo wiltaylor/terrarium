@@ -227,6 +227,7 @@ const JOBS_DIR: &str = "jobs";
 pub struct Runtime {
     tasks: Mutex<Vec<JoinHandle<()>>>,
     stopping: AtomicBool,
+    pub(crate) log_cleanup: tokio::sync::Mutex<()>,
     /// True once [`spawn`] has taken up the jobs of the last daemon
     /// ([`recover_lost`]). A job that starts before that counts as lost and
     /// goes back to the queue (TER-211).
@@ -242,6 +243,7 @@ impl Default for Runtime {
             tasks: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
             recovered: tokio::sync::watch::Sender::new(false),
+            log_cleanup: tokio::sync::Mutex::new(()),
             accepted_hold: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -369,6 +371,8 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let maintenance_state = Arc::downgrade(state);
     tokio::spawn(async move {
         let mut cursor = 0;
+        let mut log_project = String::new();
+        let mut log_cursor = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             let Some(state) = maintenance_state.upgrade() else {
@@ -376,6 +380,11 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             };
             if let Err(e) = maintain_job_cache(&state.state_dir, &state.db, &mut cursor).await {
                 warn!("job cache maintenance failed: {e}");
+            }
+            if let Err(e) =
+                crate::job_logs::maintain(&state, &mut log_project, &mut log_cursor).await
+            {
+                warn!("job log maintenance failed: {e}");
             }
         }
     });
@@ -3088,6 +3097,8 @@ struct RecipeResume {
     log: String,
     ionice: bool,
     own: Vec<(String, String)>,
+    #[serde(default)]
+    log_target: Option<String>,
 }
 
 fn recipe_resume_key(job: &Job) -> String {
@@ -3133,6 +3144,19 @@ async fn steps(
             let _ = run.ctl.send(Control::Kill);
         }
         let c = run.collect(RECIPE_MAX).await;
+        // Reuse the original writer identity. Calling begin here would revoke
+        // this attempt's ledger row even though its recipe was not restarted.
+        if let Some(identity) = &saved.log_target {
+            crate::job_logs::record_output(
+                x.state,
+                job,
+                delivery,
+                &saved.log,
+                identity,
+                &c.stdout,
+            )
+            .await?;
+        }
         return finish_recipe(x, delivery, saved, c).await;
     }
     if job.kind == JobKind::Merge {
@@ -3394,6 +3418,11 @@ async fn steps(
         ..RemoteCmd::default()
     };
     x.at(STEP_RECIPE);
+    let log_target = if job.kind == JobKind::Release {
+        None
+    } else {
+        crate::job_logs::begin(x.state, x.def, job).await?
+    };
     // An error here is a recipe that did not start: no session.
     if killed(&job.id) {
         return Err(ApiError::conflict("the job was cancelled"));
@@ -3404,6 +3433,7 @@ async fn steps(
         ..recipe_cmd
     };
     let saved = RecipeResume {
+        log_target: log_target.clone(),
         head,
         batch,
         log,
@@ -3417,6 +3447,9 @@ async fn steps(
         journal.save(&resume_key, &saved)?;
     }
     let c = step_redacted(x.state, &job.id, x.def, &recipe_cmd, RECIPE_MAX, None, &own).await?;
+    if let Some(identity) = log_target {
+        crate::job_logs::record_output(x.state, job, delivery, &log, &identity, &c.stdout).await?;
+    }
     if let Some(tunnel) = tunnel {
         tunnel.close().await;
     }
@@ -3436,6 +3469,7 @@ async fn finish_recipe(
         log,
         ionice,
         own,
+        log_target: _,
     } = saved;
     x.ionice = ionice;
     let own: Vec<_> = own
@@ -3489,6 +3523,28 @@ async fn finish_recipe(
         delivery.target.as_deref().unwrap_or("-"),
         log
     );
+    if job.kind != JobKind::Release {
+        let cmd = RemoteCmd {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!("wc -c < {}", crate::executor::sh_quote(&log)),
+            ],
+            timeout_secs: Some(10),
+            holder: x.holder.clone(),
+            ..RemoteCmd::default()
+        };
+        if let Ok(run) = crate::executor::start_cmd(x.state, x.def, &cmd) {
+            let result = run.collect(128).await;
+            if let Ok(bytes) = String::from_utf8_lossy(&result.stdout)
+                .trim()
+                .parse::<i64>()
+                && let Err(e) = crate::job_logs::completed(x.state, job, bytes).await
+            {
+                warn!(job = %job.id, "cannot record log size: {e}");
+            }
+        }
+    }
     let mut tail = format!(
         "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\n{}",
         excerpt.trim_end(),
@@ -4032,7 +4088,7 @@ pub const RELEASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 /// the two steps and replaced the tree) ends the job before the recipe
 /// runs. Both fail with exit 125 and the reason on stderr; without `flock`
 /// on the target, the recipe runs as before this, unlocked, and the step
-/// says so in one line.
+/// says so in one line. Such logs have no retention ledger ownership.
 ///
 /// Only this wrapper shell holds the lock (fd 8). The recipe runs as its
 /// child with fd 8 closed, so a process that the recipe leaves behind (a
@@ -4047,14 +4103,40 @@ fn logged_recipe(recipe: String, log: &str) -> String {
     format!(
         r#"log={log}
 mkdir -p -- "$(dirname -- "$log")" || exit 125
-(umask 077 && : > "$log") || exit 125
-lock=${{TERRARIUM_SLOT_LOCK:-}}
-if [ -z "$lock" ]; then
+[ ! -L "$log" ] || exit 125
+if ! command -v flock >/dev/null 2>&1; then
+  echo "no flock on the target: slot not locked; log not tracked for retention"
+  (umask 077 && : > "$log") || exit 125
   exec sh -c {recipe} > "$log" 2>&1
 fi
-if ! command -v flock >/dev/null 2>&1; then
-  echo "no flock on the target: slot not locked"
-  exec sh -c {recipe} > "$log" 2>&1
+root=${{log%/*}}
+name=${{log##*/}}
+old_pwd=$(pwd -P)
+{enter_root}
+enter_root || exit 125
+[ ! -L .retention.lock ] || exit 125
+exec 7>>.retention.lock || exit 125
+flock 7 || exit 125
+opened=
+for try in 1 2 3; do
+  [ ! -L "$name" ] || exit 125
+  (umask 077 && : >> "$name") || exit 125
+  exec 9>>"$name" || exit 125
+  flock -n 9 || exit 125
+  if [ "$name" -ef /proc/self/fd/9 ] && [ ! -L "$name" ]; then opened=yes; break; fi
+  exec 9>&-
+done
+[ "$opened" = yes ] || exit 125
+root_identity=$(stat -c '%d:%i' .) || exit 125
+file_identity=$(stat -Lc '%d:%i' /proc/self/fd/9) || exit 125
+# Truncate and redirect through the locked inode, never reopen its pathname.
+: > /proc/self/fd/9 || exit 125
+printf 'TERRARIUM_LOG_TRACKED %s %s\n' "$root_identity" "$file_identity"
+exec 7>&-
+cd -- "$old_pwd" || exit 125
+lock=${{TERRARIUM_SLOT_LOCK:-}}
+if [ -z "$lock" ]; then
+  exec sh -c {recipe} >&9 2>&1
 fi
 exec 8>>"$lock" || {{ echo "cannot open the slot lock $lock"; exit 125; }}
 flock -n 8 || {{
@@ -4071,11 +4153,12 @@ if [ -n "${{TERRARIUM_HEAD:-}}" ]; then
   fi
 fi
 trap : TERM INT HUP
-sh -c {recipe} > "$log" 2>&1 8>&-
+sh -c {recipe} >&9 2>&1 8>&-
 exit $?
 "#,
         log = sh_quote(log),
         recipe = sh_quote(&recipe),
+        enter_root = crate::job_logs::ENTER_ROOT,
     )
 }
 
@@ -4973,7 +5056,8 @@ res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 /// dir that a wipe keeps, and refuses the job with a clear error when
 /// another job or daemon holds it. The recipe step holds the same lock
 /// ([`logged_recipe`]). Without `flock` on the target, both run as before
-/// this, unlocked, and print one line that says so.
+/// this, unlocked, and print one line that says so. The recipe's log is then
+/// untracked and excluded from retention cleanup.
 const RECEIVE_SCRIPT: &str = r#"dir=$1; sha=$2; kind=$3; base=${4:-}; tree=${5:-}; wipe_first=${6:-}
 case "$dir" in /*/*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
 case "$sha" in *[!0-9a-f]*|'') echo "bad commit"; res error; exit 2 ;; esac
@@ -5373,6 +5457,37 @@ mod tests {
                 & 0o777,
             0o644
         );
+    }
+
+    #[test]
+    fn retained_log_writer_prevents_cleanup_until_it_exits() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("attempt.log");
+        let path = log.to_str().unwrap();
+        let mut child = recipe_sh()
+            .args(["-c", &logged_recipe("printf ready; read stop".into(), path)])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        while std::fs::read_to_string(&log).unwrap_or_default() != "ready" {
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let cleanup = || {
+            recipe_sh()
+                .args(["-c", &crate::job_logs::test_remove_script(&log)])
+                .output()
+                .unwrap()
+        };
+        assert!(!cleanup().status.success());
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "ready");
+        child.stdin.take().unwrap().write_all(b"stop\n").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(cleanup().status.success());
+        assert!(!log.exists());
     }
 
     #[tokio::test]
@@ -6050,8 +6165,8 @@ mod tests {
         assert!(free, "a child of the recipe holds the slot lock");
     }
 
-    /// TER-448 review 3: without `flock` on the target the recipe runs
-    /// unlocked, and the step says so in one line.
+    /// Without flock, preserve unlocked execution but never claim ownership
+    /// of a log whose writer cannot exclude retention cleanup.
     #[test]
     fn without_flock_the_recipe_says_the_slot_is_not_locked() {
         let tmp = tempfile::tempdir().unwrap();
@@ -6081,12 +6196,13 @@ mod tests {
             .env("TERRARIUM_SLOT_LOCK", &lock)
             .output()
             .unwrap();
-        assert!(out.status.success(), "the wrapper failed: {}", shown(&out));
+        assert!(out.status.success(), "{}", shown(&out));
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(
-            text.contains("no flock on the target: slot not locked"),
+            text.contains("no flock on the target: slot not locked; log not tracked for retention"),
             "{text}"
         );
+        assert!(!text.contains("TERRARIUM_LOG_TRACKED"));
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "ran\n");
     }
 

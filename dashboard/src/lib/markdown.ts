@@ -5,6 +5,7 @@
 // sandboxed iframe on the artifact origin.
 
 import { Marked, type Tokens } from "marked";
+import emoji from "./emoji.json";
 
 export type WikiTarget =
   | { kind: "page"; project: string; path: string }
@@ -110,6 +111,8 @@ const esc = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
 export interface RenderOptions extends ResolveContext {
+  /** Card and memory text keeps single newlines and does not strip front matter. */
+  textBody?: boolean;
   /** Turn an artifact ID into a URL (a signed URL in real mode). */
   artifactUrl?: (id: string) => string | undefined;
   /**
@@ -164,11 +167,32 @@ export const dbQueryText = (text: string): string => text.split(/\r?\n/).map((l)
  * query and shows the answer as text.
  */
 export function renderWiki(src: string, opts: RenderOptions): string {
-  const { body } = splitFrontMatter(src);
-  const md = new Marked({ gfm: true, breaks: false });
+  const body = opts.textBody ? src : splitFrontMatter(src).body;
+  const md = new Marked({ gfm: true, breaks: opts.textBody ?? false });
 
   md.use({
     extensions: [
+      {
+        name: "emoji",
+        level: "inline",
+        start: (s: string) => s.search(/:[\w+-]+:/),
+        tokenizer(s: string) {
+          const m = /^:([\w+-]+):/.exec(s);
+          if (!m || !Object.hasOwn(emoji, m[1]!)) return undefined;
+          return { type: "emoji", raw: m[0], text: emoji[m[1]! as keyof typeof emoji] };
+        },
+        renderer(token) { return esc(String(token.text)); },
+      },
+      ...(opts.textBody ? [{
+        name: "globpath",
+        level: "inline" as const,
+        start: (s: string) => s.search(/[\w.-]+\/[\w.*?/-]*\*/),
+        tokenizer(s: string) {
+          const m = /^[\w.-]+\/[\w.*?/-]*\*[\w.*?/-]*/.exec(s);
+          return m ? { type: "globpath", raw: m[0], text: m[0] } : undefined;
+        },
+        renderer(token: Tokens.Generic) { return esc(String(token.text)); },
+      }] : []),
       {
         name: "wikilink",
         level: "inline",

@@ -39,6 +39,7 @@ pub mod hosts;
 pub mod idle_alert;
 pub mod ingest;
 pub mod input_watchdog;
+pub mod job_logs;
 pub mod jobs;
 pub mod leases;
 pub mod lifecycle;

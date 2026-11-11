@@ -221,7 +221,7 @@ fn print_items(c: &Ctx, v: &Value, items: &[Value]) {
 
 /// One question: the fields, then the agent's words between markers,
 /// then the answer.
-fn print_question(c: &Ctx, v: &Value) {
+pub(super) fn print_question(c: &Ctx, v: &Value) {
     print_selected(c, v);
     let mut head = v.clone();
     let mut take = |k: &str| head.as_object_mut().and_then(|o| o.remove(k));

@@ -4720,10 +4720,7 @@ impl Supervisor for RunnerSupervisor {
         Box::pin(async move {
             let runner = {
                 let slots = lock(&self.inner.slots);
-                let Some(slot) = slots.get(&agent) else {
-                    return Ok(crate::supervisor::PendingTurns::default());
-                };
-                slot.runner.clone()
+                slots.get(&agent).and_then(|slot| slot.runner.clone())
             };
             let mut turns = Vec::new();
             let mut runner_status = None;
@@ -4754,6 +4751,15 @@ impl Supervisor for RunnerSupervisor {
             if let Some(slot) = lock(&self.inner.slots).get(&agent) {
                 turns.extend(slot.turns.iter().filter(|t| t.queued.is_none()).cloned());
             }
+            if let Some(held) = lock(&self.inner.holds).get(&agent) {
+                turns.extend(held.waiting.iter().cloned().map(|mut t| {
+                    t.source = "hold";
+                    if let Some(row) = t.queued {
+                        t.id = row.to_string();
+                    }
+                    t
+                }));
+            }
             Ok(crate::supervisor::PendingTurns {
                 items: turns,
                 runner: runner_status,
@@ -4769,6 +4775,21 @@ impl Supervisor for RunnerSupervisor {
     ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
         let source = source.to_owned();
         Box::pin(async move {
+            if source == "hold" {
+                let mut holds = lock(&self.inner.holds);
+                let Some(held) = holds.get_mut(&agent) else {
+                    return Ok(false);
+                };
+                let Some(index) = held
+                    .waiting
+                    .iter()
+                    .position(|t| t.queued.is_none() && t.id == id)
+                else {
+                    return Ok(false);
+                };
+                held.waiting.remove(index);
+                return Ok(true);
+            }
             let runner = {
                 let mut slots = lock(&self.inner.slots);
                 let Some(slot) = slots.get_mut(&agent) else {
@@ -6621,6 +6642,69 @@ mod tests {
         assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
         assert_eq!(typed, ["queued"]);
         assert_set_up_undone(&sup, id);
+    }
+
+    #[tokio::test]
+    async fn pending_hold_turns_keep_ids_order_and_cancel_without_a_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        ));
+        let id = AgentId::new();
+        let first: crate::supervisor::PendingTurn = String::from("first").into();
+        let second: crate::supervisor::PendingTurn = String::from("second").into();
+        let second_id = second.id.clone();
+        let mut third: crate::supervisor::PendingTurn = String::from("third").into();
+        third.queued = Some(42);
+        lock(&sup.inner.holds).insert(
+            id,
+            Held {
+                hold: TurnHold {
+                    until: None,
+                    reason: "limit:sub".into(),
+                },
+                waiting: vec![first, second, third],
+            },
+        );
+        let list = sup.list_pending(id).await.unwrap();
+        assert_eq!(
+            list.items
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+        assert!(list.items.iter().all(|t| t.source == "hold"));
+        assert_eq!(list.items[2].id, "42");
+        assert_eq!(list.items[2].queued, Some(42));
+        assert_eq!(sup.list_pending(id).await.unwrap().items[1].id, second_id);
+        assert!(
+            !sup.cancel_pending(AgentId::new(), "hold", second_id.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            sup.cancel_pending(id, "hold", second_id.clone())
+                .await
+                .unwrap()
+        );
+        assert!(!sup.cancel_pending(id, "hold", second_id).await.unwrap());
+        assert_eq!(
+            sup.list_pending(id)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "third"]
+        );
+        // Durable turns must be cancelled by deleting the store row.
+        assert!(!sup.cancel_pending(id, "hold", "42".into()).await.unwrap());
     }
 
     #[tokio::test]

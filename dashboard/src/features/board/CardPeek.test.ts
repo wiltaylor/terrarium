@@ -75,9 +75,9 @@ describe("CardPeek", () => {
     expect(get).toHaveBeenCalledWith("TER-1");
     expect(peek()!.querySelector("h2")!.textContent).toBe("Card TER-1");
     expect(document.querySelector(".drawer .chip")!.textContent).toBe("review");
-    const keys = [...peek()!.querySelectorAll("a.card-key")].map((a) => a.getAttribute("href"));
+    const keys = [...peek()!.querySelectorAll("a.wikilink-card")].map((a) => a.getAttribute("href"));
     expect(keys).toEqual(["/p/terrarium/board?card=TER-2", "/p/terrarium/board?card=TER-3"]);
-    expect(peek()!.querySelector("a.external")!.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(peek()!.querySelector('a[href="https://example.com/x"]')!.getAttribute("rel")).toBe("noopener noreferrer");
     expect(peek()!.textContent).toContain("terrarium/lead");
   });
 
@@ -86,7 +86,7 @@ describe("CardPeek", () => {
     mount(() => createComponent(CardPeek, {}));
     cardPeek.open({ project: "terrarium", id: "TER-1" });
     await waitFor(() => expect(peek()).not.toBeNull());
-    peek()!.querySelector<HTMLAnchorElement>("a.card-key")!.click();
+    peek()!.querySelector<HTMLAnchorElement>("a.wikilink-card")!.click();
     await waitFor(() => expect(peek()!.querySelector("h2")!.textContent).toBe("Card TER-2"));
     expect(document.querySelectorAll(".drawer")).toHaveLength(1);
   });

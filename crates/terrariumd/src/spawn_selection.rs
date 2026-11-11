@@ -64,6 +64,8 @@ pub fn pick(
         }
         let used = subs::latest_windows(conn, name)?
             .iter()
+            // LiteLLM spend and budgets are mail-only, including at 100%.
+            .filter(|_| sub.provider != "litellm")
             .map(|w| crate::quota_policy::effective_pct(w.used_pct, w.resets_at.as_deref(), now))
             .fold(0.0, f64::max);
         // A cloud subscription: room up to its used-up budget.
@@ -128,5 +130,9 @@ mod tests {
         s.provider = "anthropic".into();
         assert_eq!(cloud_refusal(&s, None, false), None);
         assert_eq!(cloud_refusal(&s, None, true), None);
+        s.provider = "litellm".into();
+        assert_eq!(cloud_refusal(&s, Some("aws"), false), None);
+        assert!(cloud_refusal(&s, None, false).is_some());
+        assert!(cloud_refusal(&s, Some("aws"), true).is_some());
     }
 }

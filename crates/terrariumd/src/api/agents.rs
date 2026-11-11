@@ -1504,6 +1504,14 @@ async fn queued(
     };
     let mut live_items = Vec::new();
     for turn in live.items {
+        if let Some(row) = turn.queued {
+            if let Some(index) = items.iter().position(|item| item.id == json!(row)) {
+                let mut item = items.remove(index);
+                item.source = "hold";
+                live_items.push(item);
+            }
+            continue;
+        }
         let text = redactor.redact_string_as(turn.text, &view).0;
         live_items.push(QueuedView {
             id: json!(turn.id),
@@ -1522,7 +1530,8 @@ async fn queued(
 
 /// `DELETE /api/agents/{id}/queued/{turn}` (TER-54): drop one queued turn
 /// before the wake types it. The right of a turn: project_admin of the
-/// agent's project, sysadmin, or the operator. 404 when the turn does not
+/// agent's own project, or the operator (not a sysadmin alone, never a
+/// link key, TER-379). 404 when the turn does not
 /// wait (any more): the wake gave it to the agent, or it never was. The
 /// turns after it keep their order.
 async fn remove_queued(
@@ -1533,16 +1542,26 @@ async fn remove_queued(
 ) -> ApiResult<StatusCode> {
     let a = load(&state, &actor, id).await?;
     if let Some(s) = q.source.as_deref()
-        && ![QUEUE_STORE, "supervisor", "runner"].contains(&s)
+        && ![QUEUE_STORE, "supervisor", "runner", "hold"].contains(&s)
     {
         return Err(ApiError::invalid(format!(
             "unknown queue `{s}`: give the source of the turn in the list"
         )));
     }
-    policy::admin_project(&actor, &a.agent.project, "removing a queued turn")?;
+    crate::links::operator_only("removing a queued turn")?;
+    if let Actor::Agent(agent) = &actor
+        && (agent.project != a.agent.project
+            || !agent.roles.contains(&terrarium_core::Role::ProjectAdmin))
+    {
+        return Err(ApiError::forbidden(
+            "removing a queued turn needs the operator or the agent's project lead",
+        ));
+    }
     let lock = state.lifecycle.turn_lock(agent_id(&a));
     let _held = lock.lock().await;
-    if let Some(source @ ("runner" | "supervisor")) = q.source.as_deref() {
+    if let Some(source @ ("runner" | "supervisor" | "hold")) = q.source.as_deref()
+        && !(source == "hold" && turn.parse::<i64>().is_ok())
+    {
         if !state
             .supervisor
             .cancel_pending(agent_id(&a), source, turn.clone())

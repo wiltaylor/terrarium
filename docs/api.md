@@ -2268,8 +2268,8 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/compact` | none, or `{"then"?: "<prompt>", "defer"?: false}` | `202` agent with `reset` (below). At rest: `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused or held. `409 not_running`: the agent does not run. |
 | `POST /api/agents/{id}/new-session` | none, or `{"then"?: "<prompt>", "recap"?: true, "defer"?: false}` | `202` agent with `reset` (below). A new harness session, not a resume. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run, or an earlier turn still waits in the store) |
-| `GET /api/agents/{id}/queued` | none | `200 {"items": [{"id", "source", "text", "body", "created_at"}]}`. Waiting turns in delivery order: `runner`, `supervisor`, then `store`, preserving each queue's order. Store IDs are numbers. Live IDs are opaque strings and are not reused on restart. `created_at` is empty for live turns. `text` includes the tag, `body` excludes it. Redacted for the caller, with the agent's read right. The snapshot can become stale during delivery. Recaps, mail pointers and quota-hold work are not included. |
-| `DELETE /api/agents/{id}/queued/{turn}?source=store` | none | `204`. Removes an untouched queued turn. Pass its ID and `source` from the list (`store` by default, also `supervisor` or `runner`). Unknown sources are `422`. Requires project_admin of the agent's project, sysadmin, or operator. `404` once dispatch takes the turn, including between list and delete. Never interrupts typing or cancels a retry of an already typed turn. Remaining turns keep their order. Audit `agent.queued.remove` includes the ID and source for live turns, or ID and byte length for store turns. |
+| `GET /api/agents/{id}/queued` | none | `200 {"items": [{"id", "source", "text", "body", "created_at"}], "queues": {"runner": "available"}}`. Waiting turns in delivery order: `runner`, `supervisor`, `hold`, then `store`, preserving each queue's order. Durable IDs are numbers. In-memory IDs are opaque strings and are not reused on restart. `created_at` is empty for in-memory turns. `text` includes the tag, `body` excludes it. Redacted for the caller, with the agent's read right. The snapshot can become stale during delivery or hold release. Recaps and mail pointers are not included. |
+| `DELETE /api/agents/{id}/queued/{turn}?source=store` | none | `204`. Removes an untouched queued turn. Pass its ID and `source` from the list (`store` by default, also `supervisor`, `runner`, or `hold`). Unknown sources are `422`. Requires the operator or project_admin of the agent's own project (not a sysadmin alone; link keys are refused). `404` once dispatch takes the turn, including between list and delete. Never interrupts typing or cancels a retry of an already typed turn. Remaining turns keep their order. Audit `agent.queued.remove` includes the ID and source for in-memory turns, or ID and byte length for durable turns. |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/interrupt` | none | `202 {"accepted": true, "interrupted": true}`. Stops the running turn; the harness keeps running (§6.5, "Interrupt"). |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
@@ -2282,6 +2282,13 @@ The queued-turn response also includes `queues.runner`: `available`,
 failure does not hide the supervisor or store items. The dashboard shows
 the marker and still allows editing those items. Empty idle queues are not
 polled repeatedly.
+
+Held turns backed by store rows appear once, with source `hold` and their
+durable row ID. Removing one deletes its row, so it cannot be delivered
+after release or a daemon restart. Budget holds are mail-only and add no
+turns here. Only vendor-refusal holds (`limit:<subscription>`) remain.
+Removing queued turns requires the operator or a project_admin of the
+agent's own project, not a sysadmin alone. Link keys may not remove turns.
 
 All need project_admin; an agent may `compact` and `new-session`
 itself. The work happens in the background. A `send` writes a row to the
@@ -4244,6 +4251,11 @@ waiting on an operator question, and create no operator notices. The monitor
 reference is hidden from readers who cannot read its project. Held monitor
 wakes are coalesced by reason in latest-transition order, so the last delivered
 monitor state is the latest one.
+
+An explicit empty monitor (`--monitor ''`, API `{"monitor":""}`) unlinks it.
+Renaming or deleting a linked monitor leaves its old reference unknown and
+not ready, posts a visible system note, and wakes the tracking agent (held
+until an outstanding operator question is answered).
 
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
 A thread opened with a `template` and no `agent` gets its agent at the
@@ -6459,6 +6471,19 @@ The quota notices of §16.6 mail the operator at `alert_at` (default 80),
 keep their turns. Checks run after each new session total and on each
 policy tick. Existing cloud-budget holds end at daemon startup with a
 `quota.resumed` event.
+
+**LiteLLM fallback budget.** A `litellm` subscription may set
+`selfhosted.budget_usd` to a positive whole USD monthly budget (create or
+patch the subscription, `null` clears it on patch). When no `key-spend`
+sample is newer than ten minutes, or the latest probe reports
+`no spend from LiteLLM`, Terrarium counts the UTC month's Claude Code
+session `costUSD` totals instead. With a budget it shows a monthly
+`budget` window and mails at `alert_at` (80 by default), 90 and 100 percent.
+Without a budget the API returns `fallback_spend_usd` and the dashboard
+shows USD without a percent. These are local session estimates, not the
+LiteLLM bill. A fresh successful spend probe takes precedence again.
+LiteLLM spend never holds agents or rejects a named spawn at a percentage.
+Automatic account swaps and spawn pool choices never select LiteLLM.
 
 ### 16.6 The quota policy
 
@@ -12785,7 +12810,8 @@ lock: the recipe runs as its child without the lock's file descriptor,
 so a process that the recipe leaves running does not keep the slot
 locked after the job. The lock needs `flock` on the target; without
 it the steps run unlocked, as before TER-448, and each step prints
-`no flock on the target: slot not locked`. The job
+`no flock on the target: slot not locked` (the recipe also states that its
+log is not tracked for retention). The job
 row has `slot` while it runs. The step checks out the commit with
 `git checkout -f` and removes every file that the commit does not track,
 ignored ones too, except `target/` at the root (`git clean -ffdx -e
@@ -12903,6 +12929,50 @@ counting running jobs and reading caps. If several old caps resolve to
 one key, the strictest applies until a cap write replaces them.
 
 ### 35.3 Results
+
+New daemon recipe logs have a per-attempt ownership ledger. Legacy logs and
+release-client logs are not adopted or deleted. Delivery config accepts
+`log_retention_secs` (default 604800, seven days, capped at ten years) and
+`log_retention_bytes` (default 1073741824, one GiB of completed logs per project).
+The CLI sets these with `project delivery set --log-retention-secs N
+--log-retention-bytes N`. Zero expires logs immediately or retains no completed
+bytes respectively. Age is fixed when an attempt is first recorded. Changing
+the byte budget affects the next cleanup pass.
+
+Without `flock`, recipes still run as before. Their logs have no ledger row,
+are never auto-cleaned, and job output states this in one line. Tracked logs
+use a shared directory lock and a writer-held inode lock. Log roots must be
+absolute physical paths without symlink components. Cleanup pins the recorded
+directory and verifies its device/inode and the log inode. A private quarantine
+protects a replacement pathname from deletion. Target creation identity,
+definition (including address/container/VM), and lifecycle timestamp are bound
+to ownership. Changed or recreated targets are skipped, not adopted.
+
+Automatic cleanup visits one project per minute. Each pass first reconciles
+an indexed page of at most 32 quarantining rows, then considers an indexed
+page of at most 32 retained rows. Oldest recorded attempts are removed when their age
+expires or the completed-log byte budget is exceeded. Queued/running jobs and
+locked log writers are never removed. Missing or unreachable targets are
+skipped and retried on later passes. Budgets are eventual, not a limit on an
+active recipe's output. Cleanup never scans log directories.
+
+`terrarium job cleanup [--after N]` (project admin) applies the same policy
+explicitly, via `POST /api/projects/{name}/jobs/cleanup` with `{"after": N}`.
+The response has `scanned`, `removed`, `skipped`, `conflicts`, and `next`. A nonzero `next`
+continues the pass, and zero ends it. Concurrent cleanup returns a conflict.
+`GET /api/jobs/{id}` includes `logs`, with attempt, target, path, written_at,
+expires_at, bytes and expired. `job show` explicitly marks removed logs as
+expired while preserving the job's stored output tail.
+
+Before moving a log, cleanup commits its `quarantining` state and deterministic
+`quarantine` path in the ledger. Interrupted moves are reconciled on later
+passes, even when the original pathname is absent. Bytes stay charged until
+the owned inode has been removed (or both recorded locations are already gone).
+If a captured replacement cannot be restored because its pathname is occupied,
+both files are preserved and the row becomes `conflict`. Such rows are never
+retried automatically. `job show` and cleanup's bounded `conflicts` list expose
+the paths for manual inspection and removal. Recovery has its own persisted
+cursor, so inaccessible quarantines cannot starve later rows.
 
 - Pass: the labels `validation:queued` and `validation:running` go away.
   A validate card moves to `review`, a merge card to `accepted`. The move
@@ -13292,6 +13362,25 @@ with TLS in front of it, as for `terrarium --url https://... login`.
 - `version`: the crate version (as `cargo_version` of `GET /api/system/version`).
 
 ### 36.2 Link rows and pairing
+
+Remote artifact previews use `POST /api/remotes/{name}/artifacts/{id}/url`
+with an operator session. The home returns a signed `/ra/...` capability on
+its artifact origin, valid for at most 120 seconds and invalidated by logout
+or password changes. Fetches send no home cookies, tokens, or link keys.
+Targets must use the API's scheme and either its origin or the artifact
+origin declared by `GET /api/system/instance` (`artifact_origin`). Redirects
+are refused, responses are limited to 32 MiB and supported MIME types, and
+served content has a sandbox CSP. Download/Open links stay on the home.
+
+The remote artifact origin must present the linked API's pinned leaf
+certificate. An independent certificate or missing HTTPS leaf pin fails
+closed: remote artifacts do not load. Separate artifact-origin pins are
+not supported yet. Private destinations are allowed only for a remote
+linked with a private IP literal or `localhost`. DNS-named remotes have a
+public-only artifact policy, independent of `TERRARIUM_WEBHOOK_PRIVATE`.
+Each artifact connection resolves once, checks the IP address, and pins
+the connection to that checked address. Private DNS labs must link using
+their private IP literal to opt into private artifact destinations.
 
 Only the operator manages links (`403 forbidden` for an agent). A link key
 calls none of these routes except `DELETE /api/links/self` (§36.4).

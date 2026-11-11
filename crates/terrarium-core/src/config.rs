@@ -875,6 +875,12 @@ pub struct CheckoutDef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryDef {
+    /// Retained job log lifetime in seconds. Default 7 days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_retention_secs: Option<u64>,
+    /// Total completed log bytes retained per project. Default 1 GiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_retention_bytes: Option<u64>,
     /// Public SSH endpoints and pinned VM host key for daemon-owned Docker access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_ci: Option<DockerCiDef>,
@@ -1011,6 +1017,8 @@ impl DeliveryDef {
             .filter(|r| !r.trim().is_empty())
             .unwrap_or_else(|| Self::DEFAULT_RELEASE_RECIPE.to_owned());
         Some(DeliveryDef {
+            log_retention_secs: self.log_retention_secs,
+            log_retention_bytes: self.log_retention_bytes,
             docker_ci: None,
             merge_secrets: BTreeMap::new(),
             failure_patterns: self.failure_patterns.clone(),

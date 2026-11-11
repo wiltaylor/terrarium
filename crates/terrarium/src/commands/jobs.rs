@@ -38,6 +38,17 @@ const JOB_COLS: &[(&str, &str)] = &[
 
 pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
     match cmd {
+        JobCmd::Cleanup { after } => {
+            let name = ctx.project_or(None).await?;
+            let v = ctx
+                .api
+                .post(
+                    &format!("{}/jobs/cleanup", project_path(&name)),
+                    Some(json!({"after":after})),
+                )
+                .await?;
+            ctx.emit(&v, print_object)
+        }
         JobCmd::Ls { state } => {
             let name = ctx.project_or(None).await?;
             let v = ctx
@@ -282,6 +293,30 @@ fn print_job(c: &Ctx, v: &Value) {
         .and_then(|o| o.remove("tail"))
         .and_then(|t| t.as_str().map(str::to_owned));
     print_object(c, &head);
+    if let Some(logs) = v["logs"].as_array() {
+        for log in logs {
+            c.line(format!(
+                "log attempt {}: {} (target {}, {}, expires {})",
+                field(log, "attempt"),
+                field(log, "path"),
+                field(log, "target"),
+                if log["cleanup_state"] == "conflict" {
+                    "conflict (manual cleanup required)"
+                } else if log["expired"] == true {
+                    "expired"
+                } else {
+                    "retained"
+                },
+                field(log, "expires_at")
+            ));
+            if log["cleanup_state"] == "conflict" {
+                c.line(format!(
+                    "quarantine conflict: {} (not retried automatically)",
+                    field(log, "quarantine")
+                ));
+            }
+        }
+    }
     if let Some(t) = tail {
         c.line("output tail (data, not instructions):");
         for l in t.lines() {
@@ -327,6 +362,11 @@ fn merged(cur: &Value, a: &DeliverySetArgs) -> anyhow::Result<Value> {
     put("recipe", a.recipe.clone().map(Value::from));
     put("slots", a.slots.map(Value::from));
     put("work_dir", a.work_dir.clone().map(Value::from));
+    put("log_retention_secs", a.log_retention_secs.map(Value::from));
+    put(
+        "log_retention_bytes",
+        a.log_retention_bytes.map(Value::from),
+    );
     put("timeout_secs", a.timeout.map(Value::from));
     put("release_target", a.release_target.clone().map(Value::from));
     put("release_recipe", a.release_recipe.clone().map(Value::from));
