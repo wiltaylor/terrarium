@@ -580,6 +580,32 @@ async fn board_summary_keeps_tile_and_eta_metadata() {
 async fn board_summary_budget_and_done_pages() {
     use std::time::Instant;
     use terrariumd::store::{Page, board};
+
+    #[derive(Default, Debug)]
+    struct QueryWork {
+        statements: u64,
+        steps: u64,
+    }
+    unsafe extern "C" fn profile(
+        _: u32,
+        context: *mut std::ffi::c_void,
+        statement: *mut std::ffi::c_void,
+        _: *mut std::ffi::c_void,
+    ) -> i32 {
+        // SQLite invokes PROFILE synchronously after each statement completes.
+        // The counter lives until tracing is disabled below, and the statement
+        // pointer is valid for the duration of this callback.
+        unsafe {
+            let work = &mut *context.cast::<QueryWork>();
+            work.statements += 1;
+            work.steps += rusqlite::ffi::sqlite3_stmt_status(
+                statement.cast(),
+                rusqlite::ffi::SQLITE_STMTSTATUS_VM_STEP,
+                1,
+            ) as u64;
+        }
+        0
+    }
     for count in [294, 2940] {
         let td = setup().await;
         let mut conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
@@ -599,18 +625,43 @@ async fn board_summary_budget_and_done_pages() {
         let start = Instant::now();
         let before = serde_json::to_vec(&board::get_board(&conn, "proj").unwrap()).unwrap();
         let before_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let mut work = QueryWork::default();
+        // This private connection has no other trace callback. Do not trace the
+        // fixture or full-card baseline, only the summary query work.
+        unsafe {
+            assert_eq!(
+                rusqlite::ffi::sqlite3_trace_v2(
+                    conn.handle(),
+                    rusqlite::ffi::SQLITE_TRACE_PROFILE,
+                    Some(profile),
+                    (&mut work as *mut QueryWork).cast(),
+                ),
+                rusqlite::ffi::SQLITE_OK
+            );
+        }
         let start = Instant::now();
-        let summary = board::board_summary(&conn, "proj", false, &Page::default()).unwrap();
+        let summary = board::board_summary(&conn, "proj", false, &Page::default());
+        // Disable before reading the counter, including on a query error.
+        unsafe {
+            rusqlite::ffi::sqlite3_trace_v2(conn.handle(), 0, None, std::ptr::null_mut());
+        }
+        let summary = summary.unwrap();
         let after = serde_json::to_vec(&summary).unwrap();
         let after_ms = start.elapsed().as_secs_f64() * 1000.0;
         println!(
-            "board count={count}: before={} bytes {before_ms:.2}ms after={} bytes {after_ms:.2}ms",
+            "board count={count}: before={} bytes {before_ms:.2}ms after={} bytes {after_ms:.2}ms {work:?}",
             before.len(),
             after.len()
         );
         assert!(after.len() < count as usize * 400, "summary size budget");
         assert!(after.len() * 10 < before.len(), "at least 90% smaller");
-        assert!(after_ms < 2000.0, "board query and serialization budget");
+        // Bound database work rather than scheduler time on a shared target.
+        // A statement per card or a repeated scan of all comments must fail.
+        assert!(work.statements <= 20, "summary statement budget: {work:?}");
+        assert!(
+            work.steps <= count as u64 * 1000,
+            "summary SQLite VM step budget: {work:?}"
+        );
         assert_eq!(
             summary["cards"].as_array().unwrap().len(),
             count as usize / 3
