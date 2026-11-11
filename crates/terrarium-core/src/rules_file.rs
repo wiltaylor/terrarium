@@ -199,6 +199,12 @@ pub const VERBS: &[Verb] = &[
         required: &["to"],
     },
     Verb {
+        kind: "card_wait_action",
+        name: "card.wait_action",
+        args: &[],
+        required: &[],
+    },
+    Verb {
         kind: "card_label",
         name: "card.label",
         args: &[("add", Arg::List), ("remove", Arg::List)],

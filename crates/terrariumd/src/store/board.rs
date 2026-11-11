@@ -36,6 +36,8 @@ use crate::store::mail::{self, Address, Outgoing};
 use crate::store::session_refs::{self, SessionRef};
 use crate::store::{Page, Paged, agents, github_gate, json_col, questions};
 
+pub mod card_waits;
+
 /// The columns of a new board, in order, with their roles.
 pub const DEFAULT_COLUMNS: [(&str, Option<&str>); 9] = [
     ("backlog", None),
@@ -583,12 +585,7 @@ fn deps(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
 /// Dependencies that are neither done nor archived.
 fn unmet(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT d.depends_on FROM card_deps d
-         JOIN cards c ON c.id = d.depends_on
-         JOIN board_columns k ON k.id = c.column_id
-         WHERE d.card = ?1 AND c.archived = 0
-           AND coalesce(k.role, k.name) NOT IN ('accepted', 'done')
-         ORDER BY d.depends_on",
+        "SELECT depends_on FROM card_dependency_unmet WHERE card = ?1 ORDER BY depends_on",
     )?;
     let rows = stmt
         .query_map([id], |r| r.get(0))?
@@ -876,10 +873,8 @@ pub fn board_summary(
           'comment_count', (SELECT count(*) FROM card_comments WHERE card = c.id),
           'last_comment_at', (SELECT max(created_at) FROM card_comments WHERE card = c.id),
           'depends_on', (SELECT json_group_array(depends_on) FROM card_deps WHERE card = c.id),
-          'blocked_by', (SELECT json_group_array(d.depends_on) FROM card_deps d
-            CROSS JOIN cards dc ON dc.id = d.depends_on JOIN board_columns dk ON dk.id = dc.column_id
-            WHERE d.card = c.id AND dc.archived = 0
-              AND coalesce(dk.role, dk.name) NOT IN ('accepted', 'done')))
+          'blocked_by', (SELECT json_group_array(d.depends_on) FROM card_dependency_unmet d
+            WHERE d.card = c.id))
          FROM cards c JOIN board_columns k ON k.id = c.column_id
          LEFT JOIN agents a ON a.id = c.assignee
          LEFT JOIN agents_removed ar ON ar.id = c.assignee
@@ -1845,6 +1840,7 @@ fn apply_move(
             notify_done(t, &moved, &closing)?;
         }
     }
+    card_waits::on_dependency_changed(t, &card.id, false)?;
     Ok(())
 }
 
@@ -2476,6 +2472,7 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
         )?;
         if let Some(d) = &p.depends_on {
             set_deps(t, &card.id, d)?;
+            t.execute("DELETE FROM card_waits WHERE card = ?1", [&card.id])?;
         }
         let fields: Vec<&str> = [
             p.title.as_ref().map(|_| "title"),
@@ -2703,6 +2700,7 @@ pub fn archive_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
     }
     card_event(t, &card, "archived", json!({}))?;
     crate::store::threads::on_card_archived(t, &card.id)?;
+    card_waits::on_dependency_changed(t, &card.id, true)?;
     Ok(())
 }
 

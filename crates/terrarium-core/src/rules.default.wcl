@@ -59,6 +59,14 @@ rule "triage-hourly" {
 
 // ------------------------------------------------------------ the queue
 
+rule "card-wait-met" {
+  description = "Apply a completed dependency wait once, including refusal notification."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "wait_met" }
+  card_wait_action {}
+}
+
 rule "version-cut" {
   description = "Freeze accepted cards for a version and mail the lead at 6 cards or 4 hours. Git and release numbering stay with the lead."
   on = ["card"]

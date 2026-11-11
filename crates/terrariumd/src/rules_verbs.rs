@@ -257,7 +257,7 @@ pub fn perform(
     let verb = action.verb.as_str();
     // The move mails only notify: a held card moved to blocked or done
     // gets its mail in rules flow as in code flow (TER-536).
-    if !matches!(verb, "card.blocked_mail" | "card.done_mail") {
+    if !matches!(verb, "card.blocked_mail" | "card.done_mail" | "card.wait_action") {
         refuse_held(t, ctx, verb)?;
     }
     let a = Args { action, ctx };
@@ -289,6 +289,13 @@ pub fn perform(
             group_verb(t, actor, ctx, &a)?
         }
         "card.move" => card_move(t, actor, ctx, &a, &mut effects)?,
+        "card.wait_action" => {
+            let card = the_card(ctx, verb)?;
+            Done {
+                changed: board::card_waits::act(t, actor, &card.id)?,
+                detail: json!({"card": card.id}),
+            }
+        }
         "card.label" => card_label(t, actor, ctx, &a)?,
         "card.comment" => {
             let card = the_card(ctx, verb)?;

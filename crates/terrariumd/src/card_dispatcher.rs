@@ -78,10 +78,7 @@ WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = 
       AND s.bound_id = c.id AND s.finished_at IS NULL)
   AND NOT EXISTS (SELECT 1 FROM conflict_fixes f WHERE f.card = c.id AND f.done = 0)
   AND NOT EXISTS (SELECT 1 FROM card_dispatch_retries d WHERE d.card = c.id AND d.retry_at > ?3)
-  AND NOT EXISTS (SELECT 1 FROM card_deps e JOIN cards dc ON dc.id = e.depends_on
-      JOIN board_columns k ON k.id = dc.column_id
-      WHERE e.card = c.id AND dc.archived = 0
-        AND coalesce(k.role, k.name) NOT IN ('accepted', 'done'))
+  AND NOT EXISTS (SELECT 1 FROM card_dependency_unmet e WHERE e.card = c.id)
   AND (c.position, c.id) > (?4, ?5)
 ORDER BY c.position, c.id LIMIT ?6";
 
