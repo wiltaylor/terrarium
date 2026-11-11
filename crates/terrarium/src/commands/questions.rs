@@ -724,9 +724,9 @@ pub(super) fn set_priority(body: &mut Value, urgent: bool, critical: bool) {
 
 /// `terrarium notify`: a leader sends a notice to the operator.
 pub async fn notify(ctx: &Ctx, a: &NotifyArgs) -> anyhow::Result<()> {
-    if a.card.is_none() && a.reply_to.is_none() && !a.urgent && !a.critical {
+    if a.card.is_none() && !a.critical {
         return Err(CliError::usage(
-            "notify requires --card, --reply-to or --urgent: only answers to the operator, one done per request, or real problems belong in the Inbox",
+            "notify requires --card unless --critical: otherwise post in an open thread on the topic with `terrarium thread post`",
         ));
     }
     if !ctx.is_agent() {

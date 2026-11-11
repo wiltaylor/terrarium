@@ -764,9 +764,9 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
                 ));
             }
         }
-        if card.is_none() && n.reply_to.is_none() && !n.priority.at_least_urgent() {
+        if card.is_none() && n.priority != Priority::Critical {
             return Err(ApiError::invalid(
-                "notify requires --card, --reply-to or --urgent: only answers to the operator, one done per request, or real problems belong in the Inbox",
+                "notify requires --card unless --critical: otherwise post in an open thread on the topic with `terrarium thread post`",
             ));
         }
     } else if n.reply_to.is_some() {
@@ -1039,19 +1039,10 @@ fn check_update_context(
     priority: Priority,
 ) -> ApiResult<()> {
     check_work_context(q.kind, card, q.thread.as_deref())?;
-    if q.kind == QuestionKind::Notice && card.is_none() && !priority.at_least_urgent() {
-        // reply_to is recorded on creation, not mutable through an update.
-        let has_reply: bool = t.query_row(
-            "SELECT EXISTS(SELECT 1 FROM audit WHERE action = 'question.ask' AND target = ?1
-                AND json_extract(detail, '$.reply_to') IS NOT NULL)",
-            [&q.id],
-            |r| r.get(0),
-        )?;
-        if !has_reply {
-            return Err(ApiError::invalid(
-                "notify requires --card, --reply-to or --urgent: only answers to the operator, one done per request, or real problems belong in the Inbox",
-            ));
-        }
+    if q.kind == QuestionKind::Notice && card.is_none() && priority != Priority::Critical {
+        return Err(ApiError::invalid(
+            "notify requires --card unless --critical: otherwise post in an open thread on the topic with `terrarium thread post`",
+        ));
     }
     if matches!(q.kind, QuestionKind::Question | QuestionKind::Bundle) {
         let open = list(

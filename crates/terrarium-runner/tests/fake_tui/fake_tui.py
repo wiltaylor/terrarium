@@ -174,6 +174,13 @@ def read_line():
             continue
         for b in chunk:
             c = bytes([b])
+            if PASTE_NEEDS_PAUSE and c == b"\x12":
+                hook("Notification", {"message": "Allow the tool?"})
+                out("\r\x1b[KAllow the tool? [y/n] ")
+                continue
+            if PASTE_NEEDS_PAUSE and c == b"\x14":
+                out(f"\r\x1b[K> [Pasted text #{PASTES[0]} +2 lines]")
+                continue
             if PASTE_NEEDS_PAUSE and c == b"\x15":
                 buf = b""
                 pasted_at = None

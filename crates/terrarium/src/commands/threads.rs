@@ -146,6 +146,34 @@ fn print_thread(c: &Ctx, v: &Value) {
 
 pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
     match cmd {
+        ThreadCmd::Version {
+            version,
+            changed,
+            test,
+        } => {
+            if changed == "-" && test == "-" {
+                return Err(CliError::usage(
+                    "only one of --changed and --test may read stdin",
+                ));
+            }
+            let project = ctx.project_or(None).await?;
+            let body =
+                json!({"version": version, "changed": ctx.text(changed)?, "test": ctx.text(test)?});
+            let v = ctx
+                .api
+                .post(
+                    &format!("/api/projects/{}/version-thread/messages", encode(&project)),
+                    Some(body),
+                )
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "quiet version post in thread {} ({}).",
+                    field(v, "id"),
+                    field(v, "status")
+                ))
+            })
+        }
         ThreadCmd::Reopen { id, reason, card } => {
             let mut body = json!({"reason": reason});
             super::set_opt(&mut body, "card", card.clone());
