@@ -5,6 +5,7 @@
 // sandboxed iframe on the artifact origin.
 
 import { Marked, type Tokens } from "marked";
+import emoji from "./emoji.json";
 
 export type WikiTarget =
   | { kind: "page"; project: string; path: string }
@@ -171,6 +172,17 @@ export function renderWiki(src: string, opts: RenderOptions): string {
 
   md.use({
     extensions: [
+      {
+        name: "emoji",
+        level: "inline",
+        start: (s: string) => s.search(/:[\w+-]+:/),
+        tokenizer(s: string) {
+          const m = /^:([\w+-]+):/.exec(s);
+          if (!m || !Object.hasOwn(emoji, m[1]!)) return undefined;
+          return { type: "emoji", raw: m[0], text: emoji[m[1]! as keyof typeof emoji] };
+        },
+        renderer(token) { return esc(String(token.text)); },
+      },
       ...(opts.textBody ? [{
         name: "globpath",
         level: "inline" as const,
