@@ -23,7 +23,7 @@ async fn native_process_wait_retains_real_exit_and_tail_across_daemon_restart() 
     let mut td = TestDaemon::start().await;
     td.project("p").await;
     let agent = td
-        .agent("p", "worker", json!({"policy": {"targets": ["box"]}}))
+        .agent("p", "worker", json!({"policy": {"targets": ["p-box"]}}))
         .await;
     let aid = agent["id"].as_str().unwrap();
     let token = td.post("/api/hosts", json!({"name": "restart-host"})).await;
@@ -43,7 +43,7 @@ async fn native_process_wait_retains_real_exit_and_tail_across_daemon_restart() 
     online(&td).await;
     td.post(
         "/api/targets",
-        json!({"name": "box", "kind": "host", "host": "restart-host", "project": "p"}),
+        json!({"name": "p-box", "kind": "host", "host": "restart-host", "project": "p"}),
     )
     .await
     .ok();
@@ -58,7 +58,7 @@ async fn native_process_wait_retains_real_exit_and_tail_across_daemon_restart() 
         .post_as(
             aid,
             &format!("/api/agents/{aid}/run"),
-            json!({"target": "box", "name": "restart", "cmd": ["sh", "-c", script]}),
+            json!({"target": "p-box", "name": "restart", "cmd": ["sh", "-c", script]}),
         )
         .await;
     let wid = run.ok()["wait"]["id"].as_str().unwrap().to_owned();
@@ -104,7 +104,7 @@ async fn native_process_wait_retains_real_exit_and_tail_across_daemon_restart() 
     let log = td.get_as(aid, &format!("/api/waits/{wid}/log")).await;
     assert_eq!(log.ok()["running"], false);
     assert!(log.body["output"].as_str().unwrap().contains("before"));
-    td.delete(&format!("/api/targets/box/sessions/{sid}"))
+    td.delete(&format!("/api/targets/p-box/sessions/{sid}"))
         .await
         .ok();
     client.abort();
