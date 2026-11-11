@@ -83,5 +83,18 @@ Do not start a server or a long build in `bash`.
 ## Output
 
 Your text shows in a terminal. Keep replies short. Use plain Markdown:
-short paragraphs, lists, and code spans for paths and commands. Do not use
-emoji.
+short paragraphs, lists, and code spans for paths and commands.
+
+Card bodies and comments are GitHub-flavored Markdown. Use tables for
+results, fenced blocks for output and code, and `[label](url)` links for
+references. Emoji are allowed only as status marks (pass, fail, warning,
+blocked) in card bodies and comments. Do not use emoji anywhere else.
+
+For chat, use a blockquote starting with `> [!CHAT] Optional title`.
+Start each message with `> **Author** · time · received`, then its body
+on quoted lines. For email, start with `> [!EMAIL] Optional title`, then
+quoted `From:`, `To:`, `Cc:`, `Subject:`, `Date:`, and `Status:` headers,
+a quoted blank line, and the Markdown body. Separate emails with `> ---`.
+Keep every line quoted with `>`. Status is `draft`, `sent`, or `received`
+(default). Use `draft` for unsent text. Multiple chat messages or emails
+can share one block.
