@@ -401,7 +401,7 @@ async fn workspace_sync_roundtrip(work_root: bool) {
     let (td, _, _, _, ssh) = daemon().await;
     let base = td.dir.path().join("remote-work");
     // ssh_plan sends one shell command, whereas rsync sends a server argv.
-    std::fs::write(&ssh, format!("#!/bin/sh\nexport HOME='{}'\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nshift\nif [ \"$#\" = 1 ]; then exec sh -c \"$1\"; else exec \"$@\"; fi\n", base.display())).unwrap();
+    std::fs::write(&ssh, format!("#!/bin/sh\nexport HOME='{}'\nwhile [ \"$#\" -gt 0 ]; do case \"$1\" in *@*) shift; break;; esac; shift; done\nif [ \"$#\" = 1 ]; then exec sh -c \"$1\"; else exec \"$@\"; fi\n", base.display())).unwrap();
     let mut definition = target("sync", 3600);
     definition["sync_workspace"] = json!(true);
     if work_root {
