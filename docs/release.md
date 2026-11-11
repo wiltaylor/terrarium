@@ -240,7 +240,11 @@ as the workflow (`scripts/release_version.py`). The steps:
    a clone of the commit with its `.git` is copied in as `/src`. The
    container gets only `RESULTS_DIR` and `HOME`. Its `/results` comes back
    to `release-out/results`, also from a red gate. A red gate publishes
-   nothing.
+   nothing. For a release or pre-release commit with a non-empty
+   `tested-at-cut: <test run ids>` trailer, this gate is skipped. The lead
+   adds that trailer only after the full suite passes on the release branch
+   (MEM-209). The summary records the skip reason and run ids, and the
+   release notes name those runs. Without the trailer the gate runs normally.
 4. `stamp`: the version into `[workspace.package]` of `Cargo.toml` and the
    workspace crates of `Cargo.lock` (the entries with no `source`), as
    `.github/stamp-version.sh` did, without cargo. The image build's
