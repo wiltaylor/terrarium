@@ -242,13 +242,24 @@ mod tests {
             let now = Utc::now();
             assert!(litellm_fallback(t, &sub, now)?);
             assert_eq!(write_window(t, &sub, now, "link")?.unwrap().used_pct, 80.0);
+            for total in [90.0, 100.0, 100.0] {
+                cloud_spend::record(t, "a", "s", Some("proxy"), &cloud::month_key(now), total)?;
+                write_window(t, &sub, now, "link")?;
+            }
+            let mails: i64 = t.query_row(
+                "SELECT count(*) FROM messages WHERE subject LIKE '%proxy%'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(mails, 3, "80, 90 and 100 notify once each");
+            assert!(crate::store::usage::holds(t)?.is_empty());
             subs::insert_sample(t, "proxy", "key-spend", 10.0, None, &json!({}))?;
             assert!(!litellm_fallback(t, &sub, now)?);
             assert!(window(t, &sub, now)?.is_none());
             subs::set_probe_result(t, "proxy", Err("parse: no spend from LiteLLM"))?;
             let mut sub = subs::get(t, "proxy")?;
             assert!(litellm_fallback(t, &sub, now)?);
-            assert_eq!(window(t, &sub, now)?.unwrap().used_usd, 80.0);
+            assert_eq!(window(t, &sub, now)?.unwrap().used_usd, 100.0);
             sub.selfhosted.as_mut().unwrap().budget_usd = None;
             assert!(window(t, &sub, now)?.is_none());
             sub.probe_error = None;

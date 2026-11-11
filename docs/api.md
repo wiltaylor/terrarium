@@ -6459,6 +6459,19 @@ keep their turns. Checks run after each new session total and on each
 policy tick. Existing cloud-budget holds end at daemon startup with a
 `quota.resumed` event.
 
+**LiteLLM fallback budget.** A `litellm` subscription may set
+`selfhosted.budget_usd` to a positive whole USD monthly budget (create or
+patch the subscription, `null` clears it on patch). When no `key-spend`
+sample is newer than ten minutes, or the latest probe reports
+`no spend from LiteLLM`, Terrarium counts the UTC month's Claude Code
+session `costUSD` totals instead. With a budget it shows a monthly
+`budget` window and mails at `alert_at` (80 by default), 90 and 100 percent.
+Without a budget the API returns `fallback_spend_usd` and the dashboard
+shows USD without a percent. These are local session estimates, not the
+LiteLLM bill. A fresh successful spend probe takes precedence again.
+LiteLLM spend never holds agents or rejects a named spawn at a percentage.
+Automatic account swaps and spawn pool choices never select LiteLLM.
+
 ### 16.6 The quota policy
 
 - A window has three lines: `alert_at` (default 80), 90, and 100 (used
