@@ -5,7 +5,7 @@ import { useInstance } from "../instance";
 // `inbox` and `question` events, so the banner comes and goes with no reload.
 // The logic is in features/inbox/critical.
 
-import { A } from "@solidjs/router";
+import { A } from "../instance/navigation";
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { announce, browserFlashEnv, createTitleFlasher, criticalBanner } from "../features/inbox/critical";
 

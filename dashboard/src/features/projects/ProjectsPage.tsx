@@ -1,5 +1,5 @@
 import { useInstance } from "../../instance";
-import { A, useNavigate } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createSignal, For, Show } from "solid-js";
 import { Empty, ErrorBanner, Modal, PageHead } from "../../components/ui";
 import type { Project } from "../../api/types";

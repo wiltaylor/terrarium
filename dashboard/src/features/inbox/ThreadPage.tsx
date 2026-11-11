@@ -10,7 +10,8 @@ import { useInstance } from "../../instance";
 // through the DOMPurify sink (SafeHtml) only; the topic, the names, the
 // handoff summary, and the link refs are text nodes.
 
-import { A, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { ApiError } from "../../api/http";

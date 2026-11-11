@@ -7,7 +7,7 @@ import { useInstance } from "../../instance";
 // words: they go into the page as text nodes only. The contexts are
 // Markdown, and go through the DOMPurify sink (SafeHtml) only.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createSignal, For, type JSX, on, Show } from "solid-js";
 import { ApiError } from "../../api/http";
 import type { Question } from "../../api/types";

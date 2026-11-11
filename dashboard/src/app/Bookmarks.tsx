@@ -1,5 +1,5 @@
 import { useInstance } from "../instance";
-import { A } from "@solidjs/router";
+import { A } from "../instance/navigation";
 import { For, Show } from "solid-js";
 
 import { skippedReport } from "../stores/bookmarks";

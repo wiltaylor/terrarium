@@ -6,7 +6,7 @@ import { useInstance } from "../../instance";
 // so the columns line up across the project groups (TER-52). The enabled
 // project actions of each project (TER-53) are buttons next to its name.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { ActiveCard } from "../../api/types";
 import { Empty, ErrorBanner } from "../../components/ui";

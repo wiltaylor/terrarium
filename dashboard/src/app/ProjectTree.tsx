@@ -12,7 +12,7 @@ import { useInstance } from "../instance";
 // onto a folder row or onto the Projects row (the top level). With a filter
 // typed, the tree shows the plain list of matching projects.
 
-import { A, useLocation, useNavigate } from "@solidjs/router";
+import { A, useLocation, useNavigate } from "../instance/navigation";
 import { createEffect, createMemo, createSignal, For, onMount, Show, untrack } from "solid-js";
 import type { Project, ProjectFolder } from "../api/types";
 import { ProjectDot } from "../components/ProjectDot";

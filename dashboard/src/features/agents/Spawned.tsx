@@ -3,7 +3,7 @@ import { useInstance } from "../../instance";
 // of an owner, the line on the page of an ephemeral agent, and the Spawn
 // rights fields of the agent form.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { Agent, Spawn, SpawnPolicy } from "../../api/types";
 

@@ -8,7 +8,8 @@ import { useInstance } from "../../instance";
 // it. A daemon with no config repo answers `501`; the page then shows a
 // short note. The logic is in ./model.ts. A description is plain text.
 
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createResource, createSignal, For, on, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";
 import { Markdown } from "../../components/Markdown";

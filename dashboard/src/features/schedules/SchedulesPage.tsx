@@ -12,7 +12,8 @@ import { useInstance } from "../../instance";
 // A webhook action (§19.5) also opens to its Deliveries panel, with Send
 // test and Redeliver.
 
-import { A, useParams, useSearchParams } from "@solidjs/router";
+import { useParams, useSearchParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
 import { MockOnlyNote } from "../../components/MockOnly";
 import { ConfirmButton, Empty, ErrorBanner, LoadMore, PageHead, Tabs, useNow } from "../../components/ui";

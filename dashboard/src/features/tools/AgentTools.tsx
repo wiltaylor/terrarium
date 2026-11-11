@@ -4,7 +4,7 @@ import { useInstance } from "../../instance";
 // target and command. The links show in its sandbox at
 // /opt/terrarium/agent-tools/bin. Settings > Tools grants and revokes.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createResource, For, Show } from "solid-js";
 import type { Agent } from "../../api/types";
 

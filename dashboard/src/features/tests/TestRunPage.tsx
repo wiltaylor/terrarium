@@ -6,7 +6,8 @@ import { useInstance } from "../../instance";
 // HTML. "Failed only" is on at first when the run has failures. The daemon
 // filters and pages the cases (`?status=failed&q=&cursor=`).
 
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import type { TestCase, TestRun } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";

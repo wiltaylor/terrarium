@@ -2,7 +2,7 @@ import { useInstance } from "../../instance";
 // The subscription select and the model field of the agent form, also on
 // the agent page. The logic is in ./subscription.ts.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createMemo, createResource, createSignal, For, onMount, Show } from "solid-js";
 import type { Harness } from "../../api/types";
 

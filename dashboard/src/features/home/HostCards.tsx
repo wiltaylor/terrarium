@@ -5,7 +5,7 @@ import { useInstance } from "../../instance";
 // disk space list has room for long mount paths (a WSL2 host has many). A
 // long path ends in an ellipsis and shows in full in its tooltip.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { Host, HostMetricsSample } from "../../api/types";
 import { isMissingEndpoint } from "../../api/http";

@@ -3,7 +3,8 @@ import { useInstance } from "../../instance";
 // form (./AddRepoForm, `POST /api/projects/{name}/repos`, project_admin), and for each repo
 // a link to its browser (/p/:project/repos/:repo) and a checkout row.
 
-import { A, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createResource, createSignal, For, on, Show } from "solid-js";
 import { isMissingEndpoint } from "../../api/http";
 import type { Repo, Target } from "../../api/types";

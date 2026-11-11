@@ -1,5 +1,6 @@
 import { useInstance } from "../../instance";
-import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
+import { useParams, useSearchParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";

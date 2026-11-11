@@ -3,7 +3,7 @@ import { useInstance } from "../../instance";
 // over the current view: the title, the column, the description, and the
 // comments, with a link to the card on its board. The Layout mounts it once.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createResource, For, Show } from "solid-js";
 import { LinkText } from "../../components/LinkText";
 import { Drawer, ErrorBanner } from "../../components/ui";

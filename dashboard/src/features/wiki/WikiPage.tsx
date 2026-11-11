@@ -2,7 +2,8 @@ import { useInstance } from "../../instance";
 // The Wiki tab of the knowledge screen (app/nav.ts KNOWLEDGE_TABS): the page
 // tree and the page of the URL (/p/:project/knowledge/wiki/*path).
 
-import { A, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createMemo, createResource, createSignal, For, Match, Show, Switch, type JSX } from "solid-js";
 import { Markdown } from "../../components/Markdown";
 import { Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";

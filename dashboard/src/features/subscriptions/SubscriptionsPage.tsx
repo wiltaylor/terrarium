@@ -13,7 +13,8 @@ import { ago, balanceText, humanize, orderWindows, subscriptionTitle, timeUntil,
 import { AddSubscriptionWizard } from "./AddSubscriptionWizard";
 import { HarnessVersions } from "./HarnessVersions";
 import { isSelfHosted, reloginFor, selfHostedSummary, stopAllText, streamsText, wizardFromQuery, type WizardPath, type WizardSetup } from "./wizard";
-import { A, useSearchParams } from "@solidjs/router";
+import { useSearchParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { accountText, defaultInfo } from "./account";
 
 /** The probe chip: `ok` with the last success, `failed` with why, or local only. */

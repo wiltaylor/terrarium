@@ -8,7 +8,7 @@ import { useInstance } from "../../instance";
 // page), the policy and the channel, the updater, and the update log.
 
 import { createResource, createSignal, For, onCleanup, Show } from "solid-js";
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { ConfirmButton, ErrorBanner, PageHead } from "../../components/ui";
 import { SafeHtml } from "../../components/SafeHtml";
 import { staleHosts } from "../../lib/build-version";

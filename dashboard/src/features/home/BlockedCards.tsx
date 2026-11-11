@@ -5,7 +5,7 @@ import { useInstance } from "../../instance";
 // status, and how long it has been blocked. It reloads on card and agent
 // status events (batched) and each minute, as Work in progress does.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { ActiveCard } from "../../api/types";
 import { Empty, ErrorBanner } from "../../components/ui";

@@ -4,7 +4,7 @@ import { useInstance } from "../../instance";
 // that waits for an agent). A mail body and a subject are the
 // sender's words: they go into the page as text nodes only.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createSignal, For, Show } from "solid-js";
 import type { InboxWatch, Message, PausedThread } from "../../api/types";
 import { ApiError } from "../../api/http";

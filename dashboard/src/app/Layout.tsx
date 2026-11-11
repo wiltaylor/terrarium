@@ -3,7 +3,8 @@ import { useInstance } from "../instance";
 // tree, the Settings section, and the footer; on the right, the side bar of
 // pinned conversations (./PinnedBar).
 
-import { A, useLocation, type RouteSectionProps } from "@solidjs/router";
+import { type RouteSectionProps } from "@solidjs/router";
+import { A, useLocation } from "../instance/navigation";
 import { createEffect, createResource, createSignal, ErrorBoundary, For, on, onCleanup, onMount, Show } from "solid-js";
 import { isMock } from "../api";
 import { CriticalBanner } from "../components/CriticalBanner";

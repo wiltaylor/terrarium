@@ -41,9 +41,10 @@ export function createTranscriptView(
   agent: () => Pick<Agent, "id" | "project">,
   session: () => Session | undefined,
   /** The page source. Default: the agent's own transcript endpoint. The session page passes `GET /api/sessions/{id}/transcript`. */
-  fetch: TranscriptSource["fetch"] = (aid, sid, after, limit) => api.agents.transcript(aid, sid, { after, limit }),
+  fetch?: TranscriptSource["fetch"],
 ) {
   const { api } = useInstance();
+  const fetchPage: TranscriptSource["fetch"] = fetch ?? ((aid, sid, after, limit) => api.agents.transcript(aid, sid, { after, limit }));
   let scroller: HTMLDivElement | undefined;
   const [tail, setTail] = createSignal(TAIL_START);
   const toBottom = () => {
@@ -72,7 +73,7 @@ export function createTranscriptView(
   const t = createTranscript({
     agentId: () => agent().id,
     session,
-    fetch,
+    fetch: fetchPage,
     stream: (aid, sid, after) => api.agents.transcriptStream(aid, sid, { after }),
     onChange,
   });

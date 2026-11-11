@@ -8,7 +8,7 @@ import { useInstance } from "../../instance";
 // template. "Back" goes to the chooser and keeps the name. With no
 // template, the dialog opens on the full form.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createResource, createSignal, For, on, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import { roleLabel, type Agent, type AgentTemplate } from "../../api/types";

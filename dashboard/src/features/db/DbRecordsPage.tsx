@@ -5,7 +5,8 @@ import { useInstance } from "../../instance";
 // terms), pages, and the record dialog. `?q=` fills the query box, `?id=`
 // opens a record (the links of the wiki `db` blocks).
 
-import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
+import { useParams, useSearchParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import type { DbQueryResult, DbRecord } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";

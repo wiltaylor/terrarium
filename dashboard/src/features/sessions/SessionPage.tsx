@@ -5,7 +5,8 @@ import { useInstance } from "../../instance";
 // The blocks render with the same TranscriptLog as the agent's Sessions tab;
 // there is no composer.
 
-import { A, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createMemo, createResource, Show } from "solid-js";
 import { ErrorBanner, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";

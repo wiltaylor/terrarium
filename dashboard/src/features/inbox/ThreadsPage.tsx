@@ -9,7 +9,8 @@ import { useInstance } from "../../instance";
 // and the project. `thread` and `inbox` events read the list again; a `card`
 // event of a linked project reads the boards again. No polling.
 
-import { A, useNavigate, useSearchParams } from "@solidjs/router";
+import { useSearchParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import type { Board, Thread } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";

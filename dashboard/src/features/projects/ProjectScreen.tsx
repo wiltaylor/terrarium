@@ -2,7 +2,8 @@ import { useInstance } from "../../instance";
 // The shell of every project page. The first path segment selects a project
 // tab, so deep links and browser history keep working without a route change.
 
-import { useLocation, useParams, type RouteSectionProps } from "@solidjs/router";
+import { useParams, type RouteSectionProps } from "@solidjs/router";
+import { useLocation } from "../../instance/navigation";
 import { createEffect, on } from "solid-js";
 import { PageHead } from "../../components/ui";
 import { decodePath, decodePathParam, projectBase } from "../../lib/url";

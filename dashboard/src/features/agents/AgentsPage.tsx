@@ -1,5 +1,6 @@
 import { useInstance } from "../../instance";
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { LeaseChips } from "../../components/Leases";
 import { HoldBadge } from "../../components/HoldBadge";

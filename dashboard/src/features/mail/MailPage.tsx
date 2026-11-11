@@ -9,7 +9,8 @@ import { useInstance } from "../../instance";
 // messages that touch one project, and replies from the project inbox where
 // the thread goes to it.
 
-import { A, useParams, useSearchParams } from "@solidjs/router";
+import { useParams, useSearchParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { createLive, createScrollKeeper, LiveControl, NewAbove } from "../../components/Live";
 import { SessionLink } from "../../components/SessionLink";

@@ -3,7 +3,7 @@
 // group of child rows. TreeNode is the Bookmarks node: the same, but its row
 // is not a link.
 
-import { A } from "@solidjs/router";
+import { A } from "../instance/navigation";
 import { Show, type JSX } from "solid-js";
 import type { createRovingTree } from "./treeNav";
 import { createExpandedStore } from "./treeModel";

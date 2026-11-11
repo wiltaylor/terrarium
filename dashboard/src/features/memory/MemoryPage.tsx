@@ -2,7 +2,8 @@ import { useInstance } from "../../instance";
 // The Memory tab of the knowledge screen (app/nav.ts KNOWLEDGE_TABS): the
 // memories of the project, and the graph of the memory of `?id=`.
 
-import { A, useParams, useSearchParams } from "@solidjs/router";
+import { useParams, useSearchParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Empty, PageHead } from "../../components/ui";
 import { RELATIONS, type Memory, type MemoryEdge, type Relation } from "../../api/types";

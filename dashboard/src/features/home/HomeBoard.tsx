@@ -1,5 +1,5 @@
 import { useInstance } from "../../instance";
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { allHome, type HomeColumn, type HomeAttention, type HomeCard } from "../../api/home";
 import { Empty, ErrorBanner } from "../../components/ui";

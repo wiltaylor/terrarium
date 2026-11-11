@@ -2,7 +2,8 @@ import { useInstance } from "../../instance";
 // The Artifacts page of a project (no tab since TER-507; old links still open it): the files of
 // the project and the viewer of the artifact of the URL (/p/:project/board/artifacts/:id).
 
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createResource, createSignal, For, Show } from "solid-js";
 import { ArtifactViewer } from "../../components/ArtifactViewer";
 import { ConfirmButton, Empty, ErrorBanner, Modal, PageHead } from "../../components/ui";

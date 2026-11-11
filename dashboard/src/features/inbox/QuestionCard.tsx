@@ -5,7 +5,7 @@ import { useInstance } from "../../instance";
 // only. The context is Markdown, and goes through the DOMPurify sink
 // (SafeHtml) only.
 
-import { A, useNavigate } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createSignal, For, type JSX, on, Show } from "solid-js";
 import type { Question } from "../../api/types";
 import { LinkText, openCardLink, readerCardKeys } from "../../components/LinkText";

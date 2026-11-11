@@ -5,7 +5,7 @@ import { useInstance } from "../instance";
 // pages. On a wide screen it collapses to a rail; on a phone it is an
 // overlay that the top bar opens.
 
-import { A, useNavigate } from "@solidjs/router";
+import { A, useNavigate } from "../instance/navigation";
 import { createResource, For, Show } from "solid-js";
 import type { Agent, Pin } from "../api/types";
 import { ErrorBanner } from "../components/ui";

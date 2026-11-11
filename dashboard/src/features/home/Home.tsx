@@ -1,5 +1,5 @@
 import { useInstance } from "../../instance";
-import { A, useNavigate } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { isLocalOnly, Sparkline, UsageTile } from "../../components/UsageTile";
 import { Empty, ErrorBanner, Modal, PageHead, ProviderLogo, Tabs, useNow } from "../../components/ui";

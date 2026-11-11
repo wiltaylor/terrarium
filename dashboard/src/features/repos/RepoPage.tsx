@@ -8,7 +8,8 @@ import { useInstance } from "../../instance";
 // only. The Files tab (./FilesTab) has the one HTML render: a Markdown file
 // through the safe Markdown component (lib/sanitize).
 
-import { A, useParams, useSearchParams } from "@solidjs/router";
+import { useParams, useSearchParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createMemo, createResource, createSignal, For, Match, on, Show, Switch } from "solid-js";
 import type { Repo, RepoCommit, RepoTree } from "../../api/types";
 import { DiffView } from "../../components/DiffView";

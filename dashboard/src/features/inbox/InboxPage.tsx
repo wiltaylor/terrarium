@@ -6,7 +6,8 @@ import { useInstance } from "../../instance";
 // The Inbox threads (docs/api.md §6.13) have their own Threads screen (TER-466): an old
 // `?tab=thread` link redirects there.
 
-import { A, Navigate, useLocation, useSearchParams, useNavigate } from "@solidjs/router";
+import { useSearchParams } from "@solidjs/router";
+import { A, Navigate, useLocation, useNavigate } from "../../instance/navigation";
 import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";

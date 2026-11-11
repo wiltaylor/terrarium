@@ -8,7 +8,7 @@ import { useInstance } from "../../instance";
 //
 // Card titles and names are untrusted: text nodes only.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Board, CardSummary as Card, Thread, ThreadCard } from "../../api/types";
 import { cardState } from "../../lib/cardState";

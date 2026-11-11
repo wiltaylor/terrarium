@@ -3,7 +3,7 @@ import { useInstance } from "../../instance";
 // `waiting`; a watch sends mail when the watched agent changes status.
 // Process output is untrusted: it goes into the page as text nodes only.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { WATCH_ON, type Agent, type Wait, type WaitLog, type Watch, type WatchOn } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, useNow } from "../../components/ui";

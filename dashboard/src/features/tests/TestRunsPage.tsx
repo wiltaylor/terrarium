@@ -5,7 +5,8 @@ import { useInstance } from "../../instance";
 // so a filtered list has a link. A row opens the run (/p/:project/tests/:id).
 // A run links to labels, such as the version label `version:1.4.0` (TER-58).
 
-import { A, useParams, useSearchParams } from "@solidjs/router";
+import { useParams, useSearchParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { TestRunListQuery, TestRunStatus, TestRunSummary } from "../../api/types";
 import { Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";

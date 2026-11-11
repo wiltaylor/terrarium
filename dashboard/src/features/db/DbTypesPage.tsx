@@ -4,7 +4,8 @@ import { useInstance } from "../../instance";
 // field and record counts. "New type" opens the schema editor. A type
 // opens its records (/p/:project/knowledge/db/:type).
 
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, Show } from "solid-js";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";

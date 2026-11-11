@@ -1,5 +1,6 @@
 import { useInstance } from "../instance";
-import { Navigate, Route, Router, useParams } from "@solidjs/router";
+import { Route, Router, useParams } from "@solidjs/router";
+import { Navigate } from "../instance/navigation";
 import { For, lazy, Match, Show, Switch } from "solid-js";
 import { isMock } from "../api";
 import { escapeMalformedPath } from "../lib/url";

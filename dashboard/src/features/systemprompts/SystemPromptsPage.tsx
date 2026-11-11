@@ -6,7 +6,7 @@ import { useInstance } from "../../instance";
 // are user content: they stay text nodes and textarea values. The logic is
 // in ./model.ts.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createResource, createSignal, For, Show } from "solid-js";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import type { SystemPromptDetail, SystemPromptSummary, SystemPromptUser } from "../../api/types";

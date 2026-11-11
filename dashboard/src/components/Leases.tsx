@@ -3,7 +3,7 @@ import { useInstance } from "../instance";
 // the Grant dialog, and the "holds <target>" chips. The Targets page and the
 // agent page use them.
 
-import { A } from "@solidjs/router";
+import { A } from "../instance/navigation";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Agent, Lease, LeaseEventData, LeaseGranted, Target } from "../api/types";
 import { scopeLabel, targetScope } from "../lib/target-scope";

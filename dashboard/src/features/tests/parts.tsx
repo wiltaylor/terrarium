@@ -4,7 +4,7 @@ import { useInstance } from "../../instance";
 // card (the card drawer). Every status shows as an icon and a word, not
 // as a colour only.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { CardTests, TestCounts, TestRunStatus, TestRunSummary } from "../../api/types";
 import { ErrorBanner } from "../../components/ui";

@@ -3,7 +3,7 @@ import { useInstance } from "../instance";
 // each segment goes into the page as a text node or an `<a>` that Solid
 // builds. No string ever reaches the DOM as HTML.
 
-import { A } from "@solidjs/router";
+import { A } from "../instance/navigation";
 import { For, Match, Switch } from "solid-js";
 import { linkSegments } from "../lib/linkText";
 import { cardOfHref } from "../lib/markdown";

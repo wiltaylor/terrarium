@@ -9,7 +9,7 @@ import { useInstance } from "../../instance";
 // action shows as a disabled button with its reason on the dashboard; Home
 // lists only the enabled ones.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createSignal, For, Show } from "solid-js";
 import type { Schedule } from "../../api/types";
 import { Modal } from "../../components/ui";
