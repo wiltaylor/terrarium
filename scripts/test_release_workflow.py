@@ -158,7 +158,16 @@ class Release(unittest.TestCase):
         for name in ("check", "version"):
             self.assertNotIn("permissions", jobs[name], f"{name} keeps the read-only default")
         for name in ("image", "release"):
-            self.assertEqual(jobs[name]["if"], "needs.version.outputs.do_release == 'true'")
+            cond = jobs[name]["if"]
+            self.assertIn("needs.version.outputs.do_release == 'true'", cond, name)
+            # A check skipped by tested-at-cut must not skip the job (TER-740).
+            self.assertTrue(cond.startswith("always() && "), f"{name}: {cond}")
+            self.assertIn("needs.version.result == 'success'", cond, name)
+        self.assertIn(
+            "needs.check.result == 'success' || needs.check.result == 'skipped'",
+            jobs["image"]["if"],
+        )
+        self.assertIn("needs.image.result == 'success'", jobs["release"]["if"])
 
     def test_the_release_has_the_asset_and_the_sums(self):
         steps = yaml_doc()["jobs"]["release"]["steps"]

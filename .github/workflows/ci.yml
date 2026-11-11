@@ -348,7 +348,12 @@ jobs:
   release:
     name: Create GitHub release
     needs: [version, image]
-    if: needs.version.outputs.do_release == 'true'
+    # always(): without it GitHub skips this job when the check job, an
+    # ancestor through image, was skipped by the tested-at-cut trailer.
+    if: >-
+      always() && needs.version.outputs.do_release == 'true'
+      && needs.version.result == 'success'
+      && needs.image.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write # the tag and the release
