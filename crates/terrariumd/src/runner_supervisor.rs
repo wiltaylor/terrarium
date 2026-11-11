@@ -6300,8 +6300,10 @@ mod tests {
     #[tokio::test]
     async fn stale_exit_keeps_the_current_epochs_credentials() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut sandbox = SandboxConfig::default();
-        sandbox.mode = SandboxMode::None;
+        let sandbox = SandboxConfig {
+            mode: SandboxMode::None,
+            ..SandboxConfig::default()
+        };
         let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
             tmp.path().join("state"),
             tmp.path().join("run"),
