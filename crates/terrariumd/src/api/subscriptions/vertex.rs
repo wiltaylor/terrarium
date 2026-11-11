@@ -77,6 +77,19 @@ impl VertexEndpoint {
         terrarium_core::cloud::check(terrarium_core::cloud::Kind::Gcp, settings)
             .map_err(ApiError::invalid)?;
         let region = settings.region.as_deref().unwrap_or("us-east5");
+        if !matches!(region, "global" | "us" | "eu") {
+            let valid = region.split_once('-').is_some_and(|(area, zone)| {
+                let letters = zone.trim_end_matches(|c: char| c.is_ascii_digit());
+                !area.is_empty()
+                    && area.bytes().all(|b| b.is_ascii_lowercase())
+                    && !letters.is_empty()
+                    && letters.bytes().all(|b| b.is_ascii_lowercase())
+                    && letters.len() < zone.len()
+            });
+            if !valid {
+                return Err(failure("Use global, us, eu, or a region such as us-east5."));
+            }
+        }
         let host = match region {
             "global" => "aiplatform.googleapis.com".to_owned(),
             "us" | "eu" => format!("aiplatform.{region}.rep.googleapis.com"),
@@ -260,6 +273,11 @@ mod tests {
         s.base_url = Some("https://attacker.invalid".into());
         assert!(VertexEndpoint::regional(&s).is_err());
         s.base_url = None;
+        for region in ["a", "us-east", "us-east5.bad", "us-east5/evil"] {
+            s.region = Some(region.into());
+            assert!(VertexEndpoint::regional(&s).is_err());
+        }
+        s.region = Some("us-east5".into());
         for id in ["../other", "a?x", "a#b", ".."] {
             s.models.insert("haiku".into(), id.into());
             assert!(VertexEndpoint::regional(&s).is_err());
