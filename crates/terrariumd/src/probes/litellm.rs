@@ -1,6 +1,6 @@
 //! LiteLLM virtual-key budget, from the subscription's own proxy only.
-use std::path::Path;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -171,9 +171,7 @@ async fn fetch_with_resolver(
     if let (Some(addr), Some(url::Host::Domain(host))) = (addr, url.host()) {
         builder = builder.resolve(host, addr);
     }
-    let client = builder
-        .build()
-        .map_err(|_| unavailable())?;
+    let client = builder.build().map_err(|_| unavailable())?;
     let mut response = client
         .get(&probe.url)
         .bearer_auth(creds.token())
@@ -252,7 +250,10 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         // This name cannot resolve in real DNS. A successful request proves
         // the client uses the checked override, retaining the original Host.
-        let base = format!("http://private.invalid:{}", listener.local_addr().unwrap().port());
+        let base = format!(
+            "http://private.invalid:{}",
+            listener.local_addr().unwrap().port()
+        );
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = calls.clone();
         let resolver: crate::webhooks::net::Resolver = std::sync::Arc::new(move |_, _| {
@@ -260,7 +261,9 @@ mod tests {
             vec![if n < 2 { "127.0.0.1" } else { "8.8.8.8" }.parse().unwrap()]
         });
         assert!(checked_address(&base, Some(resolver.clone())).is_ok());
-        let probe = LiteLlmKeySpend { url: format!("{base}/key/info") };
+        let probe = LiteLlmKeySpend {
+            url: format!("{base}/key/info"),
+        };
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = vec![0; 4096];
@@ -281,11 +284,21 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let windows = fetch_with_resolver(&probe, &Credentials::new("test-key"), Some(resolver.clone())).await.unwrap();
+        let windows = fetch_with_resolver(
+            &probe,
+            &Credentials::new("test-key"),
+            Some(resolver.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(windows[0].used_pct, 20.0);
         server.await.unwrap();
         // A subsequent connection rechecks DNS and refuses the rebound answer.
-        assert!(fetch_with_resolver(&probe, &Credentials::new("test-key"), Some(resolver)).await.is_err());
+        assert!(
+            fetch_with_resolver(&probe, &Credentials::new("test-key"), Some(resolver))
+                .await
+                .is_err()
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
@@ -306,7 +319,12 @@ mod tests {
         let resolver: crate::webhooks::net::Resolver = std::sync::Arc::new(|_, _| {
             vec!["10.0.0.1".parse().unwrap(), "fd00::1".parse().unwrap()]
         });
-        assert_eq!(checked_address("http://private.invalid:8000", Some(resolver)).unwrap().unwrap(), "10.0.0.1:8000".parse().unwrap());
+        assert_eq!(
+            checked_address("http://private.invalid:8000", Some(resolver))
+                .unwrap()
+                .unwrap(),
+            "10.0.0.1:8000".parse().unwrap()
+        );
     }
     #[test]
     fn budget_and_reset() {
