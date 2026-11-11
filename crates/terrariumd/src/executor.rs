@@ -3191,14 +3191,22 @@ pub async fn recreate(
         // Persist the verified consent and outcome before attempting that start.
         let (target, project) = (def.name.clone(), def.project.clone());
         let discarded = opts.discard_volumes.clone();
-        state.db.write(audit_actor, move |t| {
-            t.audit("target.recreate.removed", &target, project.as_deref(), json!({
-                "container_id": removed_id,
-                "force": force,
-                "discarded_volumes": discarded,
-                "outcome": "removed",
-            }))
-        }).await?;
+        state
+            .db
+            .write(audit_actor, move |t| {
+                t.audit(
+                    "target.recreate.removed",
+                    &target,
+                    project.as_deref(),
+                    json!({
+                        "container_id": removed_id,
+                        "force": force,
+                        "discarded_volumes": discarded,
+                        "outcome": "removed",
+                    }),
+                )
+            })
+            .await?;
     }
     let lifecycle_opts = LifecycleOpts {
         recreate_workspaces: Some(preserved),
