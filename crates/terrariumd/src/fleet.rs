@@ -1500,10 +1500,25 @@ pub fn apply(
         if let Some(old) = targets::find(t, &d.name)?
             && old.def != *d
         {
-            jobs::check_release_write(t, actor.is_operator(), &old.def, "changing the target from a fleet")?;
-            jobs::check_release_write(t, actor.is_operator(), d, "changing the target from a fleet")?;
+            jobs::check_release_write(
+                t,
+                actor.is_operator(),
+                &old.def,
+                "changing the target from a fleet",
+            )?;
+            jobs::check_release_write(
+                t,
+                actor.is_operator(),
+                d,
+                "changing the target from a fleet",
+            )?;
         } else if targets::find(t, &d.name)?.is_none() {
-            jobs::check_release_write(t, actor.is_operator(), d, "defining the target from a fleet")?;
+            jobs::check_release_write(
+                t,
+                actor.is_operator(),
+                d,
+                "defining the target from a fleet",
+            )?;
         }
         apply_target(t, d)?;
         let live = targets::get(t, &d.name)?;

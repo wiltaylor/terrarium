@@ -901,7 +901,9 @@ async fn retire_release_target(
     policy::operator_only(&actor, "retiring a protected release target")?;
     let rows = state
         .db
-        .write(actor.label(), move |t| jobs::retire_release_target(t, &name))
+        .write(actor.label(), move |t| {
+            jobs::retire_release_target(t, &name)
+        })
         .await?;
     Ok(Json(json!({"retired": rows})))
 }

@@ -3445,6 +3445,10 @@ async fn the_release_config_and_target_are_the_operators() {
         assert_eq!(r.status, 403, "{target}: {}", r.body);
         assert!(r.body.to_string().contains(rule), "{}", r.body);
     }
+    // rel-client stays protected after the switch (round 4): the
+    // operator retires it first.
+    let r = td.delete("/api/release-targets/rel-client").await;
+    assert_eq!(r.status, 200, "{}", r.body);
     let r = td
         .post(
             "/api/tools",
@@ -3491,9 +3495,13 @@ async fn a_fleet_cannot_change_the_release_target_unless_the_operator_applies_it
             "name = \"rel\"\n[[targets]]\nname = \"rel-fleet\"\nkind = \"ssh\"\naddress = \"{address}\"\nport = {port}\n"
         )
     };
-    let apply = |content: String, prune: bool| json!({"content": content, "prune": prune, "confirm": true});
+    let apply =
+        |content: String, prune: bool| json!({"content": content, "prune": prune, "confirm": true});
     let r = td
-        .post("/api/fleet/apply", apply(fleet("release@10.9.0.4", 2252), false))
+        .post(
+            "/api/fleet/apply",
+            apply(fleet("release@10.9.0.4", 2252), false),
+        )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     let r = td
@@ -3506,13 +3514,21 @@ async fn a_fleet_cannot_change_the_release_target_unless_the_operator_applies_it
     let rule = "release target runs release jobs only";
     // An update of the release target by a sysadmin agent.
     let r = td
-        .post_as(&sys, "/api/fleet/apply", apply(fleet("release@10.9.0.99", 2252), false))
+        .post_as(
+            &sys,
+            "/api/fleet/apply",
+            apply(fleet("release@10.9.0.99", 2252), false),
+        )
         .await;
     assert_eq!(r.status, 403, "update: {}", r.body);
     assert!(r.body.to_string().contains(rule), "{}", r.body);
     // Its delete by a prune.
     let r = td
-        .post_as(&sys, "/api/fleet/apply", apply("name = \"rel\"\n".into(), true))
+        .post_as(
+            &sys,
+            "/api/fleet/apply",
+            apply("name = \"rel\"\n".into(), true),
+        )
         .await;
     assert_eq!(r.status, 403, "prune: {}", r.body);
     assert!(r.body.to_string().contains(rule), "{}", r.body);
@@ -3527,7 +3543,10 @@ async fn a_fleet_cannot_change_the_release_target_unless_the_operator_applies_it
     assert_eq!(t["address"], "release@10.9.0.4", "{t:#}");
     // The operator passes.
     let r = td
-        .post("/api/fleet/apply", apply(fleet("release@10.9.0.4", 2253), false))
+        .post(
+            "/api/fleet/apply",
+            apply(fleet("release@10.9.0.4", 2253), false),
+        )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
 }
@@ -3566,15 +3585,24 @@ async fn a_release_target_stays_protected_until_the_operator_retires_it() {
     let refused = |target: &'static str, ip: &'static str| {
         let (w1, sys) = (w1.clone(), sys.clone());
         async move {
-            let r = td.patch(&w1, json!({"policy": {"targets": [target]}})).await;
+            let r = td
+                .patch(&w1, json!({"policy": {"targets": [target]}}))
+                .await;
             assert_eq!(r.status, 403, "{target} policy: {}", r.body);
             assert!(r.body.to_string().contains(rule), "{}", r.body);
             let r = td
-                .post(&format!("/api/targets/{target}/leases"), json!({"agent": "p/w1"}))
+                .post(
+                    &format!("/api/targets/{target}/leases"),
+                    json!({"agent": "p/w1"}),
+                )
                 .await;
             assert_eq!(r.status, 403, "{target} lease: {}", r.body);
             let r = td
-                .patch_as(&sys, &format!("/api/targets/{target}"), json!({"port": 2299}))
+                .patch_as(
+                    &sys,
+                    &format!("/api/targets/{target}"),
+                    json!({"port": 2299}),
+                )
                 .await;
             assert_eq!(r.status, 403, "{target} patch: {}", r.body);
             let r = td
@@ -3607,14 +3635,23 @@ async fn a_release_target_stays_protected_until_the_operator_retires_it() {
     refused("rel-b", "10.9.0.6").await;
     // Only the operator retires an entry.
     let r = td
-        .req(hyper::Method::DELETE, "/api/release-targets/rel-a", None, Some(&lab.lead))
+        .req(
+            hyper::Method::DELETE,
+            "/api/release-targets/rel-a",
+            None,
+            Some(&lab.lead),
+        )
         .await;
     assert_eq!(r.status, 403, "{}", r.body);
     let r = td.delete("/api/release-targets/rel-a").await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let r = td.patch(&w1, json!({"policy": {"targets": ["rel-a"]}})).await;
+    let r = td
+        .patch(&w1, json!({"policy": {"targets": ["rel-a"]}}))
+        .await;
     assert_eq!(r.status, 200, "rel-a after its retire: {}", r.body);
-    let r = td.patch(&w1, json!({"policy": {"targets": ["rel-b"]}})).await;
+    let r = td
+        .patch(&w1, json!({"policy": {"targets": ["rel-b"]}}))
+        .await;
     assert_eq!(r.status, 403, "rel-b is still protected: {}", r.body);
     let audit = td.get("/api/audit").await.ok().to_string();
     assert!(audit.contains("release_target.retire"), "{audit}");

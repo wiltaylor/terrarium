@@ -2013,12 +2013,7 @@ pub fn retire_release_target(t: &mut Tx<'_>, target: &str) -> ApiResult<Vec<Rele
         )));
     }
     t.execute("DELETE FROM release_targets WHERE target = ?1", [target])?;
-    t.audit(
-        "release_target.retire",
-        target,
-        None,
-        json!({"rows": rows}),
-    )?;
+    t.audit("release_target.retire", target, None, json!({"rows": rows}))?;
     Ok(rows)
 }
 

@@ -114,7 +114,10 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
         JobCmd::ReleaseTargets => {
             let v = ctx.api.get("/api/release-targets", vec![]).await?;
             ctx.emit(&v, |c, v| {
-                let items = v["release_targets"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+                let items = v["release_targets"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 print_table(
                     c,
                     items,
