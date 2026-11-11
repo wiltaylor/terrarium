@@ -3166,9 +3166,10 @@ output itself. It keeps the last 64 KiB for the log, and the last 4000 bytes
 of each stream for the result. The run does not belong to a turn: it goes
 on when the turn ends, and when the agent stops or restarts. The target
 stops it at its `timeout`. An ephemeral target that goes down with the
-agent ends it (`failed`, `lost`). A daemon restart loses the exec session:
-each open `process` wait then fails with `error: "lost"`, and the command
-can still run on the target. The run counts toward the 8 live exec
+agent ends it (`failed`, `lost`). A daemon restart restores host-agent
+sessions (local, Docker and VMLab), their output and terminal result, and
+reattaches their process waits. SSH and exe.dev runs instead end as
+`interrupted (ssh transport)`. The run counts toward the 8 live exec
 sessions of the agent. An `env` value `@secret:<name>[.<field>]` is a
 secret that the daemon resolves from the agent's grants at the start
 (§5.2, "Secrets in a run"): a `run` grant that names the target, or a
@@ -12913,8 +12914,11 @@ one key, the strictest applies until a cap write replaces them.
   the top of the card body. The card moves to the top of `ready` with no
   assignee, and the worker of its `by:<agent>` label gets a mail from
   `system`.
-- A daemon restart loses the running jobs: they fail (`error`) and follow
-  the same rule.
+- After a daemon restart, host-agent jobs retain their running slot and
+  resume their recorded phase. A live recipe is reattached, not killed or
+  requeued, with its exit code and output replayed. The slot's result files
+  are not wiped. SSH and exe.dev runs remain interrupted and requeued as
+  before, with reason `interrupted (ssh transport)`.
 - A host that cannot be reached is not a failure (TER-160). A job whose
   target's host agent is offline is not started and stays queued. A job
   whose target could not be reached before the recipe started (the host

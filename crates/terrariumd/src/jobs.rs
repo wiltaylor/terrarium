@@ -434,17 +434,6 @@ struct Lost {
 /// and a tick follows. A kill that fails is logged, and the job goes on
 /// anyway.
 pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
-    let bindings =
-        crate::hosts::resume::Journal::new(&state.state_dir).scan::<(String, u32)>("bound/recipe/");
-    let resumable: HashSet<_> = match bindings {
-        Ok(bindings) => bindings.into_iter().map(|(key, _)| key).collect(),
-        Err(e) => {
-            // Fail closed: a journal failure must not turn a running
-            // native recipe into a kill/requeue decision.
-            warn!("cannot read queue resume bindings: {e}");
-            return tokio::spawn(async {});
-        }
-    };
     let since = (chrono::Utc::now() - chrono::Duration::hours(DRAIN_WINDOW_HOURS))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let found = state
@@ -497,19 +486,23 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 // slot as a draining job (TER-123 review 2, major 1).
                 let live = LiveRun::new(&job.id);
                 if running && !other_host
-                    && resumable.contains(&format!("bound/{}", recipe_resume_key(&job)))
+                    && def.as_ref().is_some_and(|d|
+                        matches!(d.kind, TargetKind::Host | TargetKind::Docker | TargetKind::Vmlab))
                 {
                     resumed.push((job, delivery, live));
                     continue;
                 }
                 let dir = job.slot.map(|s| slot_dir(&delivery, &job.project, s));
+                let why = def.as_ref().filter(|d|
+                    matches!(d.kind, TargetKind::Ssh | TargetKind::Exedev))
+                    .map(|_| "interrupted (ssh transport)".to_owned());
                 out.push(Lost {
                     job,
                     running,
                     def,
                     live,
                     other_host,
-                    why: None,
+                    why,
                     red: None,
                     dir,
                 });
@@ -2083,6 +2076,12 @@ async fn run_inner(
             job.project
         )));
     }
+    if !matches!(row.def.kind, TargetKind::Ssh | TargetKind::Exedev) {
+        let host = crate::executor::host_of(&row.def)?;
+        if !state.executor.hosts.wait_online(host).await {
+            return Err(ApiError::conflict("host did not reconnect within the resume grace"));
+        }
+    }
     let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
     let slot = job
         .slot
@@ -2540,6 +2539,7 @@ impl StepCtx<'_> {
 }
 
 /// What the daemon's prepare step gave.
+#[derive(serde::Serialize, serde::Deserialize)]
 enum Prepared {
     /// The commit to test, in the bundle; the batch with its conflicts
     /// marked.
@@ -3053,8 +3053,17 @@ async fn steps(
     }
     x.at(STEP_PREPARE);
     let guard = Arc::new(guard);
-    let mut prepared = None;
+    let prepare_key = format!("prepare/{}/{}", job.id, job.attempt);
+    let cached = journal.load::<Prepared>(&prepare_key)?;
+    let mut prepared = if let Some(Prepared::Ready { head, batch, base }) = cached {
+        let bundle = x.bundle.clone();
+        let kind = job.kind;
+        Some(x.daemon(move |r| bundle_ready(r, kind, &bundle, head, batch, base)).await?)
+    } else {
+        None
+    };
     for attempt in 0..2 {
+        if prepared.is_some() { break; }
         let (j, bundle, prepare_guard) = (job.clone(), x.bundle.clone(), guard.clone());
         let (result, damaged) = x
             .daemon(move |r| {
@@ -3087,8 +3096,12 @@ async fn steps(
         x.lifetime = Some(Arc::new(lifetime));
     }
     drop(guard);
+    let prepared = prepared.ok_or_else(|| ApiError::internal("the prepare loop did not run"))?;
+    if !matches!(x.def.kind, TargetKind::Ssh | TargetKind::Exedev) {
+        journal.save(&prepare_key, &prepared)?;
+    }
     let (head, batch, base) =
-        match prepared.ok_or_else(|| ApiError::internal("the prepare loop did not run"))? {
+        match prepared {
             Prepared::Ready { head, batch, base } => (head, batch, base),
             Prepared::End(end) => return Ok(end),
         };
@@ -3124,12 +3137,29 @@ async fn steps(
     } else {
         ""
     };
-    let receive = x.plain_cmd(
+    let mut receive = x.plain_cmd(
         RECEIVE_SCRIPT,
         &[x.dir, &head, job.kind.as_str(), &base, &tree, wipe],
     );
+    let receive_key = format!("receive/{}/{}", job.id, job.attempt);
+    receive.resume_key = Some(receive_key.clone());
     x.at(STEP_RECEIVE);
-    let c = x.run(&receive, STEP_MAX, Some(data)).await?;
+    // Input has no replay offset in the host protocol. Finish any old
+    // receive with EOF before retrying an incomplete bundle, never wipe
+    // the slot while that receive still holds it.
+    let old = journal.load::<(String, u32)>(&format!("bound/{receive_key}"))?;
+    let previous = if let Some((host, id)) = old {
+        let session = x.state.executor.hosts.reattach(&host, id)
+            .ok_or_else(|| ApiError::internal("the saved receive has no replay channel"))?;
+        let run = crate::executor::pump_host(session);
+        set_control(&job.id, Some(run.ctl.clone()));
+        let _ = run.ctl.send(Control::Eof);
+        Some(run.collect(STEP_MAX).await)
+    } else { None };
+    let c = match previous {
+        Some(c) if result_line(&c.stdout).get("outcome").map(String::as_str) == Some("ok") => c,
+        _ => x.run(&receive, STEP_MAX, Some(data)).await?,
+    };
     let received = result_line(&c.stdout).get("outcome").map(String::as_str) == Some("ok");
     if received && x.wipe {
         // The slot is new: the mark of the lost job goes (finding 2).

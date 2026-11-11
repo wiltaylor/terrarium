@@ -671,7 +671,7 @@ pub fn container_name(def: &TargetDef) -> String {
         .unwrap_or_else(|| format!("terrarium-{}", def.name))
 }
 
-fn host_of(def: &TargetDef) -> ApiResult<&str> {
+pub(crate) fn host_of(def: &TargetDef) -> ApiResult<&str> {
     def.host
         .as_deref()
         .ok_or_else(|| ApiError::invalid(format!("target `{}` names no host agent", def.name)))

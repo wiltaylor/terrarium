@@ -279,6 +279,7 @@ pub struct HostRegistry {
     pub heartbeat: Duration,
     pub resume_grace: Duration,
     journal: OnceLock<resume::Journal>,
+    online_changed: tokio::sync::Notify,
 }
 
 impl Default for HostRegistry {
@@ -303,6 +304,7 @@ impl HostRegistry {
             heartbeat,
             resume_grace,
             journal: OnceLock::new(),
+            online_changed: tokio::sync::Notify::new(),
         }
     }
 
@@ -445,6 +447,18 @@ impl HostRegistry {
     /// Is the host connected now?
     pub fn is_online(&self, host: &str) -> bool {
         self.lock().get(host).is_some_and(|e| e.conn.is_some())
+    }
+
+    pub async fn wait_online(&self, host: &str) -> bool {
+        tokio::time::timeout(self.resume_grace, async {
+            loop {
+                let changed = self.online_changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.is_online(host) { return; }
+                changed.await;
+            }
+        }).await.is_ok()
     }
 
     /// The live state of a host.
@@ -687,6 +701,7 @@ impl HostRegistry {
             e.conn = old;
             return Err(error);
         }
+        self.online_changed.notify_waiters();
         Ok((
             Welcome {
                 host_id: row.id.clone(),
