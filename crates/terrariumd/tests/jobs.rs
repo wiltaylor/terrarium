@@ -69,7 +69,12 @@ async fn legacy_log_listing_requires_explicit_operator_confirmation() {
             403
         );
     }
-    let listing = lab.td.post(endpoint, json!({"target":"p-box"})).await.ok();
+    let listing = lab
+        .td
+        .post(endpoint, json!({"target":"p-box"}))
+        .await
+        .ok()
+        .clone();
     assert_eq!(listing["total"], 2, "{listing}");
     assert!(root.join(format!("{keep}-1.log")).exists());
     std::fs::write(
@@ -84,7 +89,8 @@ async fn legacy_log_listing_requires_explicit_operator_confirmation() {
             json!({"target":"p-box","confirm":listing["digest"]}),
         )
         .await
-        .ok();
+        .ok()
+        .clone();
     assert_eq!(confirmed["removed"], 1, "{confirmed}");
     assert_eq!(confirmed["changed"], 1, "{confirmed}");
     assert!(!root.join(format!("{keep}-1.log")).exists());
@@ -106,7 +112,12 @@ async fn legacy_log_listing_requires_explicit_operator_confirmation() {
             .status,
         409
     );
-    let listing = lab.td.post(endpoint, json!({"target":"p-box"})).await.ok();
+    let listing = lab
+        .td
+        .post(endpoint, json!({"target":"p-box"}))
+        .await
+        .ok()
+        .clone();
     let digest = listing["digest"].as_str().unwrap().to_owned();
     state
         .db
