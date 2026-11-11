@@ -4208,17 +4208,27 @@ async fn target_edit_patches_only_the_flags_given() {
             true,
             &["admin", "target", "edit", "box", flag],
             vec![(200, json!({"name": "box"}))],
-            vec![(Patch, "/api/targets/box", vec![], Some(json!({"sync_workspace": value})))],
-        ).await;
+            vec![(
+                Patch,
+                "/api/targets/box",
+                vec![],
+                Some(json!({"sync_workspace": value})),
+            )],
+        )
+        .await;
         for json in [false, true] {
             let out = ok(
                 json,
                 &["targets", "show", "box"],
                 vec![(200, json!({"name": "box", "sync_workspace": value}))],
                 vec![req(Get, "/api/targets/box")],
-            ).await;
+            )
+            .await;
             if json {
-                assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["sync_workspace"], value);
+                assert_eq!(
+                    serde_json::from_str::<Value>(&out).unwrap()["sync_workspace"],
+                    value
+                );
             } else {
                 assert!(out.contains("sync_workspace:"), "{out}");
                 assert!(out.contains(&value.to_string()), "{out}");
@@ -4323,7 +4333,12 @@ async fn target_edit_patches_only_the_flags_given() {
     for bad in [
         vec!["admin", "target", "edit", "t", "--keep", "--no-keep"],
         vec![
-            "admin", "target", "edit", "t", "--sync-workspace", "--no-sync-workspace",
+            "admin",
+            "target",
+            "edit",
+            "t",
+            "--sync-workspace",
+            "--no-sync-workspace",
         ],
         vec!["admin", "target", "edit", "t", "--ephemeral", "--permanent"],
         vec![

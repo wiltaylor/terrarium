@@ -1158,6 +1158,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_sync_updates_only_when_not_running() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        db.write("operator", |t| {
+            create(t, &def("kind='ssh'\naddress='u@h'", "sync"))?;
+            update(t, "sync", &json!({"sync_workspace": true}))?;
+            assert!(get(t, "sync")?.def.sync_workspace);
+            set_state(t, "sync", "running", None)?;
+            assert!(update(t, "sync", &json!({"sync_workspace": false})).is_err());
+            assert!(get(t, "sync")?.def.sync_workspace);
+            set_state(t, "sync", "stopped", None)?;
+            update(t, "sync", &json!({"sync_workspace": false}))?;
+            assert!(!get(t, "sync")?.def.sync_workspace);
+            set_state(t, "sync", "running", None)?;
+            assert!(update(t, "sync", &json!({"sync_workspace": true})).is_err());
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn root_plans_follow_target_identity_and_removal() {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&mut conn).unwrap();

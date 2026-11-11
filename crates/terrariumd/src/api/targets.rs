@@ -271,6 +271,22 @@ fn serialize_target_definition<S: serde::Serializer>(
     value.serialize(serializer)
 }
 
+#[test]
+fn target_view_definition_exposes_workspace_sync() {
+    #[derive(Serialize)]
+    struct View {
+        #[serde(flatten, serialize_with = "serialize_target_definition")]
+        def: TargetDef,
+    }
+    for enabled in [false, true] {
+        let mut def: TargetDef = toml::from_str("kind='ssh'\naddress='u@h'").unwrap();
+        def.sync_workspace = enabled;
+        let value = serde_json::to_value(View { def }).unwrap();
+        assert_eq!(value["sync_workspace"], enabled);
+        assert_eq!(value.as_object().unwrap().keys().filter(|k| *k == "sync_workspace").count(), 1);
+    }
+}
+
 /// The `limits_info` of a target view.
 #[derive(Debug, Clone, Serialize)]
 pub struct LimitsInfo {
