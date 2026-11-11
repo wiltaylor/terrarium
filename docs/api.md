@@ -12493,6 +12493,13 @@ The deny list (`403 link_forbidden`):
   rollback, drain, resume).
 - The config repo push (§25): `POST /api/config/push`,
   `POST /api/config/sync`, and the writes of `/api/config/remote`.
+- Executable automation, which runs later as `system`, its owner, or the
+  project inbox, outside the link's checks: `POST /api/schedules`,
+  `PATCH /api/schedules/{id}`, `.../run`, `.../enable`, `.../test`, and
+  `.../deliveries/{d}/redeliver`; the writes of `/api/projects/{name}/rules`
+  (`PUT`, `DELETE`), `.../rules/migrate`, and `.../rules/{rule}/enable` and
+  `/disable`. Reads, `DELETE /api/schedules/{id}`, `.../disable`, and the
+  rule `check`, `dry-run`, and `lint` stay open.
 - Any path outside `/api` (`/install/...`, `/hosts/connect`, `/a/...`).
 
 A link also may not reach the denied routes through a sysadmin agent
@@ -12500,8 +12507,10 @@ A link also may not reach the denied routes through a sysadmin agent
 /api/agents/{id}/roles`, an agent create or a spawn with that role), and
 may not drive an agent that holds `sysadmin`: no turn (`.../send`), keys,
 answer, PTY attach, `PATCH /api/agents/{id}`, compact or new session with
-`then`, spawn for it, or mail to it (`POST /api/mail`, and a reply that
-would reach it). Reads, start, stop, pause, and interrupt of such an
+`then`, spawn for it, or mail to it: `POST /api/mail`, a reply
+(`/api/mail/{id}/reply`, `/api/projects/{name}/inbox/{id}/reply`), or the
+note of `POST /api/mail/threads/{thread}/resume`, when one recipient is a
+sysadmin agent. A refused reply or resume changes nothing. Reads, start, stop, pause, and interrupt of such an
 agent work.
 
 The check decodes the path, drops empty and `.` segments, and ignores case,

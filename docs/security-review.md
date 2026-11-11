@@ -1758,11 +1758,20 @@ code; the lead's security review is still to do.
   spawn), and may not drive an agent that holds `sysadmin`
   (`links::refuse_sysadmin_agent`): no turn or raw send, no keys, no
   answer, no PTY attach, no change of its prompt or settings (`PATCH`), no
-  `then` turn of a compact or new session, no spawn for it, and no mail or
-  reply to it (`api::mail::refuse_link_to_sysadmin`; a refused reply rolls
-  back). Each is `403 link_forbidden`. Tests:
-  `a_link_cannot_grant_or_drive_sysadmin`,
-  `a_link_cannot_mail_a_sysadmin_agent`.
+  `then` turn of a compact or new session, no spawn for it, and no mail to
+  it: a send, a reply, a project inbox reply, or the note of a thread resume
+  (`api::mail::refuse_link_to_sysadmin`, checked on every recipient in the
+  same transaction, so a refused reply or resume changes nothing). Each is
+  `403 link_forbidden`. Tests: `a_link_cannot_grant_or_drive_sysadmin`,
+  `a_link_cannot_mail_a_sysadmin_agent`,
+  `a_link_cannot_reach_a_sysadmin_by_inbox_reply_or_resume_note`.
+- **No executable automation from a link** (review round 3, F6). A schedule
+  or a board rule runs later as `system`, as its owner, or as the project
+  inbox, in a task without the link's provenance, so its turn and mail
+  actions would pass the checks above. The deny list refuses a link the
+  writes, runs, tests, redeliveries, and enables of schedules, and the writes
+  and enables of board rules. Reads, a delete, and a disable stay open. Test:
+  `a_link_cannot_make_or_run_schedules_or_write_rules`.
 - **Read-only links** (Q2) pass `GET` and `HEAD` only, and a WebSocket only
   on an `.../events` route: no PTY, no target shell, no turn. Tests:
   `read_only_reads_and_opens_only_the_event_socket`,
@@ -1807,11 +1816,13 @@ code; the lead's security review is still to do.
   sysadmin agents, whose rights reach the denied routes, are closed to a
   link (above).
 - **Indirect input still reaches a sysadmin agent.** A link may still
-  write cards, card comments, wiki pages, and project inbox mail that a
-  sysadmin agent reads, and a schedule that a link makes mails later as its
-  own owner. The agents treat cards and pages as data, not as instructions
-  (their system prompt). A sysadmin agent that obeys such text could push
-  the config repo for the link. Not closed in code.
+  write cards, card comments, wiki pages, and mail to a project inbox that a
+  sysadmin agent reads. It may also emit events (`POST /api/events`) that
+  trigger a schedule or a rule that someone else made; that automation runs
+  its own fixed action, but a template in it can carry event text to a
+  sysadmin agent. The agents treat cards, pages, and event text as data, not
+  as instructions (their system prompt). A sysadmin agent that obeys such
+  text could push the config repo for the link. Not closed in code.
 - **Config auto-sync** (review round 1, finding 2). With
   `TERRARIUM_CONFIG_SYNC=sync`, the background loop of this daemon commits
   and pushes the config repo as the operator. A link may change the state
