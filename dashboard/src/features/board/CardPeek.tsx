@@ -1,4 +1,5 @@
 import { useInstance } from "../../instance";
+import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
 // The card side panel (GitHub #31, TER-571). A card key in text opens the card
 // over the current view: the title, the column, the description, and the
 // comments, with a link to the card on its board. The Layout mounts it once.
@@ -19,6 +20,7 @@ export function CardPeek() {
         const [card] = createResource(() => t.id, (id) => api.cards.get(id));
         // `card.latest` throws the load error again: read it only without an error (TER-598).
         const loaded = () => (card.error ? undefined : card.latest);
+        const read = useReadBoundary("card", () => t.id, () => loaded()?.comments.map((c) => c.created_at) ?? []);
         return (
           <Drawer
             title={
@@ -51,8 +53,11 @@ export function CardPeek() {
                   </div>
                   <section class="stack" style={{ gap: "8px" }}>
                     <h3 style={{ margin: 0 }}>Comments</h3>
+                    <ErrorBanner error={read.error()} />
                     <For each={c().comments} fallback={<p class="muted">No comments.</p>}>
-                      {(m) => (
+                      {(m, index) => (
+                        <>
+                        <Show when={index() === read.first()}><ReadBoundary /></Show>
                         <div class="comment">
                           <div class="small muted">
                             <strong style={{ color: "var(--text)" }}>{m.author_name ?? m.author}</strong> · {ago(m.created_at)}
@@ -61,6 +66,7 @@ export function CardPeek() {
                             <TextMarkdown text={m.body} project={c().project} />
                           </div>
                         </div>
+                        </>
                       )}
                     </For>
                   </section>

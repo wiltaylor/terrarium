@@ -1,4 +1,5 @@
 import { useInstance } from "../../instance";
+import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
 import { useParams, useSearchParams } from "@solidjs/router";
 import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
@@ -753,6 +754,7 @@ function CardDrawer(props: {
   onArchived: () => void;
 }) {
   const { api, agents } = useInstance();
+  const read = useReadBoundary("card", () => props.card.id, () => props.card.comments.map((c) => c.created_at));
   const [comment, setComment] = createSignal("");
   let commentInput: HTMLTextAreaElement | undefined;
   const [error, setError] = createSignal<unknown>(null);
@@ -970,8 +972,11 @@ function CardDrawer(props: {
 
       <section class="stack" style={{ gap: "8px" }}>
         <h3 style={{ margin: 0 }}>Comments</h3>
+        <ErrorBanner error={read.error()} />
         <For each={props.card.comments} fallback={<p class="muted">No comments.</p>}>
-          {(c) => (
+          {(c, index) => (
+            <>
+            <Show when={index() === read.first()}><ReadBoundary /></Show>
             <div class="comment">
               <div class="small muted">
                 <strong style={{ color: "var(--text)" }}>{c.author_name ?? c.author}</strong> · {ago(c.created_at)}
@@ -990,6 +995,7 @@ function CardDrawer(props: {
                 <TextMarkdown text={c.body} project={props.card.project} />
               </div>
             </div>
+            </>
           )}
         </For>
         <form
