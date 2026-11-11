@@ -186,6 +186,14 @@ async fn start(opts: Opts) -> Harness {
 }
 
 async fn start_with(opts: Opts, handler: Arc<dyn RequestHandler>) -> Harness {
+    start_with_adapter(opts, handler, None).await
+}
+
+async fn start_with_adapter(
+    opts: Opts,
+    handler: Arc<dyn RequestHandler>,
+    adapter: Option<Arc<dyn Adapter>>,
+) -> Harness {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut config = RunnerConfig::new(
         AgentId::new(),
@@ -222,11 +230,13 @@ async fn start_with(opts: Opts, handler: Arc<dyn RequestHandler>) -> Harness {
     for (k, v) in opts.env {
         spec = spec.env(k, v);
     }
-    let adapter = Arc::new(FakeAdapter {
-        busy_screen: opts.busy_screen,
-        exit_pause: opts.exit_pause,
-        startup_hook: opts.startup_hook,
-        submit_pause: opts.submit_pause,
+    let adapter = adapter.unwrap_or_else(|| {
+        Arc::new(FakeAdapter {
+            busy_screen: opts.busy_screen,
+            exit_pause: opts.exit_pause,
+            startup_hook: opts.startup_hook,
+            submit_pause: opts.submit_pause,
+        })
     });
     let runner = Runner::spawn(config, adapter, spec, handler)
         .await
@@ -1098,19 +1108,47 @@ async fn busy_screen_confirms_a_turn_without_the_submit_hook() {
 /// hook comes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_waits_for_the_startup_hook() {
+    check_turn_waits_for_startup(None).await;
+}
+
+/// Exercise the real Claude hook mapping and input settings, not just the
+/// fake adapter. The fake TUI supplies the PTY and SessionStart hook.
+#[cfg(feature = "bin")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_turn_waits_for_the_startup_hook() {
+    let adapter = terrarium_adapter_claude::ClaudeAdapter::default();
+    check_turn_waits_for_startup(Some(Arc::new(adapter))).await;
+}
+
+async fn check_turn_waits_for_startup(adapter: Option<Arc<dyn Adapter>>) {
+    let claude = adapter.is_some();
     let dir = tempfile::tempdir().expect("tempdir");
     let gate = dir.path().join("startup");
-    let mut h = start(Opts {
-        env: vec![("FAKE_TUI_STARTUP_GATE", gate.display().to_string())],
-        startup_hook: true,
-        session: Some("s1"),
-        ..Opts::default()
-    })
+    let mut h = start_with_adapter(
+        Opts {
+            env: vec![
+                ("FAKE_TUI_STARTUP_GATE", gate.display().to_string()),
+                (
+                    "FAKE_TUI_CLAUDE_PROMPT",
+                    if claude { "1" } else { "0" }.into(),
+                ),
+            ],
+            startup_hook: true,
+            session: Some("s1"),
+            ..Opts::default()
+        },
+        Arc::new(NoHandler),
+        adapter,
+    )
     .await;
     let delivery = h.runner.type_turn("hello");
     // The snapshot text has no trailing spaces: the prompt reads as `>`.
     until("the prompt on the screen", || {
-        h.runner.screen().text().lines().any(|l| l == ">")
+        h.runner
+            .screen()
+            .text()
+            .lines()
+            .any(|l| l == if claude { "❯" } else { ">" })
     })
     .await;
     // The prompt is on the screen and the PTY is quiet for longer than the
