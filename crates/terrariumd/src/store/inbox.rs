@@ -567,39 +567,42 @@ fn in_project(f: &Filter, item: &InboxItem) -> bool {
     }
 }
 
-/// The questions and notices of the filter.
-fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResult<Vec<InboxItem>> {
-    let mut out = Vec::new();
-    let take = |status: Option<QuestionStatus>| -> ApiResult<Vec<Question>> {
-        questions::list_inbox(
-            conn,
-            &questions::Filter {
-                project: f.project.clone(),
-                kind: Some(kind),
-                status,
-                ..questions::Filter::default()
-            },
-        )
-    };
-    if f.status.open() {
-        out.extend(take(Some(QuestionStatus::Open))?);
-    }
-    if f.status.done() {
-        let done = match kind {
-            QuestionKind::Question | QuestionKind::Bundle | QuestionKind::ToolRun => {
-                QuestionStatus::Answered
-            }
-            QuestionKind::Notice => QuestionStatus::Acknowledged,
-        };
-        out.extend(take(Some(done))?);
-        out.extend(take(Some(QuestionStatus::Retracted))?);
-    }
-    // A question of a thread shows in its thread item, not on its own.
-    Ok(out
-        .into_iter()
-        .filter(|q| q.thread.is_none())
-        .map(question_item)
-        .collect())
+// The expression index has exactly the same order as the merged Inbox.
+// Select only keys here. Hydrate bodies after merging and truncating all kinds.
+const QUESTION_PAGE_SQL: &str = "SELECT kind || ':' || id, project, created_at,
+    status = 'open', status = 'open' AND priority = 'critical',
+    status = 'open' AND priority IN ('urgent', 'critical'), kind = 'notice'
+    FROM questions INDEXED BY questions_inbox_pages
+    WHERE thread IS NULL AND (?1 IS NULL OR project = ?1)
+      AND ((?2 AND status = 'open') OR (?3 AND
+        (status = 'retracted' OR (kind = 'notice' AND status = 'acknowledged')
+         OR (kind != 'notice' AND status = 'answered'))))
+      AND ((?4 AND kind IN ('question','bundle','tool_run')) OR (?5 AND kind = 'notice'))
+      AND (?6 IS NULL OR (status = 'open', status = 'open' AND priority = 'critical',
+        status = 'open' AND priority IN ('urgent','critical'), created_at, kind || ':' || id)
+        < (?6, ?7, ?8, ?9, ?10))
+    ORDER BY status = 'open' DESC, status = 'open' AND priority = 'critical' DESC,
+      status = 'open' AND priority IN ('urgent','critical') DESC,
+      created_at DESC, kind || ':' || id DESC LIMIT ?11";
+
+fn question_items(
+    conn: &Connection,
+    f: &Filter,
+    cursor: Option<&Cursor>,
+    limit: usize,
+) -> ApiResult<Vec<InboxItem>> {
+    let mut st = conn.prepare(QUESTION_PAGE_SQL)?;
+    Ok(st.query_map(params![
+        f.project, f.status.open(), f.status.done(), wants(f, InboxKind::Question),
+        wants(f, InboxKind::Notice), cursor.map(|c| c.0), cursor.map(|c| c.1),
+        cursor.map(|c| c.2), cursor.map(|c| c.3.as_str()), cursor.map(|c| c.4.as_str()),
+        i64::try_from(limit).unwrap_or(i64::MAX),
+    ], |r| Ok(InboxItem {
+        id: r.get(0)?, project: r.get(1)?, at: r.get(2)?, open: r.get(3)?,
+        critical: r.get(4)?, urgent: r.get(5)?,
+        kind: if r.get::<_, bool>(6)? { InboxKind::Notice } else { InboxKind::Question },
+        question: None, message: None, system: None, watch: None, thread: None,
+    }))?.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// The item of an Inbox thread: open while it waits for the operator, has
@@ -711,13 +714,8 @@ pub fn page(
         return default_page(conn, f.project.as_deref(), cursor.as_ref(), limit);
     }
     let mut items = Vec::new();
-    if wants(f, InboxKind::Question) {
-        items.extend(question_items(conn, f, QuestionKind::Question)?);
-        items.extend(question_items(conn, f, QuestionKind::Bundle)?);
-        items.extend(question_items(conn, f, QuestionKind::ToolRun)?);
-    }
-    if wants(f, InboxKind::Notice) {
-        items.extend(question_items(conn, f, QuestionKind::Notice)?);
+    if wants(f, InboxKind::Question) || wants(f, InboxKind::Notice) {
+        items.extend(question_items(conn, f, cursor.as_ref(), limit)?);
     }
     if wants(f, InboxKind::Mail) {
         let mut st = conn.prepare(
@@ -789,17 +787,31 @@ pub fn page(
     });
     items.retain(|i| cursor.as_ref().is_none_or(|c| key(i) < *c));
     items.truncate(limit);
+    for i in items.iter_mut().filter(|i| matches!(i.kind, InboxKind::Question | InboxKind::Notice)) {
+        if let Some((_, id)) = i.id.split_once(':') {
+            *i = question_item(questions::get(conn, id)?);
+        }
+    }
     if items.iter().any(|i| i.kind == InboxKind::Mail) {
         let by_thread: HashMap<String, Watch> = watches(conn)?
             .into_iter()
             .map(|w| (w.thread_id.clone(), w))
             .collect();
+        let mut missing = std::collections::HashSet::new();
         for i in items.iter_mut().filter(|i| i.kind == InboxKind::Mail) {
-            let m = mail::get(conn, &i.id[5..])?;
+            let m = match mail::get(conn, &i.id[5..]) {
+                Ok(m) => m,
+                Err(e) if e.code == crate::error::Code::NotFound => {
+                    missing.insert(i.id.clone());
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let watch = by_thread.get(&m.thread_id).cloned();
             *i = mail_item(m, i.open);
             i.watch = watch;
         }
+        items.retain(|i| !missing.contains(&i.id));
     }
     Ok(items)
 }
@@ -919,4 +931,26 @@ pub fn emit(
     }
     t.emit(draft)?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod paging_tests {
+    use super::*;
+
+    #[test]
+    fn filtered_question_page_uses_ordered_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        for project in [None, Some("p")] {
+            for (open, done) in [(true, false), (false, true), (true, true)] {
+                let plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {QUESTION_PAGE_SQL}"))
+                    .unwrap().query_map(params![project, open, done, true, true,
+                        true, false, false, "a", "question:a", 20], |r| r.get::<_, String>(3))
+                    .unwrap().collect::<Result<Vec<_>, _>>().unwrap().join(" ");
+                assert!(plan.contains("questions_inbox_pages"), "{plan}");
+                assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+            }
+        }
+    }
 }
