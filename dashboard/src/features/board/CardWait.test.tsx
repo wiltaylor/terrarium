@@ -58,6 +58,17 @@ it("keeps completion latched while showing current condition state", () => {
 it("has no wait UI for old servers or cards without waits", () => {
   expect(mount(null).textContent).toBe("");
 });
+it("shows no chip without a wait and accepts a full mutation response", () => {
+  const [wait, setWait] = createSignal<CardWait | null>(null);
+  const root = document.createElement("div"); document.body.append(root);
+  dispose = render(() => createComponent(WaitChip, { get wait() { return wait(); } }), root);
+  expect(root.textContent).toBe("");
+  setWait(fixture());
+  expect(root.textContent).toBe("waits all: 1/2");
+  expect(root.textContent).not.toContain("TER-10");
+  setWait(null);
+  expect(root.textContent).toBe("");
+});
 it("updates the chip from pending any-of to latched completion", () => {
   const [wait, setWait] = createSignal<CardWaitSummary>({ mode: "any", met: false, deps_met: 1, deps_total: 2 });
   const root = document.createElement("div"); document.body.append(root);
