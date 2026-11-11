@@ -1279,7 +1279,11 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
 
 fn spawn_job(state: Shared, job: Job, def: DeliveryDef, live_run: LiveRun) {
     let owner = state.clone();
-    let mut tasks = owner.job_queue.tasks.lock().unwrap_or_else(|p| p.into_inner());
+    let mut tasks = owner
+        .job_queue
+        .tasks
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     if owner.job_queue.stopping.load(Ordering::SeqCst) {
         return;
     }

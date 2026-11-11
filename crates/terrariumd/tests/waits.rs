@@ -1025,7 +1025,9 @@ async fn a_daemon_restart_restores_native_open_process_waits() {
     lab.listener.abort();
     lab.td.boot(None, None).await;
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
-    let (listener, _) = terrariumd::hosts::serve(state, &lab._addr.to_string()).await.unwrap();
+    let (listener, _) = terrariumd::hosts::serve(state, &lab._addr.to_string())
+        .await
+        .unwrap();
     lab.listener = listener;
     fast(&lab.td);
     let w = wait_state(&lab.td, &wid, "resolved").await;
