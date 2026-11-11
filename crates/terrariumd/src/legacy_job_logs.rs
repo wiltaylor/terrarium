@@ -1,4 +1,4 @@
-//! Explicit operator attestation for pre-ledger logs. Never called by maintenance.
+//! Explicit operator attestation for pre-ledger logs. Maintenance only prunes listings.
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -10,6 +10,15 @@ use crate::executor::{RemoteCmd, sh_quote};
 use crate::store::{jobs, targets};
 
 const PAGE: usize = 256;
+const PRUNE_SQL: &str = "DELETE FROM legacy_log_listings WHERE digest IN (SELECT digest FROM legacy_log_listings INDEXED BY legacy_log_listings_expiry WHERE expires_at < ? ORDER BY expires_at LIMIT 256)";
+
+/// Keep listings for a day after expiry, including consumed listings. No log data is touched.
+pub(crate) async fn prune(db: &crate::db::Db, now: chrono::DateTime<chrono::Utc>) -> ApiResult<usize> {
+    let cutoff = (now - chrono::Duration::days(1)).to_rfc3339();
+    db.write("system", move |tx| Ok(tx.execute(PRUNE_SQL, [cutoff])?))
+        .await
+}
+
 const PAGE_SQL: &str = "SELECT id FROM jobs INDEXED BY jobs_legacy_log_page WHERE project=? AND id>? ORDER BY id LIMIT 256";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -261,6 +270,33 @@ pub async fn confirm(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn listing_prune_is_bounded_indexed_and_preserves_live_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::open(&dir.path().join("db")).unwrap();
+        for n in 0..300 {
+            db.execute("INSERT INTO legacy_log_listings VALUES (?,'p','t','identity','2026-01-01T00:00:00+00:00','[]',?)", params![format!("old-{n}"), n % 2]).unwrap();
+        }
+        for (id, expiry, consumed) in [
+            ("live", "2026-01-04T00:00:00+00:00", 0),
+            ("recent", "2026-01-02T12:00:00+00:00", 0),
+            ("consumed", "2026-01-02T12:00:00+00:00", 1),
+            ("boundary", "2026-01-02T00:00:00+00:00", 1),
+        ] {
+            db.execute("INSERT INTO legacy_log_listings VALUES (?,'p','t','identity',?,'[]',?)", params![id, expiry, consumed]).unwrap();
+        }
+        let cutoff = "2026-01-02T00:00:00+00:00";
+        let plans = db.prepare(&format!("EXPLAIN QUERY PLAN {PRUNE_SQL}")).unwrap()
+            .query_map([cutoff], |r| r.get::<_, String>(3)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(plans.iter().any(|p| p.contains("SEARCH") && p.contains("legacy_log_listings_expiry")), "{plans:?}");
+        assert!(!plans.iter().any(|p| p.contains("SCAN legacy_log_listings") || p.contains("TEMP B-TREE")), "{plans:?}");
+        assert_eq!(db.execute(PRUNE_SQL, [cutoff]).unwrap(), 256);
+        assert_eq!(db.execute(PRUNE_SQL, [cutoff]).unwrap(), 44);
+        assert_eq!(db.execute(PRUNE_SQL, [cutoff]).unwrap(), 0);
+        assert_eq!(db.query_row("SELECT count(*) FROM legacy_log_listings", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
+    }
+
     #![allow(clippy::unwrap_used)]
     use super::*;
 
