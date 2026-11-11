@@ -117,7 +117,11 @@ rm -- "$log" && printf 'expired\n'
 /// A page is bounded before checking job states. The caller carries `after`
 /// across pages, so active or unreachable logs cannot starve later records.
 pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<serde_json::Value> {
-    let _guard = state.job_queue.log_cleanup.try_lock().map_err(|_| ApiError::conflict("job log cleanup is already running"))?;
+    let _guard = state
+        .job_queue
+        .log_cleanup
+        .try_lock()
+        .map_err(|_| ApiError::conflict("job log cleanup is already running"))?;
     let p = project.clone();
     let (logs, def, mut total) = state
         .db
