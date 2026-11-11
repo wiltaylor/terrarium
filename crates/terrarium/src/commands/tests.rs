@@ -4217,9 +4217,14 @@ async fn target_edit_patches_only_the_flags_given() {
         )
         .await;
         for json in [false, true] {
+            let args = if json {
+                vec!["--json", "targets", "show", "box"]
+            } else {
+                vec!["targets", "show", "box"]
+            };
             let out = ok(
-                json,
-                &["targets", "show", "box"],
+                true,
+                &args,
                 vec![(200, json!({"name": "box", "sync_workspace": value}))],
                 vec![req(Get, "/api/targets/box")],
             )
