@@ -118,7 +118,8 @@ const MONITOR_SQL: &str = "SELECT m.id, m.project, m.name,
 const PIPELINE_SQL: &str = "SELECT p.id, p.project, p.name,
  (SELECT status FROM pipeline_runs WHERE pipeline = p.id ORDER BY sort_at DESC, ord ASC, pk DESC LIMIT 1)
  FROM pipelines p WHERE p.id = ?1";
-const LATEST_MOVE_SQL: &str = "SELECT json_extract(payload, '$.to'), json_extract(payload, '$.comment')
+const LATEST_MOVE_SQL: &str =
+    "SELECT json_extract(payload, '$.to'), json_extract(payload, '$.comment')
  FROM events INDEXED BY events_home_card_moves WHERE card = ?1 AND kind = 'card'
  AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
  ORDER BY seq DESC LIMIT 1";
@@ -190,7 +191,8 @@ pub fn list(
                 continue;
             }
             if column == "blocked" {
-                item["blocked_reason"] = blocked_reason(conn, &id, item["column"].as_str().unwrap_or_default())?.into();
+                item["blocked_reason"] =
+                    blocked_reason(conn, &id, item["column"].as_str().unwrap_or_default())?.into();
             }
             items.push(item);
         } else {
@@ -267,14 +269,23 @@ mod tests {
     fn newest_move_lookup_is_bounded_with_long_nonmatching_history() {
         let c = conn();
         for n in 0..10_000 {
-            c.execute("INSERT INTO events(id,card,kind,payload,at) VALUES (?1,'card','card',?2,'x')",
-                params![format!("event-{n}"), json!({"change": "edited", "comment": "not a move"}).to_string()]).unwrap();
+            c.execute(
+                "INSERT INTO events(id,card,kind,payload,at) VALUES (?1,'card','card',?2,'x')",
+                params![
+                    format!("event-{n}"),
+                    json!({"change": "edited", "comment": "not a move"}).to_string()
+                ],
+            )
+            .unwrap();
         }
         // A malformed payload must not enter or break the partial index.
         c.execute("INSERT INTO events(id,card,kind,payload,at) VALUES ('bad','card','card','bad JSON','x')", []).unwrap();
         assert_eq!(blocked_reason(&c, "card", "blocked").unwrap(), None);
-        c.execute("INSERT INTO events(id,card,kind,payload,at) VALUES ('move','card','card',?1,'x')",
-            [json!({"change": "moved", "to": "ready", "comment": "old placement"}).to_string()]).unwrap();
+        c.execute(
+            "INSERT INTO events(id,card,kind,payload,at) VALUES ('move','card','card',?1,'x')",
+            [json!({"change": "moved", "to": "ready", "comment": "old placement"}).to_string()],
+        )
+        .unwrap();
         assert_eq!(blocked_reason(&c, "card", "blocked").unwrap(), None);
     }
 
@@ -282,25 +293,58 @@ mod tests {
     async fn custom_home_blocked_uses_the_newest_current_column_move() {
         let db = crate::db::Db::new(conn(), crate::events::EventHub::default());
         db.write("operator", |t| {
-            projects::create(t, &projects::NewProject { name: "alpha".into(), ..Default::default() }, projects::SOURCE_API)?;
+            projects::create(
+                t,
+                &projects::NewProject {
+                    name: "alpha".into(),
+                    ..Default::default()
+                },
+                projects::SOURCE_API,
+            )?;
             let actor = crate::actor::Actor::Operator;
-            let card = board::create_card(t, &actor, "alpha", board::NewCard {
-                title: Some("custom blocked card".into()), column: Some("ready".into()), ..Default::default()
-            })?;
-            board::move_card(t, &actor, &card.id, "blocked", None, Some("Old blocked reason"))?;
-            board::move_card(t, &actor, &card.id, "research", None, Some("Current custom reason\nDetails"))?;
+            let card = board::create_card(
+                t,
+                &actor,
+                "alpha",
+                board::NewCard {
+                    title: Some("custom blocked card".into()),
+                    column: Some("ready".into()),
+                    ..Default::default()
+                },
+            )?;
+            board::move_card(
+                t,
+                &actor,
+                &card.id,
+                "blocked",
+                None,
+                Some("Old blocked reason"),
+            )?;
+            board::move_card(
+                t,
+                &actor,
+                &card.id,
+                "research",
+                None,
+                Some("Current custom reason\nDetails"),
+            )?;
             let patch = serde_json::from_value(json!({"home_board_columns": {
                 "in_progress": [], "review": [], "accepted": [], "blocked": ["research"]
-            }})).unwrap();
+            }}))
+            .unwrap();
             projects::update(t, "alpha", &patch)?;
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         db.read(|c| {
             let page = list(c, "cards", "blocked", Some("alpha"), &Page::default())?;
             assert_eq!(page.items.len(), 1);
             assert_eq!(page.items[0]["blocked_reason"], "Current custom reason");
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
