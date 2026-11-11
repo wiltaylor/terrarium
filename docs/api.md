@@ -12789,7 +12789,8 @@ lock: the recipe runs as its child without the lock's file descriptor,
 so a process that the recipe leaves running does not keep the slot
 locked after the job. The lock needs `flock` on the target; without
 it the steps run unlocked, as before TER-448, and each step prints
-`no flock on the target: slot not locked`. The job
+`no flock on the target: slot not locked` (the recipe also states that its
+log is not tracked for retention). The job
 row has `slot` while it runs. The step checks out the commit with
 `git checkout -f` and removes every file that the commit does not track,
 ignored ones too, except `target/` at the root (`git clean -ffdx -e
@@ -12917,8 +12918,14 @@ The CLI sets these with `project delivery set --log-retention-secs N
 bytes respectively. Age is fixed when an attempt is first recorded. Changing
 the byte budget affects the next cleanup pass.
 
-`flock` is required on job targets. Without it a recipe fails before starting,
-with a retained-log lock diagnostic, rather than write an unprotected log.
+Without `flock`, recipes still run as before. Their logs have no ledger row,
+are never auto-cleaned, and job output states this in one line. Tracked logs
+use a shared directory lock and a writer-held inode lock. Log roots must be
+absolute physical paths without symlink components. Cleanup pins the recorded
+directory and verifies its device/inode and the log inode. A private quarantine
+protects a replacement pathname from deletion. Target creation identity,
+definition (including address/container/VM), and lifecycle timestamp are bound
+to ownership. Changed or recreated targets are skipped, not adopted.
 
 Automatic cleanup visits one indexed project/page per minute. Each page has
 at most 32 ledger rows. Oldest recorded attempts are removed when their age

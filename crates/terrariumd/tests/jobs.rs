@@ -27,11 +27,17 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(300);
 
+fn log_inode(path: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).unwrap();
+    format!("{}:{}",meta.dev(),meta.ino())
+}
+
 #[tokio::test]
 async fn retained_log_cleanup_is_project_scoped_and_skips_active_or_missing_targets() {
     let lab = lab(1).await;
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
-    let root = lab._dirs.path().join("retention");
+    let root = lab._dirs.path().join("jobs/p/logs");
     std::fs::create_dir_all(&root).unwrap();
     for name in ["done-1", "done-2", "active", "missing", "legacy", "other"] {
         std::fs::write(root.join(name), "retained output").unwrap();
@@ -49,7 +55,8 @@ async fn retained_log_cleanup_is_project_scoped_and_skips_active_or_missing_targ
             ("Lmissing",1,"absent-target","missing","p"),
             ("Lother",1,"p-box","other","other"),
         ] {
-            t.execute("INSERT INTO job_logs(project,job,attempt,target,path,written_at,expires_at,bytes) VALUES (?,?,?,?,?,'2000-01-01','2000-01-02',15)",rusqlite::params![project,job,attempt,target,base.join(name).to_str().unwrap()])?;
+            let identity = terrariumd::store::targets::find(t,target)?.map(|r|terrariumd::job_logs::target_identity(&r)).unwrap_or_default();
+            t.execute("INSERT INTO job_logs(project,job,attempt,target,path,written_at,expires_at,bytes,root,root_identity,file_identity,target_identity) VALUES (?,?,?,?,?,'2000-01-01','2000-01-02',15,?,?,?,?)",rusqlite::params![project,job,attempt,target,base.join(name).to_str().unwrap(),base.to_str().unwrap(),log_inode(&base),log_inode(&base.join(name)),identity])?;
         }
         Ok(())
     }).await.unwrap();
@@ -127,6 +134,51 @@ async fn retained_log_recipe_records_size_and_budget_cleanup_expires_it() {
     assert!(!file.exists());
     let shown = lab.td.get(&path).await;
     assert_eq!(shown.ok()["logs"][0]["expired"], true);
+}
+
+#[tokio::test]
+async fn retained_log_target_edits_recreation_and_unlocked_output_are_not_adopted() {
+    use terrariumd::{job_logs,store::{jobs,targets}};
+    let lab=lab(1).await;
+    set_recipe(&lab,"printf owned").await;
+    let head=lab.branch("log-identity","next",&[("OK","yes\n")]);
+    let result=validate_card(&lab,"log-identity",&head).await;
+    assert_eq!(result["state"],"passed","{result}");
+    let id=result["id"].as_str().unwrap().to_owned();
+    let state=lab.td.daemon.as_ref().unwrap().state.clone();
+    let jid=id.clone();
+    let (job,original,delivery,log)=state.db.read(move |c| {
+        Ok((jobs::get(c,&jid)?, targets::get(c,"p-box")?,jobs::delivery(c,"p")?,job_logs::for_job(c,&jid)?[0].clone()))
+    }).await.unwrap();
+    state.db.write("system",|t| {
+        let mut def=jobs::delivery(t,"p")?;
+        def.log_retention_bytes=Some(0);
+        jobs::set_delivery(t,"p",&def)?;
+        // Rebind a routing field, even when the target retains its project/name.
+        targets::update(t,"p-box",&json!({"address":"replacement.invalid"}))?;
+        Ok(())
+    }).await.unwrap();
+    let edited=lab.td.post("/api/projects/p/jobs/cleanup",json!({})).await;
+    assert_eq!(edited.ok()["skipped"],1,"{}",edited.body);
+    assert!(Path::new(&log.path).exists());
+    let def=original.def.clone();
+    state.db.write("system",move |t| {
+        targets::delete(t,"p-box")?;
+        targets::create(t,&def)?;
+        Ok(())
+    }).await.unwrap();
+    let recreated=lab.td.post("/api/projects/p/jobs/cleanup",json!({})).await;
+    assert_eq!(recreated.ok()["skipped"],1,"{}",recreated.body);
+    assert!(Path::new(&log.path).exists());
+    // The runner revokes old ownership before a lost attempt rewrites output.
+    let def=state.db.read(|c|Ok(targets::get(c,"p-box")?.def)).await.unwrap();
+    let identity=job_logs::begin(&state,&def,&job).await.unwrap().unwrap();
+    job_logs::record_output(&state,&job,&delivery,&log.path,&identity,b"no flock on the target: slot not locked; log not tracked for retention\n").await.unwrap();
+    let jid=id.clone();
+    assert!(state.db.read(move |c|job_logs::for_job(c,&jid)).await.unwrap().is_empty());
+    let untracked=lab.td.post("/api/projects/p/jobs/cleanup",json!({})).await;
+    assert_eq!(untracked.ok()["scanned"],0);
+    assert!(Path::new(&log.path).exists());
 }
 
 #[tokio::test]

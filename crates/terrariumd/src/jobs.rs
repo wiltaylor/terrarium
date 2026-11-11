@@ -3200,7 +3200,7 @@ async fn steps(
         ..RemoteCmd::default()
     };
     x.at(STEP_RECIPE);
-    crate::job_logs::record(x.state, job, delivery, &log).await?;
+    let log_target = if job.kind == JobKind::Release { None } else { crate::job_logs::begin(x.state, x.def, job).await? };
     // An error here is a recipe that did not start: no session.
     if killed(&job.id) {
         return Err(ApiError::conflict("the job was cancelled"));
@@ -3210,6 +3210,9 @@ async fn steps(
         ..recipe_cmd
     };
     let c = step_redacted(x.state, &job.id, x.def, &recipe_cmd, RECIPE_MAX, None, &own).await?;
+    if let Some(identity) = log_target {
+        crate::job_logs::record_output(x.state, job, delivery, &log, &identity, &c.stdout).await?;
+    }
     if let Some(tunnel) = tunnel {
         tunnel.close().await;
     }
@@ -3841,14 +3844,39 @@ fn logged_recipe(recipe: String, log: &str) -> String {
         r#"log={log}
 mkdir -p -- "$(dirname -- "$log")" || exit 125
 [ ! -L "$log" ] || exit 125
-command -v flock >/dev/null 2>&1 || {{ echo "no flock on the target: retained log cannot be locked"; exit 125; }}
-(umask 077 && : >> "$log") || exit 125
-exec 9>>"$log" || exit 125
-flock -n 9 || exit 125
-: > "$log" || exit 125
+if ! command -v flock >/dev/null 2>&1; then
+  echo "no flock on the target: slot not locked; log not tracked for retention"
+  (umask 077 && : > "$log") || exit 125
+  exec sh -c {recipe} > "$log" 2>&1
+fi
+root=${{log%/*}}
+name=${{log##*/}}
+old_pwd=$(pwd -P)
+{enter_root}
+enter_root || exit 125
+[ ! -L .retention.lock ] || exit 125
+exec 7>>.retention.lock || exit 125
+flock 7 || exit 125
+opened=
+for try in 1 2 3; do
+  [ ! -L "$name" ] || exit 125
+  (umask 077 && : >> "$name") || exit 125
+  exec 9>>"$name" || exit 125
+  flock -n 9 || exit 125
+  if [ "$name" -ef /proc/self/fd/9 ] && [ ! -L "$name" ]; then opened=yes; break; fi
+  exec 9>&-
+done
+[ "$opened" = yes ] || exit 125
+root_identity=$(stat -c '%d:%i' .) || exit 125
+file_identity=$(stat -Lc '%d:%i' /proc/self/fd/9) || exit 125
+# Truncate and redirect through the locked inode, never reopen its pathname.
+: > /proc/self/fd/9 || exit 125
+printf 'TERRARIUM_LOG_TRACKED %s %s\n' "$root_identity" "$file_identity"
+exec 7>&-
+cd -- "$old_pwd" || exit 125
 lock=${{TERRARIUM_SLOT_LOCK:-}}
 if [ -z "$lock" ]; then
-  exec sh -c {recipe} > "$log" 2>&1
+  exec sh -c {recipe} >&9 2>&1
 fi
 exec 8>>"$lock" || {{ echo "cannot open the slot lock $lock"; exit 125; }}
 flock -n 8 || {{
@@ -3865,11 +3893,12 @@ if [ -n "${{TERRARIUM_HEAD:-}}" ]; then
   fi
 fi
 trap : TERM INT HUP
-sh -c {recipe} > "$log" 2>&1 8>&-
+sh -c {recipe} >&9 2>&1 8>&-
 exit $?
 "#,
         log = sh_quote(log),
         recipe = sh_quote(&recipe),
+        enter_root = crate::job_logs::ENTER_ROOT,
     )
 }
 
@@ -5188,7 +5217,7 @@ mod tests {
         }
         let cleanup = || {
             recipe_sh()
-                .args(["-c", &crate::job_logs::remove_script(path)])
+                .args(["-c", &crate::job_logs::test_remove_script(&log)])
                 .output()
                 .unwrap()
         };
@@ -5875,10 +5904,10 @@ mod tests {
         assert!(free, "a child of the recipe holds the slot lock");
     }
 
-    /// Retained logs require a writer lock. Without flock, fail closed
-    /// before starting the recipe rather than create an unprotected log.
+    /// Without flock, preserve unlocked execution but never claim ownership
+    /// of a log whose writer cannot exclude retention cleanup.
     #[test]
-    fn without_flock_the_recipe_refuses_an_unprotected_log() {
+    fn without_flock_the_recipe_says_the_slot_is_not_locked() {
         let tmp = tempfile::tempdir().unwrap();
         // A PATH with the tools of the wrapper, but no flock.
         let bin = tmp.path().join("bin");
@@ -5906,13 +5935,14 @@ mod tests {
             .env("TERRARIUM_SLOT_LOCK", &lock)
             .output()
             .unwrap();
-        assert_eq!(out.status.code(), Some(125), "{}", shown(&out));
+        assert!(out.status.success(), "{}", shown(&out));
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(
-            text.contains("no flock on the target: retained log cannot be locked"),
+            text.contains("no flock on the target: slot not locked; log not tracked for retention"),
             "{text}"
         );
-        assert!(!log.exists(), "no recipe output or unlocked log is created");
+        assert!(!text.contains("TERRARIUM_LOG_TRACKED"));
+        assert_eq!(std::fs::read_to_string(&log).unwrap(),"ran\n");
     }
 
     #[test]
