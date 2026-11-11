@@ -42,6 +42,7 @@ pub mod jobs;
 pub mod leases;
 pub mod lifecycle;
 pub mod links;
+pub mod remotes;
 pub mod login_session;
 pub mod models;
 pub mod monitors;
@@ -336,6 +337,7 @@ async fn start_with_usage_and_executor(
         git_proxy: Arc::default(),
         job_queue: Arc::default(),
         links: Arc::default(),
+        remotes: Arc::default(),
     });
     // The instance ID of the links (TER-61): made at the first start.
     match state.links.instance_id(&state.state_dir) {

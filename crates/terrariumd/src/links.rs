@@ -135,6 +135,8 @@ pub fn denied(
         }
     }
     match rest {
+        // A link must never acquire or drive another home's link keys.
+        ["remotes", ..] => Some("the remotes of this daemon"),
         // A link cannot make another link; it may only end itself.
         ["links", "self"] if *method == Method::DELETE => None,
         ["links", ..] => Some("the links of this daemon"),

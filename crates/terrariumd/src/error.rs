@@ -13,6 +13,10 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Code {
+    /// The remote connection failed without exposing upstream credentials.
+    RemoteUnreachable,
+    /// The endpoint no longer identifies the paired daemon.
+    RemoteMismatch,
     /// The request is malformed: bad JSON, a bad query, a bad ID.
     BadRequest,
     /// No bearer token, a wrong token, or an unknown agent header.
@@ -70,6 +74,7 @@ pub enum Code {
 impl Code {
     pub fn status(self) -> StatusCode {
         match self {
+            Self::RemoteUnreachable | Self::RemoteMismatch => StatusCode::BAD_GATEWAY,
             Self::BadRequest => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden | Self::LinkForbidden => StatusCode::FORBIDDEN,

@@ -101,6 +101,7 @@ chrono-tz.workspace = true
 # The TLS host listener (TERRARIUM_HOST_TLS_CERT, docs/host-protocol.md).
 rustls.workspace = true
 tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
 
 # The rule script child (TER-545): a seccomp filter after its rlimits.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -115,7 +116,6 @@ semver.workspace = true
 toml.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
-tokio-tungstenite.workspace = true
 tempfile.workspace = true
 # Key generation in the `ssh_agent` tests.
 rand.workspace = true

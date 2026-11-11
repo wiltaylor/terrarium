@@ -18,6 +18,7 @@ mod inbox;
 pub mod install;
 pub(crate) mod jobs;
 mod links;
+mod remotes;
 mod longpoll;
 pub(crate) mod mail;
 mod memory;
@@ -175,6 +176,7 @@ pub struct AppState {
     /// The link keys: the revocation signals, the use throttle, and the
     /// instance ID (`crate::links`, TER-61).
     pub links: Arc<crate::links::Runtime>,
+    pub remotes: Arc<crate::remotes::Runtime>,
 }
 
 impl AppState {
@@ -345,6 +347,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(skills::routes())
         .merge(system_prompts::routes())
         .merge(links::routes())
+        .merge(remotes::routes())
         .route(
             "/session",
             get(session::current)
@@ -1184,6 +1187,7 @@ mod tests {
             git_proxy: Arc::default(),
             job_queue: Arc::default(),
             links: Arc::default(),
+            remotes: Arc::default(),
         })
     }
 
