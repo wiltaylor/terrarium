@@ -34,12 +34,20 @@ async fn an_identical_user_pack_copy_keeps_the_user_cap() {
     for project in ["builtin", "copied", "own"] {
         td.project(project).await;
         if project != "own" {
-            td.patch(&format!("/api/projects/{project}"), json!({"board_flow":"rules"})).await.ok();
+            td.patch(
+                &format!("/api/projects/{project}"),
+                json!({"board_flow":"rules"}),
+            )
+            .await
+            .ok();
         }
         if project != "builtin" {
             put_rules(&td, project, terrarium_core::rules_file::DEFAULT_PACK).await;
         }
-        members.push((project.to_owned(), new_card(&td, project, json!({"title":"busy", "column":"review"})).await));
+        members.push((
+            project.to_owned(),
+            new_card(&td, project, json!({"title":"busy", "column":"review"})).await,
+        ));
     }
     settle(&td).await;
     let db = state(&td).db.clone();
@@ -48,10 +56,25 @@ async fn an_identical_user_pack_copy_keeps_the_user_cap() {
     let mut cache = rules_engine::Cache::default();
     let loaded = rules_engine::load(&db, &mut cache).await.unwrap();
     let builtin = loaded.iter().find(|p| p.project == "builtin").unwrap();
-    let pack_rule = builtin.set.rules.iter().find(|r| r.name == "merge-queued").unwrap();
+    let pack_rule = builtin
+        .set
+        .rules
+        .iter()
+        .find(|r| r.name == "merge-queued")
+        .unwrap();
     for pr in &loaded {
-        assert_eq!(pr.builtin_rules.contains("merge-queued"), pr.project == "builtin");
-        assert_eq!(pr.set.rules.iter().find(|r| r.name == "merge-queued").unwrap(), pack_rule);
+        assert_eq!(
+            pr.builtin_rules.contains("merge-queued"),
+            pr.project == "builtin"
+        );
+        assert_eq!(
+            pr.set
+                .rules
+                .iter()
+                .find(|r| r.name == "merge-queued")
+                .unwrap(),
+            pack_rule
+        );
     }
     // Exercise the cache hit too: source metadata must survive it.
     let loaded = rules_engine::load(&db, &mut cache).await.unwrap();
@@ -69,7 +92,9 @@ async fn an_identical_user_pack_copy_keeps_the_user_cap() {
         }
         Ok(())
     }).await.unwrap();
-    rules_engine::plan_pass(&db, loaded, chrono::Utc::now()).await.unwrap();
+    rules_engine::plan_pass(&db, loaded, chrono::Utc::now())
+        .await
+        .unwrap();
     db.read(|c| {
         for project in ["builtin", "copied", "own"] {
             let (state, reason): (String, Option<String>) = c.query_row(

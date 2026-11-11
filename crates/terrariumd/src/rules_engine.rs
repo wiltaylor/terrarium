@@ -245,10 +245,15 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                     rules_file::default_pack(),
                     &RuleSet::default(),
                 ));
-                let sources = set.rules.iter().map(|r| r.name.clone()).collect::<std::collections::HashSet<_>>();
-                cache
-                    .sets
-                    .insert(project.clone(), (hash.clone(), set.clone(), sources.clone()));
+                let sources = set
+                    .rules
+                    .iter()
+                    .map(|r| r.name.clone())
+                    .collect::<std::collections::HashSet<_>>();
+                cache.sets.insert(
+                    project.clone(),
+                    (hash.clone(), set.clone(), sources.clone()),
+                );
                 (set, sources)
             }
             None => {
@@ -293,10 +298,13 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                         RuleSet::default()
                     }
                 };
-                let sources = if rules_flow {
-                    rules_file::default_pack().rules.iter()
+                let sources: std::collections::HashSet<String> = if rules_flow {
+                    rules_file::default_pack()
+                        .rules
+                        .iter()
                         .filter(|r| !own.rules.iter().any(|user| user.name == r.name))
-                        .map(|r| r.name.clone()).collect()
+                        .map(|r| r.name.clone())
+                        .collect()
                 } else {
                     std::collections::HashSet::new()
                 };
@@ -305,9 +313,10 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                 } else {
                     own
                 });
-                cache
-                    .sets
-                    .insert(project.clone(), (hash.clone(), set.clone(), sources.clone()));
+                cache.sets.insert(
+                    project.clone(),
+                    (hash.clone(), set.clone(), sources.clone()),
+                );
                 (set, sources)
             }
         };
@@ -568,8 +577,15 @@ fn plan_events(
             continue;
         };
         for (ord, rule) in pr.set.rules.iter().enumerate() {
-            let planned = decide_with_source(t, &pr.project, rule, e, Some(&pr.updated_at), now,
-                pr.builtin_rules.contains(&rule.name))?;
+            let planned = decide_with_source(
+                t,
+                &pr.project,
+                rule,
+                e,
+                Some(&pr.updated_at),
+                now,
+                pr.builtin_rules.contains(&rule.name),
+            )?;
             for p in planned {
                 insert_run(t, pr, ord, rule, e, &p, now)?;
                 written += 1;
