@@ -67,62 +67,65 @@ struct VertexEndpoint {
 }
 
 impl VertexEndpoint {
-fn regional(settings: &CloudSettings) -> ApiResult<Self> {
-    // Do not send a newly entered key or token to a user-controlled endpoint.
-    if settings.base_url.is_some() {
-        return Err(failure(
-            "Test calls do not support a custom Vertex base URL.",
-        ));
+    fn regional(settings: &CloudSettings) -> ApiResult<Self> {
+        // Do not send a newly entered key or token to a user-controlled endpoint.
+        if settings.base_url.is_some() {
+            return Err(failure(
+                "Test calls do not support a custom Vertex base URL.",
+            ));
+        }
+        terrarium_core::cloud::check(terrarium_core::cloud::Kind::Gcp, settings)
+            .map_err(ApiError::invalid)?;
+        let region = settings.region.as_deref().unwrap_or("us-east5");
+        let host = match region {
+            "global" => "aiplatform.googleapis.com".to_owned(),
+            "us" | "eu" => format!("aiplatform.{region}.rep.googleapis.com"),
+            _ => format!("{region}-aiplatform.googleapis.com"),
+        };
+        let project = settings
+            .project_id
+            .as_deref()
+            .ok_or_else(|| failure("Set the Google Cloud project ID."))?;
+        // word_ok allows slashes in model IDs, but URL path components must not.
+        let component = |s: &str| {
+            s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.@".contains(&b))
+                && !s.is_empty()
+                && s != "."
+                && s != ".."
+        };
+        let model = settings
+            .models
+            .get("haiku")
+            .ok_or_else(|| failure("Set the haiku Vertex model ID."))?;
+        if !component(project) || !component(model) {
+            return Err(failure(
+                "Project and model IDs must be single path components.",
+            ));
+        }
+        Ok(Self {
+            token: TOKEN_URL.into(),
+            predict: format!(
+                "https://{host}/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:rawPredict"
+            ),
+        })
     }
-    terrarium_core::cloud::check(terrarium_core::cloud::Kind::Gcp, settings)
-        .map_err(ApiError::invalid)?;
-    let region = settings.region.as_deref().unwrap_or("us-east5");
-    let host = match region {
-        "global" => "aiplatform.googleapis.com".to_owned(),
-        "us" | "eu" => format!("aiplatform.{region}.rep.googleapis.com"),
-        _ => format!("{region}-aiplatform.googleapis.com"),
-    };
-    let project = settings
-        .project_id
-        .as_deref()
-        .ok_or_else(|| failure("Set the Google Cloud project ID."))?;
-    // word_ok allows slashes in model IDs, but URL path components must not.
-    let component = |s: &str| {
-        s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_.@".contains(&b))
-            && !s.is_empty()
-            && s != "."
-            && s != ".."
-    };
-    let model = settings
-        .models
-        .get("haiku")
-        .ok_or_else(|| failure("Set the haiku Vertex model ID."))?;
-    if !component(project) || !component(model) {
-        return Err(failure(
-            "Project and model IDs must be single path components.",
-        ));
-    }
-    Ok(Self { token: TOKEN_URL.into(), predict: format!(
-        "https://{host}/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:rawPredict"
-    ) })
-}
 
-#[cfg(test)]
-fn mock(url: String) -> Self {
-    Self { token: url.clone(), predict: url }
-}
+    #[cfg(test)]
+    fn mock(url: String) -> Self {
+        Self {
+            token: url.clone(),
+            predict: url,
+        }
+    }
 }
 
 pub(super) async fn test(key: &ApiKey, settings: &CloudSettings) -> ApiResult<()> {
     let endpoint = VertexEndpoint::regional(settings)?;
     let jwt = assertion(key.key.trim())?;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        invoke(&jwt, &endpoint),
-    )
-    .await
-    .map_err(|_| failure("The request timed out."))?
+    tokio::time::timeout(std::time::Duration::from_secs(20), invoke(&jwt, &endpoint))
+        .await
+        .map_err(|_| failure("The request timed out."))?
 }
 
 async fn invoke(jwt: &str, endpoint: &VertexEndpoint) -> ApiResult<()> {
@@ -234,20 +237,23 @@ mod tests {
         };
         assert!(
             VertexEndpoint::regional(&s)
-                .unwrap().predict
+                .unwrap()
+                .predict
                 .starts_with("https://aiplatform.googleapis.com/")
         );
         s.region = Some("us-east5".into());
         assert!(
             VertexEndpoint::regional(&s)
-                .unwrap().predict
+                .unwrap()
+                .predict
                 .starts_with("https://us-east5-aiplatform.googleapis.com/")
         );
         for region in ["us", "eu"] {
             s.region = Some(region.into());
             assert!(
                 VertexEndpoint::regional(&s)
-                    .unwrap().predict
+                    .unwrap()
+                    .predict
                     .starts_with(&format!("https://aiplatform.{region}.rep.googleapis.com/"))
             );
         }

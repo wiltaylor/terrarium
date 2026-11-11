@@ -29,10 +29,15 @@ async fn vertex_save_defaults_and_failed_test_leave_credentials_unchanged() {
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;
     let old = r#"{"type":"service_account","private_key":"E2E-old-vertex-key"}"#;
-    let response = td.post("/api/subscriptions/vertex-setup/api-key", json!({
-        "provider": "gcp", "key": old,
-        "cloud": {"project_id": "project-1", "models": {"opus": "custom-opus"}}
-    })).await;
+    let response = td
+        .post(
+            "/api/subscriptions/vertex-setup/api-key",
+            json!({
+                "provider": "gcp", "key": old,
+                "cloud": {"project_id": "project-1", "models": {"opus": "custom-opus"}}
+            }),
+        )
+        .await;
     let sub = response.ok();
     assert_eq!(sub["cloud"]["region"], "us-east5");
     assert_eq!(sub["cloud"]["models"]["opus"], "custom-opus");
@@ -42,7 +47,10 @@ async fn vertex_save_defaults_and_failed_test_leave_credentials_unchanged() {
     let state_dir = td.daemon.as_ref().unwrap().state.state_dir.clone();
     let path = terrariumd::login_session::key_path(&state_dir, "vertex-setup");
     let before = std::fs::read(&path).unwrap();
-    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("https://{}", listener.local_addr().unwrap());
@@ -62,13 +70,20 @@ async fn vertex_save_defaults_and_failed_test_leave_credentials_unchanged() {
         "test_connection": true, "cloud": {"project_id": "project-2"}
     })).await;
     response.err(422, "invalid");
-    assert!(response.body.to_string().contains("client_email and private_key"));
+    assert!(
+        response
+            .body
+            .to_string()
+            .contains("client_email and private_key")
+    );
     assert!(!response.body.to_string().contains("E2E-"));
     assert_eq!(std::fs::read(&path).unwrap(), before);
     let saved = td.get("/api/subscriptions/vertex-setup").await;
     assert_eq!(saved.ok()["cloud"]["project_id"], "project-1");
     assert_eq!(saved.ok()["cloud"]["models"]["opus"], "custom-opus");
-    td.get("/api/subscriptions/vertex-new").await.err(404, "not_found");
+    td.get("/api/subscriptions/vertex-new")
+        .await
+        .err(404, "not_found");
     assert!(!terrariumd::login_session::key_path(&state_dir, "vertex-new").exists());
 }
 

@@ -21,8 +21,8 @@ use crate::probes::{self, ProbeOutcome};
 use crate::store::projects::SOURCE_API;
 use crate::store::subscriptions::{self as subs, QuotaSample, Subscription};
 
-mod vertex;
 mod bedrock;
+mod vertex;
 
 #[derive(Deserialize)]
 struct KeySave {
@@ -1394,7 +1394,9 @@ async fn api_key(
         test_connection,
     } = save;
     if test_connection && !matches!(key.provider.as_str(), "bedrock" | "gcp") {
-        return Err(ApiError::invalid("test_connection is for bedrock and gcp only"));
+        return Err(ApiError::invalid(
+            "test_connection is for bedrock and gcp only",
+        ));
     }
     if key.key.trim().is_empty() {
         return Err(ApiError::invalid("the key is empty"));
@@ -1541,7 +1543,8 @@ async fn api_key(
     // Before any key or definition write. Never return an upstream response body,
     // request error, URL, signature or credential in the diagnostic.
     if test_connection {
-        let settings = cloud_settings.as_ref()
+        let settings = cloud_settings
+            .as_ref()
             .ok_or_else(|| ApiError::invalid("missing cloud settings"))?;
         match cloud_kind {
             Some(terrarium_core::cloud::Kind::Gcp) => vertex::test(&key, settings).await?,
