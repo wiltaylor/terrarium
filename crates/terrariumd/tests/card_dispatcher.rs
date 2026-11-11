@@ -360,7 +360,10 @@ async fn dispatch_candidate_query_uses_only_indexed_searches() {
         })
         .await
         .unwrap();
-    assert!(plan.iter().any(|s| s.contains("cards_dispatch_order")), "{plan:?}");
+    assert!(
+        plan.iter().any(|s| s.contains("cards_dispatch_order")),
+        "{plan:?}"
+    );
     assert!(plan.iter().all(|s| !s.contains("SCAN")), "{plan:?}");
     assert!(plan.iter().all(|s| !s.contains("TEMP B-TREE")), "{plan:?}");
     for index in ["conflict_fixes_card_pending", "conflict_fixes_pending"] {
