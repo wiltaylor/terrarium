@@ -3607,7 +3607,14 @@ mod tests {
     async fn a_link_cannot_reach_a_sysadmin_through_questions_or_threads() {
         let dir = tempfile::tempdir().unwrap();
         let s = state_at(dir.path());
-        let (sys, _) = seed_sysadmin(&s).await;
+        let (sys, dev) = seed_sysadmin(&s).await;
+        // A thread of project `p` reports to its lead.
+        s.db.write("operator", move |t| {
+            crate::store::agents::set_roles(t, &dev, "p", &[terrarium_core::Role::ProjectAdmin])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
         let (_, key) = paired(&s, false).await;
         let auth = format!("Bearer {key}");
         let h = [("authorization", auth.as_str())];
