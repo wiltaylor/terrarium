@@ -1,3 +1,4 @@
+-- Run after TER-469 rebuilds status and TER-688 adds the default index.
 -- Cover filtered Inbox candidate pages without reading question bodies.
 CREATE INDEX questions_inbox_pages ON questions(
     (status = 'open') DESC,
