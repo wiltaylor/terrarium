@@ -1338,8 +1338,6 @@ impl Inner {
                     resubmits: 0,
                 });
                 to_type = Some(text);
-                // The runner now owns any text left by this turn.
-                state.person_text = None;
             }
 
             // The mark of a person's text ends when the box of an agent
@@ -1347,7 +1345,6 @@ impl Inner {
             // from PERSON_INPUT_SLACK after the last write (TER-224).
             if let Some((wrote, empty)) = state.person_text {
                 if pending
-                    || !ready
                     || state.status == AgentStatus::Working
                     || now.duration_since(wrote) < PERSON_INPUT_SLACK
                 {
