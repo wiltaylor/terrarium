@@ -1493,7 +1493,7 @@ Claude Max (OAuth), ChatGPT Pro (Codex OAuth), GitHub Copilot Individual
 token was printed or stored, and no login or logout ran against a real
 home. The code is in `crates/terrariumd/src/probes/`; the sanitised answers
 are in `crates/terrariumd/tests/fixtures/probes/`. Run them again with
-`cargo test -p terrariumd --test subscriptions -- --ignored live_probes`
+`cargo test -p terrariumd --test it subscriptions::live_probes -- --ignored`
 (set `GH_TOKEN` for Copilot). All three endpoints are undocumented. Treat
 each as best-effort (PLAN §21).
 
@@ -2086,6 +2086,23 @@ account id with `<redacted>`. An expired Claude token (`expiresAt`) fails
 before the request, as for the probe. The daemon never refreshes a token.
 
 ### Cloud providers for Claude Code: from docs, not verified live
+
+Bedrock setup (TER-631, docs rechecked 2026-11-11): the API-key wizard
+accepts an IAM access key pair and region. It tests the haiku profile before
+saving with one paid `InvokeModel` call (`max_tokens: 1`). A failed test saves
+nothing and reports a fixed diagnostic, never the upstream body. Default US
+inference profiles are `us.anthropic.claude-opus-5-5`,
+`us.anthropic.claude-sonnet-4-6`, and
+`us.anthropic.claude-haiku-4-5-20251001-v1:0`. Override all three for another
+geography or account-specific profiles. These IDs and the env names below
+were checked against https://code.claude.com/docs/en/amazon-bedrock.
+
+Use a least-privilege IAM policy granting `bedrock:InvokeModel` and
+`bedrock:InvokeModelWithResponseStream` on the intended inference-profile
+and foundation-model ARNs, including destination regions for cross-region
+profiles. Claude Code may also need `bedrock:GetInferenceProfile` and
+`bedrock:ListInferenceProfiles` for discovery. Do not grant administrative
+AWS permissions. No live AWS account or real Claude Code turn was tested.
 
 Read on 2026-11-10 (TER-630). No cloud account was available, so every
 fact below is **from docs, not verified live**. The code is

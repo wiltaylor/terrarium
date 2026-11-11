@@ -223,6 +223,7 @@ import type {
 } from "./types";
 
 export interface Api {
+  home: import("./home").HomeApi;
   health(): Promise<Health>;
   /** `GET /api/system/version`: the daemon's build (version, git ref, build time). */
   systemVersion(): Promise<SystemVersion>;
@@ -290,7 +291,7 @@ export interface Api {
     list(): Promise<Project[]>;
     get(name: string): Promise<Project>;
     create(p: NewProject): Promise<Project>;
-    update(name: string, patch: { description?: string; card_prefix?: string }): Promise<Project>;
+    update(name: string, patch: { description?: string; card_prefix?: string; home_board_columns?: import("./home").HomeBoardColumns }): Promise<Project>;
     /** Sends `?confirm=true`. The daemon refuses a project with agents or a file project. */
     remove(name: string): Promise<void>;
     agents(name: string): Promise<Agent[]>;
@@ -1265,6 +1266,11 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       update: (project, columns) => patch(`${p(project)}/board`, { columns }),
     },
 
+    home: {
+      cards: (q) => get("/api/home/cards", { ...q }),
+      monitors: (q) => get("/api/home/monitors", { ...q }),
+      pipelines: (q) => get("/api/home/pipelines", { ...q }),
+    },
     cards: {
       list: (project, q = {}) => page(`${p(project)}/cards`, { ...q }),
       create: (project, card) => post(`${p(project)}/cards`, card),

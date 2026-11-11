@@ -124,6 +124,86 @@ async fn release_e2e_rejects_card_branches_members_and_missing_docker_config() {
     );
 }
 
+/// TER-753: the version header owns release queue and outcome comments.
+/// This does not grant workers release rights or allow card jobs on groups.
+#[tokio::test]
+async fn release_on_version_group_keeps_comments_and_permissions() {
+    use terrariumd::store::{groups, jobs};
+    let lab = lab(1).await;
+    release_client(&lab, "rel-client").await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "true", "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs"),
+                   "release_target": "rel-client", "release_recipe": "echo release-ok"}),
+        )
+        .await
+        .ok();
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let header = state
+        .db
+        .write("system", |t| {
+            groups::open(
+                t,
+                groups::Open {
+                    project: "p",
+                    rule: "version-cut",
+                    key: "version:test",
+                    title: "Version test",
+                    column: "accepted",
+                    done_when: "done",
+                    eta: None,
+                    close_after: None,
+                },
+            )?;
+            let header = groups::by_key(t, "p", "version:test")?.unwrap().id;
+            for kind in [jobs::JobKind::Validate, jobs::JobKind::Merge] {
+                let error = jobs::create(
+                    t,
+                    jobs::NewJob {
+                        project: "p".into(),
+                        card: header.clone(),
+                        kind,
+                        repo: "app".into(),
+                        branch: "main".into(),
+                        commit: None,
+                        by_agent: None,
+                        batch: Vec::new(),
+                        planned_secs: None,
+                    },
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("group cards cannot"));
+            }
+            Ok(header)
+        })
+        .await
+        .unwrap();
+    let path = format!("/api/cards/{header}/release");
+    let response = lab.td.post_as(&lab.w1, &path, json!({})).await;
+    assert_eq!(response.status, 403, "{}", response.body);
+    let main = git(&lab.origin, &["rev-parse", "main"]);
+    let response = lab
+        .td
+        .post_as(&lab.lead, &path, json!({"commit": main}))
+        .await;
+    assert_eq!(response.status, 201, "{}", response.body);
+    assert_eq!(response.body["job"]["card"], header);
+    assert_eq!(response.body["job"]["kind"], "release");
+    let job_id = response.body["job"]["id"].as_str().unwrap();
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["id"] == job_id).unwrap();
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let card = lab.card_of(&header).await;
+    let notes = comments(&card);
+    assert!(notes.contains("queued"), "{notes}");
+    assert!(notes.contains(job_id), "{notes}");
+    assert!(notes.contains("passed"), "{notes}");
+    assert_eq!(card["column"], "accepted");
+    assert_eq!(card["archived"], false);
+}
+
 /// A wait on the queue or a card that fails after [`DEADLINE`] without
 /// progress, or after two of them in all. Under merge-job load (load 39,
 /// IO pressure 40%) a queue that still moved took longer than
@@ -1590,16 +1670,31 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
     lab.settle().await;
     assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
     if flow == "rules" {
-        let g = lab
-            .td
-            .daemon
-            .as_ref()
-            .unwrap()
-            .state
-            .db
-            .read(move |c| Ok(terrariumd::store::groups::by_key(c, "p", &group_key)?.unwrap()))
-            .await
-            .unwrap();
+        // The accepted card move can precede the recipe boundary's group
+        // writes. Wait for that step to finish, not for the card or job row.
+        let deadline = Instant::now() + DEADLINE;
+        let g = loop {
+            let key = group_key.clone();
+            let g = lab
+                .td
+                .daemon
+                .as_ref()
+                .unwrap()
+                .state
+                .db
+                .read(move |c| Ok(terrariumd::store::groups::by_key(c, "p", &key)?.unwrap()))
+                .await
+                .unwrap();
+            let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
+            if recipe.state == "done" {
+                break g;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "e2e recipe boundary did not finish: {recipe:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
         let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
         assert!(
             recipe.started_at.is_some(),
