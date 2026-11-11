@@ -19,7 +19,7 @@
 // `404` a 404, `redirect` a 302 (no follow); any other URL is a 200.
 
 import type { Api } from "../client";
-import type { Agent, AgentEvent, MatchRule, Message, NewSchedule, Schedule, ScheduleAction, ScheduleRun, ScheduleSpec, SecretKind, Subscription, Target, TriggerSpec, WebhookAction, WebhookDelivery, WebhookTestResult } from "../types";
+import type { Agent, AgentEvent, DayStartSpec, MatchRule, Message, NewSchedule, Schedule, ScheduleAction, ScheduleRun, ScheduleSpec, SecretKind, Subscription, Target, TriggerSpec, WebhookAction, WebhookDelivery, WebhookTestResult } from "../types";
 import { contentTypeOf, headerNameProblem, MAX_TIMEOUT, previewRequest, sampleEvent, templateProblem, urlProblem } from "../../features/schedules/webhook";
 import { nextRuns, parseCron, validTimeZone } from "../../lib/cron";
 import { paginate } from "../../lib/paging";
@@ -59,7 +59,8 @@ export interface ScheduleMockContext {
 export function computeNext(s: Pick<Schedule, "enabled" | "spec" | "last_run">, from: number): string | null {
   if (!s.enabled) return null;
   const spec = s.spec;
-  if (spec.kind === "on" || spec.kind === "manual") return null;
+  // A day_start schedule has no time until a start plans its run; the mock detects no starts.
+  if (spec.kind === "on" || spec.kind === "manual" || spec.kind === "day_start") return null;
   if (spec.kind === "at") {
     const at = Date.parse(spec.at);
     return s.last_run || Number.isNaN(at) ? null : new Date(at).toISOString();
@@ -304,7 +305,41 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
     }
     if (spec.kind === "on") return checkOn(spec);
     if (spec.kind === "manual") return { kind: "manual" };
-    return invalid("spec.kind", `\`${String((spec as { kind?: unknown }).kind)}\` is not cron, interval, at, on, or manual`);
+    if (spec.kind === "day_start") return checkDayStart(spec);
+    return invalid("spec.kind", `\`${String((spec as { kind?: unknown }).kind)}\` is not cron, interval, at, on, manual, or day_start`);
+  };
+
+  /** The daemon's day_start check (store/schedules.rs), with its field names. */
+  const checkDayStart = (spec: DayStartSpec): ScheduleSpec => {
+    const tz = spec.tz?.trim() || "UTC";
+    if (!validTimeZone(tz)) return invalid("spec.tz", `\`${tz}\` is not an IANA time zone`);
+    const hhmm = (field: string, v: string | undefined) => {
+      if (v === undefined) return undefined;
+      if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(v.trim())) invalid(field, `\`${v}\` is not a time as HH:MM`);
+      return v.trim().padStart(5, "0");
+    };
+    const notBefore = hhmm("spec.not_before", spec.not_before);
+    const notAfter = hhmm("spec.not_after", spec.not_after);
+    if (notBefore && notAfter && notBefore > notAfter) invalid("spec.not_after", "`not_after` is before `not_before`");
+    if (spec.delay !== undefined) {
+      const sec = parseEvery(spec.delay);
+      if (sec === null) invalid("spec.delay", `\`${spec.delay}\` is not a duration such as 15m or 1h30m`);
+      else if (sec > 12 * 3600) invalid("spec.delay", `\`${spec.delay}\` is over the longest delay, 12h`);
+    }
+    const days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    const full = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+    for (const w of spec.weekdays ?? []) {
+      const k = String(w).trim().toLowerCase();
+      if (!days.includes(k) && !full.includes(k)) invalid("spec.weekdays", `\`${w}\` is not a day: use mon, tue, wed, thu, fri, sat, or sun`);
+    }
+    return {
+      kind: "day_start",
+      tz,
+      ...(notBefore ? { not_before: notBefore } : {}),
+      ...(notAfter ? { not_after: notAfter } : {}),
+      ...(spec.delay !== undefined ? { delay: spec.delay } : {}),
+      ...(spec.weekdays?.length ? { weekdays: spec.weekdays } : {}),
+    };
   };
 
   /** The daemon's `validate_on`, with its field names. */

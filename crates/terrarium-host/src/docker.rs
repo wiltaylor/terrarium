@@ -54,10 +54,11 @@ pub const CLI_DENIED_ENV_PREFIXES: &[&str] = &["DOCKER_", "SSL_", "OTEL_"];
 /// The exact names on the grant deny list that the fallback lets through:
 /// the daemon sends multi-line values under them. `TERRARIUM_GIT_TRAILERS`
 /// goes on each agent exec (terrariumd `executor.rs` `start_exec_secrets`), and
-/// `TERRARIUM_COMMIT_HOOK`, `TERRARIUM_GIT_KNOWN_HOSTS` and
-/// `TERRARIUM_GIT_SSH_KEY` go on a checkout (`checkout_env`,
-/// `checkout_on_target`). Neither the `docker` CLI nor its children read
-/// them. A grant cannot set them, but the daemon does not check the names
+/// `TERRARIUM_COMMIT_HOOK` and `TERRARIUM_GIT_KNOWN_HOSTS` go on a checkout
+/// (`checkout_on_target`). Neither the `docker` CLI nor its children read
+/// them. `TERRARIUM_GIT_SSH_KEY` is not on the list: the daemon sends the
+/// key base64-encoded on one line (`checkout_script_env`, TER-577), so it
+/// goes into the env file, and a multi-line key is refused. A grant cannot set them, but the daemon does not check the names
 /// in an agent's own exec env (`ExecBody.env`, terrariumd
 /// `api/targets.rs`), so the list is exact: any other `TERRARIUM_*` name
 /// with a multi-line value is refused (TER-541).
@@ -65,7 +66,6 @@ pub const CLI_ALLOWED_ENV: &[&str] = &[
     "TERRARIUM_GIT_TRAILERS",
     "TERRARIUM_GIT_KNOWN_HOSTS",
     "TERRARIUM_COMMIT_HOOK",
-    "TERRARIUM_GIT_SSH_KEY",
 ];
 
 /// Does `k` steer the `docker` CLI, its children, or the loader under it?
@@ -1146,6 +1146,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(args(&plan), "exec -i -e TERRARIUM_GIT_TRAILERS c1 sh -c id");
+        // TER-577: the SSH key comes on one line, so a multi-line key is
+        // refused and never reaches the CLI env.
+        assert!(steers_the_cli("TERRARIUM_GIT_SSH_KEY"));
+        assert!(
+            plan_exec(
+                &exec_req(json!({"TERRARIUM_GIT_SSH_KEY":"-----BEGIN KEY-----\nx\n"})),
+                "docker",
+            )
+            .is_err()
+        );
     }
 
     /// A fake `docker` CLI: it prints the DOCKER_* env that it runs with, the

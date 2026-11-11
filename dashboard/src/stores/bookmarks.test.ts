@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { bookmarkHref, createBookmarksStore } from "./bookmarks";
+import { ApiError } from "../api/http";
+import { bookmarkAddError, bookmarkHref, createBookmarksStore, skippedReport } from "./bookmarks";
 
 const origin = "https://terrarium.test";
 describe("bookmarks", () => {
@@ -84,5 +85,51 @@ describe("bookmarks", () => {
     await store.refresh();
     expect(JSON.parse(legacy)).toEqual([]);
     expect(store.items()).toHaveLength(1);
+  });
+  it("skips and reports a legacy bookmark that the daemon refuses, and later changes go on (TER-257)", async () => {
+    const long = "x".repeat(501);
+    let legacy = JSON.stringify([{ title: long, href: "https://long.test" }, { title: "Good", href: "https://good.test" }]);
+    let rows: { title: string; href: string }[] = [];
+    const store = createBookmarksStore({ getItem: () => legacy, setItem: (_k, v) => { legacy = v; } }, origin, {
+      list: async () => rows,
+      add: async (title, href) => {
+        if (title.length > 500) throw new ApiError(422, "A bookmark needs a title (up to 500 bytes)");
+        return rows = [...rows, { title, href }];
+      },
+      remove: async (href) => rows = rows.filter((b) => b.href !== href),
+    });
+    await store.refresh();
+    expect(store.error()).toBeNull();
+    expect(JSON.parse(legacy)).toEqual([]);
+    expect(store.items().map((b) => b.title)).toEqual(["Good"]);
+    expect(store.skipped().map((b) => b.href)).toEqual(["https://long.test/"]);
+    expect(skippedReport(store.skipped())?.message).toContain("1 old bookmark of this browser was not imported");
+    store.dismissSkipped();
+    expect(skippedReport(store.skipped())).toBeNull();
+    store.add("New", "https://new.test");
+    await store.refresh();
+    expect(store.error()).toBeNull();
+    expect(store.items().map((b) => b.title)).toEqual(["Good", "New"]);
+  });
+  it("keeps the bookmarks in this browser when the daemon forbids them, with no banner (TER-257)", async () => {
+    const values = new Map<string, string>([["terrarium.bookmarks", JSON.stringify([{ title: "Local", href: "https://local.test" }])]]);
+    const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { values.set(k, v); } };
+    let calls = 0;
+    const forbidden = async (): Promise<never> => { calls++; throw new ApiError(403, "bookmarks needs the operator"); };
+    const store = createBookmarksStore(storage, origin, { list: forbidden, add: forbidden, remove: forbidden });
+    await store.refresh();
+    expect(store.error()).toBeNull();
+    await store.refresh();
+    expect(calls).toBe(1);
+    expect(store.add("Second", "https://second.test")).toBe(true);
+    await store.refresh();
+    expect(calls).toBe(1);
+    expect(store.error()).toBeNull();
+    expect(createBookmarksStore(storage, origin).items().map((b) => b.title)).toEqual(["Local", "Second"]);
+  });
+  it("names the reason why a page cannot be pinned (TER-257)", () => {
+    expect(bookmarkAddError(" ", "/p/demo/knowledge/wiki/a", origin)).toContain("needs a title");
+    expect(bookmarkAddError("é".repeat(251), "/p/demo/knowledge/wiki/a", origin)).toContain("longer than 500 bytes");
+    expect(bookmarkAddError("Ok", "/settings", origin)).toContain("cannot be a bookmark");
   });
 });

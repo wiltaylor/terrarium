@@ -4,7 +4,7 @@
 
 import { DAYS, expandMacro, parseCron } from "./cron";
 import { duration } from "./format";
-import type { MatchRule, Schedule, ScheduleAction, ScheduleSpec, TriggerSpec } from "../api/types";
+import type { DayStartMark, DayStartSpec, MatchRule, Schedule, ScheduleAction, ScheduleSpec, TriggerSpec } from "../api/types";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -123,7 +123,44 @@ export function specWords(spec: ScheduleSpec): string {
       return `on ${spec.kinds.join(", ")}`;
     case "manual":
       return "on demand (a button)";
+    case "day_start":
+      return dayStartWords(spec);
   }
+}
+
+/** The weekdays of a `day_start` spec, Monday first, as the daemon reads them. */
+export const DAY_START_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+const dayName = (d: string) => {
+  const k = d.trim().slice(0, 3).toLowerCase();
+  return k ? k[0]!.toUpperCase() + k.slice(1) : d;
+};
+
+/** A `day_start` spec in words: "first start of the day, Mon, Fri, not before 07:30, 5 min after the start, Australia/Brisbane". */
+export function dayStartWords(spec: DayStartSpec): string {
+  const parts = ["first start of the day"];
+  const days = spec.weekdays ?? [];
+  if (days.length && days.length < 7) parts.push(days.map(dayName).join(", "));
+  if (spec.not_before && spec.not_after) parts.push(`between ${spec.not_before} and ${spec.not_after}`);
+  else if (spec.not_before) parts.push(`not before ${spec.not_before}`);
+  else if (spec.not_after) parts.push(`not after ${spec.not_after}`);
+  const sec = spec.delay ? parseEvery(spec.delay) : null;
+  // everyWords says "hour" for 1h: a delay reads "1 h after the start".
+  const delay = sec === null ? spec.delay : ({ minute: "1 min", hour: "1 h", day: "1 day" } as Record<string, string>)[everyWords(sec)] ?? everyWords(sec);
+  if (spec.delay) parts.push(`${delay} after the start`);
+  parts.push(spec.tz || "UTC");
+  return parts.join(", ");
+}
+
+const CAUSE_WORDS: Record<string, string> = {
+  daemon_start: "daemon start",
+  resume: "resume from sleep",
+  host_reconnect: "host agent reconnect",
+  day_change: "day change",
+};
+
+/** A detected start in words: "daemon start at <time>". */
+export function dayStartMarkWords(m: DayStartMark): string {
+  return `${CAUSE_WORDS[m.cause] ?? m.cause.replace(/_/g, " ")} at ${utcText(m.at)}`;
 }
 
 /** One match rule in words: "data.branch = main", "data.repo in a, b", "kind ~ ci.*". */
@@ -231,10 +268,12 @@ export function webhookHost(url: string): string {
 }
 
 /** The next run, relative: "in 14m", "due now", or why there is none. */
-export function nextRunWords(s: Pick<Schedule, "enabled" | "next_run_at" | "spec" | "last_run">, now = Date.now()): string {
+export function nextRunWords(s: Pick<Schedule, "enabled" | "next_run_at" | "spec" | "last_run"> & Pick<Partial<Schedule>, "day_start_done">, now = Date.now()): string {
   if (!s.enabled) return "disabled";
   if (s.spec.kind === "on") return "on each match";
   if (s.spec.kind === "manual") return "on demand";
+  // A day_start schedule has no time until a start plans its run (docs/api.md §19.3).
+  if (s.spec.kind === "day_start" && !s.next_run_at) return s.day_start_done ? `at the first start after ${s.day_start_done}` : "at the next start";
   if (!s.next_run_at) return s.spec.kind === "at" && s.last_run ? "done (ran once)" : "not planned";
   const ms = Date.parse(s.next_run_at) - now;
   return ms <= 0 ? "due now" : `in ${duration(ms)}`;
