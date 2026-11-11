@@ -487,10 +487,17 @@ async fn request_cross_project_card_rights_end_at_close() {
     let th = l.open(json!({"scope": "global", "template": "global:helper", "topic": "Cross-project request"})).await;
     let tid = id(&th);
     let (thread, lead) = (tid.clone(), l.p_lead.clone());
-    state(&l.td).db.write("operator", move |t| {
-        t.execute("UPDATE threads SET request = 1, report_to = ?2 WHERE id = ?1", rusqlite::params![thread, lead])?;
-        Ok(())
-    }).await.unwrap();
+    state(&l.td)
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE threads SET request = 1, report_to = ?2 WHERE id = ?1",
+                rusqlite::params![thread, lead],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let agent = th["agent"].as_str().unwrap();
     let made =
         l.td.post("/api/projects/p/cards", json!({"title": "Lead work"}))
