@@ -433,9 +433,10 @@ fn with_stop_grace(mut spec: Container, config: &Value, service: &str) -> Res<Co
     let seconds = if value.is_null() {
         DEFAULT_STOP_TIMEOUT
     } else {
-        value.as_str().and_then(stop_grace_seconds).ok_or_else(|| {
-            "invalid Compose stop grace period (values hidden)".to_owned()
-        })?
+        value
+            .as_str()
+            .and_then(stop_grace_seconds)
+            .ok_or_else(|| "invalid Compose stop grace period (values hidden)".to_owned())?
     };
     spec.spec["compose_stop_timeout"] = json!(seconds);
     Ok(spec)
@@ -741,11 +742,15 @@ impl Engine for Docker {
                     "cannot inspect destination image environment (values hidden)".to_owned()
                 })?
                 .ok_or_else(|| "destination image is missing (values hidden)".to_owned())?;
-            with_stop_grace(with_environment(
-                spec,
-                resolved_env(&config, service)?,
-                &destination["Config"],
-            ), &config, service)
+            with_stop_grace(
+                with_environment(
+                    spec,
+                    resolved_env(&config, service)?,
+                    &destination["Config"],
+                ),
+                &config,
+                service,
+            )
         })
     }
 
