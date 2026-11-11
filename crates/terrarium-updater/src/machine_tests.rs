@@ -249,6 +249,14 @@ impl Engine for Fake {
             } else {
                 argv
             };
+            if argv.get(1).is_some_and(|s| s == "required-templates-check") {
+                let failed = self.0.lock().unwrap().fail.contains("required-templates");
+                return Ok(ExecOut {
+                    code: i64::from(failed),
+                    stderr: if failed { "required daemon template global:request is missing".into() } else { String::new() },
+                    ..Default::default()
+                });
+            }
             if argv[0] == "python3" {
                 let command = &argv[2];
                 self.call(format!("hot:{command}"));
@@ -619,6 +627,17 @@ async fn unresolved_environment_stops_before_drain_backup_or_swap() {
     );
     assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
     assert!(r.fake.calls().iter().all(|c| c.starts_with("pull")));
+}
+
+#[tokio::test]
+async fn missing_required_template_stops_before_drain_and_names_it() {
+    let r = rig();
+    r.fake.fail("required-templates");
+    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    assert_eq!(run.outcome, Outcome::Failed);
+    let step = run.steps.iter().find(|s| s.name == "environment").unwrap();
+    assert!(step.detail.contains("global:request"));
+    assert!(!steps(&run).contains(&"drain".to_string()));
 }
 
 #[tokio::test]

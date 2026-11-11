@@ -309,6 +309,8 @@ pub enum RunnerModeName {
 /// Debug commands. Without one, the daemon serves.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Read-only check of the templates this daemon requires before an update.
+    RequiredTemplatesCheck,
     /// Print the full sandbox command for an agent, and exit. It writes the
     /// agent's prompt and harness files, as a start does, but starts nothing.
     SandboxDryRun {

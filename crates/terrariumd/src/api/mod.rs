@@ -1226,7 +1226,9 @@ mod tests {
         let (status, body) = get(router(state()), "/api/system/version", None).await;
         assert_eq!(status, StatusCode::OK);
         let v: VersionInfo = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v, VersionInfo::current());
+        let mut expected = VersionInfo::current();
+        expected.missing_templates = vec!["global:request".into()];
+        assert_eq!(v, expected);
         assert_eq!(v.version, terrarium_version::FULL);
         assert_eq!(v.cargo_version, terrarium_core::VERSION);
         assert_eq!(

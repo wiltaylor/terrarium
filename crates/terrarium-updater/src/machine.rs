@@ -489,7 +489,16 @@ impl Updater {
                         saved.spec = spec;
                         Ok(saved)
                     } else {
-                        self.engine.prepare(&cur, &to).await
+                        let prepared = self.engine.prepare(&cur, &to).await?;
+                        let out = self.engine.run_once(
+                            &prepared,
+                            &to,
+                            vec!["/opt/terrarium/bundled/bin/terrariumd".into(), "required-templates-check".into()],
+                        ).await?;
+                        if out.code != 0 {
+                            return Err(format!("required daemon templates pre-check: {}", out.reason()));
+                        }
+                        Ok(prepared)
                     }
                 },
                 |c| {
@@ -498,7 +507,7 @@ impl Updater {
                     }
                     let keys = c.spec["changed_env_keys"].as_array();
                     format!(
-                        "resolved deployment environment; changed keys (values hidden): {}",
+                        "required daemon templates: all present; resolved deployment environment; changed keys (values hidden): {}",
                         keys.map(|a| a
                             .iter()
                             .filter_map(|v| v.as_str())

@@ -84,6 +84,7 @@ pub mod system_prompts;
 pub mod target_roots;
 pub mod target_test;
 pub mod template_files;
+pub mod required_templates;
 pub mod test_results;
 pub mod thread_agent;
 pub mod thread_close;
