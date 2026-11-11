@@ -411,13 +411,11 @@ fn turn_hold(h: &ustore::Hold) -> TurnHold {
 /// an agent with two holds is the one that stays.
 pub async fn reapply(state: &Shared) -> ApiResult<usize> {
     let holds = state.db.read(ustore::holds).await?;
-    let (legacy, keep): (Vec<_>, Vec<_>) = holds
-        .into_iter()
-        .partition(|h| {
-            h.cause.starts_with(LEGACY_QUOTA_CAUSE)
-                || h.cause.starts_with("cloud-budget:")
-                || h.cause.starts_with("budget:project:")
-        });
+    let (legacy, keep): (Vec<_>, Vec<_>) = holds.into_iter().partition(|h| {
+        h.cause.starts_with(LEGACY_QUOTA_CAUSE)
+            || h.cause.starts_with("cloud-budget:")
+            || h.cause.starts_with("budget:project:")
+    });
     for h in &legacy {
         if let Ok(id) = h.agent.parse::<AgentId>()
             && let Err(e) = state.supervisor.hold_turns(id, Some(turn_hold(h))).await

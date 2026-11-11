@@ -1334,11 +1334,17 @@ async fn budgets_mail_without_holding_a_project() {
     .await;
     td.wait_status(&id, "idle").await;
     assert!(events_of(td, "quota.blocked").await.is_empty());
-    assert_eq!(td.get_as(&id, "/api/usage/me").await.ok()["holds"], json!([]));
+    assert_eq!(
+        td.get_as(&id, "/api/usage/me").await.ok()["holds"],
+        json!([])
+    );
     let mail = td.get("/api/mail?to=operator").await;
     assert!(mail.ok().as_array().unwrap().iter().any(|m| {
         m["subject"].as_str().unwrap().starts_with("Budget:")
-            && m["body"].as_str().unwrap().contains("Agents keep their turns.")
+            && m["body"]
+                .as_str()
+                .unwrap()
+                .contains("Agents keep their turns.")
     }));
     let levels: Vec<Value> = events_of(td, "quota.alert")
         .await
@@ -3161,9 +3167,13 @@ async fn a_used_up_cloud_budget_mails_without_holding_turns() {
     assert_eq!(alerts.len(), 1);
     assert_eq!(alerts[0]["data"]["level"], "exhausted");
     let mail = td.get("/api/mail?to=operator").await;
-    assert!(mail.ok().as_array().unwrap().iter().any(|m| {
-        m["body"].as_str().unwrap().contains("100%")
-    }));
+    assert!(
+        mail.ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| { m["body"].as_str().unwrap().contains("100%") })
+    );
     let win = td.get("/api/subscriptions/aws").await.ok().clone();
     let budget = win["windows"]
         .as_array()
