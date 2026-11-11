@@ -6,7 +6,6 @@ import { createSignal, For, Show } from "solid-js";
 import { SessionLink } from "../../components/SessionLink";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Message } from "../../api/types";
-import { ago } from "../../lib/format";
 import { ForumPost, quotePost } from "../../components/ForumPost";
 import { SafeHtml } from "../../components/SafeHtml";
 import { renderMarkdown } from "../../lib/markdown";
@@ -46,18 +45,9 @@ export function StateChips(props: { message: Message }) {
 export function MessageView(props: { message: Message; number?: number; project?: string; onQuote?: (text: string) => void }) {
   return (
     <ForumPost id={`mail-${props.message.id}`} number={props.number ?? 1} href={`/logs/mail?open=${encodeURIComponent(props.message.id)}#mail-${props.message.id}`} author={props.message.from_name} at={props.message.created_at} label="Mail" onQuote={props.onQuote ? (post) => props.onQuote?.(quotePost(props.message.body, post)) : undefined}>
-      <div class="spread small">
-        <span class="log-who">
-          <span>
-            <strong title={props.message.from}>{props.message.from_name}</strong> → <span title={props.message.to}>{props.message.to_name}</span>
-          </span>
-          <SessionLink row={props.message} />
-        </span>
-        <span class="muted" title={props.message.created_at}>
-          {ago(props.message.created_at)}
-        </span>
-      </div>
       <div class="row small" style={{ gap: "6px", "flex-wrap": "wrap" }}>
+        <span title={props.message.to}>To {props.message.to_name}</span>
+        <SessionLink row={props.message} />
         <Show when={props.message.subject}>
           <span class="muted">{props.message.subject}</span>
         </Show>
