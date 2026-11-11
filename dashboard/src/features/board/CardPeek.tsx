@@ -1,5 +1,6 @@
 import { useInstance } from "../../instance";
 import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
+import { CommentPost } from "../../components/CommentPost";
 // The card side panel (GitHub #31, TER-571). A card key in text opens the card
 // over the current view: the title, the column, the description, and the
 // comments, with a link to the card on its board. The Layout mounts it once.
@@ -8,7 +9,6 @@ import { A } from "../../instance/navigation";
 import { createResource, For, Show } from "solid-js";
 import { TextMarkdown } from "../../components/TextMarkdown";
 import { Drawer, ErrorBanner } from "../../components/ui";
-import { ago } from "../../lib/format";
 import { targetHref } from "../../lib/markdown";
 
 
@@ -58,14 +58,7 @@ export function CardPeek() {
                       {(m, index) => (
                         <>
                         <Show when={index() === read.first()}><ReadBoundary /></Show>
-                        <div class="comment">
-                          <div class="small muted">
-                            <strong style={{ color: "var(--text)" }}>{m.author_name ?? m.author}</strong> · {ago(m.created_at)}
-                          </div>
-                          <div>
-                            <TextMarkdown text={m.body} project={c().project} />
-                          </div>
-                        </div>
+                        <CommentPost comment={m} index={index()} card={c().id} project={c().project} />
                         </>
                       )}
                     </For>

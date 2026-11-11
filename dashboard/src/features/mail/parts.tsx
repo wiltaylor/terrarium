@@ -7,6 +7,9 @@ import { SessionLink } from "../../components/SessionLink";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Message } from "../../api/types";
 import { ago } from "../../lib/format";
+import { ForumPost, quotePost } from "../../components/ForumPost";
+import { SafeHtml } from "../../components/SafeHtml";
+import { renderMarkdown } from "../../lib/markdown";
 
 
 /** The delivery state of a message, as chips. The state is the recipient's; the log keeps no unread state for the operator. */
@@ -40,9 +43,9 @@ export function StateChips(props: { message: Message }) {
   );
 }
 
-export function MessageView(props: { message: Message }) {
+export function MessageView(props: { message: Message; number?: number; project?: string; onQuote?: (text: string) => void }) {
   return (
-    <div class="message">
+    <ForumPost id={`mail-${props.message.id}`} number={props.number ?? 1} href={`/logs/mail?open=${encodeURIComponent(props.message.id)}#mail-${props.message.id}`} author={props.message.from_name} at={props.message.created_at} label="Mail" onQuote={props.onQuote ? (post) => props.onQuote?.(quotePost(props.message.body, post)) : undefined}>
       <div class="spread small">
         <span class="log-who">
           <span>
@@ -60,8 +63,8 @@ export function MessageView(props: { message: Message }) {
         </Show>
         <StateChips message={props.message} />
       </div>
-      <pre>{props.message.body}</pre>
-    </div>
+      <SafeHtml class="prose" html={renderMarkdown(props.message.body, props.project ?? "")} />
+    </ForumPost>
   );
 }
 
