@@ -474,18 +474,21 @@ async fn workspace_sync_roundtrip(work_root: bool) {
             name: "worker".into(),
             project: "p".into(),
             roles: vec![terrarium_core::Role::Sysadmin],
-            policy: Default::default(),
+            policy: terrarium_core::config::Policy {
+                targets: vec!["sync".into()],
+                ..Default::default()
+            },
         });
         let command = || terrariumd::executor::RemoteCmd {
             argv: vec!["sh".into(), "-c".into(), "cat input; pwd".into()],
             cwd: Some(local.join("repo").display().to_string()),
             ..Default::default()
         };
-        assert!(
-            terrariumd::executor::start_exec(&state(&td), &actor, "sync", command())
-                .await
-                .is_err()
-        );
+        let error = terrariumd::executor::start_exec(&state(&td), &actor, "sync", command())
+            .await
+            .err()
+            .unwrap();
+        assert!(error.message.contains("cannot prepare owned target root"), "{error:?}");
         assert!(!owned.join(".terrarium-owner").exists());
         std::fs::remove_dir_all(&owned).unwrap();
         for run in [false, false, true] {
