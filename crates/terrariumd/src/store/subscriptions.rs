@@ -476,8 +476,7 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
             d.name
         )));
     }
-    if d.probe.is_some() && !(litellm && d.probe.as_deref() == Some(crate::probes::litellm::NAME))
-    {
+    if d.probe.is_some() && !(litellm && d.probe.as_deref() == Some(crate::probes::litellm::NAME)) {
         return Err(ApiError::invalid(format!(
             "subscription `{}`: a self-hosted server has no quota probe",
             d.name
