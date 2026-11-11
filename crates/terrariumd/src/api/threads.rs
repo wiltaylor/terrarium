@@ -636,9 +636,7 @@ async fn restart(
         let resolved = templates::resolve(c, project, &tp)?;
         if !reopening {
             let def = agent_template::to_def(&resolved.spec, &resolved.name, project).map_err(|e| ApiError::invalid(e.to_string()))?;
-            if !def.roles.contains(&terrarium_core::Role::Architect) {
-                return Err(ApiError::invalid("swap requires an architect template"));
-            }
+            crate::thread_agent::check_architect_template(&resolved.use_key(), &def)?;
         }
         let epoch = c.query_row("SELECT request_epoch FROM threads WHERE id = ?1", [&key], |r| r.get::<_, i64>(0))?;
         Ok((th.agent, epoch))

@@ -164,6 +164,9 @@ pub struct Handoff {
 /// A thread, as the API shows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thread {
+    /// Version of the agent replacement, carried through asynchronous spawn.
+    #[serde(default)]
+    pub request_epoch: i64,
     /// A request mediated by a request agent, rather than direct mail.
     #[serde(default)]
     pub request: bool,
@@ -311,6 +314,7 @@ fn row_named(r: &Row<'_>, mut name: impl FnMut(&str) -> String) -> rusqlite::Res
     let agent: Option<String> = r.get("agent")?;
     let report_to: Option<String> = r.get("report_to")?;
     Ok(Thread {
+        request_epoch: r.get("request_epoch")?,
         request: r.get("request")?,
         id: r.get("id")?,
         agent_end_outcome: r.get("agent_end_outcome")?,

@@ -224,7 +224,7 @@ async fn request_lead_swaps_to_architect_in_same_thread() {
     let made =
         l.td.post(
             "/api/templates",
-            json!({"name": "design", "spec": {"harness": "claude", "roles": ["architect"]}}),
+            json!({"name": "architect", "spec": {"harness": "claude", "roles": ["architect"]}}),
         )
         .await;
     assert_eq!(made.status, 201, "{}", made.body);
@@ -243,19 +243,129 @@ async fn request_lead_swaps_to_architect_in_same_thread() {
             json!({"template": "global:request", "reason": "Needs design"}),
         )
         .await;
-    assert_eq!(bad.status, 422);
+    assert_eq!(bad.status, 403);
     let swapped =
         l.td.post_as(
             &l.p_lead,
             &format!("/api/threads/{tid}/swap"),
-            json!({"template": "global:design", "reason": "Needs design"}),
+            json!({"template": "global:architect", "reason": "Needs design"}),
         )
         .await;
     assert_eq!(swapped.status, 200, "{}", swapped.body);
     assert_eq!(swapped.body["id"], tid);
     assert_ne!(swapped.body["agent"], th["agent"]);
     assert_eq!(swapped.body["request"], true);
-    assert_eq!(swapped.body["template"], "global:design");
+    assert_eq!(swapped.body["template"], "global:architect");
+    let agent = swapped.body["agent"].as_str().unwrap();
+    assert_eq!(l.agent(agent).await["roles"], json!(["architect"]));
+    assert_eq!(l.spawn_row(agent).await["owner"], l.p_lead);
+}
+
+#[tokio::test]
+async fn request_swap_refuses_project_and_excess_role_templates() {
+    let l = lab().await;
+    let th = request(&l).await;
+    let tid = id(&th);
+    for body in [
+        json!({"name": "architect", "project": "p", "spec": {"harness": "claude", "roles": ["architect", "sysadmin"]}}),
+        json!({"name": "unapproved", "spec": {"harness": "claude", "roles": ["architect"]}}),
+        json!({"name": "architect", "spec": {"harness": "claude", "roles": ["architect", "sysadmin"]}}),
+    ] {
+        assert_eq!(l.td.post("/api/templates", body).await.status, 201);
+    }
+    for template in ["p/architect", "global:unapproved", "global:architect"] {
+        let r =
+            l.td.post_as(
+                &l.p_lead,
+                &format!("/api/threads/{tid}/swap"),
+                json!({"template": template, "reason": "Design"}),
+            )
+            .await;
+        assert_eq!(r.status, 403, "{template}: {}", r.body);
+        assert_eq!(l.thread(&tid).await["agent"], th["agent"]);
+    }
+}
+
+#[tokio::test]
+async fn request_obsolete_swap_cannot_spawn_or_attach_after_later_restart() {
+    let l = lab().await;
+    let th = request(&l).await;
+    let tid = id(&th);
+    l.td.post(
+        "/api/templates",
+        json!({"name": "architect", "spec": {"harness": "claude", "roles": ["architect"]}}),
+    )
+    .await
+    .ok();
+    l.td.post(&format!("/api/threads/{tid}/close"), json!({}))
+        .await
+        .ok();
+    let s = state(&l.td);
+    terrariumd::bound::end(
+        &s,
+        &terrariumd::thread_agent::bound(&tid),
+        terrariumd::store::spawns::DONE,
+        "test closes original".into(),
+        false,
+    )
+    .await
+    .unwrap();
+    let key = tid.clone();
+    let (a, b) =
+        s.db.write("system", move |t| {
+            let a = terrariumd::store::threads::restart_request(
+                t,
+                &key,
+                "operator",
+                "Swap A",
+                "global:architect",
+                true,
+                (0, None),
+            )?;
+            let b = terrariumd::store::threads::restart_request(
+                t,
+                &key,
+                "operator",
+                "Swap B",
+                "global:architect",
+                false,
+                (a.request_epoch, None),
+            )?;
+            Ok((a, b))
+        })
+        .await
+        .unwrap();
+    // A resumes only after B committed. Its task and template are stale,
+    // even though B has not attached an agent yet.
+    assert!(terrariumd::thread_agent::start(&s, a, None).await.is_err());
+    let pending = l.thread(&tid).await;
+    assert_eq!(pending["status"], "waiting_agent");
+    assert!(pending["agent"].is_null());
+    let started = terrariumd::thread_agent::start(&s, b, None).await.unwrap();
+    assert_eq!(started.request_epoch, 2);
+    assert!(started.agent.is_some());
+    assert_eq!(l.thread(&tid).await["agent"], json!(started.agent));
+}
+
+#[tokio::test]
+async fn request_timer_closes_more_than_one_ordered_batch() {
+    let l = lab().await;
+    let count = terrariumd::thread_close::REQUEST_CLOSE_BATCH + 3;
+    state(&l.td).db.write("system", move |t| {
+        for _ in 0..count {
+            let th = terrariumd::store::threads::open(t, terrariumd::store::threads::NewThread {
+                topic: "Answer-only request".into(), scope: "p".into(), opened_by: "operator".into(), ..Default::default()
+            })?;
+            terrariumd::store::threads::propose_close(t, &th.id, "operator", Some("Answer"), vec![])?;
+            t.execute("UPDATE threads SET request = 1, updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1", [&th.id])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    terrariumd::thread_close::sweep(&state(&l.td)).await;
+    let closed = state(&l.td).db.read(|c| {
+        Ok(c.query_row("SELECT COUNT(*) FROM threads WHERE request = 1 AND status = 'closed' AND closed_by = 'system'", [], |r| r.get::<_, usize>(0))?)
+    }).await.unwrap();
+    assert_eq!(closed, count);
 }
 
 #[tokio::test]

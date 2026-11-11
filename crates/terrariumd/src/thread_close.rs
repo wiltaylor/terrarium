@@ -34,6 +34,8 @@ pub const ENV_STALE: &str = "TERRARIUM_THREAD_STALE";
 pub const DEFAULT_REMINDER: Duration = Duration::from_secs(3 * 86_400);
 /// The default time before the stale close.
 pub const DEFAULT_STALE: Duration = Duration::from_secs(14 * 86_400);
+/// Bound each timer read and release the database lock between batches.
+pub const REQUEST_CLOSE_BATCH: usize = 64;
 
 /// The times of the sweep. Tests make them short.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,36 +281,47 @@ pub async fn sweep(state: &Shared) {
     // Requests with an answer-only close proposal need no further operator
     // action after 24 hours. Recheck in the write transaction so a reply wins.
     if let Some(cut) = before(Duration::from_secs(86_400)) {
-        let read_cut = cut.clone();
-        let ids = state.db.read(move |c| {
-            let mut st = c.prepare("SELECT id FROM threads WHERE request = 1 AND status = 'waiting_operator' AND close_proposal IS NOT NULL AND updated_at < ?1 AND NOT EXISTS (SELECT 1 FROM thread_cards WHERE thread = threads.id)")?;
-            Ok(st.query_map([read_cut], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
+        let mut cursor = (String::new(), String::new());
+        loop {
+            let read_cut = cut.clone();
+            let after = cursor.clone();
+            let ids = state.db.read(move |c| {
+            let mut st = c.prepare("SELECT updated_at, id FROM threads WHERE request = 1 AND status = 'waiting_operator' AND close_proposal IS NOT NULL AND updated_at < ?1 AND (updated_at, id) > (?2, ?3) AND NOT EXISTS (SELECT 1 FROM thread_cards WHERE thread = threads.id) ORDER BY updated_at, id LIMIT ?4")?;
+            Ok(st.query_map(params![read_cut, after.0, after.1, REQUEST_CLOSE_BATCH as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?)
         }).await;
-        match ids {
-            Ok(ids) => {
-                for id in ids {
-                    let cut = cut.clone();
-                    if let Err(e) = state
-                        .db
-                        .write("system", move |t| {
-                            let th = threads::get(t, &id)?;
-                            if th.request
-                                && th.status == ThreadStatus::WaitingOperator
-                                && th.close_proposal.is_some()
-                                && th.updated_at < cut
-                                && th.cards.as_deref().unwrap_or_default().is_empty()
-                            {
-                                threads::confirm_close_by(t, &id, "system")?;
-                            }
-                            Ok(())
-                        })
-                        .await
-                    {
-                        warn!("cannot auto-confirm a request close: {e}");
+            match ids {
+                Ok(ids) => {
+                    if ids.is_empty() {
+                        break;
+                    }
+                    for (at, id) in ids {
+                        cursor = (at, id.clone());
+                        let cut = cut.clone();
+                        if let Err(e) = state
+                            .db
+                            .write("system", move |t| {
+                                let th = threads::get(t, &id)?;
+                                if th.request
+                                    && th.status == ThreadStatus::WaitingOperator
+                                    && th.close_proposal.is_some()
+                                    && th.updated_at < cut
+                                    && th.cards.as_deref().unwrap_or_default().is_empty()
+                                {
+                                    threads::confirm_close_by(t, &id, "system")?;
+                                }
+                                Ok(())
+                            })
+                            .await
+                        {
+                            warn!("cannot auto-confirm a request close: {e}");
+                        }
                     }
                 }
+                Err(e) => {
+                    warn!("cannot read proposed request closes: {e}");
+                    break;
+                }
             }
-            Err(e) => warn!("cannot read proposed request closes: {e}"),
         }
     }
     let tuning = state.lifecycle.threads.tuning();

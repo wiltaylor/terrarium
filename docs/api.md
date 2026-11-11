@@ -19,7 +19,11 @@ An operator reply withdraws the proposal. Threads with linked cards retain
 the ordinary close lifecycle. The operator can close a request at any time.
 
 `POST /api/threads/{id}/swap` with `{template, reason}` replaces an open
-request's agent with a new agent from an architect template. The operator
+request's agent with a new agent from `global:architect` or
+`global:architect-alt`. Project templates and other global templates are
+refused. Only Architect and Member roles are allowed, with the resolved
+definition checked again in the agent creation transaction. The new agent
+is spawned as and owned by the report-to lead, not the operator. The operator
 or report-to lead can do this. `terrarium thread swap <id> --template <key>
 --reason <text>` is the CLI equivalent.
 
@@ -32,6 +36,10 @@ linked to the thread can reopen it. `terrarium thread reopen <id> --reason
 agent, never restores the previous session. The reason is a visible post.
 Both replacement paths keep the conversation and linked cards and include
 the thread history as quoted data in the new agent's task.
+The replacement epoch is checked during creation and attachment. A stale
+spawn cannot attach or close a newer replacement. Automatic answer-only
+closure reads ordered batches of at most 64 requests, using the last
+`(updated_at, id)` key to continue after releasing the database read lock.
 
 This document is the contract between `terrariumd` and its clients: the CLI,
 the dashboard, and (later) the agent runner. The code is in
