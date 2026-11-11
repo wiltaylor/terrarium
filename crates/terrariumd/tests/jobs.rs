@@ -3689,12 +3689,16 @@ async fn ordinary_jobs_stay_off_a_protected_release_target() {
         }
         c
     };
-    let r = td.put("/api/projects/p/delivery", config("p-box", Some("rel-a"))).await;
+    let r = td
+        .put("/api/projects/p/delivery", config("p-box", Some("rel-a")))
+        .await;
     assert_eq!(r.status, 200, "{}", r.body);
     let rule = "release target runs release jobs only";
     // The switch to rel-b, then the clear: rel-a and its machine stay off.
     for release in [Some("rel-b"), None] {
-        let r = td.put("/api/projects/p/delivery", config("p-box", release)).await;
+        let r = td
+            .put("/api/projects/p/delivery", config("p-box", release))
+            .await;
         assert_eq!(r.status, 200, "{}", r.body);
         for target in ["rel-a", "rel-a-alias"] {
             let r = td
@@ -3707,12 +3711,17 @@ async fn ordinary_jobs_stay_off_a_protected_release_target() {
     // Two validate jobs on p-box: the first holds the one slot, the second
     // waits. Then the operator moves rel-a onto lab1, the machine of p-box.
     let started = |id: &str| marks.path().join(format!("started-{id}")).exists();
-    let validate = |branch: &'static str| async move {
-        let head = lab.branch(branch, "next", &[("OK", "yes\n")]);
-        let card = lab.card(branch, branch).await;
-        let r = lab
+    let l = &lab;
+    let validate = move |branch: &'static str| async move {
+        let head = l.branch(branch, "next", &[("OK", "yes\n")]);
+        let card = l.card(branch, branch).await;
+        let r = l
             .td
-            .post_as(&lab.w1, &format!("/api/cards/{card}/validate"), json!({"commit": head}))
+            .post_as(
+                &l.w1,
+                &format!("/api/cards/{card}/validate"),
+                json!({"commit": head}),
+            )
             .await;
         assert_eq!(r.status, 201, "{}", r.body);
         (card, r.body["job"]["id"].as_str().unwrap().to_owned())
@@ -3724,7 +3733,9 @@ async fn ordinary_jobs_stay_off_a_protected_release_target() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let (second_card, second) = validate("ter-p2").await;
-    let r = td.patch("/api/targets/rel-a", json!({"host": "lab1"})).await;
+    let r = td
+        .patch("/api/targets/rel-a", json!({"host": "lab1"}))
+        .await;
     assert_eq!(r.status, 200, "{}", r.body);
     let r = td.delete(&format!("/api/jobs/{first}")).await;
     assert!(r.status.is_success(), "{} {}", r.status, r.body);
@@ -3736,7 +3747,10 @@ async fn ordinary_jobs_stay_off_a_protected_release_target() {
     assert!(!mine.is_empty(), "{jobs:#?}");
     for j in &mine {
         assert_eq!(j["state"], "failed", "{j:#}");
-        assert!(!started(j["id"].as_str().unwrap()), "a job ran on the protected machine: {j:#}");
+        assert!(
+            !started(j["id"].as_str().unwrap()),
+            "a job ran on the protected machine: {j:#}"
+        );
         let detail = td
             .get(&format!("/api/jobs/{}", j["id"].as_str().unwrap()))
             .await
@@ -3768,8 +3782,9 @@ async fn a_target_write_read_before_the_protection_is_refused_at_its_write() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let rule = "release target runs release jobs only";
-    let protect = |release: &'static str| async move {
-        let r = lab
+    let l = &lab;
+    let protect = move |release: &'static str| async move {
+        let r = l
             .td
             .put(
                 "/api/projects/p/delivery",
@@ -3795,7 +3810,12 @@ async fn a_target_write_read_before_the_protection_is_refused_at_its_write() {
     // The DELETE.
     let (ready, go) = terrariumd::jobs::pause_next_target_write("rel-d");
     let (del, ()) = tokio::join!(
-        td.req(hyper::Method::DELETE, "/api/targets/rel-d", None, Some(&sys)),
+        td.req(
+            hyper::Method::DELETE,
+            "/api/targets/rel-d",
+            None,
+            Some(&sys)
+        ),
         async {
             ready.await.unwrap();
             protect("rel-d").await;
@@ -3805,7 +3825,11 @@ async fn a_target_write_read_before_the_protection_is_refused_at_its_write() {
     assert_eq!(del.status, 403, "{}", del.body);
     assert!(del.body.to_string().contains(rule), "{}", del.body);
     let r = td.get("/api/targets/rel-d").await;
-    assert_eq!(r.status, 200, "the protected target was deleted: {}", r.body);
+    assert_eq!(
+        r.status, 200,
+        "the protected target was deleted: {}",
+        r.body
+    );
 }
 
 /// TER-623, review-ter-623 F3: a release never runs again by itself. A run

@@ -2920,7 +2920,10 @@ fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
 /// The test holds of a target write (review-ter-623-r4 F2), by target
 /// name: the PATCH or DELETE of that target sends on `ready` after its read
 /// and waits for `go` before its write.
-type WritePause = (tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>);
+type WritePause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
 
 fn write_pauses() -> MutexGuard<'static, HashMap<String, WritePause>> {
     static P: OnceLock<Mutex<HashMap<String, WritePause>>> = OnceLock::new();
