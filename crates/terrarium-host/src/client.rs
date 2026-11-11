@@ -262,6 +262,11 @@ struct Shared {
     remotes: Arc<crate::display::remote::Remotes>,
     /// A self-update runs (only one at a time).
     updating: std::sync::atomic::AtomicBool,
+    /// A verified update is staged. Refuse new sessions until the swap,
+    /// so a busy host can eventually reach idle without killing work.
+    draining: std::sync::atomic::AtomicBool,
+    /// Serialize staging the drain with admission and session insertion.
+    admission: tokio::sync::Mutex<()>,
     /// The helper answered with enforcement at the last `hello`
     /// (`capabilities.native_gpu.enforced`). Native routing follows it,
     /// not the config.
@@ -304,6 +309,8 @@ impl Client {
             bearer: Mutex::new(opts.token.clone()),
             remotes: crate::display::remote::Remotes::new(opts.display.rdp_known_hosts_path()),
             updating: std::sync::atomic::AtomicBool::new(false),
+            draining: std::sync::atomic::AtomicBool::new(false),
+            admission: tokio::sync::Mutex::new(()),
             native_enforced: std::sync::atomic::AtomicBool::new(
                 opts.capabilities
                     .native_gpu
@@ -520,6 +527,10 @@ impl Client {
             match client.self_update(&su, &offer).await {
                 Ok(()) => client.shared.restart.notify_one(),
                 Err(e) => {
+                    client
+                        .shared
+                        .draining
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                     tracing::error!(offered = %version, error = %e, "self-update failed; this binary keeps running");
                     client.refuse_update(&version);
                     client
@@ -562,6 +573,12 @@ impl Client {
         let sha = u::verify(&data, offer)?;
         u::stage(&su.binary, &data, &offer.version).await?;
         tracing::info!(sha256 = %sha, bytes = data.len(), "self-update: the new binary checks out");
+        {
+            let _admission = self.shared.admission.lock().await;
+            self.shared
+                .draining
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let mut said = false;
         while self.session_count() > 0 {
             if !said {
@@ -828,6 +845,7 @@ impl Client {
     }
 
     async fn on_text(&self, text: &str, tx: &Link) -> Result<(), ClientError> {
+        let _admission = self.shared.admission.lock().await;
         let frame: DaemonFrame = match decode_control(text) {
             Ok(f) => f,
             Err(e) => {
@@ -1188,6 +1206,19 @@ impl Client {
     fn admit(&self, session: SessionId, tx: &Link) -> bool {
         if session == 0 {
             send_error(tx, 0, ErrorCode::BadRequest, "session 0 is reserved".into());
+            return false;
+        }
+        if self
+            .shared
+            .draining
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            send_error(
+                tx,
+                session,
+                ErrorCode::Busy,
+                "host is draining sessions for a staged self-update".into(),
+            );
             return false;
         }
         let sessions = self.sessions();
@@ -1650,6 +1681,36 @@ pub fn ensure_crypto_provider() {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn staged_update_refuses_new_sessions_but_keeps_control_frames() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(client.admit(1, &tx));
+        client
+            .shared
+            .draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!client.admit(2, &tx));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Outgoing::Control(HostFrame::Error {
+                session: 2,
+                code: ErrorCode::Busy,
+                ..
+            }))
+        ));
+        client.on_text(r#"{"type":"ping","nonce":7}"#, &tx).await.unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(Outgoing::Control(HostFrame::Pong { .. }))
+        ));
+        client
+            .shared
+            .draining
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(client.admit(3, &tx));
+    }
 
     /// Write the 0700 fake `nvidia-smi` script that the product execs.
     /// `gpu::sample_with` runs `nvidia_smi_bin` directly (`Command::new`)
