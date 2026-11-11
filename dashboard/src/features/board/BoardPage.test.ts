@@ -37,7 +37,7 @@ it("previews Markdown in new-card and body-edit fields without losing the draft"
   host.querySelector<HTMLButtonElement>('[aria-label="Add a card to backlog"]')!.click();
   const markdown = "**Draft** [link](https://example.com)\n\n| A | B |\n| - | - |\n| 1 | 2 |";
   const checkPreview = (label: string) => {
-    const editor = host.querySelector(`[aria-label="${label} editor"]`)!.parentElement!;
+    const editor = document.querySelector(`[aria-label="${label} editor"]`)!.parentElement!;
     const input = editor.querySelector("textarea")!;
     input.value = markdown;
     input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -51,7 +51,7 @@ it("previews Markdown in new-card and body-edit fields without losing the draft"
     expect(editor.querySelector(`[aria-label="${label} preview"]`)).toBeNull();
   };
   checkPreview("Description");
-  [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Cancel")!.click();
+  [...document.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Cancel")!.click();
   history.set({ value: `/p/terrarium/board?card=${card.id}` });
   await waitFor(() => expect(host.textContent).toContain("Original body"));
   [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Edit")!.click();
