@@ -541,7 +541,7 @@ async fn wait_queries_use_dependency_indexes_and_limits_are_enforced() {
     let a = card(&td).await;
     let b = card(&td).await;
     let db = td.daemon.as_ref().unwrap().state.db.clone();
-    let w = wait(&[(&a, None); 129], Mode::All, Action::default());
+    let w = wait(&[(a.as_str(), None); 129], Mode::All, Action::default());
     let id = b.clone();
     assert!(
         db.write("operator", move |t| card_waits::set(
