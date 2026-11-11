@@ -414,6 +414,7 @@ async fn lead_assigned_card_is_monitored_without_a_claimed_event() {
     eta(&td, &card, true).await;
     assert_signals(&td, &card, json!(["eta_overdue"])).await;
     assert_eq!(notices(&td, &lead).await, 1);
+    assert_eq!(notices(&td, &worker).await, 0);
 }
 
 #[tokio::test]
@@ -454,6 +455,7 @@ async fn research_card_starts_its_clock_and_signals_without_working_entry() {
     eta(&td, &card, true).await;
     assert_signals(&td, &card, json!(["eta_overdue"])).await;
     assert_eq!(notices(&td, &lead).await, 1);
+    assert_eq!(notices(&td, &worker).await, 1);
 }
 
 /// A local remote with one commit on `card`, a repo on project `p`, the

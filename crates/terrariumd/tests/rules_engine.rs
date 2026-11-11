@@ -27,6 +27,90 @@ fn state(td: &TestDaemon) -> Shared {
 
 const SOURCE: &str = "source:test/ping";
 
+#[tokio::test]
+async fn an_identical_user_pack_copy_keeps_the_user_cap() {
+    let mut td = TestDaemon::start().await;
+    let mut members = Vec::new();
+    for project in ["builtin", "copied", "own"] {
+        td.project(project).await;
+        if project != "own" {
+            td.patch(
+                &format!("/api/projects/{project}"),
+                json!({"board_flow":"rules"}),
+            )
+            .await
+            .ok();
+        }
+        if project != "builtin" {
+            put_rules(&td, project, terrarium_core::rules_file::DEFAULT_PACK).await;
+        }
+        members.push((
+            project.to_owned(),
+            new_card(&td, project, json!({"title":"busy", "column":"review"})).await,
+        ));
+    }
+    settle(&td).await;
+    let db = state(&td).db.clone();
+    td.daemon.take().unwrap().shutdown();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut cache = rules_engine::Cache::default();
+    let loaded = rules_engine::load(&db, &mut cache).await.unwrap();
+    let builtin = loaded.iter().find(|p| p.project == "builtin").unwrap();
+    let pack_rule = builtin
+        .set
+        .rules
+        .iter()
+        .find(|r| r.name == "merge-queued")
+        .unwrap();
+    for pr in &loaded {
+        assert_eq!(
+            pr.builtin_rules.contains("merge-queued"),
+            pr.project == "builtin"
+        );
+        assert_eq!(
+            pr.set
+                .rules
+                .iter()
+                .find(|r| r.name == "merge-queued")
+                .unwrap(),
+            pack_rule
+        );
+    }
+    // Exercise the cache hit too: source metadata must survive it.
+    let loaded = rules_engine::load(&db, &mut cache).await.unwrap();
+    db.write("test", move |t| {
+        for (project, card) in members {
+            let count = if project == "builtin" { 599 } else { 10 };
+            for n in 1..=count {
+                t.execute("INSERT INTO rule_runs (id, project, rule, rule_hash, ord, event_seq, card, lane,
+                    rule_json, cause, state, created_at, updated_at)
+                    VALUES (?1, ?2, 'merge-queued', 'seed', 0, ?3, ?4, ?4, '{}', '{}', 'done', ?5, ?5)",
+                    rusqlite::params![format!("{project}-{n}"), project, -n, card, chrono::Utc::now().to_rfc3339()])?;
+            }
+            t.emit(EventDraft::new("job", "queued", json!({"change":"queued", "kind":"merge", "origin":"queue"}))
+                .project(project).card(card))?;
+        }
+        Ok(())
+    }).await.unwrap();
+    rules_engine::plan_pass(&db, loaded, chrono::Utc::now())
+        .await
+        .unwrap();
+    db.read(|c| {
+        for project in ["builtin", "copied", "own"] {
+            let (state, reason): (String, Option<String>) = c.query_row(
+                "SELECT state, reason FROM rule_runs WHERE project = ?1 AND rule = 'merge-queued' AND event_seq > 0 ORDER BY event_seq DESC LIMIT 1",
+                [project], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            if project == "builtin" {
+                assert_eq!(state, "pending", "the real built-in rule permits its 600th run");
+            } else {
+                assert_eq!(state, "skipped");
+                assert!(reason.unwrap().contains("card rate limit: 10"));
+            }
+        }
+        Ok(())
+    }).await.unwrap();
+}
+
 /// Write a `test.ping` event about `card` with `data.n = n`, as an event
 /// source does. Returns its `seq`.
 async fn ping(td: &TestDaemon, project: &str, card: &str, n: i64) -> i64 {
@@ -830,6 +914,7 @@ const FEW: &str = r#"rule "few" {
 
 const MANY: &str = r#"rule "many" {
   on = ["test.ping"]
+  max_per_hour = 100
   card_comment { text = "many {{event.data.n}}" }
 }
 "#;
@@ -867,8 +952,7 @@ async fn the_rate_limits_stop_a_rule_per_hour_and_per_card() {
         "{reason}"
     );
 
-    // The default limit (30) holds, but one card takes at most 10 runs of
-    // a rule in an hour.
+    // A user rule's explicit limit above 10 does not raise its per-card cap.
     td.project("many").await;
     put_rules(&td, "many", MANY).await;
     let card = new_card(&td, "many", json!({"title": "busy"})).await;
