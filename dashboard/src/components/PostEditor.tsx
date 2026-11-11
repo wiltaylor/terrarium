@@ -11,6 +11,6 @@ export function PostEditor(props: { label: string; text: string; project: string
       <button type="button" role="tab" aria-selected={preview()} onClick={() => setPreview(true)}>Preview</button>
     </div>
     <div role="tabpanel" hidden={preview()}>{props.children}</div>
-    <Show when={preview()}><div role="tabpanel" aria-label={`${props.label} preview`}><SafeHtml class="prose" html={renderMarkdown(props.text, props.project)} /></div></Show>
+    <Show when={preview()}><div role="tabpanel" aria-label={`${props.label} preview`}><SafeHtml class="prose" html={renderMarkdown(props.text, props.project, { textBody: true })} /></div></Show>
   </div>;
 }
