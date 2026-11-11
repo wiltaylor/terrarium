@@ -248,6 +248,45 @@ async fn refused_move_stays_met_and_wakes_with_reason() {
 }
 
 #[tokio::test]
+async fn calendar_freezes_refuse_once_without_changing_manual_moves() {
+    for scope in ["/api/projects/p/calendar/events", "/api/calendar/global/events"] {
+        let td = setup().await;
+        let at = chrono::Utc::now();
+        let event = td.post(scope, json!({
+            "title":"release freeze", "kind":"freeze", "tz":"UTC",
+            "start":(at - chrono::Duration::hours(1)).to_rfc3339(),
+            "end":(at + chrono::Duration::hours(1)).to_rfc3339()
+        })).await.ok()["id"].as_str().unwrap().to_owned();
+        let a = card(&td).await;
+        let b = card(&td).await;
+        set(&td, &b, wait(&[(&a, Some("review"))], Mode::All, Action {
+            move_to: Some("ready".into()), ..Action::default()
+        })).await;
+        move_to(&td, &a, "review").await;
+        assert!(met(&td, &b).await);
+        assert_eq!(td.get(&format!("/api/cards/{b}")).await.ok()["column"], "backlog");
+        assert!(td.get("/api/mail?to=p/lead").await.ok().as_array().unwrap().iter()
+            .any(|m| m["subject"].as_str().is_some_and(|s| s.contains("calendar freeze"))));
+        // Manual moves remain allowed even during the freeze.
+        move_to(&td, &b, "ready").await;
+        move_to(&td, &b, "backlog").await;
+        td.delete(&format!("/api/calendar/events/{event}")).await.ok();
+        move_to(&td, &a, "backlog").await;
+        move_to(&td, &a, "review").await;
+        assert!(met(&td, &b).await);
+        let id = b.clone();
+        td.daemon.as_ref().unwrap().state.db.write("operator", move |t| {
+            let generation: String = t.query_row("SELECT generation FROM card_waits WHERE card=?1", [&id], |r| r.get(0))?;
+            assert!(!card_waits::act(t, &Actor::Operator, &id, &generation)?);
+            let audited: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM audit WHERE action='card.wait_action_failed' AND target=?1)", [&id], |r| r.get(0))?;
+            assert!(audited);
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(td.get(&format!("/api/cards/{b}")).await.ok()["column"], "backlog");
+    }
+}
+
+#[tokio::test]
 async fn cross_project_checks_reader_and_explicit_project() {
     let td = setup().await;
     td.project("other").await;
