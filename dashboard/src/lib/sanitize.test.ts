@@ -42,6 +42,7 @@ function expectInert(html: string) {
 describe("sanitizer: adversarial payloads", () => {
   for (const p of XSS_PAYLOADS) {
     it(`renderer + DOMPurify: ${p.name}`, () => expectInert(renderWiki(p.src, ctx)));
+    it(`card and memory Markdown + DOMPurify: ${p.name}`, () => expectInert(renderWiki(p.src, { ...ctx, textBody: true, cardKeys: { TER: "terrarium" } })));
     it(`DOMPurify alone: ${p.name}`, () => expectInert(p.src));
   }
 

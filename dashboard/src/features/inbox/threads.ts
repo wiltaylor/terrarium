@@ -107,7 +107,7 @@ export const sortThreads = (ts: Thread[]): Thread[] => ts.slice().sort(byThreadO
 export const scopeLabel = (scope: string): string => (scope === "global" ? "global" : `project ${scope}`);
 
 /** One entry of the chat page: a message, or a question asked in the thread. */
-export type TimelineEntry = { kind: "message"; at: string; id: string; message: ThreadMessage } | { kind: "question"; at: string; id: string; question: Question };
+export type TimelineEntry = { kind: "message"; at: string; id: string; message: ThreadMessage } | { kind: "question"; at: string; id: string; question: Question } | { kind: "proposal" | "handoff" | "response"; at: string; id: string };
 
 /**
  * The conversation in order: the messages and the questions by time. The
@@ -115,7 +115,7 @@ export type TimelineEntry = { kind: "message"; at: string; id: string; message: 
  * the order of the daemon); a question goes after the messages of the same
  * time.
  */
-export function timeline(t: Pick<Thread, "messages" | "questions">): TimelineEntry[] {
+export function timeline(t: Pick<Thread, "messages" | "questions"> & Partial<Pick<Thread, "response" | "close_proposal" | "handoff" | "status" | "closed_at">>): TimelineEntry[] {
   const msgs: TimelineEntry[] = (t.messages ?? []).map((m) => ({ kind: "message", at: m.at, id: m.id, message: m }));
   const qs: TimelineEntry[] = (t.questions ?? []).map((q) => ({ kind: "question", at: q.created_at, id: q.id, question: q }));
   qs.sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id));
@@ -125,7 +125,11 @@ export function timeline(t: Pick<Thread, "messages" | "questions">): TimelineEnt
     while (i < qs.length && qs[i]!.at < m.at) out.push(qs[i++]!);
     out.push(m);
   }
-  return out.concat(qs.slice(i));
+  const entries = out.concat(qs.slice(i));
+  if (t.response && !t.messages?.some((m) => m.kind === "response" && m.at === t.response!.at)) entries.push({ kind: "response", at: t.response.at, id: "overall-response" });
+  if (t.close_proposal && t.status !== "closed") entries.push({ kind: "proposal", at: t.close_proposal.at, id: "close-proposal" });
+  if (t.status === "closed" && t.closed_at) entries.push({ kind: "handoff", at: t.closed_at, id: "handoff" });
+  return entries.sort((a, b) => a.at.localeCompare(b.at));
 }
 
 const bytes = (s: string): number => new TextEncoder().encode(s).length;

@@ -27,6 +27,293 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(300);
 
+fn log_inode(path: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).unwrap();
+    format!("{}:{}", meta.dev(), meta.ino())
+}
+
+#[tokio::test]
+async fn retained_log_cleanup_is_project_scoped_and_skips_active_or_missing_targets() {
+    let lab = lab(1).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let root = lab._dirs.path().join("jobs/p/logs");
+    std::fs::create_dir_all(&root).unwrap();
+    for name in ["done-1", "done-2", "active", "missing", "legacy", "other"] {
+        std::fs::write(root.join(name), "retained output").unwrap();
+    }
+    let base = root.clone();
+    state.db.write("system", move |t| {
+        for (id,status) in [("Ldone","passed"),("Lactive","running"),("Lmissing","failed")] {
+            t.execute("INSERT INTO jobs(id,project,card,kind,repo,branch,state,created_by,created_at) VALUES (?,'p','C','validate','app','main',?,'system','x')",rusqlite::params![id,status])?;
+        }
+        t.execute("INSERT INTO job_log_budgets(project,bytes) VALUES ('p',60)",[])?;
+        for (job,attempt,target,name,project) in [
+            ("Ldone",1,"p-box","done-1","p"),
+            ("Ldone",2,"p-box","done-2","p"),
+            ("Lactive",1,"p-box","active","p"),
+            ("Lmissing",1,"absent-target","missing","p"),
+            ("Lother",1,"p-box","other","other"),
+        ] {
+            let identity = terrariumd::store::targets::find(t,target)?.map(|r|terrariumd::job_logs::target_identity(&r)).unwrap_or_default();
+            t.execute("INSERT INTO job_logs(project,job,attempt,target,path,written_at,expires_at,bytes,root,root_identity,file_identity,target_identity) VALUES (?,?,?,?,?,'2000-01-01','2000-01-02',15,?,?,?,?)",rusqlite::params![project,job,attempt,target,base.join(name).to_str().unwrap(),base.to_str().unwrap(),log_inode(&base),log_inode(&base.join(name)),identity])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let response = lab
+        .td
+        .post_as(&lab.w1, "/api/projects/p/jobs/cleanup", json!({}))
+        .await;
+    assert_eq!(response.status, 403, "{}", response.body);
+    let response = lab
+        .td
+        .post_as(&lab.lead, "/api/projects/p/jobs/cleanup", json!({}))
+        .await;
+    let body = response.ok();
+    assert_eq!(body["removed"], 2, "{body}");
+    assert_eq!(body["skipped"], 2, "{body}");
+    assert!(!root.join("done-1").exists());
+    assert!(!root.join("done-2").exists());
+    for name in ["active", "missing", "legacy", "other"] {
+        assert!(root.join(name).exists(), "{name}");
+    }
+    let shown = lab.td.get("/api/jobs/Ldone").await;
+    assert_eq!(shown.ok()["logs"].as_array().unwrap().len(), 2);
+    assert!(
+        shown.body["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["expired"] == true)
+    );
+    let total = state
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT bytes FROM job_log_budgets WHERE project='p'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(total, 30);
+    let again = lab.td.post("/api/projects/p/jobs/cleanup", json!({})).await;
+    assert_eq!(again.ok()["removed"], 0);
+}
+
+#[tokio::test]
+async fn retained_log_recipe_records_size_and_budget_cleanup_expires_it() {
+    let lab = lab(1).await;
+    set_recipe(&lab, "printf hello").await;
+    let head = lab.branch("retained-log", "next", &[("OK", "yes\n")]);
+    let job = validate_card(&lab, "retained-log", &head).await;
+    assert_eq!(job["state"], "passed", "{job}");
+    let path = format!("/api/jobs/{}", job["id"].as_str().unwrap());
+    let shown = lab.td.get(&path).await;
+    let log = &shown.ok()["logs"][0];
+    assert_eq!(log["bytes"], 5, "{log}");
+    assert_eq!(log["expired"], false);
+    let file = PathBuf::from(log["path"].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
+    let keep = lab.td.post("/api/projects/p/jobs/cleanup", json!({})).await;
+    assert_eq!(keep.ok()["removed"], 0);
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    state
+        .db
+        .write("system", |t| {
+            let mut def = terrariumd::store::jobs::delivery(t, "p")?;
+            def.log_retention_bytes = Some(0);
+            terrariumd::store::jobs::set_delivery(t, "p", &def)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let expired = lab.td.post("/api/projects/p/jobs/cleanup", json!({})).await;
+    assert_eq!(expired.ok()["removed"], 1, "{}", expired.body);
+    assert!(!file.exists());
+    let shown = lab.td.get(&path).await;
+    assert_eq!(shown.ok()["logs"][0]["expired"], true);
+}
+
+#[tokio::test]
+async fn retained_log_target_edits_recreation_and_unlocked_output_are_not_adopted() {
+    use terrariumd::{
+        job_logs,
+        store::{jobs, targets},
+    };
+    let lab = lab(1).await;
+    set_recipe(&lab, "printf owned").await;
+    let head = lab.branch("log-identity", "next", &[("OK", "yes\n")]);
+    let result = validate_card(&lab, "log-identity", &head).await;
+    assert_eq!(result["state"], "passed", "{result}");
+    let id = result["id"].as_str().unwrap().to_owned();
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let jid = id.clone();
+    let (job, original, delivery, log) = state
+        .db
+        .read(move |c| {
+            Ok((
+                jobs::get(c, &jid)?,
+                targets::get(c, "p-box")?,
+                jobs::delivery(c, "p")?,
+                job_logs::for_job(c, &jid)?[0].clone(),
+            ))
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .write("system", |t| {
+            let mut def = jobs::delivery(t, "p")?;
+            def.log_retention_bytes = Some(0);
+            jobs::set_delivery(t, "p", &def)?;
+            // Rebind a routing field, even when the target retains its project/name.
+            targets::update(t, "p-box", &json!({"address":"replacement.invalid"}))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let edited = lab.td.post("/api/projects/p/jobs/cleanup", json!({})).await;
+    assert_eq!(edited.ok()["skipped"], 1, "{}", edited.body);
+    assert!(Path::new(&log.path).exists());
+    let def = original.def.clone();
+    state
+        .db
+        .write("system", move |t| {
+            targets::delete(t, "p-box")?;
+            targets::create(t, &def)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let recreated = lab.td.post("/api/projects/p/jobs/cleanup", json!({})).await;
+    assert_eq!(recreated.ok()["skipped"], 1, "{}", recreated.body);
+    assert!(Path::new(&log.path).exists());
+    // The runner revokes old ownership before a lost attempt rewrites output.
+    let def = state
+        .db
+        .read(|c| Ok(targets::get(c, "p-box")?.def))
+        .await
+        .unwrap();
+    let identity = job_logs::begin(&state, &def, &job).await.unwrap().unwrap();
+    job_logs::record_output(
+        &state,
+        &job,
+        &delivery,
+        &log.path,
+        &identity,
+        b"no flock on the target: slot not locked; log not tracked for retention\n",
+    )
+    .await
+    .unwrap();
+    let jid = id.clone();
+    assert!(
+        state
+            .db
+            .read(move |c| job_logs::for_job(c, &jid))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let untracked = lab.td.post("/api/projects/p/jobs/cleanup", json!({})).await;
+    assert_eq!(untracked.ok()["scanned"], 0);
+    assert!(Path::new(&log.path).exists());
+}
+
+#[tokio::test]
+async fn retained_log_quarantine_recovery_accounts_bytes_and_surfaces_conflicts() {
+    let lab = lab(1).await;
+    set_recipe(&lab, "printf hello").await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    for (branch, conflict) in [("log-interrupted", false), ("log-conflict", true)] {
+        let head = lab.branch(branch, "next", &[("OK", "yes\n")]);
+        let job = validate_card(&lab, branch, &head).await;
+        assert_eq!(job["state"], "passed", "{job}");
+        let id = job["id"].as_str().unwrap().to_owned();
+        let jid = id.clone();
+        let log = state
+            .db
+            .read(move |c| Ok(terrariumd::job_logs::for_job(c, &jid)?[0].clone()))
+            .await
+            .unwrap();
+        let quarantine = PathBuf::from(&log.root).join(format!(".retention-delete-{}", log.id));
+        let q = quarantine.to_str().unwrap().to_owned();
+        state
+            .db
+            .write("system", move |t| {
+                t.execute(
+                    "UPDATE job_logs SET cleanup_state='quarantining',quarantine=? WHERE id=?",
+                    rusqlite::params![q, log.id],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        // Simulate the committed state followed by an interruption after move.
+        std::fs::create_dir(&quarantine).unwrap();
+        if conflict {
+            std::fs::write(quarantine.join("log"), "unowned captured file").unwrap();
+        } else {
+            std::fs::rename(&log.path, quarantine.join("log")).unwrap();
+        }
+        let before = state
+            .db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT bytes FROM job_log_budgets WHERE project='p'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(before, 5, "bytes stay charged while quarantining");
+        let response = lab.td.post("/api/projects/p/jobs/cleanup", json!({})).await;
+        let body = response.ok();
+        let shown = lab.td.get(&format!("/api/jobs/{id}")).await;
+        let status = &shown.ok()["logs"][0];
+        let after = state
+            .db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT bytes FROM job_log_budgets WHERE project='p'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        if conflict {
+            assert_eq!(body["removed"], 0, "{body}");
+            assert_eq!(body["conflicts"][0]["job"], id);
+            assert_eq!(status["cleanup_state"], "conflict");
+            assert_eq!(status["expired"], false);
+            assert_eq!(after, 5);
+            assert_eq!(std::fs::read_to_string(&log.path).unwrap(), "hello");
+            assert_eq!(
+                std::fs::read_to_string(quarantine.join("log")).unwrap(),
+                "unowned captured file"
+            );
+            let retry = lab.td.post("/api/projects/p/jobs/cleanup", json!({})).await;
+            assert_eq!(
+                retry.ok()["scanned"],
+                0,
+                "conflicts are never retried automatically"
+            );
+            assert_eq!(retry.body["conflicts"][0]["job"], id);
+        } else {
+            assert_eq!(body["removed"], 1, "{body}");
+            assert_eq!(status["cleanup_state"], "expired");
+            assert_eq!(
+                after, 0,
+                "bytes leave only after the captured inode is removed"
+            );
+            assert!(!quarantine.join("log").exists());
+        }
+    }
+}
+
 #[tokio::test]
 async fn release_e2e_rejects_card_branches_members_and_missing_docker_config() {
     use terrariumd::store::groups;

@@ -12809,7 +12809,8 @@ lock: the recipe runs as its child without the lock's file descriptor,
 so a process that the recipe leaves running does not keep the slot
 locked after the job. The lock needs `flock` on the target; without
 it the steps run unlocked, as before TER-448, and each step prints
-`no flock on the target: slot not locked`. The job
+`no flock on the target: slot not locked` (the recipe also states that its
+log is not tracked for retention). The job
 row has `slot` while it runs. The step checks out the commit with
 `git checkout -f` and removes every file that the commit does not track,
 ignored ones too, except `target/` at the root (`git clean -ffdx -e
@@ -12927,6 +12928,50 @@ counting running jobs and reading caps. If several old caps resolve to
 one key, the strictest applies until a cap write replaces them.
 
 ### 35.3 Results
+
+New daemon recipe logs have a per-attempt ownership ledger. Legacy logs and
+release-client logs are not adopted or deleted. Delivery config accepts
+`log_retention_secs` (default 604800, seven days, capped at ten years) and
+`log_retention_bytes` (default 1073741824, one GiB of completed logs per project).
+The CLI sets these with `project delivery set --log-retention-secs N
+--log-retention-bytes N`. Zero expires logs immediately or retains no completed
+bytes respectively. Age is fixed when an attempt is first recorded. Changing
+the byte budget affects the next cleanup pass.
+
+Without `flock`, recipes still run as before. Their logs have no ledger row,
+are never auto-cleaned, and job output states this in one line. Tracked logs
+use a shared directory lock and a writer-held inode lock. Log roots must be
+absolute physical paths without symlink components. Cleanup pins the recorded
+directory and verifies its device/inode and the log inode. A private quarantine
+protects a replacement pathname from deletion. Target creation identity,
+definition (including address/container/VM), and lifecycle timestamp are bound
+to ownership. Changed or recreated targets are skipped, not adopted.
+
+Automatic cleanup visits one project per minute. Each pass first reconciles
+an indexed page of at most 32 quarantining rows, then considers an indexed
+page of at most 32 retained rows. Oldest recorded attempts are removed when their age
+expires or the completed-log byte budget is exceeded. Queued/running jobs and
+locked log writers are never removed. Missing or unreachable targets are
+skipped and retried on later passes. Budgets are eventual, not a limit on an
+active recipe's output. Cleanup never scans log directories.
+
+`terrarium job cleanup [--after N]` (project admin) applies the same policy
+explicitly, via `POST /api/projects/{name}/jobs/cleanup` with `{"after": N}`.
+The response has `scanned`, `removed`, `skipped`, `conflicts`, and `next`. A nonzero `next`
+continues the pass, and zero ends it. Concurrent cleanup returns a conflict.
+`GET /api/jobs/{id}` includes `logs`, with attempt, target, path, written_at,
+expires_at, bytes and expired. `job show` explicitly marks removed logs as
+expired while preserving the job's stored output tail.
+
+Before moving a log, cleanup commits its `quarantining` state and deterministic
+`quarantine` path in the ledger. Interrupted moves are reconciled on later
+passes, even when the original pathname is absent. Bytes stay charged until
+the owned inode has been removed (or both recorded locations are already gone).
+If a captured replacement cannot be restored because its pathname is occupied,
+both files are preserved and the row becomes `conflict`. Such rows are never
+retried automatically. `job show` and cleanup's bounded `conflicts` list expose
+the paths for manual inspection and removal. Recovery has its own persisted
+cursor, so inaccessible quarantines cannot starve later rows.
 
 - Pass: the labels `validation:queued` and `validation:running` go away.
   A validate card moves to `review`, a merge card to `accepted`. The move

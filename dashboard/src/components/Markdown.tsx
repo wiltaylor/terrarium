@@ -11,6 +11,7 @@ import { ArtifactViewer, type ArtifactLike } from "./ArtifactViewer";
 import { DbEmbed } from "./DbEmbed";
 import { useInstance } from "../instance";
 import { scopeRemoteHtml } from "../instance/html";
+import { openCardLink } from "./LinkText";
 
 /** `project`: the project of the page. A `db` block queries the DB of this project only. */
 export function Markdown(props: { html: string; artifacts?: Record<string, ArtifactLike>; project?: string }) {
@@ -40,6 +41,8 @@ export function Markdown(props: { html: string; artifacts?: Record<string, Artif
   onCleanup(() => disposers.forEach((d) => d()));
 
   const onClick = (e: MouseEvent) => {
+    openCardLink(e, instance.cardPeek);
+    if (e.defaultPrevented) return;
     const a = (e.target as HTMLElement).closest("a");
     if (!a || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
     const href = a.getAttribute("href") ?? "";

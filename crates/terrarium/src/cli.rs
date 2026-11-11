@@ -520,6 +520,12 @@ pub enum DeliveryCmd {
 
 #[derive(Debug, Args)]
 pub struct DeliverySetArgs {
+    /// Job log lifetime in seconds (default 604800). Release logs are excluded.
+    #[arg(long)]
+    pub log_retention_secs: Option<u64>,
+    /// Completed job log budget per project in bytes (default 1073741824)
+    #[arg(long)]
+    pub log_retention_bytes: Option<u64>,
     /// Daemon key reference, DOCKER_CI_KEY or DOCKER_CI_RESET_KEY=@secret:name[.field].
     #[arg(long = "merge-secret")]
     pub merge_secrets: Vec<String>,
@@ -613,6 +619,12 @@ pub struct DeliverySetArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum JobCmd {
+    /// Apply log retention to at most 32 recorded attempts. Legacy logs are untouched.
+    Cleanup {
+        /// Continue from the previous response's next cursor (0 starts a pass)
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+    },
     /// List the jobs of the project, newest first
     Ls {
         /// queued, running, passed, failed, or cancelled

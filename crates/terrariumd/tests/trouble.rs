@@ -452,6 +452,16 @@ async fn research_card_starts_its_clock_and_signals_without_working_entry() {
     td.wait_status(&worker, "working").await;
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert!(usage(&td, &card).await["working_seconds"].as_u64().unwrap() >= 1);
+    // Give research the same fresh baseline and elapsed time that would
+    // signal no_progress for a working card, without making any push.
+    let (_remote, _git) = branch_watch(&td, &lead, &worker, &card, None, 1).await;
+    terrariumd::trouble::observe_remote_heads(&state(&td)).await;
+    let c = card.clone();
+    state(&td).db.write("system", move |t| {
+        t.execute("INSERT INTO card_branch_heads(card, repo, branch, head, working_seconds, observed_at, checked_at) VALUES (?1, 'app', lower(?1), NULL, 0, ?2, ?2)", rusqlite::params![c, terrariumd::db::now()])?;
+        Ok(())
+    }).await.unwrap();
+    assert_signals(&td, &card, json!([])).await;
     eta(&td, &card, true).await;
     assert_signals(&td, &card, json!(["eta_overdue"])).await;
     assert_eq!(notices(&td, &lead).await, 1);
