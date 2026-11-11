@@ -111,8 +111,13 @@
     {
       "source": "api/agents.rs",
       "registration": "\"/agents/{id}/queued/{turn}\",axum::routing::delete(remove_queued),",
-      "access": "other",
-      "cases": []
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "DELETE",
+          "path": "/api/agents/$dev/queued/1?source=hold"
+        }
+      ]
     },
     {
       "source": "api/artifacts.rs",
@@ -2692,6 +2697,9 @@
     "actor.rs": [
       "_=>Actor::Operator,",
       "matches!(self,Self::Operator)&&crate::links::operator_only(\"actastheoperator\").is_ok()"
+    ],
+    "api/agents.rs": [
+      "crate::links::operator_only(\"removingaqueuedturn\")?;"
     ],
     "api/backups.rs": [
       "policy::operator_only(&actor,\"downloadingabackup\")?;",
