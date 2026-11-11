@@ -3661,20 +3661,28 @@ mod tests {
         let auth = format!("Bearer {key}");
         let h = [("authorization", auth.as_str())];
         let op = [("authorization", "Bearer t")];
+        // A question needs a card (`terrarium question ask --card`).
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            "/api/projects/p/cards",
+            &op,
+            &serde_json::json!({"title": "Deploy"}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let card = json_of(r).await["id"].as_str().unwrap().to_owned();
         let ask = |kind: &'static str| {
             let s = s.clone();
             let sys = sys.clone();
+            let card = card.clone();
             async move {
                 let r = send_body(
                     unix_router(s),
                     "POST",
                     &format!("/api/agents/{sys}/questions"),
                     &[(crate::actor::AGENT_HEADER, sys.as_str())],
-                    &if kind == "notice" {
-                        serde_json::json!({"kind": kind, "text": "Deploy?", "priority": "urgent"})
-                    } else {
-                        serde_json::json!({"kind": kind, "text": "Deploy?"})
-                    },
+                    &serde_json::json!({"kind": kind, "text": "Deploy?", "card": card}),
                 )
                 .await;
                 let st = r.status();
