@@ -1736,12 +1736,19 @@ async fn run_inner(
         .clone()
         .ok_or_else(|| ApiError::invalid("the project has no delivery recipe"))?;
     let (project, repo_name, t_name) = (job.project.clone(), job.repo.clone(), target.clone());
+    let kind = job.kind;
     let (repo, row) = state
         .db
         .read(move |c| {
             let repo = repos::find_by_name(c, &project, &repo_name)?.ok_or_else(|| {
                 ApiError::not_found(format!("no repo `{repo_name}` in `{project}`"))
             })?;
+            // review-ter-623-r4 F1: only a release job runs on a protected
+            // release target or its machine, also a job queued before the
+            // protection.
+            if kind != JobKind::Release {
+                jobs::check_not_release_target(c, &t_name, "running a job on the target")?;
+            }
             Ok((repo, targets::get(c, &t_name)?))
         })
         .await?;
@@ -2910,6 +2917,44 @@ fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
     Ok(())
 }
 
+/// The test holds of a target write (review-ter-623-r4 F2), by target
+/// name: the PATCH or DELETE of that target sends on `ready` after its read
+/// and waits for `go` before its write.
+type WritePause = (tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>);
+
+fn write_pauses() -> MutexGuard<'static, HashMap<String, WritePause>> {
+    static P: OnceLock<Mutex<HashMap<String, WritePause>>> = OnceLock::new();
+    match P.get_or_init(Mutex::default).lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// Hold the next PATCH or DELETE of target `name` between its read and its
+/// write. For the tests only. Returns the `ready` receiver (the request
+/// reached the hold) and the `go` sender (let it write).
+#[doc(hidden)]
+pub fn pause_next_target_write(
+    name: &str,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel();
+    write_pauses().insert(name.to_owned(), (ready_tx, go_rx));
+    (ready_rx, go_tx)
+}
+
+/// The hold of [`pause_next_target_write`], if a test set one for `name`.
+pub(crate) async fn target_write_pause(name: &str) {
+    let hold = write_pauses().remove(name);
+    if let Some((ready, go)) = hold {
+        let _ = ready.send(());
+        let _ = go.await;
+    }
+}
+
 /// The env names that `release_secrets` may set (TER-623): the secrets of
 /// `scripts/release.py`, and no other name.
 pub const RELEASE_SECRET_ENV: &[&str] = &[
@@ -3121,6 +3166,9 @@ fn check_release_target(
                 "target `{target}` is, or is on the machine of, `{r}`, the release target of project `{p}`: it runs release jobs only"
             )));
         }
+        // review-ter-623-r4 F1: also a protected (earlier) release target
+        // and its machine, also when this config has no release target.
+        jobs::check_not_release_target(conn, target, "running the job queue on the target")?;
     }
     let Some(release) = def.release_target() else {
         return Ok(());

@@ -483,6 +483,10 @@ async fn update(
         false
     };
     let expected = current.clone();
+    // A test holds the PATCH here, between its read and its write
+    // (review-ter-623-r4 F2).
+    crate::jobs::target_write_pause(&name).await;
+    let (a, proposed) = (actor.clone(), candidate.clone());
     let r = state
         .db
         .write(actor.label(), move |t| {
@@ -491,6 +495,11 @@ async fn update(
                     "target changed during limits update; retry",
                 ));
             }
+            // TER-623 (review-ter-623-r4 F2): the release rule again in the
+            // write, on the live and the proposed definition, so a target
+            // that the operator protected after the read is refused.
+            release_operator(t, &a, &expected.def, "changing the target")?;
+            release_operator(t, &a, &proposed, "changing the target")?;
             if let Some(settings) = baseline {
                 let mut rt = targets::get(t, &name)?.runtime;
                 rt.docker_settings = settings;
@@ -533,17 +542,25 @@ async fn remove(
             crate::store::reservations::guard_identity(conn, "target", &reserved_name)
         })
         .await?;
-    if current.source != crate::store::projects::SOURCE_FILE {
-        executor::teardown(&state, &current).await;
-    }
+    // TER-623 (review-ter-623-r4 F2): the release rule in the delete's
+    // write, on the live definition; the teardown starts only after that
+    // write committed, so a target that the operator protected meanwhile
+    // keeps its instance.
+    crate::jobs::target_write_pause(&name).await;
+    let a = actor.clone();
     state
         .db
         .write(actor.label(), move |t| {
+            let live = targets::get(t, &name)?;
+            release_operator(t, &a, &live.def, "deleting the target")?;
             let r = targets::delete(t, &name)?;
             leases::end_all_on(t, &name)?;
             t.audit("target.delete", &name, r.def.project.as_deref(), json!({}))
         })
         .await?;
+    if current.source != crate::store::projects::SOURCE_FILE {
+        executor::teardown(&state, &current).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

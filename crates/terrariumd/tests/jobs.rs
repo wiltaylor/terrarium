@@ -3657,6 +3657,157 @@ async fn a_release_target_stays_protected_until_the_operator_retires_it() {
     assert!(audit.contains("release_target.retire"), "{audit}");
 }
 
+/// TER-623 round 5 (review-ter-623-r4 F1): ordinary jobs stay off a
+/// protected release target. After a switch and after a clear, a sysadmin
+/// agent cannot make the old release target, or a target on its machine,
+/// the job target. A validate job queued before its target got protected
+/// is refused at dispatch, and its recipe never starts.
+#[tokio::test]
+async fn ordinary_jobs_stay_off_a_protected_release_target() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    release_client(&lab, "rel-a").await;
+    let sys = td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for t in [
+        json!({"name": "rel-b", "kind": "ssh", "address": "release@10.9.0.7", "port": 2252}),
+        json!({"name": "rel-a-alias", "kind": "host", "host": "lab2"}),
+    ] {
+        let r = td.post("/api/targets", t).await;
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    let marks = tempfile::tempdir().unwrap();
+    let m = marks.path().display().to_string();
+    let recipe = format!("touch \"{m}/started-$TERRARIUM_JOB_ID\"; sleep 600");
+    let config = |target: &str, release: Option<&str>| {
+        let mut c = json!({"target": target, "recipe": recipe, "slots": 1, "next_repos": ["app"],
+                           "work_dir": lab._dirs.path().join("jobs")});
+        if let Some(r) = release {
+            c["release_target"] = json!(r);
+        }
+        c
+    };
+    let r = td.put("/api/projects/p/delivery", config("p-box", Some("rel-a"))).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let rule = "release target runs release jobs only";
+    // The switch to rel-b, then the clear: rel-a and its machine stay off.
+    for release in [Some("rel-b"), None] {
+        let r = td.put("/api/projects/p/delivery", config("p-box", release)).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        for target in ["rel-a", "rel-a-alias"] {
+            let r = td
+                .put_as(&sys, "/api/projects/p/delivery", config(target, release))
+                .await;
+            assert_eq!(r.status, 403, "{target} after {release:?}: {}", r.body);
+            assert!(r.body.to_string().contains(rule), "{}", r.body);
+        }
+    }
+    // Two validate jobs on p-box: the first holds the one slot, the second
+    // waits. Then the operator moves rel-a onto lab1, the machine of p-box.
+    let started = |id: &str| marks.path().join(format!("started-{id}")).exists();
+    let validate = |branch: &'static str| async move {
+        let head = lab.branch(branch, "next", &[("OK", "yes\n")]);
+        let card = lab.card(branch, branch).await;
+        let r = lab
+            .td
+            .post_as(&lab.w1, &format!("/api/cards/{card}/validate"), json!({"commit": head}))
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        (card, r.body["job"]["id"].as_str().unwrap().to_owned())
+    };
+    let (_, first) = validate("ter-p1").await;
+    let start = Instant::now();
+    while !started(&first) {
+        assert!(start.elapsed() < DEADLINE, "the first job never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (second_card, second) = validate("ter-p2").await;
+    let r = td.patch("/api/targets/rel-a", json!({"host": "lab1"})).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td.delete(&format!("/api/jobs/{first}")).await;
+    assert!(r.status.is_success(), "{} {}", r.status, r.body);
+    let jobs = lab.until_idle().await;
+    let mine: Vec<&Value> = jobs
+        .iter()
+        .filter(|j| j["card"] == second_card.as_str())
+        .collect();
+    assert!(!mine.is_empty(), "{jobs:#?}");
+    for j in &mine {
+        assert_eq!(j["state"], "failed", "{j:#}");
+        assert!(!started(j["id"].as_str().unwrap()), "a job ran on the protected machine: {j:#}");
+        let detail = td
+            .get(&format!("/api/jobs/{}", j["id"].as_str().unwrap()))
+            .await
+            .ok()
+            .to_string();
+        assert!(detail.contains(rule), "{detail}");
+    }
+    assert!(!started(&second));
+}
+
+/// TER-623 round 5 (review-ter-623-r4 F2): a PATCH or DELETE of a target
+/// rechecks the release rule in its write. A sysadmin agent's PATCH and
+/// DELETE, read before the operator made the target the release target,
+/// are refused at the write, and the target keeps its definition.
+#[tokio::test]
+async fn a_target_write_read_before_the_protection_is_refused_at_its_write() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    release_client(&lab, "rel-c").await;
+    let sys = td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "rel-d", "kind": "ssh", "address": "release@10.9.0.8", "port": 2252}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let rule = "release target runs release jobs only";
+    let protect = |release: &'static str| async move {
+        let r = lab
+            .td
+            .put(
+                "/api/projects/p/delivery",
+                json!({"target": "p-box", "recipe": "true", "release_target": release}),
+            )
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    };
+    // The PATCH.
+    let (ready, go) = terrariumd::jobs::pause_next_target_write("rel-c");
+    let (patch, ()) = tokio::join!(
+        td.patch_as(&sys, "/api/targets/rel-c", json!({"host": "lab1"})),
+        async {
+            ready.await.unwrap();
+            protect("rel-c").await;
+            go.send(()).unwrap();
+        }
+    );
+    assert_eq!(patch.status, 403, "{}", patch.body);
+    assert!(patch.body.to_string().contains(rule), "{}", patch.body);
+    let t = td.get("/api/targets/rel-c").await.ok().clone();
+    assert_eq!(t["host"], "lab2", "{t:#}");
+    // The DELETE.
+    let (ready, go) = terrariumd::jobs::pause_next_target_write("rel-d");
+    let (del, ()) = tokio::join!(
+        td.req(hyper::Method::DELETE, "/api/targets/rel-d", None, Some(&sys)),
+        async {
+            ready.await.unwrap();
+            protect("rel-d").await;
+            go.send(()).unwrap();
+        }
+    );
+    assert_eq!(del.status, 403, "{}", del.body);
+    assert!(del.body.to_string().contains(rule), "{}", del.body);
+    let r = td.get("/api/targets/rel-d").await;
+    assert_eq!(r.status, 200, "the protected target was deleted: {}", r.body);
+}
+
 /// TER-623, review-ter-623 F3: a release never runs again by itself. A run
 /// that the host agent lost, a release that was running when the daemon
 /// stopped, and a cancel of a running release each end the job (failed or
