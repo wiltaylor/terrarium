@@ -283,13 +283,10 @@ pub async fn client_with_policy(
     mode: PrivateMode,
 ) -> ApiResult<Client> {
     let u = check_url(&remote.url)?;
-    let addr = tokio::time::timeout(
-        CONNECT,
-        net::resolve(&u, mode, own_ports, None),
-    )
-    .await
-    .map_err(|_| unreachable())?
-    .map_err(|_| unreachable())?;
+    let addr = tokio::time::timeout(CONNECT, net::resolve(&u, mode, own_ports, None))
+        .await
+        .map_err(|_| unreachable())?
+        .map_err(|_| unreachable())?;
     if u.scheme() == "http" && !addr.ip().is_loopback() {
         return Err(unreachable());
     }

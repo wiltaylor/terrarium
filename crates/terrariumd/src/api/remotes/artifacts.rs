@@ -314,10 +314,15 @@ fn destination_policy(
     if api.scheme() != target.scheme() {
         return Err(denied());
     }
-    let declared = declared.filter(|s| !s.is_empty())
-        .map(net::check_url).transpose()?;
+    let declared = declared
+        .filter(|s| !s.is_empty())
+        .map(net::check_url)
+        .transpose()?;
     if api.origin() != target.origin()
-        && declared.as_ref().is_none_or(|d| d.origin() != target.origin()) {
+        && declared
+            .as_ref()
+            .is_none_or(|d| d.origin() != target.origin())
+    {
         return Err(denied());
     }
     let private = match api.host() {
@@ -327,7 +332,11 @@ fn destination_policy(
         Some(url::Host::Domain("localhost")) => true,
         _ => false,
     };
-    Ok(if private { PrivateMode::Allow } else { PrivateMode::Deny })
+    Ok(if private {
+        PrivateMode::Allow
+    } else {
+        PrivateMode::Deny
+    })
 }
 
 #[cfg(test)]
@@ -344,10 +353,18 @@ mod tests {
         assert!(destination_policy(api, None, &other).is_err());
         let mode = destination_policy(api, Some("https://other.example/"), &other).unwrap();
         assert_eq!(mode, PrivateMode::Deny);
-        let resolver: net::Resolver = std::sync::Arc::new(|_, _| vec!["127.0.0.1".parse().unwrap()]);
-        assert!(net::resolve(&other, mode, &[], Some(resolver)).await.is_err());
+        let resolver: net::Resolver =
+            std::sync::Arc::new(|_, _| vec!["127.0.0.1".parse().unwrap()]);
+        assert!(
+            net::resolve(&other, mode, &[], Some(resolver))
+                .await
+                .is_err()
+        );
         let private = url::Url::parse("https://10.0.0.2/a/U1").unwrap();
-        assert_eq!(destination_policy("https://10.0.0.2/", None, &private).unwrap(), PrivateMode::Allow);
+        assert_eq!(
+            destination_policy("https://10.0.0.2/", None, &private).unwrap(),
+            PrivateMode::Allow
+        );
     }
     #[test]
     fn suffix_cannot_escape_one_artifact() {
