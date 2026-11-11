@@ -849,6 +849,7 @@ struct Lab {
     td: TestDaemon,
     _addr: SocketAddr,
     _host: tokio::task::JoinHandle<()>,
+    listener: tokio::task::JoinHandle<()>,
 }
 
 async fn lab() -> Lab {
@@ -860,7 +861,7 @@ async fn lab_with(docker: Option<&std::path::Path>) -> Lab {
     let td = TestDaemon::start().await;
     fast(&td);
     let state = td.daemon.as_ref().unwrap().state.clone();
-    let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
+    let (listener, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
         .await
         .unwrap();
     let r = td.post("/api/hosts", json!({"name": "lab1"})).await;
@@ -895,6 +896,7 @@ async fn lab_with(docker: Option<&std::path::Path>) -> Lab {
         td,
         _addr: addr,
         _host: host,
+        listener,
     }
 }
 
@@ -1007,7 +1009,7 @@ async fn a_process_wait_resolves_with_the_exit_code_and_the_output_as_data() {
 }
 
 #[tokio::test]
-async fn a_daemon_restart_fails_the_open_process_waits() {
+async fn a_daemon_restart_restores_native_open_process_waits() {
     let mut lab = lab().await;
     let w1 = id(&lab
         .td
@@ -1016,14 +1018,19 @@ async fn a_daemon_restart_fails_the_open_process_waits() {
     let r = run(
         &lab.td,
         &w1,
-        json!({"target": "box", "cmd": ["sleep", "30"]}),
+        json!({"target": "box", "cmd": ["sh", "-c", "sleep 1; echo kept; exit 3"]}),
     )
     .await;
     let wid = r["wait"]["id"].as_str().unwrap().to_owned();
+    lab.listener.abort();
     lab.td.boot(None, None).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let (listener, _) = terrariumd::hosts::serve(state, &lab._addr.to_string()).await.unwrap();
+    lab.listener = listener;
     fast(&lab.td);
-    let w = wait_state(&lab.td, &wid, "failed").await;
-    assert_eq!(w["result"]["error"], "lost");
+    let w = wait_state(&lab.td, &wid, "resolved").await;
+    assert_eq!(w["result"]["exit_code"], 3);
+    assert_eq!(w["result"]["stdout_tail"], "kept\n");
     // The log still has what the result kept.
     let log = lab.td.get(&format!("/api/waits/{wid}/log")).await;
     assert_eq!(log.ok()["running"], false);

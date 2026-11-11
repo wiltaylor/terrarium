@@ -1224,8 +1224,9 @@ another host. A TLS proxy in front of the host listener must pass
    `<binary>.new --version`. The new binary must exit 0 in 10 seconds and
    print the offered version (`-dirty` does not count). Else it removes
    `.new` and stops.
-5. It waits until it holds no session (it looks every 10 seconds). An
-   update does not kill the sessions of agents.
+5. It stops admitting new sessions and waits until it holds no session
+   (it looks every 10 seconds). Existing sessions retain control traffic.
+   A failed update reopens admission. An update does not kill live sessions.
 6. It keeps the running binary as `<binary>.prev` (a hard link), writes the
    new version to `<binary>.pending`, and renames `.new` over the binary.
    The rename is atomic: the binary is always the old one or the new one.
