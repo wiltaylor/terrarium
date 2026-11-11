@@ -639,7 +639,7 @@ async fn tls_leaf_pin_is_checked_on_every_http_sse_and_ws_connection_before_key(
                 .header("sec-websocket-version", "13")
                 .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
         }
-        let error = q.send().await.err().expect("wrong leaf must fail TLS");
+        let error = q.send().await.expect_err("wrong leaf must fail TLS");
         assert!(
             net::connection_error(error)
                 .details
