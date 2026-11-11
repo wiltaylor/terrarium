@@ -44,6 +44,7 @@ export const PROVIDER_MARKS: Record<string, ProviderMark> = {
 
 /** The vendor and product name of each provider kind, for the tooltip and the screen reader. */
 export const PROVIDER_LABELS: Record<string, string> = {
+  litellm: "LiteLLM",
   anthropic: "Anthropic (Claude)",
   openai: "OpenAI (ChatGPT, Codex)",
   github: "GitHub Copilot",

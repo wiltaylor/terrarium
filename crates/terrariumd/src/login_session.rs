@@ -1559,7 +1559,7 @@ pub fn env_var_for(provider: &str) -> Option<(&'static str, Option<&'static str>
         // A self-hosted server (`terrarium_core::selfhosted`); the old word
         // `openai-compatible` is its alias. The base URL is in the
         // subscription row, not in the env.
-        "selfhosted" | "openai-compatible" => (terrarium_core::selfhosted::KEY_ENV, None),
+        "selfhosted" | "openai-compatible" | "litellm" => (terrarium_core::selfhosted::KEY_ENV, None),
         "google" | "gemini" => ("GEMINI_API_KEY", None),
         "openrouter" => ("OPENROUTER_API_KEY", None),
         "xai" => ("XAI_API_KEY", None),

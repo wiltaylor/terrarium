@@ -130,6 +130,7 @@ export const takesCode = (k: WizardLogin): boolean => k === "claude";
  * `harnesses`: the harnesses the daemon gives the new subscription; the form shows them.
  */
 export const KEY_PROVIDERS: { id: string; env: string; label: string; harnesses?: string[] }[] = [
+  { id: "litellm", env: "ANTHROPIC_AUTH_TOKEN", label: "LiteLLM (Claude Code)", harnesses: ["claude"] },
   { id: "bedrock", env: "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY", label: "Amazon Bedrock (Claude Code)", harnesses: ["claude"] },
   { id: "anthropic", env: "ANTHROPIC_API_KEY", label: "Anthropic" },
   { id: "openai", env: "OPENAI_API_KEY", label: "OpenAI" },
@@ -193,7 +194,7 @@ export function apiKeyBody(f: { provider: string; key: string; plan?: string; ba
     provider: f.provider,
     key: f.key,
     ...(takesPlan(f.provider) ? { plan: f.plan && KEY_PLANS[f.provider]?.some((p) => p.id === f.plan) ? f.plan : defaultPlan(f.provider) } : {}),
-    ...(f.provider === "openai-compatible" || (f.provider === "selfhosted" && f.baseUrl?.trim()) ? { base_url: (f.baseUrl ?? "").trim() } : {}),
+    ...(f.provider === "litellm" || f.provider === "openai-compatible" || (f.provider === "selfhosted" && f.baseUrl?.trim()) ? { base_url: (f.baseUrl ?? "").trim() } : {}),
     ...(models.length ? { models } : {}),
   };
 }

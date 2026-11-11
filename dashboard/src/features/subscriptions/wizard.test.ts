@@ -13,6 +13,13 @@ const session = (over: Partial<LoginSession> = {}): LoginSession => ({
 });
 const run = (s: WizardState, ...actions: WizardAction[]) => actions.reduce(wizardReduce, s);
 
+it("builds a Claude-only LiteLLM key request with the proxy and models", () => {
+  expect(KEY_PROVIDERS.find((p) => p.id === "litellm")?.harnesses).toEqual(["claude"]);
+  expect(apiKeyBody({ provider: "litellm", key: "test-key", baseUrl: " https://proxy.example.com ", models: "a, b" })).toEqual({
+    provider: "litellm", key: "test-key", base_url: "https://proxy.example.com", models: ["a", "b"],
+  });
+});
+
 describe("wizard state machine", () => {
   it("goes pick -> setup -> starting -> live -> done", () => {
     let s = run(initialWizard(), { type: "pick", path: "codex" });
