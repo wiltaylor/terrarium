@@ -70,7 +70,7 @@ async fn bedrock_save_defaults_and_failed_test_leave_credentials_unchanged() {
     assert!(text.contains("Nothing was saved"), "{text}");
     assert!(!text.contains("E2E-") && !text.contains(&endpoint));
     server.await.unwrap();
-    let stored = terrariumd::login_session::read_key(td.dir.path(), "bedrock-setup").unwrap();
+    let stored = terrariumd::login_session::read_key(&td.state, "bedrock-setup").unwrap();
     assert_eq!(stored.key, "E2E-old-secret");
     assert_eq!(stored.key_id.as_deref(), Some("E2E-old-id"));
     let response = td.get("/api/subscriptions/bedrock-setup").await;
