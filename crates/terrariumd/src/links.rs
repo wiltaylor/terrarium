@@ -140,6 +140,20 @@ pub fn denied(
         // The config repo push (design Q3), and its remote.
         ["config", "push" | "sync"] => Some("the config repo push"),
         ["config", "remote"] if !get => Some("the config repo push"),
+        // Executable automation (TER-61 review round 3, F6): a schedule or a
+        // board rule runs later as `system`, its owner, or the project
+        // inbox, without the link's provenance, so its turn and mail actions
+        // would reach a sysadmin agent around the checks above. Reads, a
+        // delete, and a disable stay open.
+        ["schedules"] if *method == Method::POST => Some("making a schedule"),
+        ["schedules", _] if *method == Method::PATCH => Some("changing a schedule"),
+        ["schedules", _, "run" | "enable" | "test"] => Some("running or enabling a schedule"),
+        ["schedules", _, "deliveries", _, "redeliver"] => Some("running a schedule"),
+        ["projects", _, "rules"] if !get => Some("writing the board rules"),
+        ["projects", _, "rules", "migrate" | "enable" | "disable"] => {
+            Some("writing the board rules")
+        }
+        ["projects", _, "rules", _, "enable" | "disable"] => Some("writing the board rules"),
         _ => None,
     }
 }
@@ -401,6 +415,17 @@ mod tests {
             (Method::POST, "/api/config/sync"),
             (Method::PUT, "/api/config/remote"),
             (Method::DELETE, "/api/config/remote"),
+            (Method::POST, "/api/schedules"),
+            (Method::PATCH, "/api/schedules/S1"),
+            (Method::POST, "/api/schedules/S1/run"),
+            (Method::POST, "/api/schedules/S1/enable"),
+            (Method::POST, "/api/schedules/S1/test"),
+            (Method::POST, "/api/schedules/S1/deliveries/D1/redeliver"),
+            (Method::PUT, "/api/projects/p/rules"),
+            (Method::DELETE, "/api/projects/p/rules"),
+            (Method::POST, "/api/projects/p/rules/migrate"),
+            (Method::POST, "/api/projects/p/rules/card-flow/enable"),
+            (Method::POST, "/api/projects/p/rules/card-flow/disable"),
         ];
         for (m, p) in cases {
             assert!(deny(m.clone(), p), "{m} {p} passed");
@@ -423,6 +448,14 @@ mod tests {
             (Method::DELETE, "/api/links/self"),
             (Method::GET, "/api/system/instance"),
             (Method::GET, "/api/sessions/S1"),
+            (Method::GET, "/api/schedules"),
+            (Method::GET, "/api/schedules/S1/runs"),
+            (Method::DELETE, "/api/schedules/S1"),
+            (Method::POST, "/api/schedules/S1/disable"),
+            (Method::GET, "/api/projects/p/rules"),
+            (Method::POST, "/api/projects/p/rules/check"),
+            (Method::POST, "/api/projects/p/rules/dry-run"),
+            (Method::POST, "/api/projects/p/rules/lint"),
             (Method::GET, "/api/sessions/S1/transcript"),
         ];
         for (m, p) in cases {

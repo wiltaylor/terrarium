@@ -15,7 +15,12 @@ import { linkChip } from "./model";
 export default function LinksPage() {
   const now = useNow(30_000);
   const [showRevoked, setShowRevoked] = createSignal(false);
-  const [links, { refetch }] = createResource(showRevoked, (revoked) => api.links.list({ revoked }));
+  // The source is an object, never falsy: Solid skips the fetcher for a
+  // false source, so `showRevoked` alone would load nothing at first.
+  const [links, { refetch }] = createResource(
+    () => ({ revoked: showRevoked() }),
+    (q) => api.links.list(q),
+  );
   const [error, setError] = createSignal<unknown>(null);
   const [adding, setAdding] = createSignal(false);
   // The code of a rotate: shown in the same dialog as a new link.

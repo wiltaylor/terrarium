@@ -400,11 +400,23 @@ async fn resume(
     } else {
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
     };
+    let link = crate::links::is_link_call();
     Ok(Json(
         state
             .db
             .write(actor.label(), move |t| {
-                mail::resume(t, &thread, b.note.as_deref())
+                let r = mail::resume(t, &thread, b.note.as_deref())?;
+                // The note goes out as the operator to each participant; an
+                // error here rolls the whole resume back.
+                refuse_link_to_sysadmin(
+                    t,
+                    link,
+                    r.note
+                        .iter()
+                        .filter(|m| m.to_kind == "agent")
+                        .map(|m| m.to.as_str()),
+                )?;
+                Ok(r)
             })
             .await?,
     ))
@@ -543,12 +555,21 @@ async fn inbox_reply(
     ApiJson(r): ApiJson<ReplyBody>,
 ) -> ApiResult<(StatusCode, Json<Vec<Message>>)> {
     policy::read_inbox(&actor, &name)?;
+    let link = crate::links::is_link_call();
     let out = state
         .db
         .write(actor.label(), move |t| {
             let m = inbox_message(t, &name, &id)?;
             let from = Address::Project(name.clone());
-            mail::reply(t, &m, &from, r.subject.as_deref(), &r.body)
+            let out = mail::reply(t, &m, &from, r.subject.as_deref(), &r.body)?;
+            refuse_link_to_sysadmin(
+                t,
+                link,
+                out.iter()
+                    .filter(|m| m.to_kind == "agent")
+                    .map(|m| m.to.as_str()),
+            )?;
+            Ok(out)
         })
         .await?;
     Ok((StatusCode::CREATED, Json(out)))

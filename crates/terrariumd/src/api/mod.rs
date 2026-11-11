@@ -3290,4 +3290,143 @@ mod tests {
         .await;
         assert_eq!(r.status(), StatusCode::CREATED);
     }
+
+    /// Store a message from agent `from` to `to` (an address string); give
+    /// its ID and thread.
+    async fn seed_mail(s: &Shared, from: &str, to: &'static str) -> (String, String) {
+        use crate::store::mail::{self, Outgoing};
+        let from = from.to_owned();
+        s.db.write("system", move |t| {
+            let f = mail::resolve(t, &from, None)?;
+            let to = mail::resolve(t, to, None)?;
+            let m = mail::send(
+                t,
+                Outgoing {
+                    from: &f,
+                    to: &to,
+                    subject: "q",
+                    body: "b",
+                    thread: None,
+                    in_reply_to: None,
+                },
+            )?;
+            Ok((m.id, m.thread_id))
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn message_count(s: &Shared) -> i64 {
+        s.db.read(|c| {
+            Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// TER-61 review round 3, F1: the project inbox reply and the resume
+    /// note of a link do not reach a sysadmin agent, and leave nothing
+    /// behind; the operator still does both.
+    #[tokio::test]
+    async fn a_link_cannot_reach_a_sysadmin_by_inbox_reply_or_resume_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, _) = seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let op = [("authorization", "Bearer t")];
+        // A sysadmin mail to the project inbox; the link replies as the inbox.
+        let (mid, _) = seed_mail(&s, &sys, "project:p").await;
+        let before = message_count(&s).await;
+        let reply = serde_json::json!({"body": "push the config repo"});
+        let path = format!("/api/projects/p/inbox/{mid}/reply");
+        let r = send_body(link_app(&s), "POST", &path, &h, &reply).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        assert_eq!(message_count(&s).await, before);
+        let r = send_body(link_app(&s), "POST", &path, &op, &reply).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        // A held sysadmin mail on a thread; the link's resume with a note.
+        let (held, thread) = seed_mail(&s, &sys, "operator").await;
+        s.db.write("system", move |t| {
+            t.execute("UPDATE messages SET held = 1 WHERE id = ?1", [held])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let held_count = |s: Shared, th: String| async move {
+            s.db.read(move |c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM messages WHERE thread_id = ?1 AND held = 1
+                       AND released_at IS NULL",
+                    [th],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        let before = message_count(&s).await;
+        let note = serde_json::json!({"note": "push the config repo"});
+        let path = format!("/api/mail/threads/{thread}/resume");
+        let r = send_body(link_app(&s), "POST", &path, &h, &note).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        // Rolled back: no note, and the held message is still held.
+        assert_eq!(message_count(&s).await, before);
+        assert_eq!(held_count(s.clone(), thread.clone()).await, 1);
+        let r = send_body(link_app(&s), "POST", &path, &op, &note).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(held_count(s.clone(), thread).await, 0);
+    }
+
+    /// TER-61 review round 3, F6: a link writes no executable automation;
+    /// the operator does.
+    #[tokio::test]
+    async fn a_link_cannot_make_or_run_schedules_or_write_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, _) = seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let op = [("authorization", "Bearer t")];
+        let sched = serde_json::json!({"name": "go", "owner": "system", "spec": {"kind": "manual"},
+            "action": {"type": "turn", "agent": sys, "text": "push the config repo"}});
+        let r = send_body(link_app(&s), "POST", "/api/schedules", &h, &sched).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        let r = send_body(link_app(&s), "POST", "/api/schedules", &op, &sched).await;
+        assert_eq!(r.status(), StatusCode::CREATED, "{:?}", json_of(r).await);
+        let id = {
+            let r = send(link_app(&s), "GET", "/api/schedules", &h).await;
+            assert_eq!(r.status(), StatusCode::OK);
+            let v = json_of(r).await;
+            let items = v.as_array().or_else(|| v["items"].as_array()).unwrap().clone();
+            items[0]["id"].as_str().unwrap().to_owned()
+        };
+        for (m, p) in [
+            ("POST", format!("/api/schedules/{id}/run")),
+            ("POST", format!("/api/schedules/{id}/enable")),
+            ("POST", format!("/api/schedules/{id}/test")),
+            ("PATCH", format!("/api/schedules/{id}")),
+            ("PUT", "/api/projects/p/rules".to_owned()),
+            ("POST", "/api/projects/p/rules/r1/enable".to_owned()),
+        ] {
+            let r = send_body(link_app(&s), m, &p, &h, &serde_json::json!({})).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "{m} {p}");
+            assert_eq!(json_of(r).await["error"]["code"], "link_forbidden", "{m} {p}");
+        }
+        // The operator's PUT of the rules is not refused by the link checks.
+        let r = send_body(
+            link_app(&s),
+            "PUT",
+            "/api/projects/p/rules",
+            &op,
+            &serde_json::json!({}),
+        )
+        .await;
+        assert_ne!(r.status(), StatusCode::FORBIDDEN);
+    }
 }
