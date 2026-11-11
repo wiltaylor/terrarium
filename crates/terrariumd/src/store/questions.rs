@@ -1536,6 +1536,7 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
     // A tool run approval: the agent's CLI waits on the question, no mail.
     if q.kind != QuestionKind::ToolRun
         && let Ok(to) = mail::resolve(t, &q.agent, None)
+        && to != mail::Address::System
     {
         let who = by.display();
         let mut body = format!(
@@ -1746,8 +1747,8 @@ pub fn retract(
 /// Acknowledge an open notice as `by` (the operator, or a sysadmin agent:
 /// the API layer checks it), with an optional reply. A question is `409`,
 /// and so is a notice that is not open. The `question` waits on it
-/// resolve, and the agent always gets one mail from `by` on the thread of
-/// the notice: it wakes with the acknowledgement and the reply.
+/// resolve, and the agent gets one mail from `by` on the thread of
+/// the notice, unless it is system, which cannot receive mail.
 pub fn acknowledge(
     t: &mut Tx<'_>,
     id: &str,
@@ -1780,7 +1781,9 @@ pub fn acknowledge(
     )?;
     let q = get(t, &q.id)?;
     let ended = end_waits(t, &q, "acknowledged")?;
-    if let Ok(to) = mail::resolve(t, &q.agent, None) {
+    if let Ok(to) = mail::resolve(t, &q.agent, None)
+        && to != mail::Address::System
+    {
         let who = by.display();
         let mut body = format!(
             "{who} acknowledged your notice {} (revision {}).\n\nYour notice:\n{}",
@@ -2385,6 +2388,36 @@ pub fn recap(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn system_missing_template_notice_can_be_acknowledged_and_retracted() {
+        for (verb, status, action) in [
+            ("ack", QuestionStatus::Acknowledged, "question.ack"),
+            ("retract", QuestionStatus::Retracted, "question.retract"),
+        ] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            crate::db::migrate(&mut conn).unwrap();
+            let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+            let id = db.write("system", |t| {
+                crate::required_templates::check_start(t)?;
+                Ok(t.query_row("SELECT id FROM questions WHERE agent = 'system'", [], |r| r.get::<_, String>(0))?)
+            }).await.unwrap();
+            db.write("operator", move |t| {
+                let q = if verb == "ack" {
+                    acknowledge(t, &id, &mail::Address::Operator, Some("Noted"))?
+                } else {
+                    retract(t, &id, false, Some("Resolved"))?
+                };
+                assert_eq!(q.status, status);
+                assert_eq!(get(t, &id)?.status, status);
+                let mails: i64 = t.query_row("SELECT count(*) FROM mail", [], |r| r.get(0))?;
+                assert_eq!(mails, 0);
+                let audits: i64 = t.query_row("SELECT count(*) FROM audit WHERE action = ?1", [action], |r| r.get(0))?;
+                assert_eq!(audits, 1);
+                Ok(())
+            }).await.unwrap();
+        }
+    }
 
     #[test]
     fn card_question_lookup_uses_index_without_sorting_history() {
