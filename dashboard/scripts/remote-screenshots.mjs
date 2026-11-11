@@ -25,6 +25,7 @@ try {
       if (path === "/api/session") body = { csrf: "fixture-only", password_set: true };
       else if (path === "/api/remotes/lab") body = { name: "lab", url: "https://lab.example.com", label: "Lab", status: "version_skew", read_only: true };
       else if (path.endsWith("/health")) body = { version: "0.29.0", uptime: 3600 };
+      else if (path.endsWith("/project-folders")) body = { folders: [], placements: [] };
       else if (path.endsWith("/counts")) body = {};
       await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
     });
