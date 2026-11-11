@@ -161,7 +161,8 @@ async fn litellm_live_claude_and_fallback_mail_only() {
         transcript,
         "{}",
         json!({"type": "cost-state", "sessionId": session,
-                                    "totalCostUSD": cost})
+               "totalCostUSD": cost,
+               "modelUsage": launched["result"]["modelUsage"].as_object().cloned().unwrap_or_default()})
     )
     .unwrap();
     emit(
@@ -192,7 +193,8 @@ async fn litellm_live_claude_and_fallback_mail_only() {
             transcript,
             "{}",
             json!({"type": "cost-state", "sessionId": session,
-                                        "totalCostUSD": total})
+                   "totalCostUSD": total,
+                   "modelUsage": {"claude-sonnet-4-5": {"costUSD": total}}})
         )
         .unwrap();
         emit(td, &agent, "turn_end", json!({})).await;
