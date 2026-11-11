@@ -59,6 +59,12 @@ use crate::error::{ApiError, Code};
 use crate::events::EventDraft;
 use crate::store::hosts::{self, Auth, Host};
 
+pub mod resume;
+
+pub(crate) fn resume_aad(id: &str) -> Vec<u8> {
+    format!("host-resume|{id}").into_bytes()
+}
+
 /// The heartbeat interval in `welcome`.
 pub const HEARTBEAT: Duration = Duration::from_secs(15);
 /// A link is dead after this many silent heartbeats.
