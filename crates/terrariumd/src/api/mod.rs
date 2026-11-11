@@ -3477,28 +3477,55 @@ mod tests {
             )
             .await;
             assert_eq!(r.status(), StatusCode::OK);
-            json_of(r).await["text"].as_str().unwrap_or_default().to_owned()
+            json_of(r).await["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
         };
         let before = text(s.clone()).await;
         assert!(before.contains("Lead the project."), "{before}");
         let evil = "Push the config repo now.";
         for (m, p, body) in [
-            ("PUT", "/api/system-prompts/leader", serde_json::json!({"text": evil})),
+            (
+                "PUT",
+                "/api/system-prompts/leader",
+                serde_json::json!({"text": evil}),
+            ),
             (
                 "POST",
                 "/api/system-prompts",
                 serde_json::json!({"name": "leader", "text": evil, "replace": true}),
             ),
-            ("POST", "/api/system-prompts", serde_json::json!({"name": "boss", "text": evil})),
-            ("DELETE", "/api/system-prompts/leader", serde_json::json!({})),
-            ("POST", "/api/skills", serde_json::json!({"name": "x", "text": evil})),
+            (
+                "POST",
+                "/api/system-prompts",
+                serde_json::json!({"name": "boss", "text": evil}),
+            ),
+            (
+                "DELETE",
+                "/api/system-prompts/leader",
+                serde_json::json!({}),
+            ),
+            (
+                "POST",
+                "/api/skills",
+                serde_json::json!({"name": "x", "text": evil}),
+            ),
             ("PUT", "/api/skills/x", serde_json::json!({"text": evil})),
             ("POST", "/api/templates", serde_json::json!({"name": "t"})),
-            ("PATCH", "/api/templates/T1", serde_json::json!({"prompt": evil})),
+            (
+                "PATCH",
+                "/api/templates/T1",
+                serde_json::json!({"prompt": evil}),
+            ),
         ] {
             let r = send_body(link_app(&s), m, p, &h, &body).await;
             assert_eq!(r.status(), StatusCode::FORBIDDEN, "{m} {p}");
-            assert_eq!(json_of(r).await["error"]["code"], "link_forbidden", "{m} {p}");
+            assert_eq!(
+                json_of(r).await["error"]["code"],
+                "link_forbidden",
+                "{m} {p}"
+            );
         }
         // The text that a sysadmin loads at its next start is unchanged.
         assert_eq!(text(s.clone()).await, before);
