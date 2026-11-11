@@ -3059,7 +3059,10 @@ pub fn set_columns(
     };
     for (card, anchor) in anchors {
         if let Some(name) = renames.get(&anchor) {
-            t.execute("UPDATE card_groups SET done_when = ?2 WHERE card = ?1", params![card, name])?;
+            t.execute(
+                "UPDATE card_groups SET done_when = ?2 WHERE card = ?1",
+                params![card, name],
+            )?;
         }
     }
     t.execute(
