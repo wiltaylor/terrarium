@@ -24,6 +24,13 @@ jobs:
   # scripts/ tests, and the dashboard check), one part per step.
   check:
     name: fmt + lint + test
+    # Skipped only for a push to main whose head commit carries a
+    # `tested-at-cut:` trailer: the lead ran the same full suite on that
+    # commit at the version cut (operator, 2026-11-11, question
+    # 01M74RFDZ39SP9E3258VM6F48A). Pull requests and every other push run it.
+    if: >-
+      !(github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && contains(github.event.head_commit.message, 'tested-at-cut:'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -200,7 +207,12 @@ jobs:
   image:
     name: Build and push the image
     needs: [version, check]
-    if: needs.version.outputs.do_release == 'true'
+    # A check skipped by the tested-at-cut trailer does not stop the image;
+    # a failed or cancelled check does.
+    if: >-
+      always() && needs.version.outputs.do_release == 'true'
+      && needs.version.result == 'success'
+      && (needs.check.result == 'success' || needs.check.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read
