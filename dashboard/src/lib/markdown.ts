@@ -179,7 +179,7 @@ export function renderWiki(src: string, opts: RenderOptions): string {
           const m = /^[\w.-]+\/[\w.*?/-]*\*[\w.*?/-]*/.exec(s);
           return m ? { type: "globpath", raw: m[0], text: m[0] } : undefined;
         },
-        renderer(token: { text?: unknown }) { return esc(String(token.text)); },
+        renderer(token: Tokens.Generic) { return esc(String(token.text)); },
       }] : []),
       {
         name: "wikilink",
