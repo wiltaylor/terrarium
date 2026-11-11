@@ -58,7 +58,8 @@ pub const CLI_DENIED_ENV_PREFIXES: &[&str] = &["DOCKER_", "SSL_", "OTEL_"];
 /// (`checkout_on_target`). Neither the `docker` CLI nor its children read
 /// them. `TERRARIUM_GIT_SSH_KEY` is not on the list: the daemon sends the
 /// key base64-encoded on one line (`checkout_script_env`, TER-577), so it
-/// goes into the env file, and a multi-line key is refused. A grant cannot set them, but the daemon does not check the names
+/// goes into the env file, and a multi-line key is refused. A grant cannot
+/// set them, but the daemon does not check the names
 /// in an agent's own exec env (`ExecBody.env`, terrariumd
 /// `api/targets.rs`), so the list is exact: any other `TERRARIUM_*` name
 /// with a multi-line value is refused (TER-541).

@@ -23,7 +23,7 @@ import type { Agent, AgentEvent, DayStartSpec, MatchRule, Message, NewSchedule, 
 import { contentTypeOf, headerNameProblem, MAX_TIMEOUT, previewRequest, sampleEvent, templateProblem, urlProblem } from "../../features/schedules/webhook";
 import { nextRuns, parseCron, validTimeZone } from "../../lib/cron";
 import { paginate } from "../../lib/paging";
-import { parseEvery } from "../../lib/schedule";
+import { parseDaemonEvery, parseEvery } from "../../lib/schedule";
 import type { MockWorld } from "./data";
 
 /** Who calls the schedule endpoints. Default: the operator. */
@@ -322,7 +322,7 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
     const notAfter = hhmm("spec.not_after", spec.not_after);
     if (notBefore && notAfter && notBefore > notAfter) invalid("spec.not_after", "`not_after` is before `not_before`");
     if (spec.delay !== undefined) {
-      const sec = parseEvery(spec.delay);
+      const sec = parseDaemonEvery(spec.delay);
       if (sec === null) invalid("spec.delay", `\`${spec.delay}\` is not a duration such as 15m or 1h30m`);
       else if (sec > 12 * 3600) invalid("spec.delay", `\`${spec.delay}\` is over the longest delay, 12h`);
     }

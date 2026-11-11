@@ -5134,7 +5134,7 @@ if [ -n "${TERRARIUM_GIT_SSH_KEY:-}" ]; then
   # The key comes base64-encoded on one line (TER-577), as the env of an ssh
   # target does: a docker target then keeps it in its 0600 env file.
   (umask 077 && printf '%s' "$TERRARIUM_GIT_SSH_KEY" | base64 -d > "$keyfile") \
-    || { echo "cannot decode the SSH key: the target needs base64 -d"; exit 2; }
+    || { echo "cannot decode the SSH key: the target needs base64 -d" >&2; exit 2; }
   export GIT_SSH_COMMAND="$sshbase -i $keyfile -o IdentitiesOnly=yes"
 fi
 unset TERRARIUM_GIT_SSH_KEY
@@ -5614,26 +5614,27 @@ mod tests {
         )
         .unwrap();
         let v = c.env["TERRARIUM_GIT_SSH_KEY"].clone();
-        assert!(!v.contains(['\n', '\r']), "{v}");
-        assert_eq!(
+        assert!(!v.contains(['\n', '\r']));
+        assert!(
             base64::engine::general_purpose::STANDARD
                 .decode(&v)
-                .unwrap(),
-            key.as_bytes()
+                .unwrap()
+                == key.as_bytes()
         );
-        assert_eq!(
-            checkout_env(Some(&s))["TERRARIUM_GIT_SSH_KEY"],
-            key.trim_end()
-        );
+        assert!(checkout_env(Some(&s))["TERRARIUM_GIT_SSH_KEY"] == key.trim_end());
         // A fake ssh first in PATH copies the key file that it gets.
         let bin = root.join("bin");
         std::fs::create_dir(&bin).unwrap();
         let got = root.join("got");
+        let key_path = root.join("key-path");
+        let mode = root.join("mode");
         std::fs::write(
             bin.join("ssh"),
             format!(
-                "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -i ]; then cp \"$2\" {}; fi; shift; done\nexit 1\n",
-                got.display()
+                "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -i ]; then cp \"$2\" {}; printf '%s' \"$2\" > {}; stat -c %a \"$2\" > {}; fi; shift; done\nexit 1\n",
+                got.display(),
+                key_path.display(),
+                mode.display()
             ),
         )
         .unwrap();
@@ -5654,20 +5655,18 @@ mod tests {
                 .unwrap()
         };
         let out = run(&c.env);
-        assert_eq!(
-            std::fs::read_to_string(&got).unwrap_or_default(),
-            key,
-            "{out:?}"
-        );
+        assert!(!out.status.success());
+        assert!(std::fs::read_to_string(&got).unwrap_or_default() == key);
+        assert_eq!(std::fs::read_to_string(&mode).unwrap().trim(), "600");
+        let removed = std::fs::read_to_string(&key_path).unwrap();
+        assert!(!Path::new(&removed).exists());
         // A value that is not base64 stops the script before git runs.
         let mut bad = c.env.clone();
         bad.insert("TERRARIUM_GIT_SSH_KEY".into(), "not base64!".into());
         let out = run(&bad);
         assert!(!out.status.success());
-        assert!(
-            String::from_utf8_lossy(&out.stdout).contains("cannot decode the SSH key"),
-            "{out:?}"
-        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot decode the SSH key"));
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("cannot decode the SSH key"));
     }
 
     /// S9 (secret manager review, 2026-10-29): the agent can write the

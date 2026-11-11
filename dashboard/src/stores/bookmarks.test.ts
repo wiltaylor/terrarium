@@ -5,6 +5,22 @@ import { bookmarkAddError, bookmarkHref, createBookmarksStore, skippedReport } f
 
 const origin = "https://terrarium.test";
 describe("bookmarks", () => {
+  it.each(["add", "remove"])("keeps a queued %s local when the first refresh is forbidden", async (operation) => {
+    const values = new Map<string, string>([["terrarium.bookmarks", JSON.stringify([{ title: "Local", href: "https://local.test/" }])]]);
+    const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { values.set(k, v); } };
+    let calls = 0;
+    const forbidden = async (): Promise<never> => { calls++; throw new ApiError(403, "not operator"); };
+    const store = createBookmarksStore(storage, origin, { list: forbidden, add: forbidden, remove: forbidden });
+    const first = store.refresh();
+    if (operation === "add") store.add("New", "https://new.test");
+    else store.remove("https://local.test");
+    await first;
+    await store.refresh();
+    expect(calls).toBe(1);
+    expect(store.error()).toBeNull();
+    expect(store.items().map((b) => b.title)).toEqual(operation === "add" ? ["Local", "New"] : []);
+    expect(createBookmarksStore(storage, origin).items()).toEqual(store.items());
+  });
   it("edits in place, keeps order and rejects a duplicate destination", () => {
     const store = createBookmarksStore(null, origin);
     store.add("First", "https://first.test");
