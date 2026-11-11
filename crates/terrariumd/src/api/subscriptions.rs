@@ -1547,15 +1547,21 @@ async fn api_key(
     }
     let source = exists.as_ref().map(|s| s.source.clone());
     // Validate before writing the credential file, which is outside the DB transaction.
-    if key.provider == "litellm" && exists.is_none() {
-        let sh = SelfHosted {
-            api: Api::Anthropic,
-            base_url: key.base_url.clone().unwrap_or_default(),
-            models: key.models.clone(),
-            ..SelfHosted::default()
+    if key.provider == "litellm" {
+        let mut sh = exists
+            .as_ref()
+            .and_then(|s| s.selfhosted.clone())
+            .unwrap_or_else(|| SelfHosted {
+                api: Api::Anthropic,
+                ..SelfHosted::default()
+            });
+        if let Some(url) = &key.base_url {
+            sh.base_url = url.clone();
         }
-        .checked()
-        .map_err(ApiError::invalid)?;
+        if !key.models.is_empty() {
+            sh.models = key.models.clone();
+        }
+        let sh = sh.checked().map_err(ApiError::invalid)?;
         if !sh.base_url.to_ascii_lowercase().starts_with("https://") {
             return Err(ApiError::invalid("LiteLLM base_url must use https"));
         }

@@ -46,6 +46,29 @@ async fn litellm_is_claude_only_and_keeps_the_key_private() {
     assert_eq!(sub["selfhosted"]["models"], json!(["team-model"]));
     assert_eq!(sub["no_quota"], false);
     assert!(!sub.to_string().contains("E2E-lite-secret"));
+    let r = td
+        .post(
+            "/api/subscriptions/lite/api-key",
+            json!({"provider": "litellm", "key": "E2E-rejected-key", "base_url": "http://proxy.example.com"}),
+        )
+        .await;
+    assert_eq!(r.status, 422);
+    let r = td
+        .patch(
+            "/api/subscriptions/lite",
+            json!({"selfhosted": {"base_url": "http://proxy.example.com"}}),
+        )
+        .await;
+    assert_eq!(r.status, 422);
+    let r = td.get("/api/subscriptions/lite").await;
+    assert_eq!(r.ok()["selfhosted"]["base_url"], "https://proxy.example.com");
+    // Rotating the key without supplying a URL validates the stored endpoint.
+    td.post(
+        "/api/subscriptions/lite/api-key",
+        json!({"provider": "litellm", "key": "E2E-rotated-key"}),
+    )
+    .await
+    .ok();
     for harness in ["pi", "codex", "copilot"] {
         let r = td
             .post(
