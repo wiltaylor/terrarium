@@ -46,7 +46,7 @@ it("shows the card's question and answers it with the same control as the Inbox"
   input.dispatchEvent(new Event("input", { bubbles: true }));
   el.querySelector("form[aria-label='Answer']")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
-  expect(api.questions.answer).toHaveBeenCalledWith("Q1", { answer: "Proceed", revision: 1 });
+  expect(api.questions.answer).toHaveBeenCalledWith("Q1", { answer: "Proceed" });
   expect(inbox.refresh).toHaveBeenCalledOnce();
   expect(el.querySelector("form[aria-label='Answer']")).toBeNull();
   expect(el.textContent).toContain("Answered (1)");
