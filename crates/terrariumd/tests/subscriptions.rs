@@ -146,7 +146,8 @@ async fn litellm_live_claude_and_fallback_mail_only() {
             .contains("TER798_MOCK_OK")
     );
     let cost = launched["result"]["total_cost_usd"].as_f64().unwrap();
-    assert!(cost > 0.0 && cost < 80.0);
+    // LiteLLM's mock may report zero tokens and therefore a zero CLI cost.
+    assert!(cost.is_finite() && (0.0..80.0).contains(&cost));
     let session = launched["result"]["session_id"].as_str().unwrap();
     let file = claude_project_dir(&td.state, id).join(format!("{session}.jsonl"));
     std::fs::write(&file, launched["transcript"].as_str().unwrap()).unwrap();
