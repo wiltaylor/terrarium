@@ -458,7 +458,7 @@ pub async fn start(
                 .db
                 .write("system", move |t| {
                     if threads::get_bare(t, &tid)?.request_epoch != epoch {
-                        return Ok(threads::get(t, &tid)?);
+                        return threads::get(t, &tid);
                     }
                     threads::close(
                         t,
