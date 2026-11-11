@@ -635,11 +635,7 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
                     ));
                 });
             }
-            if text.is_none()
-                && option.is_none()
-                && selected.is_empty()
-                && !select_none
-            {
+            if text.is_none() && option.is_none() && selected.is_empty() && !select_none {
                 return Err(CliError::usage(
                     "give the answer as text, --option <label|n>, or both; answer a bundle \
                      with --answers-file",
