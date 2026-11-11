@@ -486,7 +486,19 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
         panic!("the engine's rule did not comment");
     };
     let others = async {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait until the slow dry run holds the slot (only the dry runs of
+        // this module, one at a time, use the pool), not for a fixed time:
+        // under load the slow run takes its slot late (TER-680).
+        use terrariumd::rule_script::{Pool, slots_in_use};
+        let mut held = false;
+        for _ in 0..3000 {
+            if slots_in_use(Pool::DryRun) > 0 {
+                held = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(held, "the slow dry run did not take its slot");
         tokio::join!(refused, engine)
     };
     let (slow_body, ((busy, refused_in), (c, slow_had_returned))) =
