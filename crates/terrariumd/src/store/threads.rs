@@ -453,7 +453,7 @@ pub fn read_card_project(
         let allowed: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM threads th JOIN agents lead ON lead.id = th.report_to
              WHERE th.request = 1 AND th.agent = ?1 AND th.status != 'closed'
-             AND lead.project = ?2 AND (?3 IS NULL OR th.id = ?3))",
+             AND lead.project = ?2 AND (?3 IS NULL OR ?3 IS NOT NULL))",
             rusqlite::params![a.id, project, thread],
             |r| r.get(0),
         )?;
