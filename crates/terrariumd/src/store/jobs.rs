@@ -2613,13 +2613,20 @@ mod tests {
              SELECT 'job-' || x, 'p', 'C', 'validate', 'r', 'b', 'passed', 't',
                     CASE WHEN x<9990 THEN '2026-10-01' ELSE '2026-11-01' END FROM n;
              ANALYZE;",
-        ).unwrap();
-        let plan: String = conn.query_row(
-            &format!("EXPLAIN QUERY PLAN {STATS_SQL}"),
-            params!["p", "2026-11-01"], |r| r.get(3),
-        ).unwrap();
+        )
+        .unwrap();
+        let plan: String = conn
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {STATS_SQL}"),
+                params!["p", "2026-11-01"],
+                |r| r.get(3),
+            )
+            .unwrap();
         assert!(plan.contains("jobs_project_created_at"), "{plan}");
-        assert!(plan.contains("created_at>?") && !plan.contains("SCAN"), "{plan}");
+        assert!(
+            plan.contains("created_at>?") && !plan.contains("SCAN"),
+            "{plan}"
+        );
         assert_eq!(stats(&conn, "p", "2026-11-01").unwrap().jobs, 11);
     }
 
