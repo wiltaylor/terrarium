@@ -193,6 +193,7 @@ cd -P -- "$root" || return 1
 [ "$(pwd -P)" = "$root" ] || return 1
 }"#;
 
+#[cfg(test)]
 pub(crate) fn remove_script(
     path: &str,
     root: &str,
@@ -322,7 +323,12 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
     cleanup_selected(state, project, after, None).await
 }
 
-pub(crate) async fn cleanup_selected(state: &Shared, project: String, after: i64, only: Option<Vec<i64>>) -> ApiResult<serde_json::Value> {
+pub(crate) async fn cleanup_selected(
+    state: &Shared,
+    project: String,
+    after: i64,
+    only: Option<Vec<i64>>,
+) -> ApiResult<serde_json::Value> {
     let _guard = state
         .job_queue
         .log_cleanup

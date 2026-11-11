@@ -382,7 +382,9 @@ struct LegacyLogs {
     confirm: Option<String>,
 }
 
-fn legacy_default_age() -> u64 { 30 * 86400 }
+fn legacy_default_age() -> u64 {
+    30 * 86400
+}
 
 async fn legacy_logs(
     State(state): State<Shared>,
@@ -392,9 +394,10 @@ async fn legacy_logs(
 ) -> ApiResult<Json<Value>> {
     policy::operator_only(&actor, "attesting ownership of legacy job logs")?;
     let result = if let Some(digest) = body.confirm {
-        crate::legacy_job_logs::confirm(&state,name,body.target,digest).await?
+        crate::legacy_job_logs::confirm(&state, name, body.target, digest).await?
     } else {
-        crate::legacy_job_logs::list(&state,name,body.target,body.after,body.older_than_secs).await?
+        crate::legacy_job_logs::list(&state, name, body.target, body.after, body.older_than_secs)
+            .await?
     };
     Ok(Json(result))
 }

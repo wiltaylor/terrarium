@@ -26,9 +26,21 @@ const HOST_COLS: &[(&str, &str)] = &[
 
 pub async fn admin_job(ctx: &Ctx, cmd: &crate::cli::AdminJobCmd) -> anyhow::Result<()> {
     match cmd {
-        crate::cli::AdminJobCmd::LegacyLogs { target, older_than, after, confirm } => {
-            let days: u64 = older_than.strip_suffix('d').ok_or_else(|| anyhow::anyhow!("--older-than must be a whole number of days, such as 30d"))?.parse()?;
-            let secs = days.checked_mul(86400).ok_or_else(||anyhow::anyhow!("age is too large"))?;
+        crate::cli::AdminJobCmd::LegacyLogs {
+            target,
+            older_than,
+            after,
+            confirm,
+        } => {
+            let days: u64 = older_than
+                .strip_suffix('d')
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--older-than must be a whole number of days, such as 30d")
+                })?
+                .parse()?;
+            let secs = days
+                .checked_mul(86400)
+                .ok_or_else(|| anyhow::anyhow!("age is too large"))?;
             let project = ctx.project_or(None).await?;
             let v = ctx.api.post(&format!("{}/jobs/legacy-logs",project_path(&project)),Some(json!({"target":target,"older_than_secs":secs,"after":after,"confirm":confirm}))).await?;
             ctx.emit(&v, print_object)

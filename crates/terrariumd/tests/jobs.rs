@@ -43,9 +43,16 @@ async fn legacy_log_listing_requires_explicit_operator_confirmation() {
     let changed = ulid::Ulid::new().to_string();
     let active = ulid::Ulid::new().to_string();
     let release = ulid::Ulid::new().to_string();
-    for id in [&keep,&changed,&active,&release] { std::fs::write(root.join(format!("{id}-1.log")),"old log").unwrap(); }
-    std::fs::write(root.join("not-a-job.log"),"unproven").unwrap();
-    let jobs = vec![(keep.clone(),"passed","validate"),(changed.clone(),"failed","validate"),(active.clone(),"running","validate"),(release.clone(),"passed","release")];
+    for id in [&keep, &changed, &active, &release] {
+        std::fs::write(root.join(format!("{id}-1.log")), "old log").unwrap();
+    }
+    std::fs::write(root.join("not-a-job.log"), "unproven").unwrap();
+    let jobs = vec![
+        (keep.clone(), "passed", "validate"),
+        (changed.clone(), "failed", "validate"),
+        (active.clone(), "running", "validate"),
+        (release.clone(), "passed", "release"),
+    ];
     state.db.write("system",move |tx| {
         for (id,status,kind) in jobs {
             tx.execute("INSERT INTO jobs(id,project,card,kind,repo,branch,state,created_by,created_at,ended_at) VALUES (?,'p','C',?,'app','main',?,'system','2000-01-01','2000-01-02')",rusqlite::params![id,kind,status])?;
@@ -53,23 +60,75 @@ async fn legacy_log_listing_requires_explicit_operator_confirmation() {
         Ok(())
     }).await.unwrap();
     let endpoint = "/api/projects/p/jobs/legacy-logs";
-    for actor in [&lab.w1,&lab.lead] {
-        assert_eq!(lab.td.post_as(actor,endpoint,json!({"target":"p-box"})).await.status,403);
+    for actor in [&lab.w1, &lab.lead] {
+        assert_eq!(
+            lab.td
+                .post_as(actor, endpoint, json!({"target":"p-box"}))
+                .await
+                .status,
+            403
+        );
     }
-    let listing = lab.td.post(endpoint,json!({"target":"p-box"})).await.ok();
-    assert_eq!(listing["total"],2,"{listing}");
+    let listing = lab.td.post(endpoint, json!({"target":"p-box"})).await.ok();
+    assert_eq!(listing["total"], 2, "{listing}");
     assert!(root.join(format!("{keep}-1.log")).exists());
-    std::fs::write(root.join(format!("{changed}-1.log")),"changed since inspection").unwrap();
-    let confirmed = lab.td.post(endpoint,json!({"target":"p-box","confirm":listing["digest"]})).await.ok();
-    assert_eq!(confirmed["removed"],1,"{confirmed}");
-    assert_eq!(confirmed["changed"],1,"{confirmed}");
+    std::fs::write(
+        root.join(format!("{changed}-1.log")),
+        "changed since inspection",
+    )
+    .unwrap();
+    let confirmed = lab
+        .td
+        .post(
+            endpoint,
+            json!({"target":"p-box","confirm":listing["digest"]}),
+        )
+        .await
+        .ok();
+    assert_eq!(confirmed["removed"], 1, "{confirmed}");
+    assert_eq!(confirmed["changed"], 1, "{confirmed}");
     assert!(!root.join(format!("{keep}-1.log")).exists());
-    for name in [format!("{changed}-1.log"),format!("{active}-1.log"),format!("{release}-1.log"),"not-a-job.log".into()] { assert!(root.join(name).exists()); }
-    assert_eq!(lab.td.post(endpoint,json!({"target":"p-box","confirm":listing["digest"]})).await.status,409);
-    let listing = lab.td.post(endpoint,json!({"target":"p-box"})).await.ok();
+    for name in [
+        format!("{changed}-1.log"),
+        format!("{active}-1.log"),
+        format!("{release}-1.log"),
+        "not-a-job.log".into(),
+    ] {
+        assert!(root.join(name).exists());
+    }
+    assert_eq!(
+        lab.td
+            .post(
+                endpoint,
+                json!({"target":"p-box","confirm":listing["digest"]})
+            )
+            .await
+            .status,
+        409
+    );
+    let listing = lab.td.post(endpoint, json!({"target":"p-box"})).await.ok();
     let digest = listing["digest"].as_str().unwrap().to_owned();
-    state.db.write("system",move |tx| { tx.execute("UPDATE legacy_log_listings SET expires_at='2000-01-01' WHERE digest=?",[digest])?; Ok(()) }).await.unwrap();
-    assert_eq!(lab.td.post(endpoint,json!({"target":"p-box","confirm":listing["digest"]})).await.status,409);
+    state
+        .db
+        .write("system", move |tx| {
+            tx.execute(
+                "UPDATE legacy_log_listings SET expires_at='2000-01-01' WHERE digest=?",
+                [digest],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        lab.td
+            .post(
+                endpoint,
+                json!({"target":"p-box","confirm":listing["digest"]})
+            )
+            .await
+            .status,
+        409
+    );
 }
 
 #[tokio::test]
