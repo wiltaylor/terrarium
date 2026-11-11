@@ -11,7 +11,7 @@ import { useInstance } from "../../instance";
 // handoff summary, and the link refs are text nodes.
 
 import { useParams } from "@solidjs/router";
-import { A } from "../../instance/navigation";
+import { A, useLocation } from "../../instance/navigation";
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { ApiError } from "../../api/http";
@@ -31,6 +31,7 @@ import { byOperator, closeBody, retractedOnClose, scopeLabel, THREAD_MESSAGE_MAX
 export default function ThreadPage() {
   const { api, events, inbox } = useInstance();
   const params = useParams<{ id: string }>();
+  const location = useLocation();
   const now = useNow(30_000);
   const [thread, setThread] = createSignal<Thread | null>(null);
   const [loading, setLoading] = createSignal(true);
@@ -58,6 +59,13 @@ export default function ThreadPage() {
     const t = thread();
     setLog("entries", reconcile(t ? timeline(t) : [], { key: "id", merge: true }));
   });
+  // The initial hash is resolved before the async thread load has rendered its
+  // posts. Resolve it again after reconciliation, also on in-page navigation.
+  createEffect(on(() => [location.hash, log.entries.length], () => {
+    const id = location.hash.slice(1);
+    if (!/^post-[1-9]\d*$/.test(id)) return;
+    queueMicrotask(() => document.getElementById(id)?.scrollIntoView?.({ block: "start" }));
+  }));
 
   onMount(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;

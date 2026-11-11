@@ -158,6 +158,19 @@ describe("the Threads screen (TER-466)", () => {
 });
 
 describe("the chat page of a thread", () => {
+  it("resolves a permalink after the asynchronous posts render", async () => {
+    const previous = HTMLElement.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    HTMLElement.prototype.scrollIntoView = function () { scrolled.push(this.id); };
+    try {
+      const t = (await api.threads.list())[0]!;
+      mount(`/threads/${t.id}#post-3`);
+      await waitFor(() => expect(scrolled).toContain("post-3"));
+    } finally {
+      HTMLElement.prototype.scrollIntoView = previous;
+    }
+  });
+
   it("numbers full-width typed posts, quotes text and previews the reply without sending it", async () => {
     const t = (await api.threads.list())[0]!;
     const { el } = mount(`/threads/${t.id}`);
