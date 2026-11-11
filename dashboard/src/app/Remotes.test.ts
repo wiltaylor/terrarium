@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { Router, Route } from "@solidjs/router";
+import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { waitFor } from "../test/wait";
@@ -17,7 +18,7 @@ afterEach(() => { dispose?.(); document.body.replaceChildren(); localStorage.cle
 const lab = { name: "lab", label: "Lab", url: "https://lab.example", status: "online", read_only: false };
 function mount() {
   const root = document.createElement("div"); document.body.append(root);
-  dispose = render(() => <Router><Route path="*" component={Remotes} /></Router>, root);
+  dispose = render(() => createComponent(Router, { get children() { return createComponent(Route, { path: "*", component: Remotes }); } }), root);
   return root;
 }
 function button(label: string) {
