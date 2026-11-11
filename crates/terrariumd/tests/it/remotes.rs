@@ -848,6 +848,11 @@ async fn read_only_and_sysadmin_home_are_refused() {
     home.post_as(id, "/api/remotes", json!({"name":"no"}))
         .await
         .err(403, "forbidden");
+    home.post_as(id, "/api/remotes/lab/artifact-repin", json!({
+        "origin":"https://example.test/", "pin_sha256":"00".repeat(32)
+    }))
+    .await
+    .err(403, "forbidden");
     // P1 intentionally refuses DELETE /links/self for read-only links.
     assert_eq!(home.delete("/api/remotes/lab").await.ok()["revoked"], false);
     assert_eq!(
