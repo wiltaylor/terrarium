@@ -22,7 +22,10 @@ fn dashboard_test_mode_has_no_checkout_directory_input() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     compile(&manifest.join("build.rs"), &binary);
     let run = |test_build: &str| {
+        // Cargo gives a build script its CARGO_MANIFEST_DIR at run time
+        // (TER-751); a test binary run directly (the uid 1001 pass) has none.
         let result = Command::new(&binary)
+            .env("CARGO_MANIFEST_DIR", manifest)
             .env("OUT_DIR", temp.path())
             .env("TERRARIUM_TEST_BUILD", test_build)
             .output()
