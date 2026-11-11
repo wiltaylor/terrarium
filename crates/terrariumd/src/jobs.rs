@@ -2739,10 +2739,10 @@ async fn steps(
     let guard = Arc::new(guard);
     let mut prepared = None;
     for attempt in 0..2 {
-        let (j, bundle, guard) = (job.clone(), x.bundle.clone(), guard.clone());
+        let (j, bundle, prepare_guard) = (job.clone(), x.bundle.clone(), guard.clone());
         let (result, damaged) = x
             .daemon(move |r| {
-                let _guard = guard;
+                let _guard = prepare_guard;
                 let result = prepare(r, &j, &bundle);
                 let damaged = matches!(result, Prepared::End(_)) && r.needs_rebuild();
                 (result, damaged)
