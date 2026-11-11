@@ -161,7 +161,10 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
         .route(
             "/projects/{name}/jobs/cleanup",
             post(cleanup_logs),
-            &[(axum::http::Method::POST, super::link_registry::Access::Conditional)],
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
         )
 }
 
