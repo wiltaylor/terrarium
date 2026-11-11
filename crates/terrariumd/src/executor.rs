@@ -5597,6 +5597,8 @@ mod tests {
                 .env("GIT_AUTHOR_EMAIL", "t@t")
                 .env("GIT_COMMITTER_NAME", "t")
                 .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env_remove("TERRARIUM_GIT_TRAILERS")
+                .env_remove("TERRARIUM_GIT_TRAILERS_FILE")
                 .output()
                 .unwrap();
             assert!(out.status.success(), "{out:?}");

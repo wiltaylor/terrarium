@@ -149,7 +149,7 @@ fn split_print(var: &str, value: &str) -> String {
 async fn agent_exec_overrides_git_identity_and_supplies_provenance() {
     let lab = lab().await;
     let sid = lab.exec(Some(&lab.w1), json!({
-        "argv": ["sh", "-c", "printf '%s\\n' \"$GIT_AUTHOR_NAME\" \"$GIT_AUTHOR_EMAIL\" \"$GIT_COMMITTER_NAME\" \"$GIT_COMMITTER_EMAIL\"; printf '%s' \"$TERRARIUM_GIT_TRAILERS\"; test -z \"${TERRARIUM_GIT_TRAILERS_FILE-}\""],
+        "cmd": ["sh", "-c", "printf '%s\\n' \"$GIT_AUTHOR_NAME\" \"$GIT_AUTHOR_EMAIL\" \"$GIT_COMMITTER_NAME\" \"$GIT_COMMITTER_EMAIL\"; printf '%s' \"$TERRARIUM_GIT_TRAILERS\"; test -z \"${TERRARIUM_GIT_TRAILERS_FILE-}\""],
         "env": {"GIT_AUTHOR_NAME": "wrong", "GIT_AUTHOR_EMAIL": "wrong", "GIT_COMMITTER_NAME": "wrong", "GIT_COMMITTER_EMAIL": "wrong", "TERRARIUM_GIT_TRAILERS_FILE": "/wrong"}
     })).await;
     let (out, err) = drain(&lab.td, Some(&lab.w1), &sid).await;

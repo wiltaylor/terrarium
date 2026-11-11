@@ -134,6 +134,10 @@ pub fn spawn_refresh(state: Shared) -> tokio::task::JoinHandle<()> {
 
 /// Refresh the sandbox's current session and card data.
 pub async fn refresh(state: &Shared, id: &str) -> ApiResult<()> {
+    // Session and card notifications can arrive on separate listeners. Read
+    // current state only after the preceding file write has completed.
+    static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = REFRESH_LOCK.lock().await;
     let p = provenance(state, id).await?;
     let id = id.to_owned();
     let workspace = state
