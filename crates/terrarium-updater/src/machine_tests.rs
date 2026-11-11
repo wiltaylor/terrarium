@@ -500,7 +500,11 @@ async fn hot_swap_keeps_container_and_commits_only_after_health() {
     assert!(!calls.iter().any(|c| c == "offline-backup"));
     let backup = run.steps.iter().find(|s| s.name == "backup").unwrap();
     assert!(backup.detail.contains("began at"));
-    assert!(backup.detail.contains("writes after that time may not be included"));
+    assert!(
+        backup
+            .detail
+            .contains("writes after that time may not be included")
+    );
     // The hot swap records the original engine spec: a rollback replaces
     // the container with it instead of reusing the hot-swapped one.
     assert!(r.store.previous().is_some_and(|p| p.spec.is_some()));
@@ -540,7 +544,10 @@ async fn hot_swap_backup_failure_never_pauses() {
     let r = rig();
     r.fake.0.lock().unwrap().hot = true;
     r.fake.fail("backup");
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Failed);
     assert!(!r.fake.calls().iter().any(|c| c == "hot:pause"));
 }
@@ -550,7 +557,10 @@ async fn hot_swap_snapshot_failure_resumes_old_release_without_restore() {
     let r = rig();
     r.fake.0.lock().unwrap().hot = true;
     r.fake.fail("hot:snapshot");
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Failed, "{run:#?}");
     assert!(r.fake.calls().iter().any(|c| c == "hot:start"));
     assert!(!r.fake.calls().iter().any(|c| c == "hot:restore-database"));
@@ -645,7 +655,12 @@ async fn hung_switch_fails_at_safety_deadline_with_recovery_time_left() {
     let hold = tokio::time::Instant::now() + HOT_SWAP_RECOVERY_RESERVE + Duration::from_millis(20);
     let deadline = hold - HOT_SWAP_RECOVERY_RESERVE;
     let result = switch_before_deadline::<()>(deadline, std::future::pending()).await;
-    assert!(result.unwrap_err().0.contains("runner hold safety deadline"));
+    assert!(
+        result
+            .unwrap_err()
+            .0
+            .contains("runner hold safety deadline")
+    );
     assert!(tokio::time::Instant::now() < hold);
 }
 

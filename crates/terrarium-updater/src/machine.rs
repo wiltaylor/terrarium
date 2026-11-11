@@ -74,7 +74,12 @@ async fn switch_before_deadline<T>(
 ) -> Result<T, Fail> {
     tokio::time::timeout_at(deadline, work)
         .await
-        .unwrap_or_else(|_| Err(Fail("hot swap pause exceeded the runner hold safety deadline; resuming old daemon".into())))
+        .unwrap_or_else(|_| {
+            Err(Fail(
+                "hot swap pause exceeded the runner hold safety deadline; resuming old daemon"
+                    .into(),
+            ))
+        })
 }
 
 fn bounded_command(argv: Vec<String>, deadline: tokio::time::Instant) -> Res<Vec<String>> {
@@ -715,7 +720,9 @@ impl Updater {
                         self.exec_ok(&cur.id, hot_argv("pause", &["660"])),
                     )
                     .await
-                    .map_err(|_| "hot swap pause exceeded the runner hold safety deadline".to_owned())?
+                    .map_err(|_| {
+                        "hot swap pause exceeded the runner hold safety deadline".to_owned()
+                    })?
                 },
                 Clone::clone,
             )
@@ -754,7 +761,10 @@ impl Updater {
                         ),
                     )
                     .await
-                    .map_err(|_| "hot swap database snapshot exceeded the runner hold safety deadline".to_owned())?;
+                    .map_err(|_| {
+                        "hot swap database snapshot exceeded the runner hold safety deadline"
+                            .to_owned()
+                    })?;
                     let snapshot = snapshot?;
                     if snapshot.code != 0 {
                         return Err(snapshot.reason());
