@@ -345,6 +345,7 @@ mod tests {
             assert_eq!(pick(state, &v, &members, |n| n == "c"), None, "{p}");
         }
         // Named by a swap of an agent with no subscription: allowed.
+        members[1].provider = "foundry".into();
         assert!(check(state, &v, None, &members[1]).is_ok());
     }
 
