@@ -23,6 +23,43 @@ const { loadBoards } = await import("../inbox/TrackedCards");
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ""; vi.restoreAllMocks(); });
 
+it("previews Markdown in new-card and body-edit fields without losing the draft", async () => {
+  const card = await api.cards.create("terrarium", { title: "Body editor regression", column: "backlog", body: "Original body" });
+  const history = createMemoryHistory();
+  history.set({ value: "/p/terrarium/board" });
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(() => createComponent(MemoryRouter, {
+    history,
+    get children() { return createComponent(Route, { path: "/p/:project/board", component: BoardPage }); },
+  }), host);
+  await waitFor(() => expect(host.querySelector('[aria-label="Add a card to Backlog"]')).not.toBeNull());
+  host.querySelector<HTMLButtonElement>('[aria-label="Add a card to Backlog"]')!.click();
+  const markdown = "**Draft** [link](https://example.com)\n\n| A | B |\n| - | - |\n| 1 | 2 |";
+  const checkPreview = (label: string) => {
+    const editor = host.querySelector(`[aria-label="${label} editor"]`)!.parentElement!;
+    const input = editor.querySelector("textarea")!;
+    input.value = markdown;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    [...editor.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(b => b.textContent === "Preview")!.click();
+    expect(editor.querySelector("strong")?.textContent).toBe("Draft");
+    expect(editor.querySelector("table td")?.textContent).toBe("1");
+    expect(editor.querySelector("a")?.getAttribute("href")).toBe("https://example.com");
+    expect(editor.querySelector<HTMLElement>('[role="tabpanel"]')!.hidden).toBe(true);
+    [...editor.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(b => b.textContent === "Write")!.click();
+    expect(input.value).toBe(markdown);
+    expect(editor.querySelector(`[aria-label="${label} preview"]`)).toBeNull();
+  };
+  checkPreview("Description");
+  [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Cancel")!.click();
+  history.set({ value: `/p/terrarium/board?card=${card.id}` });
+  await waitFor(() => expect(host.textContent).toContain("Original body"));
+  [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Edit")!.click();
+  checkPreview("Body");
+  [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Save")!.click();
+  await waitFor(async () => expect((await api.cards.get(card.id)).body).toBe(markdown));
+});
+
 it("fetches only missing linked Done cards for Inbox progress", async () => {
   const done = await api.cards.create("terrarium", { title: "Linked completion", column: "done" });
   const get = vi.spyOn(api.cards, "get");
