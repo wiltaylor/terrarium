@@ -3317,11 +3317,9 @@ mod tests {
     }
 
     async fn message_count(s: &Shared) -> i64 {
-        s.db.read(|c| {
-            Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?)
-        })
-        .await
-        .unwrap()
+        s.db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?))
+            .await
+            .unwrap()
     }
 
     /// TER-61 review round 3, F1: the project inbox reply and the resume
@@ -3403,7 +3401,11 @@ mod tests {
             let r = send(link_app(&s), "GET", "/api/schedules", &h).await;
             assert_eq!(r.status(), StatusCode::OK);
             let v = json_of(r).await;
-            let items = v.as_array().or_else(|| v["items"].as_array()).unwrap().clone();
+            let items = v
+                .as_array()
+                .or_else(|| v["items"].as_array())
+                .unwrap()
+                .clone();
             items[0]["id"].as_str().unwrap().to_owned()
         };
         for (m, p) in [
@@ -3416,7 +3418,11 @@ mod tests {
         ] {
             let r = send_body(link_app(&s), m, &p, &h, &serde_json::json!({})).await;
             assert_eq!(r.status(), StatusCode::FORBIDDEN, "{m} {p}");
-            assert_eq!(json_of(r).await["error"]["code"], "link_forbidden", "{m} {p}");
+            assert_eq!(
+                json_of(r).await["error"]["code"],
+                "link_forbidden",
+                "{m} {p}"
+            );
         }
         // The operator's PUT of the rules is not refused by the link checks.
         let r = send_body(
