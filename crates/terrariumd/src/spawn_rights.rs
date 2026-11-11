@@ -181,6 +181,7 @@ pub fn check_targets(
     for name in targets {
         let row = crate::store::targets::find(conn, name)?
             .ok_or_else(|| ApiError::not_found(format!("no target `{name}`")))?;
+        crate::store::jobs::check_not_release_target(conn, name, "spawning with the target")?;
         let tp = row.def.project.clone();
         if let Some(p) = &tp
             && p != project
