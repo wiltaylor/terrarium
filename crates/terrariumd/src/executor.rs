@@ -2188,6 +2188,9 @@ async fn start_exec_secrets(
         row.def.kind == TargetKind::Exedev,
     )
     .await?;
+    if let Some(sync) = &sync {
+        sync.translate_cmd(&mut cmd);
+    }
     let resources = state.executor.target_resource_lock(&def).lock_owned().await;
     let (run, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
@@ -2640,7 +2643,7 @@ pub async fn start_cp(
     state: &Shared,
     actor: &Actor,
     name: &str,
-    body: CpBody,
+    mut body: CpBody,
 ) -> ApiResult<Arc<ExecSession>> {
     let row = usable(state, actor, name).await?;
     if !body.path.starts_with('/') || body.path.split('/').any(|c| c == "..") {
@@ -2661,6 +2664,9 @@ pub async fn start_cp(
     )
     .await?;
     let push = body.direction == CpDirection::Push;
+    if let Some(sync) = &sync {
+        body.path = sync.translate(&body.path);
+    }
     let (sess, ctl) = ExecSession::new(
         name,
         actor.agent().map(|a| a.id.clone()),

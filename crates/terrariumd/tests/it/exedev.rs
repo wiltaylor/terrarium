@@ -388,10 +388,11 @@ fn state(td: &TestDaemon) -> terrariumd::api::Shared {
 }
 
 #[tokio::test]
-async fn workspace_sync_path_failure_on_exedev_explains_the_workaround() {
+async fn workspace_sync_reports_mirror_creation_failure() {
     let (td, _, _, _, ssh) = daemon().await;
     let mut definition = target("sync", 3600);
     definition["sync_workspace"] = json!(true);
+    definition["work_root"] = json!("/home/exedev/work");
     td.post("/api/targets", definition).await.ok();
     td.patch("/api/targets/sync", json!({"sync_workspace":true}))
         .await
@@ -413,12 +414,10 @@ async fn workspace_sync_path_failure_on_exedev_explains_the_workaround() {
         response
             .body
             .to_string()
-            .contains("cannot write the sandbox workspace path"),
+            .contains("could not create remote workspace"),
         "{}",
         response.body
     );
-    assert!(response.body.to_string().contains("sync_workspace = false"));
-    assert!(response.body.to_string().contains("TER-873"));
     assert_eq!(
         td.get("/api/targets/sync").await.ok()["sync_workspace"],
         true
