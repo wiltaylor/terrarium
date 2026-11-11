@@ -625,6 +625,46 @@ class Release(unittest.TestCase):
         self.assertFalse(self.summary()["gate"]["passed"])
         self.assert_no_secret_leaks()
 
+    def test_tested_at_cut_skips_gate_and_publishes(self):
+        for trailer, version in (("pre-release", self.VERSION + "-alpha"),
+                                 ("release", self.VERSION)):
+            with self.subTest(trailer=trailer):
+                git(self.repo, "commit", "-q", "--allow-empty", "-m", "fix: cut",
+                    "-m", f"{trailer}: true\ntested-at-cut: TEST-101 TEST-102")
+                make_layout(self.layout, version)
+                self.log.write_text("")
+                proc = self.run_release("publish", fake={"FAKE_GATE_RC": "1"})
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertEqual(self.summary()["gate"], {
+                    "skipped": True, "reason": "tested-at-cut", "runs": "TEST-101 TEST-102",
+                })
+                self.assertFalse(any(c["tool"] == "docker" and
+                                     any("terrarium-release-gate" in a for a in c["argv"])
+                                     for c in self.calls()))
+                self.assertIn(("crane", "push"), self.tools())
+                self.assertIn(("cosign", "sign"), self.tools())
+                self.assertIn(("gh", "release"), self.tools())
+                self.assertEqual(self.summary()["release"]["tag"], "v" + version)
+                self.assertIn("Tested at cut: TEST-101 TEST-102", (self.out / "notes.md").read_text())
+                # Stamping changes these fixture files, not the release commit.
+                git(self.repo, "checkout", "HEAD", "--", "Cargo.toml", "Cargo.lock")
+
+    def test_prerelease_without_cut_runs_the_gate(self):
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "fix: cut",
+            "-m", "pre-release: true")
+        proc = self.run_release("publish", fake={"FAKE_GATE_RC": "1"})
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(self.summary()["gate"]["passed"])
+        self.assertEqual(self.tools(), [("gh", "release"), *GATE])
+
+    def test_plain_commit_with_cut_is_not_a_release(self):
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "fix: cut",
+            "-m", "tested-at-cut: TEST-101")
+        proc = self.run_release("publish")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.summary()["version"]["do_release"], "false")
+
     def test_no_trailer_no_release(self):
         git(self.repo, "commit", "-q", "--allow-empty", "-m", "fix: c")
         proc = self.run_release("publish")
