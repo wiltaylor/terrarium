@@ -63,7 +63,7 @@ impl Lab {
 }
 
 #[tokio::test]
-async fn one_open_question_or_bundle_per_thread_and_notice_replies() {
+async fn multiple_open_questions_and_bundles_per_thread_and_notice_replies() {
     let lab = lab().await;
     let t = lab.open(json!({"topic": "Decision", "scope": "p", "agent": "lead", "text": "Please investigate"})).await;
     let path = format!("/api/agents/{}/questions", lab.p_lead);
@@ -83,8 +83,7 @@ async fn one_open_question_or_bundle_per_thread_and_notice_replies() {
             "items": [{"text": "C?"}, {"text": "D?"}]}),
     ] {
         let r = lab.td.post_as(&lab.p_lead, &path, body).await;
-        r.err(409, "conflict");
-        assert_eq!(r.body["error"]["details"]["question"], q.body["id"]);
+        assert_eq!(r.status, 201, "{}", r.body);
     }
     let r = lab.td.post_as(&lab.p_lead, &path, json!({"kind": "notice", "text": "Answer to your request", "reply_to": t["messages"][0]["id"]})).await;
     assert_eq!(r.status, 201, "{}", r.body);
@@ -101,14 +100,16 @@ async fn one_open_question_or_bundle_per_thread_and_notice_replies() {
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    lab.td
+    let another = lab.td
         .post_as(
             &lab.p_lead,
             &path,
             json!({"text": "Another?", "thread": other["id"]}),
         )
-        .await
-        .err(409, "conflict");
+        .await;
+    assert_eq!(another.status, 201, "{}", another.body);
+    lab.td.post(&format!("/api/questions/{}/answer", q.body["id"].as_str().unwrap()), json!({"answer": "Yes"})).await.ok();
+    assert_eq!(lab.thread(tid).await["status"], "waiting_operator");
 }
 
 #[tokio::test]
@@ -412,10 +413,9 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
         .patch(&format!("/api/questions/{qid}"), json!({"card": null}))
         .await
         .ok();
-    // A second question must wait for the answer to the first.
-    ask(json!({"text": "Another?", "thread": tid}))
-        .await
-        .err(409, "conflict");
+    // An independent block can stay open while the first is answered.
+    let another = ask(json!({"text": "Another?", "thread": tid})).await;
+    assert_eq!(another.status, 201, "{}", another.body);
     lab.td
         .post(
             &format!("/api/questions/{qid}/answer"),
@@ -423,6 +423,8 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
         )
         .await
         .ok();
+    assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
+    lab.td.post(&format!("/api/questions/{}/answer", another.body["id"].as_str().unwrap()), json!({"answer": "Yes"})).await.ok();
     assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
     // A bundle can follow the answered question.
     let r = ask(json!({"kind": "bundle", "text": "Two more", "thread": tid,
@@ -435,9 +437,9 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
     let th = lab.thread(&tid).await;
     assert_eq!(th["status"], "waiting_operator");
     let qs = th["questions"].as_array().unwrap();
-    assert_eq!(qs.len(), 2);
+    assert_eq!(qs.len(), 3);
     assert_eq!(qs[0]["id"], qid.as_str());
-    assert_eq!(qs[1]["kind"], "bundle");
+    assert_eq!(qs[2]["kind"], "bundle");
 
     // Not in a thread of another agent, nor in an unknown thread.
     let other = lab
