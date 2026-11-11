@@ -643,9 +643,16 @@ impl HostRegistry {
         hello: &Hello,
         conn: Conn,
     ) -> crate::error::ApiResult<(Welcome, Option<Conn>, usize, u64)> {
-        let token = format!("r-{}", ulid::Ulid::new());
         let mut g = self.lock();
         let e = g.entry(row.name.clone()).or_default();
+        // Keep the reconnect capability stable. Rotating it before welcome
+        // is received can strand live sessions if either peer disconnects
+        // after this commit but before the host saves the new token.
+        // The separately authenticated host credential still gates attach.
+        let token = e
+            .resume_token
+            .clone()
+            .unwrap_or_else(|| format!("r-{}", ulid::Ulid::new()));
         let previous_token = e.resume_token.clone();
         let old = e.conn.replace(conn);
         e.generation += 1;
@@ -1934,6 +1941,48 @@ mod tests {
             },
         );
         reg
+    }
+
+    #[tokio::test]
+    async fn reconnect_journal_survives_an_undelivered_welcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&db, dir.path()).unwrap();
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore(dir.path()).unwrap();
+        reg.lock().get_mut("lab1").unwrap().resume_token = Some("host-kept-token".into());
+        let session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let id = session.id();
+        let hello = Hello {
+            protocol: 1,
+            host: "lab1".into(),
+            version: "test".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            capabilities: HostCapabilities::default(),
+            max_sessions: 8,
+            max_running_targets: None,
+            resume: Some(terrarium_host::protocol::Resume {
+                token: "host-kept-token".into(),
+                sessions: vec![terrarium_host::protocol::ResumeOffer { session: id, sent: 0 }],
+            }),
+            update_failed: None,
+        };
+        // Commit welcome, but simulate losing it before the host receives it.
+        let (welcome, _, n, _) = reg.attach(&host_row(), &hello, Conn {
+            id: 2, tx: mpsc::unbounded_channel().0,
+        }).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(welcome.resume_token, "host-kept-token");
+        drop(session);
+        drop(reg);
+        let restored = HostRegistry::default();
+        restored.restore(dir.path()).unwrap();
+        let (_, _, n, _) = restored.attach(&host_row(), &hello, Conn {
+            id: 3, tx: mpsc::unbounded_channel().0,
+        }).unwrap();
+        assert_eq!(n, 1, "the host still holds the pre-welcome token");
+        assert!(!restored.lock()["lab1"].sessions[&id].terminal);
     }
 
     #[tokio::test]
