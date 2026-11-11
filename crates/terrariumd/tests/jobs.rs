@@ -4636,7 +4636,7 @@ async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
         && lab._dirs.path().join("recipe-2").exists())
     {
         assert!(
-            start.elapsed() < DEADLINE,
+            start.elapsed() < common::WAIT,
             "recipes serialized behind the cache lock"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;

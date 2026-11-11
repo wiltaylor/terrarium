@@ -148,12 +148,6 @@ async fn ter275_cancelled_daemon_work_keeps_cache_and_damage_marker_until_it_end
         .await
         .unwrap()
         .unwrap();
-    task.abort();
-    let _ = task.await;
-    assert!(
-        path.join("job-damaged").exists(),
-        "cancellation lost recovery work"
-    );
     let locks = repo_lock(&path);
     let repo = fixture.repo.clone();
     let (queued, waiting) = tokio::sync::oneshot::channel();
@@ -164,6 +158,12 @@ async fn ter275_cancelled_daemon_work_keeps_cache_and_damage_marker_until_it_end
         repo.rebuild().unwrap();
     });
     waiting.await.unwrap();
+    task.abort();
+    let _ = task.await;
+    assert!(
+        path.join("job-damaged").exists(),
+        "cancellation lost recovery work"
+    );
     // A queued writer must not delete the cache while detached daemon work
     // is paused. With the production clone removed this writer completes.
     let mut rebuild = rebuild;
