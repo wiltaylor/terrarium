@@ -5584,11 +5584,24 @@ mod tests {
             let mut args = vec!["admin", "subscription", "set", "aws"];
             args.extend(flags);
             let Command::Admin {
-                command: AdminCmd::Subscription { command: SubscriptionCmd::Set(a) },
-            } = parse(&args).command else { panic!("not subscription set") };
-            assert_eq!(a.budget_usd, if a.clear_budget_usd { None } else { Some(50) });
+                command:
+                    AdminCmd::Subscription {
+                        command: SubscriptionCmd::Set(a),
+                    },
+            } = parse(&args).command
+            else {
+                panic!("not subscription set")
+            };
+            assert_eq!(
+                a.budget_usd,
+                if a.clear_budget_usd { None } else { Some(50) }
+            );
         }
-        for flags in [vec!["--budget-usd", "0"], vec!["--budget-usd", "1.5"], vec!["--budget-usd", "50", "--clear-budget-usd"]] {
+        for flags in [
+            vec!["--budget-usd", "0"],
+            vec!["--budget-usd", "1.5"],
+            vec!["--budget-usd", "50", "--clear-budget-usd"],
+        ] {
             let mut args = vec!["terrarium", "admin", "subscription", "set", "aws"];
             args.extend(flags);
             assert!(Cli::try_parse_from(args).is_err());
