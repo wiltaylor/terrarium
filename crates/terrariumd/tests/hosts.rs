@@ -1571,7 +1571,8 @@ async fn agent_policy_limits_the_targets() {
         )
         .await
         .err(403, "forbidden");
-    // The per-agent cap on live sessions.
+    // Keep every session live until the cap is checked, even on a loaded host.
+    let gate = lab.bins.path().join("session-cap-gate");
     let mut sessions = Vec::new();
     for _ in 0..terrariumd::executor::MAX_SESSIONS_PER_AGENT {
         let r = lab
@@ -1579,7 +1580,7 @@ async fn agent_policy_limits_the_targets() {
             .post_as(
                 &w,
                 "/api/targets/terra-box/exec",
-                json!({"cmd": ["sleep", "5"]}),
+                json!({"cmd": ["sh", "-c", "while [ ! -f \"$1\" ]; do sleep 0.02; done", "sh", gate]}),
             )
             .await;
         assert_eq!(r.status, 201, "{}", r.body);
@@ -1599,6 +1600,11 @@ async fn agent_policy_limits_the_targets() {
         )
         .await;
     assert_eq!(r.status, 204);
+    std::fs::write(&gate, "go").unwrap();
+    for sid in &sessions[1..] {
+        let d = drain_as(&lab.td, Some(&w), "terra-box", sid).await;
+        assert_eq!(d.end["code"], 0);
+    }
 }
 
 #[tokio::test]

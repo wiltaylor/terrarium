@@ -388,10 +388,59 @@ fn state(td: &TestDaemon) -> terrariumd::api::Shared {
 }
 
 #[tokio::test]
-async fn workspace_sync_path_failure_on_exedev_explains_the_workaround() {
+async fn workspace_sync_uses_exedev_work_root_and_pulls_output() {
+    workspace_sync_roundtrip(true).await;
+}
+
+#[tokio::test]
+async fn workspace_sync_uses_exedev_home_without_work_root() {
+    workspace_sync_roundtrip(false).await;
+}
+
+async fn workspace_sync_roundtrip(work_root: bool) {
+    let (td, _, _, _, ssh) = daemon().await;
+    let base = td.dir.path().join("remote-work");
+    // ssh_plan sends one shell command, whereas rsync sends a server argv.
+    std::fs::write(&ssh, format!("#!/bin/sh\nexport HOME='{}'\nwhile [ \"$#\" -gt 0 ]; do case \"$1\" in *.exe.xyz) shift; break;; esac; shift; done\nif [ \"$#\" = 1 ]; then exec sh -c \"$1\"; else exec \"$@\"; fi\n", base.display())).unwrap();
+    let mut definition = target("sync", 3600);
+    definition["sync_workspace"] = json!(true);
+    if work_root {
+        definition["work_root"] = json!(base);
+    }
+    td.post("/api/targets", definition).await.ok();
+    td.post_empty("/api/targets/sync/up").await.ok();
+    td.project("p").await;
+    let agent = td.agent("p", "worker", json!({})).await;
+    let id = agent["id"].as_str().unwrap();
+    let local = state(&td).work_dir.join("p/worker");
+    std::fs::create_dir_all(local.join("repo")).unwrap();
+    std::fs::write(local.join("repo/input"), "source").unwrap();
+    let response = td
+        .post(
+            "/api/targets/sync/exec",
+            json!({
+                "agent": id,
+                "cwd": local.join("repo"),
+                "cmd": ["sh", "-c", format!("cat input > {}/repo/output; pwd", local.display())]
+            }),
+        )
+        .await;
+    let session = response.ok()["session_id"].as_str().unwrap();
+    let (stdout, end) = output(&td, "sync", session).await;
+    assert_eq!(end["code"], 0, "{end}");
+    assert_eq!(stdout.trim(), base.join("p/worker/repo").to_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(local.join("repo/output")).unwrap(),
+        "source"
+    );
+}
+
+#[tokio::test]
+async fn workspace_sync_reports_mirror_creation_failure() {
     let (td, _, _, _, ssh) = daemon().await;
     let mut definition = target("sync", 3600);
     definition["sync_workspace"] = json!(true);
+    definition["work_root"] = json!("/home/exedev/work");
     td.post("/api/targets", definition).await.ok();
     td.patch("/api/targets/sync", json!({"sync_workspace":true}))
         .await
@@ -413,12 +462,10 @@ async fn workspace_sync_path_failure_on_exedev_explains_the_workaround() {
         response
             .body
             .to_string()
-            .contains("cannot write the sandbox workspace path"),
+            .contains("could not create remote workspace"),
         "{}",
         response.body
     );
-    assert!(response.body.to_string().contains("sync_workspace = false"));
-    assert!(response.body.to_string().contains("TER-873"));
     assert_eq!(
         td.get("/api/targets/sync").await.ok()["sync_workspace"],
         true
