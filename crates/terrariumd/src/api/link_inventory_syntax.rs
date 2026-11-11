@@ -139,6 +139,15 @@ fn link_syntax_inventory(source: &str) -> (Vec<String>, Vec<String>) {
         }
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
             if let syn::Expr::Path(path) = &*call.func {
+                let name = link_compact(&path.path);
+                // These are existing non-router data merge functions. Keep
+                // their calls in the composition snapshot rather than ignore
+                // them, so aliasing or changing one still requires review.
+                if matches!(name.as_str(), "merge" | "agent_template::merge") {
+                    self.compositions.push(link_compact(call));
+                    syn::visit::visit_expr_call(self, call);
+                    return;
+                }
                 assert!(
                     !path.path.segments.last().is_some_and(|s| matches!(
                         s.ident.to_string().as_str(),
