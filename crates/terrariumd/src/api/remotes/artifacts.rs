@@ -188,7 +188,13 @@ async fn serve(
     let cap: Capability =
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&encoded).map_err(|_| denied())?)
             .map_err(|_| denied())?;
-    if s.operator_auth.store.current().map_err(|_| denied())?.version != cap.pv {
+    if s.operator_auth
+        .store
+        .current()
+        .map_err(|_| denied())?
+        .version
+        != cap.pv
+    {
         return Err(denied());
     }
     let (sid, jti) = (cap.sid, cap.jti);
