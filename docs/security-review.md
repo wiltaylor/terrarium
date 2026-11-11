@@ -1007,8 +1007,8 @@ pi, by a restart with resume for Codex and Copilot. The code is
 
 ### The refresh rule
 
-The daemon never refreshes an OAuth token, never calls an OAuth token
-endpoint, and never writes a token that it got itself. Each harness
+For harness OAuth tokens, the daemon never refreshes a token, never calls a
+token endpoint, and never writes a token that it got itself. Each harness
 refreshes its own token with its own code, under its own lock. The daemon
 may:
 
@@ -1027,6 +1027,18 @@ every crate for `oauth/token`, `auth.openai.com/oauth`,
 `login/oauth/access_token`, `copilot_internal/v2/token`, and `grant_type`.
 `just ci::check` fails when it finds one. A probe that finds an expired
 token reports it, and waits for the harness of an agent to refresh it.
+
+**Vertex service-account exception (TER-632, lead decision 2026-11-11).**
+Only `crates/terrariumd/src/api/subscriptions/vertex.rs` may exchange the
+JWT bearer grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`) at the fixed
+`https://oauth2.googleapis.com/token`, ignoring `token_uri` in the key JSON.
+This is a one-call, operator-requested save check, not harness token refresh.
+The access token exists only in memory for the Vertex test request, then is
+dropped. It is never persisted to disk or the DB, or included in logs, events,
+or audit details. The guard allows only the exact endpoint and grant lines in
+that module. The same grant in another module, any refresh-token or other
+grant, and other token endpoints still fail the guard. Tests exercise these
+negative cases. No plan-login token or harness lock is involved.
 
 ### Threats and controls
 
