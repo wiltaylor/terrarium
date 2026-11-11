@@ -7293,6 +7293,49 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn litellm_launch_pins_http_names_and_rechecks_on_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let home = tmp.path().join("auth/claude");
+        std::fs::create_dir_all(&home).unwrap();
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            state.clone(),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig { mode: SandboxMode::None, ..SandboxConfig::default() },
+            [(HarnessId::Claude, home)].into_iter().collect(),
+        ));
+        let def = serde_json::from_value(serde_json::json!({
+            "name": "worker", "project": "p", "harness": "claude", "subscription": "lite"
+        })).unwrap();
+        let agent = Agent::from_def(&def, &state);
+        let sub: Subscription = serde_json::from_value(serde_json::json!({
+            "name": "lite", "provider": "litellm", "harnesses": ["claude"],
+            "alert_at": 80, "source": "api", "login_status": "api_key",
+            "probe_status": "none", "created_at": "", "updated_at": "",
+            "selfhosted": { "api": "anthropic", "base_url": "http://localhost:8000/prefix", "models": ["test-model"] }
+        })).unwrap();
+        let mut view = StoreView {
+            subscription: Some(SubscriptionCheck::Found(Box::new(sub))),
+            ..Default::default()
+        };
+        for resume in [None, Some(HarnessSessionId("resume-test".into()))] {
+            let built = sup.build_spec(&agent, resume.as_ref(), &view, None).await.unwrap();
+            let url = reqwest::Url::parse(&built.spec.env["ANTHROPIC_BASE_URL"]).unwrap();
+            assert!(!matches!(url.host(), Some(url::Host::Domain(_))));
+            assert_eq!(url.port(), Some(8000));
+            assert_eq!(url.path(), "/prefix");
+            assert!(built.spec.env["NO_PROXY"].contains("127.0.0.1") || built.spec.env["NO_PROXY"].contains("::1"));
+            assert_eq!(built.spec.env["NO_PROXY"], built.spec.env["no_proxy"]);
+        }
+        if let Some(SubscriptionCheck::Found(s)) = &mut view.subscription {
+            s.selfhosted.as_mut().unwrap().base_url = "http://8.8.8.8".into();
+        }
+        let err = sup.build_spec(&agent, Some(&HarnessSessionId("resume-test".into())), &view, None).await.err().unwrap();
+        assert!(err.to_string().contains("LiteLLM launch refused"));
+    }
+
     /// A launch layers the config repo's harness settings under the
     /// forced keys, gives a lead its persona in place of the harness
     /// prompt, and stops on a broken settings file with the file and the

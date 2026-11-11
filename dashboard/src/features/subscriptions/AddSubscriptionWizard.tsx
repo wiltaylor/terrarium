@@ -492,7 +492,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
       </Show>
       <Show when={(isSelfHosted(provider()) || provider() === "litellm") && !fixedName}>
         <label>
-          {provider() === "litellm" ? "LiteLLM base URL (Anthropic root, without /v1; HTTPS or private HTTP IP)" : "Base URL (a new subscription: an OpenAI-style server)"}
+          {provider() === "litellm" ? "LiteLLM base URL (Anthropic root, without /v1; HTTPS or private HTTP host)" : "Base URL (a new subscription: an OpenAI-style server)"}
           <input type="url" value={baseUrl()} onInput={(e) => setBaseUrl(e.currentTarget.value)} placeholder={provider() === "litellm" ? "https://litellm.example.com" : "http://gpu.lan:8000/v1"} required />
         </label>
       </Show>
