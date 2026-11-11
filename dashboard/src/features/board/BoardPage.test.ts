@@ -35,7 +35,7 @@ it("previews Markdown in new-card and body-edit fields without losing the draft"
   }), host);
   await waitFor(() => expect(host.querySelector('[aria-label="Add a card to backlog"]')).not.toBeNull());
   host.querySelector<HTMLButtonElement>('[aria-label="Add a card to backlog"]')!.click();
-  const markdown = "**Draft** [link](https://example.com)\n\n| A | B |\n| - | - |\n| 1 | 2 |";
+  const markdown = "**Draft** [link](https://example.com)\nSecond line\n\n| A | B |\n| - | - |\n| 1 | 2 |";
   const checkPreview = (label: string) => {
     const editor = document.querySelector(`[aria-label="${label} editor"]`)!.parentElement!;
     const input = editor.querySelector("textarea")!;
@@ -43,6 +43,7 @@ it("previews Markdown in new-card and body-edit fields without losing the draft"
     input.dispatchEvent(new Event("input", { bubbles: true }));
     [...editor.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(b => b.textContent === "Preview")!.click();
     expect(editor.querySelector("strong")?.textContent).toBe("Draft");
+    expect(editor.querySelector("p br")).not.toBeNull();
     expect(editor.querySelector("table td")?.textContent).toBe("1");
     expect(editor.querySelector("a")?.getAttribute("href")).toBe("https://example.com");
     expect(editor.querySelector<HTMLElement>('[role="tabpanel"]')!.hidden).toBe(true);

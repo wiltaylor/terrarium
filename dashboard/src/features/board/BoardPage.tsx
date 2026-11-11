@@ -663,7 +663,7 @@ function NewCardModal(props: {
             </span>
           </Show>
         </label>
-        <PostEditor label="Description" text={form.body} project={props.project}>
+        <PostEditor label="Description" text={form.body} project={props.project} textBody>
         <label>
           Description (Markdown)
           <textarea
@@ -849,7 +849,7 @@ function CardDrawer(props: {
           Title
           <input value={edit().title} onInput={editField("title")} />
         </label>
-        <PostEditor label="Body" text={edit().body} project={props.card.project}>
+        <PostEditor label="Body" text={edit().body} project={props.card.project} textBody>
         <label>
           Body
           <textarea value={edit().body} onInput={editField("body")} />
