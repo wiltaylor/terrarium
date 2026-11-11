@@ -13,6 +13,7 @@ import openaiDark from "../assets/providers/openai-dark.svg";
 import openaiLight from "../assets/providers/openai-light.svg";
 import openrouterDark from "../assets/providers/openrouter-dark.svg";
 import openrouterLight from "../assets/providers/openrouter-light.svg";
+import zai from "../assets/providers/zai.svg";
 
 /** The mark of a provider: one file for both themes, or one file for each. */
 export interface ProviderMark {
@@ -25,13 +26,14 @@ export interface ProviderMark {
 const both = (src: string): ProviderMark => ({ light: src, dark: src });
 
 /**
- * The bundled mark of each provider kind. A kind that is not here (zai,
+ * The bundled mark of each provider kind. A kind that is not here (
  * deepseek: no mark from a brand or press page could be fetched) gets the
  * letter tile. bedrock, gcp and foundry are the cloud kinds of TER-630.
  */
 export const PROVIDER_MARKS: Record<string, ProviderMark> = {
   anthropic: both(anthropic),
   openai: { light: openaiLight, dark: openaiDark },
+  zai: both(zai),
   github: { light: githubLight, dark: githubDark },
   moonshot: { light: moonshotLight, dark: moonshotDark },
   openrouter: { light: openrouterLight, dark: openrouterDark },
