@@ -384,7 +384,7 @@ impl HostRegistry {
             }
             entries.insert(host, entry);
         }
-        *self.lock() = entries;
+        self.lock().extend(entries);
         self.journal
             .set(journal)
             .map_err(|_| ApiError::internal("host journal already restored"))?;
