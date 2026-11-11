@@ -12434,8 +12434,9 @@ into a job-private reset directory. Neither SSH connection uses the daemon's
 shared TOFU known_hosts file. No endpoint
 or key pin is compiled into the daemon. Reset exit 75 retries twice with
 a two-second delay; any other failure prevents opening the tunnel.
-The daemon resolves configured merge secrets and opens the tunnel for every
-merge, independently of the recipe's `TERRARIUM_DOCKER_CI` gate switch.
+The daemon resolves these legacy-named merge secrets and opens the tunnel
+only for cut-time `e2e` jobs. Merge and validate jobs never receive the
+relay, regardless of their recipe's `TERRARIUM_DOCKER_CI` switch.
 
 The Docker gate is off by default: merges continue to run the full
 `ci::validate` without requiring Docker or a key. To roll it out in order:
@@ -12445,10 +12446,10 @@ the secret administrator grants `terrarium/docker-ci-vm` and
 `delivery:terrarium` with `--level run --target terrarium-helios-build`.
 Do not grant the key to `project:terrarium` or workers. The lead configures
 `--merge-secret DOCKER_CI_KEY=@secret:docker-ci-vm` and
-`--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery, with recipe
-`TERRARIUM_DOCKER_CI=1 just ci::validate-affected` to explicitly enable the
-live Docker gate. Leave the switch unset (or `0`) until the daemon and
-grant are ready. `--clear-merge-secrets` removes the references. The same
+`--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery.
+Queue the release e2e endpoint (§35.4) after the daemon and grants are ready.
+The Docker gate refuses every other job kind.
+`--clear-merge-secrets` removes the references. The same
 command sets `docker_ci` with `--docker-ci-destination`, `--docker-ci-port`,
 `--docker-ci-known-hosts`, `--docker-ci-reset-destination`,
 `--docker-ci-reset-port`, and `--docker-ci-reset-known-hosts`: a flag left
@@ -12867,6 +12868,19 @@ The card writes of the queue are made as the operator. Their comments
 start with `Job queue:`.
 
 ### 35.4 Endpoints
+
+`POST /api/cards/{id}/e2e` is project-admin-only. Its body is
+`{branch:"release/X.Y.Z", repo?, eta?}`. The card must be an open version
+group header. Docker CI delivery configuration and run grants are required.
+It returns `201 {job}` with kind `e2e`, pinned to the remote branch head.
+The job shares the merge lane but never merges or pushes. It runs
+`TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py`, using the same
+daemon-owned reset/tunnel handling. No key reaches recipe code. Merge and
+validate jobs receive neither the relay endpoint nor Docker credentials.
+The group's `version branch e2e` step records the job and its outcome.
+Failure or cancellation marks the step failed without changing membership
+or moving the header. Queue it again after a release fix. A card validate
+job still cannot enter the Docker gate. See [release.md](release.md).
 
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|

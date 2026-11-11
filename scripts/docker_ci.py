@@ -90,8 +90,8 @@ def main() -> int:
         print("TERRARIUM_DOCKER_CI must be 0 or 1", file=sys.stderr)
         return 1
     endpoint = os.environ.get(ENDPOINT_ENV, "")
-    if os.environ.get("TERRARIUM_JOB_KIND") != "merge" or not endpoint.startswith("unix://"):
-        print("Docker gate requires a merge job and its daemon-provisioned Unix endpoint", file=sys.stderr)
+    if os.environ.get("TERRARIUM_JOB_KIND") != "e2e" or not endpoint.startswith("unix://"):
+        print("Docker gate requires an e2e job and its daemon-provisioned Unix endpoint", file=sys.stderr)
         return 1
     env = dict(os.environ)
     for name in (ENDPOINT_ENV, "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SSH_AUTH_SOCK"):

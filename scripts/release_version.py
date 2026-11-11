@@ -15,7 +15,8 @@ The same rules as the `version` job of the GitHub CI that it replaces
 
 Usage: python3 scripts/release_version.py [--repo DIR] [--json]
 It prints `key=value` lines (version, prerelease, do_release, bump,
-last_tag), or one JSON object with --json.
+last_tag, tested_at_cut), or one JSON object with --json. `tested_at_cut`
+is true only for a release or pre-release with a non-empty tested-at-cut trailer.
 """
 
 from __future__ import annotations
@@ -66,7 +67,9 @@ def calc(repo: str) -> dict[str, str]:
     is_pre = trailer(repo, "pre-release") == "true"
     bump_trailer = re.sub(r"\s", "", trailer(repo, "bump"))
     if not is_release and not is_pre:
-        return {"do_release": "false"}
+        return {"do_release": "false", "tested_at_cut": "false"}
+
+    tested_at_cut = bool(re.sub(r"\s", "", trailer(repo, "tested-at-cut")))
 
     last_tag = git(repo, "describe", "--tags", "--match", "v*", "--abbrev=0", check=False).strip()
     promote = False
@@ -132,6 +135,7 @@ def calc(repo: str) -> dict[str, str]:
         "prerelease": prerelease,
         "bump": bump,
         "last_tag": last_tag,
+        "tested_at_cut": "true" if tested_at_cut else "false",
     }
 
 

@@ -10,6 +10,7 @@ Run: uv run python -m unittest discover -s scripts -p 'test_*.py'
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,15 @@ class ReleaseVersion(unittest.TestCase):
                 return None
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             values = dict(line.split("=", 1) for line in proc.stdout.splitlines())
+            json_proc = subprocess.run(
+                [sys.executable, "-I", str(SCRIPT), "--repo", str(repo), "--json"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(json_proc.returncode, 0, json_proc.stderr)
+            self.assertEqual(json.loads(json_proc.stdout), values)
             if wf is not None:
                 self.assertEqual(wf.returncode, 0, wf.stdout + wf.stderr)
                 theirs = dict(line.split("=", 1) for line in out.read_text().splitlines())
@@ -107,7 +117,29 @@ class ReleaseVersion(unittest.TestCase):
 
     def test_no_trailer_no_release(self):
         values = self.run_both([("tag", "v0.5.0"), ("feat: a", [])])
-        self.assertEqual(values, {"do_release": "false"})
+        self.assertEqual(values, {"do_release": "false", "tested_at_cut": "false"})
+
+    def test_prerelease_tested_at_cut(self):
+        values = self.run_both(
+            [("fix: a", ["pre-release: true", "tested-at-cut:  suite-123  "])]
+        )
+        self.assertEqual(values["tested_at_cut"], "true")
+
+    def test_plain_commit_tested_at_cut_does_not_skip_tests(self):
+        values = self.run_both([("fix: a", ["tested-at-cut: suite-123"])])
+        self.assertEqual(values, {"do_release": "false", "tested_at_cut": "false"})
+
+    def test_release_without_tested_at_cut(self):
+        values = self.run_both([("fix: a", ["release: true"])])
+        self.assertEqual(values["tested_at_cut"], "false")
+
+    def test_release_tested_at_cut(self):
+        values = self.run_both([("fix: a", ["release: true", "tested-at-cut: suite-123"])])
+        self.assertEqual(values["tested_at_cut"], "true")
+
+    def test_empty_tested_at_cut(self):
+        values = self.run_both([("fix: a", ["pre-release: true", "tested-at-cut:   "])])
+        self.assertEqual(values["tested_at_cut"], "false")
 
     def test_release_after_alpha_promotes_it(self):
         values = self.run_both(
