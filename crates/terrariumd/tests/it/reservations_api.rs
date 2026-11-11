@@ -194,7 +194,9 @@ async fn setup_opts(
         });
     }
     let client = tokio::spawn(Client::new(options).run());
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // A precondition, not a timing check: under load the link and the
+    // admission of a new host agent took over 10 s (TER-674).
+    tokio::time::timeout(crate::common::WAIT, async {
         while !state.executor.hosts.is_online("h")
             || (!live && state.executor.resource_pending("h"))
         {
@@ -887,7 +889,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         .into_owned();
     options.capabilities = state.executor.hosts.capabilities("h").unwrap();
     let client_b = tokio::spawn(Client::new(options).run());
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(crate::common::WAIT, async {
         while !state.executor.hosts.is_online("other-host")
             || state.executor.resource_pending("other-host")
         {
@@ -922,7 +924,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(crate::common::WAIT, async {
         while !directory.join("pull-entered").exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
