@@ -171,6 +171,16 @@ export function renderWiki(src: string, opts: RenderOptions): string {
 
   md.use({
     extensions: [
+      ...(opts.textBody ? [{
+        name: "globpath",
+        level: "inline" as const,
+        start: (s: string) => s.search(/[\w.-]+\/[\w.*?/-]*\*/),
+        tokenizer(s: string) {
+          const m = /^[\w.-]+\/[\w.*?/-]*\*[\w.*?/-]*/.exec(s);
+          return m ? { type: "globpath", raw: m[0], text: m[0] } : undefined;
+        },
+        renderer(token: { text?: unknown }) { return esc(String(token.text)); },
+      }] : []),
       {
         name: "wikilink",
         level: "inline",
