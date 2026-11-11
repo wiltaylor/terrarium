@@ -12,8 +12,12 @@ use crate::{policy, store};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new().route(
-        "/read-positions/{kind}/{item}", post(visit),
-        &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)],
+        "/read-positions/{kind}/{item}",
+        post(visit),
+        &[(
+            axum::http::Method::POST,
+            super::link_registry::Access::OperatorOnly,
+        )],
     )
 }
 
