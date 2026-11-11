@@ -46,10 +46,22 @@ async fn two_daemons_pair_proxy_revoke_and_remove() {
     let remote = remote().await;
     let r = link(&home, &remote, false).await;
     assert!(r.get("key").is_none() && r.get("sealed").is_none());
-    let sys = remote.agent("terra","sys",json!({"roles":["sysadmin"]})).await;
+    let sys = remote
+        .agent("terra", "sys", json!({"roles":["sysadmin"]}))
+        .await;
     let id = sys["id"].as_str().unwrap();
-    home.post(&format!("/api/remotes/lab/proxy/api/agents/{id}/send"),json!({"text":"do not deliver"})).await.err(403,"link_forbidden");
-    home.post("/api/remotes/lab/proxy/api/mail",json!({"to":id,"body":"do not deliver"})).await.err(403,"link_forbidden");
+    home.post(
+        &format!("/api/remotes/lab/proxy/api/agents/{id}/send"),
+        json!({"text":"do not deliver"}),
+    )
+    .await
+    .err(403, "link_forbidden");
+    home.post(
+        "/api/remotes/lab/proxy/api/mail",
+        json!({"to":id,"body":"do not deliver"}),
+    )
+    .await
+    .err(403, "link_forbidden");
     home.post(
         "/api/remotes/lab/proxy/api/projects",
         json!({"name":"remote-project"}),
@@ -98,32 +110,67 @@ async fn ten_browser_tabs_share_one_remote_firehose_and_keep_filters() {
     let instance = id.clone();
     let connects = Arc::new(AtomicUsize::new(0));
     let counter = connects.clone();
-    let (tx,_) = tokio::sync::broadcast::channel::<String>(8);
+    let (tx, _) = tokio::sync::broadcast::channel::<String>(8);
     let upstream = tx.clone();
     let app = Router::new()
-        .route("/api/system/instance",get(move || { let id=instance.clone(); async move { Json(json!({"id":id,"version":terrarium_version::VERSION})) } }))
-        .route("/api/events/latest",get(|| async { Json(json!({"seq":0})) }))
-        .route("/api/events",get(move |ws: axum::extract::WebSocketUpgrade| {
-            counter.fetch_add(1,Ordering::SeqCst);
-            let mut rx = upstream.subscribe();
-            async move { ws.on_upgrade(move |mut socket| async move {
-                while let Ok(text) = rx.recv().await {
-                    if socket.send(axum::extract::ws::Message::Text(text.into())).await.is_err() { break; }
+        .route(
+            "/api/system/instance",
+            get(move || {
+                let id = instance.clone();
+                async move { Json(json!({"id":id,"version":terrarium_version::VERSION})) }
+            }),
+        )
+        .route(
+            "/api/events/latest",
+            get(|| async { Json(json!({"seq":0})) }),
+        )
+        .route(
+            "/api/events",
+            get(move |ws: axum::extract::WebSocketUpgrade| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut rx = upstream.subscribe();
+                async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        while let Ok(text) = rx.recv().await {
+                            if socket
+                                .send(axum::extract::ws::Message::Text(text.into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
                 }
-            }) }
-        }));
-    let _server = fake(&home,app,&id).await;
+            }),
+        );
+    let _server = fake(&home, app, &id).await;
     let mut tabs = Vec::new();
-    for _ in 0..10 { tabs.push(home.ws("/api/remotes/lab/proxy/api/events?live=1&project=terra",None).await.unwrap()); }
-    assert_eq!(connects.load(Ordering::SeqCst),1);
-    tx.send(json!({"seq":1,"kind":"test","project":"other"}).to_string()).unwrap();
-    tx.send(json!({"seq":2,"kind":"test","project":"terra"}).to_string()).unwrap();
-    for tab in &mut tabs {
-        let frame = tokio::time::timeout(Duration::from_secs(10),tab.next()).await.unwrap().unwrap().unwrap();
-        let v: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-        assert_eq!(v["seq"],2);
+    for _ in 0..10 {
+        tabs.push(
+            home.ws(
+                "/api/remotes/lab/proxy/api/events?live=1&project=terra",
+                None,
+            )
+            .await
+            .unwrap(),
+        );
     }
-    assert_eq!(connects.load(Ordering::SeqCst),1);
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
+    tx.send(json!({"seq":1,"kind":"test","project":"other"}).to_string())
+        .unwrap();
+    tx.send(json!({"seq":2,"kind":"test","project":"terra"}).to_string())
+        .unwrap();
+    for tab in &mut tabs {
+        let frame = tokio::time::timeout(Duration::from_secs(10), tab.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        assert_eq!(v["seq"], 2);
+    }
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
     home.delete("/api/remotes/lab").await.ok();
 }
 

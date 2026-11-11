@@ -1,7 +1,7 @@
 //! Network policy shared by pairing and every upstream HTTP/SSE/WS connection.
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, Method, header};
@@ -26,11 +26,20 @@ pub fn unreachable() -> ApiError {
 pub fn connection_error(e: reqwest::Error) -> ApiError {
     use std::error::Error;
     fn is_pin(e: &(dyn Error + 'static)) -> bool {
-        if e.is::<terrarium_host::tls::FingerprintMismatch>() { return true; }
+        if e.is::<terrarium_host::tls::FingerprintMismatch>() {
+            return true;
+        }
         if let Some(rustls::Error::Other(inner)) = e.downcast_ref::<rustls::Error>()
-            && inner.0.is::<terrarium_host::tls::FingerprintMismatch>() { return true; }
+            && inner.0.is::<terrarium_host::tls::FingerprintMismatch>()
+        {
+            return true;
+        }
         if let Some(io) = e.downcast_ref::<std::io::Error>()
-            && let Some(inner) = io.get_ref() && is_pin(inner) { return true; }
+            && let Some(inner) = io.get_ref()
+            && is_pin(inner)
+        {
+            return true;
+        }
         e.source().is_some_and(is_pin)
     }
     if is_pin(&e) {
@@ -314,8 +323,11 @@ pub struct EventFeed {
 
 impl Default for EventFeed {
     fn default() -> Self {
-        Self { frames: tokio::sync::broadcast::channel(32).0,
-            alive: AtomicBool::new(true), last_seq: AtomicI64::new(0) }
+        Self {
+            frames: tokio::sync::broadcast::channel(32).0,
+            alive: AtomicBool::new(true),
+            last_seq: AtomicI64::new(0),
+        }
     }
 }
 

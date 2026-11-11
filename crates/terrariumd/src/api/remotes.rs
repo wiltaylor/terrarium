@@ -31,7 +31,10 @@ pub fn routes() -> Router<Shared> {
 }
 
 async fn operator_guard(actor: Actor, req: Request, next: axum::middleware::Next) -> Response {
-    match operator(&actor) { Ok(()) => next.run(req).await, Err(e) => e.into_response() }
+    match operator(&actor) {
+        Ok(()) => next.run(req).await,
+        Err(e) => e.into_response(),
+    }
 }
 
 fn operator(actor: &Actor) -> ApiResult<()> {
@@ -72,25 +75,27 @@ struct NewRemote {
 fn own_ports(s: &Shared) -> Vec<u16> {
     // Include configured public endpoints as well as auxiliary listeners.
     let mut ports = s.webhooks.net_rules().1;
-    ports.extend([
-        s.web.public_url.as_deref(),
-        s.web.artifact_public_url.as_deref(),
-        s.web.git_proxy_listen.as_deref(),
-        Some(s.artifact_listen.as_str()),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(|raw| {
-        raw.parse::<std::net::SocketAddr>()
-            .ok()
-            .map(|a| a.port())
-            .or_else(|| {
-                url::Url::parse(raw)
-                    .ok()
-                    .and_then(|u| u.port_or_known_default())
-            })
-    })
-    .collect::<Vec<_>>());
+    ports.extend(
+        [
+            s.web.public_url.as_deref(),
+            s.web.artifact_public_url.as_deref(),
+            s.web.git_proxy_listen.as_deref(),
+            Some(s.artifact_listen.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|raw| {
+            raw.parse::<std::net::SocketAddr>()
+                .ok()
+                .map(|a| a.port())
+                .or_else(|| {
+                    url::Url::parse(raw)
+                        .ok()
+                        .and_then(|u| u.port_or_known_default())
+                })
+        })
+        .collect::<Vec<_>>(),
+    );
     ports
 }
 
@@ -344,7 +349,8 @@ async fn proxy(
         .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
     net::check_path(req.method(), &path, ws, r.read_only)?;
     let id = r.id.clone();
-    s.db.write(actor.label(),move |t| store::count_call(t,&id)).await?;
+    s.db.write(actor.label(), move |t| store::count_call(t, &id))
+        .await?;
     let limits = s.remotes.get(&r.id);
     let mut closed = limits.closed.subscribe();
     if *closed.borrow() {
@@ -361,8 +367,18 @@ async fn proxy(
 }
 
 fn failure_status(e: &ApiError) -> &'static str {
-    if e.details.as_ref().is_some_and(|d| d["status"] == "pin_mismatch") { "pin_mismatch" }
-    else { match e.code { Code::RemoteMismatch => "mismatch", Code::Unauthorized => "auth_failed", _ => "offline" } }
+    if e.details
+        .as_ref()
+        .is_some_and(|d| d["status"] == "pin_mismatch")
+    {
+        "pin_mismatch"
+    } else {
+        match e.code {
+            Code::RemoteMismatch => "mismatch",
+            Code::Unauthorized => "auth_failed",
+            _ => "offline",
+        }
+    }
 }
 
 /// The identity is also checked when no dashboard currently has a stream open.
@@ -372,19 +388,34 @@ pub fn spawn_checks(s: Shared) -> tokio::task::JoinHandle<()> {
         interval.tick().await;
         loop {
             interval.tick().await;
-            let Ok(rows) = s.db.read(store::list).await else { continue; };
+            let Ok(rows) = s.db.read(store::list).await else {
+                continue;
+            };
             for r in rows {
-                if *s.remotes.get(&r.id).closed.borrow() { continue; }
+                if *s.remotes.get(&r.id).closed.borrow() {
+                    continue;
+                }
                 let result = async {
                     let limits = s.remotes.get(&r.id);
                     let _permit = limits.acquire(false)?;
-                    let c = net::client(&r,&own_ports(&s)).await?;
-                    let h = net::request_headers(&HeaderMap::new(),&key(&s,&r).await?,&s.links.instance_id(&s.state_dir)?)?;
-                    net::instance(&c,&r,&h).await
-                }.await;
-                let status = match &result { Ok(id) if id.version != terrarium_version::VERSION => "version_skew", Ok(_) => "online", Err(e) => failure_status(e) };
-                if matches!(status,"pin_mismatch"|"mismatch"|"auth_failed") { s.remotes.close(&r.id); }
-                let _ = mark(&s,&r,status).await;
+                    let c = net::client(&r, &own_ports(&s)).await?;
+                    let h = net::request_headers(
+                        &HeaderMap::new(),
+                        &key(&s, &r).await?,
+                        &s.links.instance_id(&s.state_dir)?,
+                    )?;
+                    net::instance(&c, &r, &h).await
+                }
+                .await;
+                let status = match &result {
+                    Ok(id) if id.version != terrarium_version::VERSION => "version_skew",
+                    Ok(_) => "online",
+                    Err(e) => failure_status(e),
+                };
+                if matches!(status, "pin_mismatch" | "mismatch" | "auth_failed") {
+                    s.remotes.close(&r.id);
+                }
+                let _ = mark(&s, &r, status).await;
             }
         }
     })
@@ -529,7 +560,10 @@ async fn forward(
                         Some((Ok::<_, std::io::Error>(b), (resp, p, sp, rx, n)))
                     }
                     Ok(Ok(None)) => None,
-                    _ => Some((Err(std::io::Error::other("remote stream ended")),(resp,p,sp,rx,usize::MAX))),
+                    _ => Some((
+                        Err(std::io::Error::other("remote stream ended")),
+                        (resp, p, sp, rx, usize::MAX),
+                    )),
                 }
             },
         );
