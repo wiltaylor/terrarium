@@ -93,6 +93,7 @@ pub(super) fn start(
                 }
                 control = controls.recv() => match control {
                     Some(Control::Kill | Control::Signal(_)) => {
+                        if state.executor.hosts.is_stopped() { break; }
                         // Ask the still-live supervisor to signal its own
                         // child. A stale PID file can never kill a reused PID.
                         let kill = RemoteCmd {

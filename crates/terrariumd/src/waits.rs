@@ -335,9 +335,13 @@ fn run_result(end: &End, started: Instant, tail: Option<&TailBuf>) -> (WaitState
 
 async fn finish_run(state: &Shared, wait: &str, st: WaitState, result: Value) {
     let id = wait.to_owned();
+    let hosts = state.executor.hosts.clone();
     if let Err(e) = state
         .db
         .write("system", move |t| {
+            // An old output reader can observe its local SSH pipe closing
+            // during shutdown. Only the replacement daemon owns completion.
+            if hosts.is_stopped() { return Ok(()); }
             waits::finish(t, &id, st, result, true, 0).map(|_| ())
         })
         .await
@@ -358,6 +362,7 @@ pub fn spawn_run_reader(state: &Shared, wait: String, waiter: String, sess: Arc<
         loop {
             let read = sess.read(since, Duration::from_secs(30), MAX_READ).await;
             let Some(state) = weak.upgrade() else { return };
+            if state.executor.hosts.is_stopped() { return; }
             let out = match read {
                 Ok(o) => o,
                 Err(e) => {

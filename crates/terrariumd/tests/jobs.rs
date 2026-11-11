@@ -3092,7 +3092,7 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     let (ssh, _) = crate::exedev::fake_ssh(marks.path());
     let mut lab = lab_impl_ssh(1, None, "code", Some(&ssh)).await;
     let spool_root = marks.path().join("spool");
-    lab.td.post("/api/targets", json!({"name":"queue-ssh","kind":"ssh","address":"ci@127.0.0.1","project":"p","work_root":spool_root})).await.ok();
+    lab.td.post("/api/targets", json!({"name":"p-queue-ssh","kind":"ssh","address":"ci@127.0.0.1","project":"p","work_root":spool_root})).await.ok();
     let go = marks.path().join("go");
     let started = marks.path().join("started");
     let xml = marks.path().join("junit.xml");
@@ -3102,7 +3102,7 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
         xml.display(),
         go.display()
     );
-    lab.td.put("/api/projects/p/delivery", json!({"target":"queue-ssh","recipe":recipe,"slots":1,"next_repos":["app"],"work_dir":lab._dirs.path().join("jobs")})).await.ok();
+    lab.td.put("/api/projects/p/delivery", json!({"target":"p-queue-ssh","recipe":recipe,"slots":1,"next_repos":["app"],"work_dir":lab._dirs.path().join("jobs")})).await.ok();
     lab.branch("ter-ssh-restart", "next", &[("OK", "yes\n")]);
     let card = lab.card("ssh-restart", "ter-ssh-restart").await;
     let queued = lab
