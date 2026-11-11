@@ -3832,7 +3832,7 @@ pub const RELEASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 /// the two steps and replaced the tree) ends the job before the recipe
 /// runs. Both fail with exit 125 and the reason on stderr; without `flock`
 /// on the target, the recipe runs as before this, unlocked, and the step
-/// says so in one line.
+/// says so in one line. Such logs have no retention ledger ownership.
 ///
 /// Only this wrapper shell holds the lock (fd 8). The recipe runs as its
 /// child with fd 8 closed, so a process that the recipe leaves behind (a
@@ -4800,7 +4800,8 @@ res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 /// dir that a wipe keeps, and refuses the job with a clear error when
 /// another job or daemon holds it. The recipe step holds the same lock
 /// ([`logged_recipe`]). Without `flock` on the target, both run as before
-/// this, unlocked, and print one line that says so.
+/// this, unlocked, and print one line that says so. The recipe's log is then
+/// untracked and excluded from retention cleanup.
 const RECEIVE_SCRIPT: &str = r#"dir=$1; sha=$2; kind=$3; base=${4:-}; tree=${5:-}; wipe_first=${6:-}
 case "$dir" in /*/*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
 case "$sha" in *[!0-9a-f]*|'') echo "bad commit"; res error; exit 2 ;; esac
