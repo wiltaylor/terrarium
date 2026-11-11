@@ -442,6 +442,11 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
         }
     };
     if litellm {
+        if sh.budget_usd == Some(0) {
+            return Err(ApiError::invalid(
+                "selfhosted.budget_usd must be at least 1; omit it for no budget",
+            ));
+        }
         if sh.api != selfhosted::Api::Anthropic {
             return Err(ApiError::invalid("LiteLLM needs the anthropic API style"));
         }
@@ -456,6 +461,11 @@ fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<Subscrip
                 "a LiteLLM subscription is for the claude harness only",
             ));
         }
+    }
+    if !litellm && sh.budget_usd.is_some() {
+        return Err(ApiError::invalid(
+            "selfhosted.budget_usd is only for LiteLLM",
+        ));
     }
     if d.harnesses.is_empty() {
         d.harnesses = sh.api.harnesses().to_vec();

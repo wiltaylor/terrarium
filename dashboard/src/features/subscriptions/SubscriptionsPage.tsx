@@ -241,6 +241,9 @@ export default function SubscriptionsPage() {
                         Probe error: {s.probe_error}
                       </div>
                     </Show>
+                    <Show when={s.fallback_spend_usd != null && !s.windows.some((w) => w.window === "budget")}>
+                      <div class="muted small">Local monthly spend: ${s.fallback_spend_usd?.toFixed(2)} USD</div>
+                    </Show>
                     <Show when={s.month_spend_usd !== undefined}>
                       <div class="small">This month (UTC): ${s.month_spend_usd?.toFixed(2)} USD · local estimate</div>
                     </Show>
