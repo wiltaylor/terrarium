@@ -94,10 +94,24 @@ pub(super) fn registered_serving_routes(state: &Shared) -> super::link_registry:
     use super::link_registry::{Access, RegisteredRouter};
     use axum::http::Method;
     RegisteredRouter::new()
-        .route("/a/{id}", get(serve_root), &[(Method::GET, Access::PublicDenied)])
-        .route("/a/{id}/", get(serve_root), &[(Method::GET, Access::PublicDenied)])
-        .route("/a/{id}/{*path}", get(serve_path), &[(Method::GET, Access::PublicDenied)])
-        .map_router(|router| router.route_layer(axum::middleware::from_fn_with_state(state.clone(), cors)))
+        .route(
+            "/a/{id}",
+            get(serve_root),
+            &[(Method::GET, Access::PublicDenied)],
+        )
+        .route(
+            "/a/{id}/",
+            get(serve_root),
+            &[(Method::GET, Access::PublicDenied)],
+        )
+        .route(
+            "/a/{id}/{*path}",
+            get(serve_path),
+            &[(Method::GET, Access::PublicDenied)],
+        )
+        .map_router(|router| {
+            router.route_layer(axum::middleware::from_fn_with_state(state.clone(), cors))
+        })
 }
 
 /// The serving routes alone, for a listener of their own (port 8081).

@@ -46,9 +46,21 @@ pub(super) fn registered_routes() -> super::link_registry::RegisteredRouter {
     use super::link_registry::{Access, RegisteredRouter};
     use axum::http::Method;
     RegisteredRouter::new()
-        .route(SCRIPT_PATH, get(script), &[(Method::GET, Access::PublicDenied)])
-        .route(BINARY_PATH, get(binary), &[(Method::GET, Access::PublicDenied)])
-        .route(CHECKSUM_PATH, get(checksum), &[(Method::GET, Access::PublicDenied)])
+        .route(
+            SCRIPT_PATH,
+            get(script),
+            &[(Method::GET, Access::PublicDenied)],
+        )
+        .route(
+            BINARY_PATH,
+            get(binary),
+            &[(Method::GET, Access::PublicDenied)],
+        )
+        .route(
+            CHECKSUM_PATH,
+            get(checksum),
+            &[(Method::GET, Access::PublicDenied)],
+        )
 }
 
 /// The binary and its SHA-256 only. The host listener serves these too:

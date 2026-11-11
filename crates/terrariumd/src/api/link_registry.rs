@@ -156,7 +156,11 @@ impl RegisteredRouter {
         // link credential must not turn public routing into an auth bypass.
         for path in ["/", "/{*path}"] {
             for method in [Method::GET, Method::HEAD] {
-                self.entries.push(Entry { method, path: path.into(), access: Access::PublicDenied });
+                self.entries.push(Entry {
+                    method,
+                    path: path.into(),
+                    access: Access::PublicDenied,
+                });
             }
         }
         self

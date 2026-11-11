@@ -719,8 +719,14 @@ async fn require_token(
 ) -> Response {
     // Select link credentials before the public-path bypass. Public assets
     // stay anonymous, but a link bearer never becomes an anonymous request.
-    let selected = session::bearer_value(req.headers()).map(|key| (None, key.to_owned()))
-        .or_else(|| is_websocket(&req).then(|| protocol_token(&req)).flatten().map(|(proto, key)| (Some(proto), key)));
+    let selected = session::bearer_value(req.headers())
+        .map(|key| (None, key.to_owned()))
+        .or_else(|| {
+            is_websocket(&req)
+                .then(|| protocol_token(&req))
+                .flatten()
+                .map(|(proto, key)| (Some(proto), key))
+        });
     if let Some((echo, key)) = selected.as_ref()
         && key.starts_with(crate::store::links::KEY_PREFIX)
         && !token_matches(key.as_bytes(), auth.token.as_bytes())
@@ -730,10 +736,13 @@ async fn require_token(
             None => unauthorized("missing or wrong bearer token"),
         };
     }
-    if selected.is_none() && is_websocket(&req)
+    if selected.is_none()
+        && is_websocket(&req)
         && query_token(&req).is_some_and(|key| key.starts_with(crate::store::links::KEY_PREFIX))
     {
-        return unauthorized("a link key uses a bearer header or WebSocket subprotocol, not a query parameter");
+        return unauthorized(
+            "a link key uses a bearer header or WebSocket subprotocol, not a query parameter",
+        );
     }
     if !req.uri().path().starts_with("/api") {
         return next.run(req).await;
@@ -946,8 +955,11 @@ async fn link_request(
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let access = registry.access(&method, &path);
-    let registry_denied = matches!(access, None | Some(link_registry::Access::OperatorOnly | link_registry::Access::PublicDenied))
-        .then_some("an unregistered or operator-only endpoint");
+    let registry_denied = matches!(
+        access,
+        None | Some(link_registry::Access::OperatorOnly | link_registry::Access::PublicDenied)
+    )
+    .then_some("an unregistered or operator-only endpoint");
     if let Some(why) = registry_denied
         .or_else(|| crate::links::denied(&method, &path, websocket, caller.read_only))
     {
@@ -1186,7 +1198,10 @@ async fn registered_endpoint(
             .extensions()
             .get::<axum::extract::MatchedPath>()
             .and_then(|path| registry.pattern_access(req.method(), path.as_str()));
-        if matches!(access, None | Some(link_registry::Access::OperatorOnly | link_registry::Access::PublicDenied)) {
+        if matches!(
+            access,
+            None | Some(link_registry::Access::OperatorOnly | link_registry::Access::PublicDenied)
+        ) {
             return ApiError::new(
                 Code::LinkForbidden,
                 "a link key may not call an unregistered endpoint",
