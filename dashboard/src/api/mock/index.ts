@@ -2977,7 +2977,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const move = w.events.filter(e => e.card === c.id && e.kind === "card" && e.data.change === "moved").at(-1);
           return { id: c.id, title: c.title, project: c.project, column: c.column, home_column: q.column, labels: c.labels,
             assignee: c.assignee ?? null, assignee_name: agent?.name ?? null, assignee_status: agent?.status ?? null,
-            eta_at: c.eta_at ?? null, blocked_reason: q.column === "blocked" && move?.data.to === c.column && typeof move.data.comment === "string" ? move.data.comment.split("\n")[0] : null };
+            eta_at: c.eta_at ?? null, blocked_reason: q.column === "blocked" && move?.data.to === c.column && typeof move.data.comment === "string" ? move.data.comment.split("\n")[0] ?? null : null };
         }), next: end < rows.length ? String(end) : null };
       }),
       monitors: async (q = {}) => {
