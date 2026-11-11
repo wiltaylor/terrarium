@@ -164,6 +164,69 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Option<Wait>> {
     }))
 }
 
+/// Clear configuration and dependencies with exactly the setter's ownership gate.
+pub fn clear(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
+    let card = find_row(t, id)?;
+    policy::write_project(actor, &card.project)?;
+    not_archived(&card)?;
+    if !policy::is_admin_of(actor, &card.project) && !owns(actor, &card) {
+        return Err(ApiError::forbidden(
+            "only the owner or a project admin clears a card wait",
+        ));
+    }
+    t.execute("DELETE FROM card_deps WHERE card=?1", [&card.id])?;
+    t.execute("DELETE FROM card_waits WHERE card=?1", [&card.id])?;
+    card_event(t, &card, "edited", json!({"fields": ["wait"]}))
+}
+
+/// Authorized presentation. Completion is latched, dependency conditions are live.
+pub fn view(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<serde_json::Value> {
+    let card = find_row(conn, id)?;
+    crate::store::threads::read_card_project(conn, actor, &card.project, None)?;
+    let Some(wait) = get(conn, &card.id)? else {
+        return Ok(json!(null));
+    };
+    let mut result = json!(wait);
+    let (generation, setter): (String, String) = conn.query_row(
+        "SELECT generation, setter FROM card_waits WHERE card=?1",
+        [&card.id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    result["generation"] = json!(generation);
+    result["wake_recipient"] = json!(wake_recipient(conn, &card, &setter)?.key());
+    let mut dependencies = Vec::new();
+    for dep in &wait.dependencies {
+        let row = find_row(conn, &dep.card)?;
+        let met: bool = conn.query_row(
+            "SELECT c.archived = 0 AND CASE WHEN ?2 IS NULL
+             THEN coalesce(k.role,k.name) IN ('accepted','done')
+             ELSE k.name=?2 OR coalesce(k.role=?2,0) END
+             FROM cards c JOIN board_columns k ON k.id=c.column_id WHERE c.id=?1",
+            params![dep.card, dep.target],
+            |r| r.get(0),
+        )?;
+        dependencies.push(if policy::read_project(actor, &row.project).is_err() {
+            json!({"card": null, "hidden": true, "met": met})
+        } else {
+            json!({"card": dep.card, "target": dep.target, "met": met, "hidden": false})
+        });
+    }
+    result["dependencies"] = json!(dependencies);
+    Ok(result)
+}
+
+fn wake_recipient(conn: &Connection, row: &CardRow, setter: &str) -> ApiResult<Address> {
+    let target = [row.assignee.as_deref(), Some(setter)]
+        .into_iter()
+        .flatten()
+        .filter(|a| *a != "operator")
+        .find_map(|a| mail::resolve(conn, a, None).ok());
+    match target {
+        Some(to) => Ok(to),
+        None => Ok(mail::inbox_recipient(conn, &row.project)?.unwrap_or(Address::Operator)),
+    }
+}
+
 pub(super) fn evaluate(t: &mut Tx<'_>, id: &str, broken: bool) -> ApiResult<()> {
     let open: bool = t.query_row(
         "SELECT EXISTS(SELECT 1 FROM card_waits WHERE card=?1 AND met_at IS NULL)",
@@ -270,6 +333,7 @@ fn act_inner(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiRe
         if let Some(to) = action.move_to {
             // check_move runs before writes, so a refusal leaves the move untouched.
             let checked = column(t, &row.project, &to).and_then(|destination| {
+                check_freeze(t, &row.project)?;
                 check_move(t, actor, &row, &destination, action.comment.as_deref())?;
                 Ok(destination)
             });
@@ -298,15 +362,7 @@ fn act_inner(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiRe
         }
     }
     if action.wake || broken || refused {
-        let target = [row.assignee.as_deref(), Some(setter.as_str())]
-            .into_iter()
-            .flatten()
-            .filter(|a| *a != "operator")
-            .find_map(|a| mail::resolve(t, a, None).ok());
-        let to = match target {
-            Some(to) => to,
-            None => mail::inbox_recipient(t, &row.project)?.unwrap_or(Address::Operator),
-        };
+        let to = wake_recipient(t, &row, &setter)?;
         mail::send(
             t,
             Outgoing {
@@ -323,4 +379,45 @@ fn act_inner(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiRe
         )?;
     }
     Ok(true)
+}
+
+/// Calendar scopes are capped at MAX_EVENTS. Read only the two relevant scopes
+/// through the project index, including recurring events and their exceptions.
+fn check_freeze(conn: &Connection, project: &str) -> ApiResult<()> {
+    use crate::store::calendar;
+    let at = chrono::Utc::now();
+    for scope in [Some(project), None] {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM calendar_events WHERE project IS ?1 ORDER BY start_at, id LIMIT ?2",
+        )?;
+        let ids = stmt
+            .query_map(params![scope, calendar::MAX_EVENTS + 1], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if ids.len() > calendar::MAX_EVENTS {
+            return Err(ApiError::conflict(
+                "calendar freeze check exceeds event limit",
+            ));
+        }
+        for id in ids {
+            let event = calendar::get(conn, &id)?;
+            if event.kind != "freeze" {
+                continue;
+            }
+            let (occurrences, cut) =
+                calendar::expand(&[event], at, at + chrono::Duration::milliseconds(1));
+            if cut
+                || occurrences.iter().any(|o| {
+                    calendar::parse_utc(&o.start).is_some_and(|start| start <= at)
+                        && calendar::parse_utc(&o.end).is_some_and(|end| at < end)
+                })
+            {
+                return Err(ApiError::conflict(format!(
+                    "calendar freeze `{id}` prevents automatic move"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
