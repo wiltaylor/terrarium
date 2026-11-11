@@ -71,7 +71,7 @@ pub const CANDIDATE_PAGE: i64 = 16;
 /// after the keyset `(?4, ?5)`. Keep the indexed query public for plan
 /// regression tests.
 pub const CANDIDATES: &str = "
-SELECT c.id, c.position, c.title, c.labels FROM cards c INDEXED BY cards_column
+SELECT c.id, c.position, c.title, c.labels FROM cards c INDEXED BY cards_dispatch_order
 WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
   AND c.archived = 0 AND c.kind = 'card' AND c.assignee IS NULL
   AND NOT EXISTS (SELECT 1 FROM spawns s WHERE s.bound_kind = 'card'
