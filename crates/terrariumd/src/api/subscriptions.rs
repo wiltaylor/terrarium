@@ -24,6 +24,12 @@ use crate::store::subscriptions::{self as subs, QuotaSample, Subscription};
 mod bedrock;
 mod vertex;
 
+#[cfg(test)]
+tokio::task_local! {
+    // Scoped to one route-test task, never process-wide or production-configurable.
+    pub(super) static VERTEX_MOCK_URL: String;
+}
+
 #[derive(Deserialize)]
 struct KeySave {
     #[serde(flatten)]

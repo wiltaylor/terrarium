@@ -135,6 +135,10 @@ impl VertexEndpoint {
 
 pub(super) async fn test(key: &ApiKey, settings: &CloudSettings) -> ApiResult<()> {
     let endpoint = VertexEndpoint::regional(settings)?;
+    #[cfg(test)]
+    let endpoint = super::VERTEX_MOCK_URL
+        .try_with(|url| VertexEndpoint::mock(url.clone()))
+        .unwrap_or(endpoint);
     let jwt = assertion(key.key.trim())?;
     tokio::time::timeout(std::time::Duration::from_secs(20), invoke(&jwt, &endpoint))
         .await

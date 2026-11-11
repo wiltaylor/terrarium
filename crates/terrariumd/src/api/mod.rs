@@ -2346,6 +2346,126 @@ mod tests {
 
     // ---- password login, JWT sessions, renewal ----
 
+    #[tokio::test]
+    async fn vertex_save_route_checks_signed_credentials_before_persisting() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+        use signature::Verifier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_at(dir.path());
+        let path = crate::login_session::key_path(dir.path(), "vertex-success");
+        let private = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        let public = private.to_public_key();
+        let key = serde_json::json!({
+            "type": "service_account", "client_email": "route-test@example.invalid",
+            "private_key": private.to_pkcs8_pem(LineEnding::LF).unwrap().as_str(),
+            "token_uri": "https://ignored.invalid/token"
+        })
+        .to_string();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let unsaved = path.clone();
+        let mock = Router::new().route(
+            "/",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let calls = seen.clone();
+                    let path = unsaved.clone();
+                    let public = public.clone();
+                    async move {
+                        assert!(!path.exists(), "the save must wait for the remote check");
+                        match calls.fetch_add(1, Ordering::SeqCst) {
+                            0 => {
+                                let form = reqwest::Url::parse(&format!(
+                                    "http://mock/?{}",
+                                    String::from_utf8(body.to_vec()).unwrap()
+                                ))
+                                .unwrap();
+                                let fields: std::collections::HashMap<_, _> =
+                                    form.query_pairs().into_owned().collect();
+                                assert_eq!(fields.len(), 2);
+                                let parts: Vec<_> = fields["assertion"].split('.').collect();
+                                assert_eq!(parts.len(), 3);
+                                let claims: serde_json::Value = serde_json::from_slice(
+                                    &URL_SAFE_NO_PAD.decode(parts[1]).unwrap(),
+                                )
+                                .unwrap();
+                                assert_eq!(claims["iss"], "route-test@example.invalid");
+                                let audience =
+                                    reqwest::Url::parse(claims["aud"].as_str().unwrap()).unwrap();
+                                assert_eq!(audience.scheme(), "https");
+                                assert_eq!(audience.host_str(), Some("oauth2.googleapis.com"));
+                                assert_eq!(audience.path(), "/token");
+                                let sig = rsa::pkcs1v15::Signature::try_from(
+                                    URL_SAFE_NO_PAD.decode(parts[2]).unwrap().as_slice(),
+                                )
+                                .unwrap();
+                                rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(public)
+                                    .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig)
+                                    .unwrap();
+                                r#"{"access_token":"E2E-vertex-route-token"}"#
+                            }
+                            1 => {
+                                assert_eq!(
+                                    headers["authorization"],
+                                    "Bearer E2E-vertex-route-token"
+                                );
+                                let request: serde_json::Value =
+                                    serde_json::from_slice(&body).unwrap();
+                                assert_eq!(request["anthropic_version"], "vertex-2023-10-16");
+                                assert_eq!(request["max_tokens"], 1);
+                                r#"{"content":[{"type":"text","text":"Hi"}]}"#
+                            }
+                            _ => panic!("unexpected extra Google request"),
+                        }
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let response = subscriptions::VERTEX_MOCK_URL.scope(url, send_body(
+            router(state.clone()), "POST", "/api/subscriptions/vertex-success/api-key", &[],
+            &serde_json::json!({"provider": "gcp", "key": key, "test_connection": true,
+                "cloud": {"project_id": "route-project", "region": "us-east5", "models": {"opus": "custom-opus"}}}),
+        )).await;
+        server.abort();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_of(response).await;
+        let text = body.to_string();
+        assert!(!text.contains("PRIVATE KEY") && !text.contains("E2E-vertex-route-token"));
+        assert!(!text.contains("route-test@example.invalid"));
+        assert_eq!(body["cloud"]["project_id"], "route-project");
+        assert_eq!(body["cloud"]["models"]["opus"], "custom-opus");
+        assert_eq!(
+            body["cloud"]["models"]["haiku"],
+            "claude-haiku-4-5@20251001"
+        );
+        let stored = crate::login_session::read_key(dir.path(), "vertex-success").unwrap();
+        assert_eq!(stored.key, key);
+        let saved = json_of(
+            send_body(
+                router(state),
+                "GET",
+                "/api/subscriptions/vertex-success",
+                &[],
+                &serde_json::Value::Null,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(saved["cloud"], body["cloud"]);
+        assert!(
+            !std::fs::read_to_string(path)
+                .unwrap()
+                .contains("E2E-vertex-route-token")
+        );
+    }
+
     const PW: &str = "a long operator password";
 
     /// A state whose state dir (and password file) is `dir`.
