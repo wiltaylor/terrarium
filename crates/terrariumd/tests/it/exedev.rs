@@ -488,7 +488,10 @@ async fn workspace_sync_roundtrip(work_root: bool) {
             .await
             .err()
             .unwrap();
-        assert!(error.message.contains("cannot prepare owned target root"), "{error:?}");
+        assert!(
+            error.message.contains("cannot prepare owned target root"),
+            "{error:?}"
+        );
         assert!(!owned.join(".terrarium-owner").exists());
         std::fs::remove_dir_all(&owned).unwrap();
         for run in [false, false, true] {
