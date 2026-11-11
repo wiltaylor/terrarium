@@ -893,7 +893,7 @@ pub(crate) mod tests {
     /// ([`terrarium_core::env_deny`]), plus its own names. The exact names
     /// that the daemon sends multi-line values under
     /// ([`terrarium_host::docker::CLI_ALLOWED_ENV`]) are the one exception
-    /// (TER-541): a grant cannot set them, and the fallback lets them
+    /// (TER-541; the SSH key of a checkout comes on one line, TER-577): a grant cannot set them, and the fallback lets them
     /// through. Any other `TERRARIUM_*` name is refused.
     #[test]
     fn the_host_agent_refuses_every_name_that_a_grant_refuses() {
@@ -1342,13 +1342,16 @@ pub(crate) mod tests {
         assert_eq!(e.code, crate::error::Code::Invalid, "{}", e.message);
         // Grant rows that an older daemon or a config import wrote: the
         // launch refuses each final name with a warning, and does not fail.
-        for (name, fields, env) in [
-            ("x", ["preload", "library_path"], "LD"),
-            ("y", ["socket", "agent"], "TERRARIUM"),
-            ("z", ["config_count", "config_key_0"], "GIT"),
-            ("w", ["env", "y"], "BASH"),
-            ("v", ["preload", "x"], "PYTHON"),
-        ] {
+        // A one-field secret sets the base name itself: `KRB5CCNAME` (TER-577).
+        let rows: [(&str, &[&str], &str); 6] = [
+            ("x", &["preload", "library_path"], "LD"),
+            ("y", &["socket", "agent"], "TERRARIUM"),
+            ("z", &["config_count", "config_key_0"], "GIT"),
+            ("w", &["env", "y"], "BASH"),
+            ("v", &["preload", "x"], "PYTHON"),
+            ("u", &["ccname"], "KRB5CCNAME"),
+        ];
+        for (name, fields, env) in rows {
             let values: Map<String, Value> = fields
                 .iter()
                 .map(|f| ((*f).to_owned(), json!("v1")))
@@ -1381,6 +1384,7 @@ pub(crate) mod tests {
             "GIT_CONFIG_COUNT",
             "BASH_ENV",
             "PYTHON_PRELOAD",
+            "KRB5CCNAME",
         ] {
             assert!(
                 l.warnings.iter().any(|w| w.contains(n)),

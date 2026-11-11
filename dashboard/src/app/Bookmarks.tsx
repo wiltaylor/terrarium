@@ -1,6 +1,7 @@
 import { A } from "@solidjs/router";
 import { For, Show } from "solid-js";
 import { bookmarks } from "../stores";
+import { skippedReport } from "../stores/bookmarks";
 import { ErrorBanner } from "../components/ui";
 import { expanded, TreeNode } from "./TreeRoot";
 import { createRovingTree } from "./treeNav";
@@ -31,6 +32,7 @@ export function Bookmarks(props: { nav?: ReturnType<typeof createRovingTree> }) 
         )}
       </For>
       <li role="none"><ErrorBanner error={bookmarks.error()} /></li>
+      <li role="none"><ErrorBanner error={skippedReport(bookmarks.skipped())} onDismiss={bookmarks.dismissSkipped} /></li>
     </TreeNode>
   );
 }

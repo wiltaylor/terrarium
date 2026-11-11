@@ -115,7 +115,8 @@ describe("grants", () => {
     expect(envError("LD_PRELOAD")).not.toBeNull();
     expect(envError("GH_TOKEN")).toBeNull();
     expect(envError("DB_URL")).toBeNull();
-    for (const bad of ["db_url", "_X", "NODE_OPTIONS", "HTTPS_PROXY", "GIT_DIR", "BASH_ENV", "OPENAI_API_KEY", "PYTHONPATH"])
+    // TER-577: the deny prefixes of TER-541 (OPENSSL_, KRB5, DBUS_).
+    for (const bad of ["db_url", "_X", "NODE_OPTIONS", "HTTPS_PROXY", "GIT_DIR", "BASH_ENV", "OPENAI_API_KEY", "PYTHONPATH", "KRB5CCNAME", "KRB5_CONFIG", "DBUS_SESSION_BUS_ADDRESS", "OPENSSL_CONF", "OPENSSL_MODULES"])
       expect(envError(bad), bad).not.toBeNull();
     expect(grantBody({ grantee: "project:ops", level: "read", env: "HOME" })).toHaveProperty("error");
   });

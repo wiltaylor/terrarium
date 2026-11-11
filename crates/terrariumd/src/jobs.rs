@@ -123,7 +123,10 @@
 //!   the target broke, is lost. Its processes on the target get the kill
 //!   of a lost run ([`end_lost`], with the slot wipe when the kill is not
 //!   confirmed), and the same job goes back to the queue with its attempt
-//!   and its place ([`jobs::requeue_infra`]): a batch reruns whole. An
+//!   and its place ([`jobs::requeue_infra`]): a batch reruns whole. It
+//!   goes back only once the lost run let go of its slot lock
+//!   ([`wait_slot_free`], TER-676); past [`LOST_SLOT_WAIT_SECS`] it ends
+//!   instead, with the lock in its tail. An
 //!   error end that a rerun gets again ([`FIXED_ERRORS`]) is red, and after
 //!   [`MAX_LOST_RERUNS`] lost runs in a row the next one is red.
 //! - Each end and each cancel emits one `job.verdict` event per card
@@ -392,6 +395,10 @@ struct Lost {
     /// The red end of a run past [`MAX_LOST_RERUNS`]: after the kill the
     /// job ends with it instead of going back to the queue.
     red: Option<JobEnd>,
+    /// The work tree of its slot on the target ([`slot_dir`]), when it
+    /// has a slot: the job goes back to the queue only after the lock of
+    /// that tree is free ([`wait_slot_free`], TER-676).
+    dir: Option<String>,
 }
 
 /// TER-123: end the processes that the jobs of the last daemon left on
@@ -462,6 +469,7 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 // a running one that gets a cancel meanwhile keeps its
                 // slot as a draining job (TER-123 review 2, major 1).
                 let live = LiveRun::new(&job.id);
+                let dir = job.slot.map(|s| slot_dir(&delivery, &job.project, s));
                 out.push(Lost {
                     job,
                     running,
@@ -470,6 +478,7 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                     other_host,
                     why: None,
                     red: None,
+                    dir,
                 });
             }
             Ok(out)
@@ -501,14 +510,15 @@ async fn end_lost(state: &Shared, l: Lost) {
         other_host,
         why,
         red,
+        dir,
     } = l;
     let mut report = None;
     let wraps = def.as_ref().is_some_and(crate::run_kill::kind_wraps);
-    match def {
+    match &def {
         Some(def) if wraps => {
             let r = crate::run_kill::kill_file(
                 state,
-                &def,
+                def,
                 Some(terrarium_host::native::service_holder(&job.project, "jobs")),
                 &crate::run_kill::job_pidfile(&job.id),
             )
@@ -530,6 +540,37 @@ async fn end_lost(state: &Shared, l: Lost) {
         Some(_) => debug!(job = %job.id, "a lost job run on a target without PID files"),
         None => {}
     }
+    // TER-676: a job that goes back to the queue starts again only after
+    // the lost run let go of its slot. Its receive step takes the slot
+    // lock without a wait, so a rerun that starts while the lost run still
+    // ends fails as held. Past the cap the job ends, with why.
+    let red = match (&def, dir.as_deref()) {
+        (Some(def), Some(dir)) if running && red.is_none() && wraps && !other_host => {
+            match wait_slot_free(state, def, &job, dir).await {
+                Some(held) => {
+                    let merge = job.kind == JobKind::Merge;
+                    let (outcome, counts) = if merge {
+                        (OUTCOME_INFRA, "an infra failure, not a test failure")
+                    } else {
+                        ("red", "red")
+                    };
+                    Some(JobEnd {
+                        passed: false,
+                        outcome: Some(outcome.into()),
+                        tail: Some(format!(
+                            "the run was lost ({}), and its kill did not end it: {held}. \
+                             The job does not rerun and counts as {counts}. Stop the \
+                             processes that hold the lock on the target, then queue the job again.",
+                            why.as_deref().unwrap_or("the last daemon left it running")
+                        )),
+                        ..JobEnd::default()
+                    })
+                }
+                None => None,
+            }
+        }
+        _ => red,
+    };
     // TER-190 review, finding 2: processes of the run may still write into
     // the slot's tree. The slot is free below, so the next job of the slot
     // makes its tree new first. The mark is written before the slot frees.
@@ -589,6 +630,117 @@ async fn end_lost(state: &Shared, l: Lost) {
     }
     drop(live);
     kick(state);
+}
+
+/// How long, in all, the end of a lost run waits for its slot lock to be
+/// free before the job ends instead of going back to the queue (TER-676).
+pub const LOST_SLOT_WAIT_SECS: u64 = 120;
+
+/// The longest single wait for the slot lock on the target. Between two
+/// waits the kill of the lost run runs again.
+const LOST_SLOT_PROBE_SECS: u64 = 15;
+
+/// The wait of [`LOST_SLOT_WAIT_SECS`] of some jobs, for the tests of the
+/// capped path.
+fn lost_slot_waits() -> MutexGuard<'static, HashMap<String, u64>> {
+    static W: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    match W.get_or_init(Mutex::default).lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// Set the wait for the slot lock of lost job `job` to `secs`. For the
+/// tests of the capped path only ([`wait_slot_free`]).
+#[doc(hidden)]
+pub fn set_lost_slot_wait(job: &str, secs: u64) {
+    lost_slot_waits().insert(job.to_owned(), secs);
+}
+
+/// `sh -c SLOT_FREE sh <dir> <secs>`: wait at most `secs` for the lock of
+/// slot tree `dir` (TER-448, [`RECEIVE_SCRIPT`]) and let go of it at
+/// once. Prints `free`, `held` (still locked after the wait), `noflock`,
+/// or `error`.
+const SLOT_FREE: &str = r#"lock=$1.lock; w=$2
+command -v flock >/dev/null 2>&1 || { echo noflock; exit 0; }
+[ -e "$lock" ] || { echo free; exit 0; }
+flock -E 75 -w "$w" "$lock" true 2>/dev/null
+case $? in 0) echo free ;; 75) echo held ;; *) echo error ;; esac
+"#;
+
+/// Wait until no process of lost job `job` holds the lock of its slot
+/// tree `dir` on target `def` (TER-676). The kill of a lost run
+/// ([`end_lost`]) can end before the run does: under load, or when the
+/// kill could not start. While the lock is held, the kill runs again
+/// (a PID file that is still there gets it), up to
+/// [`LOST_SLOT_WAIT_SECS`]. `None` when the lock is free, or when the
+/// target cannot tell (no `flock`, an error): the receive step then
+/// decides as before. `Some(why)` when it is still held at the cap.
+async fn wait_slot_free(state: &Shared, def: &TargetDef, job: &Job, dir: &str) -> Option<String> {
+    let holder = Some(terrarium_host::native::service_holder(&job.project, "jobs"));
+    let cap = lost_slot_waits()
+        .remove(&job.id)
+        .unwrap_or(LOST_SLOT_WAIT_SECS);
+    let started = Instant::now();
+    let until = started + Duration::from_secs(cap);
+    loop {
+        let left = until.saturating_duration_since(Instant::now()).as_secs();
+        let wait = left.clamp(1, LOST_SLOT_PROBE_SECS);
+        let probe = RemoteCmd {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                SLOT_FREE.into(),
+                "sh".into(),
+                dir.to_owned(),
+                wait.to_string(),
+            ],
+            timeout_secs: Some(wait + 30),
+            holder: holder.clone(),
+            ..RemoteCmd::default()
+        };
+        let said = match crate::executor::start_cmd(state, def, &probe) {
+            Ok(run) => {
+                let c = run.collect(4096).await;
+                String::from_utf8_lossy(&c.stdout).trim().to_owned()
+            }
+            Err(e) => {
+                warn!(job = %job.id, "cannot check the slot lock of a lost job run: {e}");
+                return None;
+            }
+        };
+        match said.as_str() {
+            "free" => {
+                if started.elapsed() >= Duration::from_secs(1) {
+                    info!(job = %job.id, secs = started.elapsed().as_secs(),
+                        "the slot of a lost job run is free; the job goes back to the queue");
+                }
+                return None;
+            }
+            "held" => {}
+            other => {
+                debug!(job = %job.id, said = other, "the target cannot tell if the slot of a lost job run is free");
+                return None;
+            }
+        }
+        if Instant::now() >= until {
+            let lock = format!("{dir}.lock");
+            warn!(job = %job.id, lock, cap, "the processes of a lost job run still hold its slot");
+            return Some(format!(
+                "its processes still held the slot lock {lock} after {} s",
+                started.elapsed().as_secs()
+            ));
+        }
+        warn!(job = %job.id, dir, "the slot of a lost job run is still held; its kill runs again");
+        let r = crate::run_kill::kill_file(
+            state,
+            def,
+            holder.clone(),
+            &crate::run_kill::job_pidfile(&job.id),
+        )
+        .await;
+        debug!(job = %job.id, report = %r, "the kill of a lost job run, again");
+    }
 }
 
 /// True when the kill of a lost job run shows that none of its processes
@@ -1380,11 +1532,12 @@ async fn rerun_lost(state: &Shared, job: Job, why: String, red: Option<JobEnd>, 
     hold(&job.id, why.clone(), None);
     // As in [`recover_lost`]: the kill goes to the current delivery
     // target, and a job that ran on another host gets no confirmed kill.
-    let (project, ran_on) = (job.project.clone(), job.host.clone());
+    let (project, ran_on, slot) = (job.project.clone(), job.host.clone(), job.slot);
     let found = state
         .db
         .read(move |c| {
             let delivery = jobs::delivery(c, &project)?;
+            let dir = slot.map(|s| slot_dir(&delivery, &project, s));
             let def = match delivery.target.as_deref().map(|n| targets::get(c, n)) {
                 Some(Ok(row)) if row.def.project.as_ref().is_none_or(|p| *p == project) => {
                     Some(row.def)
@@ -1395,12 +1548,12 @@ async fn rerun_lost(state: &Shared, job: Job, why: String, red: Option<JobEnd>, 
                 && ran_on
                     .as_deref()
                     .is_some_and(|h| h != jobs::host_of(c, &delivery));
-            Ok((def, other))
+            Ok((def, other, dir))
         })
         .await;
-    let (def, other_host) = found.unwrap_or_else(|e| {
+    let (def, other_host, dir) = found.unwrap_or_else(|e| {
         warn!(job = %job.id, "cannot read the target of a lost job run: {e}");
-        (None, false)
+        (None, false, None)
     });
     end_lost(
         state,
@@ -1412,6 +1565,7 @@ async fn rerun_lost(state: &Shared, job: Job, why: String, red: Option<JobEnd>, 
             other_host,
             why: Some(why),
             red,
+            dir,
         },
     )
     .await;
