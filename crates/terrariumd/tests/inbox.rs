@@ -56,6 +56,13 @@ async fn setup() -> World {
     }
 }
 
+async fn decision_card(td: &TestDaemon) -> Value {
+    td.post("/api/projects/p/cards", json!({"title": "Decision"}))
+        .await
+        .ok()["id"]
+        .clone()
+}
+
 async fn notify(td: &TestDaemon, agent: &str, body: Value) -> Value {
     let mut body = body;
     body["kind"] = json!("notice");
@@ -272,7 +279,7 @@ async fn a_lead_sends_a_notice_and_the_rights_follow_the_roles() {
         .post_as(
             &lead,
             &format!("/api/agents/{lead}/questions"),
-            json!({"text": "v2 is deployed."}),
+            json!({"text": "v2 is deployed.", "card": n["card"]}),
         )
         .await;
     assert_eq!(q.status, 201, "{}", q.body);
@@ -517,7 +524,7 @@ async fn the_default_inbox_only_lists_open_questions_and_critical_notices() {
         .post_as(
             &lead,
             &format!("/api/agents/{lead}/questions"),
-            json!({"text": "Ship?", "options": ["yes", "no"]}),
+            json!({"text": "Ship?", "options": ["yes", "no"], "card": decision_card(&td).await}),
         )
         .await
         .ok()
@@ -610,7 +617,7 @@ async fn a_critical_notice_goes_first_and_counts() {
         .post_as(
             &lead,
             &format!("/api/agents/{lead}/questions"),
-            json!({"text": "Ship?"}),
+            json!({"text": "Ship?", "card": decision_card(&td).await}),
         )
         .await
         .ok()
@@ -1155,7 +1162,7 @@ async fn a_forward_quotes_the_question_and_keeps_it_open() {
             &lead,
             &format!("/api/agents/{lead}/questions"),
             json!({"text": "Which database?", "options": ["sqlite", "postgres"],
-                   "context": "We have 3 users."}),
+                   "context": "We have 3 users.", "card": decision_card(&td).await}),
         )
         .await;
     assert_eq!(q.status, 201, "{}", q.body);

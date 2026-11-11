@@ -80,9 +80,11 @@ export function CardQuestions(props: { card: Card; linkable: Question[]; onChang
     return c.some((q) => q.status === "retracted") ? `Answered or retracted (${c.length})` : `Answered (${c.length})`;
   };
   const unlink = (q: Question) => (
-    <button type="button" class="small" disabled={busy()} title={`Unlink ${q.kind} ${q.id} from ${props.card.id}. It stays in the Inbox.`} onClick={() => void setCard(q.id, null)}>
-      Unlink
-    </button>
+    <Show when={q.thread || (q.kind !== "question" && q.kind !== "bundle")}>
+      <button type="button" class="small" disabled={busy()} title={`Unlink ${q.kind} ${q.id} from ${props.card.id}. It stays in the Inbox.`} onClick={() => void setCard(q.id, null)}>
+        Unlink
+      </button>
+    </Show>
   );
   const view = (q: Question) => (
     <Show when={q.kind === "bundle"} fallback={<QuestionCard question={q} now={now()} showAgent showKind hideCard actions={unlink(q)} onChange={change} />}>

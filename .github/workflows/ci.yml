@@ -24,6 +24,15 @@ jobs:
   # scripts/ tests, and the dashboard check), one part per step.
   check:
     name: fmt + lint + test
+    # Skipped only for a push to main whose head commit carries a
+    # `tested-at-cut:` trailer: the lead ran the same full suite on that
+    # commit at the version cut (operator, 2026-11-11, question
+    # 01M74RFDZ39SP9E3258VM6F48A). Pull requests and every other push run it.
+    # The version job reads the real git trailers of HEAD; on a pull
+    # request it is skipped, and the check runs.
+    needs: [version]
+    if: >-
+      always() && needs.version.outputs.tested_at_cut != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,6 +107,7 @@ jobs:
       version: ${{ steps.calc.outputs.version }}
       prerelease: ${{ steps.calc.outputs.prerelease }}
       do_release: ${{ steps.calc.outputs.do_release }}
+      tested_at_cut: ${{ steps.calc.outputs.tested_at_cut }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,9 +117,19 @@ jobs:
           IS_RELEASE=$(git log -1 --format='%(trailers:key=release,valueonly)')
           IS_PRERELEASE=$(git log -1 --format='%(trailers:key=pre-release,valueonly)')
           BUMP_TRAILER=$(git log -1 --format='%(trailers:key=bump,valueonly)' | tr -d '[:space:]')
+          # The lead's full suite on this commit at the cut (a real trailer,
+          # not text in the body); only a release commit may skip the check.
+          TESTED_AT_CUT=$(git log -1 --format='%(trailers:key=tested-at-cut,valueonly)' | tr -d '[:space:]')
+          if [[ -n "$TESTED_AT_CUT" && ( "$IS_RELEASE" == "true" || "$IS_PRERELEASE" == "true" ) ]]; then
+            echo "tested_at_cut=true" >> "$GITHUB_OUTPUT"
+            echo "Tested at the cut: $TESTED_AT_CUT (the check job is skipped)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "tested_at_cut=false" >> "$GITHUB_OUTPUT"
+          fi
 
           if [[ "$IS_RELEASE" != "true" && "$IS_PRERELEASE" != "true" ]]; then
             echo "do_release=false" >> "$GITHUB_OUTPUT"
+            echo "tested_at_cut=false" >> "$GITHUB_OUTPUT"
             echo "No release/pre-release trailer on HEAD — tests only." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -200,7 +220,12 @@ jobs:
   image:
     name: Build and push the image
     needs: [version, check]
-    if: needs.version.outputs.do_release == 'true'
+    # A check skipped by the tested-at-cut trailer does not stop the image;
+    # a failed or cancelled check does.
+    if: >-
+      always() && needs.version.outputs.do_release == 'true'
+      && needs.version.result == 'success'
+      && (needs.check.result == 'success' || needs.check.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read

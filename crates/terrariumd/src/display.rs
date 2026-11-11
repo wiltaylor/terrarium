@@ -141,6 +141,8 @@ pub async fn rights(state: &Shared, actor: &Actor, row: &TargetRow) -> ApiResult
     let (standing, active) = state
         .db
         .read(move |c| {
+            // TER-623: no agent uses a release target.
+            crate::store::jobs::check_not_release_target(c, &name, "using the target")?;
             Ok((
                 leases::standing(c, &name, &me)?,
                 leases::active_on(c, &name)?,

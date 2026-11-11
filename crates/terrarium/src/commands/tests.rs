@@ -7002,6 +7002,8 @@ async fn questions_ask_list_update_and_answer() {
             "question",
             "ask",
             "Ship v2 on Friday?",
+            "--card",
+            "TER-1",
             "-o",
             "yes",
             "--option",
@@ -7021,7 +7023,7 @@ async fn questions_ask_list_update_and_answer() {
             Some(
                 json!({"text": "Ship v2 on Friday?", "options": ["yes", "no"],
                         "context": "**CI** is green", "priority": "urgent", "wait": true,
-                        "timeout": "2h"}),
+                        "timeout": "2h", "card": "TER-1"}),
             ),
         )],
     )
@@ -7032,7 +7034,13 @@ async fn questions_ask_list_update_and_answer() {
     // --timeout needs --wait.
     assert!(Cli::try_parse_from(["terrarium", "question", "ask", "x", "--timeout", "2h"]).is_err());
     // The operator does not ask.
-    let r = exec(false, &["question", "ask", "x"], vec![], None).await;
+    let r = exec(
+        false,
+        &["question", "ask", "x", "--card", "TER-1"],
+        vec![],
+        None,
+    )
+    .await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
 
     let out = ok(
@@ -7253,6 +7261,8 @@ async fn question_bundles_ask_show_update_and_answer() {
             "question",
             "bundle",
             "Release plan",
+            "--card",
+            "TER-1",
             "--item",
             "Ship?",
             "--item",
@@ -7263,8 +7273,10 @@ async fn question_bundles_ask_show_update_and_answer() {
             Post,
             mine(),
             vec![],
-            Some(json!({"kind": "bundle", "text": "Release plan",
-                        "items": [{"text": "Ship?"}, {"text": "Region?"}]})),
+            Some(
+                json!({"kind": "bundle", "text": "Release plan", "card": "TER-1",
+                        "items": [{"text": "Ship?"}, {"text": "Region?"}]}),
+            ),
         )],
     )
     .await;
@@ -7283,6 +7295,8 @@ async fn question_bundles_ask_show_update_and_answer() {
             "question",
             "bundle",
             "Release plan",
+            "--card",
+            "TER-1",
             "--items-file",
             "-",
             "--urgent",
@@ -7295,7 +7309,7 @@ async fn question_bundles_ask_show_update_and_answer() {
             mine(),
             vec![],
             Some(
-                json!({"kind": "bundle", "text": "Release plan", "priority": "urgent",
+                json!({"kind": "bundle", "text": "Release plan", "priority": "urgent", "card": "TER-1",
                         "wait": true,
                         "items": [{"text": "Ship?", "options": ["yes", "no"]},
                                   {"text": "Notes?"}]}),
@@ -7327,7 +7341,15 @@ async fn question_bundles_ask_show_update_and_answer() {
     }
     let r = exec(
         true,
-        &["question", "bundle", "-", "--items-file", "-"],
+        &[
+            "question",
+            "bundle",
+            "-",
+            "--items-file",
+            "-",
+            "--card",
+            "TER-1",
+        ],
         vec![],
         Some("x"),
     )
@@ -7335,7 +7357,15 @@ async fn question_bundles_ask_show_update_and_answer() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     let r = exec(
         true,
-        &["question", "bundle", "x", "--items-file", "-"],
+        &[
+            "question",
+            "bundle",
+            "x",
+            "--items-file",
+            "-",
+            "--card",
+            "TER-1",
+        ],
         vec![],
         Some("{"),
     )
@@ -7343,7 +7373,7 @@ async fn question_bundles_ask_show_update_and_answer() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     let r = exec(
         false,
-        &["question", "bundle", "x", "--item", "a"],
+        &["question", "bundle", "x", "--item", "a", "--card", "TER-1"],
         vec![],
         None,
     )
@@ -7621,13 +7651,20 @@ async fn notify_and_the_admin_inbox() {
     assert!(Cli::try_parse_from(["terrarium", "notify", "x", "--urgent", "--critical"]).is_err());
     let out = ok(
         true,
-        &["question", "ask", "Roll back?", "--critical"],
+        &[
+            "question",
+            "ask",
+            "Roll back?",
+            "--critical",
+            "--card",
+            "TER-1",
+        ],
         vec![(201, crit)],
         vec![(
             Post,
             mine(),
             vec![],
-            Some(json!({"text": "Roll back?", "priority": "critical"})),
+            Some(json!({"text": "Roll back?", "priority": "critical", "card": "TER-1"})),
         )],
     )
     .await;
@@ -11137,6 +11174,56 @@ async fn rules_stored_parse_problems_are_printed_and_check_fails() {
             );
         }
     }
+}
+
+/// `admin link ...` (TER-61, docs/api.md §36): the pairing code alone on
+/// stdout, and the routes of rotate and revoke.
+#[tokio::test]
+async fn admin_link_prints_the_pairing_code_alone() {
+    let made = json!({"link": {"id": "L1", "label": "office", "read_only": true,
+                               "status": "pending"},
+                      "code": "tlp_abc", "code_expires_at": "2026-11-09T10:10:00Z",
+                      "instance": {"id": "01I", "name": "lab", "version": "0.1.0"},
+                      "url": null});
+    let out = ok(
+        false,
+        &["admin", "link", "new", "office", "--read-only"],
+        vec![(201, made.clone())],
+        vec![(
+            Post,
+            "/api/links",
+            vec![],
+            Some(json!({"label": "office", "read_only": true})),
+        )],
+    )
+    .await;
+    // The code is the first line (stdout); the hints follow (stderr).
+    assert_eq!(out.lines().next(), Some("tlp_abc"), "{out}");
+    assert!(
+        out.contains("one use") && out.contains("instance: 01I"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["admin", "link", "rotate", "L1"],
+        vec![(200, made)],
+        vec![req(Post, "/api/links/L1/rotate")],
+    )
+    .await;
+    // The code is the first line (stdout); the hints follow (stderr).
+    assert_eq!(out.lines().next(), Some("tlp_abc"), "{out}");
+    assert!(
+        out.contains("one use") && out.contains("instance: 01I"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["admin", "link", "revoke", "L1"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/links/L1")],
+    )
+    .await;
+    assert_eq!(out, "revoked link L1\n");
 }
 
 /// Run `args` as an agent against `mock`: the result and the output.

@@ -3170,6 +3170,45 @@ export interface Host {
 }
 
 /** `POST /api/hosts` (`201`): the host and its token. The token shows once, here only. */
+/** A link key row (docs/api.md §36): another daemon (the home) that calls this one. No hash or key is ever in it. */
+export interface Link {
+  id: string;
+  label: string;
+  /** GET, SSE, and the event WebSocket only. */
+  read_only: boolean;
+  /** `pending`: no key (a pairing code is open, ran out, or the link was rotated). */
+  status: "pending" | "active" | "revoked";
+  home_instance_id: string | null;
+  home_name: string | null;
+  paired_at: string | null;
+  paired_from: string | null;
+  created_by: string;
+  created_at: string;
+  rotated_at: string | null;
+  first_used_at: string | null;
+  last_used_at: string | null;
+  last_used_from: string | null;
+  pair_expires_at: string | null;
+  revoked_at: string | null;
+}
+
+/** `GET /api/system/instance`. */
+export interface LinkInstance {
+  id: string;
+  name: string;
+  version: string;
+}
+
+/** The answer of `POST /api/links` and of the rotate: the one-time pairing code, shown once. */
+export interface NewLinkCode {
+  link: Link;
+  code: string;
+  code_expires_at: string;
+  instance: LinkInstance;
+  /** TERRARIUM_PUBLIC_URL of this daemon, or null. */
+  url: string | null;
+}
+
 export type NewHostToken = Host & {
   token: string;
   /** `host` (a long-lived `thk_` token) or `enrol` (a one-time `the_` token, 10 minutes). */

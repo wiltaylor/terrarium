@@ -68,10 +68,12 @@ pub enum Actor {
 }
 
 impl Actor {
-    /// The label in events and audit rows: `operator` or `agent:<ulid>`.
+    /// The label in events and audit rows: `operator`, `agent:<ulid>`, or
+    /// `link:<ulid>` for the operator through a link key (the task-local
+    /// `crate::links::CALLER` of the request, TER-61).
     pub fn label(&self) -> String {
         match self {
-            Self::Operator => "operator".into(),
+            Self::Operator => crate::links::current_label().unwrap_or_else(|| "operator".into()),
             Self::Agent(a) => format!("agent:{}", a.id),
         }
     }

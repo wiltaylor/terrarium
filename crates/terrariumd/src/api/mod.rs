@@ -17,6 +17,7 @@ mod hosts;
 mod inbox;
 pub mod install;
 pub(crate) mod jobs;
+mod links;
 mod longpoll;
 pub(crate) mod mail;
 mod memory;
@@ -79,6 +80,7 @@ use tracing::{error, info, warn};
 
 pub use artifacts::{artifact_router, run_prune, sweep_orphans};
 pub use config::spawn_config_sync;
+pub use links::this_instance;
 pub use schedules::{run_schedule, run_triggered};
 pub use subscriptions::settle_defaults as settle_account_defaults;
 pub use system::{DefinitionCounts, Health, VersionInfo};
@@ -170,6 +172,9 @@ pub struct AppState {
     /// The job queue: whether the start has taken up the jobs of the last
     /// daemon (`crate::jobs`).
     pub job_queue: Arc<crate::jobs::Runtime>,
+    /// The link keys: the revocation signals, the use throttle, and the
+    /// instance ID (`crate::links`, TER-61).
+    pub links: Arc<crate::links::Runtime>,
 }
 
 impl AppState {
@@ -339,6 +344,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(config::routes())
         .merge(skills::routes())
         .merge(system_prompts::routes())
+        .merge(links::routes())
         .route(
             "/session",
             get(session::current)
@@ -441,7 +447,7 @@ fn query_token(req: &Request) -> Option<String> {
     })
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -492,6 +498,15 @@ pub struct TokenAuth {
     public_origin: Option<String>,
     /// The client addresses that got the `?token=` warning.
     warned: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The link keys (`tlk_`, TER-61). `None`: a link key is a wrong token.
+    links: Option<LinkAuth>,
+}
+
+/// What the TCP auth needs to check a link key.
+#[derive(Clone)]
+pub struct LinkAuth {
+    pub db: Db,
+    pub runtime: Arc<crate::links::Runtime>,
 }
 
 impl TokenAuth {
@@ -502,7 +517,15 @@ impl TokenAuth {
             sessions: None,
             public_origin: None,
             warned: std::sync::Mutex::default(),
+            links: None,
         }
+    }
+
+    /// Also take link keys (`tlk_`, `docs/api.md` §36).
+    #[must_use]
+    pub fn with_links(mut self, links: LinkAuth) -> Self {
+        self.links = Some(links);
+        self
     }
 
     /// Also take the session cookie. `public_origin`: the dashboard origin
@@ -616,6 +639,15 @@ async fn require_token(
         req.extensions_mut().insert(Transport::Tcp);
         return next.run(req).await;
     }
+    // A link pairing: `POST /api/links/pair` with no `Authorization`. The
+    // one-time pairing code in the body is the proof (`api::links::pair`).
+    if req.uri().path() == "/api/links/pair"
+        && req.method() == axum::http::Method::POST
+        && header_token.is_none()
+    {
+        req.extensions_mut().insert(Transport::Tcp);
+        return next.run(req).await;
+    }
     // The subprotocol that carried the token: the answer must name it, or
     // the browser drops the connection.
     let mut echo = None;
@@ -640,6 +672,11 @@ async fn require_token(
         // The static token, else a CLI session token.
         let via = if token_matches(given.as_bytes(), auth.token.as_bytes()) {
             session::AuthVia::Bearer
+        } else if given.starts_with(crate::store::links::KEY_PREFIX) {
+            return match &auth.links {
+                Some(links) => link_request(links, &given, req, next, echo).await,
+                None => unauthorized("missing or wrong bearer token"),
+            };
         } else {
             let found = match &auth.sessions {
                 Some(s) => s.check(&given, session::TokenKind::Cli, now).await,
@@ -755,6 +792,122 @@ async fn require_token(
     }
 }
 
+/// A request with a link key (`docs/api.md` §36, wiki
+/// design/linked-instances D3): the operator's rights minus the deny list
+/// of [`crate::links::denied`], with the actor label `link:<id>`. The
+/// request holds the key's revocation signal from before the lookup, so a
+/// revoke ends a long poll, a stream, or a WebSocket of the key at once.
+async fn link_request(
+    links: &LinkAuth,
+    key: &str,
+    mut req: Request,
+    next: Next,
+    echo: Option<String>,
+) -> Response {
+    use crate::links::{CALLER, LinkCaller};
+    let hash = crate::store::hosts::token_hash(key);
+    let guard = links.runtime.guard(&hash);
+    let h = hash.clone();
+    let found = links
+        .db
+        .read(move |c| crate::store::links::by_key_hash(c, &h))
+        .await;
+    let link = match found {
+        Ok(Some(l)) => l,
+        Ok(None) => return unauthorized("the link key is wrong or was revoked"),
+        Err(e) => return e.into_response(),
+    };
+    let caller = LinkCaller {
+        id: link.id,
+        label: link.label,
+        read_only: link.read_only,
+        key_hash: hash,
+    };
+    let from = client_addr(&req);
+    let websocket = is_websocket(&req);
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    if let Some(why) = crate::links::denied(&method, &path, websocket, caller.read_only) {
+        if links
+            .runtime
+            .should_audit_forbidden(&caller.id, &method, &path)
+        {
+            let (id, label, ro) = (caller.id.clone(), caller.label.clone(), caller.read_only);
+            let m = method.to_string();
+            let p = path.clone();
+            let r = links
+                .db
+                .write(format!("link:{id}"), move |t| {
+                    t.audit(
+                        "link.forbidden",
+                        &id,
+                        None,
+                        serde_json::json!({"label": label, "method": m, "path": p,
+                                           "read_only": ro, "from": from, "reason": why}),
+                    )
+                })
+                .await;
+            if let Err(e) = r {
+                tracing::warn!("cannot write the link.forbidden audit row: {}", e.message);
+            }
+        }
+        return ApiError::new(
+            Code::LinkForbidden,
+            format!("a link key may not call {method} {path}: {why}"),
+        )
+        .into_response();
+    }
+    if links.runtime.should_mark(&caller.id, &from) {
+        let id = caller.id.clone();
+        let r = links
+            .db
+            .write(format!("link:{id}"), move |t| {
+                crate::store::links::mark_used(t, &id, &from)
+            })
+            .await;
+        if let Err(e) = r {
+            tracing::warn!("cannot record the use of a link key: {}", e.message);
+        }
+    }
+    req.extensions_mut().insert(session::AuthVia::Link);
+    req.extensions_mut().insert(Transport::Tcp);
+    req.extensions_mut().insert(caller.clone());
+    req.extensions_mut().insert(guard.clone());
+    let g = guard.clone();
+    let run = CALLER.scope(caller, async move {
+        tokio::select! {
+            r = next.run(req) => Some(r),
+            () = g.revoked() => None,
+        }
+    });
+    let Some(mut resp) = run.await else {
+        return unauthorized("the link was revoked");
+    };
+    if let Some(proto) = echo
+        && resp.status() == axum::http::StatusCode::SWITCHING_PROTOCOLS
+        && !resp.headers().contains_key(header::SEC_WEBSOCKET_PROTOCOL)
+        && let Ok(v) = HeaderValue::from_str(&proto)
+    {
+        resp.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, v);
+    }
+    revocable_body(resp, guard)
+}
+
+/// End a streamed answer body (SSE, a download) when the link is revoked.
+/// An answer of a known size is sent as it is.
+fn revocable_body(resp: Response, guard: crate::links::LinkGuard) -> Response {
+    use axum::body::HttpBody;
+    if resp.body().size_hint().exact().is_some() {
+        return resp;
+    }
+    let (parts, body) = resp.into_parts();
+    let stream = futures_util::StreamExt::take_until(
+        body.into_data_stream(),
+        Box::pin(async move { guard.revoked().await }),
+    );
+    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
 /// The CSP of an API answer: it loads nothing and is never framed.
 pub const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
 
@@ -845,17 +998,22 @@ pub fn tcp_router(state: Shared, token: String) -> anyhow::Result<Router> {
             state.state_dir.join(session::KEY_FILE).display()
         )
     })?;
-    let auth = TokenAuth::new(token, state.web.ws_query_token).with_sessions(
-        session::Sessions {
-            key,
-            ttl: state.web.session_ttl,
-            cli_ttl: state.web.cli_session_ttl,
-            max_age: state.web.session_max_age,
+    let auth = TokenAuth::new(token, state.web.ws_query_token)
+        .with_sessions(
+            session::Sessions {
+                key,
+                ttl: state.web.session_ttl,
+                cli_ttl: state.web.cli_session_ttl,
+                max_age: state.web.session_max_age,
+                db: state.db.clone(),
+                operator: state.operator_auth.clone(),
+            },
+            state.web.public_origin(),
+        )
+        .with_links(LinkAuth {
             db: state.db.clone(),
-            operator: state.operator_auth.clone(),
-        },
-        state.web.public_origin(),
-    );
+            runtime: state.links.clone(),
+        });
     let on_dashboard = artifacts_on_dashboard(&state);
     Ok(tcp_router_with(state, auth, on_dashboard))
 }
@@ -1025,6 +1183,7 @@ mod tests {
             pipelines: Arc::default(),
             git_proxy: Arc::default(),
             job_queue: Arc::default(),
+            links: Arc::default(),
         })
     }
 
@@ -2704,5 +2863,1059 @@ mod tests {
         assert_eq!(renewed.claims.auth_time, now - max + 600);
         assert_eq!(renewed.claims.exp, now - max + 600 + max);
         assert_eq!(renewed.claims.sid, "sid-near");
+    }
+
+    // ---- link keys (TER-61, docs/api.md §36) ----
+
+    fn link_app(s: &Shared) -> Router {
+        tcp_router_with(
+            s.clone(),
+            TokenAuth::new("t".into(), false).with_links(LinkAuth {
+                db: s.db.clone(),
+                runtime: s.links.clone(),
+            }),
+            false,
+        )
+    }
+
+    /// A new link and its key: `POST /api/links`, then the pairing.
+    async fn paired(s: &Shared, read_only: bool) -> (String, String) {
+        let r = send_body(
+            link_app(s),
+            "POST",
+            "/api/links",
+            &[("authorization", "Bearer t")],
+            &serde_json::json!({"label": "home", "read_only": read_only}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        assert_eq!(hdr(&r, "cache-control"), "no-store");
+        let v = json_of(r).await;
+        let code = v["code"].as_str().unwrap().to_owned();
+        assert!(code.starts_with("tlp_"));
+        assert_eq!(v["link"]["status"], "pending");
+        assert!(
+            v["instance"]["id"]
+                .as_str()
+                .unwrap()
+                .parse::<ulid::Ulid>()
+                .is_ok()
+        );
+        let body = serde_json::json!({"code": code, "home_instance_id": ulid::Ulid::new().to_string(),
+                                      "home_name": "home"});
+        // No `Authorization`: the code is the proof.
+        let r = send_body(link_app(s), "POST", "/api/links/pair", &[], &body).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(hdr(&r, "cache-control"), "no-store");
+        let v = json_of(r).await;
+        let key = v["key"].as_str().unwrap().to_owned();
+        assert!(key.starts_with("tlk_"));
+        // The same code a second time fails.
+        let r = send_body(link_app(s), "POST", "/api/links/pair", &[], &body).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        (v["link_id"].as_str().unwrap().to_owned(), key)
+    }
+
+    #[tokio::test]
+    async fn a_link_key_acts_as_the_operator_minus_the_deny_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (id, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let r = send(link_app(&s), "GET", "/api/agents", &h).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = send(link_app(&s), "GET", "/api/session", &h).await;
+        assert_eq!(json_of(r).await["kind"], "link");
+        let r = send(link_app(&s), "GET", "/api/system/instance", &h).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        for (m, p) in [
+            ("POST", "/api/backups"),
+            ("GET", "/api/backups/x.tar"),
+            ("GET", "/api/links"),
+            ("POST", "/api/links"),
+            ("POST", "/api/hosts"),
+            ("PUT", "/api/auth/password"),
+            ("POST", "/api/secrets/global/x/reveal"),
+            ("POST", "/api/system/update"),
+            ("POST", "/api/config/push"),
+            ("POST", "/api/session"),
+            ("DELETE", "/api/sessions"),
+        ] {
+            let r = send(link_app(&s), m, p, &h).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "{m} {p}");
+            assert_eq!(
+                json_of(r).await["error"]["code"],
+                "link_forbidden",
+                "{m} {p}"
+            );
+        }
+        let rows = audit_rows(&s, "link.forbidden").await;
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|(a, _)| *a == format!("link:{id}")));
+        // The key is in no audit row and no event.
+        let k = key.clone();
+        let leaked: i64 =
+            s.db.read(move |c| {
+                Ok(c.query_row(
+                    "SELECT (SELECT count(*) FROM audit WHERE instr(detail, ?1) > 0)
+                          + (SELECT count(*) FROM events WHERE instr(payload, ?1) > 0)",
+                    [k],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(leaked, 0);
+        // The link ends itself; the audit row names the link.
+        let r = send(link_app(&s), "DELETE", "/api/links/self", &h).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let rows = audit_rows(&s, "link.revoke").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, format!("link:{id}"));
+        let r = send(link_app(&s), "GET", "/api/agents", &h).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // The audit list gives the label of the link actor.
+        let r = send(
+            link_app(&s),
+            "GET",
+            "/api/audit?action=link.revoke",
+            &[("authorization", "Bearer t")],
+        )
+        .await;
+        let v = json_of(r).await;
+        let items = v.as_array().or_else(|| v["items"].as_array()).unwrap();
+        assert_eq!(items[0]["link_label"], "home");
+        // The operator's own writes keep the actor `operator`.
+        let rows = audit_rows(&s, "link.new").await;
+        assert_eq!(rows[0].0, "operator");
+    }
+
+    #[tokio::test]
+    async fn a_read_only_link_only_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (_, key) = paired(&s, true).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let r = send(link_app(&s), "GET", "/api/agents", &h).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            "/api/projects",
+            &h,
+            &serde_json::json!({"name": "p"}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        let r = send(link_app(&s), "DELETE", "/api/links/self", &h).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_revoke_closes_the_open_streams_of_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (id, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let r = send(
+            link_app(&s),
+            "GET",
+            "/api/events?live=1",
+            &[
+                ("authorization", auth.as_str()),
+                ("accept", "text/event-stream"),
+            ],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = tokio::spawn(async move { r.into_body().collect().await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!body.is_finished(), "the stream ended before the revoke");
+        let r = send(
+            link_app(&s),
+            "DELETE",
+            &format!("/api/links/{id}"),
+            &[("authorization", "Bearer t")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        tokio::time::timeout(std::time::Duration::from_secs(5), body)
+            .await
+            .expect("the stream stays open after the revoke")
+            .unwrap()
+            .unwrap();
+        let r = send(
+            link_app(&s),
+            "GET",
+            "/api/agents",
+            &[("authorization", auth.as_str())],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_or_missing_pairing_code_fails_alike() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        for code in ["tlp_00", "nope", ""] {
+            let r = send_body(
+                link_app(&s),
+                "POST",
+                "/api/links/pair",
+                &[],
+                &serde_json::json!({"code": code, "home_instance_id": ulid::Ulid::new().to_string()}),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{code}");
+        }
+        // A wrong link key is a plain 401, as a wrong token.
+        let r = send(
+            link_app(&s),
+            "GET",
+            "/api/agents",
+            &[("authorization", "Bearer tlk_00")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Seed project `p` with the agents `sys` (sysadmin) and `dev`; give
+    /// their IDs.
+    async fn seed_sysadmin(s: &Shared) -> (String, String) {
+        s.db.write("operator", |t| {
+            crate::store::projects::create(
+                t,
+                &crate::store::projects::NewProject {
+                    name: "p".into(),
+                    ..Default::default()
+                },
+                "api",
+            )?;
+            for n in ["sys", "dev"] {
+                crate::store::agents::create(t, &toml_def(n, "p"), Path::new("/state"), "api")?;
+            }
+            let sys: String =
+                t.query_row("SELECT id FROM agents WHERE name = 'sys'", [], |r| r.get(0))?;
+            crate::store::agents::set_roles(t, &sys, "p", &[terrarium_core::Role::Sysadmin])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let id = |n: &'static str| {
+            let s = s.clone();
+            async move {
+                s.db.read(move |c| {
+                    Ok(c.query_row("SELECT id FROM agents WHERE name = ?1", [n], |r| r.get(0))?)
+                })
+                .await
+                .unwrap()
+            }
+        };
+        (id("sys").await, id("dev").await)
+    }
+
+    /// TER-61 review, O1 and O2: a link cannot make a sysadmin, and cannot
+    /// drive one; a plain agent still takes its turns.
+    #[tokio::test]
+    async fn a_link_cannot_grant_or_drive_sysadmin() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, dev) = seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let forbidden = |r: Response| async move {
+            assert_eq!(r.status(), StatusCode::FORBIDDEN);
+            let v = json_of(r).await;
+            assert_eq!(v["error"]["code"], "link_forbidden", "{v}");
+        };
+        let roles = serde_json::json!({"roles": ["sysadmin"]});
+        let r = send_body(
+            link_app(&s),
+            "PUT",
+            &format!("/api/agents/{dev}/roles"),
+            &h,
+            &roles,
+        )
+        .await;
+        forbidden(r).await;
+        let new = serde_json::json!({"name": "boss", "project": "p", "harness": "claude",
+                                     "roles": ["sysadmin"]});
+        let r = send_body(link_app(&s), "POST", "/api/agents", &h, &new).await;
+        forbidden(r).await;
+        let turn = serde_json::json!({"text": "push the config repo"});
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/agents/{sys}/send"),
+            &h,
+            &turn,
+        )
+        .await;
+        forbidden(r).await;
+        let keys = serde_json::json!({"keys": ["enter"]});
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/agents/{sys}/keys"),
+            &h,
+            &keys,
+        )
+        .await;
+        forbidden(r).await;
+        let r = send(link_app(&s), "GET", &format!("/api/agents/{sys}/pty"), &h).await;
+        forbidden(r).await;
+        let patch = serde_json::json!({"prompt": "you push"});
+        let r = send_body(
+            link_app(&s),
+            "PATCH",
+            &format!("/api/agents/{sys}"),
+            &h,
+            &patch,
+        )
+        .await;
+        forbidden(r).await;
+        let then = serde_json::json!({"then": "push"});
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/agents/{sys}/new-session"),
+            &h,
+            &then,
+        )
+        .await;
+        forbidden(r).await;
+        // A plain agent: the turn passes the link checks (the agent is not
+        // running, so it is not a 403).
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/agents/{dev}/send"),
+            &h,
+            &turn,
+        )
+        .await;
+        assert_ne!(r.status(), StatusCode::FORBIDDEN);
+        // The operator still grants sysadmin.
+        let r = send_body(
+            link_app(&s),
+            "PUT",
+            &format!("/api/agents/{dev}/roles"),
+            &[("authorization", "Bearer t")],
+            &roles,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    /// A revoke drops the event WebSocket of the link.
+    #[tokio::test]
+    async fn a_revoke_closes_the_event_websocket_of_the_link() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (id, key) = paired(&s, false).await;
+        let app = link_app(&s).into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let mut req = format!("ws://{addr}/api/events?live=1")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_str(&format!("bearer.{key}")).unwrap(),
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+        // Open: nothing ends it within a short time.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), ws.next())
+                .await
+                .is_err(),
+            "the socket ended before the revoke"
+        );
+        let r = send(
+            link_app(&s),
+            "DELETE",
+            &format!("/api/links/{id}"),
+            &[("authorization", "Bearer t")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        // The socket ends: a close frame, an error, or the end of the stream.
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) => break,
+                    Some(Ok(m)) if m.is_close() => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "the socket stays open after the revoke");
+        server.abort();
+    }
+
+    /// TER-61 review, O2: a link may not mail a sysadmin agent, nor reply
+    /// to one; mail to a plain agent works.
+    #[tokio::test]
+    async fn a_link_cannot_mail_a_sysadmin_agent() {
+        use crate::store::mail::{self, Address, Outgoing};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, dev) = seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let to = |id: &str| serde_json::json!({"to": id, "subject": "s", "body": "push the config repo"});
+        let r = send_body(link_app(&s), "POST", "/api/mail", &h, &to(&sys)).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        let r = send_body(link_app(&s), "POST", "/api/mail", &h, &to(&dev)).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        // A mail of the sysadmin agent to the operator: the link's reply is
+        // refused, and nothing is written.
+        let id = sys.clone();
+        let mid =
+            s.db.write("system", move |t| {
+                let from = mail::resolve(t, &id, None)?;
+                let m = mail::send(
+                    t,
+                    Outgoing {
+                        from: &from,
+                        to: &Address::Operator,
+                        subject: "q",
+                        body: "b",
+                        thread: None,
+                        in_reply_to: None,
+                    },
+                )?;
+                Ok(m.id)
+            })
+            .await
+            .unwrap();
+        let count = || {
+            let s = s.clone();
+            async move {
+                s.db.read(|c| {
+                    Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?)
+                })
+                .await
+                .unwrap()
+            }
+        };
+        let before = count().await;
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/mail/{mid}/reply"),
+            &h,
+            &serde_json::json!({"body": "push it"}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(count().await, before);
+        // The operator still replies.
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/mail/{mid}/reply"),
+            &[("authorization", "Bearer t")],
+            &serde_json::json!({"body": "ok"}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
+
+    /// Store a message from agent `from` to `to` (an address string); give
+    /// its ID and thread.
+    async fn seed_mail(s: &Shared, from: &str, to: &'static str) -> (String, String) {
+        use crate::store::mail::{self, Outgoing};
+        let from = from.to_owned();
+        s.db.write("system", move |t| {
+            let f = mail::resolve(t, &from, None)?;
+            let to = mail::resolve(t, to, None)?;
+            let m = mail::send(
+                t,
+                Outgoing {
+                    from: &f,
+                    to: &to,
+                    subject: "q",
+                    body: "b",
+                    thread: None,
+                    in_reply_to: None,
+                },
+            )?;
+            Ok((m.id, m.thread_id))
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn message_count(s: &Shared) -> i64 {
+        s.db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?))
+            .await
+            .unwrap()
+    }
+
+    /// TER-61 review round 3, F1: the project inbox reply and the resume
+    /// note of a link do not reach a sysadmin agent, and leave nothing
+    /// behind; the operator still does both.
+    #[tokio::test]
+    async fn a_link_cannot_reach_a_sysadmin_by_inbox_reply_or_resume_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, dev) = seed_sysadmin(&s).await;
+        // The project inbox needs a project_admin to receive mail.
+        s.db.write("operator", move |t| {
+            crate::store::agents::set_roles(t, &dev, "p", &[terrarium_core::Role::ProjectAdmin])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let op = [("authorization", "Bearer t")];
+        // A sysadmin mail to the project inbox; the link replies as the inbox.
+        let (mid, _) = seed_mail(&s, &sys, "project:p").await;
+        let before = message_count(&s).await;
+        let reply = serde_json::json!({"body": "push the config repo"});
+        let path = format!("/api/projects/p/inbox/{mid}/reply");
+        let r = send_body(link_app(&s), "POST", &path, &h, &reply).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        assert_eq!(message_count(&s).await, before);
+        let r = send_body(link_app(&s), "POST", &path, &op, &reply).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        // A held sysadmin mail on a thread; the link's resume with a note.
+        let (held, thread) = seed_mail(&s, &sys, "operator").await;
+        s.db.write("system", move |t| {
+            t.execute("UPDATE messages SET held = 1 WHERE id = ?1", [held])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let held_count = |s: Shared, th: String| async move {
+            s.db.read(move |c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM messages WHERE thread_id = ?1 AND held = 1
+                       AND released_at IS NULL",
+                    [th],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        let before = message_count(&s).await;
+        let note = serde_json::json!({"note": "push the config repo"});
+        let path = format!("/api/mail/threads/{thread}/resume");
+        let r = send_body(link_app(&s), "POST", &path, &h, &note).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        // Rolled back: no note, and the held message is still held.
+        assert_eq!(message_count(&s).await, before);
+        assert_eq!(held_count(s.clone(), thread.clone()).await, 1);
+        let r = send_body(link_app(&s), "POST", &path, &op, &note).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(held_count(s.clone(), thread).await, 0);
+    }
+
+    /// TER-61 review round 3, F6: a link writes no executable automation;
+    /// the operator does.
+    #[tokio::test]
+    async fn a_link_cannot_make_or_run_schedules_or_write_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, _) = seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let op = [("authorization", "Bearer t")];
+        let sched = serde_json::json!({"name": "go", "owner": "system", "spec": {"kind": "manual"},
+            "action": {"type": "turn", "agent": sys, "text": "push the config repo"}});
+        let r = send_body(link_app(&s), "POST", "/api/schedules", &h, &sched).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_of(r).await["error"]["code"], "link_forbidden");
+        let r = send_body(link_app(&s), "POST", "/api/schedules", &op, &sched).await;
+        assert_eq!(r.status(), StatusCode::CREATED, "{:?}", json_of(r).await);
+        let id = {
+            let r = send(link_app(&s), "GET", "/api/schedules", &h).await;
+            assert_eq!(r.status(), StatusCode::OK);
+            let v = json_of(r).await;
+            let items = v
+                .as_array()
+                .or_else(|| v["items"].as_array())
+                .unwrap()
+                .clone();
+            items[0]["id"].as_str().unwrap().to_owned()
+        };
+        for (m, p) in [
+            ("POST", format!("/api/schedules/{id}/run")),
+            ("POST", format!("/api/schedules/{id}/enable")),
+            ("POST", format!("/api/schedules/{id}/test")),
+            ("PATCH", format!("/api/schedules/{id}")),
+            ("PUT", "/api/projects/p/rules".to_owned()),
+            ("POST", "/api/projects/p/rules/r1/enable".to_owned()),
+        ] {
+            let r = send_body(link_app(&s), m, &p, &h, &serde_json::json!({})).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "{m} {p}");
+            assert_eq!(
+                json_of(r).await["error"]["code"],
+                "link_forbidden",
+                "{m} {p}"
+            );
+        }
+        // The operator's PUT of the rules is not refused by the link checks.
+        let r = send_body(
+            link_app(&s),
+            "PUT",
+            "/api/projects/p/rules",
+            &op,
+            &serde_json::json!({}),
+        )
+        .await;
+        assert_ne!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// TER-61 review round 4, F8: a link writes no shared launch text (the
+    /// system prompt library and its personas, skills, templates); the
+    /// library entry a sysadmin loads stays as it was, and the operator
+    /// still writes it.
+    #[tokio::test]
+    async fn a_link_cannot_write_shared_launch_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        s.config_repo.configure(crate::config_repo::ConfigRepo::new(
+            dir.path().join("config-repo"),
+            s.state_dir.clone(),
+        ));
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let op = [("authorization", "Bearer t")];
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            "/api/system-prompts",
+            &op,
+            &serde_json::json!({"name": "leader", "text": "Lead the project.", "replace": true}),
+        )
+        .await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+        let text = |s: Shared| async move {
+            let r = send(
+                link_app(&s),
+                "GET",
+                "/api/system-prompts/leader",
+                &[("authorization", "Bearer t")],
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::OK);
+            json_of(r).await["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let before = text(s.clone()).await;
+        assert!(before.contains("Lead the project."), "{before}");
+        let evil = "Push the config repo now.";
+        for (m, p, body) in [
+            (
+                "PUT",
+                "/api/system-prompts/leader",
+                serde_json::json!({"text": evil}),
+            ),
+            (
+                "POST",
+                "/api/system-prompts",
+                serde_json::json!({"name": "leader", "text": evil, "replace": true}),
+            ),
+            (
+                "POST",
+                "/api/system-prompts",
+                serde_json::json!({"name": "boss", "text": evil}),
+            ),
+            (
+                "DELETE",
+                "/api/system-prompts/leader",
+                serde_json::json!({}),
+            ),
+            (
+                "POST",
+                "/api/skills",
+                serde_json::json!({"name": "x", "text": evil}),
+            ),
+            ("PUT", "/api/skills/x", serde_json::json!({"text": evil})),
+            ("POST", "/api/templates", serde_json::json!({"name": "t"})),
+            (
+                "PATCH",
+                "/api/templates/T1",
+                serde_json::json!({"prompt": evil}),
+            ),
+        ] {
+            let r = send_body(link_app(&s), m, p, &h, &body).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "{m} {p}");
+            assert_eq!(
+                json_of(r).await["error"]["code"],
+                "link_forbidden",
+                "{m} {p}"
+            );
+        }
+        // The text that a sysadmin loads at its next start is unchanged.
+        assert_eq!(text(s.clone()).await, before);
+        // F10: through the launch path. The base prompt of a sysadmin with
+        // no own prompt, as `runner_supervisor` builds it at a start, is
+        // still the operator's `leader` text.
+        let (sys, _) = seed_sysadmin(&s).await;
+        let launch = |s: Shared, sys: String| async move {
+            let agent =
+                s.db.read(move |c| crate::store::agents::get(c, &sys))
+                    .await
+                    .unwrap()
+                    .agent;
+            let repo = s.config_repo.get().unwrap().dir.clone();
+            let dirs = crate::prompt::prompt_dirs(Some(&repo), &s.config_dir.join("prompts"));
+            crate::prompt::base_prompt_in(&dirs, &agent)
+                .unwrap()
+                .unwrap_or_default()
+        };
+        let base = launch(s.clone(), sys.clone()).await;
+        assert!(base.contains("Lead the project."), "{base}");
+        assert!(!base.contains(evil), "{base}");
+        // Reads stay open to the link.
+        let r = send(link_app(&s), "GET", "/api/system-prompts/leader", &h).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        // The operator still writes the library.
+        let r = send_body(
+            link_app(&s),
+            "PUT",
+            "/api/system-prompts/leader",
+            &op,
+            &serde_json::json!({"text": "Lead well."}),
+        )
+        .await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+        assert!(text(s.clone()).await.contains("Lead well."));
+        // The next start of the sysadmin takes the operator's new text.
+        assert!(launch(s.clone(), sys).await.contains("Lead well."));
+        // The operator still writes skills and templates.
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            "/api/skills",
+            &op,
+            &serde_json::json!({"name": "fern-check", "description": "Check the ferns."}),
+        )
+        .await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            "/api/templates",
+            &op,
+            &serde_json::json!({"name": "worker", "description": "A worker",
+                                "spec": {"harness": "codex", "prompt": "worker"}}),
+        )
+        .await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+    }
+
+    /// The questions of agent `id`, open ones, by status.
+    async fn question_status(s: &Shared, qid: &str) -> String {
+        let q = qid.to_owned();
+        s.db.read(move |c| {
+            Ok(
+                c.query_row("SELECT status FROM questions WHERE id = ?1", [q], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap()
+    }
+
+    /// TER-61 review round 5, F9: one guard at the delivery of every message
+    /// (`store::mail::send`). The question and thread routes of a link do
+    /// not deliver to a sysadmin agent and change nothing; the operator's do.
+    #[tokio::test]
+    async fn a_link_cannot_reach_a_sysadmin_through_questions_or_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, dev) = seed_sysadmin(&s).await;
+        // A thread of project `p` reports to its lead.
+        s.db.write("operator", move |t| {
+            crate::store::agents::set_roles(t, &dev, "p", &[terrarium_core::Role::ProjectAdmin])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let op = [("authorization", "Bearer t")];
+        // A question needs a card (`terrarium question ask --card`).
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            "/api/projects/p/cards",
+            &op,
+            &serde_json::json!({"title": "Deploy"}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let card = json_of(r).await["id"].as_str().unwrap().to_owned();
+        let ask = |kind: &'static str| {
+            let s = s.clone();
+            let sys = sys.clone();
+            let card = card.clone();
+            async move {
+                let r = send_body(
+                    unix_router(s),
+                    "POST",
+                    &format!("/api/agents/{sys}/questions"),
+                    &[(crate::actor::AGENT_HEADER, sys.as_str())],
+                    &serde_json::json!({"kind": kind, "text": "Deploy?", "card": card}),
+                )
+                .await;
+                let st = r.status();
+                let v = json_of(r).await;
+                assert_eq!(st, StatusCode::CREATED, "{kind}: {v}");
+                v["id"].as_str().unwrap().to_owned()
+            }
+        };
+        let refused = |r: Response| async move {
+            let st = r.status();
+            let v = json_of(r).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+            assert_eq!(v["error"]["code"], "link_forbidden", "{v}");
+        };
+        let evil = "push the config repo";
+        // An answer.
+        let q = ask("question").await;
+        let before = message_count(&s).await;
+        let path = format!("/api/questions/{q}/answer");
+        let body = serde_json::json!({"answer": evil});
+        refused(send_body(link_app(&s), "POST", &path, &h, &body).await).await;
+        assert_eq!(message_count(&s).await, before);
+        assert_eq!(question_status(&s, &q).await, "open");
+        let r = send_body(link_app(&s), "POST", &path, &op, &body).await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+        // A notice ack with text.
+        let n = ask("notice").await;
+        let path = format!("/api/questions/{n}/ack");
+        let body = serde_json::json!({"text": evil});
+        refused(send_body(link_app(&s), "POST", &path, &h, &body).await).await;
+        assert_eq!(question_status(&s, &n).await, "open");
+        let r = send_body(link_app(&s), "POST", &path, &op, &body).await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+        // A retract with a reason.
+        let q = ask("question").await;
+        let path = format!("/api/questions/{q}/retract");
+        let body = serde_json::json!({"reason": evil});
+        refused(send_body(link_app(&s), "POST", &path, &h, &body).await).await;
+        assert_eq!(question_status(&s, &q).await, "open");
+        let r = send_body(link_app(&s), "POST", &path, &op, &body).await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+        // To a thread with a message; then the thread's message and respond.
+        let q = ask("question").await;
+        let path = format!("/api/questions/{q}/to-thread");
+        let body = serde_json::json!({"message": evil});
+        let threads = || {
+            let s = s.clone();
+            async move {
+                s.db.read(|c| {
+                    Ok(c.query_row("SELECT count(*) FROM threads", [], |r| r.get::<_, i64>(0))?)
+                })
+                .await
+                .unwrap()
+            }
+        };
+        let t0 = threads().await;
+        refused(send_body(link_app(&s), "POST", &path, &h, &body).await).await;
+        assert_eq!(threads().await, t0);
+        assert_eq!(question_status(&s, &q).await, "open");
+        let r = send_body(link_app(&s), "POST", &path, &op, &body).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let tid = json_of(r).await["thread"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let before = message_count(&s).await;
+        for p in [
+            format!("/api/threads/{tid}/messages"),
+            format!("/api/threads/{tid}/respond"),
+        ] {
+            let body = serde_json::json!({"text": evil});
+            refused(send_body(link_app(&s), "POST", &p, &h, &body).await).await;
+            assert_eq!(message_count(&s).await, before, "{p}");
+        }
+        let r = send_body(
+            link_app(&s),
+            "POST",
+            &format!("/api/threads/{tid}/messages"),
+            &op,
+            &serde_json::json!({"text": "ok"}),
+        )
+        .await;
+        assert!(r.status().is_success(), "{:?}", json_of(r).await);
+    }
+
+    /// F9: the link of a request reaches a task that the request spawns
+    /// with `links::spawn`, and its write still delivers nothing to a
+    /// sysadmin agent; without a link the same write passes.
+    #[tokio::test]
+    async fn the_link_provenance_survives_into_a_spawned_task() {
+        use crate::store::mail::{self, Address, Outgoing};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, _) = seed_sysadmin(&s).await;
+        let write = |s: Shared, sys: String| async move {
+            s.db.write("operator", move |t| {
+                let to = mail::resolve(t, &sys, None)?;
+                mail::send(
+                    t,
+                    Outgoing {
+                        from: &Address::Operator,
+                        to: &to,
+                        subject: "s",
+                        body: "push the config repo",
+                        thread: None,
+                        in_reply_to: None,
+                    },
+                )
+                .map(|_| ())
+            })
+            .await
+        };
+        let caller = crate::links::LinkCaller {
+            id: "L1".into(),
+            label: "home".into(),
+            read_only: false,
+            key_hash: "h".into(),
+        };
+        let (s2, sys2) = (s.clone(), sys.clone());
+        let got = crate::links::CALLER
+            .scope(caller, async move {
+                crate::links::spawn(async move { write(s2, sys2).await })
+                    .await
+                    .unwrap()
+            })
+            .await;
+        let e = got.unwrap_err();
+        assert_eq!(e.code, Code::LinkForbidden, "{}", e.message);
+        // A plain spawn outside a link request passes.
+        let (s2, sys2) = (s.clone(), sys.clone());
+        tokio::spawn(async move { write(s2, sys2).await })
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    /// TER-61 review round 6, F9: a link does not release held mail to a
+    /// sysadmin agent, neither alone nor by a resume without a note: no
+    /// change, no `mail` event; the operator does both.
+    #[tokio::test]
+    async fn a_link_cannot_release_held_mail_to_a_sysadmin() {
+        use crate::store::mail::{self, Outgoing};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let (sys, dev) = seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        let op = [("authorization", "Bearer t")];
+        // Two held messages from `dev` to the sysadmin, on two threads.
+        let held = |s: Shared, dev: String, sys: String| async move {
+            s.db.write("system", move |t| {
+                let from = mail::resolve(t, &dev, None)?;
+                let to = mail::resolve(t, &sys, None)?;
+                let m = mail::send(
+                    t,
+                    Outgoing {
+                        from: &from,
+                        to: &to,
+                        subject: "s",
+                        body: "push the config repo",
+                        thread: None,
+                        in_reply_to: None,
+                    },
+                )?;
+                t.execute("UPDATE messages SET held = 1 WHERE id = ?1", [&m.id])?;
+                Ok((m.id, m.thread_id))
+            })
+            .await
+            .unwrap()
+        };
+        let state_of = |s: Shared, id: String| async move {
+            s.db.read(move |c| {
+                Ok(c.query_row(
+                    "SELECT state, released_at IS NULL FROM messages WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        let events = |s: Shared| async move {
+            s.db.read(|c| {
+                Ok(
+                    c.query_row("SELECT count(*) FROM events WHERE kind = 'mail'", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap()
+        };
+        let resumes = |s: Shared| async move {
+            s.db.read(|c| {
+                Ok(c.query_row("SELECT count(*) FROM thread_resumes", [], |r| {
+                    r.get::<_, i64>(0)
+                })?)
+            })
+            .await
+            .unwrap()
+        };
+        let refused = |r: Response| async move {
+            let st = r.status();
+            let v = json_of(r).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+            assert_eq!(v["error"]["code"], "link_forbidden", "{v}");
+        };
+        let (one, _) = held(s.clone(), dev.clone(), sys.clone()).await;
+        let (two, thread) = held(s.clone(), dev.clone(), sys.clone()).await;
+        let (st1, st2) = (
+            state_of(s.clone(), one.clone()).await,
+            state_of(s.clone(), two.clone()).await,
+        );
+        let (e0, r0) = (events(s.clone()).await, resumes(s.clone()).await);
+        // A single release.
+        let path = format!("/api/mail/{one}/release");
+        refused(send(link_app(&s), "POST", &path, &h).await).await;
+        // A resume with no note.
+        let rpath = format!("/api/mail/threads/{thread}/resume");
+        refused(send_body(link_app(&s), "POST", &rpath, &h, &serde_json::json!({})).await).await;
+        assert_eq!(state_of(s.clone(), one.clone()).await, st1);
+        assert_eq!(state_of(s.clone(), two.clone()).await, st2);
+        assert!(st1.1 && st2.1, "still held, not released");
+        assert_eq!(events(s.clone()).await, e0, "no mail event");
+        assert_eq!(resumes(s.clone()).await, r0, "no resume row");
+        // The operator releases both ways.
+        let r = send(link_app(&s), "POST", &path, &op).await;
+        assert_eq!(r.status(), StatusCode::OK, "{:?}", json_of(r).await);
+        assert!(!state_of(s.clone(), one).await.1);
+        let r = send_body(link_app(&s), "POST", &rpath, &op, &serde_json::json!({})).await;
+        assert_eq!(r.status(), StatusCode::OK, "{:?}", json_of(r).await);
+        assert!(!state_of(s.clone(), two).await.1);
+        assert!(events(s.clone()).await > e0);
     }
 }

@@ -20,6 +20,18 @@
 //! - `POST /api/merges` {cards, repo?, eta?} (TER-112): a project admin. One
 //!   merge job for the cards of one project, merged in the given order and
 //!   validated once. One card is the same as `POST /api/cards/{id}/merge`.
+//! - `POST /api/cards/{id}/release` {repo?, commit?, eta?} (TER-623): a
+//!   project admin (the lead's release step). A queued release job on the
+//!   project's `release_target`, at the head of `main` on the remote
+//!   (`commit`, when given, must be that head). It runs `release_recipe`
+//!   with `release_secrets` in its env and the `docker_release` relay. The
+//!   card does not move: it gets a comment at the queue and at the end,
+//!   and no `job.verdict` event.
+//! - `GET /api/release-targets` (any actor) and `DELETE
+//!   /api/release-targets/{name}` (the operator, audited): the protected
+//!   release targets (TER-623). A set of `release_target` adds the target
+//!   and its machine; a switch or a clear keeps it protected until the
+//!   operator retires it.
 //! - With `board_flow = rules` (TER-170) a validate, a merge, a batch,
 //!   and a cancel only queue or cancel the job: its events are all, and
 //!   the board rules set the labels, move, and comment (the built-in pack
@@ -41,7 +53,7 @@ use std::collections::HashMap;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -67,6 +79,10 @@ pub fn routes() -> Router<Shared> {
         .route("/jobs/{id}", get(show).delete(cancel))
         .route("/cards/{id}/validate", post(validate))
         .route("/cards/{id}/merge", post(merge))
+        .route("/cards/{id}/e2e", post(e2e))
+        .route("/cards/{id}/release", post(release))
+        .route("/release-targets", get(list_release_targets))
+        .route("/release-targets/{name}", delete(retire_release_target))
         .route("/merges", post(merge_batch))
         .route("/job-hosts", get(list_hosts))
         .route("/job-hosts/{host}", put(set_host).delete(clear_host))
@@ -363,6 +379,10 @@ async fn cancel(
         .db
         .write(actor.label(), move |t| {
             let j = jobs::cancel(t, &jid)?;
+            if j.kind == JobKind::E2e {
+                rt::on_end(t, &j)?;
+                return Ok(j);
+            }
             rt::emit_verdicts(t, &j)?;
             // With `board_flow = rules` the pack clears them (TER-170).
             if rt::code_flow(t, &j.project)? {
@@ -425,6 +445,20 @@ struct MergeBody {
     /// version, for a release-blocker fix.
     #[serde(default)]
     onto: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseBody {
+    #[serde(default)]
+    repo: Option<String>,
+    /// The release merge commit: the head of `main` on the remote. With
+    /// none, the head now.
+    #[serde(default)]
+    commit: Option<String>,
+    /// The planned duration, as for a validate.
+    #[serde(default)]
+    eta: Option<String>,
 }
 
 /// The planned duration of a body's `eta`: `None` without one.
@@ -576,6 +610,95 @@ fn job_labels(labels: &[String], by: Option<&str>) -> (Vec<String>, Vec<String>)
     let mut add = vec![rt::LABEL_QUEUED.to_owned()];
     add.extend(keep);
     (add, remove)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct E2eBody {
+    branch: String,
+    repo: Option<String>,
+    eta: Option<String>,
+}
+
+/// Only a project admin may give release code access to the Docker relay.
+async fn e2e(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(b): ApiJson<E2eBody>,
+) -> ApiResult<Response> {
+    rt::check_ref(&b.branch)?;
+    let version = b.branch.strip_prefix("release/").unwrap_or("");
+    let parts: Vec<_> = version.split('.').collect();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|c| c.is_ascii_digit()))
+    {
+        return Err(ApiError::invalid("e2e requires release/X.Y.Z"));
+    }
+    let planned_secs = planned(b.eta.as_deref())?;
+    let card_id = board::normalise_id(&id);
+    let a = actor.clone();
+    let given_repo = b.repo.clone();
+    let (card, repo) = state
+        .db
+        .read(move |c| {
+            let card = board::get_card(c, &card_id)?;
+            policy::admin_project(&a, &card.project, "queueing release e2e")?;
+            not_held(&card)?;
+            let group = crate::store::groups::get(c, &card.id)?;
+            if !group.key.starts_with("version:") || group.closed_at.is_some() {
+                return Err(ApiError::invalid("e2e requires an open version group"));
+            }
+            let def = jobs::delivery(c, &card.project)?;
+            enabled(&def, &card.project)?;
+            if def.merge_secrets.is_empty() || def.docker_ci.is_none() {
+                return Err(ApiError::invalid(
+                    "release e2e requires Docker CI delivery configuration",
+                ));
+            }
+            let repo = repo_of(c, &card, given_repo)?;
+            Ok((card, repo))
+        })
+        .await?;
+    let commit = rt::remote_head(&state, &card.project, &repo, &b.branch)
+        .await?
+        .ok_or_else(|| ApiError::invalid("release branch is not on the remote"))?;
+    let job = state
+        .db
+        .write(actor.label(), move |t| {
+            let group = crate::store::groups::get(t, &card.id)?;
+            if group.closed_at.is_some() {
+                return Err(ApiError::conflict("version group is closed"));
+            }
+            let job = jobs::create(
+                t,
+                NewJob {
+                    project: card.project,
+                    card: card.id,
+                    kind: JobKind::E2e,
+                    repo,
+                    branch: b.branch,
+                    commit: Some(commit),
+                    by_agent: None,
+                    batch: Vec::new(),
+                    planned_secs,
+                },
+            )?;
+            crate::store::groups::step(
+                t,
+                &group,
+                "version branch e2e",
+                Some("running"),
+                Some(&format!("Job {} queued", job.id)),
+                b.eta.as_deref(),
+            )?;
+            Ok(job)
+        })
+        .await?;
+    rt::kick(&state);
+    Ok((StatusCode::CREATED, Json(json!({"job": job}))).into_response())
 }
 
 async fn validate(
@@ -755,6 +878,133 @@ async fn merge(
         .await?;
     rt::kick(&state);
     Ok(queued_answer(job.0, job.1, job.2, job.3))
+}
+
+/// Queue a release job (TER-623): the lead's release step. A project
+/// admin queues it on the card of the release (for example the version
+/// card). It runs the release recipe on the project's release target, on
+/// the head of `main` on the remote, which must be the given commit. The
+/// card does not move; it gets a comment at the queue and at the end.
+async fn release(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(b): ApiJson<ReleaseBody>,
+) -> ApiResult<Response> {
+    if let Some(c) = &b.commit {
+        rt::check_commit(c)?;
+    }
+    let planned_secs = planned(b.eta.as_deref())?;
+    let card_id = board::normalise_id(&id);
+    let (a, given_repo) = (actor.clone(), b.repo.clone());
+    let (card, repo) = state
+        .db
+        .read(move |c| {
+            let card = board::get_card(c, &card_id)?;
+            policy::admin_project(&a, &card.project, "queueing a release")?;
+            release_ok(c, &card)?;
+            let repo = repo_of(c, &card, given_repo)?;
+            Ok((card, repo))
+        })
+        .await?;
+    // A release builds what is on `main`: the head on the remote now.
+    let head = rt::remote_head(&state, &card.project, &repo, jobs::RELEASE_BRANCH)
+        .await?
+        .ok_or_else(|| {
+            ApiError::conflict(format!(
+                "repo `{repo}` has no `{}` branch on its remote",
+                jobs::RELEASE_BRANCH
+            ))
+        })?;
+    rt::check_commit(&head)?;
+    if let Some(c) = &b.commit
+        && !head.starts_with(&c.to_lowercase())
+    {
+        return Err(ApiError::conflict(format!(
+            "commit {c} is not the head of `{}` on the remote (the head is {head}): a release takes the release merge commit at the head of `{}`",
+            jobs::RELEASE_BRANCH,
+            jobs::RELEASE_BRANCH
+        )));
+    }
+    let job = state
+        .db
+        .write(actor.label(), move |t| {
+            let card = board::get_card(t, &card.id)?;
+            policy::admin_project(&actor, &card.project, "queueing a release")?;
+            release_ok(t, &card)?;
+            let job = jobs::create(
+                t,
+                NewJob {
+                    project: card.project.clone(),
+                    card: card.id.clone(),
+                    kind: JobKind::Release,
+                    repo: repo.clone(),
+                    branch: jobs::RELEASE_BRANCH.into(),
+                    commit: Some(head),
+                    by_agent: actor.agent().map(|a| a.name.clone()),
+                    batch: Vec::new(),
+                    planned_secs,
+                },
+            )?;
+            board::add_comment(
+                t,
+                &Actor::Operator,
+                &card.id,
+                &rt::queue_comment(&job, &card.id),
+            )?;
+            let place = jobs::place(t, &job)?;
+            Ok((job, place))
+        })
+        .await?;
+    rt::kick(&state);
+    // Releases have their own lane of one (TER-623).
+    Ok(queued_answer(job.0, job.1, None, 1))
+}
+
+/// `GET /api/release-targets` (any actor, TER-623): the protected release
+/// targets, which no agent uses or defines until the operator retires them.
+async fn list_release_targets(
+    State(state): State<Shared>,
+    _actor: Actor,
+) -> ApiResult<Json<Value>> {
+    let rows = state.db.read(jobs::release_targets).await?;
+    Ok(Json(json!({"release_targets": rows})))
+}
+
+/// `DELETE /api/release-targets/{name}` (the operator only, TER-623):
+/// retire the protection of a target that is no longer a release target.
+/// Audited as `release_target.retire`.
+async fn retire_release_target(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    policy::operator_only(&actor, "retiring a protected release target")?;
+    let rows = state
+        .db
+        .write(actor.label(), move |t| {
+            jobs::retire_release_target(t, &name)
+        })
+        .await?;
+    Ok(Json(json!({"retired": rows})))
+}
+
+/// The checks of a release on `card`: a card that is not archived or
+/// held, of a project with a job queue and a release target.
+fn release_ok(c: &rusqlite::Connection, card: &Card) -> ApiResult<()> {
+    not_held(card)?;
+    if card.archived {
+        return Err(ApiError::conflict(format!("card {} is archived", card.id)));
+    }
+    let def = jobs::delivery(c, &card.project)?;
+    enabled(&def, &card.project)?;
+    if def.release_target().is_none() {
+        return Err(ApiError::conflict(format!(
+            "project `{}` has no release target: set `release_target` with `terrarium project delivery set --release-target`",
+            card.project
+        )));
+    }
+    Ok(())
 }
 
 /// The commit that a merge takes for each of the cards `ids`, with its

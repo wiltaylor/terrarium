@@ -374,6 +374,7 @@ async fn create(
     if let Some(p) = &def.project {
         def.name = prefixed(p, &def.name);
     }
+    let actor_of = actor.clone();
     if def.host.is_none() {
         crate::jobs::prepare_hosts(&state.db, def.address.clone()).await?;
     }
@@ -381,6 +382,7 @@ async fn create(
     let r = state
         .db
         .write(actor.label(), move |t| {
+            release_operator(t, &actor_of, &def, "defining the target")?;
             if let Some(p) = &def.project {
                 let n = targets::count_in_project(t, p)?;
                 if n >= max {
@@ -429,9 +431,15 @@ async fn update(
     let n = name.clone();
     let p = patch.clone();
     let label = actor.label().to_owned();
+    let (cur, a) = (current.def.clone(), actor.clone());
     let (candidate, _) = state
         .db
-        .read(move |t| targets::prepare_update(t, &label, &n, &p, live))
+        .read(move |t| {
+            let (candidate, x) = targets::prepare_update(t, &label, &n, &p, live)?;
+            release_operator(t, &a, &cur, "changing the target")?;
+            release_operator(t, &a, &candidate, "changing the target")?;
+            Ok((candidate, x))
+        })
         .await?;
     let mut before = serde_json::to_value(&current.def)?;
     let mut after = serde_json::to_value(&candidate)?;
@@ -475,6 +483,10 @@ async fn update(
         false
     };
     let expected = current.clone();
+    // A test holds the PATCH here, between its read and its write
+    // (review-ter-623-r4 F2).
+    crate::jobs::target_write_pause(&name).await;
+    let (a, proposed) = (actor.clone(), candidate.clone());
     let r = state
         .db
         .write(actor.label(), move |t| {
@@ -483,6 +495,11 @@ async fn update(
                     "target changed during limits update; retry",
                 ));
             }
+            // TER-623 (review-ter-623-r4 F2): the release rule again in the
+            // write, on the live and the proposed definition, so a target
+            // that the operator protected after the read is refused.
+            release_operator(t, &a, &expected.def, "changing the target")?;
+            release_operator(t, &a, &proposed, "changing the target")?;
             if let Some(settings) = baseline {
                 let mut rt = targets::get(t, &name)?.runtime;
                 rt.docker_settings = settings;
@@ -517,30 +534,62 @@ async fn remove(
     let current = load(&state, &actor, name.clone()).await?;
     policy::define_target(&actor, current.def.project.as_deref())?;
     let reserved_name = name.clone();
+    let (cur, a) = (current.def.clone(), actor.clone());
     state
         .db
         .read(move |conn| {
+            release_operator(conn, &a, &cur, "deleting the target")?;
             crate::store::reservations::guard_identity(conn, "target", &reserved_name)
         })
         .await?;
-    if current.source != crate::store::projects::SOURCE_FILE {
-        executor::teardown(&state, &current).await;
-    }
+    // TER-623 (review-ter-623-r4 F2): the release rule in the delete's
+    // write, on the live definition; the teardown starts only after that
+    // write committed, so a target that the operator protected meanwhile
+    // keeps its instance.
+    crate::jobs::target_write_pause(&name).await;
+    let a = actor.clone();
     state
         .db
         .write(actor.label(), move |t| {
+            let live = targets::get(t, &name)?;
+            release_operator(t, &a, &live.def, "deleting the target")?;
             let r = targets::delete(t, &name)?;
             leases::end_all_on(t, &name)?;
             t.audit("target.delete", &name, r.def.project.as_deref(), json!({}))
         })
         .await?;
+    if current.source != crate::store::projects::SOURCE_FILE {
+        executor::teardown(&state, &current).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// TER-623 (review-ter-623-r2 findings 2 and 3): only the operator
+/// defines, changes or deletes a release target or a target on the machine
+/// of one. So no agent can point the release target's name at another
+/// machine, or add a second name for its machine.
+fn release_operator(
+    conn: &rusqlite::Connection,
+    actor: &Actor,
+    def: &TargetDef,
+    what: &str,
+) -> ApiResult<()> {
+    crate::store::jobs::check_release_write(conn, actor.is_operator(), def, what)
+}
+
 /// The target of a lifecycle verb or a snapshot call: the actor may use
-/// it, or may define it (docs/api.md §17.3).
+/// it, or may define it (docs/api.md §17.3). A release target, or a target
+/// on its machine: the operator only (review-ter-623-r2 finding 5).
 async fn verb_target(state: &Shared, actor: &Actor, name: String) -> ApiResult<TargetRow> {
     let r = load(state, actor, name).await?;
+    if !actor.is_operator() {
+        let def = r.def.clone();
+        let a = actor.clone();
+        state
+            .db
+            .read(move |c| release_operator(c, &a, &def, "a lifecycle verb on the target"))
+            .await?;
+    }
     if executor::usable(state, actor, &r.def.name).await.is_err() {
         policy::define_target(actor, r.def.project.as_deref()).map_err(|_| {
             ApiError::forbidden(format!(
@@ -1038,17 +1087,28 @@ async fn session_ws(
             "this endpoint is a WebSocket; send an upgrade request",
         ));
     }
+    let guard = req.extensions().get::<crate::links::LinkGuard>().cloned();
     let (mut parts, _) = req.into_parts();
     let ws = WebSocketUpgrade::from_request_parts(&mut parts, &())
         .await
         .map_err(|e| ApiError::bad_request(e.body_text()))?;
-    Ok(ws.on_upgrade(move |socket| ws_bridge(socket, s)))
+    Ok(ws.on_upgrade(move |socket| crate::links::until_revoked(guard, ws_bridge(socket, s))))
+}
+
+/// Aborts its task when dropped, so a bridge that is dropped mid-way (a
+/// link revoke, `crate::links::until_revoked`) leaves no task behind.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 async fn ws_bridge(socket: WebSocket, s: std::sync::Arc<ExecSession>) {
     let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<PtyInput>(16);
-    let reader = {
+    let _reader = AbortOnDrop({
         let s = s.clone();
         tokio::spawn(async move {
             let mut since = 0u64;
@@ -1069,8 +1129,8 @@ async fn ws_bridge(socket: WebSocket, s: std::sync::Arc<ExecSession>) {
                 }
             }
         })
-    };
-    let writer = {
+    });
+    let _writer = AbortOnDrop({
         let s = s.clone();
         tokio::spawn(async move {
             while let Some(i) = in_rx.recv().await {
@@ -1083,7 +1143,7 @@ async fn ws_bridge(socket: WebSocket, s: std::sync::Arc<ExecSession>) {
                 }
             }
         })
-    };
+    });
     super::streams::pty_session(
         socket,
         PtyAttachment {
@@ -1093,8 +1153,6 @@ async fn ws_bridge(socket: WebSocket, s: std::sync::Arc<ExecSession>) {
         },
     )
     .await;
-    reader.abort();
-    writer.abort();
 }
 
 // ------------------------------------------------------------------ leases

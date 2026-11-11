@@ -14,7 +14,8 @@ pub struct AuditEntry {
     /// The position in the log; the list cursor.
     pub seq: i64,
     pub at: String,
-    /// `operator`, `agent:<ulid>`, or `system`.
+    /// `operator`, `agent:<ulid>`, `link:<ulid>` (a link key, TER-61), or
+    /// `system`.
     pub actor: String,
     /// For example `agent.start` or `card.reassign`.
     pub action: String,
@@ -26,6 +27,9 @@ pub struct AuditEntry {
     /// `at`, when the reader may read it.
     #[serde(flatten)]
     pub link: SessionField,
+    /// The label of the link of a `link:<ulid>` actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_label: Option<String>,
 }
 
 fn row(r: &Row<'_>) -> rusqlite::Result<AuditEntry> {
@@ -40,6 +44,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<AuditEntry> {
         project: r.get("project")?,
         detail: serde_json::from_str(&detail).unwrap_or(Value::String(detail)),
         link: SessionField::default(),
+        link_label: None,
     })
 }
 
@@ -124,6 +129,17 @@ pub fn attach_links(conn: &Connection, rows: &mut [AuditEntry]) -> ApiResult<()>
     let links = session_refs::links(conn, &keys)?;
     for (e, l) in rows.iter_mut().zip(links) {
         e.link = SessionField::of(l);
+    }
+    // The label of each link actor (`store::links`).
+    let ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|e| e.actor.strip_prefix("link:"))
+        .collect();
+    if !ids.is_empty() {
+        let mut labels = crate::store::links::labels(conn, &ids)?.into_iter();
+        for e in rows.iter_mut().filter(|e| e.actor.starts_with("link:")) {
+            e.link_label = labels.next().flatten();
+        }
     }
     Ok(())
 }

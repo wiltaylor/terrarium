@@ -423,6 +423,11 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["thread"], tid.as_str());
     let qid = r.body["id"].as_str().unwrap().to_owned();
+    // Its thread remains sufficient context when the operator clears card.
+    lab.td
+        .patch(&format!("/api/questions/{qid}"), json!({"card": null}))
+        .await
+        .ok();
     // A second question must wait for the answer to the first.
     ask(json!({"text": "Another?", "thread": tid}))
         .await
@@ -528,6 +533,22 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
             .iter()
             .any(|i| i["id"] == format!("inbox-thread:{tid}")),
         "an item that waits for the agent is not open: {items}"
+    );
+
+    // The attached agent is not a leader, but can retract its own question.
+    let own = ask(json!({"text": "No longer needed?", "thread": tid})).await;
+    let own_id = own.ok()["id"].as_str().unwrap().to_owned();
+    lab.td
+        .post_as(
+            &lab.arch,
+            &format!("/api/questions/{own_id}/retract"),
+            json!({"reason": "Resolved while investigating"}),
+        )
+        .await
+        .ok();
+    assert_eq!(
+        lab.thread(&tid).await["questions"][2]["status"],
+        "retracted"
     );
 
     // No question in a closed thread.

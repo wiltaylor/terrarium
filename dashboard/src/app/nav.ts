@@ -90,6 +90,8 @@ export const SETTINGS_TABS = [
   // The config repo: for the operator or a sysadmin.
   { path: "harness", label: "Harness config" },
   { path: "hosts", label: "Hosts" },
+  // The link keys of other daemons that show this one (docs/api.md §36).
+  { path: "links", label: "Links" },
   // The build of the daemon (docs/api.md §4) and the stale host agents. Self-update (#19) goes here.
   { path: "software", label: "Software" },
 ] as const;

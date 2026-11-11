@@ -250,6 +250,8 @@ fn emit(t: &mut Tx<'_>, l: &LeaseRow, change: &str) -> ApiResult<()> {
 /// agent with an active lease on the target is `409 conflict`. A clash with
 /// an exclusive lease of another agent is `409 lease_held`.
 pub fn grant(t: &mut Tx<'_>, g: &Grant) -> ApiResult<LeaseRow> {
+    // TER-623: no lease on a release target, for any granter.
+    crate::store::jobs::check_not_release_target(t, &g.target, "leasing the target")?;
     if let Some(p) = &g.target_project
         && *p != g.agent_project
     {
@@ -359,6 +361,7 @@ pub fn extend(
     agent: &str,
     expires_at: Option<String>,
 ) -> ApiResult<LeaseRow> {
+    crate::store::jobs::check_not_release_target(t, target, "extending a lease on the target")?;
     let l = active_lease(t, target, agent)?;
     t.execute(
         "UPDATE target_leases SET expires_at = ?2 WHERE id = ?1",

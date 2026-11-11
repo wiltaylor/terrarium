@@ -141,7 +141,7 @@ async fn stored_records_hold_the_label_not_the_value() {
         .post_as(
             &wid,
             &format!("/api/agents/{wid}/questions"),
-            json!({"text": leaky("question")}),
+            json!({"text": leaky("question"), "card": c["id"]}),
         )
         .await;
     assert_eq!(q.status, 201, "{}", q.body);

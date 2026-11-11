@@ -431,8 +431,9 @@ refused it. Do not parse the message; use `code`.
 | HTTP | `code` | When |
 |---|---|---|
 | 400 | `bad_request` | Bad JSON, an unknown field, a bad query value, an ambiguous agent name, a non-WebSocket request to a WebSocket endpoint. |
-| 401 | `unauthorized` | No token or a wrong token on TCP; `X-Terrarium-Agent` without `--insecure-agent-header`, or an unknown agent in it. |
+| 401 | `unauthorized` | No token or a wrong token on TCP (also a wrong, rotated, or revoked link key, and a failed link pairing, §36); `X-Terrarium-Agent` without `--insecure-agent-header`, or an unknown agent in it. |
 | 403 | `forbidden` | The actor does not have the capability (§3). |
+| 403 | `link_forbidden` | A link key called a route of the link deny list, or a read-only link tried to write (§36.4). |
 | 404 | `not_found` | No such route or object, or the actor may not read the message. |
 | 405 | `method_not_allowed` | The route exists, but not with this method. |
 | 409 | `conflict` | The name exists, the card is archived or assigned, a column has cards. |
@@ -3244,7 +3245,7 @@ except for the differences in "Bundles" below.
 | `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice and a bundle have none: options on a notice or a bundle are `422 invalid`. |
 | `items` | A bundle only: the questions, 2 to 20, each `{text, options, context?, answer?, answer_option?}`. Absent for a question and a notice. See "Bundles". |
 | `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
-| `card` | Optional. A card of the agent's project. The question then shows on that card on the board (§8) and in the Inbox. Link or unlink later with `PATCH` (see "Cards"). |
+| `card` | A card of the agent's project. Required for a question or bundle unless asked inside an Inbox thread, even at urgent or critical priority. The question shows on that card on the board (§8) and in the Inbox. Answers are also saved as system comments on the card. Link or unlink later with `PATCH` (see "Cards"). |
 | `priority` | `normal`, `urgent`, or `critical`. Lists put the critical open questions first, then the urgent ones. Use `critical` only when the operator must act now: production is down, data is lost, a security problem, or a spent budget that stops all work. While a critical item is open, the dashboard shows a banner on each page and flashes its browser tab (§6.9). |
 | `status` | A question: `open`, `in_thread`, `answered`, or `retracted`. A notice: `open`, `in_thread`, `acknowledged`, or `retracted`. Only `open` and `in_thread` change. `in_thread`: the operator moved it into an Inbox thread with its agent (see "To thread"). |
 | `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. For an acknowledged notice, `answer` is the reply of the operator, if any. |
@@ -3261,7 +3262,7 @@ The rights:
 | Ask, update | The agent itself, when it is a leader: project_admin of its project, or sysadmin. A member gets `403` with "workers send questions to their lead: terrarium mail send <lead> ...". The operator does not ask. |
 | Read | The agent itself, a project_admin of its project, a sysadmin, the operator. Another caller gets `404` for one question and `403` for a list. |
 | Answer, acknowledge | The operator. A sysadmin agent, for the question or notice of another agent. Never the asking agent (`403`). |
-| Retract | The asking leader, or the operator. |
+| Retract | The asking leader, the attached thread agent for its own thread question, or the operator. |
 | To thread | The operator. Another caller that reads the question gets `403`. |
 | Link to a card, unlink | The asking leader while the question is open. The operator, and a sysadmin agent for the question of another agent, at each status. |
 
@@ -3352,6 +3353,8 @@ Cards:
   card, or unlinks it with `"card": null`. The revision stays, so an answer
   in progress stays valid. The asking leader changes the card of an open
   question only. The operator and a sysadmin change it at each status.
+  A question or bundle without an Inbox thread cannot be unlinked, at any
+  priority or status (`422 invalid`). A full update enforces the same rule.
 - A change of the card writes the audit row `question.update` with
   `changed: ["card"]`, `card`, and `previous_card`, and an `updated`
   event with `previous_card_id` (the old card), so that the old card
@@ -4687,7 +4690,7 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
 | `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |
-| `GET /api/cards/{id}` | | `200` card |
+| `GET /api/cards/{id}` | | `200` card, with `questions` (all linked questions, including closed ones) |
 | `PATCH /api/cards/{id}` | card patch | `200` card |
 | `DELETE /api/cards/{id}` | | `204`; the card is archived |
 | `POST /api/cards/{id}/move` | `{"column", "position"?, "comment"?}` | `200` card |
@@ -6041,6 +6044,15 @@ only. Audit actions: `login.start`, `login.attach`, `login.input`,
 At most four sessions are live at once (`409 conflict`).
 
 ### 16.5 API keys
+
+`PUT /api/subscriptions/{name}/cloud` replaces the cloud settings of an
+API-managed Bedrock, GCP, or Foundry subscription. The body is the complete
+cloud settings object (`region`, `models`, `budget_usd`, and the other
+provider fields), not a `{cloud: ...}` wrapper. Omitted optional fields are
+cleared. The operator-only endpoint checks the settings and returns the
+subscription without reading or changing its key file. File-managed and
+non-cloud subscriptions return `422 invalid`. Raising or removing the budget
+ends a cloud-budget hold at the next budget check.
 
 `POST /api/subscriptions/{name}/api-key` stores the key in
 `<state>/credentials/subscriptions/<name>.json`, mode `0600` (the
@@ -12385,6 +12397,10 @@ or the operator) read and set the config. The body is a JSON object:
 | `failure_patterns` | literal strings to extract from recipe output, with three following lines of context | `["FAILED", "panicked", "test result: FAILED", "failures:"]` |
 | `merge_secrets` | `DOCKER_CI_KEY` and `DOCKER_CI_RESET_KEY` mapped to `@secret:<name>[.<field>]`, consumed only by the daemon for merge jobs | `{}` |
 | `docker_ci` | public SSH settings: `destination`, `port`, `known_hosts`, `reset_destination`, `reset_port`, `reset_known_hosts` | none |
+| `release_target` | the release client target of release jobs (§35.6); it runs release jobs only | none: no releases |
+| `release_recipe` | the release command, run with `sh -c` in the root of the clone | `just release::publish` |
+| `release_secrets` | `GHCR_TOKEN`, `GH_TOKEN`, `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` mapped to `@secret:<name>[.<field>]`, the env of release jobs only | `{}` |
+| `docker_release` | the release VM: `destination`, `port`, `known_hosts`, and `key` (`@secret:<name>[.<field>]`, used by the daemon only) | none |
 
 `merge_secrets` uses the project's `delivery:<project>` principal, never
 agent or project grants. A delivery grant requires `level: run`, named
@@ -12414,8 +12430,9 @@ into a job-private reset directory. Neither SSH connection uses the daemon's
 shared TOFU known_hosts file. No endpoint
 or key pin is compiled into the daemon. Reset exit 75 retries twice with
 a two-second delay; any other failure prevents opening the tunnel.
-The daemon resolves configured merge secrets and opens the tunnel for every
-merge, independently of the recipe's `TERRARIUM_DOCKER_CI` gate switch.
+The daemon resolves these legacy-named merge secrets and opens the tunnel
+only for cut-time `e2e` jobs. Merge and validate jobs never receive the
+relay, regardless of their recipe's `TERRARIUM_DOCKER_CI` switch.
 
 The Docker gate is off by default: merges continue to run the full
 `ci::validate` without requiring Docker or a key. To roll it out in order:
@@ -12425,10 +12442,10 @@ the secret administrator grants `terrarium/docker-ci-vm` and
 `delivery:terrarium` with `--level run --target terrarium-helios-build`.
 Do not grant the key to `project:terrarium` or workers. The lead configures
 `--merge-secret DOCKER_CI_KEY=@secret:docker-ci-vm` and
-`--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery, with recipe
-`TERRARIUM_DOCKER_CI=1 just ci::validate-affected` to explicitly enable the
-live Docker gate. Leave the switch unset (or `0`) until the daemon and
-grant are ready. `--clear-merge-secrets` removes the references. The same
+`--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery.
+Queue the release e2e endpoint (§35.4) after the daemon and grants are ready.
+The Docker gate refuses every other job kind.
+`--clear-merge-secrets` removes the references. The same
 command sets `docker_ci` with `--docker-ci-destination`, `--docker-ci-port`,
 `--docker-ci-known-hosts`, `--docker-ci-reset-destination`,
 `--docker-ci-reset-port`, and `--docker-ci-reset-known-hosts`: a flag left
@@ -12798,15 +12815,74 @@ A batch merge:
 - Any other failure (`error`) runs the batch once more with the merged
   cards, then fails each of them.
 
+The failed tests of the full suite run once more in a release validation
+(TER-683), in the recipe, so the run stays one run. The daemon takes no
+part in it: it reads nothing of it from the job log, and files no card.
+
+- The switch: `TERRARIUM_VALIDATE_CONTEXT=release` (the full suite at the
+  version cut, [release.md](release.md)), or `TERRARIUM_JOB_KIND=merge` (a
+  merge job). Either one makes `ci::validate` run the uid 1001 pass
+  (`ci::test-unprivileged`) after `ci::test`, and makes both passes rerun.
+  Without either (a card check, a validate job) nothing reruns.
+- When `ci::test` (the root pass) or `ci::test-unprivileged` (the uid 1001
+  pass) fails, `scripts/rerun_tests.py` takes the names of the failed tests
+  from the libtest output (the console output, or the libtest JSON when
+  `RESULTS_DIR` is set) and runs exactly those tests once more: the same
+  cargo command with the test names and `--exact` (and `--tests`, so no
+  doctest), or for uid 1001 the same test binary as the same uid, from the
+  same directory, with the same env and a new private HOME. With
+  `RESULTS_DIR` the rerun writes `rust-rerun.json` and
+  `rust-unprivileged-rerun.json`; `rust.json` keeps the first run.
+- Every rerun test passes: the step passes, and the suite goes on. One
+  fails again, does not run, or the rerun ends otherwise: the step fails.
+- No rerun, the step fails at once, unless every failure is a failed test.
+  The script counts each test run that cargo starts (`Running`,
+  `Doc-tests` on its stderr) or that it starts itself (uid 1001), and each
+  end: cargo itself ending with a status other than 101 (a signal or any
+  other code), a build error or any other cargo `error` line, a test run that ended
+  with a signal or an exit code other than 101, a run that has no test
+  result (a crash or a panic before `running`), a failed run with no failed
+  test result, a failed doctest, or more than 5 failed tests in the step.
+- With `RESULTS_DIR`, each step that failed writes its entry to
+  `$RESULTS_DIR/reruns.json`: `{version: 1, context, steps: [{step,
+  outcome, reason?, tests: [{name, first, rerun, tail}]}]}`, `step` `test`
+  or `test-unprivileged`, `outcome` `green`, `red` or `no_rerun` (with the
+  `reason`), `first` `failed`, `rerun` `ok`, `failed`, `missing`, or `null`
+  with no rerun, `tail` the end (1500 bytes) of the first failure's output.
+  The names and the results come from the script's own count of the runs
+  it started, never from a line that a test prints. `ci::validate` removes
+  the file when it starts.
+- The flaky-test cards come from that file:
+  `just ci::flaky-cards "$RESULTS_DIR/reruns.json" "<the run>"`
+  (`scripts/flaky_cards.py`) prints, for each test with `rerun: ok`, the
+  `terrarium` commands for its card: a comment on the open card with the
+  label `flaky-test:<hash of the name>` (not in `done`), or a new card
+  `Flaky test: <name>` in `backlog` with the labels `flaky`,
+  `flaky-test:<hash>`, `version:vnext` and `type:small`. It runs nothing.
+
 The card writes of the queue are made as the operator. Their comments
 start with `Job queue:`.
 
 ### 35.4 Endpoints
 
+`POST /api/cards/{id}/e2e` is project-admin-only. Its body is
+`{branch:"release/X.Y.Z", repo?, eta?}`. The card must be an open version
+group header. Docker CI delivery configuration and run grants are required.
+It returns `201 {job}` with kind `e2e`, pinned to the remote branch head.
+The job shares the merge lane but never merges or pushes. It runs
+`TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py`, using the same
+daemon-owned reset/tunnel handling. No key reaches recipe code. Merge and
+validate jobs receive neither the relay endpoint nor Docker credentials.
+The group's `version branch e2e` step records the job and its outcome.
+Failure or cancellation marks the step failed without changing membership
+or moving the header. Queue it again after a release fix. A card validate
+job still cannot enter the Docker gate. See [release.md](release.md).
+
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?, eta?}`. `eta` is the planned duration (§35.5). The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?, onto?}`. `eta` is the planned duration (§35.5). `onto` is `next` (the default) or a release branch `release/X.Y.Z` (see the release-blocker fix below). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `POST /api/cards/{id}/release`     | a project admin                       | `{repo?, commit?, eta?}` (§35.6): a release job at the head of `main` on the remote; `commit`, when given, must be that head. The project needs `release_target`. The card does not move. `201` as above |
 | `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of one or more cards, in this order (no limit of the daemon; the batch rule of the merge queue sets its own, §19.11). All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. A batch of two or more cards with a `release-blocker` card is refused with `409`: that card merges alone. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/projects/{name}/jobs/stats` | members                            | `?since=`: an RFC 3339 time, or a duration back from now such as `7d` (the default); anything else is `400`. The jobs created at or after `since` (a rerun keeps the `created_at` of its first try): `{project, since, jobs, first_attempt, validate, merge, reruns, conflicts, errors, cancelled, open, splits, failed_steps: [{step, failed}], failed_targets: [{target, failed, first_attempt}], untargeted_test_fails}`. Each of `first_attempt`, `validate`, `merge`, and `reruns` is `{ended, passed, failed, pass_rate}`; `pass_rate` is `passed / ended` from 0 to 1, `null` with none ended. A first attempt is attempt 1 and no split half; a `conflict` counts in `conflicts`, not in `ended`. A job with outcome `error` could not run (host agent offline, prepare step failed, push to `next` failed): first attempts and reruns with it count in `errors`, not in `ended`, so an outage does not lower the rate. Split halves count in `splits` only. `failed_targets` (most first) come from the `error: N targets failed:` lines of the failed jobs' output tails, all attempts; `failed_steps` from the first ``error: recipe `<step>` failed`` line, or `timeout`. `untargeted_test_fails` counts the failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off) |
@@ -12912,6 +12988,247 @@ line of the end. `failure_block` is the `Validation failed:` block for
 `red`, `conflict`, and `error`, else `null`. The verdict says what the run
 found, not what the queue does next: the rerun and the split stay as
 above.
+
+### 35.6 Release jobs
+
+A release job (TER-623, kind `release`) is the lead's release step. The
+release config (`release_target`, `release_recipe`, `release_secrets`,
+`docker_release`) is the operator's: only the operator sets, changes or
+clears it. Any other actor gets `403` for a change of these four fields and
+may still set the other delivery fields. A project admin queues a release on the card of the release with `POST
+/api/cards/{id}/release` or `terrarium job release <card>`. It takes the
+head of `main` on the remote (the release merge commit), clones that commit
+on `release_target` into a new tree, and runs `release_recipe` there
+(default `just release::publish`, docs/release.md). Releases have their own
+lane: one at a time per project, on the host of the release target, beside
+the merge and validate jobs. The card does not move and gets no label: it
+gets a comment when the job is queued and when it ends (with the output on
+a failure). A release emits `job` events but no `job.verdict`, so the board
+rules do not act on it. A release whose run is lost (the daemon stopped, or
+the link to the target broke) ends as an error and never runs again by
+itself: its push or GitHub release may be done, so the lead checks them and
+queues a new one.
+
+The release secrets:
+
+- `release_secrets` resolve through the `delivery:<project>` principal
+  with a `run` grant that names the release target, only for a release job,
+  only on that target. A grant that names another target fails the job
+  before its recipe and before the tunnel. Merge and validate jobs never
+  resolve them: they run on `target`, and the code path reads them for
+  release jobs only.
+- The values go into the env of the release recipe only. The executor sends
+  the env on stdin, never on a command line. The recipe output, the
+  retained log excerpt and the tail are redacted with each value. Each use
+  emits `secret.run` with the job, `kind: release`, the target, the env
+  name and the reference, never the value.
+- `release_target` is not the `target` of any project, and not the release
+  target of another project; a project's `target` is not another project's
+  release target. The check compares machines too: a target on the same
+  host agent, or with the same ssh host and port, counts as the same.
+  Every process on that target that runs as the release user can read the
+  secrets of a running release, so the target runs release jobs only:
+  - No agent may use it: exec, shell, copy and the screen are refused, also
+    for an agent whose policy lists it or that holds a lease.
+  - No policy may list it, no lease, lease extension or reservation may
+    name it, and a spawn may not take it, whoever asks (also the operator
+    and a project admin). A fleet file that lists it has an error.
+  - A target that an agent's `policy.targets` lists, or that has an active
+    lease, cannot become a release target.
+  - The operator keeps exec and shell on it, to set it up.
+  - A release target is a global target. Only the operator creates,
+    changes or deletes it, or a target on its machine.
+  - The machine counts too: a target on the same host agent, or with the
+    same ssh host and port, is refused for agents, policies, leases,
+    reservations, spawns and tools as the release target is.
+  - No tool may name the release target or its machine, a tool run there
+    is refused, and a target that a tool names cannot become one.
+  - The lifecycle verbs (`test`, `up`, `down`, `recreate`, `status`, the
+    snapshots) on it are the operator's.
+- The release recipe first removes the HOMEs that a killed release left
+  (`terrarium-release-home.*` under `TMPDIR`, else `/tmp`, owned by the
+  release user), and runs with the fixed `PATH`
+  `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`: no dir
+  under the release user's home. The release tools are installed
+  system-wide on the client.
+- The release recipe runs in a new HOME: a mode-0700 dir from `mktemp -d`
+  (under `TMPDIR`, else `/tmp`), removed when the recipe ends, with the XDG
+  config, cache, data and state dirs in it, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1`, and no `DOCKER_CONFIG`, `CARGO_HOME`,
+  `RUSTUP_HOME` or `UV_CACHE_DIR`. So no `~/.docker`, `~/.gitconfig`,
+  `~/.config` or cache in the release user's home is read. `XDG_RUNTIME_DIR`
+  stays. The login shell of the ssh user still reads its own start files
+  (for example `~/.bashrc`) before the job: they belong to the operator's
+  setup of the target, which no agent can reach.
+- `docker_release` is the release VM. The daemon resolves its `key` (with
+  the same grant rule), keeps it in a private run dir, and opens the SSH
+  forward with the pinned `known_hosts` line, as for `docker_ci` (§35.1),
+  with no reset. The recipe gets only `TERRARIUM_DOCKER_HOST=unix://<job
+  socket>` through the relay on the release target, never the key.
+
+`terrarium project delivery set` sets them with `--release-target`,
+`--release-recipe`, `--release-secret NAME=@secret:name[.field]` (repeat;
+replaces the list; `--clear-release-secrets`), and
+`--docker-release-destination`, `--docker-release-port`,
+`--docker-release-known-hosts`, `--docker-release-key` (all four at the
+first set; `--clear-docker-release`).
+
+## 36. Linked instances: link keys
+
+Another Terrarium daemon (the **home**) can show this daemon (the
+**remote**) in its dashboard and act on it (TER-49, wiki page
+`design/linked-instances`, approved 2026-11-06). This section is the remote
+side (TER-61): the instance ID, the link keys, their pairing, and the rights
+of a link. The home side (the proxy, `/api/remotes`) is TER-62.
+
+The link goes one way: the home calls the remote. A link key works only on
+the TCP listener. The remote's API port is plaintext: put a reverse proxy
+with TLS in front of it, as for `terrarium --url https://... login`.
+
+### 36.1 The instance
+
+`GET /api/system/instance`: `{id, name, version}`. Every caller may read it.
+
+- `id`: a ULID, made at the first start in `<state>/instance.id` and kept.
+  A file that holds no ULID is an error; the daemon never replaces it, so
+  the ID that a home pinned does not change. A restore onto a new host
+  keeps the file with the state dir.
+- `name`: the host of `TERRARIUM_PUBLIC_URL`, else the host name.
+- `version`: the crate version (as `cargo_version` of `GET /api/system/version`).
+
+### 36.2 Link rows and pairing
+
+Only the operator manages links (`403 forbidden` for an agent). A link key
+calls none of these routes except `DELETE /api/links/self` (§36.4).
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /api/links` | `?revoked=true` adds the revoked links | The links, newest first. |
+| `GET /api/links/{id}` | | One link. |
+| `POST /api/links` | `{label, read_only?}` | `201` `{link, code, code_expires_at, instance, url}`, `Cache-Control: no-store`. |
+| `POST /api/links/{id}/rotate` | | `{link, code, code_expires_at, instance, url}`. The old key stops now (§36.3). |
+| `DELETE /api/links/{id}` | | `204`. The key and an open code stop, and the open streams of the key close. |
+| `DELETE /api/links/self` | | `204`: a link key ends its own link (the home's Remove). Another caller gets `400`. |
+| `POST /api/links/pair` | `{code, home_instance_id, home_name?}` | `200` `{link_id, label, read_only, key, instance}`, `Cache-Control: no-store`. |
+
+A link: `{id, label, read_only, status, home_instance_id, home_name,
+paired_at, paired_from, created_by, created_at, rotated_at, first_used_at,
+last_used_at, last_used_from, pair_expires_at, revoked_at}`. `status` is
+`pending` (no key: a code is open, ran out, or the link was rotated),
+`active`, or `revoked`. A revoked link keeps its row without hashes, so the
+audit rows of its actor keep their label. `label`: 1 to 64 characters, no
+control characters. `url` is `TERRARIUM_PUBLIC_URL` or `null`.
+
+Pairing, as the host agent enrol (§17.1):
+
+1. On the remote, the operator makes a link (`terrarium admin link new
+   <label> [--read-only]`, or Settings, Links). The answer has a one-time
+   **pairing code**: `tlp_` and 64 hex digits, good for 10 minutes.
+2. On the home, the operator gives the remote's URL and the code (TER-62).
+3. The home calls `POST /api/links/pair` with the code and its own instance
+   ID. The call needs no `Authorization`: the code is the proof. One
+   database update swaps the code for the long-lived **link key** (`tlk_`
+   and 64 hex digits), so of two calls with one code only one wins. The key
+   is in this answer only; it never passes through the operator's
+   clipboard.
+4. The home compares `instance.id` (and the TLS certificate it saw) with
+   what the remote's operator sees.
+
+A wrong, used, or expired code, and a code without the `tlp_` prefix, all
+get the same `401 unauthorized`. `home_instance_id` must be a ULID
+(`422 invalid`), and not the remote's own ID. The daemon keeps only the
+SHA-256 of the code and of the key; neither is in a log, an event, or an
+audit row.
+
+### 36.3 Rotate and revoke
+
+- `POST /api/links/{id}/rotate`: a new pairing code. The old key stops at
+  once and its open streams close, so a rotate after a leak cuts the key
+  now. The home takes the new code with its Re-pair.
+- `DELETE /api/links/{id}`: the key stops. A call that is in flight with the
+  key (a long poll, an SSE stream, a WebSocket of the events, a PTY, or a
+  target shell) ends at once: the request holds the key's revocation signal
+  from before the key lookup. A pending answer becomes `401`, a stream ends,
+  a WebSocket drops.
+- A revoked or rotated key gets `401 unauthorized`, as a wrong token.
+
+### 36.4 The rights of a link
+
+A link key is `Authorization: Bearer tlk_...` (on a WebSocket upgrade also
+the subprotocol `bearer.tlk_...`). For the rules the caller is the operator,
+minus a deny list. Audit rows and events of its actions carry the actor
+`link:<id>`; `GET /api/audit` adds `link_label` to those rows. Mail, card
+authors, and pins stay `operator`. `GET /api/session` gives `kind: "link"`.
+
+The deny list (`403 link_forbidden`):
+
+- The credentials of the remote: `POST` and `DELETE /api/session`,
+  `DELETE /api/sessions`, `/api/auth/...`, `POST /api/secrets/{scope}/{name}/reveal`,
+  `/api/agent/secrets/...`, the writes of `/api/credentials`,
+  `POST /api/hosts`, `DELETE /api/hosts/{name}`,
+  `/api/hosts/{name}/rotate`, `/api/subscriptions/login...` (§16.4), and
+  `/api/subscriptions/{name}/api-key`.
+- `/api/links/...`, except `DELETE /api/links/self`: a link cannot make,
+  list, or pair another link.
+- The backups (§32): `POST /api/backups` and `GET /api/backups/{name}`. A
+  backup holds `secrets.key`, `session.key`, and every sealed secret.
+- The daemon itself: `/api/system/update...` (status, update, check,
+  rollback, drain, resume).
+- The config repo push (§25): `POST /api/config/push`,
+  `POST /api/config/sync`, and the writes of `/api/config/remote`.
+- Executable automation, which runs later as `system`, its owner, or the
+  project inbox, outside the link's checks: `POST /api/schedules`,
+  `PATCH /api/schedules/{id}`, `.../run`, `.../enable`, `.../test`, and
+  `.../deliveries/{d}/redeliver`; the writes of `/api/projects/{name}/rules`
+  (`PUT`, `DELETE`), `.../rules/migrate`, and `.../rules/{rule}/enable` and
+  `/disable`. Reads, `DELETE /api/schedules/{id}`, `.../disable`, and the
+  rule `check`, `dry-run`, and `lint` stay open.
+- The shared text that agents load at start: every write (`POST`, `PUT`,
+  `PATCH`, `DELETE`) of `/api/system-prompts...` (the system prompt
+  library and its personas; also `replace: true`), `/api/skills...`, and
+  `/api/templates...` (also `.../from-agent/{agent}`), and
+  `POST /api/config/defaults/accept` and `/keep`. A sysadmin agent with no
+  own prompt loads the library entry `leader` at start. Reads stay open.
+- Any path outside `/api` (`/install/...`, `/hosts/connect`, `/a/...`).
+
+A link also may not reach the denied routes through a sysadmin agent
+(`403 link_forbidden` too): it may not grant or revoke `sysadmin` (`PUT
+/api/agents/{id}/roles`, an agent create or a spawn with that role), and
+may not drive an agent that holds `sysadmin`: no turn (`.../send`), keys,
+answer, PTY attach, `PATCH /api/agents/{id}`, compact or new session with
+`then`, spawn for it, or mail to it: `POST /api/mail`, a reply
+(`/api/mail/{id}/reply`, `/api/projects/{name}/inbox/{id}/reply`), or the
+note of `POST /api/mail/threads/{thread}/resume`, when one recipient is a
+sysadmin agent. A refused reply or resume changes nothing. Beyond these
+routes, every message that a link request writes is checked where it is
+delivered (`store::mail::send`): a question answer, a notice ack text, a
+retract reason, a to-thread message, a thread message or response, and any
+notice that the request makes. The release of a held message
+(`POST /api/mail/{id}/release`, and a resume with or without a note) is a
+delivery too, checked in `store::mail::release` before any change. A message to a sysadmin agent (also through a
+project inbox whose admin is one) fails the whole request with
+`403 link_forbidden`, and nothing of it is kept. So a link may not move a
+card or end a thread when that mails a sysadmin agent. Reads, start, stop, pause, and interrupt of such an
+agent work.
+
+The check decodes the path, drops empty and `.` segments, and ignores case,
+so no other spelling of a denied route passes; a path with `..` is denied.
+A deny list hit writes a `link.forbidden` audit row (`{label, method, path,
+read_only, from, reason}`), at most one a minute per link, method, and path.
+
+A **read-only** link (`read_only: true`) may only `GET` (and `HEAD`): reads,
+SSE, and the WebSocket of an `.../events` route. No PTY, no target shell,
+no turn, no write, and no `DELETE /api/links/self`.
+
+### 36.5 The use record and the audit
+
+- The remote writes `first_used_at`, `last_used_at`, and `last_used_from`
+  (the peer address; a reverse proxy shows as itself) at the first call of
+  a key, at a new address, and at most once a minute after that.
+- Audit rows: `link.new`, `link.rotate`, `link.revoke` (`by_self` when the
+  link ended itself), `link.pair` (actor `link:<id>`, with `home`,
+  `home_name`, and `from`), and `link.forbidden`. No row holds a code or a
+  key.
 
 ## Agent calls during daemon restarts
 

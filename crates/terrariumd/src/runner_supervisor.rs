@@ -2233,6 +2233,13 @@ impl RunnerSupervisor {
         let (agent, resume, start_reason) = {
             let mut slots = lock(&self.inner.slots);
             let slot = slots.get_mut(&id).ok_or(SupervisorError::NotRunning(id))?;
+            if slot.epoch != epoch {
+                return Err(SupervisorError::NotRunning(id));
+            }
+            // Clear files left by a daemon crash before exec-env writes new ones.
+            if self.inner.cfg.sandbox.mode == SandboxMode::None {
+                remove_credential_dir(&self.inner.cfg.runtime_dir, id);
+            }
             (
                 slot.agent.clone(),
                 slot.resume.clone(),
@@ -3374,10 +3381,16 @@ impl RunnerSupervisor {
     }
 
     async fn on_exit(&self, id: AgentId, epoch: u64, status: ExitStatus) {
-        // The credential files of sandbox mode `none` go with the harness;
-        // a relaunch writes them again.
-        if self.inner.cfg.sandbox.mode == SandboxMode::None {
-            remove_credential_dir(&self.inner.cfg.runtime_dir, id);
+        // Check the epoch while holding the slot lock: a late exit must
+        // never remove a newer launch's credential files, even at shutdown.
+        {
+            let slots = lock(&self.inner.slots);
+            if !slots.get(&id).is_some_and(|s| s.epoch == epoch) {
+                return;
+            }
+            if self.inner.cfg.sandbox.mode == SandboxMode::None {
+                remove_credential_dir(&self.inner.cfg.runtime_dir, id);
+            }
         }
         if self.inner.shutting_down.load(Ordering::SeqCst) {
             return;
@@ -6282,6 +6295,44 @@ mod tests {
             status(AgentStatus::Working, AgentStatus::Waiting, Some(12)),
         );
         assert_eq!(rest_seq(), Some(12));
+    }
+
+    #[tokio::test]
+    async fn stale_exit_keeps_the_current_epochs_credentials() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sandbox = SandboxConfig {
+            mode: SandboxMode::None,
+            ..SandboxConfig::default()
+        };
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            tmp.path().join("state"),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            sandbox,
+            HashMap::new(),
+        ));
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude",
+            "workspace": "/w"
+        }))
+        .unwrap();
+        let id = agent.id;
+        let mut slot = Slot::new(agent);
+        slot.epoch = 2;
+        lock(&sup.inner.slots).insert(id, slot);
+        let dir = credential_dir(&sup.inner.cfg.runtime_dir, id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gcp.json");
+        std::fs::write(&file, "new epoch").unwrap();
+        sup.inner.shutting_down.store(true, Ordering::SeqCst);
+        let status = ExitStatus {
+            code: 0,
+            signal: None,
+        };
+        sup.on_exit(id, 1, status.clone()).await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new epoch");
+        sup.on_exit(id, 2, status).await;
+        assert!(!dir.exists());
     }
 
     /// TER-591: a launch starts with no rest seq: the seq of a rest event

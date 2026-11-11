@@ -61,6 +61,43 @@ Both binaries also get a GitHub build provenance attestation.
 
 ## How to make a release
 
+### Version branch e2e at the cut
+
+After pushing `release/X.Y.Z`, the project admin queues the cut-time gate
+on the open version group's header card (not a member card):
+
+```text
+POST /api/cards/TER-<header>/e2e
+{"branch":"release/X.Y.Z","repo":"terrarium","eta":"20m"}
+```
+
+The daemon pins the remote branch head and runs
+`TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py` on that tree. The job
+shares the merge lane. Only e2e jobs receive the Docker relay. Merge and
+validate jobs cannot request a reset or tunnel, whatever their recipe sets.
+It does not merge or push a branch, move the header or change membership.
+It records the job and tested commit on the group's `version branch e2e`
+step, marking it done only on success, failed on failure or cancellation.
+Do not pre-release until this step is done on the final release commit.
+After a blocker fix, queue it again on the same group and release branch.
+
+The gate runs the full validation suite, then the two ignored live Docker
+tests named in `scripts/docker_ci.py`. It rejects skipped or unmatched live
+tests. Results are written under `results/` in the job slot. Upload
+`results/docker.json` and the suite's result files with
+`terrarium test push --card <header> --label version:X.Y.Z`.
+Device-IO and Claude live tests still need their separate hardware or
+credentials. If applicable, run them on the same release commit and record
+their evidence on the group before publishing. They are not silently
+enabled by the Docker job.
+
+The delivery principal needs the existing Docker CI tunnel and reset run
+grants and pinned endpoints. Both keys stay inside the daemon. Branch code
+gets only a job-scoped Unix relay endpoint. Never fetch a VM key or run the
+gate manually against the real VM. Card validation remains ineligible.
+
+### Publishing
+
 A release occurs only for a push to `main` when the head commit has a
 trailer:
 
@@ -197,6 +234,26 @@ checks the release hash ([host-protocol.md, "Self-update"](host-protocol.md#self
 The host agent does not verify the attestation itself: the image that
 holds the binary is the item to verify.
 
+## The full suite at the version cut
+
+Merge jobs run no tests: the full suite runs once at the version cut, on
+the version branch, as a release validation (TER-683):
+
+```sh
+mkdir -p /src/<cut>-results
+TERRARIUM_VALIDATE_CONTEXT=release RESULTS_DIR=/src/<cut>-results just ci::validate
+just ci::flaky-cards /src/<cut>-results/reruns.json "the <X.Y.Z> cut"   # read it, then run it with | sh
+```
+
+`TERRARIUM_VALIDATE_CONTEXT=release` runs the uid 1001 pass after
+`ci::test` (as root; the host needs uid 1001, see AGENTS.md) and lets both
+test passes rerun their failed tests once. A test that passes on the rerun
+keeps the run green and is listed in `reruns.json`; one that fails again is
+red. A build error, a crash, a failed doctest, or more than 5 failed tests
+gets no rerun ([api.md](api.md) 35.3). `ci::flaky-cards` prints the
+`terrarium` commands that file or comment on the `flaky` card of each test
+that passed on the rerun; it runs nothing itself.
+
 ## The local release build
 
 `just release::publish` runs `scripts/release.py` on a clean checkout of the
@@ -256,6 +313,46 @@ push`.
 
 `just release::dry-run` runs steps 1 to 6 with no secret: nothing is pushed,
 signed, or released. `--no-gate` skips the gate in a dry run only.
+
+### The release job
+
+The daemon runs the release as a job of kind `release` (TER-623,
+[api.md §35.6](api.md)). The setup, once, by the operator or meta/lead:
+
+1. Define the release client (META-119) as a global ssh target (the
+   operator), user `release`, with its pinned host key. Install the
+   release tools system-wide (the job's `PATH` has no dir under the
+   release user's home). Once it is the release
+   target, the daemon refuses every agent on it (exec, shell, copy,
+   policy entries, leases, reservations); only the operator and the
+   release job use it. Each release runs in a new HOME that goes after
+   it.
+2. Grant `release-github`, `release-cosign`, and `docker-release-vm` to
+   `delivery:terrarium` with `--level run --target <release client>`, and
+   to nobody else.
+3. Set the delivery config (the operator only: the release fields are
+   the operator's):
+
+   ```sh
+   terrarium project delivery set --release-target <release client> \
+     --release-secret GHCR_TOKEN=@secret:release-github \
+     --release-secret GH_TOKEN=@secret:release-github \
+     --release-secret COSIGN_PRIVATE_KEY=@secret:release-cosign.private_key \
+     --release-secret COSIGN_PASSWORD=@secret:release-cosign.password \
+     --docker-release-destination root@10.3.0.2 --docker-release-port 2251 \
+     --docker-release-known-hosts '<the pinned known_hosts line>' \
+     --docker-release-key @secret:docker-release-vm
+   ```
+
+   The daemon refuses a release target that is the job target of any
+   project.
+
+The lead's release step, after the release merge onto `main`:
+`terrarium job release <version card>` (the head of `main`, or
+`--commit <sha>` to make sure it is that commit). The job clones the
+commit into a new tree on the client, opens the relay to the release VM,
+and runs `just release::publish` with the secrets in its env. The end comes
+as a comment on the card. A lost run does not run again by itself.
 
 ### Secrets
 
