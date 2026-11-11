@@ -11841,13 +11841,15 @@ passphrase (§31.2).
 
 | Root | Dir | Content |
 |---|---|---|
-| `state` | `TERRARIUM_STATE_DIR` | The database (as a `VACUUM INTO` copy), the agent dirs, the trash, the artifacts, the credentials, `secrets.key`, `session.key`, `operator.password`. |
+| `state` | `TERRARIUM_STATE_DIR` | The database (as a `VACUUM INTO` copy), the agent dirs, the artifacts, the credentials, `secrets.key`, `session.key`, `operator.password`. |
 | `config` | `TERRARIUM_CONFIG_REPO` | The config repo, with its `.git`. |
 | `work` | `TERRARIUM_WORK_DIR` | The agent workspaces. Only with `work` (`--work`). |
 
 The database is never a raw file copy: the daemon copies it with
 `VACUUM INTO`, which gives one consistent snapshot while the daemon writes.
-The walk skips the backup dir, the live database files (`terrarium.db`,
+The walk skips the backup dir, `<state>/trash` (deleted agents and
+workspaces retained for cleanup, not included in full or diff backups),
+the live database files (`terrarium.db`,
 `-wal`, `-shm`, `-journal`), the restore dirs (§32.3), sockets, and the
 dirs named `target`, `node_modules`, and `.cache`, at any depth. The tools
 dir is not a root. Symlinks stay symlinks. The manifest records the mode of

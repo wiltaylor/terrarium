@@ -490,6 +490,9 @@ pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
     // Reconstructible image payloads, not application data. In particular do
     // not copy every retained daemon binary into every pre-upgrade backup.
     skip.insert(state_c.join("releases"));
+    // Deleted agents and workspaces are retention trash, not live state.
+    // Walking this tree dominated pre-update backups on production.
+    skip.insert(state_c.join("trash"));
     // The one-shot helper files of live git and ssh runs (askpass
     // scripts, keys): never data, and secrets in the clear.
     skip.insert(crate::secrets::RunDirs::base(&state_c));
