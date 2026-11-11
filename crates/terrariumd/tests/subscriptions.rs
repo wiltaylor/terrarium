@@ -3169,18 +3169,53 @@ async fn an_unmapped_cloud_model_is_refused_at_start_and_sync() {
     )
     .await
     .ok();
-    let a = td.agent("p", "custom", json!({"subscription": "aws", "model": "custom"})).await;
+    let a = td
+        .agent(
+            "p",
+            "custom",
+            json!({"subscription": "aws", "model": "custom"}),
+        )
+        .await;
     let id = a["id"].as_str().unwrap().to_owned();
-    td.put("/api/subscriptions/aws/cloud", json!({"region": "us-east-1"})).await.ok();
-    let r = td.post_empty(&format!("/api/agents/{id}/start")).await;
-    r.err(422, "invalid");
-    assert!(r.body.to_string().contains("cloud.models.custom"), "{}", r.body);
+    td.put(
+        "/api/subscriptions/aws/cloud",
+        json!({"region": "us-east-1"}),
+    )
+    .await
+    .ok();
     let state = td.daemon.as_ref().unwrap().state.clone();
+    // Use the real supervisor: the daemon fixture uses an in-memory one.
+    use terrariumd::runner_supervisor::{RunnerSupervisor, RunnerSupervisorConfig};
+    use terrariumd::supervisor::{Supervisor, SupervisorError};
+    let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+        td.state.clone(),
+        td.dir.path().join("run"),
+        td.config.join("prompts"),
+        terrariumd::sandbox::SandboxConfig::default(),
+        HashMap::new(),
+    ));
+    sup.bind(&state);
+    let key = id.clone();
+    let agent = state
+        .db
+        .read(move |c| Ok(terrariumd::store::agents::get(c, &key)?.agent))
+        .await
+        .unwrap();
+    let error = sup.start(agent, None).await.unwrap_err();
+    assert!(
+        matches!(&error, SupervisorError::NotReady(m) if m.contains("cloud.models.custom") && m.contains("aws")),
+        "{error}"
+    );
     let def = serde_json::from_value::<terrarium_core::config::AgentDef>(json!({
-        "name": "custom", "harness": "claude", "subscription": "aws", "model": "custom"
-    })).unwrap();
-    let error = state.db.write("operator", move |t| {
-        terrariumd::store::agents::sync_def(t, &id, &def)
-    }).await.unwrap_err();
+        "name": "custom", "project": "p", "harness": "claude", "subscription": "aws", "model": "custom"
+    }))
+    .unwrap();
+    let error = state
+        .db
+        .write("operator", move |t| {
+            terrariumd::store::agents::sync_def(t, &id, &def)
+        })
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("cloud.models.custom"), "{error}");
 }
