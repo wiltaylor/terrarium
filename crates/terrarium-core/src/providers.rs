@@ -183,6 +183,9 @@ pub fn display_name(
         Some(t) => format!("{product} {t}"),
         None => product.to_owned(),
     };
+    if p == "litellm" {
+        return "LiteLLM".into();
+    }
     if selfhosted::is_selfhosted(&p) {
         let host = selfhosted.and_then(|s| host_of(&s.base_url));
         return format!("Self-hosted {}", host.unwrap_or(name));

@@ -191,7 +191,7 @@ pub fn pick(
         let Some(s) = members.iter().find(|s| &s.name == name) else {
             continue;
         };
-        if s.cloud_kind().is_some() {
+        if s.cloud_kind().is_some() || s.provider == "litellm" {
             continue;
         }
         let usable = matches!(
