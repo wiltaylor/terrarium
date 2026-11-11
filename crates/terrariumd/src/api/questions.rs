@@ -597,7 +597,7 @@ async fn retract(
     let by_owner = actor.agent().is_some_and(|a| a.id == q.agent);
     // The agent that waits for a tool run approval may give it up (its
     // CLI does on Ctrl-C), whatever its role.
-    if !(q.kind == QuestionKind::ToolRun && by_owner) {
+    if !(by_owner && (q.kind == QuestionKind::ToolRun || q.thread.is_some())) {
         policy::retract_question(&actor, &q.agent, &q.project)?;
     }
     let qid = q.id.clone();
