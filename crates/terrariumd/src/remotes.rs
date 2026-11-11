@@ -17,7 +17,17 @@ pub const JSON_MAX: usize = 16 * 1024 * 1024;
 pub const IMAGE_MAX: usize = 8 * 1024 * 1024;
 
 pub fn image_content_type(headers: &HeaderMap) -> ApiResult<&'static str> {
-    match headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").split(';').next().unwrap_or("").trim().to_ascii_lowercase().as_str() {
+    match headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "image/png" => Ok("image/png"),
         "image/jpeg" => Ok("image/jpeg"),
         "image/gif" => Ok("image/gif"),
@@ -27,7 +37,9 @@ pub fn image_content_type(headers: &HeaderMap) -> ApiResult<&'static str> {
 }
 
 pub fn check_image_path(method: &Method, path: &str) -> ApiResult<()> {
-    if *method != Method::GET { return Err(ApiError::bad_request("images require GET")); }
+    if *method != Method::GET {
+        return Err(ApiError::bad_request("images require GET"));
+    }
     // Reuse ambiguity and link-policy checks. Signed artifact paths are the only
     // non-API exception and never receive the link credential.
     if let Some(rest) = path.strip_prefix("/a/") {

@@ -811,16 +811,50 @@ async fn image_proxy_rejects_active_types_redirects_and_oversized_bodies() {
     let id = ulid::Ulid::new().to_string();
     let instance = id.clone();
     let app = Router::new()
-        .route("/api/system/instance", get(move || { let id = instance.clone(); async move { Json(json!({"id":id,"version":terrarium_version::VERSION})) } }))
-        .route("/a/good", get(|headers: HeaderMap| async move {
-            assert!(!headers.contains_key("cookie"));
-            assert!(!headers.contains_key("authorization"));
-            ([("content-type", "image/png"), ("set-cookie", "evil=1")], "png")
-        }))
-        .route("/a/svg", get(|| async { ([("content-type", "image/svg+xml")], "<svg/>") }))
-        .route("/a/html", get(|| async { ([("content-type", "text/html")], "<html/>") }))
-        .route("/a/redirect", get(|| async { (StatusCode::FOUND, [("location", "https://evil.example/image")]) }))
-        .route("/a/large", get(|| async { ([("content-type", "image/jpeg")], vec![0u8; net::IMAGE_MAX + 1]) }));
+        .route(
+            "/api/system/instance",
+            get(move || {
+                let id = instance.clone();
+                async move { Json(json!({"id":id,"version":terrarium_version::VERSION})) }
+            }),
+        )
+        .route(
+            "/a/good",
+            get(|headers: HeaderMap| async move {
+                assert!(!headers.contains_key("cookie"));
+                assert!(!headers.contains_key("authorization"));
+                (
+                    [("content-type", "image/png"), ("set-cookie", "evil=1")],
+                    "png",
+                )
+            }),
+        )
+        .route(
+            "/a/svg",
+            get(|| async { ([("content-type", "image/svg+xml")], "<svg/>") }),
+        )
+        .route(
+            "/a/html",
+            get(|| async { ([("content-type", "text/html")], "<html/>") }),
+        )
+        .route(
+            "/a/redirect",
+            get(|| async {
+                (
+                    StatusCode::FOUND,
+                    [("location", "https://evil.example/image")],
+                )
+            }),
+        )
+        .route(
+            "/a/large",
+            get(|| async {
+                (
+                    [("content-type", "image/jpeg")],
+                    vec![0u8; net::IMAGE_MAX + 1],
+                )
+            }),
+        );
     let _server = fake(&home, app, &id).await;
     let good = home.get("/api/remotes/lab/proxy/image/a/good").await;
     assert_eq!(good.status, StatusCode::OK);
@@ -829,14 +863,22 @@ async fn image_proxy_rejects_active_types_redirects_and_oversized_bodies() {
     assert_eq!(good.headers["cache-control"], "no-store");
     assert!(!good.headers.contains_key("set-cookie"));
     for path in ["svg", "html", "redirect", "large"] {
-        home.get(&format!("/api/remotes/lab/proxy/image/a/{path}")).await.err(502, "remote_unreachable");
+        home.get(&format!("/api/remotes/lab/proxy/image/a/{path}"))
+            .await
+            .err(502, "remote_unreachable");
     }
     assert!(net::check_image_path(&Method::POST, "/a/good").is_err());
-    for path in ["/api/%252e/foo", "/a/../secret", "//evil.example/a/good", "/api/remotes"] {
+    for path in [
+        "/api/%252e/foo",
+        "/a/../secret",
+        "//evil.example/a/good",
+        "/api/remotes",
+    ] {
         assert!(net::check_image_path(&Method::GET, path).is_err(), "{path}");
     }
     for ct in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
-        let mut h = HeaderMap::new(); h.insert(header::CONTENT_TYPE, ct.parse().unwrap());
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_TYPE, ct.parse().unwrap());
         assert_eq!(net::image_content_type(&h).unwrap(), ct);
     }
 }
