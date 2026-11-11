@@ -574,6 +574,10 @@ impl HostRegistry {
         }
     }
 
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Claim the replay channel of a session from the previous daemon.
     pub fn reattach(self: &Arc<Self>, host: &str, id: SessionId) -> Option<HostSession> {
         let mut entries = self.lock();

@@ -28,16 +28,16 @@ fn copy_binary(jail: &Path, binary: &str) {
     }
 }
 
-struct Ssh {
+pub(crate) struct Ssh {
     _dir: tempfile::TempDir,
-    jail: PathBuf,
-    key: PathBuf,
-    port: u16,
-    server: tokio::process::Child,
+    pub(crate) jail: PathBuf,
+    pub(crate) key: PathBuf,
+    pub(crate) port: u16,
+    pub(crate) server: tokio::process::Child,
 }
 
 impl Ssh {
-    async fn start(sshd: std::ffi::OsString) -> Self {
+    pub(crate) async fn start(sshd: std::ffi::OsString) -> Self {
         // sshd rejects a writable ancestor such as /tmp for ChrootDirectory.
         let dir = tempfile::tempdir_in("/run").unwrap();
         let jail = dir.path().join("jail");
@@ -58,6 +58,12 @@ impl Ssh {
             "/bin/sleep",
             "/usr/bin/base64",
             "/usr/bin/tr",
+            "/usr/bin/setsid",
+            "/usr/bin/nohup",
+            "/usr/bin/head",
+            "/usr/bin/tail",
+            "/usr/bin/mkfifo",
+            "/usr/bin/rmdir",
         ] {
             copy_binary(&jail, binary);
         }

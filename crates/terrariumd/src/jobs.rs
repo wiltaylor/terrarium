@@ -1739,6 +1739,9 @@ async fn step_redacted(
     input: Option<Vec<u8>>,
     own: &[(String, zeroize::Zeroizing<String>)],
 ) -> ApiResult<Collected> {
+    if cmd.durable && input.is_some() {
+        return Err(ApiError::invalid("durable execution cannot take stdin"));
+    }
     let pidfile = crate::run_kill::job_pidfile(job);
     let admission = state.executor.target_resource_lock(def).lock_owned().await;
     let (running, report) =

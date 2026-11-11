@@ -55,7 +55,8 @@ pub(super) fn start(
         return Err(ApiError::conflict("durable SSH checkpoint expired"));
     }
     let root = saved.def.work_root.as_deref()
-        .ok_or_else(|| ApiError::invalid("durable SSH execution needs work_root"))?;
+        .unwrap_or(crate::target_roots::DEFAULT_BASE);
+    crate::target_roots::check_base(root)?;
     let path = format!("{root}/.terrarium-runs/{}", saved.token);
     let script = script(&path, &saved.cmd);
     *plan.args.last_mut().ok_or_else(|| ApiError::internal("empty SSH plan"))? = script;
@@ -71,6 +72,9 @@ pub(super) fn start(
         let mut ended = false;
         loop {
             tokio::select! {
+                () = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if state.executor.hosts.is_stopped() { break; }
+                }
                 control = controls.recv() => match control {
                     Some(Control::Kill | Control::Signal(_)) => {
                         // The remote supervisor owns this PID file and process
@@ -123,6 +127,13 @@ fn script(path: &str, cmd: &RemoteCmd) -> String {
     let command = format!("{}exec {}", cmd.cwd.as_ref().map(|cwd| format!("cd {} && ", sh_quote(cwd))).unwrap_or_default(),
         cmd.argv.iter().map(|arg| sh_quote(arg)).collect::<Vec<_>>().join(" "));
     let timeout = cmd.timeout_secs.filter(|n| *n > 0).unwrap_or(MAX_RUN).min(MAX_RUN);
+    let janitor = format!(r#"
+p={path}
+echo $$ > "$p/janitor"
+sleep {expiry}
+rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit" "$p/exit.part" "$p/janitor"
+rmdir "$p"
+"#, path=sh_quote(path), expiry=MAX_RUN + RETAIN);
     // Each logger retains at most 64 MiB and then drains the rest. Output
     // limits do not impose a file-size limit on the user's other files.
     let supervisor = format!(r#"
@@ -130,6 +141,7 @@ umask 077
 p={path}
 mkdir "$p" 2>/dev/null || exit 0
 echo $$ > "$p/pid"
+setsid nohup sh -c {janitor} </dev/null >/dev/null 2>&1 &
 mkfifo "$p/o" "$p/e" || exit 1
 (head -c 67108864 > "$p/out"; cat > /dev/null) < "$p/o" &
 o=$!
@@ -145,10 +157,7 @@ kill "$w" 2>/dev/null
 wait "$o" "$e" 2>/dev/null
 printf '%s\n' "$code" > "$p/exit.part"
 mv "$p/exit.part" "$p/exit"
-sleep {RETAIN}
-rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit"
-rmdir "$p"
-"#, path=sh_quote(path), command=sh_quote(&command));
+"#, path=sh_quote(path), command=sh_quote(&command), janitor=sh_quote(&janitor));
     let env = if cmd.env.is_empty() { "" } else {
         "IFS= read -r __terrarium_env && eval \"$(printf '%s' \"$__terrarium_env\" | base64 -d)\" && unset __terrarium_env;"
     };

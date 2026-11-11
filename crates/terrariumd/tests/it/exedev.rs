@@ -255,6 +255,26 @@ fn target(name: &str, life: u64) -> Value {
            "exedev": {"max_life_secs": life}})
 }
 
+#[tokio::test]
+async fn durable_exedev_finishes_offline_once_with_real_exit() {
+    let (mut td, _fake, _, url, ssh) = daemon().await;
+    let root = td.dir.path().join("remote-spool");
+    let mut def = target("restart-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/restart-ex/up").await.ok();
+    let (aid, wid) = super::ssh_restart::start(&td, "restart-ex", root.to_str().unwrap()).await;
+    super::ssh_restart::wait_file(&root.join("launches")).await;
+    td.daemon.take().unwrap().shutdown_and_wait().await;
+    std::fs::write(root.join("go"), "go").unwrap();
+    let spool = std::fs::read_dir(root.join(".terrarium-runs")).unwrap().next().unwrap().unwrap().path();
+    super::ssh_restart::wait_file(&spool.join("exit")).await;
+    assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "23\n");
+    reboot(&mut td, &url, &ssh).await;
+    super::ssh_restart::completed(&td, &aid, &wid, &root).await;
+    super::ssh_restart::cleanup(&root);
+}
+
 fn db(td: &TestDaemon) -> rusqlite::Connection {
     terrariumd::db::open(&td.state.join("terrarium.db")).unwrap()
 }

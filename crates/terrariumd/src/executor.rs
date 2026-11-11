@@ -895,7 +895,14 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
             );
             tokio::spawn(attach(run, session.clone(), ctl, false, false));
         } else if let Some(key) = saved.remote_key {
-            let run = durable::resume(state, &key)?;
+            let run = match durable::resume(state, &key) {
+                Ok(run) => run,
+                Err(error) => {
+                    session.finish(End::error("interrupted", error.message));
+                    state.executor.insert(session);
+                    continue;
+                }
+            };
             let secrets: Vec<_> = saved.secrets.into_iter()
                 .map(|(name, value)| (name, zeroize::Zeroizing::new(value))).collect();
             let view = saved.project.map_or(terrarium_core::redact::View::All, terrarium_core::redact::View::Scope);
@@ -1901,6 +1908,9 @@ pub(crate) fn start_cmd_locked(
 ) -> ApiResult<Running> {
     if cmd.durable && (cmd.pty.is_some() || cmd.shell) {
         return Err(ApiError::invalid("durable execution cannot use a PTY or shell"));
+    }
+    if state.executor.hosts.is_stopped() {
+        return Err(ApiError::conflict("executor is stopping"));
     }
     no_exec(def)?;
     // An exedev target runs its commands over ssh on its VM.

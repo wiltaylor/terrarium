@@ -7,6 +7,7 @@ mod card_waits;
 mod common;
 mod exedev;
 mod host_restart;
+mod ssh_restart;
 mod read_positions;
 mod remotes;
 mod ter221_latency;
