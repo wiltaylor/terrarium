@@ -6254,6 +6254,13 @@ the adapter's env. The start log and `terrariumd sandbox-dry-run` show the
 value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
 `<redacted>`.
 
+For Bedrock, `test_connection: true` makes a paid one-output-token test of
+the haiku inference profile before any write. The wizard always requests
+this. On failure the endpoint returns a safe diagnostic and saves nothing.
+API callers may omit it to store credentials without making a paid call.
+Missing Bedrock region defaults to `us-east-1`; missing model tiers get
+the US inference profiles listed in `docs/compat.md`. Explicit entries win.
+
 **Cloud providers (Claude Code only).** `provider` `bedrock` (Amazon
 Bedrock), `gcp` (Google Cloud Vertex AI), or `foundry` (Microsoft
 Foundry); the code is `crates/terrarium-core/src/cloud.rs`. The

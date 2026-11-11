@@ -130,6 +130,7 @@ export const takesCode = (k: WizardLogin): boolean => k === "claude";
  * `harnesses`: the harnesses the daemon gives the new subscription; the form shows them.
  */
 export const KEY_PROVIDERS: { id: string; env: string; label: string; harnesses?: string[] }[] = [
+  { id: "bedrock", env: "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY", label: "Amazon Bedrock (Claude Code)", harnesses: ["claude"] },
   { id: "anthropic", env: "ANTHROPIC_API_KEY", label: "Anthropic" },
   { id: "openai", env: "OPENAI_API_KEY", label: "OpenAI" },
   { id: "google", env: "GEMINI_API_KEY", label: "Google" },
@@ -170,6 +171,7 @@ export const defaultPlan = (provider: string): string => KEY_PLANS[provider]?.[0
 
 /** Where to get the key, for the providers that need a word of help. */
 export const KEY_HELP: Record<string, string> = {
+  bedrock: "Use an IAM access key pair with bedrock:InvokeModel and bedrock:InvokeModelWithResponseStream on your permitted models and inference profiles. Saving tests the haiku profile with a paid, one-output-token call before storing the key. US inference profiles are the defaults. For other geographies, enter profile IDs or ARNs for all three models.",
   selfhosted: "The key of a self-hosted server that needs one. Add a new server with the Self-hosted model path: it sets the API style, the models, and the limits.",
   zai: "Make a key at z.ai/manage-apikey/apikey-list. The GLM Coding Plan and pay as you go use the same key; the plan picks the endpoint. Agents run on Claude Code and pi.",
   moonshot:
@@ -180,7 +182,12 @@ export const KEY_HELP: Record<string, string> = {
 export const takesPlan = (provider: string): boolean => provider in KEY_PLANS;
 
 /** The body of `POST /api/subscriptions/{name}/api-key` from the form fields. */
-export function apiKeyBody(f: { provider: string; key: string; plan?: string; baseUrl?: string; models?: string }): ApiKeyInput {
+export function apiKeyBody(f: { provider: string; key: string; plan?: string; baseUrl?: string; models?: string; keyId?: string; region?: string; cloudModels?: Record<string, string> }): ApiKeyInput {
+  if (f.provider === "bedrock") return {
+    provider: "bedrock", key: f.key, key_id: f.keyId?.trim(),
+    cloud: { region: f.region?.trim() || "us-east-1", models: Object.fromEntries(Object.entries(f.cloudModels ?? {}).filter(([, v]) => v.trim()).map(([k, v]) => [k, v.trim()])) },
+    test_connection: true,
+  };
   const models = (f.models ?? "").split(",").map((m) => m.trim()).filter(Boolean);
   return {
     provider: f.provider,
