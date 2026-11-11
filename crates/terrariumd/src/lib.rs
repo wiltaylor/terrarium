@@ -170,6 +170,7 @@ impl Daemon {
     /// launches them again.
     pub fn shutdown(self) {
         self.state.executor.hosts.shutdown();
+        self.state.job_queue.stop();
         for t in &self.tasks {
             t.abort();
         }
@@ -186,6 +187,9 @@ impl Daemon {
     /// started runs on to its end on the blocking pool (TER-646).
     pub async fn shutdown_and_wait(mut self) {
         self.state.executor.hosts.shutdown();
+        for task in self.state.job_queue.stop() {
+            let _ = task.await;
+        }
         let tasks = std::mem::take(&mut self.tasks);
         for t in &tasks {
             t.abort();

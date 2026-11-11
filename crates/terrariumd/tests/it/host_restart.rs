@@ -4,6 +4,11 @@ use serde_json::json;
 use std::time::Duration;
 use terrarium_host::{Client, ClientOptions};
 
+#[tokio::test]
+async fn native_merge_keeps_recipe_exit_tail_slot_and_junit_across_restart() {
+    crate::jobs::native_merge_restart_keeps_recipe_exit_tail_and_junit().await;
+}
+
 async fn online(td: &TestDaemon) {
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {

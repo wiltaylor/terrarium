@@ -225,6 +225,7 @@ const JOBS_DIR: &str = "jobs";
 
 /// The queue state of one daemon (`AppState::job_queue`).
 pub struct Runtime {
+    tasks: Mutex<Vec<JoinHandle<()>>>,
     /// True once [`spawn`] has taken up the jobs of the last daemon
     /// ([`recover_lost`]). A job that starts before that counts as lost and
     /// goes back to the queue (TER-211).
@@ -237,6 +238,7 @@ pub struct Runtime {
 impl Default for Runtime {
     fn default() -> Self {
         Self {
+            tasks: Mutex::new(Vec::new()),
             recovered: tokio::sync::watch::Sender::new(false),
             accepted_hold: std::sync::atomic::AtomicBool::new(false),
         }
@@ -244,6 +246,14 @@ impl Default for Runtime {
 }
 
 impl Runtime {
+    pub fn stop(&self) -> Vec<JoinHandle<()>> {
+        let tasks = std::mem::take(&mut *self.tasks.lock().unwrap_or_else(|p| p.into_inner()));
+        for task in &tasks {
+            task.abort();
+        }
+        tasks
+    }
+
     /// Hold (or release) the background read of the reviewed commits.
     pub fn hold_accepted_reads(&self, hold: bool) {
         self.accepted_hold
@@ -434,6 +444,19 @@ struct Lost {
 /// and a tick follows. A kill that fails is logged, and the job goes on
 /// anyway.
 pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
+    // Pre-upgrade native jobs have no continuation checkpoint. Keep the
+    // old kill/requeue path for them instead of replaying prepare beneath
+    // an untracked recipe. Read outside the shared DB writer transaction.
+    let journal = crate::hosts::resume::Journal::new(&state.state_dir);
+    let checkpoints: HashSet<String> = match journal.scan::<serde_json::Value>("prepare/") {
+        Ok(rows) => rows.into_iter().filter_map(|(key, _)|
+            key.strip_prefix("prepare/").and_then(|rest| rest.split('/').next()).map(str::to_owned)
+        ).collect(),
+        Err(error) => {
+            warn!(%error, "cannot read native job checkpoints");
+            HashSet::new()
+        }
+    };
     let since = (chrono::Utc::now() - chrono::Duration::hours(DRAIN_WINDOW_HOURS))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let found = state
@@ -485,7 +508,7 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 // a running one that gets a cancel meanwhile keeps its
                 // slot as a draining job (TER-123 review 2, major 1).
                 let live = LiveRun::new(&job.id);
-                if running && !other_host
+                if running && !other_host && checkpoints.contains(&job.id)
                     && def.as_ref().is_some_and(|d|
                         matches!(d.kind, TargetKind::Host | TargetKind::Docker | TargetKind::Vmlab))
                 {
@@ -1224,7 +1247,8 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
 }
 
 fn spawn_job(state: Shared, job: Job, def: DeliveryDef, live_run: LiveRun) {
-    tokio::spawn(async move {
+    let owner = state.clone();
+    let task = tokio::spawn(async move {
         let end = match run(&state, &job, &def).await {
             // A merge that failed before its tests (TER-614 R3): one
             // retry after the wait, with no attempt used; the second
@@ -1261,6 +1285,9 @@ fn spawn_job(state: Shared, job: Job, def: DeliveryDef, live_run: LiveRun) {
         drop(live_run);
         kick(&state);
     });
+    let mut tasks = owner.job_queue.tasks.lock().unwrap_or_else(|p| p.into_inner());
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(task);
 }
 
 /// End running job `id` with `end`, then run its card flow
