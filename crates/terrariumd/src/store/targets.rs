@@ -1175,7 +1175,9 @@ mod tests {
             set_state(t, "sync", "running", None)?;
             assert!(update(t, "sync", &json!({"sync_workspace": true})).is_err());
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

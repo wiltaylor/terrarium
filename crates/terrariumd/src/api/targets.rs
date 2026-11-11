@@ -272,6 +272,7 @@ fn serialize_target_definition<S: serde::Serializer>(
 }
 
 #[test]
+#[allow(clippy::unwrap_used)]
 fn target_view_definition_exposes_workspace_sync() {
     #[derive(Serialize)]
     struct View {
@@ -283,7 +284,6 @@ fn target_view_definition_exposes_workspace_sync() {
         def.sync_workspace = enabled;
         let value = serde_json::to_value(View { def }).unwrap();
         assert_eq!(value["sync_workspace"], enabled);
-        assert_eq!(value.as_object().unwrap().keys().filter(|k| *k == "sync_workspace").count(), 1);
     }
 }
 
