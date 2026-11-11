@@ -381,6 +381,9 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             if let Err(e) = maintain_job_cache(&state.state_dir, &state.db, &mut cursor).await {
                 warn!("job cache maintenance failed: {e}");
             }
+            if let Err(e) = crate::legacy_job_logs::prune(&state.db, chrono::Utc::now()).await {
+                warn!("legacy log listing maintenance failed: {e}");
+            }
             if let Err(e) =
                 crate::job_logs::maintain(&state, &mut log_project, &mut log_cursor).await
             {
