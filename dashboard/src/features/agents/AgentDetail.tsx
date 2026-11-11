@@ -1,4 +1,6 @@
-import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
+import { useInstance } from "../../instance";
+import { useParams, useSearchParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { GrantDialog, grantNotice, LeaseChips, LeaseTable, useLeaseList } from "../../components/Leases";
 import { HoldBadge } from "../../components/HoldBadge";
@@ -9,7 +11,7 @@ import { Terminal } from "../../components/Terminal";
 import { ConfirmButton, ErrorBanner, PageHead, ProviderLogo, Tabs } from "../../components/ui";
 import { GRANTABLE_ROLES, roleLabel, type Agent, type AgentStatus, type ResetKind, type ResetResult, type Role } from "../../api/types";
 import { ago } from "../../lib/format";
-import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
+
 import { eventAgentId } from "../../stores/agents";
 import { ApiError } from "../../api/http";
 import { AgentForm } from "./AgentForm";
@@ -38,8 +40,9 @@ import { spawnedTabLabel, spawnRightsText } from "./spawn";
 import { AgentTools } from "../tools/AgentTools";
 
 /** The API call of a lifecycle button. Resume clears the pause (`unpause`). */
-const lifecycleCall = (kind: LifecycleAction["kind"], id: string) =>
-  kind === "pause" ? api.agents.pause(id) : kind === "resume" ? api.agents.unpause(id) : api.agents.restart(id);
+const lifecycleCall = (api: ReturnType<typeof useInstance>["api"], kind: LifecycleAction["kind"], id: string) => {
+  return kind === "pause" ? api.agents.pause(id) : kind === "resume" ? api.agents.unpause(id) : api.agents.restart(id);
+};
 
 /**
  * The page of an agent that the daemon removed. The back link opens the agents
@@ -60,6 +63,7 @@ function RemovedAgent(props: { project?: string }) {
 export const RUNNING: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 
 export default function AgentDetail() {
+  const { api, agents, leases: holds, events, quota } = useInstance();
   const params = useParams<{ id: string }>();
   const navigate = useNavigate();
   const id = () => decodeURIComponent(params.id);
@@ -197,7 +201,7 @@ export default function AgentDetail() {
             {/* An ephemeral agent has no pause: Cancel closes it (docs/api.md §6.10). */}
             <For each={lifecycleActions(a()).filter((b) => !a().ephemeral || b.kind === "restart")}>
               {(b) => (
-                <button onClick={() => act(b.label, () => lifecycleCall(b.kind, a().id))} disabled={b.disabled} title={b.title}>
+                <button onClick={() => act(b.label, () => lifecycleCall(api, b.kind, a().id))} disabled={b.disabled} title={b.title}>
                   {b.label}
                 </button>
               )}
@@ -334,6 +338,7 @@ export default function AgentDetail() {
  * `PATCH /api/agents/{id}`. The change applies at the next start.
  */
 export function SubscriptionCell(props: { agent: Agent; running: boolean; onError: (e: unknown) => void }) {
+  const { api, subscriptions, agents } = useInstance();
   const [detail] = createResource(
     () => [props.agent.id, props.agent.subscription ?? ""] as const,
     async ([id, name]) => {
@@ -476,6 +481,7 @@ export function SubscriptionCell(props: { agent: Agent; running: boolean; onErro
  * here, but it can swap inside it.
  */
 export function PoolCell(props: { agent: Agent; onError: (e: unknown) => void }) {
+  const { api, agents } = useInstance();
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal<string[]>([]);
   const [target, setTarget] = createSignal("");
@@ -584,6 +590,7 @@ export function PoolCell(props: { agent: Agent; onError: (e: unknown) => void })
  * subscription.
  */
 function SystemPromptCell(props: { agent: Agent; running: boolean; onError: (e: unknown) => void }) {
+  const { api, agents } = useInstance();
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal<PromptFields>({ persona: "", system_prompt: "" });
   const [busy, setBusy] = createSignal(false);
@@ -695,6 +702,7 @@ function SystemPromptCell(props: { agent: Agent; running: boolean; onError: (e: 
  * start: `skills_restart` says that a restart applies them.
  */
 function SkillsCell(props: { agent: Agent; running: boolean; onError: (e: unknown) => void }) {
+  const { agents, api } = useInstance();
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal<SkillSelection>({ skills: [], skills_off: [], default_skills: true });
   const [busy, setBusy] = createSignal(false);
@@ -805,6 +813,7 @@ function SkillsCell(props: { agent: Agent; running: boolean; onError: (e: unknow
 
 /** The targets the agent holds by lease (`GET /api/agents/{id}/leases`, docs/api.md §17.7), kept live from `lease` events. */
 function LeasesPanel(props: { agent: Agent; onNotice: (s: string) => void }) {
+  const { api, leases: holds } = useInstance();
   const list = useLeaseList({
     key: () => props.agent.id,
     fetch: (id, all) => api.agents.leases(id, { all }),
@@ -851,6 +860,7 @@ function LeasesPanel(props: { agent: Agent; onNotice: (s: string) => void }) {
 
 /** `GET` and `PUT /api/agents/{id}/roles` (docs/api.md §6.4). */
 function RolesPanel(props: { agent: Agent; onError: (e: unknown) => void }) {
+  const { api, agents } = useInstance();
   const [roles, { mutate }] = createResource(
     () => props.agent.id,
     (aid) => api.agents.roles(aid).catch((e: unknown) => (props.onError(e), props.agent.roles)),

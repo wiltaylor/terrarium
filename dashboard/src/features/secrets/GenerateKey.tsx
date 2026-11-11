@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Generate an SSH key pair in the store (PLAN §16b.6a, docs/api.md §5.2
 // `POST /api/secrets/{scope}/{name}/generate`). The private key never
 // leaves the daemon; the answer shows the public key. The form is a group,
@@ -7,7 +8,7 @@ import { createSignal, For, Show } from "solid-js";
 import { ApiError } from "../../api/http";
 import type { Secret, SecretGenerate } from "../../api/types";
 import { ErrorBanner } from "../../components/ui";
-import { api } from "../../stores";
+
 import { GLOBAL, NAME_RE } from "./model";
 import { PublicKey } from "./PublicKey";
 
@@ -22,6 +23,7 @@ export function GenerateKeyForm(props: {
   /** Show the public key of the new key in the form. */
   showResult?: boolean;
 }) {
+  const { api } = useInstance();
   const [scope, setScope] = createSignal(props.scope);
   const [name, setName] = createSignal(props.name ?? "");
   const [type, setType] = createSignal<"ed25519" | "rsa">("ed25519");

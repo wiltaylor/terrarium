@@ -9,11 +9,11 @@ const ofAgent = vi.fn();
 const refresh = vi.fn();
 const off = vi.fn();
 let event: (e: AgentEvent) => void;
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api: { questions: { ofAgent } },
   inbox: { refresh },
   events: { on: (fn: typeof event) => { event = fn; return off; } },
-}));
+})); });
 
 let change: (q: Question) => void;
 vi.mock("./QuestionCard", () => ({ QuestionCard: (p: { question: Question; onChange: typeof change }) => {

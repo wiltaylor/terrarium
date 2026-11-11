@@ -1,13 +1,14 @@
+import { useInstance } from "../instance";
 // Target leases (docs/api.md §17.7): the lease list with Revoke and Extend,
 // the Grant dialog, and the "holds <target>" chips. The Targets page and the
 // agent page use them.
 
-import { A } from "@solidjs/router";
+import { A } from "../instance/navigation";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Agent, Lease, LeaseEventData, LeaseGranted, Target } from "../api/types";
 import { scopeLabel, targetScope } from "../lib/target-scope";
 import { actorLabel, applyLeaseEvent, countdown, holderLabel, shownState, untilValue, type UntilMode } from "../lib/leases";
-import { agents, api, events, leases as holds } from "../stores";
+
 import { createGrantDialog, eligibleAgents, eligibleTargets, grantTitle, NO_EXCLUSIVE_REASON } from "../features/targets/grant";
 import { ConfirmButton, Empty, ErrorBanner, Modal, useNow } from "./ui";
 
@@ -15,6 +16,7 @@ const STATE_CHIP: Record<string, string> = { active: "ok", revoked: "", expired:
 
 /** A name for an `agent:<ulid>` actor from the agents store. */
 const agentName = (id: string) => {
+  const { agents } = useInstance();
   const a = agents.byId(id);
   return a ? `${a.project}/${a.name}` : undefined;
 };
@@ -38,6 +40,7 @@ export function LeaseExpiry(props: { lease: Pick<Lease, "expires_at" | "state">;
 
 /** "holds <target>" chips for an agent, from the leases store. */
 export function LeaseChips(props: { agentId: string; now?: number }) {
+  const { leases: holds } = useInstance();
   const tick = useNow(15_000);
   const list = () => holds.holdsFor(props.agentId, props.now ?? tick());
   return (
@@ -62,6 +65,7 @@ export function useLeaseList(opts: {
   /** Seed the chips from a fresh list. */
   onLoaded?: (key: string, list: Lease[]) => void;
 }) {
+  const { events } = useInstance();
   const [all, setAll] = createSignal(false);
   const [list, setList] = createSignal<Lease[]>([]);
   const [loading, setLoading] = createSignal(false);
@@ -121,6 +125,7 @@ export function useLeaseList(opts: {
 
 /** The lease table with Revoke and Extend. The API refuses a caller without the right; the banner shows its message. */
 export function LeaseTable(props: { leases: Lease[]; show: "agent" | "target"; onChange: (l: Lease) => void; history?: boolean; loading?: boolean }) {
+  const { api } = useInstance();
   const now = useNow(1000);
   const [error, setError] = createSignal<unknown>(null);
   const [extending, setExtending] = createSignal<string | null>(null);
@@ -245,6 +250,7 @@ function UntilInput(props: { mode: UntilMode; duration: string; time: string; on
 
 /** `PATCH /api/targets/{name}/leases/{agent}` with a new `until`. */
 function ExtendForm(props: { lease: Lease; onDone: (l: Lease) => void; onCancel: () => void }) {
+  const { api } = useInstance();
   const [mode, setMode] = createSignal<UntilMode>("duration");
   const [dur, setDur] = createSignal("30m");
   const [time, setTime] = createSignal("");
@@ -285,6 +291,7 @@ function ExtendForm(props: { lease: Lease; onDone: (l: Lease) => void; onCancel:
  * all for a global target). From an agent: pick the target.
  */
 export function GrantDialog(props: { target?: Target; agent?: Agent; targets?: Target[]; onClose: () => void; onGranted: (l: LeaseGranted) => void }) {
+  const { api, agents } = useInstance();
   const now = useNow(1000);
   const targetOf = (name: string) => (props.target?.name === name ? props.target : props.targets?.find((t) => t.name === name));
   const dlg = createGrantDialog(api, { target: props.target?.name ?? "", agent: props.agent?.id ?? "" }, Date.now, targetOf);

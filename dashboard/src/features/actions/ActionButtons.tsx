@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The buttons of the project actions (TER-53, docs/api.md §19.10), on the
 // project dashboard and next to the project name in Home 'Work in
 // progress'. A click opens the confirm step: what the action does, who it
@@ -8,11 +9,11 @@
 // action shows as a disabled button with its reason on the dashboard; Home
 // lists only the enabled ones.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createSignal, For, Show } from "solid-js";
 import type { Schedule } from "../../api/types";
 import { Modal } from "../../components/ui";
-import { api } from "../../stores";
+
 import { confirmText, failureOf, historyHref, limitWords, offReason, resultOf, type RunResult } from "./model";
 
 export function ActionButtons(props: { actions: Schedule[]; compact?: boolean; onRan?: () => void }) {
@@ -37,6 +38,7 @@ export function ActionButtons(props: { actions: Schedule[]; compact?: boolean; o
 }
 
 function RunDialog(props: { action: Schedule; onClose: () => void; onRan?: () => void }) {
+  const { api } = useInstance();
   const t = confirmText(props.action);
   const [busy, setBusy] = createSignal(false);
   const [result, setResult] = createSignal<RunResult | null>(null);

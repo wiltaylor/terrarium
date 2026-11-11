@@ -18,6 +18,25 @@ describe("buildQuery", () => {
 });
 
 describe("createHttpTransport", () => {
+  it("keeps a same-origin remote proxy prefix on HTTP, SSE, bytes, and sockets", async () => {
+    const f = fakeFetch(200, []);
+    const t = createHttpTransport({
+      baseUrl: "/api/remotes/lab/proxy/", fetch: f, getToken: () => null,
+      getCsrf: () => "home-csrf", location: { protocol: "https:", host: "home.test" },
+    });
+    await t.request("PATCH", "/api/agents/A1", { body: { model: "test" } });
+    await t.page("/api/projects");
+    await t.bytes("/api/repos/R1/file");
+    await t.stream("/api/events", { since: 7 }, new AbortController().signal);
+    expect(f.mock.calls.map(([u]) => u)).toEqual([
+      "/api/remotes/lab/proxy/api/agents/A1", "/api/remotes/lab/proxy/api/projects",
+      "/api/remotes/lab/proxy/api/repos/R1/file", "/api/remotes/lab/proxy/api/events?since=7",
+    ]);
+    expect(f.mock.calls[0]![1]?.headers).toMatchObject({ "X-CSRF-Token": "home-csrf" });
+    expect(t.wsUrl("/api/events", { since: 7 })).toBe("wss://home.test/api/remotes/lab/proxy/api/events?since=7");
+    expect(t.wsUrl("/api/agents/A1/pty")).toBe("wss://home.test/api/remotes/lab/proxy/api/agents/A1/pty");
+  });
+
   it("sends the bearer token and a JSON body", async () => {
     const f = fakeFetch(200, { ok: 1 });
     const t = createHttpTransport({ fetch: f, getToken: () => "s3cret" });

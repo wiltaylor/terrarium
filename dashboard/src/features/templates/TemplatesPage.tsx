@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Agent templates (docs/api.md §21). Under /settings/templates (a tab of the
 // settings screen): the global templates and those of each project, with a
 // scope filter. Create, edit, and delete (an in-page
@@ -14,11 +15,12 @@ import { createResource, createSignal, For, onCleanup, onMount, Show } from "sol
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
 import type { AgentTemplate, TemplateWcl } from "../../api/types";
 import { ago } from "../../lib/format";
-import { api, events, projects } from "../../stores";
+
 import { pathKey, scopeLabel, selectable } from "./model";
 import { TemplateDialog } from "./TemplateDialog";
 
 export default function TemplatesPage() {
+  const { api, events, projects } = useInstance();
   const route = useParams<{ project?: string }>();
   // "all", "global", or a project name.
   const [scope, setScope] = createSignal("all");

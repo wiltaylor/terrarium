@@ -1,20 +1,22 @@
+import { useInstance } from "../../instance";
 // Home, Blocked (TER-51): every card in the blocked column of every project
 // the caller may read, by project, with its link, title, what it needs (the
 // first line of the comment of the move to blocked), the agent with its
 // status, and how long it has been blocked. It reloads on card and agent
 // status events (batched) and each minute, as Work in progress does.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { ActiveCard } from "../../api/types";
 import { Empty, ErrorBanner } from "../../components/ui";
-import { api, events } from "../../stores";
+
 import { cardHref } from "../inbox/questions";
 import { assigneeText, byProject, statusTone } from "./active";
 import { blockedFor, blockedSummary, reasonLine } from "./blocked";
 
 /** The section. `now` drives the "blocked for" times. */
 export function BlockedCards(props: { now: number }) {
+  const { api, events } = useInstance();
   const [tick, setTick] = createSignal(0);
   const [cards] = createResource(tick, () => api.cards.active({ columns: ["blocked"] }));
   onMount(() => {

@@ -27,7 +27,7 @@ const gone: Host = { name: "gone", status: "offline", offline_reason: "never con
 
 const list = vi.fn(async () => [wsl, gone]);
 const metrics = vi.fn(async () => ({ host: "wsl", interval_secs: 10, minutes: 15, stale: false, samples: [sample] }));
-vi.mock("../../stores", () => ({ api: { hosts: { list, metrics, revoke: vi.fn() }, targets: { list: vi.fn(async () => []) } } }));
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({ api: { hosts: { list, metrics, revoke: vi.fn() }, targets: { list: vi.fn(async () => []) } } })); });
 vi.mock("@solidjs/router", () => ({ A: (p: { children?: unknown }) => p.children }));
 
 const { HostCards } = await import("./HostCards");

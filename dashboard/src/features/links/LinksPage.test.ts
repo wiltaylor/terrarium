@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMockApi } from "../../api/mock";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, autoLoginMs: 0 });
-vi.mock("../../stores", () => ({ api }));
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({ api })); });
 
 const { default: LinksPage } = await import("./LinksPage");
 
