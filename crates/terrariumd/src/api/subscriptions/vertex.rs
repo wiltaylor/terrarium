@@ -104,7 +104,8 @@ async fn invoke(jwt: &str, token_url: &str, url: &str) -> ApiResult<()> {
     struct Token { access_token: String }
     let token: Token = serde_json::from_slice(&bytes).map_err(|_| failure("Invalid Google authentication response."))?;
     let response = client.post(url).bearer_auth(token.access_token)
-        .json(&json!({"anthropic_version": "vertex-2023-10-16", "max_tokens": 1, "messages": [{"role": "user", "content": "Hi"}]}))
+        .header("content-type", "application/json")
+        .body(json!({"anthropic_version": "vertex-2023-10-16", "max_tokens": 1, "messages": [{"role": "user", "content": "Hi"}]}).to_string())
         .send().await.map_err(|_| failure("Cannot reach Vertex. Check the region."))?;
     if response.status().is_success() { return Ok(()); }
     let hint = match response.status().as_u16() {
