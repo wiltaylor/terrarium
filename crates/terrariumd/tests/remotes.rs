@@ -177,6 +177,42 @@ async fn ten_browser_tabs_share_one_remote_firehose_and_keep_filters() {
 }
 
 #[tokio::test]
+async fn firehose_reconnect_releases_its_stream_slot_and_resumes_sequence() {
+    let home = TestDaemon::start().await;
+    let id = ulid::Ulid::new().to_string();
+    let instance = id.clone();
+    let connects = Arc::new(AtomicUsize::new(0));
+    let counter = connects.clone();
+    let app = Router::new()
+        .route("/api/system/instance",get(move || { let id=instance.clone(); async move { Json(json!({"id":id,"version":terrarium_version::VERSION})) } }))
+        .route("/api/events/latest",get(|| async { Json(json!({"seq":0})) }))
+        .route("/api/events",get(move |ws: axum::extract::WebSocketUpgrade, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String,String>>| {
+            let n = counter.fetch_add(1,Ordering::SeqCst)+1;
+            async move { ws.on_upgrade(move |mut socket| async move {
+                // Report the resume cursor as data, without putting remote
+                // events into the home's event store.
+                let text = json!({"seq":n,"kind":"test","resume":q.get("since")}).to_string();
+                socket.send(axum::extract::ws::Message::Text(text.into())).await.unwrap();
+                if n==1 { let _ = socket.send(axum::extract::ws::Message::Close(None)).await; }
+                else { std::future::pending::<()>().await; }
+            }) }
+        }));
+    let _server = fake(&home,app,&id).await;
+    let r = home.get("/api/remotes/lab").await;
+    let limits = home.daemon.as_ref().unwrap().state.remotes.get(r.ok()["id"].as_str().unwrap());
+    let _other_streams: Vec<_> = (0..7).map(|_| limits.acquire(true).unwrap()).collect();
+    let mut ws = home.ws("/api/remotes/lab/proxy/api/events?live=1",None).await.unwrap();
+    for (seq,resume) in [(1,"0"),(2,"1")] {
+        let frame = tokio::time::timeout(Duration::from_secs(10),ws.next()).await.unwrap().unwrap().unwrap();
+        let value: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        assert_eq!(value["seq"],seq);
+        assert_eq!(value["resume"],resume);
+    }
+    assert_eq!(connects.load(Ordering::SeqCst),2);
+    home.delete("/api/remotes/lab").await.ok();
+}
+
+#[tokio::test]
 async fn read_only_and_sysadmin_home_are_refused() {
     let home = TestDaemon::start().await;
     let remote = remote().await;

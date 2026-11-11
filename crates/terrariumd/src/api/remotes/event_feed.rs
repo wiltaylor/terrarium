@@ -25,7 +25,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::remotes::{EventFeed, Limits};
 
 type Upstream = WebSocketStream<reqwest::Upgraded>;
-type Connection = (Upstream, OwnedSemaphorePermit, i64);
+type Connection = (Upstream, Option<OwnedSemaphorePermit>, i64);
 
 async fn open(s: &Shared, r: &Remote, since: &str) -> ApiResult<Connection> {
     let limits = s.remotes.get(&r.id);
@@ -99,7 +99,7 @@ async fn open(s: &Shared, r: &Remote, since: &str) -> ApiResult<Connection> {
     .await?;
     Ok((
         WebSocketStream::from_raw_socket(upstream, Role::Client, Some(cfg)).await,
-        stream,
+        Some(stream),
         since.parse().map_err(|_| net::unreachable())?,
     ))
 }
@@ -206,6 +206,9 @@ async fn relay(
             Some(tungstenite::Message::Pong(_)) => {}
             Some(tungstenite::Message::Binary(_) | tungstenite::Message::Frame(_)) => break,
             Some(tungstenite::Message::Close(_)) | None => {
+                // The dead connection must not occupy the eighth stream
+                // slot while its replacement waits for admission.
+                upstream.1.take();
                 let _ = mark(&s, &r, "offline").await;
                 loop {
                     if *closed.borrow() || feed.frames.receiver_count() == 0 {
