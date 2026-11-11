@@ -89,6 +89,9 @@ async fn held_turns_are_redacted_stable_and_removable_by_the_lead() {
     )
     .await
     .ok();
+    td.post(&format!("/api/agents/{w}/unpause"), json!({}))
+        .await
+        .ok();
     td.post(&format!("/api/agents/{w}/start"), json!({}))
         .await
         .ok();
