@@ -66,6 +66,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Reserve { command } => reservations::run(ctx, command).await,
         Command::Daemon { command } => system::daemon(ctx, command).await,
         Command::Whoami => system::whoami(ctx).await,
+        Command::Remote { command } => system::remotes(ctx, command).await,
         Command::Group { command } => groups::group(ctx, command).await,
         Command::Login {
             password_stdin,

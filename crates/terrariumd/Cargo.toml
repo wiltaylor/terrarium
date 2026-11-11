@@ -12,6 +12,10 @@ license.workspace = true
 name = "it"
 path = "tests/it/main.rs"
 
+[[test]]
+name = "remotes"
+path = "tests/remotes.rs"
+
 # Keep the cheap cross-crate source guard independently selectable.
 [[test]]
 name = "no_token_endpoint"

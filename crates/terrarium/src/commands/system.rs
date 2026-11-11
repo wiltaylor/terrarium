@@ -9,7 +9,7 @@ use super::{event_line, print_generic, print_table, set_opt};
 use crate::api::{ServerError, query};
 use crate::cli::{
     AdminTargetCmd, AuditArgs, BackupCmd, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, LinkCmd,
-    SnapshotArgs, SnapshotCmd, SnapshotOn, SubscriptionCmd, UsageCmd,
+    RemoteCmd, SnapshotArgs, SnapshotCmd, SnapshotOn, SubscriptionCmd, UsageCmd,
 };
 use crate::ctx::Ctx;
 use crate::output::field;
@@ -879,6 +879,37 @@ pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
 /// `admin link ...`: the link keys of this daemon (docs/api.md §36). The
 /// pairing code prints alone on stdout; the long-lived key never reaches
 /// the CLI (the home gets it from `POST /api/links/pair`).
+pub async fn remotes(ctx: &Ctx, cmd: &RemoteCmd) -> anyhow::Result<()> {
+    fn code() -> anyhow::Result<String> {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        Ok(line.trim().to_owned())
+    }
+    fn ca(file: &Option<std::path::PathBuf>) -> anyhow::Result<Option<String>> {
+        file.as_ref().map(std::fs::read_to_string).transpose().map_err(Into::into)
+    }
+    let v = match cmd {
+        RemoteCmd::Ls => ctx.api.get("/api/remotes", vec![]).await?,
+        RemoteCmd::Add { name, url, instance_id, pin_sha256, ca_file, label } => {
+            ctx.api.post("/api/remotes", Some(json!({
+                "name": name, "url": url, "instance_id": instance_id,
+                "pin_sha256": pin_sha256, "ca_pem": ca(ca_file)?, "label": label,
+                "code": code()?,
+            }))).await?
+        }
+        RemoteCmd::Rm { name } => ctx.api.delete(&format!("/api/remotes/{}", crate::transport::encode(name)), vec![]).await?,
+        RemoteCmd::Repin { name, pin_sha256, ca_file } => {
+            ctx.api.post(&format!("/api/remotes/{}/repin", crate::transport::encode(name)),
+                Some(json!({"pin_sha256": pin_sha256, "ca_pem": ca(ca_file)?}))).await?
+        }
+        RemoteCmd::Pair { name } => {
+            ctx.api.post(&format!("/api/remotes/{}/pair", crate::transport::encode(name)),
+                Some(json!({"code": code()?}))).await?
+        }
+    };
+    ctx.emit(&v, |c,v| print_generic(c, v, "no remotes"))
+}
+
 pub async fn links(ctx: &Ctx, cmd: &LinkCmd) -> anyhow::Result<()> {
     match cmd {
         LinkCmd::Ls { all } => {

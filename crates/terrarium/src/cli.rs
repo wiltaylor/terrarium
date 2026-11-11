@@ -337,6 +337,11 @@ pub enum Command {
         #[command(subcommand)]
         command: GroupCmd,
     },
+    /// Linked instances on this daemon (operator only)
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCmd,
+    },
     /// Operator commands that an agent's role permits
     Admin {
         #[command(subcommand)]
@@ -4580,6 +4585,40 @@ pub enum LinkCmd {
     /// Revoke a link: its key stops working and its open streams close
     #[command(visible_alias = "rm")]
     Revoke { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RemoteCmd {
+    /// List the home daemon's linked instances (operator only)
+    Ls,
+    /// Pair a remote. Read the one-time code from stdin, not argv
+    Add {
+        name: String,
+        url: String,
+        /// Compare this ID with the remote's Links screen
+        #[arg(long)]
+        instance_id: String,
+        /// The leaf SHA-256 fingerprint confirmed on the remote
+        #[arg(long)]
+        pin_sha256: Option<String>,
+        /// PEM trust roots, instead of the system roots
+        #[arg(long)]
+        ca_file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Remove a remote and revoke its link on a best-effort basis
+    Rm { name: String },
+    /// Replace the TLS trust settings after checking the new fingerprint
+    Repin {
+        name: String,
+        #[arg(long)]
+        pin_sha256: Option<String>,
+        #[arg(long)]
+        ca_file: Option<std::path::PathBuf>,
+    },
+    /// Replace a rotated link key. Read the pairing code from stdin
+    Pair { name: String },
 }
 
 #[derive(Debug, Subcommand)]

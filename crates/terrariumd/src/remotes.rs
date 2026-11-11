@@ -22,6 +22,20 @@ pub fn unreachable() -> ApiError {
     ApiError::new(Code::RemoteUnreachable, "remote connection failed")
 }
 
+pub fn connection_error(e: reqwest::Error) -> ApiError {
+    use std::error::Error;
+    let mut source: Option<&(dyn Error + 'static)> = Some(&e);
+    while let Some(s) = source {
+        if s.is::<terrarium_host::tls::FingerprintMismatch>() {
+            let mut error = unreachable();
+            error.details = Some(serde_json::json!({"status":"pin_mismatch"}));
+            return error;
+        }
+        source = s.source();
+    }
+    unreachable()
+}
+
 pub fn mismatch() -> ApiError {
     ApiError::new(Code::RemoteMismatch, "remote instance does not match")
 }
@@ -60,7 +74,7 @@ pub fn check_path(method: &Method, path: &str, ws: bool, read_only: bool) -> Api
     if !matches!(*method, Method::GET | Method::POST | Method::PUT | Method::PATCH | Method::DELETE | Method::HEAD) {
         return Err(ApiError::bad_request("proxy method is not supported"));
     }
-    if ws && !(path == "/api/events" || (path.starts_with("/api/agents/") && path.ends_with("/pty") && path.split('/').count() == 5)) {
+    if ws && !(path == "/api/events" || (path.starts_with("/api/agents/") && (path.ends_with("/pty") || path.ends_with("/events")) && path.split('/').count() == 5)) {
         return Err(ApiError::new(Code::LinkForbidden, "unsupported remote WebSocket"));
     }
     Ok(())
@@ -87,7 +101,7 @@ pub fn request_headers(input: &HeaderMap, key: &str, home: &str) -> ApiResult<He
 }
 
 pub fn response_headers(input: &HeaderMap, name: &str, empty: bool) -> ApiResult<HeaderMap> {
-    if !empty {
+    if !empty || input.contains_key(header::CONTENT_TYPE) {
         let ct = input.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
         if !matches!(ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase().as_str(),
             "application/json" | "text/event-stream" | "application/octet-stream") {
@@ -147,7 +161,10 @@ pub async fn limited(mut r: reqwest::Response, cap: usize, deadline: Duration) -
 
 pub async fn instance(c: &Client, r: &Remote, headers: &HeaderMap) -> ApiResult<Instance> {
     let resp = c.get(format!("{}api/system/instance", r.url)).headers(headers.clone())
-        .timeout(PLAIN).send().await.map_err(|_| unreachable())?;
+        .timeout(PLAIN).send().await.map_err(connection_error)?;
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(ApiError::new(Code::Unauthorized, "remote link authentication failed"));
+    }
     if resp.status() != reqwest::StatusCode::OK { return Err(unreachable()); }
     let id: Instance = serde_json::from_slice(&limited(resp, 16384, PLAIN).await?).map_err(|_| unreachable())?;
     if id.id != r.instance_id { return Err(mismatch()); }
@@ -180,6 +197,10 @@ impl Runtime {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).entry(id.to_owned()).or_default().clone()
     }
     pub fn close(&self, id: &str) {
-        if let Some(l) = self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(id) { l.closed.send_replace(true); }
+        self.get(id).closed.send_replace(true);
+    }
+    pub fn reset(&self, id: &str) {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(l) = map.insert(id.to_owned(), Arc::default()) { l.closed.send_replace(true); }
     }
 }

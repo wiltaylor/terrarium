@@ -81,7 +81,7 @@ async fn pair(s: &Shared, r: &mut Remote, code: String) -> ApiResult<Vec<u8>> {
         "code": code, "home_instance_id": s.links.instance_id(&s.state_dir)?,
     }))?);
     let resp = c.post(format!("{}api/links/pair", r.url)).header(header::CONTENT_TYPE, "application/json")
-        .body(body.to_vec()).timeout(net::PLAIN).send().await.map_err(|_| net::unreachable())?;
+        .body(body.to_vec()).timeout(net::PLAIN).send().await.map_err(net::connection_error)?;
     if resp.status() != StatusCode::OK { return Err(net::unreachable()); }
     let bytes = zeroize::Zeroizing::new(net::limited(resp, 16384, net::PLAIN).await?);
     let mut p: Paired = serde_json::from_slice(&bytes).map_err(|_| net::unreachable())?;
@@ -131,10 +131,12 @@ async fn repin(State(s): State<Shared>, actor: Actor, Path(name): Path<String>, 
     let h = net::request_headers(&HeaderMap::new(), &key(&s, &r).await?, &s.links.instance_id(&s.state_dir)?)?;
     net::instance(&c, &r, &h).await?;
     s.remotes.close(&r.id);
+    let id = r.id.clone();
     s.db.write(actor.label(), move |t| {
         t.execute("UPDATE remotes SET pin_sha256=?2,ca_pem=?3 WHERE id=?1", rusqlite::params![r.id,r.pin_sha256,r.ca_pem])?;
         t.audit("remote.repin", &r.name, None, json!({}))
     }).await?;
+    s.remotes.reset(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -147,10 +149,12 @@ async fn repair(State(s): State<Shared>, actor: Actor, Path(name): Path<String>,
     let mut r = load(&s, name).await?;
     let sealed = pair(&s, &mut r, b.code).await?;
     s.remotes.close(&r.id);
+    let id = r.id.clone();
     s.db.write(actor.label(), move |t| {
         t.execute("UPDATE remotes SET sealed=?2,read_only=?3 WHERE id=?1", rusqlite::params![r.id,sealed,r.read_only])?;
         t.audit("remote.pair", &r.name, None, json!({}))
     }).await?;
+    s.remotes.reset(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -190,12 +194,21 @@ async fn mark(s: &Shared, r: &Remote, status: &str) -> ApiResult<()> {
 async fn proxy(State(s): State<Shared>, actor: Actor, Path((name, _rest)): Path<(String,String)>, req: Request) -> ApiResult<Response> {
     operator(&actor)?;
     let r = load(&s, name).await?;
-    let path = req.uri().path().split_once("/proxy").map(|(_,p)| p).ok_or_else(|| ApiError::bad_request("bad proxy path"))?.to_owned();
+    let prefix = format!("/api/remotes/{}/proxy", r.name);
+    let path = req.uri().path().strip_prefix(&prefix).ok_or_else(|| ApiError::bad_request("bad proxy path"))?.to_owned();
     let ws = req.headers().get(header::UPGRADE).is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
     net::check_path(req.method(), &path, ws, r.read_only)?;
-    let result = forward(&s, &r, actor, path, ws, req).await;
+    let limits = s.remotes.get(&r.id);
+    let mut closed = limits.closed.subscribe();
+    if *closed.borrow() { return Err(net::unreachable()); }
+    let result = tokio::select! {
+        _ = closed.changed() => Err(net::unreachable()),
+        result = forward(&s, &r, actor, path, ws, req) => result,
+    };
     if let Err(e) = &result {
-        mark(&s, &r, if e.code == Code::RemoteMismatch { "mismatch" } else { "offline" }).await?;
+        let status = if e.details.as_ref().is_some_and(|d| d["status"] == "pin_mismatch") { "pin_mismatch" }
+            else { match e.code { Code::RemoteMismatch => "mismatch", Code::Unauthorized => "auth_failed", _ => "offline" } };
+        mark(&s, &r, status).await?;
     }
     result
 }
@@ -224,7 +237,7 @@ async fn forward(s: &Shared, r: &Remote, actor: Actor, path: String, ws: bool, r
         .map_err(|_| ApiError::bad_request("upload timeout"))?
         .map_err(|_| ApiError::new(Code::TooLarge, "remote upload exceeds 256 MiB"))?;
     let resp = tokio::time::timeout(net::PLAIN, outgoing.body(body).send()).await
-        .map_err(|_| net::unreachable())?.map_err(|_| net::unreachable())?;
+        .map_err(|_| net::unreachable())?.map_err(net::connection_error)?;
     let status = resp.status();
     if status.is_redirection() && status != StatusCode::SWITCHING_PROTOCOLS { return Err(net::unreachable()); }
     let state = if status == StatusCode::UNAUTHORIZED { "auth_failed" }
@@ -261,6 +274,7 @@ async fn forward(s: &Shared, r: &Remote, actor: Actor, path: String, ws: bool, r
         let stream_permit = limits.acquire(true)?;
         let rx = limits.closed.subscribe();
         let stream = futures_util::stream::unfold((resp, permit, stream_permit, rx, 0usize), move |(mut resp, p, sp, mut rx, total)| async move {
+            if *rx.borrow() || total > net::UPLOAD_MAX && !sse { return None; }
             let next = tokio::select! {
                 _ = rx.changed() => return None,
                 b = tokio::time::timeout(net::IDLE, resp.chunk()) => b,
@@ -271,7 +285,7 @@ async fn forward(s: &Shared, r: &Remote, actor: Actor, path: String, ws: bool, r
                     Some((Ok::<_, std::io::Error>(b), (resp,p,sp,rx,n)))
                 }
                 Ok(Ok(None)) => None,
-                _ => Some((Err(std::io::Error::other("remote stream ended")), (resp,p,sp,rx,net::UPLOAD_MAX))),
+                _ => None,
             }
         });
         Body::from_stream(stream)
@@ -288,6 +302,7 @@ where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
     use tungstenite::Message as R;
     let mut closed = limits.closed.subscribe();
     loop {
+        if *closed.borrow() { break; }
         tokio::select! {
             _ = closed.changed() => break,
             _ = tokio::time::sleep(net::IDLE) => break,
@@ -299,7 +314,7 @@ where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
                     Some(Ok(H::Pong(b))) => R::Pong(b),
                     _ => break,
                 };
-                if tokio::time::timeout(net::IDLE, remote.send(m)).await.is_err_or(|r| r.is_err()) { break; }
+                if !matches!(tokio::time::timeout(net::IDLE, remote.send(m)).await, Ok(Ok(()))) { break; }
             }
             msg = remote.next() => {
                 let m = match msg {
@@ -309,7 +324,7 @@ where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
                     Some(Ok(R::Pong(b))) => H::Pong(b),
                     _ => break,
                 };
-                if tokio::time::timeout(net::IDLE, home.send(m)).await.is_err_or(|r| r.is_err()) { break; }
+                if !matches!(tokio::time::timeout(net::IDLE, home.send(m)).await, Ok(Ok(()))) { break; }
             }
         }
     }
