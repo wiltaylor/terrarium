@@ -53,7 +53,12 @@ pub fn set(t: &mut Tx<'_>, actor: &Actor, id: &str, wait: &Wait) -> ApiResult<()
     if wait.dependencies.is_empty() || wait.dependencies.len() > MAX_DEPS {
         return Err(ApiError::invalid("a card wait needs 1 to 128 dependencies"));
     }
-    if wait.action.comment.as_ref().is_some_and(|c| c.trim().is_empty()) {
+    if wait
+        .action
+        .comment
+        .as_ref()
+        .is_some_and(|c| c.trim().is_empty())
+    {
         return Err(ApiError::invalid("a wait action comment must not be empty"));
     }
     if let Some(to) = &wait.action.move_to {
@@ -80,7 +85,11 @@ pub fn set(t: &mut Tx<'_>, actor: &Actor, id: &str, wait: &Wait) -> ApiResult<()
         }
         wanted.push((key, dep.target.clone()));
     }
-    check_cycles(t, &card.id, &wanted.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>())?;
+    check_cycles(
+        t,
+        &card.id,
+        &wanted.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+    )?;
     t.execute("DELETE FROM card_deps WHERE card = ?1", [&card.id])?;
     for (dep, target) in wanted {
         t.execute(
@@ -100,18 +109,25 @@ pub fn set(t: &mut Tx<'_>, actor: &Actor, id: &str, wait: &Wait) -> ApiResult<()
 pub(super) fn check_cycles(conn: &Connection, card: &str, roots: &[String]) -> ApiResult<()> {
     let mut seen = HashSet::new();
     let mut stack = roots.to_vec();
-    let mut statement = conn.prepare("SELECT depends_on FROM card_deps WHERE card = ?1 LIMIT 129")?;
+    let mut statement =
+        conn.prepare("SELECT depends_on FROM card_deps WHERE card = ?1 LIMIT 129")?;
     while let Some(next) = stack.pop() {
         if next == card {
             return Err(ApiError::invalid("card wait makes a dependency cycle"));
         }
-        if !seen.insert(next.clone()) { continue }
+        if !seen.insert(next.clone()) {
+            continue;
+        }
         if seen.len() > MAX_GRAPH {
             return Err(ApiError::invalid("dependency graph exceeds 4096 cards"));
         }
-        let edges = statement.query_map([next], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        let edges = statement
+            .query_map([next], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
         if edges.len() > MAX_DEPS {
-            return Err(ApiError::invalid("dependency graph exceeds 128 edges per card"));
+            return Err(ApiError::invalid(
+                "dependency graph exceeds 128 edges per card",
+            ));
         }
         stack.extend(edges);
     }
@@ -213,7 +229,12 @@ pub fn act(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiResu
         Ok(acted) => Ok(acted),
         Err(error) => {
             t.execute("UPDATE card_waits SET acted_at=?3 WHERE card=?1 AND generation=?2 AND met_at IS NOT NULL", params![id, generation, now()])?;
-            t.audit("card.wait_action_failed", id, Some(&row.project), json!({"reason": error.to_string(), "wait_generation": generation}))?;
+            t.audit(
+                "card.wait_action_failed",
+                id,
+                Some(&row.project),
+                json!({"reason": error.to_string(), "wait_generation": generation}),
+            )?;
             Ok(true)
         }
     }
@@ -264,7 +285,12 @@ fn act_inner(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiRe
                 Err(e) => {
                     reason = format!("wait met, move refused: {e}");
                     refused = true;
-                    t.audit("card.wait_action_failed", id, Some(&row.project), json!({"reason": reason, "wait_generation": generation}))?;
+                    t.audit(
+                        "card.wait_action_failed",
+                        id,
+                        Some(&row.project),
+                        json!({"reason": reason, "wait_generation": generation}),
+                    )?;
                 }
             }
         } else if let Some(comment) = action.comment {

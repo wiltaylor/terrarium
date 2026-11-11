@@ -583,47 +583,135 @@ async fn blank_action_comments_are_refused_before_dependency_changes() {
     let db = td.daemon.as_ref().unwrap().state.db.clone();
     for comment in ["", " \n\t "] {
         let id = b.clone();
-        let w = wait(&[(&a, Some("review"))], Mode::All, Action { comment: Some(comment.into()), ..Action::default() });
-        let error = db.write("operator", move |t| card_waits::set(t, &Actor::Operator, &id, &w)).await.unwrap_err();
+        let w = wait(
+            &[(&a, Some("review"))],
+            Mode::All,
+            Action {
+                comment: Some(comment.into()),
+                ..Action::default()
+            },
+        );
+        let error = db
+            .write("operator", move |t| {
+                card_waits::set(t, &Actor::Operator, &id, &w)
+            })
+            .await
+            .unwrap_err();
         assert_eq!(error.code, terrariumd::error::Code::Invalid);
     }
     move_to(&td, &a, "review").await;
-    assert_eq!(td.get(&format!("/api/cards/{a}")).await.ok()["column"], "review");
+    assert_eq!(
+        td.get(&format!("/api/cards/{a}")).await.ok()["column"],
+        "review"
+    );
 }
 
 #[tokio::test]
 async fn no_lead_and_bad_actions_cannot_rollback_dependency_changes() {
     let td = TestDaemon::start().await;
-    td.post("/api/projects", json!({"name":"p", "card_prefix":"N"})).await.ok();
+    td.post("/api/projects", json!({"name":"p", "card_prefix":"N"}))
+        .await
+        .ok();
     let a = card(&td).await;
-    let b = td.post("/api/projects/p/cards", json!({"title":"legacy", "depends_on":[a]})).await.ok()["id"].as_str().unwrap().to_owned();
+    let b = td
+        .post(
+            "/api/projects/p/cards",
+            json!({"title":"legacy", "depends_on":[a]}),
+        )
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     td.delete(&format!("/api/cards/{a}")).await.ok();
-    assert!(td.get(&format!("/api/cards/{a}")).await.ok()["archived"].as_bool().unwrap());
+    assert!(
+        td.get(&format!("/api/cards/{a}")).await.ok()["archived"]
+            .as_bool()
+            .unwrap()
+    );
     assert!(met(&td, &b).await);
-    assert!(td.get("/api/mail?to=operator").await.ok().as_array().unwrap().iter().any(|m| m["subject"].as_str().is_some_and(|s| s.contains("wait broken"))));
+    assert!(
+        td.get("/api/mail?to=operator")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["subject"]
+                .as_str()
+                .is_some_and(|s| s.contains("wait broken")))
+    );
 
     let a = card(&td).await;
     let b = card(&td).await;
-    set(&td, &b, wait(&[(&a, Some("review"))], Mode::All, Action { move_to:Some("blocked".into()), ..Action::default() })).await;
+    set(
+        &td,
+        &b,
+        wait(
+            &[(&a, Some("review"))],
+            Mode::All,
+            Action {
+                move_to: Some("blocked".into()),
+                ..Action::default()
+            },
+        ),
+    )
+    .await;
     move_to(&td, &a, "review").await;
     assert!(met(&td, &b).await);
-    assert_eq!(td.get(&format!("/api/cards/{a}")).await.ok()["column"], "review");
-    assert_eq!(td.get(&format!("/api/cards/{b}")).await.ok()["column"], "backlog");
-    assert!(td.get("/api/mail?to=operator").await.ok().as_array().unwrap().iter().any(|m| m["subject"].as_str().is_some_and(|s| s.contains("move refused"))));
+    assert_eq!(
+        td.get(&format!("/api/cards/{a}")).await.ok()["column"],
+        "review"
+    );
+    assert_eq!(
+        td.get(&format!("/api/cards/{b}")).await.ok()["column"],
+        "backlog"
+    );
+    assert!(
+        td.get("/api/mail?to=operator")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["subject"]
+                .as_str()
+                .is_some_and(|s| s.contains("move refused")))
+    );
 
     let c = card(&td).await;
     let d = card(&td).await;
-    set(&td, &d, wait(&[(&c, Some("review"))], Mode::All, Action { comment:Some("valid".into()), ..Action::default() })).await;
+    set(
+        &td,
+        &d,
+        wait(
+            &[(&c, Some("review"))],
+            Mode::All,
+            Action {
+                comment: Some("valid".into()),
+                ..Action::default()
+            },
+        ),
+    )
+    .await;
     let id = d.clone();
     let db = td.daemon.as_ref().unwrap().state.db.clone();
     // Model an invalid action persisted before blank comments were refused.
     db.write("operator", move |t| {
-        t.execute("UPDATE card_waits SET action=?2 WHERE card=?1", rusqlite::params![id, json!({"comment":" "}).to_string()])?;
+        t.execute(
+            "UPDATE card_waits SET action=?2 WHERE card=?1",
+            rusqlite::params![id, json!({"comment":" "}).to_string()],
+        )?;
         Ok(())
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     move_to(&td, &c, "review").await;
     assert!(met(&td, &d).await);
-    assert_eq!(td.get(&format!("/api/cards/{c}")).await.ok()["column"], "review");
+    assert_eq!(
+        td.get(&format!("/api/cards/{c}")).await.ok()["column"],
+        "review"
+    );
     db.read(move |c| {
         let acted: bool = c.query_row("SELECT acted_at IS NOT NULL FROM card_waits WHERE card=?1", [&d], |r| r.get(0))?;
         let recorded: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM audit WHERE action='card.wait_action_failed' AND target=?1)", [&d], |r| r.get(0))?;
@@ -634,13 +722,27 @@ async fn no_lead_and_bad_actions_cannot_rollback_dependency_changes() {
 
 #[tokio::test]
 async fn shared_graph_budget_covers_all_roots_and_legacy_walks() {
-    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
     let td = setup().await;
     let template = card(&td).await;
     let waiter = card(&td).await;
     let legacy = card(&td).await;
     let roots: Vec<String> = (0..128).map(|n| format!("GRAPH-{n}")).collect();
-    let w = Wait { dependencies: roots.iter().map(|id| Dependency { card:id.clone(), target:None }).collect(), mode:Mode::All, action:Action::default(), met_at:None };
+    let w = Wait {
+        dependencies: roots
+            .iter()
+            .map(|id| Dependency {
+                card: id.clone(),
+                target: None,
+            })
+            .collect(),
+        mode: Mode::All,
+        action: Action::default(),
+        met_at: None,
+    };
     let db = td.daemon.as_ref().unwrap().state.db.clone();
     db.write("operator", move |t| {
         // 128 roots share a 3900-card chain. Another 69 nodes test the global cap.
