@@ -19,6 +19,7 @@ pub mod hosts;
 pub mod inbox;
 pub mod jobs;
 pub mod leases;
+pub mod links;
 pub mod mail;
 pub mod memory;
 pub mod monitors;

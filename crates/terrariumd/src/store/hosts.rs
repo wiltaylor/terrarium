@@ -91,7 +91,9 @@ pub fn new_token() -> ApiResult<String> {
     random_token(TOKEN_PREFIX)
 }
 
-fn random_token(prefix: &str) -> ApiResult<String> {
+/// A random token: `prefix` and 32 random bytes in hex. Link keys use it
+/// too (`store::links`).
+pub fn random_token(prefix: &str) -> ApiResult<String> {
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))

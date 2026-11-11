@@ -2171,6 +2171,11 @@ terrarium admin host show <name>               the link, the capabilities, the t
 terrarium admin host new <name> [--enrol]      prints the token once, alone on stdout
 terrarium admin host rotate <name> [--enrol]   a new token, printed once, alone on stdout
 terrarium admin host rm <name>                 revokes the token
+terrarium admin link ls [--all]                each link key: label, status, read-only, home, last use (--all: also revoked)
+terrarium admin link show <id>                 one link: the home, the pairing, the key use record
+terrarium admin link new <label> [--read-only] prints the one-time pairing code alone on stdout
+terrarium admin link rotate <id>               stops the key now, prints a new pairing code
+terrarium admin link revoke <id>               the key stops and its open streams close (alias: rm)
 terrarium admin subscription ls                each subscription: provider, plan, account, login, enabled, default
 terrarium admin subscription show <name>       one subscription: the server, the streams, the status page
 terrarium admin subscription default <name>    the default account of its harness (PLAN §16.3)
@@ -2323,6 +2328,22 @@ operator only (PLAN §10: host agent tokens are operator-only). An agent gets
   `last_used_from` that you do not expect is a warning sign.
 - A host that exists gets `409` from `new`. Use `rotate` to give it a new
   token.
+
+`admin link ...` manages the link keys with which another Terrarium daemon
+(the home) shows and runs this one (TER-61). The operator only; an agent,
+also a sysadmin, gets `403`, and a link key gets `403 link_forbidden`. The
+API is [api.md §36](api.md#36-linked-instances-link-keys).
+
+| Command | Request | Text output |
+|---|---|---|
+| `admin link ls [--all]` | `GET /api/links` (`?revoked=true`) | A table: `ID`, `LABEL`, `STATUS`, `READ ONLY`, `HOME`, `LAST USED`, `FROM`. |
+| `admin link show <id>` | `GET /api/links/{id}` | One `key value` line per field. |
+| `admin link new <label> [--read-only]` | `POST /api/links` `{"label", "read_only"}` | The `tlp_` pairing code, alone on stdout. Lines on stderr give the link, the expiry (10 minutes), the URL to type on the home (`TERRARIUM_PUBLIC_URL`), and the instance ID to compare. |
+| `admin link rotate <id>` | `POST /api/links/{id}/rotate` | The new pairing code on stdout, as `new`. The old key stops at once. |
+| `admin link revoke <id>` | `DELETE /api/links/{id}` | `revoked link <id>` |
+
+- The pairing code is on stdout one time only. The long-lived `tlk_` key
+  never reaches the CLI: the home gets it from `POST /api/links/pair`.
 
 `admin config` works on the config repo (PLAN §8.3, [api.md §25](api.md#25-config-repo)):
 the prompts, the harness settings, and the export, in git. It needs the

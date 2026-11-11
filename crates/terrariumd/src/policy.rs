@@ -714,6 +714,12 @@ pub fn change_role(actor: &Actor, target: &str, target_project: &str, role: Role
     {
         return Err(ApiError::forbidden("an agent cannot change its own roles"));
     }
+    // A link key may not grant or revoke sysadmin, also when it makes an
+    // agent or spawns one (TER-61 review, O1): a sysadmin agent would act
+    // outside the link's deny list.
+    if role == Role::Sysadmin {
+        crate::links::refuse_for_link("grant or revoke sysadmin")?;
+    }
     match role {
         Role::Member => Ok(()),
         Role::Sysadmin | Role::Architect if actor.is_operator() => Ok(()),
