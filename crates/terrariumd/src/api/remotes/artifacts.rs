@@ -120,8 +120,16 @@ pub(crate) fn serving_routes() -> crate::api::link_registry::RegisteredRouter {
     use crate::api::link_registry::{Access, RegisteredRouter};
     use axum::http::Method;
     RegisteredRouter::new()
-        .route("/ra/{cap}/{exp}/{sig}/", get(root), &[(Method::GET, Access::PublicDenied)])
-        .route("/ra/{cap}/{exp}/{sig}/{*path}", get(asset), &[(Method::GET, Access::PublicDenied)])
+        .route(
+            "/ra/{cap}/{exp}/{sig}/",
+            get(root),
+            &[(Method::GET, Access::PublicDenied)],
+        )
+        .route(
+            "/ra/{cap}/{exp}/{sig}/{*path}",
+            get(asset),
+            &[(Method::GET, Access::PublicDenied)],
+        )
 }
 
 async fn root(

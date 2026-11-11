@@ -70,7 +70,10 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
         .route(
             "/remotes/{name}/artifacts/{id}/url",
             post(artifacts::mint),
-            &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)],
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
         )
         .route(
             "/remotes/{name}/proxy/{*rest}",
