@@ -969,6 +969,21 @@ pub async fn remotes(ctx: &Ctx, cmd: &RemoteCmd) -> anyhow::Result<()> {
                 )
                 .await?
         }
+        RemoteCmd::ArtifactRepin {
+            name,
+            origin,
+            pin_sha256,
+        } => {
+            ctx.api
+                .post(
+                    &format!(
+                        "/api/remotes/{}/artifact-repin",
+                        crate::transport::encode(name)
+                    ),
+                    Some(json!({"origin": origin, "pin_sha256": pin_sha256})),
+                )
+                .await?
+        }
         RemoteCmd::Pair { name } => {
             ctx.api
                 .post(
