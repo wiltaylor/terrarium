@@ -1202,7 +1202,7 @@ pub fn startable(
 pub fn job_delivery(def: &DeliveryDef, kind: JobKind) -> Option<DeliveryDef> {
     match kind {
         JobKind::Release => def.release_view(),
-        JobKind::Validate | JobKind::Merge => Some(def.clone()),
+        JobKind::Validate | JobKind::Merge | JobKind::E2e => Some(def.clone()),
     }
 }
 
