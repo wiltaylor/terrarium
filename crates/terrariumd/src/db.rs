@@ -2655,6 +2655,7 @@ impl Db {
             let acquired = std::time::Instant::now();
             // The snapshot comes after the lock: a write that changed a
             // secret swapped its matcher in before it let the lock go.
+            let result = {
             let redactor = handle.get();
             // IMMEDIATE: the write lock comes at the start, so a write of
             // another connection to the same file (a second daemon on the
@@ -2704,6 +2705,8 @@ impl Db {
                 tracing::debug!(patterns = r.pattern_count(), "redaction matcher built");
                 handle.replace(r);
             }
+            (value, events, audits.into_inner())
+            };
             let finished = std::time::Instant::now();
             drop(guard);
             tracing::debug!(target: "terrariumd::db_timing", operation = "write",
@@ -2711,7 +2714,7 @@ impl Db {
                 mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
                 sql_us = finished.duration_since(acquired).as_micros() as u64,
                 "database access");
-            Ok::<_, ApiError>((value, events, audits.into_inner()))
+            Ok::<_, ApiError>(result)
         })
         .await
         .map_err(|e| ApiError::internal(format!("database task failed: {e}")))??;
