@@ -435,15 +435,10 @@ fn cards_of(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadCard>> {
     Ok(rows)
 }
 
-/// Link card `card` (`<project>:<card>` or `<card>`) to thread `id` for
-/// `actor` (TER-146, TER-144 D2). `actor` must read the thread (else `404`)
-/// and the card's project (else `404`, the same answer as for a card that
-/// does not exist); the link gives neither. A closed thread is `409
-/// conflict`; a card that is not in the named project is `404`; an
-/// archived card is `422 invalid`. A card that is linked already stays as
-/// it is. Writes the audit row `thread.card_link` under the card's project.
-/// Emits a `thread` event `card_linked`, which wakes no agent. The thread
-/// with the cards that `actor` may read.
+/// Card-only read access. An attached request agent may also read its
+/// report-to lead's project while the request is open. For a link, `thread`
+/// restricts that exception to the agent's own request. No project-wide
+/// read or card-write capability is granted.
 pub fn read_card_project(
     conn: &Connection,
     actor: &Actor,
@@ -469,6 +464,9 @@ pub fn read_card_project(
     Err(denied)
 }
 
+/// Link `<project>:<card>` or `<card>` to a readable, open thread.
+/// The card must be readable and unarchived. Cross-project request access
+/// applies only to the attached agent's own thread.
 pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResult<Thread> {
     let th = readable(actor, get_bare(t, id)?)?;
     not_closed(&th, "a card link")?;

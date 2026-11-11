@@ -109,6 +109,7 @@ async fn list_cards(
     let rows = longpoll::hold(&state, wait, &["card"], || {
         let (actor, name, page, f) = (actor.clone(), name.clone(), page.clone(), f.clone());
         state.db.read(move |c| {
+            crate::store::threads::read_card_project(c, &actor, &name, None)?;
             crate::store::projects::get(c, &name)?;
             let assignee = match f.assignee.as_deref() {
                 None => None,
