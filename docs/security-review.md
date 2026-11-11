@@ -31,6 +31,14 @@ the daemon crate. The completeness test compares every production router
 registration, including method chains and handlers, and the direct operator
 comparisons and shared gates. New registrations or gates require an access
 classification and HTTP cases for exclusive or conditional operator actions.
+The scanner parses Rust syntax and removes only test items, including when
+production items follow them. Reviewed `.merge` and `.nest` expressions have
+a separate composition snapshot. Changes to it require checking mounted paths
+against the HTTP cases. Service routes, UFCS router calls, router operations
+inside macros, method-router variables and renamed operator gates fail closed.
+Operator markers include bare and qualified `Operator`, the shared helpers,
+and decoded `"operator"` literals. The gate snapshot hashes the whole enclosing
+item so a changed condition or body also requires review.
 The HTTP walk consumes that inventory, including real tool-run and hold
 questions, verifies denied approvals change no state, and then verifies that
 the ordinary operator can answer them.

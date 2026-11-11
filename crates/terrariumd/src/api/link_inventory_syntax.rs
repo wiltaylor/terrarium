@@ -8,6 +8,38 @@ fn link_compact(tokens: impl ToTokens) -> String {
     tokens.to_token_stream().to_string().chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+// Hash the entire enclosing item, not just the line containing Operator. This
+// catches changed conditions and bodies even when the spelling is multiline.
+fn link_gate_lines(source: &str) -> Vec<String> {
+    use sha2::{Digest, Sha256};
+    fn marker(tokens: proc_macro2::TokenStream) -> bool {
+        tokens.into_iter().any(|token| match token {
+            proc_macro2::TokenTree::Group(group) => marker(group.stream()),
+            proc_macro2::TokenTree::Ident(ident) => matches!(ident.to_string().as_str(),
+                "Operator" | "operator_only" | "operator_only_with_provenance" | "is_operator"),
+            proc_macro2::TokenTree::Literal(literal) => syn::parse_str::<syn::LitStr>(&literal.to_string())
+                .is_ok_and(|s| s.value() == "operator"),
+            _ => false,
+        })
+    }
+    fn walk(nodes: &[syn::Item], out: &mut Vec<String>) {
+        for item in nodes {
+            if let syn::Item::Mod(module) = item {
+                if let Some((_, contents)) = &module.content { walk(contents, out); }
+            } else if marker(item.to_token_stream()) {
+                let tokens = item.to_token_stream().to_string();
+                let label = tokens.chars().take(100).collect::<String>();
+                out.push(format!("{label}:sha256:{:x}", Sha256::digest(tokens.as_bytes())));
+            }
+        }
+    }
+    let file = syn::parse_file(source).expect("gate inventory must parse Rust");
+    let mut result = Vec::new();
+    walk(&file.items, &mut result);
+    result.sort();
+    result
+}
+
 fn link_production_source(source: &str) -> String {
     struct Tests(Vec<std::ops::Range<usize>>);
     impl<'ast> Visit<'ast> for Tests {
@@ -118,6 +150,6 @@ fn link_inventory_parser_regressions() {
     let source = link_production_source("#[cfg(test)]\nmod tests { fn test() {} }\nfn routes() { r . route (r#\"/real\"#, get(read).post(write)); }\n");
     assert_eq!(link_syntax_inventory(&source).0, ["r#\"/real\"#,get(read).post(write)"]);
     for spelling in ["Self :: Operator", "Operator", "label == \"operator\"", "policy :: operator_only (actor)"] {
-        assert!(!link_gate_lines(spelling).is_empty(), "missed {spelling}");
+        assert!(!link_gate_lines(&format!("fn gate() {{ let _ = {spelling}; }}")).is_empty(), "missed {spelling}");
     }
 }

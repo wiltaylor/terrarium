@@ -67,29 +67,6 @@ fn link_registration_expressions(source: &str) -> Vec<String> {
 }
 
 
-fn link_gate_lines(source: &str) -> Vec<String> {
-    let mut result: Vec<_> = source
-        .lines()
-        .filter(|line| {
-            !line.trim_start().starts_with("//")
-                && [
-                    "Operator",
-                    "operator_only",
-                    "is_operator",
-                    "\"operator\"",
-                ]
-                .iter()
-                .any(|needle| line.contains(needle))
-        })
-        .map(|line| {
-            line.chars()
-                .filter(|c| !c.is_whitespace())
-                .collect::<String>()
-        })
-        .collect();
-    result.sort();
-    result
-}
 
 #[test]
 fn link_route_inventory_is_complete() {
