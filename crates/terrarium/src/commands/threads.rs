@@ -105,6 +105,7 @@ fn print_thread(c: &Ctx, v: &Value) {
             field(q, "status"),
             short(q["text"].as_str().unwrap_or_default())
         ));
+        super::questions::print_question(c, q);
     }
     if let Some(r) = response.as_ref().filter(|r| r.is_object()) {
         c.line(format!(

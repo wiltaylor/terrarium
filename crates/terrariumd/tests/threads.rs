@@ -444,11 +444,14 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
     lab.td
         .post(
             &format!("/api/questions/{qid}/answer"),
-            json!({"option": "yes"}),
+            json!({"option": "yes", "answer": "Keep it for compliance."}),
         )
         .await
         .ok();
-    assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
+    let th = lab.thread(&tid).await;
+    assert_eq!(th["status"], "waiting_operator");
+    assert_eq!(th["questions"][0]["answer_option"], 0);
+    assert_eq!(th["questions"][0]["answer"], "Keep it for compliance.");
     lab.td
         .post(
             &format!(
@@ -538,12 +541,19 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
     lab.td
         .post(
             &format!("/api/questions/{bid}/answer"),
-            json!({"items": [{"option": "daily"}, {"option": "eu"}]}),
+            json!({"items": [{"option": "daily", "answer": "Every night."},
+                             {"option": "eu", "answer": "For residency."}]}),
         )
         .await
         .ok();
     let th = lab.thread(&tid).await;
     assert_eq!(th["status"], "waiting_agent");
+    let bundle = th["questions"].as_array().unwrap().iter()
+        .find(|q| q["id"] == bid).unwrap();
+    assert_eq!(bundle["items"][0]["answer_option"], 0);
+    assert_eq!(bundle["items"][0]["answer"], "Every night.");
+    assert_eq!(bundle["items"][1]["answer_option"], 0);
+    assert_eq!(bundle["items"][1]["answer"], "For residency.");
     assert_eq!(th["questions"][1]["status"], "answered");
     let items = lab.td.get("/api/inbox?kind=thread").await.ok().clone();
     assert!(

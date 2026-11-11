@@ -10591,6 +10591,27 @@ async fn owners_and_target_grants() {
 /// TER-93: `thread new`, `post`, `ask` (question and bundle), `respond`,
 /// `close`, `ls`, and `show`, and a refused open (A1).
 #[tokio::test]
+async fn thread_show_preserves_options_and_answer_text() {
+    let question = json!({"id": "Q1", "kind": "question", "status": "answered",
+        "text": "Region?", "options": ["eu", "us"], "answer_option": 1,
+        "answer": "For latency.", "answered_by_name": "operator"});
+    let bundle = json!({"id": "B1", "kind": "bundle", "status": "answered",
+        "text": "Plan", "answered_by_name": "operator", "items": [
+            {"text": "Backups?", "options": ["daily", "weekly"],
+             "answer_option": 0, "answer": "Every night."}]});
+    let full = json!({"id": "T1", "questions": [question, bundle]});
+    let out = ok(true, &["thread", "show", "T1"], vec![(200, full.clone())],
+        vec![req(Get, "/api/threads/T1")]).await;
+    for needle in ["chosen option: 2. us", "For latency.",
+        "item 1 chosen option: 1. daily", "Every night."] {
+        assert!(out.contains(needle), "{out}");
+    }
+    let out = ok(true, &["--json", "thread", "show", "T1"], vec![(200, full.clone())],
+        vec![req(Get, "/api/threads/T1")]).await;
+    assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), full);
+}
+
+#[tokio::test]
 async fn thread_commands() {
     let out = ok_in(
         true,
