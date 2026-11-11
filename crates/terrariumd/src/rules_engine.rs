@@ -140,13 +140,17 @@ pub struct ProjectRules {
     /// When the rules were stored: an older event starts no run.
     pub updated_at: String,
     pub set: Arc<RuleSet>,
+    /// Names inherited from the built-in pack, excluding every user replacement.
+    pub builtin_rules: std::collections::HashSet<String>,
 }
 
 /// The parsed rules files, by project, with their hash: a file is parsed
 /// again only when it changed.
+type CachedRules = (String, Arc<RuleSet>, std::collections::HashSet<String>);
+
 #[derive(Debug, Default)]
 pub struct Cache {
-    sets: HashMap<String, (String, Arc<RuleSet>)>,
+    sets: HashMap<String, CachedRules>,
     /// The timers written ([`fire_timers`]): the due time of each
     /// (project, rule), so one wait writes one timer.
     fired: HashMap<(String, String), String>,
@@ -232,19 +236,20 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
         let cached = cache
             .sets
             .get(&project)
-            .filter(|(h, _)| *h == hash)
-            .map(|(_, s)| s.clone());
-        let set = match cached {
+            .filter(|(h, _, _)| *h == hash)
+            .map(|(_, s, sources)| (s.clone(), sources.clone()));
+        let (set, builtin_rules) = match cached {
             Some(s) => s,
             None if file.is_none() => {
                 let set = Arc::new(rules_file::with_pack(
                     rules_file::default_pack(),
                     &RuleSet::default(),
                 ));
+                let sources = set.rules.iter().map(|r| r.name.clone()).collect::<std::collections::HashSet<_>>();
                 cache
                     .sets
-                    .insert(project.clone(), (hash.clone(), set.clone()));
-                set
+                    .insert(project.clone(), (hash.clone(), set.clone(), sources.clone()));
+                (set, sources)
             }
             None => {
                 let p = project.clone();
@@ -288,6 +293,13 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                         RuleSet::default()
                     }
                 };
+                let sources = if rules_flow {
+                    rules_file::default_pack().rules.iter()
+                        .filter(|r| !own.rules.iter().any(|user| user.name == r.name))
+                        .map(|r| r.name.clone()).collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
                 let set = Arc::new(if rules_flow {
                     rules_file::with_pack(rules_file::default_pack(), &own)
                 } else {
@@ -295,8 +307,8 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                 });
                 cache
                     .sets
-                    .insert(project.clone(), (hash.clone(), set.clone()));
-                set
+                    .insert(project.clone(), (hash.clone(), set.clone(), sources.clone()));
+                (set, sources)
             }
         };
         out.push(ProjectRules {
@@ -304,6 +316,7 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
             hash,
             updated_at,
             set,
+            builtin_rules,
         });
     }
     Ok(out)
@@ -405,6 +418,19 @@ pub fn decide(
     after: Option<&str>,
     now: DateTime<Utc>,
 ) -> ApiResult<Vec<Planned>> {
+    decide_with_source(conn, project, rule, e, after, now, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decide_with_source(
+    conn: &Connection,
+    project: &str,
+    rule: &Rule,
+    e: &StoredEvent,
+    after: Option<&str>,
+    now: DateTime<Utc>,
+    builtin: bool,
+) -> ApiResult<Vec<Planned>> {
     if !rule.enabled || e.project.as_deref() != Some(project) {
         return Ok(Vec::new());
     }
@@ -471,7 +497,7 @@ pub fn decide(
     }
     let hour_ago = schedules::stamp(now - chrono::Duration::hours(1));
     let max = i64::from(rule.max_per_hour.unwrap_or(DEFAULT_MAX_PER_HOUR));
-    let card_max = if rules_file::default_pack().rules.iter().any(|r| r == rule) {
+    let card_max = if builtin {
         rule.max_per_hour.map_or(MAX_PER_CARD_PER_HOUR, i64::from)
     } else {
         MAX_PER_CARD_PER_HOUR
@@ -542,7 +568,8 @@ fn plan_events(
             continue;
         };
         for (ord, rule) in pr.set.rules.iter().enumerate() {
-            let planned = decide(t, &pr.project, rule, e, Some(&pr.updated_at), now)?;
+            let planned = decide_with_source(t, &pr.project, rule, e, Some(&pr.updated_at), now,
+                pr.builtin_rules.contains(&rule.name))?;
             for p in planned {
                 insert_run(t, pr, ord, rule, e, &p, now)?;
                 written += 1;
