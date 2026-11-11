@@ -44,7 +44,10 @@ async fn list(
                     &kind,
                     query.column.as_deref().unwrap_or("in_progress"),
                     project.as_deref(),
-                    &Page { limit: query.limit, cursor: query.cursor },
+                    &Page {
+                        limit: query.limit,
+                        cursor: query.cursor,
+                    },
                 )
             })
             .await?,

@@ -77,7 +77,12 @@ impl HomeBoardColumns {
                     // Legacy boards can have only a named In Progress column,
                     // without the modern working role.
                     (selector == "working" && by_role.is_none())
-                        .then(|| columns.iter().find(|(n, _)| n.eq_ignore_ascii_case("in_progress") || n.eq_ignore_ascii_case("In Progress")))
+                        .then(|| {
+                            columns.iter().find(|(n, _)| {
+                                n.eq_ignore_ascii_case("in_progress")
+                                    || n.eq_ignore_ascii_case("In Progress")
+                            })
+                        })
                         .flatten()
                 })
                 .is_some_and(|(n, _)| n == name)
@@ -243,7 +248,11 @@ mod tests {
         );
         assert!(settings.matches("in_progress", "custom", &columns).unwrap());
         for name in ["in_progress", "In Progress"] {
-            assert!(settings.matches("in_progress", name, &[(name.into(), None)]).unwrap());
+            assert!(
+                settings
+                    .matches("in_progress", name, &[(name.into(), None)])
+                    .unwrap()
+            );
         }
         assert!(settings.selectors("bad").is_err());
     }
