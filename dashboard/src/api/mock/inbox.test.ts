@@ -157,14 +157,14 @@ describe("the inbox in the mock", () => {
     const store = createInboxStore(api, { on: (fn) => api.events.stream({ since: api.world.seq }).subscribe(fn) }, { debounceMs: 0 });
     await store.refresh();
     expect(store.loaded()).toBe(true);
-    expect(store.counts()).toMatchObject({ open: 8, urgent: 1, thread: 1 });
-    expect(store.open()).toHaveLength(8);
+    expect(store.counts()).toMatchObject({ open: 3, urgent: 1, thread: 1 });
+    expect(store.open()).toHaveLength(3);
     await wait();
     await api.questions.answer(store.open()[0]!.question!.id, { answer: "yes" });
-    await waitFor(() => expect(store.counts()).toMatchObject({ open: 7, urgent: 0, question: 2 }));
+    await waitFor(() => expect(store.counts()).toMatchObject({ open: 2, urgent: 0, question: 2 }));
     await api.inbox.ackMail(fakeUlid("msg", 13));
-    await waitFor(() => expect(store.counts()).toMatchObject({ open: 6, mail: 2 }));
-    expect(store.open()).toHaveLength(6);
+    await waitFor(() => expect(store.counts()).toMatchObject({ open: 2, mail: 2 }));
+    expect(store.open()).toHaveLength(2);
   });
 
   it("shows a critical notice first, counts it, and drops the banner after the acknowledgement", async () => {

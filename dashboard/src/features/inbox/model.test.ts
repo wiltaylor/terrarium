@@ -172,8 +172,8 @@ describe("ask and forward (GitHub #24)", () => {
 
   it("does not count an open watch in the badge", () => {
     const c = countItems([watchItem(), item("mail:M", { kind: "mail" })]);
-    expect(c).toMatchObject({ open: 1, mail: 1, watch: 1 });
-    expect(badge(c)!.n).toBe(1);
+    expect(c).toMatchObject({ open: 0, mail: 1, watch: 1 });
+    expect(badge(c)).toBeNull();
     expect(badge(countItems([watchItem()]))).toBeNull();
   });
 

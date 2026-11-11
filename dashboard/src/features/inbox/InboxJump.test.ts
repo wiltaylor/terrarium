@@ -60,11 +60,11 @@ describe("the Inbox keeps the card in work (TER-40)", () => {
     box.value = "half of my answer";
     box.dispatchEvent(new Event("input", { bubbles: true }));
     const before = el.querySelectorAll("article").length;
-    // New items: two mails to the operator, then the inbox events.
+    // New actionable items, then the inbox events.
     for (const body of ["one", "two"]) {
-      await api.mail.send({ from: "terrarium/lead", to: "operator", subject: `new ${body}`, body });
+      api.world.questions!.push({ ...q, id: `new-${body}`, text: `new ${body}`, options: [] });
     }
-    for (const fn of listeners) fn({ kind: "inbox", data: { item: "mail:x", kind: "mail", change: "opened" } } as unknown as AgentEvent);
+    for (const fn of listeners) fn({ kind: "inbox", data: { item: "question:new-two", kind: "question", change: "opened" } } as unknown as AgentEvent);
     await waitFor(() => expect(el.querySelectorAll("article").length).toBe(before + 2), 3000);
     // The same card, with its state.
     expect(card()).toBe(first);
