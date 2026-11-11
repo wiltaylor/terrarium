@@ -40,25 +40,39 @@ async fn visit(
     }
     let read_at = through.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let owner = actor.address();
-    Ok(Json(state.db.write(actor.label(), move |t| {
-        // Resolve real items before writing: arbitrary IDs cannot grow the table.
-        match kind.as_str() {
-            "thread" => { store::threads::get_bare(t, &item)?; }
-            "card" => { store::board::get_card(t, &item)?; }
-            "mail" if store::mail::thread_exists(t, &item)? => {}
-            "mail" => return Err(ApiError::not_found(format!("mail thread {item}"))),
-            _ => return Err(ApiError::bad_request("kind must be thread, mail or card")),
-        }
-        let previous = t.query_row(
-            "SELECT read_at FROM read_positions WHERE owner=?1 AND kind=?2 AND item=?3",
-            params![owner, kind, item], |r| r.get(0),
-        ).optional()?;
-        t.execute(
-            "INSERT INTO read_positions(owner,kind,item,read_at) VALUES (?1,?2,?3,?4)
+    Ok(Json(
+        state
+            .db
+            .write(actor.label(), move |t| {
+                // Resolve real items before writing: arbitrary IDs cannot grow the table.
+                match kind.as_str() {
+                    "thread" => {
+                        store::threads::get_bare(t, &item)?;
+                    }
+                    "card" => {
+                        store::board::project_of(t, &item)?;
+                    }
+                    "mail" if store::mail::thread_exists(t, &item)? => {}
+                    "mail" => return Err(ApiError::not_found(format!("mail thread {item}"))),
+                    _ => return Err(ApiError::bad_request("kind must be thread, mail or card")),
+                }
+                let previous = t
+                    .query_row(
+                        "SELECT read_at FROM read_positions WHERE owner=?1 AND kind=?2 AND item=?3",
+                        params![owner, kind, item],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                t.execute(
+                    "INSERT INTO read_positions(owner,kind,item,read_at) VALUES (?1,?2,?3,?4)
              ON CONFLICT(owner,kind,item) DO UPDATE SET read_at=MAX(read_at,excluded.read_at)",
-            params![owner, kind, item, read_at],
-        )?;
-        let read_at = previous.as_ref().map_or(read_at.clone(), |old: &String| old.max(&read_at).clone());
-        Ok(Visit { previous, read_at })
-    }).await?))
+                    params![owner, kind, item, read_at],
+                )?;
+                let read_at = previous
+                    .as_ref()
+                    .map_or(read_at.clone(), |old: &String| old.max(&read_at).clone());
+                Ok(Visit { previous, read_at })
+            })
+            .await?,
+    ))
 }

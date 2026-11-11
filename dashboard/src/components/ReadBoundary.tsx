@@ -23,7 +23,7 @@ export function useReadBoundary(kind: "thread" | "mail" | "card", item: () => st
     if (visited || !entries.length) return;
     visited = true;
     const mine = ++generation;
-    const through = new Date(Math.max(...entries.map(Date.parse))).toISOString();
+    const through = new Date(entries.reduce((latest, at) => Math.max(latest, Date.parse(at)), 0)).toISOString();
     void Promise.resolve().then(() => api.readPositions.visit(kind, id, through)).then((visit) => {
       if (mine === generation) setPrevious(visit.previous);
     }).catch((e) => { if (mine === generation) setError(e); });
