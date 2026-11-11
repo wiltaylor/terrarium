@@ -1,5 +1,46 @@
 # Terrarium daemon API
 
+## Request threads
+
+Ask an agent and Message an agent open `POST /api/threads` with
+`{report_to: "project/lead", topic, text}`. Only the operator opens a
+request, and `report_to` must name a project_admin. The scope is that lead's
+project. The daemon spawns `global:request` (META-136), with no named agent
+or alternative template accepted. A missing template fails the start with
+the existing closed-thread error rather than silently sending plain mail.
+Forwarding an existing Inbox question still uses the watched-mail path.
+
+The request agent acknowledges the request, mails the selected lead, links
+and tracks the lead's cards, and reports in the thread. It does not change
+code or perform the work. Existing thread card-link and tracking endpoints
+apply. An answer-only close proposal waits for one-click operator
+confirmation, or is confirmed automatically after 24 hours without activity.
+An operator reply withdraws the proposal. Threads with linked cards retain
+the ordinary close lifecycle. The operator can close a request at any time.
+
+`POST /api/threads/{id}/swap` with `{template, reason}` replaces an open
+request's agent with a new agent from `global:architect` or
+`global:architect-alt`. Project templates and other global templates are
+refused. Only Architect and Member roles are allowed, with the resolved
+definition checked again in the agent creation transaction. The new agent
+is spawned as and owned by the report-to lead, not the operator. The operator
+or report-to lead can do this. `terrarium thread swap <id> --template <key>
+--reason <text>` is the CLI equivalent.
+
+`POST /api/threads/{id}/reopen` with `{reason, card?}` reopens a closed request.
+The optional card ID is linked atomically, so a lead can reopen a request
+by linking new related work from its project, even while the thread is closed.
+The operator, report-to lead, or a project_admin whose project has a card
+linked to the thread can reopen it. `terrarium thread reopen <id> --reason
+<text>` is the CLI equivalent. Reopening creates a new `global:request`
+agent, never restores the previous session. The reason is a visible post.
+Both replacement paths keep the conversation and linked cards and include
+the thread history as quoted data in the new agent's task.
+The replacement epoch is checked during creation and attachment. A stale
+spawn cannot attach or close a newer replacement. Automatic answer-only
+closure reads ordered batches of at most 64 requests, using the last
+`(updated_at, id)` key to continue after releasing the database read lock.
+
 This document is the contract between `terrariumd` and its clients: the CLI,
 the dashboard, and (later) the agent runner. The code is in
 `crates/terrariumd/src/api/`. The integration tests in
@@ -431,8 +472,9 @@ refused it. Do not parse the message; use `code`.
 | HTTP | `code` | When |
 |---|---|---|
 | 400 | `bad_request` | Bad JSON, an unknown field, a bad query value, an ambiguous agent name, a non-WebSocket request to a WebSocket endpoint. |
-| 401 | `unauthorized` | No token or a wrong token on TCP; `X-Terrarium-Agent` without `--insecure-agent-header`, or an unknown agent in it. |
+| 401 | `unauthorized` | No token or a wrong token on TCP (also a wrong, rotated, or revoked link key, and a failed link pairing, §36); `X-Terrarium-Agent` without `--insecure-agent-header`, or an unknown agent in it. |
 | 403 | `forbidden` | The actor does not have the capability (§3). |
+| 403 | `link_forbidden` | A link key called a route of the link deny list, or a read-only link tried to write (§36.4). |
 | 404 | `not_found` | No such route or object, or the actor may not read the message. |
 | 405 | `method_not_allowed` | The route exists, but not with this method. |
 | 409 | `conflict` | The name exists, the card is archived or assigned, a column has cards. |
@@ -12416,8 +12458,9 @@ into a job-private reset directory. Neither SSH connection uses the daemon's
 shared TOFU known_hosts file. No endpoint
 or key pin is compiled into the daemon. Reset exit 75 retries twice with
 a two-second delay; any other failure prevents opening the tunnel.
-The daemon resolves configured merge secrets and opens the tunnel for every
-merge, independently of the recipe's `TERRARIUM_DOCKER_CI` gate switch.
+The daemon resolves these legacy-named merge secrets and opens the tunnel
+only for cut-time `e2e` jobs. Merge and validate jobs never receive the
+relay, regardless of their recipe's `TERRARIUM_DOCKER_CI` switch.
 
 The Docker gate is off by default: merges continue to run the full
 `ci::validate` without requiring Docker or a key. To roll it out in order:
@@ -12427,10 +12470,10 @@ the secret administrator grants `terrarium/docker-ci-vm` and
 `delivery:terrarium` with `--level run --target terrarium-helios-build`.
 Do not grant the key to `project:terrarium` or workers. The lead configures
 `--merge-secret DOCKER_CI_KEY=@secret:docker-ci-vm` and
-`--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery, with recipe
-`TERRARIUM_DOCKER_CI=1 just ci::validate-affected` to explicitly enable the
-live Docker gate. Leave the switch unset (or `0`) until the daemon and
-grant are ready. `--clear-merge-secrets` removes the references. The same
+`--merge-secret DOCKER_CI_RESET_KEY=@secret:docker-ci-reset` on delivery.
+Queue the release e2e endpoint (§35.4) after the daemon and grants are ready.
+The Docker gate refuses every other job kind.
+`--clear-merge-secrets` removes the references. The same
 command sets `docker_ci` with `--docker-ci-destination`, `--docker-ci-port`,
 `--docker-ci-known-hosts`, `--docker-ci-reset-destination`,
 `--docker-ci-reset-port`, and `--docker-ci-reset-known-hosts`: a flag left
@@ -12800,10 +12843,68 @@ A batch merge:
 - Any other failure (`error`) runs the batch once more with the merged
   cards, then fails each of them.
 
+The failed tests of the full suite run once more in a release validation
+(TER-683), in the recipe, so the run stays one run. The daemon takes no
+part in it: it reads nothing of it from the job log, and files no card.
+
+- The switch: `TERRARIUM_VALIDATE_CONTEXT=release` (the full suite at the
+  version cut, [release.md](release.md)), or `TERRARIUM_JOB_KIND=merge` (a
+  merge job). Either one makes `ci::validate` run the uid 1001 pass
+  (`ci::test-unprivileged`) after `ci::test`, and makes both passes rerun.
+  Without either (a card check, a validate job) nothing reruns.
+- When `ci::test` (the root pass) or `ci::test-unprivileged` (the uid 1001
+  pass) fails, `scripts/rerun_tests.py` takes the names of the failed tests
+  from the libtest output (the console output, or the libtest JSON when
+  `RESULTS_DIR` is set) and runs exactly those tests once more: the same
+  cargo command with the test names and `--exact` (and `--tests`, so no
+  doctest), or for uid 1001 the same test binary as the same uid, from the
+  same directory, with the same env and a new private HOME. With
+  `RESULTS_DIR` the rerun writes `rust-rerun.json` and
+  `rust-unprivileged-rerun.json`; `rust.json` keeps the first run.
+- Every rerun test passes: the step passes, and the suite goes on. One
+  fails again, does not run, or the rerun ends otherwise: the step fails.
+- No rerun, the step fails at once, unless every failure is a failed test.
+  The script counts each test run that cargo starts (`Running`,
+  `Doc-tests` on its stderr) or that it starts itself (uid 1001), and each
+  end: cargo itself ending with a status other than 101 (a signal or any
+  other code), a build error or any other cargo `error` line, a test run that ended
+  with a signal or an exit code other than 101, a run that has no test
+  result (a crash or a panic before `running`), a failed run with no failed
+  test result, a failed doctest, or more than 5 failed tests in the step.
+- With `RESULTS_DIR`, each step that failed writes its entry to
+  `$RESULTS_DIR/reruns.json`: `{version: 1, context, steps: [{step,
+  outcome, reason?, tests: [{name, first, rerun, tail}]}]}`, `step` `test`
+  or `test-unprivileged`, `outcome` `green`, `red` or `no_rerun` (with the
+  `reason`), `first` `failed`, `rerun` `ok`, `failed`, `missing`, or `null`
+  with no rerun, `tail` the end (1500 bytes) of the first failure's output.
+  The names and the results come from the script's own count of the runs
+  it started, never from a line that a test prints. `ci::validate` removes
+  the file when it starts.
+- The flaky-test cards come from that file:
+  `just ci::flaky-cards "$RESULTS_DIR/reruns.json" "<the run>"`
+  (`scripts/flaky_cards.py`) prints, for each test with `rerun: ok`, the
+  `terrarium` commands for its card: a comment on the open card with the
+  label `flaky-test:<hash of the name>` (not in `done`), or a new card
+  `Flaky test: <name>` in `backlog` with the labels `flaky`,
+  `flaky-test:<hash>`, `version:vnext` and `type:small`. It runs nothing.
+
 The card writes of the queue are made as the operator. Their comments
 start with `Job queue:`.
 
 ### 35.4 Endpoints
+
+`POST /api/cards/{id}/e2e` is project-admin-only. Its body is
+`{branch:"release/X.Y.Z", repo?, eta?}`. The card must be an open version
+group header. Docker CI delivery configuration and run grants are required.
+It returns `201 {job}` with kind `e2e`, pinned to the remote branch head.
+The job shares the merge lane but never merges or pushes. It runs
+`TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py`, using the same
+daemon-owned reset/tunnel handling. No key reaches recipe code. Merge and
+validate jobs receive neither the relay endpoint nor Docker credentials.
+The group's `version branch e2e` step records the job and its outcome.
+Failure or cancellation marks the step failed without changing membership
+or moving the header. Queue it again after a release fix. A card validate
+job still cannot enter the Docker gate. See [release.md](release.md).
 
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|
@@ -12999,6 +13100,163 @@ replaces the list; `--clear-release-secrets`), and
 `--docker-release-destination`, `--docker-release-port`,
 `--docker-release-known-hosts`, `--docker-release-key` (all four at the
 first set; `--clear-docker-release`).
+
+## 36. Linked instances: link keys
+
+Another Terrarium daemon (the **home**) can show this daemon (the
+**remote**) in its dashboard and act on it (TER-49, wiki page
+`design/linked-instances`, approved 2026-11-06). This section is the remote
+side (TER-61): the instance ID, the link keys, their pairing, and the rights
+of a link. The home side (the proxy, `/api/remotes`) is TER-62.
+
+The link goes one way: the home calls the remote. A link key works only on
+the TCP listener. The remote's API port is plaintext: put a reverse proxy
+with TLS in front of it, as for `terrarium --url https://... login`.
+
+### 36.1 The instance
+
+`GET /api/system/instance`: `{id, name, version}`. Every caller may read it.
+
+- `id`: a ULID, made at the first start in `<state>/instance.id` and kept.
+  A file that holds no ULID is an error; the daemon never replaces it, so
+  the ID that a home pinned does not change. A restore onto a new host
+  keeps the file with the state dir.
+- `name`: the host of `TERRARIUM_PUBLIC_URL`, else the host name.
+- `version`: the crate version (as `cargo_version` of `GET /api/system/version`).
+
+### 36.2 Link rows and pairing
+
+Only the operator manages links (`403 forbidden` for an agent). A link key
+calls none of these routes except `DELETE /api/links/self` (§36.4).
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /api/links` | `?revoked=true` adds the revoked links | The links, newest first. |
+| `GET /api/links/{id}` | | One link. |
+| `POST /api/links` | `{label, read_only?}` | `201` `{link, code, code_expires_at, instance, url}`, `Cache-Control: no-store`. |
+| `POST /api/links/{id}/rotate` | | `{link, code, code_expires_at, instance, url}`. The old key stops now (§36.3). |
+| `DELETE /api/links/{id}` | | `204`. The key and an open code stop, and the open streams of the key close. |
+| `DELETE /api/links/self` | | `204`: a link key ends its own link (the home's Remove). Another caller gets `400`. |
+| `POST /api/links/pair` | `{code, home_instance_id, home_name?}` | `200` `{link_id, label, read_only, key, instance}`, `Cache-Control: no-store`. |
+
+A link: `{id, label, read_only, status, home_instance_id, home_name,
+paired_at, paired_from, created_by, created_at, rotated_at, first_used_at,
+last_used_at, last_used_from, pair_expires_at, revoked_at}`. `status` is
+`pending` (no key: a code is open, ran out, or the link was rotated),
+`active`, or `revoked`. A revoked link keeps its row without hashes, so the
+audit rows of its actor keep their label. `label`: 1 to 64 characters, no
+control characters. `url` is `TERRARIUM_PUBLIC_URL` or `null`.
+
+Pairing, as the host agent enrol (§17.1):
+
+1. On the remote, the operator makes a link (`terrarium admin link new
+   <label> [--read-only]`, or Settings, Links). The answer has a one-time
+   **pairing code**: `tlp_` and 64 hex digits, good for 10 minutes.
+2. On the home, the operator gives the remote's URL and the code (TER-62).
+3. The home calls `POST /api/links/pair` with the code and its own instance
+   ID. The call needs no `Authorization`: the code is the proof. One
+   database update swaps the code for the long-lived **link key** (`tlk_`
+   and 64 hex digits), so of two calls with one code only one wins. The key
+   is in this answer only; it never passes through the operator's
+   clipboard.
+4. The home compares `instance.id` (and the TLS certificate it saw) with
+   what the remote's operator sees.
+
+A wrong, used, or expired code, and a code without the `tlp_` prefix, all
+get the same `401 unauthorized`. `home_instance_id` must be a ULID
+(`422 invalid`), and not the remote's own ID. The daemon keeps only the
+SHA-256 of the code and of the key; neither is in a log, an event, or an
+audit row.
+
+### 36.3 Rotate and revoke
+
+- `POST /api/links/{id}/rotate`: a new pairing code. The old key stops at
+  once and its open streams close, so a rotate after a leak cuts the key
+  now. The home takes the new code with its Re-pair.
+- `DELETE /api/links/{id}`: the key stops. A call that is in flight with the
+  key (a long poll, an SSE stream, a WebSocket of the events, a PTY, or a
+  target shell) ends at once: the request holds the key's revocation signal
+  from before the key lookup. A pending answer becomes `401`, a stream ends,
+  a WebSocket drops.
+- A revoked or rotated key gets `401 unauthorized`, as a wrong token.
+
+### 36.4 The rights of a link
+
+A link key is `Authorization: Bearer tlk_...` (on a WebSocket upgrade also
+the subprotocol `bearer.tlk_...`). For the rules the caller is the operator,
+minus a deny list. Audit rows and events of its actions carry the actor
+`link:<id>`; `GET /api/audit` adds `link_label` to those rows. Mail, card
+authors, and pins stay `operator`. `GET /api/session` gives `kind: "link"`.
+
+The deny list (`403 link_forbidden`):
+
+- The credentials of the remote: `POST` and `DELETE /api/session`,
+  `DELETE /api/sessions`, `/api/auth/...`, `POST /api/secrets/{scope}/{name}/reveal`,
+  `/api/agent/secrets/...`, the writes of `/api/credentials`,
+  `POST /api/hosts`, `DELETE /api/hosts/{name}`,
+  `/api/hosts/{name}/rotate`, `/api/subscriptions/login...` (§16.4), and
+  `/api/subscriptions/{name}/api-key`.
+- `/api/links/...`, except `DELETE /api/links/self`: a link cannot make,
+  list, or pair another link.
+- The backups (§32): `POST /api/backups` and `GET /api/backups/{name}`. A
+  backup holds `secrets.key`, `session.key`, and every sealed secret.
+- The daemon itself: `/api/system/update...` (status, update, check,
+  rollback, drain, resume).
+- The config repo push (§25): `POST /api/config/push`,
+  `POST /api/config/sync`, and the writes of `/api/config/remote`.
+- Executable automation, which runs later as `system`, its owner, or the
+  project inbox, outside the link's checks: `POST /api/schedules`,
+  `PATCH /api/schedules/{id}`, `.../run`, `.../enable`, `.../test`, and
+  `.../deliveries/{d}/redeliver`; the writes of `/api/projects/{name}/rules`
+  (`PUT`, `DELETE`), `.../rules/migrate`, and `.../rules/{rule}/enable` and
+  `/disable`. Reads, `DELETE /api/schedules/{id}`, `.../disable`, and the
+  rule `check`, `dry-run`, and `lint` stay open.
+- The shared text that agents load at start: every write (`POST`, `PUT`,
+  `PATCH`, `DELETE`) of `/api/system-prompts...` (the system prompt
+  library and its personas; also `replace: true`), `/api/skills...`, and
+  `/api/templates...` (also `.../from-agent/{agent}`), and
+  `POST /api/config/defaults/accept` and `/keep`. A sysadmin agent with no
+  own prompt loads the library entry `leader` at start. Reads stay open.
+- Any path outside `/api` (`/install/...`, `/hosts/connect`, `/a/...`).
+
+A link also may not reach the denied routes through a sysadmin agent
+(`403 link_forbidden` too): it may not grant or revoke `sysadmin` (`PUT
+/api/agents/{id}/roles`, an agent create or a spawn with that role), and
+may not drive an agent that holds `sysadmin`: no turn (`.../send`), keys,
+answer, PTY attach, `PATCH /api/agents/{id}`, compact or new session with
+`then`, spawn for it, or mail to it: `POST /api/mail`, a reply
+(`/api/mail/{id}/reply`, `/api/projects/{name}/inbox/{id}/reply`), or the
+note of `POST /api/mail/threads/{thread}/resume`, when one recipient is a
+sysadmin agent. A refused reply or resume changes nothing. Beyond these
+routes, every message that a link request writes is checked where it is
+delivered (`store::mail::send`): a question answer, a notice ack text, a
+retract reason, a to-thread message, a thread message or response, and any
+notice that the request makes. The release of a held message
+(`POST /api/mail/{id}/release`, and a resume with or without a note) is a
+delivery too, checked in `store::mail::release` before any change. A message to a sysadmin agent (also through a
+project inbox whose admin is one) fails the whole request with
+`403 link_forbidden`, and nothing of it is kept. So a link may not move a
+card or end a thread when that mails a sysadmin agent. Reads, start, stop, pause, and interrupt of such an
+agent work.
+
+The check decodes the path, drops empty and `.` segments, and ignores case,
+so no other spelling of a denied route passes; a path with `..` is denied.
+A deny list hit writes a `link.forbidden` audit row (`{label, method, path,
+read_only, from, reason}`), at most one a minute per link, method, and path.
+
+A **read-only** link (`read_only: true`) may only `GET` (and `HEAD`): reads,
+SSE, and the WebSocket of an `.../events` route. No PTY, no target shell,
+no turn, no write, and no `DELETE /api/links/self`.
+
+### 36.5 The use record and the audit
+
+- The remote writes `first_used_at`, `last_used_at`, and `last_used_from`
+  (the peer address; a reverse proxy shows as itself) at the first call of
+  a key, at a new address, and at most once a minute after that.
+- Audit rows: `link.new`, `link.rotate`, `link.revoke` (`by_self` when the
+  link ended itself), `link.pair` (actor `link:<id>`, with `home`,
+  `home_name`, and `from`), and `link.forbidden`. No row holds a code or a
+  key.
 
 ## Agent calls during daemon restarts
 

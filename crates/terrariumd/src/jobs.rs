@@ -698,66 +698,136 @@ async fn wait_slot_free(state: &Shared, def: &TargetDef, job: &Job, dir: &str) -
     let cap = lost_slot_waits()
         .remove(&job.id)
         .unwrap_or(LOST_SLOT_WAIT_SECS);
+    wait_slot_free_with(
+        &job.id,
+        dir,
+        cap,
+        |wait| {
+            let holder = holder.clone();
+            async move {
+                let probe = RemoteCmd {
+                    argv: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        SLOT_FREE.into(),
+                        "sh".into(),
+                        dir.to_owned(),
+                        wait.to_string(),
+                    ],
+                    timeout_secs: Some(wait + 30),
+                    holder,
+                    ..RemoteCmd::default()
+                };
+                let run = crate::executor::start_cmd(state, def, &probe)?;
+                let c = run.collect(4096).await;
+                Ok(String::from_utf8_lossy(&c.stdout).trim().to_owned())
+            }
+        },
+        || {
+            let holder = holder.clone();
+            async move {
+                crate::run_kill::kill_file(
+                    state,
+                    def,
+                    holder,
+                    &crate::run_kill::job_pidfile(&job.id),
+                )
+                .await
+            }
+        },
+    )
+    .await
+}
+
+/// Keep one deadline around probes, retry delays, and re-kills alike.
+async fn wait_slot_free_with<P, PF, K, KF>(
+    job_id: &str,
+    dir: &str,
+    cap: u64,
+    mut probe: P,
+    mut kill: K,
+) -> Option<String>
+where
+    P: FnMut(u64) -> PF,
+    PF: std::future::Future<Output = ApiResult<String>>,
+    K: FnMut() -> KF,
+    KF: std::future::Future<Output = Value>,
+{
     let started = Instant::now();
     let until = started + Duration::from_secs(cap);
-    loop {
-        let left = until.saturating_duration_since(Instant::now()).as_secs();
-        let wait = left.clamp(1, LOST_SLOT_PROBE_SECS);
-        let probe = RemoteCmd {
-            argv: vec![
-                "sh".into(),
-                "-c".into(),
-                SLOT_FREE.into(),
-                "sh".into(),
-                dir.to_owned(),
-                wait.to_string(),
-            ],
-            timeout_secs: Some(wait + 30),
-            holder: holder.clone(),
-            ..RemoteCmd::default()
-        };
-        let said = match crate::executor::start_cmd(state, def, &probe) {
-            Ok(run) => {
-                let c = run.collect(4096).await;
-                String::from_utf8_lossy(&c.stdout).trim().to_owned()
-            }
-            Err(e) => {
-                warn!(job = %job.id, "cannot check the slot lock of a lost job run: {e}");
-                return None;
-            }
-        };
-        match said.as_str() {
-            "free" => {
-                if started.elapsed() >= Duration::from_secs(1) {
-                    info!(job = %job.id, secs = started.elapsed().as_secs(),
-                        "the slot of a lost job run is free; the job goes back to the queue");
+    let result = tokio::time::timeout(Duration::from_secs(cap), async {
+        loop {
+            let left = until.saturating_duration_since(Instant::now()).as_secs();
+            let wait = left.clamp(1, LOST_SLOT_PROBE_SECS);
+            let said = match probe(wait).await {
+                Ok(said) => said,
+                Err(e) => {
+                    if matches!(
+                        e.code,
+                        crate::error::Code::Conflict | crate::error::Code::RateLimited
+                    ) {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    warn!(
+                        job = job_id,
+                        "cannot check the slot lock of a lost job run: {e}"
+                    );
+                    return None;
                 }
-                return None;
+            };
+            match said.as_str() {
+                "free" => {
+                    if started.elapsed() >= Duration::from_secs(1) {
+                        info!(
+                            job = job_id,
+                            secs = started.elapsed().as_secs(),
+                            "the slot of a lost job run is free; the job goes back to the queue"
+                        );
+                    }
+                    return None;
+                }
+                "held" => {}
+                other => {
+                    debug!(
+                        job = job_id,
+                        said = other,
+                        "the target cannot tell if the slot of a lost job run is free"
+                    );
+                    return None;
+                }
             }
-            "held" => {}
-            other => {
-                debug!(job = %job.id, said = other, "the target cannot tell if the slot of a lost job run is free");
-                return None;
+            if Instant::now() >= until {
+                let lock = format!("{dir}.lock");
+                warn!(
+                    job = job_id,
+                    lock, cap, "the processes of a lost job run still hold its slot"
+                );
+                return Some(format!(
+                    "its processes still held the slot lock {lock} after {} s",
+                    started.elapsed().as_secs()
+                ));
             }
+            warn!(
+                job = job_id,
+                dir, "the slot of a lost job run is still held; its kill runs again"
+            );
+            let r = kill().await;
+            debug!(job = job_id, report = %r, "the kill of a lost job run, again");
         }
-        if Instant::now() >= until {
-            let lock = format!("{dir}.lock");
-            warn!(job = %job.id, lock, cap, "the processes of a lost job run still hold its slot");
-            return Some(format!(
-                "its processes still held the slot lock {lock} after {} s",
-                started.elapsed().as_secs()
-            ));
-        }
-        warn!(job = %job.id, dir, "the slot of a lost job run is still held; its kill runs again");
-        let r = crate::run_kill::kill_file(
-            state,
-            def,
-            holder.clone(),
-            &crate::run_kill::job_pidfile(&job.id),
-        )
-        .await;
-        debug!(job = %job.id, report = %r, "the kill of a lost job run, again");
-    }
+    })
+    .await;
+    result.unwrap_or_else(|_| {
+        let lock = format!("{dir}.lock");
+        warn!(
+            job = job_id,
+            lock, cap, "the processes of a lost job run still hold its slot"
+        );
+        Some(format!(
+            "its processes still held the slot lock {lock} after {} s",
+            started.elapsed().as_secs()
+        ))
+    })
 }
 
 /// True when the kill of a lost job run shows that none of its processes
@@ -1885,10 +1955,13 @@ async fn run_inner(
         .target
         .clone()
         .ok_or_else(|| ApiError::invalid("the project has no delivery target"))?;
-    let recipe = def
-        .recipe
-        .clone()
-        .ok_or_else(|| ApiError::invalid("the project has no delivery recipe"))?;
+    let recipe = if job.kind == JobKind::E2e {
+        "RESULTS_DIR=\"$PWD/results\" TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py".to_owned()
+    } else {
+        def.recipe
+            .clone()
+            .ok_or_else(|| ApiError::invalid("the project has no delivery recipe"))?
+    };
     let (project, repo_name, t_name) = (job.project.clone(), job.repo.clone(), target.clone());
     let kind = job.kind;
     let (repo, row) = state
@@ -3000,13 +3073,13 @@ async fn steps(
     }
 }
 
-/// Resolve only the project's delivery principal, only at a merge boundary.
+/// Resolve only the project's delivery principal, only for cut-time e2e.
 async fn merge_secrets(
     state: &Shared,
     job: &Job,
     delivery: &DeliveryDef,
 ) -> ApiResult<Vec<secrets::run_env::Injected>> {
-    if job.kind != JobKind::Merge || delivery.merge_secrets.is_empty() {
+    if job.kind != JobKind::E2e || delivery.merge_secrets.is_empty() {
         return Ok(Vec::new());
     }
     check_merge_refs(delivery)?;
@@ -3768,7 +3841,7 @@ pub(crate) fn failure_block(j: &Job) -> String {
 /// pack (`job.queue_comment`, TER-170).
 pub fn queue_comment(j: &Job, card: &str) -> String {
     match j.kind {
-        JobKind::Validate => format!(
+        JobKind::Validate | JobKind::E2e => format!(
             "Job queue: validate job {} queued. Repo {}, branch {}, commit {}.",
             j.id,
             j.repo,
@@ -3919,7 +3992,24 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
 
 /// The end of a job in one write: a `job.verdict` event for each card,
 /// then the coded card flow (the move, the rerun, or the split).
-fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+pub(crate) fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    if j.kind == JobKind::E2e {
+        let group = crate::store::groups::get(t, &j.card)?;
+        let state = if j.state == jobs::JobState::Passed {
+            "done"
+        } else {
+            "failed"
+        };
+        crate::store::groups::step(
+            t,
+            &group,
+            "version branch e2e",
+            Some(state),
+            Some(&end_comment(j, state)),
+            None,
+        )?;
+        return Ok(());
+    }
     emit_verdicts(t, j)?;
     if j.kind == JobKind::Release {
         return release_end(t, j);
@@ -4192,7 +4282,9 @@ pub fn card_view(j: &Job, c: &BatchCard) -> Job {
 fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
     let to = match j.kind {
-        JobKind::Validate => board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?,
+        JobKind::Validate | JobKind::E2e => {
+            board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?
+        }
         JobKind::Merge => board::role_name(t, &j.project, board::ACCEPTED, COL_ACCEPTED)?,
         // [`on_end`] ends a release in [`release_end`].
         JobKind::Release => return release_end(t, j),
@@ -4550,6 +4642,82 @@ printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lost_slot_retries_offline_and_busy_probes() {
+        use crate::error::Code;
+        for code in [Code::Conflict, Code::RateLimited] {
+            let mut calls = 0;
+            let started = Instant::now();
+            let result = wait_slot_free_with(
+                "test",
+                "/slot",
+                4,
+                |_| {
+                    calls += 1;
+                    std::future::ready(if calls == 1 {
+                        Err(ApiError::new(code, "temporary"))
+                    } else {
+                        Ok("free".into())
+                    })
+                },
+                || async { panic!("a failed probe must not re-kill") },
+            )
+            .await;
+            assert!(result.is_none());
+            assert_eq!(calls, 2);
+            assert!(started.elapsed() >= Duration::from_secs(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_slot_cap_includes_probe_retries_and_rekill() {
+        use crate::error::Code;
+        for mode in ["offline", "probe", "kill"] {
+            let started = Instant::now();
+            let result = wait_slot_free_with(
+                "test",
+                "/slot",
+                1,
+                |_| async {
+                    match mode {
+                        "offline" => Err(ApiError::new(Code::Conflict, "offline")),
+                        "probe" => std::future::pending().await,
+                        _ => Ok("held".into()),
+                    }
+                },
+                std::future::pending::<Value>,
+            )
+            .await;
+            assert!(result.unwrap().contains("/slot.lock"));
+            assert!(started.elapsed() >= Duration::from_secs(1));
+            assert!(started.elapsed() < Duration::from_secs(3), "{mode}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_slot_unknown_probe_falls_back_without_rekill() {
+        for said in ["noflock", "error", ""] {
+            let result = wait_slot_free_with(
+                "test",
+                "/slot",
+                1,
+                |_| std::future::ready(Ok(said.to_owned())),
+                || async { panic!("unknown slot state must fall back") },
+            )
+            .await;
+            assert!(result.is_none(), "{said}");
+        }
+        let result = wait_slot_free_with(
+            "test",
+            "/slot",
+            1,
+            |_| std::future::ready(Err(ApiError::forbidden("denied"))),
+            || async { panic!("permanent error must fall back") },
+        )
+        .await;
+        assert!(result.is_none());
+    }
 
     /// TER-623 F1: the release recipe runs in a new private HOME, with no
     /// global git config, and the HOME is gone after it; the exit code is
@@ -6168,6 +6336,63 @@ mod tests {
         // The coded flow: C1 and C3 merged and the batch is red, so it
         // splits into two halves of one card each.
         assert_eq!(queued, 2);
+    }
+
+    #[tokio::test]
+    async fn release_e2e_records_outcome_without_moving_version_group() {
+        use crate::store::{groups, projects};
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        let db = crate::db::Db::new(c, crate::events::EventHub::default());
+        db.write("system", |t| {
+            projects::create(
+                t,
+                &projects::NewProject {
+                    name: "p".into(),
+                    ..Default::default()
+                },
+                projects::SOURCE_API,
+            )?;
+            groups::open(
+                t,
+                groups::Open {
+                    project: "p",
+                    rule: "version-cut",
+                    key: "version:test",
+                    title: "Version test",
+                    column: "review",
+                    done_when: "done",
+                    eta: None,
+                    close_after: None,
+                },
+            )?;
+            let g = groups::by_key(t, "p", "version:test")?.unwrap();
+            for (state, expected) in [
+                (jobs::JobState::Passed, "done"),
+                (jobs::JobState::Failed, "failed"),
+                (jobs::JobState::Cancelled, "failed"),
+            ] {
+                let mut j = ended(JobKind::E2e, state, None);
+                j.card = g.id.clone();
+                j.project = "p".into();
+                on_end(t, &j)?;
+                let after = groups::get(t, &g.id)?;
+                assert_eq!(after.column, g.column);
+                assert_eq!(after.members, g.members);
+                assert_eq!(
+                    after
+                        .steps
+                        .iter()
+                        .find(|s| s.name == "version branch e2e")
+                        .unwrap()
+                        .state,
+                    expected
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     /// TER-137: the job queue writes its comments and its moves with the

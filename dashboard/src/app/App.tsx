@@ -30,6 +30,7 @@ const RulesPage = lazy(() => import("../features/rules/RulesPage"));
 const TemplatesPage = lazy(() => import("../features/templates/TemplatesPage"));
 const SystemPromptsPage = lazy(() => import("../features/systemprompts/SystemPromptsPage"));
 const HostsPage = lazy(() => import("../features/hosts/HostsPage"));
+const LinksPage = lazy(() => import("../features/links/LinksPage"));
 const AuditPage = lazy(() => import("../features/audit/AuditPage"));
 const EventsPage = lazy(() => import("../features/events/EventsPage"));
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
@@ -117,6 +118,7 @@ export function App() {
           <Route path="/targets" component={TargetsPage} />
           <Route path="/harness" component={ConfigPage} />
           <Route path="/hosts" component={HostsPage} />
+          <Route path="/links" component={LinksPage} />
           <Route path="/software" component={SoftwarePage} />
         </Route>
         {/* Every project page keeps its URL under one shell with route tabs (nav.ts PROJECT_TABS). */}

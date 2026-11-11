@@ -42,8 +42,9 @@ It runs these checks in order and stops at the first failure:
 1. `ci::fmt-check`: `cargo fmt --all --check`
 2. `ci::lint`: clippy over the workspace, warnings fail
 3. `ci::test`: `cargo test --workspace --no-fail-fast`
-   At the version cut, set `TERRARIUM_JOB_KIND=merge` so it is followed by
-   `ci::test-unprivileged`: the built terrarium-host test binaries and the
+   In a release validation (`TERRARIUM_VALIDATE_CONTEXT=release`, the full
+   suite at the version cut) or a merge job (`TERRARIUM_JOB_KIND=merge`) it
+   is followed by `ci::test-unprivileged`: the built terrarium-host test binaries and the
    terrariumd lib and `it` test binaries run again as uid 1001, the user of
    the release gate, each with a private HOME and the shared /tmp (TER-579,
    TER-611). The terrariumd lib and `it` binaries run alone, the others at
@@ -51,6 +52,16 @@ It runs these checks in order and stops at the first failure:
    The merge host needs a passwd entry for uid 1001 (OpenSSH tests need one):
    `useradd -u 1001 -M -s /usr/sbin/nologin terrarium-ci`. Without it the
    step fails before it runs a test.
+   In the same two contexts a failed test step (the root pass or the uid
+   1001 pass) runs only its failed tests once more (TER-683,
+   `scripts/rerun_tests.py`). All pass: the step passes. One fails again:
+   the step fails. No rerun unless every failure is a failed test: a build
+   or other cargo error, a crash or signal, a test binary without a result,
+   a failed doctest, or more than 5 failed tests keeps it red. With
+   `RESULTS_DIR` the step writes `$RESULTS_DIR/reruns.json`, and
+   `just ci::flaky-cards "$RESULTS_DIR/reruns.json" "<the run>"` prints the
+   flaky-test card commands for the lead. A card check never reruns: there
+   each failure shows as it is (docs/api.md 35.3, docs/release.md).
 4. `ci::scripts-test`: the Python tests under `scripts/`
 5. `ci::dashboard-check`: `npm run check`, then the dashboard unit tests (`npm run test -- --run`) in `dashboard/`
 
@@ -60,11 +71,11 @@ the release merge only after that run passes. Releases use the local release
 job (`terrarium job release`), not GitHub Actions. Run the full suite for a
 card when its changes touch the build (see above).
 
-Merge jobs enter through `ci::validate-affected` and `ci::merge`. The merge
-gate is opt-in with `TERRARIUM_DOCKER_CI=1` in the delivery recipe. Off by
-default, it runs only `ci::validate` and needs neither a key nor Docker.
-The switch controls only the recipe gate. Whenever merge secrets are configured,
-the daemon resets the VM and opens the tunnel, even if the recipe gate is off.
+Merge jobs enter through `ci::validate-affected` and `ci::merge`. Only the
+cut-time `e2e` job may enter the Docker gate. Merge and validate jobs never
+reset the VM or receive its relay, whatever their recipe sets. For an e2e
+job, the daemon uses the legacy-named merge secret references to provision
+the reset and tunnel.
 The daemon consumes the configured `DOCKER_CI_KEY` and
 `DOCKER_CI_RESET_KEY` references
 from a `delivery:terrarium` run grant. The recipe receives only

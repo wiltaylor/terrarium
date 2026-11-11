@@ -512,6 +512,8 @@ pub enum AuthVia {
     CliToken,
     /// The session cookie.
     Cookie,
+    /// A link key (`tlk_`, `docs/api.md` §36).
+    Link,
 }
 
 /// The session of a request that a session token let in, as a request
@@ -522,8 +524,8 @@ pub struct CurrentSession(pub Session);
 /// The answer of `POST /api/session` and `GET /api/session`.
 #[derive(Debug, Serialize)]
 pub struct SessionAnswer {
-    /// `browser`, `cli`, `token` (the static bearer token), or `local`
-    /// (the Unix socket).
+    /// `browser`, `cli`, `token` (the static bearer token), `link` (a link
+    /// key, `docs/api.md` §36), or `local` (the Unix socket).
     pub kind: &'static str,
     /// Browser: send it as `X-CSRF-Token` on every `POST`, `PUT`, `PATCH`,
     /// and `DELETE` that the cookie authenticates.
@@ -805,6 +807,14 @@ pub async fn current(
         .is_set();
     let mut answer = match (session, via) {
         (Some(Extension(CurrentSession(s))), _) => SessionAnswer::of(&s, false),
+        (None, Some(Extension(AuthVia::Link))) => SessionAnswer {
+            kind: "link",
+            csrf: None,
+            token: None,
+            exp: None,
+            expires_at: None,
+            password_set: None,
+        },
         (None, Some(Extension(_))) => SessionAnswer {
             kind: "token",
             csrf: None,

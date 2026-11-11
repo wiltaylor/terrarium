@@ -5,7 +5,7 @@
 // The Inbox threads (docs/api.md §6.13) have their own Threads screen (TER-466): an old
 // `?tab=thread` link redirects there.
 
-import { A, Navigate, useLocation, useSearchParams } from "@solidjs/router";
+import { A, Navigate, useLocation, useSearchParams, useNavigate } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";
@@ -164,11 +164,10 @@ function InboxScreen() {
   const [notice, setNotice] = createSignal<string | null>(null);
   /** "Message an agent" (TER-46): the dialog, and the last mail sent from it. */
   const [messaging, setMessaging] = createSignal(false);
-  const [sent, setSent] = createSignal<{ agent: string; thread: string } | null>(null);
-  const messaged = (m: { to_name: string; thread_id: string }) => {
+  const navigate = useNavigate();
+  const messaged = (m: { id: string }) => {
     setMessaging(false);
-    setSent({ agent: m.to_name, thread: m.thread_id });
-    setTimeout(() => setSent(null), 8000);
+    navigate(`/threads/${m.id}`);
   };
   const asked = (agent: string, forward: boolean) => {
     setAsking(null);
@@ -224,13 +223,6 @@ function InboxScreen() {
       </Show>
       <Tabs tabs={STATUS_TABS} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s, tab: params.tab === "watch" ? undefined : params.tab })} />
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
-      <Show when={sent()}>
-        {(s) => (
-          <p class="notice small" role="status" style={{ margin: 0 }}>
-            Sent to {s().agent}. <A href={`/mail?open=${encodeURIComponent(s().thread)}`}>Open the thread</A>
-          </p>
-        )}
-      </Show>
       <Show when={notice()}>
         <p class="notice small" role="status" style={{ margin: 0 }}>
           {notice()}
@@ -281,7 +273,7 @@ function InboxScreen() {
         <MessageDialog onClose={() => setMessaging(false)} onSent={messaged} />
       </Show>
       <Show when={asking()}>
-        {(a) => <AskDialog question={a().question} onClose={() => setAsking(null)} onAsked={(r) => asked(r.watch.agent_name, !!a().question)} />}
+        {(a) => <AskDialog question={a().question} onClose={() => setAsking(null)} onAsked={(r) => asked(r.watch.agent_name, !!a().question)} onRequested={(t) => { setAsking(null); navigate(`/threads/${t.id}`); }} />}
       </Show>
     </div>
   );

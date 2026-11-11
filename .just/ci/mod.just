@@ -19,10 +19,15 @@ validate: require-uv
 	# Stable test-only inputs across slot checkouts. Release builds do not use this gate.
 	export TERRARIUM_GIT_REF=ci-test TERRARIUM_TEST_BUILD=1 SOURCE_DATE_EPOCH=0
 	uv run python scripts/affected.py --check-commit-trailers
+	# A release validation (the cut, TER-683) or a merge job also runs the
+	# uid 1001 pass, and both test passes rerun their failed tests once.
+	full=
+	if [ "${TERRARIUM_JOB_KIND:-}" = merge ] || [ "${TERRARIUM_VALIDATE_CONTEXT:-}" = release ]; then full=1; fi
+	if [ -n "${RESULTS_DIR:-}" ]; then rm -f "$RESULTS_DIR/reruns.json"; fi
 	just ci::fmt-check
 	just ci::lint
 	just ci::test
-	if [ "${TERRARIUM_JOB_KIND:-}" = merge ]; then just ci::test-unprivileged; fi
+	if [ -n "$full" ]; then just ci::test-unprivileged; fi
 	just ci::scripts-test
 	just ci::dashboard-check
 
@@ -94,10 +99,15 @@ test: require-cargo
 	fi
 	python3 scripts/rust_tests.py --workspace --no-fail-fast
 
-# Run the terrarium-host test binaries and the terrariumd lib and `it` test binaries of `ci::test` again as uid 1001 (the release CI user), not as root (TER-579, TER-611). `ci::validate` runs it in merge jobs only
+# Run the terrarium-host test binaries and the terrariumd lib and `it` test binaries of `ci::test` again as uid 1001 (the release CI user), not as root (TER-579, TER-611). `ci::validate` runs it in a merge job or a release validation (TERRARIUM_VALIDATE_CONTEXT=release) only
 [group('ci')]
 test-unprivileged: require-cargo
 	python3 scripts/unprivileged_tests.py
+
+# Print the flaky-test card commands for the reruns.json of a release validation (TER-683): `just ci::flaky-cards "$RESULTS_DIR/reruns.json" "the 0.43.0 cut"`, read the output, then run it with `| sh`
+[group('ci')]
+flaky-cards file source='a release validation':
+	python3 scripts/flaky_cards.py {{quote(file)}} --source {{quote(source)}}
 
 # Opt-in parallel runner. RESULTS_DIR retains rust.xml and doctests.json.
 [group('ci')]

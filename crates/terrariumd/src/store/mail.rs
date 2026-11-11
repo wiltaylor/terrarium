@@ -565,6 +565,13 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
         ))?,
         other => other.clone(),
     };
+    // The one delivery point of every message (TER-61 review round 5, F9):
+    // a write of a link request delivers nothing to an agent that holds
+    // sysadmin, whatever route it came through. The error fails the whole
+    // transaction, so the question, thread, or reply change rolls back.
+    if let Address::Agent { id, .. } = &recipient {
+        refuse_link_delivery(t, id)?;
+    }
     // The loop guard: agent mail past the limit types no pointer.
     let limit = mail_loop_limit();
     let held_reason = if matches!(
@@ -841,6 +848,25 @@ pub fn guard_threads(conn: &Connection) -> ApiResult<Vec<String>> {
     Ok(out)
 }
 
+/// The delivery guard of a link write (TER-61 review rounds 5 and 6, F9):
+/// with a link provenance (`Tx::link`), nothing reaches an agent that holds
+/// sysadmin. The error fails the whole transaction, so the change and its
+/// events roll back. `send` (every new message) and `release` (a held one)
+/// call it.
+fn refuse_link_delivery(t: &Tx<'_>, agent: &str) -> ApiResult<()> {
+    if t.link.is_some()
+        && agents::get(t, agent)
+            .is_ok_and(|v| v.agent.roles.contains(&terrarium_core::Role::Sysadmin))
+    {
+        return Err(ApiError::new(
+            crate::error::Code::LinkForbidden,
+            "a link key may not deliver a message to an agent that holds sysadmin \
+             (docs/api.md §36.4)",
+        ));
+    }
+    Ok(())
+}
+
 /// Release one held message (the operator). A message to an agent becomes
 /// `queued` again, and its `mail` event (with `released: true` and no
 /// `held`) makes the push pointer for the recipient. The thread stays
@@ -859,6 +885,10 @@ pub fn release(t: &mut Tx<'_>, id: &str) -> ApiResult<Message> {
         )));
     }
     let to_agent = m.to_kind == "agent";
+    // Before any change or event: a release delivers too.
+    if to_agent {
+        refuse_link_delivery(t, &m.to)?;
+    }
     t.execute(
         "UPDATE messages SET released_at = ?2, released_by = ?3,
                 state = CASE WHEN ?4 AND state = 'delivered' THEN 'queued' ELSE state END,
