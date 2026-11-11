@@ -166,7 +166,7 @@ missing, stop and use a drained full-backup recovery instead of guessing.
 to the entrypoint only (no `-g`). Then the entrypoint:
 
 1. Sends the signal (SIGTERM or SIGINT) to `terrariumd`.
-2. Waits `TERRARIUM_DAEMON_STOP_TIMEOUT` (5 s) for it. After that, it sends
+2. Waits `TERRARIUM_DAEMON_STOP_TIMEOUT` (610 s) for it. After that, it sends
    SIGKILL. `terrariumd` leaves its runners running when it stops.
 3. Sends SIGTERM to each live runner. It finds them through
    `/run/terrarium/runners/<ulid>.pid`. A runner types the exit keys of an
@@ -181,9 +181,19 @@ to the entrypoint only (no `-g`). Then the entrypoint:
    record; the next start launches its agent again too.
 6. Exits 0.
 
-`compose.yaml` sets `stop_grace_period: 40s`. Keep it larger than
+`compose.yaml` sets `stop_grace_period: 650s`. Keep it larger than
 `TERRARIUM_DAEMON_STOP_TIMEOUT` plus `TERRARIUM_SHUTDOWN_GRACE`, else
 Docker sends SIGKILL to the container before the runners stop.
+
+The default ordering is RPC drain cap (600 s) < daemon stop timeout (610 s),
+then daemon stop plus runner shutdown (630 s) < container grace (650 s)
+< runner call queue limit (900 s). The margins allow shutdown bookkeeping
+and leave time for the replacement daemon to reconnect. The updater uses
+the container's configured stop timeout, or 650 s when it has none.
+If overriding the drain cap or shutdown timeouts, preserve this ordering
+and leave startup time within the queue budget. Existing containers retain
+their old stop timeout until recreated. Coordinate recreation with the
+TER-261/262 rollout and obtain rollout approval before changing live containers.
 
 ## Environment variables
 
@@ -192,7 +202,7 @@ Docker sends SIGKILL to the container before the runners stop.
 | `TERRARIUM_SUPERVISOR` | `1` | Set `0` to run `terrariumd` once, with no restart loop. |
 | `TERRARIUM_SUPERVISOR_MAX_BACKOFF` | `30` | The maximum wait before a restart, in seconds. |
 | `TERRARIUM_SUPERVISOR_RESET_AFTER` | `300` | The uptime, in seconds, after which the backoff goes back to 1 s. |
-| `TERRARIUM_DAEMON_STOP_TIMEOUT` | `5` | The time, in seconds, that `terrariumd` gets to stop. |
+| `TERRARIUM_DAEMON_STOP_TIMEOUT` | `610` | The time, in seconds, that `terrariumd` gets to stop. |
 | `TERRARIUM_SHUTDOWN_GRACE` | `20` | The time, in seconds, that the runners get to stop. |
 | `TERRARIUM_RUNTIME_DIR` | `/run/terrarium` | The runtime dir. The daemon reads the same variable. |
 | `TERRARIUM_STATE_DIR` | `/state` | The state dir. The daemon reads the same variable. |
