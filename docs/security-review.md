@@ -26,22 +26,17 @@ link provenance, not just the operator address. A link cannot take the
 operator-only no-grant tool execution path, change a held card through an
 operator exemption, or manage an operator watch.
 
-The reviewed test inventory is `tests/fixtures/link-route-access.json` in
-the daemon crate. The completeness test compares every production router
-registration, including method chains and handlers, and the direct operator
-comparisons and shared gates. New registrations or gates require an access
-classification and HTTP cases for exclusive or conditional operator actions.
-The scanner parses Rust syntax and removes only test items, including when
-production items follow them. Reviewed `.merge` and `.nest` expressions have
-a separate composition snapshot. Changes to it require checking mounted paths
-against the HTTP cases. Service routes, UFCS router calls, router operations
-inside macros, method-router variables and renamed operator gates fail closed.
-Operator markers include bare and qualified `Operator`, the shared helpers,
-and decoded `"operator"` literals. The gate snapshot hashes the whole enclosing
-item so a changed condition or body also requires review.
-The HTTP walk consumes that inventory, including real tool-run and hold
-questions, verifies denied approvals change no state, and then verifies that
-the ordinary operator can answer them.
+The runtime link registry in `api/link_registry.rs` is the boundary, not a
+source scanner. Route builders declare each method, path pattern and link
+access class together with the axum registration. Nesting prefixes the
+registry entries as well as the router. The outer TCP authentication layer
+checks the registry before routing. An undeclared method/path or an
+operator-only entry gets `403 link_forbidden`, including routes added by
+plain axum, macros, helpers or conditional compilation. Shared operator
+gates and the link deny list remain additional restrictions. The HTTP walk
+iterates the actual registry's operator-only entries. Additional conditional
+and real approval cases in `tests/fixtures/link-route-access.json` verify
+denied approvals change no state and the ordinary operator can answer them.
 
 Read-only review before Terrarium runs with real subscriptions. Date: 2026-10-24.
 Reviewer: pre-flight security pass.

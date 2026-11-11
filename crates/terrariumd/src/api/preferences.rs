@@ -1,5 +1,5 @@
 //! Server-side operator preferences, shared by all browsers.
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{Json, extract::State, routing::get};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
@@ -11,8 +11,8 @@ pub struct Preferences {
     pub default_agent: Option<String>,
 }
 
-pub fn routes() -> Router<Shared> {
-    Router::new().route("/preferences", get(read).put(update))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new().route("/preferences", get(read).put(update), &[(axum::http::Method::GET, super::link_registry::Access::OperatorRead), (axum::http::Method::PUT, super::link_registry::Access::OperatorOnly)])
 }
 
 fn load(c: &rusqlite::Connection, owner: &str) -> ApiResult<Preferences> {

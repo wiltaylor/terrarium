@@ -15,7 +15,7 @@
 
 use axum::extract::{Path, State};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Json};
 use serde::Serialize;
 use serde_json::Value;
 use terrarium_core::{AgentId, AgentStatus, HarnessId};
@@ -29,11 +29,11 @@ use crate::store::board;
 use crate::store::session_refs::{self, SessionField, SessionLink, SessionRef, SessionRow};
 use crate::transcripts::{LocateError, Located, locate_row};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/sessions/{id}", get(show))
-        .route("/sessions/{id}/transcript", get(transcript))
-        .route("/cards/{id}/sessions", get(card_sessions))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/sessions/{id}", get(show), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/sessions/{id}/transcript", get(transcript), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/cards/{id}/sessions", get(card_sessions), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
 }
 
 /// The rights check of the session links of log rows, with a cache for

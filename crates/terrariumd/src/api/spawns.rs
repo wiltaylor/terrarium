@@ -14,7 +14,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json};
 use serde::Deserialize;
 
 use super::{ApiJson, ApiQuery, Shared, paged};
@@ -25,13 +25,13 @@ use crate::spawn::{SpawnBody, Spawned};
 use crate::store::Page;
 use crate::store::spawns::{self, OPERATOR, Spawn};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/agents/{id}/spawn", post(spawn))
-        .route("/agents/{id}/spawned", get(spawned))
-        .route("/agents/{id}/done", post(done))
-        .route("/agents/{id}/cancel", post(cancel))
-        .route("/spawns/{id}", get(show))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/agents/{id}/spawn", post(spawn), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/agents/{id}/spawned", get(spawned), &[(axum::http::Method::GET, super::link_registry::Access::Conditional)])
+        .route("/agents/{id}/done", post(done), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/agents/{id}/cancel", post(cancel), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/spawns/{id}", get(show), &[(axum::http::Method::GET, super::link_registry::Access::Conditional)])
 }
 
 async fn spawn(

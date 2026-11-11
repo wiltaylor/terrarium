@@ -8,7 +8,7 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -20,13 +20,13 @@ use crate::error::{ApiError, ApiResult};
 use crate::policy;
 use crate::self_update::{self, DrainInfo, Report};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/system/update", get(status).post(update))
-        .route("/system/update/check", post(check))
-        .route("/system/update/rollback", post(rollback))
-        .route("/system/update/drain", post(drain))
-        .route("/system/update/resume", post(resume))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/system/update", get(status).post(update), &[(axum::http::Method::GET, super::link_registry::Access::OperatorOnly), (axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
+        .route("/system/update/check", post(check), &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
+        .route("/system/update/rollback", post(rollback), &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
+        .route("/system/update/drain", post(drain), &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
+        .route("/system/update/resume", post(resume), &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
 }
 
 /// An optional JSON body: no body is the default.

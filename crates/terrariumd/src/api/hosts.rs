@@ -5,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Json};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -16,12 +16,12 @@ use crate::events::EventDraft;
 use crate::policy;
 use crate::store::hosts::{self, Host, Issued};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/hosts", get(list).post(create))
-        .route("/hosts/{name}", get(show).delete(revoke))
-        .route("/hosts/{name}/rotate", axum::routing::post(rotate))
-        .route("/hosts/{name}/metrics", get(metrics))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/hosts", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/hosts/{name}", get(show).delete(revoke), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/hosts/{name}/rotate", axum::routing::post(rotate), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/hosts/{name}/metrics", get(metrics), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
 }
 
 /// The longest history of `GET /api/hosts/{name}/metrics`, in minutes.

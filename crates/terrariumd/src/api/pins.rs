@@ -5,7 +5,7 @@
 
 use axum::extract::{Path, State};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Json};
 
 use super::Shared;
 use crate::actor::Actor;
@@ -14,10 +14,10 @@ use crate::policy;
 use crate::store::agents;
 use crate::store::pins::{self, Pin};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/pins", get(list))
-        .route("/pins/{agent}", axum::routing::put(pin).delete(unpin))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/pins", get(list), &[(axum::http::Method::GET, super::link_registry::Access::OperatorRead)])
+        .route("/pins/{agent}", axum::routing::put(pin).delete(unpin), &[(axum::http::Method::PUT, super::link_registry::Access::OperatorOnly), (axum::http::Method::DELETE, super::link_registry::Access::OperatorOnly)])
 }
 
 /// `GET /api/pins`: the pins, oldest first.

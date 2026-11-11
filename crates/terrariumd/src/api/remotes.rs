@@ -8,7 +8,7 @@ use axum::extract::{FromRequestParts, Path, Request, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
-use axum::{Json, Router};
+use axum::{Json};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
@@ -20,13 +20,13 @@ use crate::error::{ApiError, ApiResult, Code};
 use crate::remotes::{self as net, Limits};
 use crate::store::remotes::{self as store, Remote};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/remotes", get(list).post(add))
-        .route("/remotes/{name}", get(show).delete(remove))
-        .route("/remotes/{name}/repin", post(repin))
-        .route("/remotes/{name}/pair", post(repair))
-        .route("/remotes/{name}/proxy/{*rest}", any(proxy))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/remotes", get(list).post(add), &[(axum::http::Method::GET, super::link_registry::Access::OperatorOnly), (axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
+        .route("/remotes/{name}", get(show).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::OperatorOnly), (axum::http::Method::DELETE, super::link_registry::Access::OperatorOnly)])
+        .route("/remotes/{name}/repin", post(repin), &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
+        .route("/remotes/{name}/pair", post(repair), &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)])
+        .route("/remotes/{name}/proxy/{*rest}", any(proxy), &[(axum::http::Method::GET, super::link_registry::Access::OperatorOnly), (axum::http::Method::HEAD, super::link_registry::Access::OperatorOnly), (axum::http::Method::POST, super::link_registry::Access::OperatorOnly), (axum::http::Method::PUT, super::link_registry::Access::OperatorOnly), (axum::http::Method::PATCH, super::link_registry::Access::OperatorOnly), (axum::http::Method::DELETE, super::link_registry::Access::OperatorOnly), (axum::http::Method::OPTIONS, super::link_registry::Access::OperatorOnly), (axum::http::Method::TRACE, super::link_registry::Access::OperatorOnly), (axum::http::Method::CONNECT, super::link_registry::Access::OperatorOnly)])
         .route_layer(axum::middleware::from_fn(operator_guard))
 }
 

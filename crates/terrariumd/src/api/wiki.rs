@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json};
 use serde::Deserialize;
 
 use super::{ApiJson, ApiQuery, Shared, paged};
@@ -17,19 +17,19 @@ use crate::store::wiki::{
     WikiPage,
 };
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/projects/{name}/wiki", get(list).post(create))
-        .route("/wiki/{id}", get(show).put(save).delete(remove))
-        .route("/wiki/{id}/section", post(section))
-        .route("/wiki/{id}/append", post(append))
-        .route("/wiki/{id}/revisions", get(revisions))
-        .route("/wiki/{id}/revisions/{rev}", get(revision))
-        .route("/wiki/{id}/diff", get(diff))
-        .route("/wiki/{id}/restore", post(restore))
-        .route("/wiki/{id}/move", post(move_page))
-        .route("/wiki/{id}/backlinks", get(backlinks))
-        .route("/wiki/{id}/review", post(review))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/projects/{name}/wiki", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/wiki/{id}", get(show).put(save).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PUT, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/wiki/{id}/section", post(section), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/wiki/{id}/append", post(append), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/wiki/{id}/revisions", get(revisions), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/wiki/{id}/revisions/{rev}", get(revision), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/wiki/{id}/diff", get(diff), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/wiki/{id}/restore", post(restore), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/wiki/{id}/move", post(move_page), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/wiki/{id}/backlinks", get(backlinks), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/wiki/{id}/review", post(review), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
 }
 
 async fn list(

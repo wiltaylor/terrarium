@@ -24,7 +24,7 @@ use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::routing::post;
-use axum::{Json, Router};
+use axum::{Json};
 use base64::Engine;
 use serde::Serialize;
 use serde_json::json;
@@ -52,11 +52,10 @@ pub const MAX_AGE: Duration = Duration::from_secs(7 * 86_400);
 /// shape, from the handler.
 const BODY_LIMIT: usize = MAX_ATTACHMENT_BYTES / 3 * 4 + 64 * 1024;
 
-pub fn routes() -> Router<Shared> {
-    Router::new().route(
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new().route(
         "/agents/{id}/attachments",
-        post(upload).layer(DefaultBodyLimit::max(BODY_LIMIT)),
-    )
+        post(upload).layer(DefaultBodyLimit::max(BODY_LIMIT)), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
 }
 
 /// The JSON form of an upload.

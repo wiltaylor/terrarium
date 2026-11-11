@@ -11,7 +11,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -25,14 +25,14 @@ use crate::policy;
 use crate::store::pipelines::{self, Pipeline, PipelineDef};
 use crate::webhooks;
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/projects/{name}/pipelines", get(list).post(create))
-        .route("/projects/{name}/pipelines/test", post(test_poll))
-        .route("/pipelines/{id}", get(show).patch(update).delete(remove))
-        .route("/pipelines/{id}/refresh", post(refresh))
-        .route("/pipelines/{id}/runs", get(runs))
-        .route("/pipelines/{id}/runs/{run}", get(run_detail))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/projects/{name}/pipelines", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/projects/{name}/pipelines/test", post(test_poll), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/pipelines/{id}", get(show).patch(update).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PATCH, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/pipelines/{id}/refresh", post(refresh), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/pipelines/{id}/runs", get(runs), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/pipelines/{id}/runs/{run}", get(run_detail), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
 }
 
 /// Fill `running` from the runtime.

@@ -16,7 +16,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post, put};
-use axum::{Json, Router};
+use axum::{Json};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,45 +28,38 @@ use crate::policy;
 use crate::store::calendar::{self as cal, Event, Filter, Scope};
 use crate::store::{agents, projects};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/calendar", get(combined))
-        .route("/calendar/global", get(global_view))
-        .route("/calendar/global/events", post(create_global))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/calendar", get(combined), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/calendar/global", get(global_view), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/calendar/global/events", post(create_global), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
         .route(
             "/calendar/global/watches",
-            get(global_watches).post(global_watch),
-        )
+            get(global_watches).post(global_watch), &[(axum::http::Method::GET, super::link_registry::Access::OperatorRead), (axum::http::Method::POST, super::link_registry::Access::Conditional)])
         .route(
             "/calendar/global/watches/{watcher}",
-            axum::routing::delete(global_unwatch),
-        )
+            axum::routing::delete(global_unwatch), &[(axum::http::Method::DELETE, super::link_registry::Access::Conditional)])
         .route(
             "/calendar/events/{id}",
-            get(show).patch(update).delete(remove),
-        )
-        .route("/calendar/events/{id}/skip", post(skip))
-        .route("/calendar/events/{id}/unskip", post(unskip))
+            get(show).patch(update).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PATCH, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/calendar/events/{id}/skip", post(skip), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/calendar/events/{id}/unskip", post(unskip), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
         .route(
             "/calendar/events/{id}/assignees/{agent}",
-            put(assign).delete(unassign),
-        )
-        .route("/calendar/events/{id}/notices", get(notices))
-        .route("/projects/{name}/calendar", get(project_view))
-        .route("/projects/{name}/calendar/events", post(create_project))
+            put(assign).delete(unassign), &[(axum::http::Method::PUT, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/calendar/events/{id}/notices", get(notices), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/projects/{name}/calendar", get(project_view), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/projects/{name}/calendar/events", post(create_project), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
         .route(
             "/projects/{name}/calendar/watches",
-            get(project_watches).post(project_watch),
-        )
+            get(project_watches).post(project_watch), &[(axum::http::Method::GET, super::link_registry::Access::OperatorRead), (axum::http::Method::POST, super::link_registry::Access::Conditional)])
         .route(
             "/projects/{name}/calendar/watches/{watcher}",
-            axum::routing::delete(project_unwatch),
-        )
-        .route("/projects/{name}/calendar/grants", get(grants))
+            axum::routing::delete(project_unwatch), &[(axum::http::Method::DELETE, super::link_registry::Access::Conditional)])
+        .route("/projects/{name}/calendar/grants", get(grants), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
         .route(
             "/projects/{name}/calendar/grants/{agent}",
-            put(grant).delete(revoke),
-        )
+            put(grant).delete(revoke), &[(axum::http::Method::PUT, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
 }
 
 // ------------------------------------------------------------- the range

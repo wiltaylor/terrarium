@@ -7,7 +7,7 @@
 
 use axum::extract::{Path, State};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Json};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use terrarium_runner::ScreenSnapshot;
@@ -18,8 +18,8 @@ use crate::actor::Actor;
 use crate::error::ApiResult;
 use crate::policy;
 
-pub fn routes() -> Router<Shared> {
-    Router::new().route("/agents/{id}/screen", get(screen))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new().route("/agents/{id}/screen", get(screen), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
 }
 
 #[derive(Debug, Default, Deserialize)]

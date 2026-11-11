@@ -1,139 +1,21 @@
-// The inventory is a reviewed classification, not a generated allow list.
-// New registrations, methods, handlers, and operator comparisons must be
-// classified before this test passes. The HTTP walk consumes the same data.
-include!("link_inventory_syntax.rs");
+// Runtime registry entries are the boundary. These additional reviewed cases
+// exercise conditional actions and real approval resources.
 #[derive(serde::Deserialize)]
-struct LinkRouteInventory {
-    routes: Vec<LinkRouteEntry>,
-    gates: std::collections::BTreeMap<String, Vec<String>>,
-    compositions: std::collections::BTreeMap<String, Vec<String>>,
-}
-
+struct LinkRouteInventory { routes: Vec<LinkRouteEntry> }
 #[derive(serde::Deserialize)]
-struct LinkRouteEntry {
-    source: String,
-    registration: String,
-    access: String,
-    cases: Vec<LinkRouteCase>,
-}
-
+struct LinkRouteEntry { cases: Vec<LinkRouteCase> }
 #[derive(serde::Deserialize)]
 struct LinkRouteCase {
     method: String,
     path: String,
-    #[serde(default)]
-    body: serde_json::Value,
-    #[serde(default)]
-    allowed: bool,
-    #[serde(default)]
-    approval: bool,
+    #[serde(default)] body: serde_json::Value,
+    #[serde(default)] allowed: bool,
+    #[serde(default)] approval: bool,
 }
-
 fn link_inventory() -> LinkRouteInventory {
-    serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/link-route-access.json"
-    )))
-    .unwrap()
+    serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/link-route-access.json"))).unwrap()
 }
 
-fn link_inventory_sources(
-    dir: &Path,
-    root: &Path,
-    out: &mut std::collections::BTreeMap<String, String>,
-) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            link_inventory_sources(&path, root, out);
-        } else if path.extension().is_some_and(|e| e == "rs")
-            && path.file_name().unwrap() != "link_access_tests.rs"
-            && path.file_name().unwrap() != "link_inventory_syntax.rs"
-        {
-            let source = std::fs::read_to_string(&path).unwrap();
-            out.insert(
-                path.strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-                link_production_source(&source),
-            );
-        }
-    }
-}
-
-fn link_registration_expressions(source: &str) -> Vec<String> {
-    link_syntax_inventory(source).0
-}
-
-#[test]
-fn link_route_inventory_is_complete() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut sources = std::collections::BTreeMap::new();
-    link_inventory_sources(&root, &root, &mut sources);
-    let inventory = link_inventory();
-    let actual: std::collections::BTreeSet<_> = sources
-        .iter()
-        .flat_map(|(name, source)| {
-            link_registration_expressions(source)
-                .into_iter()
-                .map(|r| (name.clone(), r))
-        })
-        .collect();
-    let expected: std::collections::BTreeSet<_> = inventory
-        .routes
-        .iter()
-        .map(|r| (r.source.clone(), r.registration.clone()))
-        .collect();
-    assert_eq!(
-        actual, expected,
-        "classify each new or changed router registration in link-route-access.json"
-    );
-    assert_eq!(
-        expected.len(),
-        inventory.routes.len(),
-        "duplicate inventory entry"
-    );
-    for entry in &inventory.routes {
-        assert!(
-            matches!(
-                entry.access.as_str(),
-                "operator-only" | "link-allowed-read" | "conditional" | "other"
-            ),
-            "unclassified registration: {}",
-            entry.registration
-        );
-        if entry.access != "other" {
-            assert!(
-                !entry.cases.is_empty(),
-                "missing HTTP coverage: {}",
-                entry.registration
-            );
-        }
-    }
-    let gates: std::collections::BTreeMap<_, _> = sources
-        .iter()
-        .filter_map(|(name, source)| {
-            let lines = link_gate_lines(source);
-            (!lines.is_empty()).then(|| (name.clone(), lines))
-        })
-        .collect();
-    assert_eq!(
-        gates, inventory.gates,
-        "review new operator comparisons and conditional gates, then update their route classes and HTTP cases"
-    );
-    let compositions: std::collections::BTreeMap<_, _> = sources
-        .iter()
-        .filter_map(|(name, source)| {
-            let calls = link_syntax_inventory(source).1;
-            (!calls.is_empty()).then(|| (name.clone(), calls))
-        })
-        .collect();
-    assert_eq!(
-        compositions, inventory.compositions,
-        "review router composition before changing the mounted endpoint set"
-    );
-}
 
 async fn link_approval_fixtures(
     s: &Shared,
@@ -237,7 +119,6 @@ async fn link_approval_snapshot(s: &Shared) -> serde_json::Value {
 
 #[tokio::test]
 async fn link_operator_routes_deny_by_default() {
-    link_route_inventory_is_complete();
     let dir = tempfile::tempdir().unwrap();
     let s = state_at(dir.path());
     let (_, dev) = seed_sysadmin(&s).await;
@@ -245,6 +126,15 @@ async fn link_operator_routes_deny_by_default() {
     let fixture = link_approval_fixtures(&s, dev).await;
     let auth = format!("Bearer {key}");
     let h = [("authorization", auth.as_str())];
+    let (_, registry) = routes_with_registry(s.clone(), false, false);
+    for entry in &registry.entries {
+        if entry.access != link_registry::Access::OperatorOnly { continue; }
+        let path = entry.path.split('/').map(|segment| {
+            if segment.starts_with('{') { "link-test" } else { segment }
+        }).collect::<Vec<_>>().join("/");
+        let response = send_body(link_app(&s), entry.method.as_str(), &path, &h, &serde_json::json!({})).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{} {path}", entry.method);
+    }
     let mut approvals = Vec::new();
     for entry in link_inventory().routes {
         for case in entry.cases {
@@ -308,4 +198,33 @@ async fn link_operator_routes_deny_by_default() {
         assert_eq!(status, StatusCode::OK, "operator {path}: {v}");
         assert_eq!(v["status"], "answered");
     }
+}
+
+#[tokio::test]
+async fn link_unregistered_routes_never_reach_handlers() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let s = state_at(dir.path());
+    let (_, key) = paired(&s, false).await;
+    let called = Arc::new(AtomicUsize::new(0));
+    let app = || {
+        let called = called.clone();
+        // No registration helper: this could equally come from a macro,
+        // a cfg'd helper, or a nested/merged axum router.
+        let plain = Router::new().route("/hidden", get(move || async move {
+            called.fetch_add(1, Ordering::SeqCst);
+            StatusCode::OK
+        }));
+        let (real, registry) = routes_with_registry(s.clone(), false, false);
+        let mut auth = TokenAuth::new("t".into(), false).with_links(LinkAuth { db: s.db.clone(), runtime: s.links.clone() });
+        auth.registry = registry;
+        authenticated_router(s.clone(), real.nest("/api/unregistered", plain), auth)
+    };
+    let bearer = format!("Bearer {key}");
+    let response = send(app(), "GET", "/api/unregistered/hidden", &[("authorization", &bearer)]).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    let response = send(app(), "GET", "/api/unregistered/hidden", &[("authorization", "Bearer t")]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(called.load(Ordering::SeqCst), 1);
 }

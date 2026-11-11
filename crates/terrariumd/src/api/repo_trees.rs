@@ -28,7 +28,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -44,14 +44,14 @@ use crate::store::Page;
 use crate::store::agents;
 use crate::store::repos::{self, Repo};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/repos/{id}/trees", get(trees))
-        .route("/repos/{id}/trees/{tree}/files", get(files))
-        .route("/repos/{id}/trees/{tree}/file", get(file))
-        .route("/repos/{id}/trees/{tree}/diff", get(diff))
-        .route("/repos/{id}/trees/{tree}/commits", get(commits))
-        .route("/repos/{id}/trees/{tree}/commits/{sha}", get(commit))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/repos/{id}/trees", get(trees), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/repos/{id}/trees/{tree}/files", get(files), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/repos/{id}/trees/{tree}/file", get(file), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/repos/{id}/trees/{tree}/diff", get(diff), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/repos/{id}/trees/{tree}/commits", get(commits), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/repos/{id}/trees/{tree}/commits/{sha}", get(commit), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
 }
 
 /// A fetch into the mirror at most this often on a read.

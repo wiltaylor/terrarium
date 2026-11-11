@@ -7,7 +7,7 @@
 
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::fleet::{self, Fleet, Issue, ObjectRef, References};
@@ -20,14 +20,14 @@ use crate::fleet::{self as store, Action, Origin, Plan};
 use crate::policy;
 use crate::store::{agents, repos};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/fleet", get(list))
-        .route("/fleet/validate", post(validate))
-        .route("/fleet/plan", post(plan))
-        .route("/fleet/apply", post(apply))
-        .route("/fleet/export", get(export))
-        .route("/fleet/{name}", get(show))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/fleet", get(list), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/fleet/validate", post(validate), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/fleet/plan", post(plan), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/fleet/apply", post(apply), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/fleet/export", get(export), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/fleet/{name}", get(show), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
 }
 
 /// The body of `POST /api/fleet/{validate,plan,apply}`.

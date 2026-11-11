@@ -25,7 +25,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -36,15 +36,14 @@ use crate::policy;
 use crate::secrets::grants::{self, Effective, Grant, Level, NewGrant};
 use crate::secrets::{self, Kind};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
         .route(
             "/secrets/{scope}/{name}/grants",
-            get(list).post(create).delete(revoke),
-        )
-        .route("/agent/secrets", get(mine))
-        .route("/agent/secrets/{name}/get", post(read_value))
-        .route("/agent/secrets/env", post(launch_env))
+            get(list).post(create).delete(revoke), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/agent/secrets", get(mine), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/agent/secrets/{name}/get", post(read_value), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/agent/secrets/env", post(launch_env), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
 }
 
 /// `terrarium secret get` answers at most this many times per agent in

@@ -9,7 +9,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::post;
-use axum::{Json, Router};
+use axum::{Json};
 use serde::Deserialize;
 use serde_json::{Map, json};
 
@@ -20,8 +20,8 @@ use crate::policy;
 use crate::secrets::ssh::{self, KeyType};
 use crate::secrets::{self, Kind, NewSecret, PutMode, SecretInfo, SecretInput};
 
-pub fn routes() -> Router<Shared> {
-    Router::new().route("/secrets/{scope}/{name}/generate", post(generate))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new().route("/secrets/{scope}/{name}/generate", post(generate), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
 }
 
 /// The body of a generate. Each field is optional.

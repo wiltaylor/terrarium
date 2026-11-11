@@ -13363,6 +13363,14 @@ audit row.
 
 ### 36.4 The rights of a link
 
+The runtime link-access registry is the fail-closed boundary. Every admitted
+method and path pattern has an explicit link access class declared with its
+route. The outer TCP authentication layer checks this registry before API
+routing or handlers. Unregistered methods/paths and operator-only entries
+return `403 link_forbidden`. Plain axum routes, nested mounts, macros, helpers
+and cfg'd routes do not gain link access without a registry declaration.
+The shared operator gate and the deny list below are additional restrictions.
+
 A link key is `Authorization: Bearer tlk_...` (on a WebSocket upgrade also
 the subprotocol `bearer.tlk_...`). For the rules the caller is the operator,
 minus a deny list. Operator-only gates deny link keys by default, except

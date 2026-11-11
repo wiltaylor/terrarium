@@ -17,7 +17,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -30,15 +30,15 @@ use crate::store::agents::{self, AgentView};
 use crate::store::waits::{self, NewWait, NewWatch, Until, Wait, WaitKind, WaitState, Watch};
 use crate::waits as rt;
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/agents/{id}/waits", get(list).post(create))
-        .route("/agents/{id}/run", post(run))
-        .route("/agents/{id}/watches", get(watch_list).post(watch_create))
-        .route("/waits/{id}", get(show).delete(cancel))
-        .route("/waits/{id}/log", get(log))
-        .route("/watches", get(watches_by))
-        .route("/watches/{id}", axum::routing::delete(watch_remove))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/agents/{id}/waits", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Conditional), (axum::http::Method::POST, super::link_registry::Access::Conditional)])
+        .route("/agents/{id}/run", post(run), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/agents/{id}/watches", get(watch_list).post(watch_create), &[(axum::http::Method::GET, super::link_registry::Access::Conditional), (axum::http::Method::POST, super::link_registry::Access::Conditional)])
+        .route("/waits/{id}", get(show).delete(cancel), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/waits/{id}/log", get(log), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/watches", get(watches_by), &[(axum::http::Method::GET, super::link_registry::Access::Conditional)])
+        .route("/watches/{id}", axum::routing::delete(watch_remove), &[(axum::http::Method::DELETE, super::link_registry::Access::Conditional)])
 }
 
 /// The longest `reason` note of a wait.

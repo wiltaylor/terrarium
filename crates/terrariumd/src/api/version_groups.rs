@@ -7,28 +7,25 @@ use crate::{
     store::{groups, version_groups},
 };
 use axum::{
-    Json, Router,
+    Json, axum::Router,
     extract::{Path, State},
     routing::post,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
         .route(
             "/projects/{project}/version-groups/{key}/built",
-            post(built),
-        )
+            post(built), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
         .route(
             "/projects/{project}/version-groups/{key}/status",
-            post(status),
-        )
+            post(status), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
         .route(
             "/projects/{project}/version-groups/{key}/remove",
-            post(remove),
-        )
-        .route("/projects/{project}/version-groups/{key}/add", post(add))
+            post(remove), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/projects/{project}/version-groups/{key}/add", post(add), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
 }
 
 async fn add(

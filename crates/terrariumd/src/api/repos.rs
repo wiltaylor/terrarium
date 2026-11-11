@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -27,11 +27,11 @@ use crate::store::agents::{self, AgentView};
 use crate::store::repos::{self, Repo};
 use terrarium_core::config::PushVia;
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/repos/credential", post(credential_helper))
-        .route("/repos/{id}", get(show).delete(remove))
-        .route("/repos/{id}/checkout", post(checkout))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/repos/credential", post(credential_helper), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/repos/{id}", get(show).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/repos/{id}/checkout", post(checkout), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
 }
 
 /// The credential helper answers at most this many times per agent in

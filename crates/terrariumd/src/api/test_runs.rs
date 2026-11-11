@@ -20,7 +20,7 @@ use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Json};
 use base64::Engine;
 use serde::Deserialize;
 
@@ -36,18 +36,17 @@ use crate::test_results::{self, Format};
 /// The request body limit: a 20 MiB file as base64 in JSON, with room.
 pub const UPLOAD_BODY_LIMIT: usize = 30 * 1024 * 1024;
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
         .route(
             "/projects/{name}/test-runs",
             get(list)
                 .post(upload)
-                .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
-        )
-        .route("/test-runs/{id}", get(show).delete(remove))
-        .route("/test-runs/{id}/raw", get(raw))
-        .route("/test-runs/{id}/compare", get(compare))
-        .route("/test-runs/{id}/links", axum::routing::patch(links))
+                .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/test-runs/{id}", get(show).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/test-runs/{id}/raw", get(raw), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/test-runs/{id}/compare", get(compare), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/test-runs/{id}/links", axum::routing::patch(links), &[(axum::http::Method::PATCH, super::link_registry::Access::Link)])
 }
 
 // ---- upload ----

@@ -17,7 +17,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::tool::ToolDef;
@@ -28,18 +28,17 @@ use crate::error::{ApiError, ApiResult};
 use crate::policy;
 use crate::store::tools::{self, ToolGrant, ToolRow};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/tools", get(list).post(create))
-        .route("/tools/{name}", get(show).patch(update).delete(remove))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route("/tools", get(list).post(create), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link)])
+        .route("/tools/{name}", get(show).patch(update).delete(remove), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::PATCH, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
         .route(
             "/tools/{name}/grants",
-            get(grants_list).post(grant).delete(revoke),
-        )
-        .route("/tools/{name}/run", post(run))
-        .route("/tools/sessions/{id}", axum::routing::delete(session_close))
-        .route("/tools/sessions/{id}/output", get(session_output))
-        .route("/tools/sessions/{id}/input", post(session_input))
+            get(grants_list).post(grant).delete(revoke), &[(axum::http::Method::GET, super::link_registry::Access::Link), (axum::http::Method::POST, super::link_registry::Access::Link), (axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/tools/{name}/run", post(run), &[(axum::http::Method::POST, super::link_registry::Access::Conditional)])
+        .route("/tools/sessions/{id}", axum::routing::delete(session_close), &[(axum::http::Method::DELETE, super::link_registry::Access::Link)])
+        .route("/tools/sessions/{id}/output", get(session_output), &[(axum::http::Method::GET, super::link_registry::Access::Link)])
+        .route("/tools/sessions/{id}/input", post(session_input), &[(axum::http::Method::POST, super::link_registry::Access::Link)])
 }
 
 #[derive(Debug, Default, Deserialize)]
