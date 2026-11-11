@@ -1097,6 +1097,14 @@ async fn hot_swap_mid_turn_preserves_wait_and_target_run() {
     ])
     .await;
     let gate = td.dir.path().join("finish-run");
+    // Release the native shell even when an assertion fails before completion.
+    struct ReleaseRun(PathBuf);
+    impl Drop for ReleaseRun {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, "");
+        }
+    }
+    let _release = ReleaseRun(gate.clone());
     let started = td.dir.path().join("run-started");
     let script = format!(
         "echo before; touch '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; echo after",
@@ -1171,7 +1179,19 @@ async fn hot_swap_mid_turn_preserves_wait_and_target_run() {
         Some(json!({"text":"go", "raw":true})),
     )
     .await;
-    restarted_after_turn(&td, &bob, mark, 2, old_pid).await;
+    let starts = td
+        .wait_events(&bob, "session_started", |e| e.len() == 2)
+        .await;
+    let start = starts[1]["seq"].as_u64().unwrap();
+    let ends = td.events(&bob, "turn_end").await;
+    assert!(
+        ends.iter()
+            .filter_map(|e| e["seq"].as_u64())
+            .any(|s| s > mark && s < start)
+    );
+    // Open waits make the resting status waiting, not idle.
+    td.wait_status(&bob, "waiting").await;
+    assert_ne!(td.runner_pid(&bob), Some(old_pid));
     assert!(td.events(&bob, "error").await.is_empty());
     std::fs::write(&gate, "").unwrap();
     let resolved = timeout(WAIT, async {
