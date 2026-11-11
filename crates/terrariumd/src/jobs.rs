@@ -5160,24 +5160,41 @@ mod tests {
             db.write("system", move |t| {
                 t.execute("UPDATE jobs SET state = ?1 WHERE id = 'J'", [state])?;
                 Ok(())
-            }).await.unwrap();
-            maintain_job_cache(tmp.path(), &db, &mut cursor).await.unwrap();
+            })
+            .await
+            .unwrap();
+            maintain_job_cache(tmp.path(), &db, &mut cursor)
+                .await
+                .unwrap();
             assert_eq!(git_in(&cache, &["rev-parse", "refs/job/merge"]), head);
             git_in(&cache, &["cat-file", "-e", &head]);
         }
         db.write("system", |t| {
             t.execute("UPDATE jobs SET state = 'passed' WHERE id = 'J'", [])?;
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let locks = repo_lock(&cache);
         let reader = locks.lifetime.clone().read_owned().await;
-        maintain_job_cache(tmp.path(), &db, &mut cursor).await.unwrap();
+        maintain_job_cache(tmp.path(), &db, &mut cursor)
+            .await
+            .unwrap();
         git_in(&cache, &["cat-file", "-e", &head]);
         drop(reader);
-        maintain_job_cache(tmp.path(), &db, &mut cursor).await.unwrap();
+        maintain_job_cache(tmp.path(), &db, &mut cursor)
+            .await
+            .unwrap();
         assert!(git_in(&cache, &["for-each-ref"]).is_empty());
-        assert!(!std::process::Command::new("git").current_dir(&cache)
-            .args(["cat-file", "-e", &head]).output().unwrap().status.success());
+        assert!(
+            !std::process::Command::new("git")
+                .current_dir(&cache)
+                .args(["cat-file", "-e", &head])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
     }
 
     #[tokio::test]
