@@ -38,6 +38,18 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
   const [threadMessage, setThreadMessage] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
+  const [changedNote, setChangedNote] = createSignal<string | null>(null);
+  const [draftRevision, setDraftRevision] = createSignal(q().revision);
+  createEffect(on(
+    () => JSON.stringify([q().id, q().revision, q().multi_select, q().options]),
+    () => {
+      setSelected([]);
+      setOption(null);
+      setDraftRevision(q().revision);
+      setChangedNote("The question changed. Check the options and select your choices again.");
+    },
+    { defer: true },
+  ));
   createEffect(on(() => props.prefill, (p) => p && setText(p.text)));
 
   const run = async (call: () => Promise<Question>) => {
@@ -60,6 +72,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
     }
     const b = answerBody(q(), text(), option(), skip(), selected());
     if ("error" in b) return setError(b.error);
+    if (q().multi_select) b.body.revision = draftRevision();
     void run(() => api.questions.answer(q().id, b.body));
   };
 
@@ -129,6 +142,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
       <Show when={q().status === "open" || q().status === "in_thread"}>
         <form class="stack" style={{ gap: "6px" }} onSubmit={send} aria-label={notice() ? "Acknowledge" : "Answer"}>
           <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+          <Show when={changedNote()}>{(note) => <p role="status">{note()}</p>}</Show>
           <Show when={!notice() && q().options.length}>
             <div class="row" style={{ "flex-wrap": "wrap", gap: "6px" }} role="group" aria-label="Options">
               <For each={q().options}>

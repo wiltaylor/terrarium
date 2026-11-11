@@ -3,7 +3,7 @@
 // the linked Inbox thread, or creates one for an open question with none;
 // "Show mail" opens the mail thread of the question.
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
-import { createComponent } from "solid-js";
+import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Question } from "../../api/types";
@@ -38,7 +38,8 @@ const question = (over: Partial<Question> = {}): Question =>
     ...over,
   }) as Question;
 
-function mount(q: Question, inThread = false) {
+function mount(q: Question | (() => Question), inThread = false) {
+  const current = () => typeof q === "function" ? q() : q;
   const el = document.createElement("div");
   document.body.append(el);
   const history = createMemoryHistory();
@@ -48,7 +49,7 @@ function mount(q: Question, inThread = false) {
       createComponent(MemoryRouter, {
         history,
         get children() {
-          return createComponent(Route, { path: "*", component: () => q.kind === "bundle" ? createComponent(BundleCard, { question: q, now: Date.parse("2026-11-10T00:01:00Z"), onChange: () => {} }) : createComponent(QuestionCard, { question: q, now: Date.parse("2026-11-10T00:01:00Z"), inThread, onChange: () => {} }) });
+          return createComponent(Route, { path: "*", component: () => current().kind === "bundle" ? createComponent(BundleCard, { get question() { return current(); }, now: Date.parse("2026-11-10T00:01:00Z"), onChange: () => {} }) : createComponent(QuestionCard, { get question() { return current(); }, now: Date.parse("2026-11-10T00:01:00Z"), inThread, onChange: () => {} }) });
         },
       }),
     el,
@@ -58,6 +59,25 @@ function mount(q: Question, inThread = false) {
 
 const links = (el: HTMLElement, text: string) => [...el.querySelectorAll("a")].filter((a) => a.textContent?.trim() === text);
 const buttons = (el: HTMLElement, text: string) => [...el.querySelectorAll("button")].filter((b) => b.textContent?.trim() === text);
+
+it.each([false, true])("clears checkbox choices and announces changed options (bundle=$0)", async (bundle) => {
+  sessionStorage.clear();
+  const base = question(bundle ? { kind: "bundle", items: [{ text: "Pick", multi_select: true, options: ["A", "B"] }, { text: "Other", multi_select: true, options: [] }] } : { multi_select: true });
+  const [q, setQ] = createSignal(base);
+  const answer = vi.fn().mockResolvedValue({ ...base, status: "answered" });
+  api.questions.answer = answer;
+  const el = mount(q);
+  el.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+  expect(el.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(true);
+  setQ(bundle ? { ...base, revision: 2, items: [{ ...base.items![0]!, options: ["B", "A"] }, base.items![1]!] } : { ...base, revision: 2, options: ["No", "Yes"] });
+  await Promise.resolve();
+  expect([...el.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].every((c) => !c.checked)).toBe(true);
+  expect(el.textContent).toContain("changed");
+  el.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+  el.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await Promise.resolve();
+  expect(answer).toHaveBeenCalledWith("Q1", bundle ? { revision: 2, items: [{ options: [0] }, { options: [] }] } : { revision: 2, options: [0] });
+});
 
 it.each([[], [0], [0, 1]].map((selected) => ({ selected })))("renders and submits checkbox selections $selected", async ({ selected }) => {
   const q = question({ multi_select: true });
@@ -71,7 +91,7 @@ it.each([[], [0], [0, 1]].map((selected) => ({ selected })))("renders and submit
   expect(buttons(el, "Send answer")[0]!.disabled).toBe(false);
   el.querySelector('form[aria-label="Answer"]')!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   await Promise.resolve();
-  expect(answer).toHaveBeenCalledWith("Q1", { options: selected });
+  expect(answer).toHaveBeenCalledWith("Q1", { options: selected, revision: 1 });
 });
 
 it.each([[], [0], [0, 1]].map((selected) => ({ selected })))("renders and submits checkbox bundle selections $selected", async ({ selected }) => {

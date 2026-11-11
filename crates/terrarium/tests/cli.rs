@@ -990,6 +990,26 @@ fn checkbox_bundle_cli_preserves_item_types_and_answers() {
 }
 
 #[test]
+fn checkbox_bundle_cli_rejects_non_array_options_without_posting() {
+    let dir = temp_dir("checkbox-invalid-options");
+    let (socket, seen) = fake_runner(&dir, |_| {
+        json!({"status": 200, "headers": {}, "body": {"id": "B1", "kind": "bundle", "revision": 1, "items": [
+            {"text": "Pick", "multi_select": true, "options": ["A"]},
+            {"text": "Other", "multi_select": true, "options": []}
+        ]}})
+    });
+    for options in [json!("A"), json!(null), json!(false), json!(1), json!({"A": true})] {
+        let answers_path = dir.join("answers.json");
+        std::fs::write(&answers_path, json!([{"options": options}, {}]).to_string()).unwrap();
+        let o = bin().env("TERRARIUM_AGENT", "01AGENT").env("TERRARIUM_SOCKET", &socket)
+            .args(["admin", "question", "answer", "B1", "--answers-file"]).arg(&answers_path).output().unwrap();
+        assert!(!o.status.success());
+        assert!(text(&o.stderr).contains("options must be an array"));
+    }
+    assert!(!seen.lock().unwrap().iter().any(|r| r["method"] == "http"));
+}
+
+#[test]
 fn version_group_actions_use_project_scoped_api() {
     let dir = temp_dir("version-groups");
     let (socket, seen) = fake_runner(

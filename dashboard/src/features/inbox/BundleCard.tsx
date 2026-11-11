@@ -43,26 +43,31 @@ export function BundleCard(props: { question: Question; now: number; showAgent?:
   const [error, setError] = createSignal<unknown>(null);
   /** Set when the agent changed the bundle while the operator answered it. */
   const [changedNote, setChangedNote] = createSignal<string | null>(null);
+  const [draftRevision, setDraftRevision] = createSignal(q().revision);
 
   // A new revision: keep the answers of the items that did not change.
   let seen: Question = q();
   createEffect(
     on(
-      () => [q().id, q().revision] as const,
-      ([id, revision]) => {
+      () => JSON.stringify([q().id, q().revision, q().items]),
+      () => {
+        const { id, revision } = q();
         const before = seen;
         seen = q();
+        setDraftRevision(revision);
         if (before.id !== id) return void setDraft(loadDraft(store, q()) ?? emptyDraft(q()));
-        if (before.revision === revision || q().status !== "open") return;
+        if (q().status !== "open") return;
         const stored = loadDraft(store, q());
         const carried = carryDraft(before, draft(), q());
         clearDraft(store, before);
-        setDraft(stored ?? carried.draft);
-        saveDraft(store, q(), stored ?? carried.draft);
+        // Checkbox selections belong to the revision they were composed against.
+        const next = (stored ?? carried.draft).map((d, i) => q().items?.[i]?.multi_select ? { ...d, options: [] } : d);
+        setDraft(next);
+        saveDraft(store, q(), next);
         const lost = stored ? [] : carried.changed;
         setChangedNote(
           `The agent changed this bundle (now revision ${revision}).` +
-            (lost.length ? ` Check ${lost.length === 1 ? "item" : "items"} ${andList(lost)}: the answers there were cleared.` : " Your answers still fit."),
+            (q().items?.some((item) => item.multi_select) ? " Checkbox selections were cleared. Check the options and select your choices again." : lost.length ? ` Check ${lost.length === 1 ? "item" : "items"} ${andList(lost)}: the answers there were cleared.` : " Your answers still fit."),
         );
       },
       { defer: true },
@@ -102,6 +107,7 @@ export function BundleCard(props: { question: Question; now: number; showAgent?:
     e.preventDefault();
     const b = bundleAnswerBody(q(), draft());
     if ("error" in b) return setError(b.error);
+    b.body.revision = draftRevision();
     void run(() => api.questions.answer(q().id, b.body));
   };
   const open = () => q().status === "open";

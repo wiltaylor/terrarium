@@ -117,14 +117,13 @@ pub(super) fn items_value(ctx: &Ctx, arg: &str) -> anyhow::Result<Value> {
 
 /// The `items` of a bundle answer from `--answers-file`. An option is a
 /// label of its item, or a number from 1, as `--option` takes it.
-fn answers_value(ctx: &Ctx, arg: &str, bundle: &Value) -> anyhow::Result<Value> {
+fn answers_value(given: Vec<Value>, bundle: &Value) -> anyhow::Result<Value> {
     if bundle["kind"] != "bundle" {
         return Err(CliError::usage(
             "--answers-file is for a bundle; answer a question with a text or --option",
         ));
     }
     let items = as_items(&bundle["items"]);
-    let given = json_list(ctx, arg, "answers", "items")?;
     let mut out = Vec::with_capacity(given.len());
     for (i, a) in given.into_iter().enumerate() {
         let item = items.get(i).cloned().unwrap_or_default();
@@ -144,7 +143,10 @@ fn answers_value(ctx: &Ctx, arg: &str, bundle: &Value) -> anyhow::Result<Value> 
                     entry["option"] = option_ref(&item, &o)
                         .map_err(|e| CliError::usage(format!("item {}: {e}", i + 1)))?;
                 }
-                if let Some(options) = o.get("options").and_then(Value::as_array) {
+                if let Some(options) = o.get("options") {
+                    let options = options.as_array().ok_or_else(|| {
+                        CliError::usage(format!("item {}: options must be an array", i + 1))
+                    })?;
                     let selected = options
                         .iter()
                         .map(|o| {
@@ -618,10 +620,16 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
             answers_file,
         } => {
             if let Some(f) = answers_file {
+                let given = json_list(ctx, f, "answers", "items")?;
+                for (i, entry) in given.iter().enumerate() {
+                    if entry.get("options").is_some_and(|options| !options.is_array()) {
+                        return Err(CliError::usage(format!("item {}: options must be an array", i + 1)));
+                    }
+                }
                 let q = ctx.api.get(&path(id), vec![]).await?;
                 // The revision that the answers are for: a change of the
                 // agent meanwhile is a conflict.
-                let body = json!({"items": answers_value(ctx, f, &q)?, "revision": q["revision"]});
+                let body = json!({"items": answers_value(given, &q)?, "revision": q["revision"]});
                 let v = ctx
                     .api
                     .post(&format!("{}/answer", path(id)), Some(body))
