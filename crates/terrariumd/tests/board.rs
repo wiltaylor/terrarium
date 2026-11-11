@@ -587,10 +587,10 @@ async fn board_summary_budget_and_done_pages() {
     fn statement(_: rusqlite::trace::TraceEvent<'_>) {
         STATEMENTS.set(STATEMENTS.get() + 1);
     }
-    // Measured with bundled SQLite: 14 statements and about 443k / 40.77m
-    // instructions respectively. Keep roughly 2x headroom, independent of
-    // scheduler load. The existing query is not linear in fixture size.
-    for (count, step_budget) in [(294, 900_000), (2940, 82_000_000)] {
+    // Measured with bundled SQLite: about 39k / 433k VM steps respectively
+    // after TER-815 made the query near-linear. Keep roughly 2x headroom,
+    // independent of scheduler load, but reject the old quadratic plan.
+    for (count, step_budget) in [(294, 100_000), (2940, 1_000_000)] {
         let td = setup().await;
         let mut conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
         let tx = conn.transaction().unwrap();
