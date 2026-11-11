@@ -638,6 +638,26 @@ async fn request_cross_project_card_rights_end_at_close() {
         404
     );
     let second = l.open(json!({"scope": "p", "topic": "Other thread"})).await;
+    // The caller can read this thread as its opener, but is not its
+    // attached agent. Refusal must come from the own-request link gate.
+    let (other_thread, opener) = (id(&second), agent.to_owned());
+    state(&l.td)
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE threads SET opened_by = ?2 WHERE id = ?1",
+                rusqlite::params![other_thread, opener],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        l.td.get_as(agent, &format!("/api/threads/{}", id(&second)))
+            .await
+            .status,
+        200
+    );
     assert_eq!(
         l.td.post_as(
             agent,
