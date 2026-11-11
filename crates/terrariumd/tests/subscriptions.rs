@@ -37,7 +37,8 @@ async fn litellm_is_claude_only_and_keeps_the_key_private() {
             }),
         )
         .await
-        .ok();
+        .ok()
+        .clone();
     assert_eq!(sub["provider"], "litellm");
     assert_eq!(sub["display_name"], "LiteLLM");
     assert_eq!(sub["harnesses"], json!(["claude"]));
