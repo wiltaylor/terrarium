@@ -50,7 +50,8 @@ async fn bedrock_save_defaults_and_failed_test_leave_credentials_unchanged() {
     );
     // A caller-supplied endpoint must be refused without a connection.
     // The old key and settings must survive it, for pairs and bearer keys.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let endpoint = format!("https://{}", listener.local_addr().unwrap());
     for key_id in [Some("E2E-new-id"), None] {
         let response = td
@@ -68,7 +69,7 @@ async fn bedrock_save_defaults_and_failed_test_leave_credentials_unchanged() {
         assert!(text.contains("save without test_connection"), "{text}");
         assert!(!text.contains("E2E-") && !text.contains(&endpoint));
         assert!(
-            matches!(listener.try_accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+            matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
         );
     }
     let response = td
