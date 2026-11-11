@@ -4390,3 +4390,4 @@ p.warn { color: var(--warn); margin: 0; }
   padding: 12px 20px;
 }
 .remote-banner a { color: #fff; margin-left: 20px; text-decoration: underline; }
+.remote-tree { padding-left: 12px; border-left: 2px solid #7356b8; }

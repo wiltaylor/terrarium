@@ -11,7 +11,7 @@ export function RemoteScope(props: RouteSectionProps) {
   const { auth, storage } = useInstance();
   const [remote] = createResource(() => params.remote, (name) => remotes.get(name));
   return <Show when={!remote.error} fallback={<ErrorBanner error={remote.error} />}>
-    <Show keyed when={remote()} fallback={<div role="status">Loading remote…</div>}>
+    <Show keyed when={!remote.loading && remote()?.name === params.remote ? remote() : undefined} fallback={<div role="status">Loading remote…</div>}>
       {(r) => {
         const instance = createInstance({ name: r.name, auth });
         onCleanup(instance.dispose);

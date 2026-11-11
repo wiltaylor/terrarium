@@ -1,8 +1,26 @@
 import { A } from "@solidjs/router";
-import { createResource, createSignal, For, Show } from "solid-js";
-import { useInstance } from "../instance";
+import { createResource, createSignal, For, Show, onCleanup, onMount } from "solid-js";
+import { createInstance, InstanceProvider, useInstance } from "../instance";
+import { A as InstanceLink } from "../instance/navigation";
 import { ErrorBanner, Modal } from "../components/ui";
 import { remoteColour, useRemotes, type Remote } from "./remotes";
+import { ProjectTree } from "./ProjectTree";
+import { TOP_ITEMS, SETTINGS_ITEMS } from "./nav";
+
+function RemoteTree(props: { name: string }) {
+  const { auth } = useInstance();
+  const instance = createInstance({ name: props.name, auth });
+  onCleanup(instance.dispose);
+  onMount(() => { void instance.projects.refresh().catch(() => undefined); void instance.agents.refresh().catch(() => undefined); });
+  return <InstanceProvider instance={instance}>
+    <div class="remote-tree">
+      <For each={TOP_ITEMS}>{(item) => <InstanceLink href={item.href}>{item.label}</InstanceLink>}</For>
+      <ProjectTree />
+      <h4>Settings</h4>
+      <For each={SETTINGS_ITEMS}>{(item) => <InstanceLink href={item.href}>{item.label}</InstanceLink>}</For>
+    </div>
+  </InstanceProvider>;
+}
 
 export function Remotes() {
   const api = useRemotes();
@@ -14,18 +32,24 @@ export function Remotes() {
   const [error, setError] = createSignal<unknown>();
   const [busy, setBusy] = createSignal(false);
   const [colour, setColour] = createSignal("#7356b8");
+  const [open, setOpen] = createSignal(true);
+  const [expanded, setExpanded] = createSignal<string[]>([]);
   const [form, setForm] = createSignal({ name: "", url: "", instance_id: "", code: "", label: "" });
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true); setError(undefined);
     try { await fn(); await refetch(); } catch (e) { setError(e); } finally { setBusy(false); }
   };
   return <section class="nav-section" aria-label="Remotes">
-    <div class="spread"><h4>Remotes</h4><button class="small ghost" aria-label="Add remote" onClick={() => { setError(undefined); setAdding(true); }}>+</button></div>
+    <div class="spread"><button class="ghost" aria-expanded={open()} onClick={() => setOpen(!open())}>Remotes</button><button class="small ghost" aria-label="Add remote" onClick={() => { setError(undefined); setAdding(true); }}>+</button></div>
     <Show when={rows.error}><ErrorBanner error={rows.error} /></Show>
-    <For each={rows()}>{(r) => <div class="spread">
+    <Show when={open()}><For each={rows()}>{(r) => <div>
+      <div class="spread">
+      <button class="small ghost" aria-label={`Expand remote ${r.name}`} aria-expanded={expanded().includes(r.name)} onClick={() => setExpanded((names) => names.includes(r.name) ? names.filter((n) => n !== r.name) : [...names, r.name])}>▸</button>
       <A href={`/remote/${r.name}/`} title={`${r.url}: ${r.status}`}><span style={{ color: remoteColour(r.name, storage) }}>●</span> {r.name} · {r.status}</A>
       <button class="small ghost" aria-label={`Remove remote ${r.name}`} onClick={() => { setError(undefined); setTyped(""); setRemoving(r); }}>×</button>
-    </div>}</For>
+      </div>
+      <Show when={expanded().includes(r.name)}><RemoteTree name={r.name} /></Show>
+    </div>}</For></Show>
     <Show when={adding()}><Modal title="Add remote to home" onClose={() => { if (!busy()) { setAdding(false); setForm({ name: "", url: "", instance_id: "", code: "", label: "" }); } }}>
       <form class="stack" onSubmit={(e) => { e.preventDefault(); void act(async () => {
         const body = form();
