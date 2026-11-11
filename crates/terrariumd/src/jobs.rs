@@ -2654,7 +2654,6 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
             ..JobEnd::default()
         })
     };
-    let refname = job_ref(job.kind);
     let mut batch = None;
     // The base of the changed files (TER-100): `next` before the merge for
     // a merge, the merge-base of the commit and `next` for a validate.
@@ -2806,7 +2805,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                 return failed("a release job needs its commit on main".into());
             }
             base = None;
-            return bundle_ready(repo, refname, bundle, head, batch, base);
+            return bundle_ready(repo, job.kind, bundle, head, batch, base);
         }
         // A repo without `next` is no error: the recipe then gets no list
         // of changed files.
@@ -2819,21 +2818,22 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
         };
         head
     };
-    bundle_ready(repo, refname, bundle, head, batch, base)
+    bundle_ready(repo, job.kind, bundle, head, batch, base)
 }
 
 /// Write the job ref and its bundle: the end of [`prepare`].
 fn bundle_ready(
     repo: &git::JobRepo,
-    refname: &str,
+    kind: JobKind,
     bundle: &std::path::Path,
     head: String,
     batch: Option<Vec<BatchCard>>,
     base: Option<String>,
 ) -> Prepared {
+    let refname = job_ref(kind);
     if let Err(e) = repo
         .set_ref(refname, &head)
-        .and_then(|()| repo.bundle(refname, bundle))
+        .and_then(|()| repo.bundle(refname, bundle, kind == JobKind::Release))
     {
         return Prepared::End(JobEnd {
             passed: false,
@@ -4693,6 +4693,9 @@ sync() {
   T config user.email "${GIT_COMMITTER_EMAIL:-terrarium@localhost}" || return 1
   T for-each-ref --format='delete %(refname)' refs/replace/ | T update-ref --stdin || return 1
   T fetch -q --no-tags -- "$b" "+$r:$r" || return 1
+  if [ "$kind" = release ]; then
+    T fetch -q --no-tags -- "$b" '+refs/tags/v*:refs/tags/v*' || return 1
+  fi
   got=$(T rev-parse --verify -q "$r^{commit}")
   if [ "$got" != "$sha" ]; then echo "the bundle holds ${got:-nothing}, not $sha"; return 3; fi
   if [ "$kind" = merge ]; then
@@ -5146,6 +5149,38 @@ mod tests {
     /// TER-103: the target gets the job's commit as a bundle on stdin, and
     /// its clone is at that commit, with no remote and no bundle left. A
     /// bundle of another commit, or a cut one, fails the step.
+    #[test]
+    fn only_release_clones_import_version_tags() {
+        let s = Src::new();
+        let (sha, tree) = s.commit("one");
+        git_in(&s.src, &["tag", "v1.2.3"]);
+        git_in(&s.src, &["tag", "-a", "v1.2.4", "-m", "release"]);
+        git_in(&s.src, &["tag", "other"]);
+        git_in(&s.src, &["update-ref", "refs/job/head", &sha]);
+        git_in(
+            &s.src,
+            &["bundle", "create", "-q", "../b", "refs/job/head", "--tags"],
+        );
+        let bundle = std::fs::read(s.src.parent().unwrap().join("b")).unwrap();
+        for kind in ["release", "validate", "e2e"] {
+            let dir = s.src.parent().unwrap().join(kind);
+            let (ok, text) = run_plain(
+                RECEIVE_SCRIPT,
+                &[dir.to_str().unwrap(), &sha, kind, "", &tree],
+                &bundle,
+            );
+            assert!(ok, "{text}");
+            assert_eq!(
+                git_in(&dir, &["tag", "--list"]),
+                if kind == "release" {
+                    "v1.2.3\nv1.2.4"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+
     #[test]
     fn the_target_clones_the_job_commit_from_the_bundle() {
         let tmp = tempfile::tempdir().unwrap();
