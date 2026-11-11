@@ -1846,7 +1846,7 @@ a.chip.card-link:hover {
 .comm-block { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 12px 0; }
 .comm-title { font-weight: 600; margin-bottom: 12px; }
 .comm-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 8px 0; min-width: 0; }
-.comm-meta { color: var(--text-muted); font-size: 0.85em; overflow-wrap: anywhere; }
+.comm-meta { color: var(--muted); font-size: 0.85em; overflow-wrap: anywhere; }
 .comm-chat { display: flex; flex-direction: column; }
 .comm-chat > .comm-item { max-width: 90%; align-self: flex-start; }
 .comm-chat > .comm-sent, .comm-chat > .comm-draft { align-self: flex-end; }

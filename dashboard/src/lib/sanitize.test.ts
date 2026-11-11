@@ -14,6 +14,22 @@ describe("communication blocks", () => {
     setSafeHtml(root, renderWiki(body, ctx));
     return root;
   };
+  it("renders the operator's SMS example", () => {
+    const root = render("> [!CHAT] SMS with Sam Lee\n> **Sam Lee** · 2026-11-10 14:02\n> Are you free at 3?\n>\n> **Wil** · 14:05 · sent\n> Yes.\n>\n> **Wil** · draft\n> I will call you then. Is the **office number** right?");
+    expect(root.querySelector(".comm-title")?.textContent).toBe("SMS with Sam Lee");
+    expect(root.querySelectorAll(".comm-item")).toHaveLength(3);
+    expect(root.querySelector(".comm-received")?.textContent).toContain("2026-11-10 14:02");
+    expect(root.querySelector(".comm-sent")?.textContent).toContain("Yes.");
+    expect(root.querySelector(".comm-draft p strong")?.textContent).toBe("office number");
+  });
+  it("renders the operator's invoice example", () => {
+    const root = render("> [!EMAIL] Invoice 1042\n> From: Sam Lee <sam@example.com>\n> To: wil@example.com\n> Subject: Invoice 1042\n> Date: 2026-11-10 14:02\n> Status: received\n>\n> Hi Wil,\n> the invoice is attached.\n>\n> ---\n> From: wil@example.com\n> To: Sam Lee <sam@example.com>\n> Subject: Re: Invoice 1042\n> Status: draft\n>\n> Hi Sam,\n> I paid it today.");
+    expect(root.querySelectorAll(".comm-item")).toHaveLength(2);
+    expect(root.querySelector(".comm-received")?.textContent).toContain("Sam Lee <sam@example.com>");
+    expect(root.querySelector(".comm-received p br")).not.toBeNull();
+    expect(root.querySelector(".comm-draft")?.textContent).toContain("Draft, not sent");
+    expect(root.querySelector(".comm-draft p")?.textContent).toContain("I paid it today.");
+  });
   it("renders a chat with received, sent, draft and implicit received messages", () => {
     const root = render("> [!CHAT] Release discussion\n> **Sam** · 10:00 · received\n> Hello **team**\n>\n> **Lee** · 10:01 · sent\n> [Plan](https://example.com)\n> **Lee** · draft\n> Not ready\n> **Sam**\n> Thanks");
     expect(root.querySelector(".comm-title")?.textContent).toBe("Release discussion");
