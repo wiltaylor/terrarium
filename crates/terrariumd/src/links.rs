@@ -192,7 +192,8 @@ pub fn denied(
         // Private infrastructure, credentials, and audit data never form part
         // of a remote dashboard's operator-route exceptions (TER-791).
         [
-            "admin" | "secrets" | "audit" | "subscriptions" | "credentials" | "targets" | "hosts",
+            "admin" | "secrets" | "audit" | "subscriptions" | "credentials" | "targets" | "hosts"
+            | "remotes",
             ..,
         ] => Some("private operator infrastructure"),
         // A link cannot make another link; it may only end itself.
