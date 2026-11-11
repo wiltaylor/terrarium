@@ -2740,7 +2740,7 @@ async fn steps(
     x.at(STEP_PREPARE);
     let guard = Arc::new(guard);
     let mut prepared = None;
-    for attempt in 0..2 {
+    for attempt in 0..3 {
         let (j, bundle, prepare_guard) = (job.clone(), x.bundle.clone(), guard.clone());
         let (result, damaged) = x
             .daemon(move |r| {
@@ -2752,7 +2752,7 @@ async fn steps(
                 (result, damaged)
             })
             .await?;
-        if !damaged || attempt == 1 {
+        if !damaged || attempt == 2 {
             prepared = Some(result);
             break;
         }
