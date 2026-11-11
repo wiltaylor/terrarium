@@ -201,12 +201,14 @@ fn online_zip_restore_is_the_pre_pause_point_not_the_swap_point() {
         .map(|s| s.parse().unwrap())
         .unwrap_or(0);
     if seed_mib > 0 {
-        live.execute_batch("CREATE TABLE bulk(value BLOB);").unwrap();
+        live.execute_batch("CREATE TABLE bulk(value BLOB);")
+            .unwrap();
         for _ in 0..seed_mib {
             live.execute("INSERT INTO bulk VALUES (zeroblob(1048576))", [])
                 .unwrap();
         }
-        live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
         let data = vec![b'x'; 1024 * 1024];
         for dir in ["agents/A1/logs", "archive"] {
             fs::create_dir_all(fx.state.join(dir)).unwrap();
@@ -227,8 +229,16 @@ fn online_zip_restore_is_the_pre_pause_point_not_the_swap_point() {
         full.size,
         started.elapsed().as_secs_f64(),
     );
-    assert!(!names(&full).iter().any(|n| n.starts_with("files/state/trash/")));
-    assert!(names(&full).iter().any(|n| n.starts_with("files/state/agents/")));
+    assert!(
+        !names(&full)
+            .iter()
+            .any(|n| n.starts_with("files/state/trash/"))
+    );
+    assert!(
+        names(&full)
+            .iter()
+            .any(|n| n.starts_with("files/state/agents/"))
+    );
     live.execute_batch("INSERT INTO t VALUES ('after-backup-before-pause');")
         .unwrap();
     assert!(fx.db_value().contains(&"after-backup-before-pause".into()));
