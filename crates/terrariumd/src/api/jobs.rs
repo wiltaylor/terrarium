@@ -76,6 +76,7 @@ pub fn routes() -> Router<Shared> {
         )
         .route("/projects/{name}/jobs", get(list))
         .route("/projects/{name}/jobs/stats", get(stats))
+        .route("/projects/{name}/jobs/cleanup", post(cleanup_logs))
         .route("/jobs/{id}", get(show).delete(cancel))
         .route("/cards/{id}/validate", post(validate))
         .route("/cards/{id}/merge", post(merge))
@@ -352,8 +353,24 @@ async fn show(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-) -> ApiResult<Json<Job>> {
-    Ok(Json(find(&state, &actor, id).await?))
+) -> ApiResult<Json<Value>> {
+    let job = find(&state, &actor, id).await?;
+    let id = job.id.clone();
+    let logs = state.db.read(move |c| crate::job_logs::for_job(c, &id)).await?;
+    let mut value = json!(job);
+    value["logs"] = json!(logs);
+    Ok(Json(value))
+}
+
+#[derive(Default, Deserialize)]
+struct CleanupLogs { #[serde(default)] after: i64 }
+
+async fn cleanup_logs(
+    State(state): State<Shared>, actor: Actor, Path(name): Path<String>,
+    ApiJson(body): ApiJson<CleanupLogs>,
+) -> ApiResult<Json<Value>> {
+    policy::admin_project(&actor, &name, "cleaning retained job logs")?;
+    Ok(Json(crate::job_logs::cleanup(&state, name, body.after.max(0)).await?))
 }
 
 /// Cancel: the actor that queued the job, the card's worker, or a

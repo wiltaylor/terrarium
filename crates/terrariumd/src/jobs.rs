@@ -355,6 +355,8 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let maintenance_state = Arc::downgrade(state);
     tokio::spawn(async move {
         let mut cursor = 0;
+        let mut log_project = String::new();
+        let mut log_cursor = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             let Some(state) = maintenance_state.upgrade() else {
@@ -362,6 +364,9 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             };
             if let Err(e) = maintain_job_cache(&state.state_dir, &state.db, &mut cursor).await {
                 warn!("job cache maintenance failed: {e}");
+            }
+            if let Err(e) = crate::job_logs::maintain(&state, &mut log_project, &mut log_cursor).await {
+                warn!("job log maintenance failed: {e}");
             }
         }
     });
@@ -3191,6 +3196,7 @@ async fn steps(
         ..RemoteCmd::default()
     };
     x.at(STEP_RECIPE);
+    crate::job_logs::record(x.state, job, delivery, &log).await?;
     // An error here is a recipe that did not start: no session.
     if killed(&job.id) {
         return Err(ApiError::conflict("the job was cancelled"));
@@ -3250,6 +3256,22 @@ async fn steps(
         delivery.target.as_deref().unwrap_or("-"),
         log
     );
+    if job.kind != JobKind::Release {
+        let cmd = RemoteCmd {
+            argv: vec!["sh".into(), "-c".into(), format!("wc -c < {}", crate::executor::sh_quote(&log))],
+            timeout_secs: Some(10),
+            holder: x.holder.clone(),
+            ..RemoteCmd::default()
+        };
+        if let Ok(run) = crate::executor::start_cmd(x.state, x.def, &cmd) {
+            let result = run.collect(128).await;
+            if let Ok(bytes) = String::from_utf8_lossy(&result.stdout).trim().parse::<i64>() {
+                if let Err(e) = crate::job_logs::completed(x.state, job, bytes).await {
+                    warn!(job = %job.id, "cannot record log size: {e}");
+                }
+            }
+        }
+    }
     let mut tail = format!(
         "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\n{}",
         excerpt.trim_end(),
@@ -3808,7 +3830,12 @@ fn logged_recipe(recipe: String, log: &str) -> String {
     format!(
         r#"log={log}
 mkdir -p -- "$(dirname -- "$log")" || exit 125
-(umask 077 && : > "$log") || exit 125
+[ ! -L "$log" ] || exit 125
+command -v flock >/dev/null 2>&1 || exit 125
+(umask 077 && : >> "$log") || exit 125
+exec 9>>"$log" || exit 125
+flock -n 9 || exit 125
+: > "$log" || exit 125
 lock=${{TERRARIUM_SLOT_LOCK:-}}
 if [ -z "$lock" ]; then
   exec sh -c {recipe} > "$log" 2>&1
@@ -5134,6 +5161,29 @@ mod tests {
                 & 0o777,
             0o644
         );
+    }
+
+    #[test]
+    fn retained_log_writer_prevents_cleanup_until_it_exits() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("attempt.log");
+        let path = log.to_str().unwrap();
+        let mut child = recipe_sh().args(["-c", &logged_recipe("printf ready; read stop".into(), path)])
+            .stdin(Stdio::piped()).spawn().unwrap();
+        let start = std::time::Instant::now();
+        while std::fs::read_to_string(&log).unwrap_or_default() != "ready" {
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let cleanup = || recipe_sh().args(["-c", &crate::job_logs::remove_script(path)]).output().unwrap();
+        assert!(!cleanup().status.success());
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "ready");
+        child.stdin.take().unwrap().write_all(b"stop\n").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(cleanup().status.success());
+        assert!(!log.exists());
     }
 
     #[tokio::test]

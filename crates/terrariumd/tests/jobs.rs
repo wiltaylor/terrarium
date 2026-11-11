@@ -28,6 +28,50 @@ use terrarium_host::{Client, ClientOptions};
 const DEADLINE: Duration = Duration::from_secs(300);
 
 #[tokio::test]
+async fn retained_log_cleanup_is_project_scoped_and_skips_active_or_missing_targets() {
+    let lab = lab(1).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let root = lab._dirs.path().join("retention");
+    std::fs::create_dir_all(&root).unwrap();
+    for name in ["done-1", "done-2", "active", "missing", "legacy", "other"] {
+        std::fs::write(root.join(name), "retained output").unwrap();
+    }
+    let base = root.clone();
+    state.db.write("system", move |t| {
+        for (id,status) in [("Ldone","passed"),("Lactive","running"),("Lmissing","failed")] {
+            t.execute("INSERT INTO jobs(id,project,card,kind,repo,branch,state,created_by,created_at) VALUES (?,'p','C','validate','app','main',?,'system','x')",rusqlite::params![id,status])?;
+        }
+        t.execute("INSERT INTO job_log_budgets(project,bytes) VALUES ('p',60)",[])?;
+        for (job,attempt,target,name,project) in [
+            ("Ldone",1,"p-box","done-1","p"),
+            ("Ldone",2,"p-box","done-2","p"),
+            ("Lactive",1,"p-box","active","p"),
+            ("Lmissing",1,"absent-target","missing","p"),
+            ("Lother",1,"p-box","other","other"),
+        ] {
+            t.execute("INSERT INTO job_logs(project,job,attempt,target,path,written_at,expires_at,bytes) VALUES (?,?,?,?,?,'2000-01-01','2000-01-02',15)",rusqlite::params![project,job,attempt,target,base.join(name).to_str().unwrap()])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let response = lab.td.post_as(&lab.w1,"/api/projects/p/jobs/cleanup",json!({})).await;
+    assert_eq!(response.status,403,"{}",response.body);
+    let response = lab.td.post_as(&lab.lead,"/api/projects/p/jobs/cleanup",json!({})).await;
+    let body = response.ok();
+    assert_eq!(body["removed"],2,"{body}");
+    assert_eq!(body["skipped"],2,"{body}");
+    assert!(!root.join("done-1").exists());
+    assert!(!root.join("done-2").exists());
+    for name in ["active","missing","legacy","other"] { assert!(root.join(name).exists(),"{name}"); }
+    let shown = lab.td.get("/api/jobs/Ldone").await;
+    assert_eq!(shown.ok()["logs"].as_array().unwrap().len(),2);
+    assert!(shown.body["logs"].as_array().unwrap().iter().all(|l|l["expired"]==true));
+    let total = state.db.read(|c| Ok(c.query_row("SELECT bytes FROM job_log_budgets WHERE project='p'",[],|r|r.get::<_,i64>(0))?)).await.unwrap();
+    assert_eq!(total,30);
+    let again = lab.td.post("/api/projects/p/jobs/cleanup",json!({})).await;
+    assert_eq!(again.ok()["removed"],0);
+}
+
+#[tokio::test]
 async fn release_e2e_rejects_card_branches_members_and_missing_docker_config() {
     use terrariumd::store::groups;
     let lab = lab(1).await;
