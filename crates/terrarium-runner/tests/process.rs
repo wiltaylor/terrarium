@@ -554,23 +554,28 @@ async fn a_second_runner_for_the_agent_refuses_to_start() {
 /// agent with no daemon that knew of it.
 #[tokio::test]
 async fn a_start_that_times_out_kills_the_process() {
-    use std::os::unix::fs::PermissionsExt;
     let env = Env::new();
     let gate = env.dir.path().join("gate");
     let pid_file = env.dir.path().join("gated.pid");
     std::fs::write(&gate, "").unwrap();
     let gated = env.dir.path().join("gated-runner");
-    std::fs::write(
-        &gated,
-        format!(
+    // Write in a separate process: another test can fork while the writer
+    // is open and keep that fd alive until exec, causing ETXTBSY here even
+    // after std::fs::write returns. Waiting for the writer avoids that race.
+    let written = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("printf %s \"$1\" > \"$2\" && chmod 755 \"$2\"")
+        .arg("sh")
+        .arg(format!(
             "#!/bin/sh\necho $$ > '{}'\nwhile [ -e '{}' ]; do sleep 0.02; done\nexec '{}' \"$@\"\n",
             pid_file.display(),
             gate.display(),
             bin().display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&gated, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ))
+        .arg(&gated)
+        .status()
+        .expect("write gated runner");
+    assert!(written.success(), "write gated runner: {written}");
 
     let mut opts = SpawnOptions::new(env.agent, env.state(), env.run(), env.spec());
     opts.connect = env.options(Some(0));
