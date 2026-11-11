@@ -2347,18 +2347,6 @@ exit 101"#;
     }
 }
 
-/// The cards of project `p` with the label `label`.
-async fn cards_with_label(lab: &Lab, label: &str) -> Vec<Value> {
-    let board = lab.td.get("/api/projects/p/board").await.ok().clone();
-    board["cards"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|c| labels(c).iter().any(|l| l == label))
-        .cloned()
-        .collect()
-}
-
 /// A fake merge recipe that prints the rerun line of one test, as
 /// `scripts/rerun_tests.py` does, and ends with `code`.
 fn rerun_recipe(test: &str, rerun: &str, code: i32) -> String {
