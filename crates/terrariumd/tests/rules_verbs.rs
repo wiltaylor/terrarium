@@ -1366,6 +1366,7 @@ async fn default_merge_group_cancelled_batch_abandons_header() {
         .unwrap();
     verdict(&td, &cancelled, &a, "cancelled").await;
     settle(&td).await;
+    assert_eq!(card(&td, &gid).await["group"]["steps"][0]["state"], "failed");
     assert_eq!(card(&td, &gid).await["archived"], true);
     assert!(card(&td, &a).await.get("group").is_none());
     assert_eq!(card(&td, &a).await["column"], "review");
@@ -1667,6 +1668,24 @@ async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
     settle(&td).await;
     let runs = runs_of(&td, "p", "merge-pass").await;
     assert!(runs.iter().all(|r| r["state"] != "failed"), "{runs:?}");
+}
+
+#[tokio::test]
+async fn merge_job_step_falls_back_to_passed_project_jobs() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(&td, "p", json!({"title":"a", "column":"review", "repo":"app"})).await;
+    let job = store_job(&td, JobKind::Merge, &[&a]).await;
+    settle(&td).await;
+    let id = job.id;
+    let member = a.clone();
+    state(&td).db.write("test", move |t| {
+        t.execute("UPDATE jobs SET state = 'passed', created_at = '2026-11-08T10:00:00Z',
+            started_at = '2026-11-08T10:00:30Z', ended_at = '2026-11-08T10:01:30Z' WHERE id = ?1", [id])?;
+        let g = terrariumd::store::groups::for_card(t, &member)?.unwrap();
+        assert_eq!(g.steps.iter().find(|s| s.name == "merge job").unwrap().estimated_secs, Some(60));
+        Ok(())
+    }).await.unwrap();
 }
 
 #[tokio::test]

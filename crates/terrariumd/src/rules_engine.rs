@@ -1357,6 +1357,8 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
                     .any(|s| s.name == "e2e" && s.started_at.is_some())
                 {
                     "e2e".into()
+                } else if g.steps.iter().any(|s| s.name == "queued" && s.state == "running") {
+                    "queued".into()
                 } else {
                     "merge job".into()
                 }

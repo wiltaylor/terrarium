@@ -17,4 +17,7 @@ describe("group step timing", () => {
   it("shows done for an untimed completion", () => {
     expect(stepTiming({ ...step, state: "done", eta_at: null }, now)).toBe("done");
   });
+  it("shows failed for an untimed failure", () => {
+    expect(stepTiming({ ...step, state: "failed", eta_at: null }, now)).toBe("failed");
+  });
 });

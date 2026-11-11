@@ -227,7 +227,7 @@ fn historical_secs(
     }
     // Before phase timing existed, successful merge jobs still recorded queue
     // wait and total run time. Use run time as the initial e2e estimate only.
-    if !samples.contains_key("queued") || !samples.contains_key("e2e") {
+    if !samples.contains_key("queued") || !samples.contains_key("e2e") || !samples.contains_key("merge job") {
         let mut jobs = conn.prepare(
             "SELECT j.created_at, j.started_at, j.ended_at FROM jobs j
             JOIN card_groups g ON g.card = ?1 AND g.project = j.project
@@ -243,6 +243,7 @@ fn historical_secs(
             run.extend(running);
         }
         samples.entry("queued".into()).or_insert(queue);
+        samples.entry("merge job".into()).or_insert_with(|| run.clone());
         samples.entry("e2e".into()).or_insert(run);
     }
     Ok(samples
@@ -534,14 +535,7 @@ pub fn step(
         text.or_else(|| existing.map(|s| s.text.as_str()))
             .unwrap_or_default(),
     );
-    let stored_eta = t
-        .query_row(
-            "SELECT eta_at FROM group_steps WHERE group_card = ?1 AND name = ?2",
-            params![g.id, name],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten();
+    let stored_eta = existing.and_then(|s| s.eta_at.clone());
     let eta_at = match eta {
         Some("jobs") => return Err(ApiError::invalid("a step ETA takes a duration, not jobs")),
         Some(value) => Some(deadline(value)?),
