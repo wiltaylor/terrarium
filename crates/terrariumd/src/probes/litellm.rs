@@ -75,7 +75,8 @@ async fn harness_env_with_resolver(
             return Ok(Vec::new());
         };
         let mut url = reqwest::Url::parse(&base).map_err(|_| "invalid LiteLLM URL")?;
-        url.set_ip_host(addr.ip()).map_err(|_| "invalid LiteLLM host")?;
+        url.set_ip_host(addr.ip())
+            .map_err(|_| "invalid LiteLLM host")?;
         let ip = addr.ip().to_string();
         Ok(vec![
             ("ANTHROPIC_BASE_URL".into(), url.to_string()),
@@ -363,14 +364,33 @@ mod tests {
             let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             vec![if n == 0 { "10.0.0.2" } else { "8.8.8.8" }.parse().unwrap()]
         });
-        let env = harness_env_with_resolver("http://private.invalid:8000/prefix", Some(resolver.clone())).await.unwrap();
-        assert_eq!(env[0], ("ANTHROPIC_BASE_URL".into(), "http://10.0.0.2:8000/prefix".into()));
+        let env =
+            harness_env_with_resolver("http://private.invalid:8000/prefix", Some(resolver.clone()))
+                .await
+                .unwrap();
+        assert_eq!(
+            env[0],
+            (
+                "ANTHROPIC_BASE_URL".into(),
+                "http://10.0.0.2:8000/prefix".into()
+            )
+        );
         assert_eq!(env[1], ("NO_PROXY".into(), "10.0.0.2".into()));
         assert_eq!(env[2], ("no_proxy".into(), "10.0.0.2".into()));
-        assert!(harness_env_with_resolver("http://private.invalid:8000/prefix", Some(resolver)).await.unwrap_err().contains("private network"));
+        assert!(
+            harness_env_with_resolver("http://private.invalid:8000/prefix", Some(resolver))
+                .await
+                .unwrap_err()
+                .contains("private network")
+        );
         let env = harness_env("http://[::1]:8000/prefix").await.unwrap();
         assert_eq!(env[0].1, "http://[::1]:8000/prefix");
-        assert!(harness_env("https://private.invalid").await.unwrap().is_empty());
+        assert!(
+            harness_env("https://private.invalid")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
     #[test]
     fn budget_and_reset() {

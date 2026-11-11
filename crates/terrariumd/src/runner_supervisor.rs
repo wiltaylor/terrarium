@@ -7303,12 +7303,16 @@ mod tests {
             state.clone(),
             tmp.path().join("run"),
             tmp.path().join("prompts"),
-            SandboxConfig { mode: SandboxMode::None, ..SandboxConfig::default() },
+            SandboxConfig {
+                mode: SandboxMode::None,
+                ..SandboxConfig::default()
+            },
             [(HarnessId::Claude, home)].into_iter().collect(),
         ));
         let def = serde_json::from_value(serde_json::json!({
             "name": "worker", "project": "p", "harness": "claude", "subscription": "lite"
-        })).unwrap();
+        }))
+        .unwrap();
         let agent = Agent::from_def(&def, &state);
         let sub: Subscription = serde_json::from_value(serde_json::json!({
             "name": "lite", "provider": "litellm", "harnesses": ["claude"],
@@ -7321,18 +7325,33 @@ mod tests {
             ..Default::default()
         };
         for resume in [None, Some(HarnessSessionId("resume-test".into()))] {
-            let built = sup.build_spec(&agent, resume.as_ref(), &view, None).await.unwrap();
+            let built = sup
+                .build_spec(&agent, resume.as_ref(), &view, None)
+                .await
+                .unwrap();
             let url = reqwest::Url::parse(&built.spec.env["ANTHROPIC_BASE_URL"]).unwrap();
             assert!(!matches!(url.host(), Some(url::Host::Domain(_))));
             assert_eq!(url.port(), Some(8000));
             assert_eq!(url.path(), "/prefix");
-            assert!(built.spec.env["NO_PROXY"].contains("127.0.0.1") || built.spec.env["NO_PROXY"].contains("::1"));
+            assert!(
+                built.spec.env["NO_PROXY"].contains("127.0.0.1")
+                    || built.spec.env["NO_PROXY"].contains("::1")
+            );
             assert_eq!(built.spec.env["NO_PROXY"], built.spec.env["no_proxy"]);
         }
         if let Some(SubscriptionCheck::Found(s)) = &mut view.subscription {
             s.selfhosted.as_mut().unwrap().base_url = "http://8.8.8.8".into();
         }
-        let err = sup.build_spec(&agent, Some(&HarnessSessionId("resume-test".into())), &view, None).await.err().unwrap();
+        let err = sup
+            .build_spec(
+                &agent,
+                Some(&HarnessSessionId("resume-test".into())),
+                &view,
+                None,
+            )
+            .await
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("LiteLLM launch refused"));
     }
 
