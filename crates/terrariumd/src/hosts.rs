@@ -1969,6 +1969,7 @@ mod tests {
                 sessions: vec![terrarium_host::protocol::ResumeOffer {
                     session: id,
                     sent: 0,
+                    finished: false,
                 }],
             }),
             update_failed: None,
