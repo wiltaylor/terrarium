@@ -1840,7 +1840,7 @@ a.chip.card-link:hover {
   line-height: 1.6;
   overflow-wrap: break-word;
 }
-.text-markdown { min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.text-markdown { min-width: 0; max-width: 100%; contain: inline-size; overflow-wrap: anywhere; white-space: normal; }
 .text-markdown .prose > :first-child { margin-top: 0; }
 .text-markdown .prose > :last-child { margin-bottom: 0; }
 .text-markdown pre { max-width: 100%; overflow-x: auto; padding: 10px; background: var(--bg); white-space: pre; }
