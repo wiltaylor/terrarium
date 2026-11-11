@@ -180,7 +180,7 @@ pub async fn pass(state: &Shared) {
         if let Err(error) = dispatch(state, r.clone()).await {
             tracing::warn!(card = %r.card, error = %error.message, "conflict repair deferred");
             let _ = state.db.write("system", move |t| {
-                t.execute("UPDATE conflict_fixes SET retry_at = unixepoch() + 60 WHERE job = ?1 AND card = ?2", params![r.job, r.card])?;
+                t.execute("UPDATE conflict_fixes SET retry_at = unixepoch() + 60, last_error = ?3 WHERE job = ?1 AND card = ?2", params![r.job, r.card, error.message])?;
                 Ok(())
             }).await;
         }

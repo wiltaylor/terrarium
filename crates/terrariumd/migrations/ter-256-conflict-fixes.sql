@@ -7,6 +7,7 @@ CREATE TABLE conflict_fixes (
     task TEXT NOT NULL,
     done INTEGER NOT NULL DEFAULT 0,
     retry_at INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
     PRIMARY KEY (job, card)
 );
 CREATE INDEX conflict_fixes_pending ON conflict_fixes(done, retry_at);
