@@ -665,7 +665,7 @@ async fn recreate(
     }
     let r = load(&state, &actor, name).await?;
     policy::define_target(&actor, r.def.project.as_deref())?;
-    let out = executor::recreate(&state, &r.def, &opts, actor.label()).await;
+    let out = executor::recreate(&state, &r.def, &opts, &actor.label()).await;
     let detail = match &out {
         Ok(value) => {
             let mut detail = value.clone();
