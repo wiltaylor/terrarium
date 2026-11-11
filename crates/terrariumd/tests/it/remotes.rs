@@ -60,7 +60,7 @@ async fn artifact_capability_serves_without_credentials_and_ends_on_logout() {
         .send()
         .await
         .unwrap();
-    assert_eq!(login.status(), StatusCode::OK);
+    assert_eq!(login.status(), StatusCode::CREATED);
     let cookie = login.headers()[header::SET_COOKIE]
         .to_str()
         .unwrap()
