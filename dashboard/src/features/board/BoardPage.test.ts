@@ -33,8 +33,8 @@ it("previews Markdown in new-card and body-edit fields without losing the draft"
     history,
     get children() { return createComponent(Route, { path: "/p/:project/board", component: BoardPage }); },
   }), host);
-  await waitFor(() => expect(host.querySelector('[aria-label="Add a card to Backlog"]')).not.toBeNull());
-  host.querySelector<HTMLButtonElement>('[aria-label="Add a card to Backlog"]')!.click();
+  await waitFor(() => expect(host.querySelector('[aria-label="Add a card to backlog"]')).not.toBeNull());
+  host.querySelector<HTMLButtonElement>('[aria-label="Add a card to backlog"]')!.click();
   const markdown = "**Draft** [link](https://example.com)\n\n| A | B |\n| - | - |\n| 1 | 2 |";
   const checkPreview = (label: string) => {
     const editor = host.querySelector(`[aria-label="${label} editor"]`)!.parentElement!;
