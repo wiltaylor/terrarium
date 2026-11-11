@@ -153,7 +153,7 @@ export default function ThreadPage() {
                     <Switch>
                       <Match when={entry.kind === "message" && entry.message}>
                         {(m) => (
-                          <article class={`card-box stack thread-msg${byOperator(m()) ? " mine" : ""}${m().kind === "response" ? " response" : ""}`} style={{ gap: "4px" }} aria-label={`Message ${m().id}`}>
+                          <article class="stack thread-msg" style={{ gap: "4px" }} aria-label={`Message ${m().id}`}>
                             <section aria-label={m().kind === "response" ? "Your response" : undefined}><SafeHtml class="prose" html={renderMarkdown(m().text, project())} /></section>
                           </article>
                         )}

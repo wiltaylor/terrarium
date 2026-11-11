@@ -2246,9 +2246,9 @@ a.chip.card-link:hover {
 .thread-post-body { padding: 12px; overflow-wrap: anywhere; }
 .thread-post-body > .thread-msg { border: 0; padding: 0; }
 .post-question, .post-question-bundle { border-color: var(--warn); }
-.post-response { border-color: var(--link); }
-.post-close-proposal { border-color: var(--warn); }
-.post-handoff { border-color: var(--ok); }
+.post-response { border-color: var(--info); }
+.post-close-proposal { border-color: var(--st-restarting); }
+.post-handoff { border-color: var(--accent); }
 .thread-page textarea { width: 100%; box-sizing: border-box; }
 /* The linked cards of a thread (TER-147): a mini kanban, one row per project with its board columns. An empty column is narrow. */
 .tracked-cards > summary {
