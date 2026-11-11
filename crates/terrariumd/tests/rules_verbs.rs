@@ -2844,6 +2844,10 @@ rule "h-queue" {
   on = ["test.ping"]
   job_queue { kind = "validate" }
 }
+rule "h-wait-action" {
+  on = ["test.ping"]
+  card_wait_action {}
+}
 rule "h-cancel" {
   on = ["test.ping"]
   job_cancel {}
@@ -2942,7 +2946,7 @@ async fn every_verb_refuses_a_held_card() {
         // (TER-536). A `test.ping` is not a `card` event, so they fail
         // for that.
         let verb = run["steps"][0]["verb"].as_str().unwrap();
-        if matches!(verb, "card.blocked_mail" | "card.done_mail") {
+        if matches!(verb, "card.blocked_mail" | "card.done_mail" | "card.wait_action") {
             assert_eq!(run["state"], "failed", "{run}");
             let reason = run["reason"].as_str().unwrap();
             assert!(reason.contains("needs a `card` event"), "{run}");
