@@ -2563,7 +2563,7 @@ pub struct Db {
     /// ([`crate::jobs::prepare_hosts`]). Per database, not per process: the
     /// test binary runs hundreds of daemons in one process, and one shared
     /// lock queued every boot behind the DNS lookups of the others (TER-648).
-    host_pins: Arc<tokio::sync::Mutex<()>>,
+    host_pins: Arc<tokio::sync::Mutex<crate::jobs::HostRetries>>,
 }
 
 impl Db {
@@ -2577,7 +2577,7 @@ impl Db {
     }
 
     /// The lock of [`crate::jobs::prepare_hosts`] on this database.
-    pub(crate) fn host_pins(&self) -> &tokio::sync::Mutex<()> {
+    pub(crate) fn host_pins(&self) -> &tokio::sync::Mutex<crate::jobs::HostRetries> {
         &self.host_pins
     }
 
