@@ -386,16 +386,9 @@ pub fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
 /// (TER-146), or every linked card for its attached open request agent
 /// (TER-910). Other thread readers gain no project access from a link.
 pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
-    let own_request = match actor {
-        Actor::Agent(a)
-            if th.request
-                && th.status != ThreadStatus::Closed
-                && th.agent.as_deref() == Some(&a.id) =>
-        {
-            true
-        }
-        _ => false,
-    };
+    let own_request = matches!(actor, Actor::Agent(a) if th.request
+        && th.status != ThreadStatus::Closed
+        && th.agent.as_deref() == Some(&a.id));
     if th.monitor.as_ref().is_some_and(|m| {
         m.split_once(':')
             .is_none_or(|(p, _)| policy::read_project(actor, p).is_err())
