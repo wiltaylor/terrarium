@@ -408,7 +408,10 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
     assert_eq!(r.body["thread"], tid.as_str());
     let qid = r.body["id"].as_str().unwrap().to_owned();
     // Its thread remains sufficient context when the operator clears card.
-    lab.td.patch(&format!("/api/questions/{qid}"), json!({"card": null})).await.ok();
+    lab.td
+        .patch(&format!("/api/questions/{qid}"), json!({"card": null}))
+        .await
+        .ok();
     // A second question must wait for the answer to the first.
     ask(json!({"text": "Another?", "thread": tid}))
         .await

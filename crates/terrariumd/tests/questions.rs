@@ -134,17 +134,25 @@ async fn question_and_bundle_updates_cannot_remove_their_only_context() {
     let World { td, lead, sys, .. } = setup().await;
     for kind in ["question", "bundle"] {
         for priority in ["normal", "urgent", "critical"] {
-            let mut body = json!({"kind": kind, "text": format!("{kind} {priority}?"), "priority": priority});
+            let mut body =
+                json!({"kind": kind, "text": format!("{kind} {priority}?"), "priority": priority});
             if kind == "bundle" {
                 body["items"] = json!([{"text": "First?"}, {"text": "Second?"}]);
             }
             let q = ask(&td, &lead, body).await;
             let path = format!("/api/questions/{}", id(&q));
-            for patch in [json!({"card": null}), json!({"card": null, "text": "Changed?", "priority": priority})] {
+            for patch in [
+                json!({"card": null}),
+                json!({"card": null, "text": "Changed?", "priority": priority}),
+            ] {
                 td.patch_as(&lead, &path, patch).await.err(422, "invalid");
             }
-            td.patch(&path, json!({"card": null})).await.err(422, "invalid");
-            td.patch_as(&sys, &path, json!({"card": null})).await.err(422, "invalid");
+            td.patch(&path, json!({"card": null}))
+                .await
+                .err(422, "invalid");
+            td.patch_as(&sys, &path, json!({"card": null}))
+                .await
+                .err(422, "invalid");
             let unchanged = td.get(&path).await;
             assert_eq!(unchanged.body["card"], q["card"]);
             assert_eq!(unchanged.body["revision"], q["revision"]);
@@ -1303,7 +1311,9 @@ async fn a_question_is_linked_to_a_card_and_unlinked() {
         .err(409, "conflict");
     let v = td.patch_as(&sys, &path, json!({"card": c1})).await;
     assert_eq!(v.ok()["card"], c1.as_str());
-    td.patch(&path, json!({"card": null})).await.err(422, "invalid");
+    td.patch(&path, json!({"card": null}))
+        .await
+        .err(422, "invalid");
     assert!(of(&c1).await.contains(&qid));
 
     // The `question` event names the new card and the old one.

@@ -1072,7 +1072,11 @@ fn check_update_context(
 }
 
 /// A decision keeps its work context when edited, not only when asked.
-fn check_work_context(kind: QuestionKind, card: Option<&str>, thread: Option<&str>) -> ApiResult<()> {
+fn check_work_context(
+    kind: QuestionKind,
+    card: Option<&str>,
+    thread: Option<&str>,
+) -> ApiResult<()> {
     if matches!(kind, QuestionKind::Question | QuestionKind::Bundle)
         && card.is_none()
         && thread.is_none()
@@ -2274,14 +2278,25 @@ mod tests {
     fn card_question_lookup_uses_index_without_sorting_history() {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&mut conn).unwrap();
-        let (sql, args) = list_query(&Filter {
-            card: Some("P-1".into()),
-            ..Filter::default()
-        }, 200);
-        let plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
-            .query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(3)).unwrap()
-            .collect::<Result<Vec<_>, _>>().unwrap().join("\n");
-        assert!(plan.contains("SEARCH questions USING INDEX questions_card_order"), "{plan}");
+        let (sql, args) = list_query(
+            &Filter {
+                card: Some("P-1".into()),
+                ..Filter::default()
+            },
+            200,
+        );
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            plan.contains("SEARCH questions USING INDEX questions_card_order"),
+            "{plan}"
+        );
         assert!(!plan.contains("SCAN questions"), "{plan}");
         assert!(!plan.contains("TEMP B-TREE"), "{plan}");
     }
