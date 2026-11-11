@@ -13404,3 +13404,76 @@ this policy prevents duplicate execution, but cannot promise a successful
 answer for an interrupted external write. Journal records have no automatic
 expiry, so an old request ID cannot silently become executable again.
 
+## 37. Linked instances: home remotes
+
+Only the local operator may manage or use `/api/remotes`. Agents, including
+sysadmin agents, and incoming link actors are refused before body parsing.
+
+| Method | Route | Body or result |
+|---|---|---|
+| GET | `/api/remotes` | Remote rows, without keys or ciphertext |
+| POST | `/api/remotes` | `{name,url,instance_id,code,pin_sha256?,ca_pem?,label?}` |
+| GET | `/api/remotes/{name}` | One remote row |
+| DELETE | `/api/remotes/{name}` | Best-effort upstream revoke, then local deletion. `{revoked,revoke_on_remote}` tells the operator whether to revoke manually |
+| POST | `/api/remotes/{name}/pair` | `{code}` replaces a rotated link key |
+| POST | `/api/remotes/{name}/repin` | `{pin_sha256?,ca_pem?}` replaces TLS trust settings after an instance check |
+| GET/HEAD/POST/PUT/PATCH/DELETE | `/api/remotes/{name}/proxy/api/{rest}` | Forward an allowed remote API call |
+
+The name matches `[a-z][a-z0-9-]{0,31}`. The URL is an origin, with no
+userinfo, path, query or fragment. HTTPS uses system roots, supplied PEM
+roots, or a SHA-256 leaf pin. A pin without a CA overrides certificate name
+and expiry, as for host links. HTTP is restricted to loopback, including the
+resolved address. Each operation resolves once, fixes that address, and
+disables redirects and environment proxies. `TERRARIUM_WEBHOOK_PRIVATE=deny`
+also refuses private addresses and the daemon's own listener ports.
+
+Before pairing, compare the remote's instance ID and leaf fingerprint on
+its Links screen and supply the confirmed values. Pairing consumes the
+one-time code on the remote. A mismatched returned ID is refused, with no
+subsequent calls. Keys are sealed with `secrets.key` and AAD `remote:<id>` in
+the separate `remotes` table. They cannot be listed, revealed or granted as
+normal secrets. Master-key rotation and interrupted-rotation recovery cover
+these rows, including a database containing only remote keys.
+
+The proxy applies the link deny list in §36 before forwarding. Encoded
+separators, nested percent escapes, dot segments and ambiguous paths are
+refused. It forwards only `Accept`, `Content-Type`, `Last-Event-ID` and
+`If-None-Match`, adding the link bearer and `X-Terrarium-Link`. Home cookies,
+tokens, CSRF, Origin and forwarding headers do not pass. WebSocket query
+tokens are removed. The remote still enforces its link actor, read-only
+scope, sysadmin restrictions and delivery guard.
+
+Response headers are restricted to Content-Type, X-Next-Cursor, Retry-After,
+ETag, Cache-Control and attachment-only Content-Disposition. Only JSON, SSE
+and octet-stream bodies pass. Cookies, redirects and active content such as
+HTML are refused or discarded. Responses carry `X-Terrarium-Remote`, the
+home API CSP and `nosniff`. Connection errors use fixed text, with
+`502 remote_unreachable` or `502 remote_mismatch`. Revoked keys give 401 and
+set `auth_failed`. No upstream error containing credentials is logged.
+Read-only links cannot call `DELETE /api/links/self` under the P1 policy.
+Removing one therefore returns `revoke_on_remote: true` and leaves revocation
+to the remote operator. The home does not widen that policy.
+
+Limits per remote are 64 upstream requests and 8 upstream streams.
+Each home admits at most 32 remote browser WebSockets,
+with admission retained for the entire socket lifetime. A 33rd receives 429
+with Retry-After. Historical event page reads take upstream request permits.
+The home stores at most 64 remotes. Listings use bounded, name-cursor pages
+with `limit` and `cursor`, and duplicate names use an indexed existence check.
+Other proxy limits are a 30 s
+connect timeout, 60 s ordinary request timeout, 5 min stream idle timeout,
+16 MiB JSON responses and 256 MiB uploads or binary downloads. SSE streams
+incrementally. Event WebSockets share one upstream firehose across browser
+tabs, with independent historical cursors and filters. Reconnects resume at
+the last upstream sequence with bounded backoff. Lagged browser queues
+close so the browser reconnects using its own cursor. PTY sockets and scoped
+agent event streams remain independent. Removing, re-pairing or re-pinning
+closes existing home streams. Remote frames never enter the home event log.
+
+Instance IDs are checked before upstream operations and every new stream,
+and on a 10 min background interval. Remote rows include `status`,
+`last_ok_at`, `last_error` and UTC `calls_today`. Status changes emit a local
+`remote` event. Status values are `offline`, `online`, `version_skew`,
+`auth_failed`, `pin_mismatch` and `mismatch`. Writes produce `remote.call`
+audit rows with method, path, status and duration, never bodies or keys.
+

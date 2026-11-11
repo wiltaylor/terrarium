@@ -30,6 +30,7 @@ mod project_folders;
 mod projects;
 mod questions;
 mod records;
+mod remotes;
 pub(crate) mod repo_trees;
 mod repos;
 mod reservations;
@@ -82,6 +83,7 @@ use tracing::{error, info, warn};
 pub use artifacts::{artifact_router, run_prune, sweep_orphans};
 pub use config::spawn_config_sync;
 pub use links::this_instance;
+pub use remotes::spawn_checks as spawn_remote_checks;
 pub use schedules::{run_schedule, run_triggered};
 pub use subscriptions::settle_defaults as settle_account_defaults;
 pub use system::{DefinitionCounts, Health, VersionInfo};
@@ -176,6 +178,7 @@ pub struct AppState {
     /// The link keys: the revocation signals, the use throttle, and the
     /// instance ID (`crate::links`, TER-61).
     pub links: Arc<crate::links::Runtime>,
+    pub remotes: Arc<crate::remotes::Runtime>,
 }
 
 impl AppState {
@@ -347,6 +350,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(skills::routes())
         .merge(system_prompts::routes())
         .merge(links::routes())
+        .merge(remotes::routes())
         .route(
             "/session",
             get(session::current)
@@ -1186,6 +1190,7 @@ mod tests {
             git_proxy: Arc::default(),
             job_queue: Arc::default(),
             links: Arc::default(),
+            remotes: Arc::default(),
         })
     }
 

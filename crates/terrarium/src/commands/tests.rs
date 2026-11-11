@@ -17,6 +17,36 @@ use crate::transport::{ApiRequest, Method};
 const ME: &str = "01AGENTAGENTAGENTAGENTAGEN";
 
 #[tokio::test]
+async fn remote_management_uses_only_home_api_routes() {
+    let run = exec(false, &["remote", "ls"], vec![(200, json!([]))], None).await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].path, "/api/remotes");
+    let run = exec(
+        false,
+        &["remote", "rm", "lab"],
+        vec![(200, json!({"revoke_on_remote":false}))],
+        None,
+    )
+    .await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].path, "/api/remotes/lab");
+    assert_eq!(run.reqs[0].method, Method::Delete);
+    let run = exec(
+        false,
+        &["remote", "repin", "lab", "--pin-sha256", "00"],
+        vec![(204, Value::Null)],
+        None,
+    )
+    .await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].path, "/api/remotes/lab/repin");
+    assert_eq!(
+        run.reqs[0].body,
+        Some(json!({"pin_sha256":"00","ca_pem":null}))
+    );
+}
+
+#[tokio::test]
 async fn issue_import_uses_the_daemon_endpoint() {
     let run = exec(
         true,

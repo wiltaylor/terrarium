@@ -337,6 +337,11 @@ pub enum Command {
         #[command(subcommand)]
         command: GroupCmd,
     },
+    /// Linked instances on this daemon (operator only)
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCmd,
+    },
     /// Operator commands that an agent's role permits
     Admin {
         #[command(subcommand)]
@@ -4609,6 +4614,41 @@ pub enum LinkCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum RemoteCmd {
+    /// List the home daemon's linked instances (operator only)
+    Ls,
+    /// Pair a remote. Read the one-time code from stdin, not argv
+    Add {
+        name: String,
+        #[arg(value_name = "URL")]
+        remote_url: String,
+        /// Compare this ID with the remote's Links screen
+        #[arg(long)]
+        instance_id: String,
+        /// The leaf SHA-256 fingerprint confirmed on the remote
+        #[arg(long)]
+        pin_sha256: Option<String>,
+        /// PEM trust roots, instead of the system roots
+        #[arg(long)]
+        ca_file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Remove a remote and revoke its link on a best-effort basis
+    Rm { name: String },
+    /// Replace the TLS trust settings after checking the new fingerprint
+    Repin {
+        name: String,
+        #[arg(long)]
+        pin_sha256: Option<String>,
+        #[arg(long)]
+        ca_file: Option<std::path::PathBuf>,
+    },
+    /// Replace a rotated link key. Read the pairing code from stdin
+    Pair { name: String },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum SubscriptionCmd {
     /// List the subscriptions: provider, plan, the harness of the plan
     /// account, the login, and `*` on the default account of each harness
@@ -4961,7 +5001,7 @@ pub struct EventsArgs {
 pub fn hide_for_mode(cmd: clap::Command, agent_mode: bool) -> clap::Command {
     let hidden: &[&str] = if agent_mode {
         &[
-            "daemon", "events", "audit", "hook", "exec-env", "login", "logout",
+            "daemon", "events", "audit", "hook", "exec-env", "login", "logout", "remote",
         ]
     } else {
         &["admin", "status", "exec", "shell", "cp", "hook", "exec-env"]
@@ -5021,6 +5061,28 @@ mod tests {
             walk(s, &globals, s.get_name(), &mut bad);
         }
         assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    #[test]
+    fn remote_add_keeps_the_home_and_remote_urls_separate() {
+        let cli = parse(&[
+            "--url",
+            "https://home.example",
+            "remote",
+            "add",
+            "lab",
+            "https://remote.example",
+            "--instance-id",
+            "confirmed-id",
+        ]);
+        assert_eq!(cli.url.as_deref(), Some("https://home.example"));
+        let Command::Remote {
+            command: RemoteCmd::Add { remote_url, .. },
+        } = cli.command
+        else {
+            panic!("expected remote add");
+        };
+        assert_eq!(remote_url, "https://remote.example");
     }
 
     /// Design D3: a tool link runs `tool run <name> -- args`; the CLI and
