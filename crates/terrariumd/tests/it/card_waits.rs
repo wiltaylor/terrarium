@@ -334,20 +334,38 @@ async fn unrelated_and_expired_freezes_do_not_block_wait_moves() {
         ("/api/projects/other/calendar/events", 1),
         ("/api/projects/p/calendar/events", -1),
     ] {
-        td.post(scope, json!({
-            "title":"freeze", "kind":"freeze", "tz":"UTC",
-            "start":(at - chrono::Duration::hours(2)).to_rfc3339(),
-            "end":(at + chrono::Duration::hours(hours)).to_rfc3339()
-        })).await.ok();
+        td.post(
+            scope,
+            json!({
+                "title":"freeze", "kind":"freeze", "tz":"UTC",
+                "start":(at - chrono::Duration::hours(2)).to_rfc3339(),
+                "end":(at + chrono::Duration::hours(hours)).to_rfc3339()
+            }),
+        )
+        .await
+        .ok();
     }
     let a = card(&td).await;
     let b = card(&td).await;
-    set(&td, &b, wait(&[(&a, Some("review"))], Mode::All, Action {
-        move_to: Some("ready".into()), ..Action::default()
-    })).await;
+    set(
+        &td,
+        &b,
+        wait(
+            &[(&a, Some("review"))],
+            Mode::All,
+            Action {
+                move_to: Some("ready".into()),
+                ..Action::default()
+            },
+        ),
+    )
+    .await;
     move_to(&td, &a, "review").await;
     assert!(met(&td, &b).await);
-    assert_eq!(td.get(&format!("/api/cards/{b}")).await.ok()["column"], "ready");
+    assert_eq!(
+        td.get(&format!("/api/cards/{b}")).await.ok()["column"],
+        "ready"
+    );
     td.daemon.as_ref().unwrap().state.db.read(|c| {
         for scope in [Some("p"), None] {
             let mut stmt = c.prepare("EXPLAIN QUERY PLAN SELECT id FROM calendar_events WHERE project IS ?1 ORDER BY start_at, id LIMIT 1001")?;
