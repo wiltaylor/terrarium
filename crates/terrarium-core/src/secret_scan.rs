@@ -1298,9 +1298,8 @@ mod tests {
         );
         assert_eq!(rules(export, &text), ["url-userinfo"].map(str::to_owned));
         // In a user file the marker still skips the decoded soft rules.
-        let text = format!(
-            "note = \"Zx8Qp2Lm7Vt4\\u0041Rn9Ks1Wd6Hy3Fj5Bc0GaUe\" # {ALLOW_MARKER}\n"
-        );
+        let text =
+            format!("note = \"Zx8Qp2Lm7Vt4\\u0041Rn9Ks1Wd6Hy3Fj5Bc0GaUe\" # {ALLOW_MARKER}\n");
         assert!(rules("fleets/prod.fleet.toml", &text).is_empty(), "{text}");
         // A value out of the allow shape with a token in it hits, marker
         // or not.
