@@ -2,7 +2,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use crate::common::TestDaemon;
 use serde_json::json;
-use std::{path::Path, time::Duration};
+use std::{path::{Path, PathBuf}, time::Duration};
+
+pub(crate) struct RemoteCleanup(pub PathBuf);
+
+impl Drop for RemoteCleanup {
+    fn drop(&mut self) {
+        cleanup(&self.0);
+    }
+}
 
 pub(crate) async fn start(td: &TestDaemon, target: &str, root: &str) -> (String, String) {
     td.project("p").await;
@@ -21,7 +29,7 @@ pub(crate) async fn start(td: &TestDaemon, target: &str, root: &str) -> (String,
         .post_as(
             &aid,
             &format!("/api/agents/{aid}/run"),
-            json!({"target":target,"cwd":root,"name":"offline-ssh","cmd":["sh","-c",script]}),
+            json!({"target":target,"cwd":root,"name":"offline-ssh","timeout":"30s","cmd":["sh","-c",script]}),
         )
         .await;
     let sid = run.ok()["session_id"].as_str().unwrap();
@@ -122,14 +130,14 @@ pub(crate) async fn completed(td: &TestDaemon, aid: &str, wid: &str, physical: &
 }
 
 pub(crate) fn cleanup(physical: &Path) {
-    for dir in std::fs::read_dir(physical.join(".terrarium-runs")).unwrap() {
-        let pid = std::fs::read_to_string(dir.unwrap().path().join("janitor")).unwrap();
+    let Ok(dirs) = std::fs::read_dir(physical.join(".terrarium-runs")) else { return; };
+    for dir in dirs.flatten() {
+        let Ok(pid) = std::fs::read_to_string(dir.path().join("janitor")) else { continue; };
         // Only the cleanup process group created by this fixture.
-        let status = std::process::Command::new("kill")
+        let _ = std::process::Command::new("kill")
             .args(["-KILL", "--", &format!("-{}", pid.trim())])
             .status()
             .unwrap();
-        assert!(status.success());
     }
 }
 
@@ -139,6 +147,7 @@ async fn durable_ssh_finishes_offline_once_with_real_exit() {
         return;
     };
     let mut ssh = super::workspace_sync::Ssh::start(sshd).await;
+    let _cleanup = RemoteCleanup(ssh.jail.join("tmp/restart"));
     let mut td = TestDaemon::start().await;
     td.post("/api/secrets", json!({"name":"restart-key","kind":"ssh_key","fields":{"private_key":std::fs::read_to_string(&ssh.key).unwrap()}})).await.ok();
     td.post("/api/targets", json!({"name":"restart-ssh","kind":"ssh","address":"root@127.0.0.1","port":ssh.port,"credential":"restart-key","work_root":"/tmp/restart"})).await.ok();
@@ -159,6 +168,5 @@ async fn durable_ssh_finishes_offline_once_with_real_exit() {
     completed(&td, &aid, &wid, &root).await;
     td.boot(None, None).await;
     completed(&td, &aid, &wid, &root).await;
-    cleanup(&root);
     ssh.server.kill().await.unwrap();
 }

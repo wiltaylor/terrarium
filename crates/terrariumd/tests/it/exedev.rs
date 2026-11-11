@@ -259,6 +259,7 @@ fn target(name: &str, life: u64) -> Value {
 async fn durable_exedev_finishes_offline_once_with_real_exit() {
     let (mut td, _fake, _, url, ssh) = daemon().await;
     let root = td.dir.path().join("remote-spool");
+    let _cleanup = super::ssh_restart::RemoteCleanup(root.clone());
     let mut def = target("restart-ex", 8 * 3600);
     def["work_root"] = json!(root);
     td.post("/api/targets", def).await.ok();
@@ -279,7 +280,6 @@ async fn durable_exedev_finishes_offline_once_with_real_exit() {
     super::ssh_restart::completed(&td, &aid, &wid, &root).await;
     reboot(&mut td, &url, &ssh).await;
     super::ssh_restart::completed(&td, &aid, &wid, &root).await;
-    super::ssh_restart::cleanup(&root);
 }
 
 fn db(td: &TestDaemon) -> rusqlite::Connection {

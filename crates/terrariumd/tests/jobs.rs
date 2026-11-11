@@ -3092,6 +3092,7 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     let (ssh, _) = crate::exedev::fake_ssh(marks.path());
     let mut lab = lab_impl_ssh(1, None, "code", Some(&ssh)).await;
     let spool_root = marks.path().join("spool");
+    let _cleanup = crate::ssh_restart::RemoteCleanup(spool_root.clone());
     lab.td.post("/api/targets", json!({"name":"p-queue-ssh","kind":"ssh","address":"ci@127.0.0.1","project":"p","work_root":spool_root})).await.ok();
     let go = marks.path().join("go");
     let started = marks.path().join("started");
@@ -3148,7 +3149,6 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
         .count();
     assert_eq!(notifications, 1, "{}", card.body);
     assert!(std::fs::read_to_string(xml).unwrap().contains("kept"));
-    crate::ssh_restart::cleanup(&spool_root);
 }
 
 async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
