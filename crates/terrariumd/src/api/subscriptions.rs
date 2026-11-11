@@ -49,6 +49,7 @@ pub fn routes() -> Router<Shared> {
         .route("/subscriptions/{name}/logout", post(logout))
         .route("/subscriptions/{name}/default", post(make_default))
         .route("/subscriptions/{name}/api-key", post(api_key))
+        .route("/subscriptions/{name}/cloud", axum::routing::put(set_cloud))
         .route("/subscriptions/{name}/label", axum::routing::put(set_label))
 }
 
@@ -1315,6 +1316,35 @@ pub async fn settle_defaults(state: &Shared, fresh: Option<String>) {
         }
         Err(e) => tracing::warn!("cannot set the default plan accounts: {e}"),
     }
+}
+
+/// Replace cloud settings without reading or writing the credential file.
+async fn set_cloud(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(settings): ApiJson<terrarium_core::cloud::CloudSettings>,
+) -> ApiResult<Json<SubscriptionView>> {
+    policy::operator_only(&actor, "changing cloud settings")?;
+    let n = name.clone();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            let sub = subs::get(t, &n)?;
+            if sub.source != SOURCE_API {
+                return Err(ApiError::invalid(format!(
+                    "subscription `{n}` comes from a file; set its `[cloud]` table there"
+                )));
+            }
+            let kind = sub.cloud_kind().ok_or_else(|| {
+                ApiError::invalid(format!("subscription `{n}` is not a cloud subscription"))
+            })?;
+            terrarium_core::cloud::check(kind, &settings).map_err(ApiError::invalid)?;
+            subs::set_cloud(t, &n, &settings)?;
+            t.audit("subscription.cloud", &n, None, json!({"cloud": settings}))
+        })
+        .await?;
+    Ok(Json(load(&state, name).await?))
 }
 
 /// `POST /api/subscriptions/{name}/api-key`. The answer never has the key.

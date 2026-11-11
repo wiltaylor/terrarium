@@ -3097,14 +3097,14 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     assert_eq!(events_of(td, "quota.blocked").await.len(), 1);
 
     // The operator raises the budget: the next check ends the hold.
-    td.post(
-        "/api/subscriptions/aws/api-key",
-        json!({"provider": "bedrock", "key": "E2E-SECRET-bedrock-1", "key_id": "AKIAE2E1",
-               "cloud": {"region": "us-east-1", "budget_usd": 50}}),
+    td.put(
+        "/api/subscriptions/aws/cloud",
+        json!({"region": "us-east-1", "budget_usd": 50,
+               "models": {"opus": "us.anthropic.claude-opus-5-5"}}),
     )
     .await
     .ok();
-    // The body had no `models`: the stored map stays.
+    // A settings-only replacement needs no credential.
     let sub = td.get("/api/subscriptions/aws").await.ok().clone();
     assert_eq!(sub["cloud"]["budget_usd"], 50);
     assert_eq!(

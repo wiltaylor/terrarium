@@ -6029,6 +6029,15 @@ At most four sessions are live at once (`409 conflict`).
 
 ### 16.5 API keys
 
+`PUT /api/subscriptions/{name}/cloud` replaces the cloud settings of an
+API-managed Bedrock, GCP, or Foundry subscription. The body is the complete
+cloud settings object (`region`, `models`, `budget_usd`, and the other
+provider fields), not a `{cloud: ...}` wrapper. Omitted optional fields are
+cleared. The operator-only endpoint checks the settings and returns the
+subscription without reading or changing its key file. File-managed and
+non-cloud subscriptions return `422 invalid`. Raising or removing the budget
+ends a cloud-budget hold at the next budget check.
+
 `POST /api/subscriptions/{name}/api-key` stores the key in
 `<state>/credentials/subscriptions/<name>.json`, mode `0600` (the
 directories are `0700`), and sets `env_var`:
