@@ -3244,7 +3244,7 @@ except for the differences in "Bundles" below.
 | `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice and a bundle have none: options on a notice or a bundle are `422 invalid`. |
 | `items` | A bundle only: the questions, 2 to 20, each `{text, options, context?, answer?, answer_option?}`. Absent for a question and a notice. See "Bundles". |
 | `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
-| `card` | Optional. A card of the agent's project. The question then shows on that card on the board (§8) and in the Inbox. Link or unlink later with `PATCH` (see "Cards"). |
+| `card` | A card of the agent's project. Required for a question or bundle unless asked inside an Inbox thread, even at urgent or critical priority. The question shows on that card on the board (§8) and in the Inbox. Answers are also saved as system comments on the card. Link or unlink later with `PATCH` (see "Cards"). |
 | `priority` | `normal`, `urgent`, or `critical`. Lists put the critical open questions first, then the urgent ones. Use `critical` only when the operator must act now: production is down, data is lost, a security problem, or a spent budget that stops all work. While a critical item is open, the dashboard shows a banner on each page and flashes its browser tab (§6.9). |
 | `status` | A question: `open`, `in_thread`, `answered`, or `retracted`. A notice: `open`, `in_thread`, `acknowledged`, or `retracted`. Only `open` and `in_thread` change. `in_thread`: the operator moved it into an Inbox thread with its agent (see "To thread"). |
 | `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. For an acknowledged notice, `answer` is the reply of the operator, if any. |
@@ -3261,7 +3261,7 @@ The rights:
 | Ask, update | The agent itself, when it is a leader: project_admin of its project, or sysadmin. A member gets `403` with "workers send questions to their lead: terrarium mail send <lead> ...". The operator does not ask. |
 | Read | The agent itself, a project_admin of its project, a sysadmin, the operator. Another caller gets `404` for one question and `403` for a list. |
 | Answer, acknowledge | The operator. A sysadmin agent, for the question or notice of another agent. Never the asking agent (`403`). |
-| Retract | The asking leader, or the operator. |
+| Retract | The asking leader, the attached thread agent for its own thread question, or the operator. |
 | To thread | The operator. Another caller that reads the question gets `403`. |
 | Link to a card, unlink | The asking leader while the question is open. The operator, and a sysadmin agent for the question of another agent, at each status. |
 
@@ -4674,7 +4674,7 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
 | `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |
-| `GET /api/cards/{id}` | | `200` card |
+| `GET /api/cards/{id}` | | `200` card, with `questions` (all linked questions, including closed ones) |
 | `PATCH /api/cards/{id}` | card patch | `200` card |
 | `DELETE /api/cards/{id}` | | `204`; the card is archived |
 | `POST /api/cards/{id}/move` | `{"column", "position"?, "comment"?}` | `200` card |

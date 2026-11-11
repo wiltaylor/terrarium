@@ -2797,7 +2797,7 @@ pub enum QuestionCmd {
         #[command(flatten)]
         context: QuestionContext,
         /// The card that the question is about
-        #[arg(long)]
+        #[arg(long, required = true)]
         card: Option<String>,
         /// Mark the question urgent
         #[arg(long, conflicts_with = "critical")]
@@ -2837,7 +2837,7 @@ pub enum QuestionCmd {
         #[command(flatten)]
         context: QuestionContext,
         /// The card that the bundle is about
-        #[arg(long)]
+        #[arg(long, required = true)]
         card: Option<String>,
         /// Mark the bundle urgent
         #[arg(long, conflicts_with = "critical")]

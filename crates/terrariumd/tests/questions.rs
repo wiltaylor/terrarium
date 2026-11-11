@@ -57,12 +57,52 @@ async fn setup() -> World {
     }
 }
 
-async fn ask(td: &TestDaemon, agent: &str, body: Value) -> Value {
+async fn ask(td: &TestDaemon, agent: &str, mut body: Value) -> Value {
+    // Independent decisions need independent work cards. Tests of missing
+    // context use the API directly, not this successful-creation helper.
+    if body.get("card").is_none() && body.get("thread").is_none()
+        && body["kind"] != "notice"
+    {
+        let project = td.get(&format!("/api/agents/{agent}")).await.ok()["project"]
+            .as_str().unwrap().to_owned();
+        let card = td.post(&format!("/api/projects/{project}/cards"),
+            json!({"title": "Question decision"})).await;
+        body["card"] = card.ok()["id"].clone();
+    }
     let r = td
         .post_as(agent, &format!("/api/agents/{agent}/questions"), body)
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     r.body
+}
+
+#[tokio::test]
+async fn questions_require_work_context_and_save_answers_on_the_card() {
+    let World { td, lead, .. } = setup().await;
+    let path = format!("/api/agents/{lead}/questions");
+    for priority in ["normal", "urgent", "critical"] {
+        for kind in ["question", "bundle"] {
+            let mut body = json!({"text": "Decision?", "kind": kind, "priority": priority});
+            if kind == "bundle" {
+                body["items"] = json!([{"text": "First?"}, {"text": "Second?"}]);
+            }
+            let r = td.post_as(&lead, &path, body).await;
+            r.err(422, "invalid");
+            assert!(r.body["error"]["message"].as_str().unwrap().contains("--card"));
+        }
+    }
+    let card = id(td.post("/api/projects/p/cards", json!({"title": "Decision"})).await.ok());
+    let q = ask(&td, &lead, json!({"text": "Proceed?", "card": card})).await;
+    let qid = id(&q);
+    let shown = td.get(&format!("/api/cards/{card}")).await;
+    assert_eq!(shown.body["questions"][0]["id"], qid);
+    td.post(&format!("/api/questions/{qid}/answer"), json!({"answer": "Proceed"})).await.ok();
+    let shown = td.get(&format!("/api/cards/{card}")).await;
+    assert_eq!(shown.body["questions"][0]["status"], "answered");
+    let comments = shown.body["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 1);
+    assert!(comments[0]["body"].as_str().unwrap().contains("Proceed"));
+    assert!(td.get("/api/questions?status=open").await.ok().as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

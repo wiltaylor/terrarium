@@ -45,6 +45,25 @@ fn bin() -> Command {
     c
 }
 
+#[test]
+fn questions_require_card_even_when_urgent_or_critical() {
+    for verb in ["ask", "bundle"] {
+        for priority in [None, Some("--urgent"), Some("--critical")] {
+            let mut command = bin();
+            command.args(["question", verb, "Decision?"]);
+            if verb == "bundle" {
+                command.args(["--item", "First?", "--item", "Second?"]);
+            }
+            if let Some(priority) = priority {
+                command.arg(priority);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("--card"));
+        }
+    }
+}
+
 fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }

@@ -752,6 +752,14 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
         Some(th) => Some(crate::store::threads::check_ask(t, th, &n.agent)?.id),
         None => None,
     };
+    if matches!(n.kind, QuestionKind::Question | QuestionKind::Bundle)
+        && card.is_none()
+        && in_thread.is_none()
+    {
+        return Err(ApiError::invalid(
+            "question ask and bundle require --card, or ask inside an Inbox thread with thread ask",
+        ));
+    }
     let (text, options, context) = redact_fields(t, text, options, context);
     let items = redact_items(t, items);
     let open = list(
@@ -1458,6 +1466,7 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
         json!({"agent": q.agent, "by": by.key(), "option": q.answer_option,
                "answer": short(&answer, 200)}),
     )?;
+    answer_comment(t, &q, by)?;
     emit(t, &q, "answered")?;
     Ok(q)
 }
@@ -1500,8 +1509,25 @@ fn answer_bundle(
                "answers": q.items.iter().map(|i| short(i.answer.as_deref().unwrap_or_default(), 80))
                    .collect::<Vec<_>>()}),
     )?;
+    answer_comment(t, &q, by)?;
     emit(t, &q, "answered")?;
     Ok(q)
+}
+
+/// Preserve the decision alongside the work, regardless of which UI answered it.
+fn answer_comment(t: &mut Tx<'_>, q: &Question, by: &mail::Address) -> ApiResult<()> {
+    if let Some(card) = &q.card {
+        let body = if q.kind == QuestionKind::Bundle {
+            bundle_mail(q, &by.display(), &[])
+        } else {
+            format!(
+                "{} answered question {}: {}\n\n{}",
+                by.display(), q.id, q.text, q.answer.as_deref().unwrap_or_default()
+            )
+        };
+        crate::store::board::system_comment(t, card, &body, None)?;
+    }
+    Ok(())
 }
 
 /// Retract an open question. `by_owner`: the asking agent itself (no mail,
