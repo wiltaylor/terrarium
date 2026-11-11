@@ -3334,6 +3334,24 @@ mod tests {
         MIGRATIONS.len() + NAMED_MIGRATIONS.len()
     }
 
+    #[tokio::test]
+    async fn failed_profiled_write_rolls_back_and_releases_lock() {
+        let db = Db::new(test_db(), EventHub::default());
+        let result = db
+            .write("system", |t| {
+                t.execute_batch("CREATE TABLE failed_profile_write (id INTEGER)")?;
+                Err::<(), _>(ApiError::internal("intentional rollback"))
+            })
+            .await;
+        assert!(result.is_err());
+        db.write("system", |t| {
+            t.execute_batch("CREATE TABLE failed_profile_write (id INTEGER)")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn legacy_migration_list_is_frozen() {
         assert_eq!(
