@@ -1921,7 +1921,105 @@ pub fn release_target_of(conn: &Connection, target: &str) -> ApiResult<Option<St
             return Ok(Some(p));
         }
     }
-    Ok(None)
+    Ok(conn
+        .query_row(
+            "SELECT project FROM release_targets WHERE target = ?1 ORDER BY added_at LIMIT 1",
+            [target],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// A protected release target (TER-623, review-ter-623-r3 finding 2): a
+/// target that was a `release_target`, with its machine then. It stays
+/// protected after a switch or a clear, until the operator retires it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseTarget {
+    pub target: String,
+    /// The machine at the set ([`machine_key`]); empty for a row that came
+    /// with the migration.
+    pub machine: String,
+    pub project: String,
+    pub added_by: String,
+    pub added_at: String,
+}
+
+/// The protected release targets, by target and time.
+pub fn release_targets(conn: &Connection) -> ApiResult<Vec<ReleaseTarget>> {
+    let mut st = conn.prepare(
+        "SELECT target, machine, project, added_by, added_at FROM release_targets
+         ORDER BY target, added_at",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok(ReleaseTarget {
+                target: r.get(0)?,
+                machine: r.get(1)?,
+                project: r.get(2)?,
+                added_by: r.get(3)?,
+                added_at: r.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Add the release target of `def` of `project` and its machine now to the
+/// protected list ([`ReleaseTarget`]). A known pair stays as it is.
+fn protect_release_target(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResult<()> {
+    let Some(r) = def.release_target() else {
+        return Ok(());
+    };
+    let machine = machine_of(t, r);
+    let n = t.execute(
+        "INSERT OR IGNORE INTO release_targets (target, machine, project, added_by, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![r, machine, project, t.actor, now()],
+    )?;
+    if n > 0 {
+        t.audit(
+            "release_target.protect",
+            r,
+            Some(project),
+            json!({"machine": machine}),
+        )?;
+    }
+    Ok(())
+}
+
+/// Retire the protection of release target `target` (the operator only,
+/// the caller checks): every row of it goes, audited. Refused while a
+/// project has it as its `release_target`.
+pub fn retire_release_target(t: &mut Tx<'_>, target: &str) -> ApiResult<Vec<ReleaseTarget>> {
+    let mut st = t.prepare("SELECT project FROM project_delivery ORDER BY project")?;
+    let names = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(st);
+    for p in names {
+        if delivery(t, &p)?.release_target() == Some(target) {
+            return Err(ApiError::conflict(format!(
+                "target `{target}` is the release target of project `{p}`: switch or clear it first"
+            )));
+        }
+    }
+    let rows: Vec<ReleaseTarget> = release_targets(t)?
+        .into_iter()
+        .filter(|r| r.target == target)
+        .collect();
+    if rows.is_empty() {
+        return Err(ApiError::not_found(format!(
+            "target `{target}` is no protected release target"
+        )));
+    }
+    t.execute("DELETE FROM release_targets WHERE target = ?1", [target])?;
+    t.audit(
+        "release_target.retire",
+        target,
+        None,
+        json!({"rows": rows}),
+    )?;
+    Ok(rows)
 }
 
 /// The refusal of `what` on the release target `target` of `project`
@@ -1981,7 +2079,37 @@ pub fn release_match(conn: &Connection, def: &TargetDef) -> ApiResult<Option<(St
             return Ok(Some((p, r.to_owned())));
         }
     }
+    // The protected list (review-ter-623-r3 finding 2): a target that was a
+    // release target, its machine then, and its machine now.
+    for r in release_targets(conn)? {
+        if r.target == def.name
+            || (!r.machine.is_empty() && r.machine == key)
+            || machine_of(conn, &r.target) == key
+        {
+            return Ok(Some((r.project, r.target)));
+        }
+    }
     Ok(None)
+}
+
+/// The operator-only rule of a target write (review-ter-623-r2 findings 2
+/// and 3, r3 finding 1): only the operator (`operator`) defines, changes or
+/// deletes a release target, a protected one, or a target on the machine
+/// of one. The target API and the fleet apply check the definition before
+/// and after the write.
+pub fn check_release_write(
+    conn: &Connection,
+    operator: bool,
+    def: &TargetDef,
+    what: &str,
+) -> ApiResult<()> {
+    if operator {
+        return Ok(());
+    }
+    match release_match(conn, def)? {
+        Some((p, r)) => Err(release_only(&r, &p, &format!("{what} `{}`", def.name))),
+        None => Ok(()),
+    }
 }
 
 /// [`release_only`] when `target` is a release target or on the machine of
@@ -2041,6 +2169,7 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
         Some(project),
         json!({"old": old, "new": def}),
     )?;
+    protect_release_target(t, project, def)?;
     delivery(t, project)
 }
 

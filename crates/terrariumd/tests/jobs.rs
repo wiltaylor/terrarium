@@ -3474,6 +3474,152 @@ async fn the_release_config_and_target_are_the_operators() {
     assert!(marker.exists());
 }
 
+/// TER-623 round 4 (review-ter-623-r3 finding 1): a fleet apply follows
+/// the rule of the target API. A sysadmin agent cannot change the release
+/// target, delete it by a prune, or add a target on its machine through a
+/// fleet; the operator can.
+#[tokio::test]
+async fn a_fleet_cannot_change_the_release_target_unless_the_operator_applies_it() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    let sys = td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fleet = |address: &str, port: u16| {
+        format!(
+            "name = \"rel\"\n[[targets]]\nname = \"rel-fleet\"\nkind = \"ssh\"\naddress = \"{address}\"\nport = {port}\n"
+        )
+    };
+    let apply = |content: String, prune: bool| json!({"content": content, "prune": prune, "confirm": true});
+    let r = td
+        .post("/api/fleet/apply", apply(fleet("release@10.9.0.4", 2252), false))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "true", "release_target": "rel-fleet"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let rule = "release target runs release jobs only";
+    // An update of the release target by a sysadmin agent.
+    let r = td
+        .post_as(&sys, "/api/fleet/apply", apply(fleet("release@10.9.0.99", 2252), false))
+        .await;
+    assert_eq!(r.status, 403, "update: {}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    // Its delete by a prune.
+    let r = td
+        .post_as(&sys, "/api/fleet/apply", apply("name = \"rel\"\n".into(), true))
+        .await;
+    assert_eq!(r.status, 403, "prune: {}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    // A second name for its machine.
+    let alias = "name = \"alias\"\n[[targets]]\nname = \"rel-alias\"\nkind = \"ssh\"\naddress = \"other@10.9.0.4\"\nport = 2252\n";
+    let r = td
+        .post_as(&sys, "/api/fleet/apply", apply(alias.into(), false))
+        .await;
+    assert_eq!(r.status, 403, "alias: {}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    let t = td.get("/api/targets/rel-fleet").await.ok().clone();
+    assert_eq!(t["address"], "release@10.9.0.4", "{t:#}");
+    // The operator passes.
+    let r = td
+        .post("/api/fleet/apply", apply(fleet("release@10.9.0.4", 2253), false))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// TER-623 round 4 (review-ter-623-r3 finding 2): the protection of a
+/// release target outlives the config. After a switch from A to B, and
+/// after a clear, A, B and their machines stay refused for agents (policy,
+/// lease, target change, alias). Only the operator retires an entry, and
+/// not the current release target; then the target is free again.
+#[tokio::test]
+async fn a_release_target_stays_protected_until_the_operator_retires_it() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    let sys = td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (name, ip) in [("rel-a", "10.9.0.5"), ("rel-b", "10.9.0.6")] {
+        let r = td
+            .post(
+                "/api/targets",
+                json!({"name": name, "kind": "ssh", "address": format!("release@{ip}"), "port": 2252}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    let set = |release: Option<&str>| {
+        let mut c = json!({"target": "p-box", "recipe": "true"});
+        if let Some(r) = release {
+            c["release_target"] = json!(r);
+        }
+        c
+    };
+    let rule = "release target runs release jobs only";
+    let w1 = format!("/api/agents/{}", lab.w1);
+    let refused = |target: &'static str, ip: &'static str| {
+        let (w1, sys) = (w1.clone(), sys.clone());
+        async move {
+            let r = td.patch(&w1, json!({"policy": {"targets": [target]}})).await;
+            assert_eq!(r.status, 403, "{target} policy: {}", r.body);
+            assert!(r.body.to_string().contains(rule), "{}", r.body);
+            let r = td
+                .post(&format!("/api/targets/{target}/leases"), json!({"agent": "p/w1"}))
+                .await;
+            assert_eq!(r.status, 403, "{target} lease: {}", r.body);
+            let r = td
+                .patch_as(&sys, &format!("/api/targets/{target}"), json!({"port": 2299}))
+                .await;
+            assert_eq!(r.status, 403, "{target} patch: {}", r.body);
+            let r = td
+                .post_as(
+                    &sys,
+                    "/api/targets",
+                    json!({"name": format!("{target}-alias"), "kind": "ssh",
+                           "address": format!("other@{ip}"), "port": 2252}),
+                )
+                .await;
+            assert_eq!(r.status, 403, "{target} alias: {}", r.body);
+        }
+    };
+    let r = td.put("/api/projects/p/delivery", set(Some("rel-a"))).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // The switch to B.
+    let r = td.put("/api/projects/p/delivery", set(Some("rel-b"))).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    refused("rel-a", "10.9.0.5").await;
+    refused("rel-b", "10.9.0.6").await;
+    let list = td.get("/api/release-targets").await.ok().to_string();
+    assert!(list.contains("rel-a") && list.contains("rel-b"), "{list}");
+    // The current release target is not retired.
+    let r = td.delete("/api/release-targets/rel-b").await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    // The clear.
+    let r = td.put("/api/projects/p/delivery", set(None)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    refused("rel-a", "10.9.0.5").await;
+    refused("rel-b", "10.9.0.6").await;
+    // Only the operator retires an entry.
+    let r = td
+        .req(hyper::Method::DELETE, "/api/release-targets/rel-a", None, Some(&lab.lead))
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = td.delete("/api/release-targets/rel-a").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td.patch(&w1, json!({"policy": {"targets": ["rel-a"]}})).await;
+    assert_eq!(r.status, 200, "rel-a after its retire: {}", r.body);
+    let r = td.patch(&w1, json!({"policy": {"targets": ["rel-b"]}})).await;
+    assert_eq!(r.status, 403, "rel-b is still protected: {}", r.body);
+    let audit = td.get("/api/audit").await.ok().to_string();
+    assert!(audit.contains("release_target.retire"), "{audit}");
+}
+
 /// TER-623, review-ter-623 F3: a release never runs again by itself. A run
 /// that the host agent lost, a release that was running when the daemon
 /// stopped, and a cancel of a running release each end the job (failed or

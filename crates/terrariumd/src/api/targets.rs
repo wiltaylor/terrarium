@@ -557,17 +557,7 @@ fn release_operator(
     def: &TargetDef,
     what: &str,
 ) -> ApiResult<()> {
-    if actor.is_operator() {
-        return Ok(());
-    }
-    match crate::store::jobs::release_match(conn, def)? {
-        Some((p, r)) => Err(crate::store::jobs::release_only(
-            &r,
-            &p,
-            &format!("{what} `{}`", def.name),
-        )),
-        None => Ok(()),
-    }
+    crate::store::jobs::check_release_write(conn, actor.is_operator(), def, what)
 }
 
 /// The target of a lifecycle verb or a snapshot call: the actor may use

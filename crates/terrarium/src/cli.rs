@@ -622,6 +622,15 @@ pub enum JobCmd {
     Show { id: String },
     /// Cancel a queued or running job (a running one is killed)
     Cancel { id: String },
+    /// The protected release targets (TER-623): no agent uses or defines
+    /// them, also after a switch or a clear of `release_target`
+    ReleaseTargets,
+    /// Retire the protection of a target that is no longer a release
+    /// target (the operator only, audited)
+    ReleaseRetire {
+        /// The target
+        target: String,
+    },
     /// Queue a release job on the card of the release (project admin,
     /// TER-623): the release recipe on the project's release target, at
     /// the head of `main`, with the release secrets in its env

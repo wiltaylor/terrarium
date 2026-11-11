@@ -111,6 +111,34 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
             let v = ctx.api.put(&path, json!({ "aliases": aliases })).await?;
             ctx.emit(&v, print_hosts)
         }
+        JobCmd::ReleaseTargets => {
+            let v = ctx.api.get("/api/release-targets", vec![]).await?;
+            ctx.emit(&v, |c, v| {
+                let items = v["release_targets"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+                print_table(
+                    c,
+                    items,
+                    &[
+                        ("TARGET", "target"),
+                        ("MACHINE", "machine"),
+                        ("PROJECT", "project"),
+                        ("BY", "added_by"),
+                        ("AT", "added_at"),
+                    ],
+                    "no protected release targets",
+                );
+            })
+        }
+        JobCmd::ReleaseRetire { target } => {
+            let v = ctx
+                .api
+                .delete(&format!("/api/release-targets/{}", encode(target)), vec![])
+                .await?;
+            ctx.emit(&v, |c, v| {
+                let n = v["retired"].as_array().map_or(0, Vec::len);
+                c.line(format!("retired release target {target} ({n} entries)"));
+            })
+        }
         JobCmd::Release {
             card,
             repo,

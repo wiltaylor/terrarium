@@ -1495,6 +1495,16 @@ pub fn apply(
         apply_project(t, &name, &p.def, p.delivery.is_some())?;
     }
     for d in f.all_targets() {
+        // TER-623 (review-ter-623-r3 finding 1): the rule of the target API,
+        // on the stored and on the new definition, in this write.
+        if let Some(old) = targets::find(t, &d.name)?
+            && old.def != *d
+        {
+            jobs::check_release_write(t, actor.is_operator(), &old.def, "changing the target from a fleet")?;
+            jobs::check_release_write(t, actor.is_operator(), d, "changing the target from a fleet")?;
+        } else if targets::find(t, &d.name)?.is_none() {
+            jobs::check_release_write(t, actor.is_operator(), d, "defining the target from a fleet")?;
+        }
         apply_target(t, d)?;
         let live = targets::get(t, &d.name)?;
         record(
@@ -1631,6 +1641,14 @@ pub fn apply(
                     }
                 }
                 Kind::Target => {
+                    if let Some(old) = targets::find(t, &e.key)? {
+                        jobs::check_release_write(
+                            t,
+                            actor.is_operator(),
+                            &old.def,
+                            "deleting the target from a fleet",
+                        )?;
+                    }
                     targets::delete(t, &e.key)?;
                 }
                 Kind::Schedule => {

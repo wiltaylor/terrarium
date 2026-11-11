@@ -27,6 +27,11 @@
 //!   with `release_secrets` in its env and the `docker_release` relay. The
 //!   card does not move: it gets a comment at the queue and at the end,
 //!   and no `job.verdict` event.
+//! - `GET /api/release-targets` (any actor) and `DELETE
+//!   /api/release-targets/{name}` (the operator, audited): the protected
+//!   release targets (TER-623). A set of `release_target` adds the target
+//!   and its machine; a switch or a clear keeps it protected until the
+//!   operator retires it.
 //! - With `board_flow = rules` (TER-170) a validate, a merge, a batch,
 //!   and a cancel only queue or cancel the job: its events are all, and
 //!   the board rules set the labels, move, and comment (the built-in pack
@@ -48,7 +53,7 @@ use std::collections::HashMap;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -75,6 +80,8 @@ pub fn routes() -> Router<Shared> {
         .route("/cards/{id}/validate", post(validate))
         .route("/cards/{id}/merge", post(merge))
         .route("/cards/{id}/release", post(release))
+        .route("/release-targets", get(list_release_targets))
+        .route("/release-targets/{name}", delete(retire_release_target))
         .route("/merges", post(merge_batch))
         .route("/job-hosts", get(list_hosts))
         .route("/job-hosts/{host}", put(set_host).delete(clear_host))
@@ -871,6 +878,32 @@ async fn release(
     rt::kick(&state);
     // Releases have their own lane of one (TER-623).
     Ok(queued_answer(job.0, job.1, None, 1))
+}
+
+/// `GET /api/release-targets` (any actor, TER-623): the protected release
+/// targets, which no agent uses or defines until the operator retires them.
+async fn list_release_targets(
+    State(state): State<Shared>,
+    _actor: Actor,
+) -> ApiResult<Json<Value>> {
+    let rows = state.db.read(jobs::release_targets).await?;
+    Ok(Json(json!({"release_targets": rows})))
+}
+
+/// `DELETE /api/release-targets/{name}` (the operator only, TER-623):
+/// retire the protection of a target that is no longer a release target.
+/// Audited as `release_target.retire`.
+async fn retire_release_target(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    policy::operator_only(&actor, "retiring a protected release target")?;
+    let rows = state
+        .db
+        .write(actor.label(), move |t| jobs::retire_release_target(t, &name))
+        .await?;
+    Ok(Json(json!({"retired": rows})))
 }
 
 /// The checks of a release on `card`: a card that is not archived or
