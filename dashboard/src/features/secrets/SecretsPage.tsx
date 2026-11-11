@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Secrets (PLAN §16b, docs/api.md §5.2). Under /settings/secrets (a tab of
 // the settings screen): every secret that the caller manages, with a scope filter. Under
 // /p/:project/settings/secrets (a tab of the project settings screen): the
@@ -14,7 +15,7 @@ import { createResource, createSignal, For, Show } from "solid-js";
 import type { Secret } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, Modal, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { api, projects } from "../../stores";
+
 import { deleteConflict, filterSecrets, fingerprint, GLOBAL, KINDS, plainFields, projectSecrets, type ListedSecret } from "./model";
 import { GenerateKeyForm } from "./GenerateKey";
 import { GrantsPanel } from "./GrantsPanel";
@@ -26,6 +27,7 @@ const COLS = 6;
 const key = (s: Pick<Secret, "scope" | "name">) => `${s.scope}/${s.name}`;
 
 export default function SecretsPage() {
+  const { api, projects } = useInstance();
   const route = useParams<{ project?: string }>();
   // "all", "global", or a project name. The project of the route wins.
   const [scope, setScope] = createSignal("all");

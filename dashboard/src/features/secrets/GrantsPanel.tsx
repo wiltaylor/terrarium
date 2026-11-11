@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The grants of one secret (PLAN §16b.3, docs/api.md §5.2): the list, a
 // new grant, and a revoke. The grantee picker offers what the scope allows:
 // any project or agent for a global secret; the project and its agents for
@@ -9,10 +10,11 @@ import { createResource, createSignal, For, onMount, Show } from "solid-js";
 import type { GrantLevel, Secret } from "../../api/types";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { agents, api, projects } from "../../stores";
+
 import { defaultLevel, emptyGrant, envAllowed, grantBody, granteeOptions, TOKEN_USE_NOTE, tokenKind, type GrantForm } from "./model";
 
 export function GrantsPanel(props: { secret: Secret; onClose: () => void }) {
+  const { api, agents, projects } = useInstance();
   const s = () => props.secret;
   const [list, { refetch }] = createResource(
     () => ({ scope: s().scope, name: s().name }),

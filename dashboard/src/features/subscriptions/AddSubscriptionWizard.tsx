@@ -1,3 +1,5 @@
+import { InstanceAnchor } from "../../instance/navigation";
+import { useInstance } from "../../instance";
 // Add subscription wizard (PLAN §16.1, docs/api.md §16.4). One path per kind.
 // The state machine is in ./wizard.ts. The login terminal is operator-only;
 // the daemon tears it down on completion or after ten minutes. Closing the
@@ -10,7 +12,7 @@ import { Terminal } from "../../components/Terminal";
 import { isLocalOnly } from "../../components/UsageTile";
 import { CopyButton, ErrorBanner, Modal, useNow } from "../../components/ui";
 import { humanize, orderWindows, subscriptionTitle, windowLabel } from "../../lib/format";
-import { api, subscriptions } from "../../stores";
+
 import {
   apiKeyBody,
   countdown,
@@ -65,6 +67,7 @@ const STATE_CHIP: Record<LoginSession["state"], string> = {
 };
 
 export function AddSubscriptionWizard(props: { path?: WizardPath; setup?: WizardSetup; onClose: () => void }) {
+  const { api, subscriptions } = useInstance();
   const [state, setState] = createSignal<WizardState>(initialWizard(props.path, props.setup));
   const [error, setError] = createSignal<unknown>(null);
   const send = (a: WizardAction) => setState((s) => wizardReduce(s, a));
@@ -248,6 +251,7 @@ function LoginSetup(props: { kind: WizardLogin; setup: WizardSetup; onSetup: (s:
 }
 
 function LiveLogin(props: { kind: WizardLogin; session: LoginSession; onError: (e: unknown) => void; onCancel: () => void }) {
+  const { api } = useInstance();
   const now = useNow(1000);
   const [code, setCode] = createSignal("");
   const [sent, setSent] = createSignal(false);
@@ -289,9 +293,9 @@ function LiveLogin(props: { kind: WizardLogin; session: LoginSession; onError: (
       </Show>
       <Show when={props.session.url} fallback={<p class="muted small">Waiting for the login URL in the terminal…</p>}>
         <div class="copy-row">
-          <a href={props.session.url} target="_blank" rel="noopener noreferrer" class="ellipsis">
+          <InstanceAnchor href={props.session.url} target="_blank" rel="noopener noreferrer" class="ellipsis">
             {props.session.url}
-          </a>
+          </InstanceAnchor>
           <CopyButton text={props.session.url!} label="Copy URL" />
         </div>
       </Show>
@@ -339,6 +343,7 @@ function LiveLogin(props: { kind: WizardLogin; session: LoginSession; onError: (
 }
 
 function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (name: string) => void }) {
+  const { api } = useInstance();
   const [provider, setProvider] = createSignal(props.setup.provider ?? "openrouter");
   const [name, setName] = createSignal(props.setup.name ?? `${props.setup.provider ?? "openrouter"}-key`);
   const [key, setKey] = createSignal("");
@@ -507,6 +512,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
 }
 
 function DefineForm(props: { onBack: () => void; onSaved: (name: string) => void }) {
+  const { api } = useInstance();
   const [name, setName] = createSignal("");
   const [provider, setProvider] = createSignal("anthropic");
   const [plan, setPlan] = createSignal("");
@@ -587,6 +593,7 @@ function DefineForm(props: { onBack: () => void; onSaved: (name: string) => void
 }
 
 function DoneStep(props: { name: string; onClose: () => void }) {
+  const { api } = useInstance();
   const [sub] = createResource(() => props.name, (n) => api.subscriptions.get(n));
   return (
     <div class="stack">
@@ -641,6 +648,7 @@ function DoneStep(props: { name: string; onClose: () => void }) {
  * the form has one (`POST .../api-key`).
  */
 function SelfHostedSetup(props: { onBack: () => void; onSaved: (name: string) => void }) {
+  const { api } = useInstance();
   const [f, setF] = createSignal<SelfHostedForm>(emptySelfHostedForm());
   const [error, setError] = createSignal<unknown>(null);
   const [fetchNote, setFetchNote] = createSignal<string | null>(null);

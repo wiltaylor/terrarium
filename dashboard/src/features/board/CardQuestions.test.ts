@@ -5,12 +5,12 @@ import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Card, Question } from "../../api/types";
 
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api: { questions: { list: vi.fn(), answer: vi.fn() } },
   events: { on: () => () => {} },
   inbox: { refresh: vi.fn() },
   projects: { projects: () => [] },
-}));
+})); });
 const { api, inbox } = await import("../../stores");
 const { CardQuestions } = await import("./CardQuestions");
 let dispose: (() => void) | undefined;

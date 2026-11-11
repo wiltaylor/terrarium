@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Settings, Account tab: the sign-in session and the operator login. How the dashboard
 // authenticates, when the cookie session ends (it renews while in use), the
 // password, and the two log-outs (src/README.md, "Authentication").
@@ -5,12 +6,13 @@
 import { createSignal, Match, onMount, Show, Switch } from "solid-js";
 import { ConfirmButton, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { timeUntil } from "../../lib/format";
-import { api, auth, changePasswordNow, signOutAll, signOutNow, theme } from "../../stores";
+
 import { ApiError } from "../../api";
 import { MIN_PASSWORD, passwordFormError } from "../../stores/auth";
 import { DefaultAgent } from "./DefaultAgent";
 
 export default function AccountPage() {
+  const { auth, api, changePasswordNow, signOutNow, signOutAll, theme } = useInstance();
   const now = useNow(30_000);
   const ends = () => {
     const at = auth.expiresAt();

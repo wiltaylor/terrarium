@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The live view of a target display (docs/api.md §17.10): a screenshot
 // every 2.5 s while the panel shows and the page is visible, a pause
 // button, the size, the backend, and the operations. The operator can turn
@@ -9,10 +10,11 @@ import { createResource, createSignal, onCleanup, onMount, Show } from "solid-js
 import { ApiError } from "../../api/http";
 import type { DisplayShot, Target } from "../../api/types";
 import { ErrorBanner } from "../../components/ui";
-import { api } from "../../stores";
+
 import { createRefresher, mapClick, shotSrc } from "./display";
 
 export function ScreenPanel(props: { target: Target; onClose: () => void }) {
+  const { api } = useInstance();
   const [shot, setShot] = createSignal<DisplayShot | null>(null);
   const [error, setError] = createSignal<unknown>(null);
   const [paused, setPaused] = createSignal(false);
