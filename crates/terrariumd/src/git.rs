@@ -2477,8 +2477,7 @@ impl JobRepo {
         let healthy = || -> Result<bool, GitError> {
             let fd = open_git_dir(&self.c.dest, true)?;
             check_git_dir(&fd, &self.c.dest)?;
-            Ok(!self.c.dest.join("job-damaged").exists()
-                && !job_repo_has_locks(&self.c.dest)?)
+            Ok(!self.c.dest.join("job-damaged").exists() && !job_repo_has_locks(&self.c.dest)?)
         };
         !healthy().unwrap_or(false)
     }
@@ -2495,7 +2494,9 @@ impl JobRepo {
     // so a cancelled job still leaves recovery work for the next prepare.
     fn checked_mutation(&self, result: Result<String, GitError>) -> Result<(), GitError> {
         if result.is_err()
-            && self.local(&["fsck", "--connectivity-only", "--no-dangling"]).is_err()
+            && self
+                .local(&["fsck", "--connectivity-only", "--no-dangling"])
+                .is_err()
         {
             std::fs::write(self.c.dest.join("job-damaged"), b"").map_err(io)?;
         }
@@ -2503,7 +2504,8 @@ impl JobRepo {
     }
 
     /// Open the persistent bare repo at `c.dest`, or initialize it in a
-    /// 0700 parent dir. The caller serializes creation and preparation.
+    /// 0700 parent dir. The caller holds the prepare mutex and the lifetime
+    /// write guard, since an unhealthy cache is deleted here.
     pub fn create(c: Checkout) -> Result<Self, GitError> {
         use std::os::unix::fs::PermissionsExt;
         check_url(&c.url, &c.deny_local_under)?;
@@ -2563,7 +2565,10 @@ impl JobRepo {
             self.c.url.as_str(),
         ];
         args.extend(specs.iter().map(String::as_str));
-        self.checked_mutation(self.runner(true)?.git(Some(&self.c.dest), &args, &mut |_| {}))
+        self.checked_mutation(
+            self.runner(true)?
+                .git(Some(&self.c.dest), &args, &mut |_| {}),
+        )
     }
 
     /// The commit that `rev` names, if any.

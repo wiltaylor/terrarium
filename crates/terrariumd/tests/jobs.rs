@@ -4434,7 +4434,10 @@ async fn the_next_job_recovers_a_damaged_daemon_repo() {
         .state
         .state_dir
         .join("jobs/p/repos/app.git");
-    for (i, damage) in ["index.lock", "refs/job/merge.lock", "refs/job/broken"].iter().enumerate() {
+    for (i, damage) in ["index.lock", "refs/job/merge.lock", "refs/job/broken"]
+        .iter()
+        .enumerate()
+    {
         std::fs::write(cached.join(damage), "interrupted").unwrap();
         let branch = format!("ter-recover-{i}");
         lab.branch(&branch, "next", &[(&branch, "new\n")]);

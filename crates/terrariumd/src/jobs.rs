@@ -1954,9 +1954,7 @@ async fn run_inner(
             drop(lifetime);
             let lifetime = locks.lifetime.clone().write_owned().await;
             tokio::task::spawn_blocking(move || {
-                git::JobRepo::create(recovery).map(|r| {
-                    (Arc::new(r), guard, lifetime.downgrade())
-                })
+                git::JobRepo::create(recovery).map(|r| (Arc::new(r), guard, lifetime.downgrade()))
             })
             .await
             .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?
@@ -2031,10 +2029,10 @@ fn job_repo_dir(state: &Shared, project: &str, repo: &str) -> PathBuf {
         .join(format!("{repo}.git"))
 }
 
-/// Serialize creation, health checks and prepare, whose scratch refs are
-/// shared. The guard moves into blocking prepare so cancellation cannot
-/// unlock a fetch that is still running. Recipes use independent bundles,
-/// and pushes use recorded commit IDs, never these shared scratch refs.
+/// Serialize preparation, whose scratch refs are shared. A separate lifetime
+/// lock permits concurrent recipes but excludes rebuilds until all jobs and
+/// blocking git tasks have stopped using the cache. Both guards move into
+/// blocking mutations so cancellation cannot unlock a task still running.
 #[derive(Default)]
 struct RepoLocks {
     prepare: Arc<tokio::sync::Mutex<()>>,
@@ -2058,6 +2056,7 @@ fn cleanup_job_files(root: &std::path::Path) -> std::io::Result<()> {
     fn visit(root: &std::path::Path, depth: usize, error: &mut Option<std::io::Error>) {
         let entries = match std::fs::read_dir(root) {
             Ok(entries) => entries,
+            Err(e) if depth == 0 && e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
                 error.get_or_insert(e);
                 return;
@@ -2070,9 +2069,15 @@ fn cleanup_job_files(root: &std::path::Path) -> std::io::Result<()> {
                 let kind = entry.file_type()?;
                 if kind.is_dir() && (depth == 0 || (depth == 1 && entry.file_name() == "repos")) {
                     visit(&path, depth + 1, error);
-                } else if depth == 1 && kind.is_dir() && path.extension().is_some_and(|e| e == "git") {
+                } else if depth == 1
+                    && kind.is_dir()
+                    && path.extension().is_some_and(|e| e == "git")
+                {
                     std::fs::remove_dir_all(path)?;
-                } else if depth > 0 && kind.is_file() && path.extension().is_some_and(|e| e == "bundle") {
+                } else if depth > 0
+                    && kind.is_file()
+                    && path.extension().is_some_and(|e| e == "bundle")
+                {
                     std::fs::remove_file(path)?;
                 }
                 Ok::<_, std::io::Error>(())
@@ -2081,9 +2086,6 @@ fn cleanup_job_files(root: &std::path::Path) -> std::io::Result<()> {
                 error.get_or_insert(e);
             }
         }
-    }
-    if !root.exists() {
-        return Ok(());
     }
     let mut error = None;
     visit(root, 0, &mut error);
@@ -2258,8 +2260,8 @@ impl StepCtx<'_> {
             let _lifetime = lifetime;
             f(&repo)
         })
-            .await
-            .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))
+        .await
+        .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))
     }
 }
 
@@ -2735,12 +2737,14 @@ async fn steps(
     let mut prepared = None;
     for attempt in 0..2 {
         let (j, bundle, guard) = (job.clone(), x.bundle.clone(), guard.clone());
-        let (result, damaged) = x.daemon(move |r| {
-            let _guard = guard;
-            let result = prepare(r, &j, &bundle);
-            let damaged = matches!(result, Prepared::End(_)) && r.needs_rebuild();
-            (result, damaged)
-        }).await?;
+        let (result, damaged) = x
+            .daemon(move |r| {
+                let _guard = guard;
+                let result = prepare(r, &j, &bundle);
+                let damaged = matches!(result, Prepared::End(_)) && r.needs_rebuild();
+                (result, damaged)
+            })
+            .await?;
         if !damaged || attempt == 1 {
             prepared = Some(result);
             break;
@@ -2754,14 +2758,17 @@ async fn steps(
         let (repo, lifetime) = tokio::task::spawn_blocking(move || {
             let _guard = prepare_guard;
             repo.rebuild().map(|r| (Arc::new(r), lifetime.downgrade()))
-        }).await
-            .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?
-            .map_err(|e| ApiError::conflict(format!("cannot rebuild the job repo: {e}")))?;
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?
+        .map_err(|e| ApiError::conflict(format!("cannot rebuild the job repo: {e}")))?;
         x.repo = repo;
         x.lifetime = Some(Arc::new(lifetime));
     }
     drop(guard);
-    let (head, batch, base) = match prepared.expect("prepare ran") {
+    let (head, batch, base) = match prepared
+        .ok_or_else(|| ApiError::internal("the prepare loop did not run"))?
+    {
         Prepared::Ready { head, batch, base } => (head, batch, base),
         Prepared::End(end) => return Ok(end),
     };
@@ -4767,6 +4774,46 @@ mod tests {
                 & 0o777,
             0o644
         );
+    }
+
+    #[tokio::test]
+    async fn repo_lifetime_allows_readers_but_blocks_rebuild_after_cancellation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locks = repo_lock(tmp.path());
+        let first = Arc::new(locks.lifetime.clone().read_owned().await);
+        let second = locks.lifetime.clone().try_read_owned().unwrap();
+        drop(second);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let reader = first.clone();
+        let prepare = locks.prepare.clone().lock_owned().await;
+        let task = tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let _reader = reader;
+                let _prepare = prepare;
+                started.send(()).unwrap();
+                released.recv().unwrap();
+            })
+            .await
+            .unwrap();
+        });
+        ready.await.unwrap();
+        task.abort();
+        let _ = task.await;
+        drop(first);
+        let rebuild_blocked = locks.lifetime.clone().try_write_owned().is_err();
+        let prepare_blocked = locks.prepare.clone().try_lock_owned().is_err();
+        release.send(()).unwrap();
+        let writer = tokio::time::timeout(
+            Duration::from_secs(10),
+            locks.lifetime.clone().write_owned(),
+        )
+        .await
+        .unwrap();
+        assert!(rebuild_blocked);
+        assert!(prepare_blocked);
+        drop(writer);
+        assert!(locks.prepare.clone().try_lock_owned().is_ok());
     }
 
     #[test]
