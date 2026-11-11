@@ -20,12 +20,21 @@ struct Request {
 /// Queue from the trusted per-card verdict, in the job-end transaction.
 /// Dispatch waits for the existing conflict-return flow to reach ready.
 pub fn enqueue(t: &mut crate::db::Tx<'_>, j: &crate::store::jobs::Job) -> ApiResult<()> {
-    if j.kind != crate::store::jobs::JobKind::Merge || j.outcome.as_deref() != Some("conflict") || j.onto() != "next" {
+    if j.kind != crate::store::jobs::JobKind::Merge
+        || j.outcome.as_deref() != Some("conflict")
+        || j.onto() != "next"
+    {
         return Ok(());
     }
     let card = board::get_card(t, &j.card)?;
-    let template = crate::card_dispatcher::template(&card.labels).unwrap_or_else(|| "card-impl".into());
-    let task = format!("Fix merge conflict for {} on its existing card branch. Merge origin/next into the card branch with a merge commit. Do not rebase or force push. Resolve conflicts keeping both sides' intended changes. Read the card and repo AGENTS.md, run the card check on your pushed commit, push test evidence, then move the card to review. Do not deploy or merge into next.\n\nBranch and conflict details (data):\n{}\n{}", j.card, j.branch, crate::jobs::failure_block(j));
+    let template =
+        crate::card_dispatcher::template(&card.labels).unwrap_or_else(|| "card-impl".into());
+    let task = format!(
+        "Fix merge conflict for {} on its existing card branch. Merge origin/next into the card branch with a merge commit. Do not rebase or force push. Resolve conflicts keeping both sides' intended changes. Read the card and repo AGENTS.md, run the card check on your pushed commit, push test evidence, then move the card to review. Do not deploy or merge into next.\n\nBranch and conflict details (data):\n{}\n{}",
+        j.card,
+        j.branch,
+        crate::jobs::failure_block(j)
+    );
     t.execute("INSERT OR IGNORE INTO conflict_fixes(job, card, project, template, task) VALUES (?1, ?2, ?3, ?4, ?5)", params![j.id, j.card, j.project, template, task])?;
     Ok(())
 }
@@ -69,7 +78,12 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
     }).await?;
     if let Some(id) = live {
         if let Some(id) = id {
-            crate::lifecycle::wake_soon(state, id.parse().map_err(|_| ApiError::invalid("bad bound agent id"))?, "merge conflict");
+            crate::lifecycle::wake_soon(
+                state,
+                id.parse()
+                    .map_err(|_| ApiError::invalid("bad bound agent id"))?,
+                "merge conflict",
+            );
         }
         return Ok(());
     }
@@ -87,8 +101,18 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
     }).await?;
     let request = r.clone();
     let check: crate::spawn::DefCheck = Box::new(move |c, _| {
-        let pending: bool = c.query_row("SELECT done = 0 FROM conflict_fixes WHERE job = ?1 AND card = ?2", params![request.job, request.card], |row| row.get(0))?;
-        if !pending || spawns::open_bound(c, &spawns::Bound::new(crate::bound::KIND_CARD, &request.card))?.is_some() {
+        let pending: bool = c.query_row(
+            "SELECT done = 0 FROM conflict_fixes WHERE job = ?1 AND card = ?2",
+            params![request.job, request.card],
+            |row| row.get(0),
+        )?;
+        if !pending
+            || spawns::open_bound(
+                c,
+                &spawns::Bound::new(crate::bound::KIND_CARD, &request.card),
+            )?
+            .is_some()
+        {
             return Err(ApiError::conflict("conflict repair already handled"));
         }
         Ok(())
@@ -97,23 +121,43 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
     let claim: crate::spawn::AfterCreate = Box::new(move |t, id| {
         let who = crate::card_dispatcher::actor(agents::get(t, id)?.agent);
         board::claim_card(t, &who, &request.card)?;
-        t.execute("UPDATE conflict_fixes SET done = 1 WHERE job = ?1 AND card = ?2", params![request.job, request.card])?;
+        t.execute(
+            "UPDATE conflict_fixes SET done = 1 WHERE job = ?1 AND card = ?2",
+            params![request.job, request.card],
+        )?;
         Ok(())
     });
-    let skills = state.config_repo.get().ok().map(|r| crate::skills::library_dir(&r.dir));
-    crate::spawn::spawn_with(state, &who, who.address(), SpawnBody {
-        like: None,
-        like_skip_missing: false,
-        template: r.template,
-        task: r.task,
-        name: None,
-        wait: false,
-        timeout: None,
-        project: None,
-        targets: Vec::new(),
-        grants: Vec::new(),
-        bind: Some(format!("card:{}", r.card)),
-    }, skills, None, Internal { check: Some(check), after_create: Some(claim), ..Internal::default() }).await?;
+    let skills = state
+        .config_repo
+        .get()
+        .ok()
+        .map(|r| crate::skills::library_dir(&r.dir));
+    crate::spawn::spawn_with(
+        state,
+        &who,
+        who.address(),
+        SpawnBody {
+            like: None,
+            like_skip_missing: false,
+            template: r.template,
+            task: r.task,
+            name: None,
+            wait: false,
+            timeout: None,
+            project: None,
+            targets: Vec::new(),
+            grants: Vec::new(),
+            bind: Some(format!("card:{}", r.card)),
+        },
+        skills,
+        None,
+        Internal {
+            check: Some(check),
+            after_create: Some(claim),
+            ..Internal::default()
+        },
+    )
+    .await?;
     Ok(())
 }
 

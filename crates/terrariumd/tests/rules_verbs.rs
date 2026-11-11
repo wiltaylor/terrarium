@@ -3198,39 +3198,108 @@ async fn job_fix_acts_on_a_red_merge_only() {
 async fn conflict_repair_spawns_once_and_returns_conflicts_to_live_worker() {
     let td = TestDaemon::start().await;
     td.project("p").await;
-    let template = td.post("/api/templates", json!({"name": "card-impl", "project": "p", "spec": {"harness": "claude"}})).await;
+    let template = td
+        .post(
+            "/api/templates",
+            json!({"name": "card-impl", "project": "p", "spec": {"harness": "claude"}}),
+        )
+        .await;
     assert_eq!(template.status, 201, "{}", template.body);
     td.agent("p", "lead", json!({"roles": ["project_admin"], "policy": {"spawn": {"templates": ["project:*"], "max_concurrent": 2, "max_lifetime": "1h", "bound": true}}})).await;
     put_rules(&td, "p", FIX_ONLY_RED).await;
     let a = new_card(&td, "p", json!({"title": "a", "column": "ready"})).await;
     let job = store_job(&td, JobKind::Merge, &[&a]).await;
-    let job = fail_job(&td, &job, "conflict").await;
-    state(&td).db.write("system", move |t| {
-        terrariumd::jobs::emit_verdicts(t, &job)?;
-        terrariumd::jobs::emit_verdicts(t, &job)
-    }).await.unwrap();
+    let mut job = fail_job(&td, &job, "conflict").await;
+    job.tail = Some("conflicting files: src/first.rs".into());
+    state(&td)
+        .db
+        .write("system", move |t| {
+            terrariumd::jobs::emit_verdicts(t, &job)?;
+            terrariumd::jobs::emit_verdicts(t, &job)
+        })
+        .await
+        .unwrap();
     settle(&td).await;
     // No effect is required: reconciliation alone recovers the request.
     terrariumd::conflict_fixes::pass(&state(&td)).await;
     terrariumd::conflict_fixes::pass(&state(&td)).await;
     let bound = a.clone();
-    let sp = state(&td).db.read(move |c| Ok(terrariumd::store::spawns::open_bound(c, &terrariumd::store::spawns::Bound::new("card", &bound))?.unwrap())).await.unwrap();
+    let sp = state(&td)
+        .db
+        .read(move |c| {
+            Ok(terrariumd::store::spawns::open_bound(
+                c,
+                &terrariumd::store::spawns::Bound::new("card", &bound),
+            )?
+            .unwrap())
+        })
+        .await
+        .unwrap();
     assert_eq!(sp.template, "card-impl");
     assert!(sp.task.contains("Merge origin/next"));
     assert!(sp.task.contains("Do not rebase or force push"));
-    let count = state(&td).db.read(|c| Ok(c.query_row("SELECT count(*) FROM spawns", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    assert!(sp.task.contains("src/first.rs"));
+    let count = state(&td)
+        .db
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM spawns", [], |r| r.get::<_, i64>(0))?))
+        .await
+        .unwrap();
     assert_eq!(count, 1);
     td.wait_status(&sp.id, "idle").await;
+    let id = sp.id.clone();
+    let before = state(&td).db.read(move |c| Ok(c.query_row("SELECT count(*) FROM deliveries WHERE agent_id = ?1 AND origin = 'system'", [id], |r| r.get::<_, i64>(0))?)).await.unwrap();
     // A later conflict must go to the same worker, not spawn another.
     let next = store_job(&td, JobKind::Merge, &[&a]).await;
     let next = fail_job(&td, &next, "conflict").await;
-    state(&td).db.write("system", move |t| terrariumd::jobs::emit_verdicts(t, &next)).await.unwrap();
+    state(&td)
+        .db
+        .write("system", move |t| terrariumd::jobs::emit_verdicts(t, &next))
+        .await
+        .unwrap();
     settle(&td).await;
     terrariumd::conflict_fixes::pass(&state(&td)).await;
-    let count = state(&td).db.read(|c| Ok(c.query_row("SELECT count(*) FROM spawns", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    let count = state(&td)
+        .db
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM spawns", [], |r| r.get::<_, i64>(0))?))
+        .await
+        .unwrap();
     assert_eq!(count, 1);
-    let done = state(&td).db.read(|c| Ok(c.query_row("SELECT count(*) FROM conflict_fixes WHERE done = 1", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    let done = state(&td)
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM conflict_fixes WHERE done = 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
     assert_eq!(done, 2);
+    let id = sp.id.clone();
+    let after = state(&td).db.read(move |c| Ok(c.query_row("SELECT count(*) FROM deliveries WHERE agent_id = ?1 AND origin = 'system'", [id], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    assert_eq!(after, before + 1, "the live worker receives a conflict turn");
+}
+
+#[tokio::test]
+async fn conflict_repair_excludes_other_jobs_and_release_branches() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let a = new_card(&td, "p", json!({"title": "a"})).await;
+    let job = store_job(&td, JobKind::Merge, &[&a]).await;
+    let mut job = fail_job(&td, &job, "conflict").await;
+    state(&td).db.write("system", move |t| {
+        for kind in [JobKind::Validate, JobKind::Release, JobKind::E2e] {
+            job.kind = kind;
+            terrariumd::conflict_fixes::enqueue(t, &job)?;
+        }
+        job.kind = JobKind::Merge;
+        job.onto = Some("release/0.1.0".into());
+        terrariumd::conflict_fixes::enqueue(t, &job)?;
+        let count: i64 = t.query_row("SELECT count(*) FROM conflict_fixes", [], |r| r.get(0))?;
+        assert_eq!(count, 0);
+        Ok(())
+    }).await.unwrap();
 }
 
 const BUSY_RERUN: &str = r#"rule "again" {
