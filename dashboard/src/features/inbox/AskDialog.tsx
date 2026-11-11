@@ -1,16 +1,15 @@
 // Ask an agent a question from the Inbox, or forward a question, bundle, or
-// notice of the Inbox to one (GitHub #24, docs/api.md §6.9 "Ask and
-// forward"). The daemon sends one mail as the operator on a new thread and
-// watches it: the Asked tab shows it until the agent answers.
+// notice of the Inbox to one. New requests get a dedicated thread agent.
+// Forwarding an existing question keeps its watched-mail contract.
 
 import { createSignal, For, Show } from "solid-js";
-import type { InboxAsk, Question } from "../../api/types";
+import type { InboxAsk, Question, Thread } from "../../api/types";
 import { ErrorBanner, Modal } from "../../components/ui";
 import { agents, api } from "../../stores";
 import { ASK_TEXT_MAX, askBody } from "./model";
 import { useDefaultAgent } from "./defaultAgent";
 
-export function AskDialog(props: { question?: Question; onClose: () => void; onAsked: (r: InboxAsk) => void }) {
+export function AskDialog(props: { question?: Question; onClose: () => void; onAsked: (r: InboxAsk) => void; onRequested?: (r: Thread) => void }) {
   const forward = () => !!props.question;
   const defaultAgent = useDefaultAgent();
   const [picked, setTo] = createSignal<string>();
@@ -20,7 +19,7 @@ export function AskDialog(props: { question?: Question; onClose: () => void; onA
   const [error, setError] = createSignal<unknown>(null);
   const choices = () =>
     agents.state.agents
-      .filter((a) => !a.ephemeral || `${a.project}/${a.name}` === defaultAgent())
+      .filter((a) => forward() ? !a.ephemeral : !a.ephemeral && a.roles.includes("project_admin"))
       .map((a) => `${a.project}/${a.name}`)
       .sort();
   const submit = async (e: Event) => {
@@ -29,7 +28,11 @@ export function AskDialog(props: { question?: Question; onClose: () => void; onA
     if ("error" in b) return setError(b.error);
     setBusy(true);
     try {
-      props.onAsked(await api.inbox.ask(b.body));
+      if (forward()) props.onAsked(await api.inbox.ask(b.body));
+      else {
+        const thread = await api.threads.open({ report_to: b.body.to, topic: b.body.text!.split("\n")[0]!.slice(0, 200), text: b.body.text });
+        props.onRequested?.(thread);
+      }
     } catch (err) {
       setError(err);
     } finally {
@@ -71,7 +74,7 @@ export function AskDialog(props: { question?: Question; onClose: () => void; onA
           <textarea rows={4} maxLength={ASK_TEXT_MAX} value={text()} onInput={(e) => setText(e.currentTarget.value)} aria-label={forward() ? "Note" : "Question text"} />
         </label>
         <p class="muted small" style={{ margin: 0 }}>
-          The agent gets one mail from you and answers with <code>terrarium mail reply</code>. The Asked tab shows the thread until it answers.
+          {forward() ? "The agent gets one mail. The Asked tab shows it until it answers." : "A request agent opens a thread, passes your question to the selected lead, and tracks the answer and linked cards there."}
         </p>
         <div class="row" style={{ gap: "6px" }}>
           <button class="primary" type="submit" disabled={busy()}>

@@ -351,6 +351,7 @@ async fn update(
         &a.agent.project,
         "setting an agent's prompt, harness, or policy",
     )?;
+    crate::links::refuse_sysadmin_agent(&a.agent.roles, "change")?;
     if a.source == projects::SOURCE_FILE {
         return Err(file_managed(&a));
     }
@@ -813,6 +814,10 @@ async fn reset(
     a: &AgentView,
     req: crate::reset::Request,
 ) -> ApiResult<(StatusCode, Json<ResetAnswer>)> {
+    // `then` is a turn after the reset.
+    if req.then.is_some() {
+        crate::links::refuse_sysadmin_agent(&a.agent.roles, "send a `then` turn to")?;
+    }
     let outcome = crate::reset::request(state, actor, a, req).await?;
     let id = a.agent.id.to_string();
     let v = state.db.read(move |c| agents::get(c, &id)).await?;
@@ -1017,6 +1022,7 @@ pub(super) async fn send_as(
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
     let a = load(state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "typing a turn into an agent")?;
+    crate::links::refuse_sysadmin_agent(&a.agent.roles, "send a turn to")?;
     if body.text.trim().is_empty() {
         return Err(ApiError::invalid("the turn text is empty"));
     }
@@ -1215,6 +1221,7 @@ async fn keys(
         &a.agent.project,
         "sending keys to an agent terminal",
     )?;
+    crate::links::refuse_sysadmin_agent(&a.agent.roles, "send keys to")?;
     if body.keys.is_empty() {
         return Err(ApiError::invalid("send at least one key"));
     }
@@ -1337,6 +1344,7 @@ async fn answer(
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "answering an agent's question")?;
+    crate::links::refuse_sysadmin_agent(&a.agent.roles, "answer")?;
     let input = match body {
         AnswerBody {
             request_id: Some(request_id),

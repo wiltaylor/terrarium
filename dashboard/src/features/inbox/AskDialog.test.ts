@@ -8,11 +8,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InboxWatch, Message, Question } from "../../api/types";
 
 const ask = vi.fn();
+const openRequest = vi.fn(async () => ({ id: "R1" }));
 const cancelWatch = vi.fn();
 const preferences = vi.fn(async () => ({ default_agent: null as string | null }));
 vi.mock("../../stores", () => ({
-  api: { account: { preferences }, inbox: { ask, cancelWatch, ackMail: vi.fn() } },
-  agents: { state: { agents: [{ id: "A2", project: "demo", name: "w2" }, { id: "A1", project: "demo", name: "w1" }, { id: "E1", project: "demo", name: "tmp", ephemeral: true }] } },
+  api: { account: { preferences }, threads: { open: openRequest }, inbox: { ask, cancelWatch, ackMail: vi.fn() } },
+  agents: { state: { agents: [{ id: "A2", project: "demo", name: "w2", roles: ["project_admin"] }, { id: "A1", project: "demo", name: "w1", roles: ["project_admin"] }, { id: "E1", project: "demo", name: "tmp", roles: [], ephemeral: true }] } },
 }));
 vi.mock("@solidjs/router", () => ({ A: (p: { href: string; children?: unknown }) => p.children }));
 
@@ -55,8 +56,8 @@ describe("the Ask dialog", () => {
   });
   it("lists the agents without the ephemeral ones, checks the input, and asks", async () => {
     ask.mockResolvedValue({ message: { id: "M1" }, watch: watch() });
-    const onAsked = vi.fn();
-    const { button } = mount(() => createComponent(AskDialog, { onClose: () => {}, onAsked }));
+    const onRequested = vi.fn();
+    const { button } = mount(() => createComponent(AskDialog, { onClose: () => {}, onAsked: vi.fn(), onRequested }));
     const options = [...document.querySelectorAll("select[aria-label=Agent] option")].map((o) => o.textContent);
     expect(options).toEqual(["Pick an agent…", "demo/w1", "demo/w2"]);
     button("Ask")!.click();
@@ -67,8 +68,8 @@ describe("the Ask dialog", () => {
     setValue("textarea[aria-label='Question text']", "  Why did it fail?  ");
     button("Ask")!.click();
     await settle();
-    expect(ask).toHaveBeenCalledWith({ to: "demo/w1", text: "Why did it fail?" });
-    expect(onAsked).toHaveBeenCalledWith(expect.objectContaining({ watch: expect.objectContaining({ agent_name: "demo/w1" }) }));
+    expect(openRequest).toHaveBeenCalledWith({ report_to: "demo/w1", topic: "Why did it fail?", text: "Why did it fail?" });
+    expect(onRequested).toHaveBeenCalledWith({ id: "R1" });
   });
 
   it("forwards a question with an optional note", async () => {

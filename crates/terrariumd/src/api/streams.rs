@@ -129,6 +129,8 @@ async fn respond(
 ) -> ApiResult<Response> {
     let live = is_on(q.live.as_deref())?;
     let desc = is_desc(q.order.as_deref())?;
+    // A link key's socket closes when the link is revoked (TER-61).
+    let guard = req.extensions().get::<crate::links::LinkGuard>().cloned();
     let (mode, last_event_id) = mode(req).await?;
     if desc && !matches!(mode, Mode::Json) {
         return Err(ApiError::bad_request(
@@ -188,7 +190,12 @@ async fn respond(
             // Subscribe before the upgrade, so no row between now and the
             // live loop is lost.
             let audit = audit.map(|f| (f, state.db.hub().subscribe_audit()));
-            ws.on_upgrade(move |socket| ws_events(socket, state, actor, filter, audit, since))
+            ws.on_upgrade(move |socket| {
+                crate::links::until_revoked(
+                    guard,
+                    ws_events(socket, state, actor, filter, audit, since),
+                )
+            })
         }
         Mode::Sse => {
             let audit = audit.map(|f| (f, state.db.hub().subscribe_audit()));
@@ -484,11 +491,13 @@ pub async fn pty(
 ) -> ApiResult<Response> {
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "attaching to an agent terminal")?;
+    crate::links::refuse_sysadmin_agent(&a.agent.roles, "attach to the terminal of")?;
     if !is_websocket(&req) {
         return Err(ApiError::bad_request(
             "the PTY is a WebSocket; send an upgrade request",
         ));
     }
+    let guard = req.extensions().get::<crate::links::LinkGuard>().cloned();
     let (mut parts, _) = req.into_parts();
     let ws = WebSocketUpgrade::from_request_parts(&mut parts, &())
         .await
@@ -506,7 +515,9 @@ pub async fn pty(
             t.audit("agent.attach", &id, Some(&project), json!({}))
         })
         .await?;
-    Ok(ws.on_upgrade(move |socket| pty_session(socket, attachment)))
+    Ok(ws.on_upgrade(move |socket| {
+        crate::links::until_revoked(guard, pty_session(socket, attachment))
+    }))
 }
 
 /// Serve a PTY attachment over a WebSocket: agents and login sessions.

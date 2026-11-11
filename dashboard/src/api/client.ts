@@ -139,6 +139,8 @@ import type {
   Message,
   NewCard,
   NewHostToken,
+  Link,
+  NewLinkCode,
   NewMemory,
   NewMessage,
   NewProject,
@@ -1028,6 +1030,17 @@ export interface Api {
     reservations(name: string): Promise<Reservation[]>;
   };
 
+  /** docs/api.md §36: the link keys of this daemon (the operator only). */
+  links: {
+    list(opts?: { revoked?: boolean }): Promise<Link[]>;
+    /** A new link with a one-time pairing code (10 minutes), in this answer only. */
+    create(label: string, opts?: { readOnly?: boolean }): Promise<NewLinkCode>;
+    /** A new pairing code; the old key stops now. */
+    rotate(id: string): Promise<NewLinkCode>;
+    /** The key stops, and its open streams close. */
+    revoke(id: string): Promise<void>;
+  };
+
   events: {
     /** The firehose socket (`/api/events`), reconnecting with `?since=<last seq>`. */
     stream(opts?: { since?: number }): EventStream;
@@ -1637,6 +1650,13 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       create: (name, opts) => post("/api/hosts", opts?.enrol ? { name, enrol: true } : { name }),
       revoke: (name) => del(`/api/hosts/${seg(name)}`),
       metrics: (name, opts = {}) => get(`/api/hosts/${seg(name)}/metrics`, opts.minutes ? { minutes: opts.minutes } : undefined),
+    },
+
+    links: {
+      list: (o = {}) => get("/api/links", o.revoked ? { revoked: true } : undefined),
+      create: (label, o = {}) => post("/api/links", { label, read_only: !!o.readOnly }),
+      rotate: (id) => post(`/api/links/${seg(id)}/rotate`),
+      revoke: (id) => del(`/api/links/${seg(id)}`),
     },
 
     events: {

@@ -2696,6 +2696,23 @@ pub struct QuestionContext {
 /// `terrarium thread ...` (docs/api.md §6.13): Inbox threads.
 #[derive(Debug, Subcommand)]
 pub enum ThreadCmd {
+    /// Reopen a closed request with a new request agent and its history
+    Reopen {
+        id: String,
+        #[arg(long)]
+        reason: String,
+        /// A related card ID to link atomically while reopening
+        #[arg(long)]
+        card: Option<String>,
+    },
+    /// Replace a request agent with an architect in the same thread
+    Swap {
+        id: String,
+        #[arg(long)]
+        template: String,
+        #[arg(long)]
+        reason: String,
+    },
     /// Open a thread. An agent needs the right thread:open and a template
     /// whose rights do not exceed its own; the operator opens any thread
     New {
@@ -3280,6 +3297,12 @@ pub enum AdminCmd {
     Host {
         #[command(subcommand)]
         command: HostCmd,
+    },
+    /// Link keys: another Terrarium daemon (the home) that shows and runs
+    /// this one in its dashboard (docs/api.md §36). The operator only
+    Link {
+        #[command(subcommand)]
+        command: LinkCmd,
     },
     /// Subscriptions: the plans and their accounts, and the default
     /// account of each harness
@@ -4530,6 +4553,33 @@ pub enum HostCmd {
     },
     /// Revoke a host agent's token and remove the host agent
     Rm { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LinkCmd {
+    /// List the links: label, status, read-only, the home, and the last use
+    Ls {
+        /// Also the revoked links
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show a link: the home, the pairing, and the key use record
+    Show { id: String },
+    /// Make a link; prints its one-time pairing code (10 minutes) alone on
+    /// stdout, and on stderr what to type and compare on the home
+    New {
+        /// A name for the link, for example the home's name
+        label: String,
+        /// Reads only: GET, the event streams; no turn, no PTY, no write
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Stop the link's key now and print a new pairing code for the home's
+    /// Re-pair
+    Rotate { id: String },
+    /// Revoke a link: its key stops working and its open streams close
+    #[command(visible_alias = "rm")]
+    Revoke { id: String },
 }
 
 #[derive(Debug, Subcommand)]

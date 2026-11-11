@@ -34,22 +34,22 @@ function mount() {
   dispose = render(() => createComponent(Home, {}), el);
 }
 it("asks from Home with the default agent", async () => {
-  const a = api.world.agents.find((a) => !a.ephemeral)!;
+  const a = api.world.agents.find((a) => !a.ephemeral && a.roles.includes("project_admin"))!;
   await api.account.setPreferences({ default_agent: `${a.project}/${a.name}` });
-  const ask = vi.spyOn(api.inbox, "ask");
+  const ask = vi.spyOn(api.threads, "open");
   mount(); button("Ask an agent").click(); await settle();
   input("textarea", "Why?"); button("Ask").click(); await settle();
-  expect(ask).toHaveBeenCalledWith({ to: `${a.project}/${a.name}`, text: "Why?" });
-  expect(navigate).toHaveBeenCalledWith("/inbox?status=asked");
+  expect(ask).toHaveBeenCalledWith({ report_to: `${a.project}/${a.name}`, topic: "Why?", text: "Why?" });
+  expect(navigate).toHaveBeenCalledWith(expect.stringContaining("/threads/"));
 });
 it("messages from Home", async () => {
-  const a = api.world.agents.find((a) => !a.ephemeral)!;
+  const a = api.world.agents.find((a) => !a.ephemeral && a.roles.includes("project_admin"))!;
   await api.account.setPreferences({ default_agent: `${a.project}/${a.name}` });
-  const send = vi.spyOn(api.mail, "send");
+  const send = vi.spyOn(api.threads, "open");
   mount(); button("Message an agent").click(); await settle();
   input("textarea", "Hello"); button("Send").click(); await settle();
   expect(send).toHaveBeenCalled();
-  expect(navigate).toHaveBeenCalledWith("/inbox");
+  expect(navigate).toHaveBeenCalledWith(expect.stringContaining("/threads/"));
 });
 it("opens New thread from Home with the shared dialog", async () => {
   const open = vi.spyOn(api.threads, "open");

@@ -2628,6 +2628,11 @@ impl Db {
     {
         let conn = self.conn.clone();
         let actor = actor.into();
+        // The link of the request (TER-61 review round 5, F9): the
+        // task-local is gone inside the blocking task, so take it here. An
+        // actor label `link:<id>` counts too.
+        let link = crate::links::current_link_id()
+            .or_else(|| actor.strip_prefix("link:").map(str::to_owned));
         let handle = self.redactor.clone();
         let (value, events, audits) = tokio::task::spawn_blocking(move || {
             let mut guard = match conn.lock() {
@@ -2648,6 +2653,7 @@ impl Db {
             let mut t = Tx {
                 tx,
                 actor,
+                link,
                 cause: None,
                 events: Vec::new(),
                 audits: RefCell::default(),
@@ -2704,6 +2710,10 @@ pub struct Tx<'c> {
     /// `operator`, `agent:<ulid>`, `system`, or `schedule:<ulid>` (the
     /// writes of a trigger run).
     pub actor: String,
+    /// The link (`link:<id>`, TER-61) whose request made this write, or
+    /// `None`. `store::mail::send` refuses a message of a link write to a
+    /// sysadmin agent.
+    pub link: Option<String>,
     /// When set, every event of the transaction gets it as `data.cause`
     /// (a trigger run: `{schedule, run, event, depth}`).
     pub cause: Option<serde_json::Value>,
@@ -2796,6 +2806,7 @@ impl<'c> Tx<'c> {
         Self {
             tx,
             actor: actor.to_owned(),
+            link: actor.strip_prefix("link:").map(str::to_owned),
             cause: None,
             events: Vec::new(),
             audits: RefCell::default(),
@@ -3015,6 +3026,7 @@ impl<'c> Tx<'c> {
             project: project.map(str::to_owned),
             detail,
             link: Default::default(),
+            link_label: None,
         };
         // The live `audit` frame carries the session too.
         crate::store::audit::attach_links(&self.tx, std::slice::from_mut(&mut row))?;
@@ -3277,6 +3289,31 @@ mod tests {
             97,
             "add a named migration under migrations/ instead"
         );
+    }
+
+    #[test]
+    fn request_close_migration_indexes_the_complete_batch_order() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        // Keep this identical to the auto-close batch query in thread_close.
+        let sql = "SELECT updated_at, id FROM threads WHERE request = 1 AND status = 'waiting_operator' AND close_proposal IS NOT NULL AND updated_at < ?1 AND (updated_at, id) > (?2, ?3) AND NOT EXISTS (SELECT 1 FROM thread_cards WHERE thread = threads.id) ORDER BY updated_at, id LIMIT ?4";
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan = statement
+            .query_map(
+                rusqlite::params![
+                    "2026-11-11T00:00:00.000Z",
+                    "2020-01-01T00:00:00.000Z",
+                    "cursor",
+                    64
+                ],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("threads_request_close"), "{plan}");
+        assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
     }
 
     #[test]
