@@ -403,13 +403,24 @@ async fn workspace_sync_path_failure_on_exedev_explains_the_workaround() {
     // Simulate the remote user's refusal to create the absolute sandbox path.
     std::fs::write(&ssh, "#!/bin/sh\nexit 1\n").unwrap();
     let response = td
-        .post("/api/targets/sync/exec", json!({"agent":agent,"cmd":["true"]}))
+        .post(
+            "/api/targets/sync/exec",
+            json!({"agent":agent,"cmd":["true"]}),
+        )
         .await;
     response.err(422, "invalid");
-    assert!(response.body.to_string().contains("cannot write the sandbox workspace path"));
+    assert!(
+        response
+            .body
+            .to_string()
+            .contains("cannot write the sandbox workspace path")
+    );
     assert!(response.body.to_string().contains("sync_workspace = false"));
     assert!(response.body.to_string().contains("TER-873"));
-    assert_eq!(td.get("/api/targets/sync").await.ok()["sync_workspace"], true);
+    assert_eq!(
+        td.get("/api/targets/sync").await.ok()["sync_workspace"],
+        true
+    );
 }
 
 async fn started_agent(td: &TestDaemon, project: &str, name: &str) -> String {
