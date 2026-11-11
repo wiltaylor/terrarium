@@ -385,7 +385,7 @@ async fn request_concurrent_reopen_has_one_winner() {
     );
     let statuses = [a.status, b.status];
     assert_eq!(statuses.iter().filter(|&&s| s == 200).count(), 1);
-    assert!(statuses.contains(&409));
+    assert!(statuses.iter().any(|s| *s == 409));
 }
 
 impl Lab {
