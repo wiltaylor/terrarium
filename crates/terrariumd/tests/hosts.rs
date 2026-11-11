@@ -4673,10 +4673,7 @@ async fn docker_recreate_requires_admin_and_refuses_live_sessions() {
     lab.td.post_empty("/api/targets/dbox/up").await.ok();
     let sid = exec(&lab.td, "dbox", json!({"cmd": ["sleeper"]})).await;
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
-    let r = lab
-        .td
-        .post_empty("/api/targets/dbox/recreate")
-        .await;
+    let r = lab.td.post_empty("/api/targets/dbox/recreate").await;
     r.err(409, "conflict");
     assert_eq!(
         r.body["error"]["message"],
