@@ -300,13 +300,18 @@ fn print_job(c: &Ctx, v: &Value) {
                 field(log, "attempt"),
                 field(log, "path"),
                 field(log, "target"),
-                if log["expired"] == true {
+                if log["cleanup_state"] == "conflict" {
+                    "conflict (manual cleanup required)"
+                } else if log["expired"] == true {
                     "expired"
                 } else {
                     "retained"
                 },
                 field(log, "expires_at")
             ));
+            if log["cleanup_state"] == "conflict" {
+                c.line(format!("quarantine conflict: {} (not retried automatically)",field(log,"quarantine")));
+            }
         }
     }
     if let Some(t) = tail {

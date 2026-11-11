@@ -12940,8 +12940,9 @@ protects a replacement pathname from deletion. Target creation identity,
 definition (including address/container/VM), and lifecycle timestamp are bound
 to ownership. Changed or recreated targets are skipped, not adopted.
 
-Automatic cleanup visits one indexed project/page per minute. Each page has
-at most 32 ledger rows. Oldest recorded attempts are removed when their age
+Automatic cleanup visits one project per minute. Each pass first reconciles
+an indexed page of at most 32 quarantining rows, then considers an indexed
+page of at most 32 retained rows. Oldest recorded attempts are removed when their age
 expires or the completed-log byte budget is exceeded. Queued/running jobs and
 locked log writers are never removed. Missing or unreachable targets are
 skipped and retried on later passes. Budgets are eventual, not a limit on an
@@ -12949,11 +12950,21 @@ active recipe's output. Cleanup never scans log directories.
 
 `terrarium job cleanup [--after N]` (project admin) applies the same policy
 explicitly, via `POST /api/projects/{name}/jobs/cleanup` with `{"after": N}`.
-The response has `scanned`, `removed`, `skipped`, and `next`. A nonzero `next`
+The response has `scanned`, `removed`, `skipped`, `conflicts`, and `next`. A nonzero `next`
 continues the pass, and zero ends it. Concurrent cleanup returns a conflict.
 `GET /api/jobs/{id}` includes `logs`, with attempt, target, path, written_at,
 expires_at, bytes and expired. `job show` explicitly marks removed logs as
 expired while preserving the job's stored output tail.
+
+Before moving a log, cleanup commits its `quarantining` state and deterministic
+`quarantine` path in the ledger. Interrupted moves are reconciled on later
+passes, even when the original pathname is absent. Bytes stay charged until
+the owned inode has been removed (or both recorded locations are already gone).
+If a captured replacement cannot be restored because its pathname is occupied,
+both files are preserved and the row becomes `conflict`. Such rows are never
+retried automatically. `job show` and cleanup's bounded `conflicts` list expose
+the paths for manual inspection and removal. Recovery has its own persisted
+cursor, so inaccessible quarantines cannot starve later rows.
 
 - Pass: the labels `validation:queued` and `validation:running` go away.
   A validate card moves to `review`, a merge card to `accepted`. The move

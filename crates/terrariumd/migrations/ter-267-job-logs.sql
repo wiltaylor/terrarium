@@ -1,6 +1,7 @@
 CREATE TABLE job_log_budgets (
     project TEXT PRIMARY KEY,
-    bytes INTEGER NOT NULL DEFAULT 0
+    bytes INTEGER NOT NULL DEFAULT 0,
+    reconcile_cursor INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE job_logs (
     id INTEGER PRIMARY KEY,
@@ -17,6 +18,8 @@ CREATE TABLE job_logs (
     expires_at TEXT NOT NULL,
     bytes INTEGER NOT NULL DEFAULT 0,
     expired INTEGER NOT NULL DEFAULT 0,
+    cleanup_state TEXT NOT NULL DEFAULT 'retained',
+    quarantine TEXT NOT NULL DEFAULT '',
     UNIQUE(job, attempt)
 );
-CREATE INDEX job_logs_cleanup ON job_logs(project, expired, id);
+CREATE INDEX job_logs_cleanup ON job_logs(project, cleanup_state, id);

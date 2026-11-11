@@ -222,6 +222,58 @@ async fn retained_log_target_edits_recreation_and_unlocked_output_are_not_adopte
 }
 
 #[tokio::test]
+async fn retained_log_quarantine_recovery_accounts_bytes_and_surfaces_conflicts() {
+    let lab=lab(1).await;
+    set_recipe(&lab,"printf hello").await;
+    let state=lab.td.daemon.as_ref().unwrap().state.clone();
+    for (branch,conflict) in [("log-interrupted",false),("log-conflict",true)] {
+        let head=lab.branch(branch,"next",&[("OK","yes\n")]);
+        let job=validate_card(&lab,branch,&head).await;
+        assert_eq!(job["state"],"passed","{job}");
+        let id=job["id"].as_str().unwrap().to_owned();
+        let jid=id.clone();
+        let log=state.db.read(move |c|Ok(terrariumd::job_logs::for_job(c,&jid)?[0].clone())).await.unwrap();
+        let quarantine=PathBuf::from(&log.root).join(format!(".retention-delete-{}",log.id));
+        let q=quarantine.to_str().unwrap().to_owned();
+        state.db.write("system",move |t| {
+            t.execute("UPDATE job_logs SET cleanup_state='quarantining',quarantine=? WHERE id=?",rusqlite::params![q,log.id])?;
+            Ok(())
+        }).await.unwrap();
+        // Simulate the committed state followed by an interruption after move.
+        std::fs::create_dir(&quarantine).unwrap();
+        if conflict {
+            std::fs::write(quarantine.join("log"),"unowned captured file").unwrap();
+        } else {
+            std::fs::rename(&log.path,quarantine.join("log")).unwrap();
+        }
+        let before=state.db.read(|c|Ok(c.query_row("SELECT bytes FROM job_log_budgets WHERE project='p'",[],|r|r.get::<_,i64>(0))?)).await.unwrap();
+        assert_eq!(before,5,"bytes stay charged while quarantining");
+        let response=lab.td.post("/api/projects/p/jobs/cleanup",json!({})).await;
+        let body=response.ok();
+        let shown=lab.td.get(&format!("/api/jobs/{id}")).await;
+        let status=&shown.ok()["logs"][0];
+        let after=state.db.read(|c|Ok(c.query_row("SELECT bytes FROM job_log_budgets WHERE project='p'",[],|r|r.get::<_,i64>(0))?)).await.unwrap();
+        if conflict {
+            assert_eq!(body["removed"],0,"{body}");
+            assert_eq!(body["conflicts"][0]["job"],id);
+            assert_eq!(status["cleanup_state"],"conflict");
+            assert_eq!(status["expired"],false);
+            assert_eq!(after,5);
+            assert_eq!(std::fs::read_to_string(&log.path).unwrap(),"hello");
+            assert_eq!(std::fs::read_to_string(quarantine.join("log")).unwrap(),"unowned captured file");
+            let retry=lab.td.post("/api/projects/p/jobs/cleanup",json!({})).await;
+            assert_eq!(retry.ok()["scanned"],0,"conflicts are never retried automatically");
+            assert_eq!(retry.body["conflicts"][0]["job"],id);
+        } else {
+            assert_eq!(body["removed"],1,"{body}");
+            assert_eq!(status["cleanup_state"],"expired");
+            assert_eq!(after,0,"bytes leave only after the captured inode is removed");
+            assert!(!quarantine.join("log").exists());
+        }
+    }
+}
+
+#[tokio::test]
 async fn release_e2e_rejects_card_branches_members_and_missing_docker_config() {
     use terrariumd::store::groups;
     let lab = lab(1).await;
