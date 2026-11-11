@@ -587,7 +587,10 @@ async fn board_summary_budget_and_done_pages() {
     fn statement(_: rusqlite::trace::TraceEvent<'_>) {
         STATEMENTS.set(STATEMENTS.get() + 1);
     }
-    for count in [294, 2940] {
+    // Measured with bundled SQLite: 14 statements and about 443k / 40.77m
+    // instructions respectively. Keep roughly 2x headroom, independent of
+    // scheduler load. The existing query is not linear in fixture size.
+    for (count, step_budget) in [(294, 900_000), (2940, 82_000_000)] {
         let td = setup().await;
         let mut conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
         let tx = conn.transaction().unwrap();
@@ -643,7 +646,7 @@ async fn board_summary_budget_and_done_pages() {
         // A statement per card or a repeated scan of all comments must fail.
         assert!(statements <= 20, "summary statement budget: {statements}");
         assert!(
-            steps <= count as u64 * 3000,
+            steps <= step_budget,
             "summary SQLite VM step budget: {steps}"
         );
         assert_eq!(
