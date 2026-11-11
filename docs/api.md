@@ -3290,6 +3290,8 @@ The rules:
   It creates or reuses the project's standing Versions thread and posts one
   quiet update (no Threads badge), with the lead's changes and test guidance.
   All three fields must be nonempty. A repeated version is `409 conflict`.
+  The standing Versions thread cannot be closed, including by admins:
+  closing or proposing its close is `409 conflict` naming the thread.
   Post at each pre-release publish, alongside the releases wiki row.
   Version group completion posts nothing.
   `reply_to` (notices only) names an

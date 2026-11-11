@@ -1677,6 +1677,7 @@ pub fn propose_close(
     links: Vec<Link>,
 ) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
+    check_close(&th)?;
     not_closed(&th, "a close proposal")?;
     let (summary, links) = checked_handoff(t, summary, links)?;
     let at = now();
@@ -1706,6 +1707,7 @@ pub fn propose_close(
 /// with the proposed handoff. No proposal is `409 conflict`.
 pub fn confirm_close(t: &mut Tx<'_>, id: &str) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
+    check_close(&th)?;
     not_closed(&th, "a confirm")?;
     let Some(p) = th.close_proposal else {
         return Err(ApiError::conflict(format!(
@@ -1733,6 +1735,16 @@ fn agent_session(conn: &Connection, th: &Thread) -> ApiResult<Option<String>> {
         return Ok(None);
     };
     Ok(agents::current_session(conn, &sp.id)?.or(sp.session_id))
+}
+
+/// The project Versions thread stays open across pre-releases, for every caller.
+pub fn check_close(th: &Thread) -> ApiResult<()> {
+    if th.template.as_deref() == Some("versions") {
+        return Err(ApiError::conflict(format!(
+            "standing Versions thread {} cannot be closed", th.id
+        )));
+    }
+    Ok(())
 }
 
 /// Close a thread with a handoff (summary and links), for `reason`. The
@@ -1763,6 +1775,7 @@ fn close_as(
     links: Vec<Link>,
 ) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
+    check_close(&th)?;
     not_closed(&th, "a close")?;
     let (summary, checked) = checked_handoff(t, summary, links)?;
     let open: Vec<String> = {

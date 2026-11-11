@@ -598,12 +598,6 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
     Ok(out
         .into_iter()
         .filter(|q| q.thread.is_none())
-        .filter(|q| {
-            f.kind.is_some()
-                || f.status != Status::Open
-                || (q.status == QuestionStatus::Open
-                    && (q.kind != QuestionKind::Notice || q.priority == Priority::Critical))
-        })
         .map(question_item)
         .collect())
 }
@@ -656,6 +650,48 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
 
 type Cursor = (bool, bool, bool, String, String);
 
+// Keep aligned with the partial questions_default_inbox index. The page and
+// badge use exactly the same predicate, including the thread exclusion.
+const DEFAULT_QUESTION_WHERE: &str = "status = 'open' AND thread IS NULL
+    AND (kind IN ('question', 'bundle', 'tool_run') OR (kind = 'notice' AND priority = 'critical'))";
+
+fn default_page(
+    conn: &Connection,
+    project: Option<&str>,
+    cursor: Option<&Cursor>,
+    limit: usize,
+) -> ApiResult<Vec<InboxItem>> {
+    if cursor.is_some_and(|c| !c.0) {
+        return Ok(Vec::new());
+    }
+    // Select only keys, with a SQL LIMIT, before hydrating any question. The
+    // covering partial index contains no ordinary or urgent notice bodies.
+    let mut st = conn.prepare(&format!(
+        "SELECT id FROM questions INDEXED BY questions_default_inbox
+         WHERE {DEFAULT_QUESTION_WHERE} AND (?1 IS NULL OR project = ?1)
+           AND (?2 IS NULL OR (priority = 'critical', priority IN ('urgent', 'critical'),
+                              created_at, kind || ':' || id) < (?2, ?3, ?4, ?5))
+         ORDER BY priority = 'critical' DESC, priority IN ('urgent', 'critical') DESC,
+                  created_at DESC, kind || ':' || id DESC LIMIT ?6"
+    ))?;
+    let ids = st
+        .query_map(
+            params![
+                project,
+                cursor.map(|c| c.1),
+                cursor.map(|c| c.2),
+                cursor.map(|c| c.3.as_str()),
+                cursor.map(|c| c.4.as_str()),
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            ],
+            |r| r.get::<_, String>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.iter()
+        .map(|id| questions::get(conn, id).map(question_item))
+        .collect()
+}
+
 fn key(i: &InboxItem) -> Cursor {
     (i.open, i.critical, i.urgent, i.at.clone(), i.id.clone())
 }
@@ -671,6 +707,9 @@ pub fn page(
     let cursor: Option<Cursor> = cursor
         .map(|s| serde_json::from_str(s).map_err(|_| ApiError::invalid("invalid Inbox cursor")))
         .transpose()?;
+    if f.kind.is_none() && f.status == Status::Open {
+        return default_page(conn, f.project.as_deref(), cursor.as_ref(), limit);
+    }
     let mut items = Vec::new();
     if wants(f, InboxKind::Question) {
         items.extend(question_items(conn, f, QuestionKind::Question)?);
@@ -792,12 +831,17 @@ pub struct Counts {
 
 /// The counts of the open items, of every project or of one.
 pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
-    let q = questions::inbox_open_total(conn, project, Some(QuestionKind::Question))?;
-    let b = questions::inbox_open_total(conn, project, Some(QuestionKind::Bundle))?;
-    let r = questions::inbox_open_total(conn, project, Some(QuestionKind::ToolRun))?;
-    let n = questions::inbox_open_total(conn, project, Some(QuestionKind::Notice))?;
-    // A bundle counts once, as a question; so does a tool run approval.
-    let (question, notice) = (q.open + b.open + r.open, n.critical);
+    let (question, notice, urgent, critical): (usize, usize, usize, usize) = conn.query_row(
+        &format!(
+            "SELECT coalesce(sum(kind <> 'notice'), 0), coalesce(sum(kind = 'notice'), 0),
+                    coalesce(sum(priority IN ('urgent', 'critical')), 0),
+                    coalesce(sum(priority = 'critical'), 0)
+             FROM questions INDEXED BY questions_default_inbox
+             WHERE {DEFAULT_QUESTION_WHERE} AND (?1 IS NULL OR project = ?1)"
+        ),
+        [project],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
     let f = Filter {
         status: Status::Open,
         kind: None,
@@ -817,9 +861,9 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
         .count();
     let (thread, thread_urgent, thread_critical) = threads::inbox_counts(conn, project)?;
     Ok(Counts {
-        open: question + n.critical,
-        urgent: q.urgent + b.urgent + r.urgent + n.critical,
-        critical: q.critical + b.critical + r.critical + n.critical,
+        open: question + notice,
+        urgent,
+        critical,
         question,
         notice,
         mail,

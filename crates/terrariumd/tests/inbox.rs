@@ -166,6 +166,17 @@ async fn version_posts_reuse_a_quiet_project_thread_without_a_badge() {
             && text.contains("C1: card notices")
             && text.contains("Run notify without a card")
     );
+    for actor in [None, Some(lead.as_str()), Some(sys.as_str())] {
+        for close in [json!({}), json!({"confirm": true})] {
+            let close_path = format!("/api/threads/{thread}/close");
+            let r = match actor {
+                None => td.post(&close_path, close).await,
+                Some(actor) => td.post_as(actor, &close_path, close).await,
+            };
+            r.err(409, "conflict");
+            assert!(r.body["error"]["message"].as_str().unwrap().contains(&thread));
+        }
+    }
     td.post_as(&lead, path, body).await.err(409, "conflict");
     let second = td
         .post_as(

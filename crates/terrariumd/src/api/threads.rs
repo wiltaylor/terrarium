@@ -373,6 +373,7 @@ async fn close(
             .db
             .write(label, move |t| {
                 let th = readable(&actor, threads::get_bare(t, &id)?)?;
+                threads::check_close(&th)?;
                 match &actor {
                     Actor::Agent(a) if th.agent.as_deref() != Some(a.id.as_str()) => {
                         Err(ApiError::forbidden(format!(
