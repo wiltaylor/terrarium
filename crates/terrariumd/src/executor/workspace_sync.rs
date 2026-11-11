@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_is_opt_in_and_ssh_only() {
+    fn sync_defaults_off_and_is_refused() {
         let mut def: TargetDef = serde_json::from_value(json!({
             "name": "fixture", "kind": "ssh", "address": "localhost"
         }))
@@ -541,13 +541,13 @@ mod tests {
                 .is_none()
         );
         def.sync_workspace = true;
-        assert!(crate::store::targets::validate(&def).is_ok());
+        assert!(crate::store::targets::validate(&def).is_err());
         def.kind = TargetKind::Host;
         assert!(
             crate::store::targets::validate(&def)
                 .unwrap_err()
                 .message
-                .contains("requires an ssh or exedev target")
+                .contains("disable it")
         );
     }
 
