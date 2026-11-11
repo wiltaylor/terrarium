@@ -472,6 +472,8 @@ impl HostRegistry {
         #[derive(Deserialize)]
         struct Binding {
             host_session: Option<(String, SessionId)>,
+            #[serde(default)]
+            remote_key: Option<String>,
         }
         let key = format!("exec/{id}");
         let mut entries = self.lock();
@@ -481,6 +483,10 @@ impl HostRegistry {
         let binding = journal.load::<Binding>(&key)?;
         let mut values = Vec::new();
         let mut prefixes = Vec::new();
+        let mut removed = vec![key.clone()];
+        if let Some(remote) = binding.as_ref().and_then(|b| b.remote_key.as_ref()) {
+            removed.push(format!("ssh/{remote}"));
+        }
         let session = binding.and_then(|b| b.host_session);
         if let Some((host, session)) = &session {
             let host_key = format!("host/{host}");
@@ -494,7 +500,7 @@ impl HostRegistry {
             }
             prefixes.push(format!("event/{host}/{session}/"));
         }
-        journal.replace(&values, &[key], &prefixes)?;
+        journal.replace(&values, &removed, &prefixes)?;
         if let Some((host, session)) = session
             && let Some(entry) = entries.get_mut(&host)
         {
@@ -513,7 +519,7 @@ impl HostRegistry {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
-        let mut prefixes = vec![format!("prepare/{job}/"), format!("recipe/{job}/")];
+        let mut prefixes = vec![format!("prepare/{job}/"), format!("recipe/{job}/"), format!("ssh/recipe/{job}/")];
         let mut removed = Vec::new();
         for phase in ["recipe", "receive"] {
             let prefix = format!("bound/{phase}/{job}/");
