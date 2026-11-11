@@ -2079,7 +2079,9 @@ async fn run_inner(
     if !matches!(row.def.kind, TargetKind::Ssh | TargetKind::Exedev) {
         let host = crate::executor::host_of(&row.def)?;
         if !state.executor.hosts.wait_online(host).await {
-            return Err(ApiError::conflict("host did not reconnect within the resume grace"));
+            return Err(ApiError::conflict(
+                "host did not reconnect within the resume grace",
+            ));
         }
     }
     let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
@@ -3058,12 +3060,17 @@ async fn steps(
     let mut prepared = if let Some(Prepared::Ready { head, batch, base }) = cached {
         let bundle = x.bundle.clone();
         let kind = job.kind;
-        Some(x.daemon(move |r| bundle_ready(r, kind, &bundle, head, batch, base)).await?)
+        Some(
+            x.daemon(move |r| bundle_ready(r, kind, &bundle, head, batch, base))
+                .await?,
+        )
     } else {
         None
     };
     for attempt in 0..2 {
-        if prepared.is_some() { break; }
+        if prepared.is_some() {
+            break;
+        }
         let (j, bundle, prepare_guard) = (job.clone(), x.bundle.clone(), guard.clone());
         let (result, damaged) = x
             .daemon(move |r| {
@@ -3100,11 +3107,10 @@ async fn steps(
     if !matches!(x.def.kind, TargetKind::Ssh | TargetKind::Exedev) {
         journal.save(&prepare_key, &prepared)?;
     }
-    let (head, batch, base) =
-        match prepared {
-            Prepared::Ready { head, batch, base } => (head, batch, base),
-            Prepared::End(end) => return Ok(end),
-        };
+    let (head, batch, base) = match prepared {
+        Prepared::Ready { head, batch, base } => (head, batch, base),
+        Prepared::End(end) => return Ok(end),
+    };
     check_commit(&head)?;
     // The tree that the slot's work tree must have (TER-190 review,
     // finding 1), from the daemon's repo, not from the slot.
@@ -3149,13 +3155,19 @@ async fn steps(
     // the slot while that receive still holds it.
     let old = journal.load::<(String, u32)>(&format!("bound/{receive_key}"))?;
     let previous = if let Some((host, id)) = old {
-        let session = x.state.executor.hosts.reattach(&host, id)
+        let session = x
+            .state
+            .executor
+            .hosts
+            .reattach(&host, id)
             .ok_or_else(|| ApiError::internal("the saved receive has no replay channel"))?;
         let run = crate::executor::pump_host(session);
         set_control(&job.id, Some(run.ctl.clone()));
         let _ = run.ctl.send(Control::Eof);
         Some(run.collect(STEP_MAX).await)
-    } else { None };
+    } else {
+        None
+    };
     let c = match previous {
         Some(c) if result_line(&c.stdout).get("outcome").map(String::as_str) == Some("ok") => c,
         _ => x.run(&receive, STEP_MAX, Some(data)).await?,

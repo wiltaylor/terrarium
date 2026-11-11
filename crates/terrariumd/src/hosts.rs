@@ -455,10 +455,14 @@ impl HostRegistry {
                 let changed = self.online_changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
-                if self.is_online(host) { return; }
+                if self.is_online(host) {
+                    return;
+                }
                 changed.await;
             }
-        }).await.is_ok()
+        })
+        .await
+        .is_ok()
     }
 
     /// The live state of a host.
