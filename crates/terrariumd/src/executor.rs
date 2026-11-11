@@ -55,8 +55,8 @@ use crate::secrets::{RunDirs, Secret};
 use crate::store::leases;
 use crate::store::targets::{self, TargetRow};
 
-mod workspace_sync;
 pub(crate) mod durable;
+mod workspace_sync;
 
 /// Live exec sessions an agent may hold at once.
 pub const MAX_SESSIONS_PER_AGENT: usize = 8;
@@ -871,7 +871,9 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
         Arc::get_mut(&mut session)
             .ok_or_else(|| ApiError::internal("restored session is unexpectedly shared"))?
             .id = saved.id;
-        session.takes_stdin.store(saved.remote_key.is_none(), Ordering::SeqCst);
+        session
+            .takes_stdin
+            .store(saved.remote_key.is_none(), Ordering::SeqCst);
         if let Some((host, id)) = saved.host_session {
             let hs = state
                 .executor
@@ -903,9 +905,15 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
                     continue;
                 }
             };
-            let secrets: Vec<_> = saved.secrets.into_iter()
-                .map(|(name, value)| (name, zeroize::Zeroizing::new(value))).collect();
-            let view = saved.project.map_or(terrarium_core::redact::View::All, terrarium_core::redact::View::Scope);
+            let secrets: Vec<_> = saved
+                .secrets
+                .into_iter()
+                .map(|(name, value)| (name, zeroize::Zeroizing::new(value)))
+                .collect();
+            let view = saved.project.map_or(
+                terrarium_core::redact::View::All,
+                terrarium_core::redact::View::Scope,
+            );
             let run = redact_run(run, own_redactor(&secrets), state.db.redactor().get(), view);
             tokio::spawn(attach(run, session.clone(), ctl, false, false));
         } else {
@@ -1907,7 +1915,9 @@ pub(crate) fn start_cmd_locked(
     cmd: &RemoteCmd,
 ) -> ApiResult<Running> {
     if cmd.durable && (cmd.pty.is_some() || cmd.shell) {
-        return Err(ApiError::invalid("durable execution cannot use a PTY or shell"));
+        return Err(ApiError::invalid(
+            "durable execution cannot use a PTY or shell",
+        ));
     }
     if state.executor.hosts.is_stopped() {
         return Err(ApiError::conflict("executor is stopping"));
@@ -2245,7 +2255,9 @@ async fn start_exec_secrets(
     let saved = SavedExec {
         remote_key: if cmd.durable && matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
             cmd.resume_key.clone()
-        } else { None },
+        } else {
+            None
+        },
         id: sess.id.clone(),
         target: sess.target.clone(),
         owner: sess.owner.clone(),

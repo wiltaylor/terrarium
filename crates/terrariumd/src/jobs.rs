@@ -464,9 +464,16 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
     // old kill/requeue path for them instead of replaying prepare beneath
     // an untracked recipe. Read outside the shared DB writer transaction.
     let journal = crate::hosts::resume::Journal::new(&state.state_dir);
-    let remote_checkpoints: HashSet<String> = journal.scan::<serde_json::Value>("ssh/recipe/")
-        .unwrap_or_default().into_iter().filter_map(|(key, _)| key.strip_prefix("ssh/recipe/")
-            .and_then(|rest| rest.split('/').next()).map(str::to_owned)).collect();
+    let remote_checkpoints: HashSet<String> = journal
+        .scan::<serde_json::Value>("ssh/recipe/")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(key, _)| {
+            key.strip_prefix("ssh/recipe/")
+                .and_then(|rest| rest.split('/').next())
+                .map(str::to_owned)
+        })
+        .collect();
     let checkpoints: HashSet<String> = match journal.scan::<serde_json::Value>("prepare/") {
         Ok(rows) => rows
             .into_iter()
@@ -3129,21 +3136,21 @@ async fn steps(
     let host_bound = journal.load::<(String, u32)>(&format!("bound/{resume_key}"))?;
     let remote_bound = crate::executor::durable::exists(x.state, &resume_key)?;
     if let Some(saved) = journal.load::<RecipeResume>(&resume_key)?
-        && (host_bound.is_some() || remote_bound) {
+        && (host_bound.is_some() || remote_bound)
+    {
         drop(guard);
         x.at(STEP_RECIPE);
         x.recipe_started.store(true, Ordering::SeqCst);
-        let running = if let Some((host, id)) = host_bound {
-            let session = x
-            .state
-            .executor
-            .hosts
-            .reattach(&host, id)
-            .ok_or_else(|| ApiError::internal("the saved recipe has no replay channel"))?;
-            crate::executor::pump_host(session)
-        } else {
-            crate::executor::durable::resume(x.state, &resume_key)?
-        };
+        let running =
+            if let Some((host, id)) = host_bound {
+                let session =
+                    x.state.executor.hosts.reattach(&host, id).ok_or_else(|| {
+                        ApiError::internal("the saved recipe has no replay channel")
+                    })?;
+                crate::executor::pump_host(session)
+            } else {
+                crate::executor::durable::resume(x.state, &resume_key)?
+            };
         let own: Vec<_> = saved
             .own
             .iter()

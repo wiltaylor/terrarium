@@ -519,7 +519,11 @@ impl HostRegistry {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
-        let mut prefixes = vec![format!("prepare/{job}/"), format!("recipe/{job}/"), format!("ssh/recipe/{job}/")];
+        let mut prefixes = vec![
+            format!("prepare/{job}/"),
+            format!("recipe/{job}/"),
+            format!("ssh/recipe/{job}/"),
+        ];
         let mut removed = Vec::new();
         for phase in ["recipe", "receive"] {
             let prefix = format!("bound/{phase}/{job}/");

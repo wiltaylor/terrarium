@@ -18,11 +18,14 @@ fn journal(state: &Shared) -> crate::hosts::resume::Journal {
 }
 
 pub(crate) fn exists(state: &Shared, key: &str) -> ApiResult<bool> {
-    Ok(journal(state).load::<Checkpoint>(&format!("ssh/{key}"))?.is_some())
+    Ok(journal(state)
+        .load::<Checkpoint>(&format!("ssh/{key}"))?
+        .is_some())
 }
 
 pub(crate) fn resume(state: &Shared, key: &str) -> ApiResult<Running> {
-    let saved = journal(state).load::<Checkpoint>(&format!("ssh/{key}"))?
+    let saved = journal(state)
+        .load::<Checkpoint>(&format!("ssh/{key}"))?
         .ok_or_else(|| ApiError::internal("missing durable SSH checkpoint"))?;
     start_cmd_locked(state, &saved.def, &saved.cmd)
 }
@@ -34,7 +37,9 @@ pub(super) fn start(
     mut plan: SshPlan,
     guard: Option<Box<dyn Send>>,
 ) -> ApiResult<Running> {
-    let key = cmd.resume_key.as_deref()
+    let key = cmd
+        .resume_key
+        .as_deref()
         .ok_or_else(|| ApiError::invalid("durable execution needs a resume identity"))?;
     let j = journal(state);
     let id = format!("ssh/{key}");
@@ -42,8 +47,10 @@ pub(super) fn start(
         Some(saved) => saved,
         None => {
             let saved = Checkpoint {
-                def: def.clone(), cmd: cmd.clone(),
-                token: ulid::Ulid::new().to_string(), created: chrono::Utc::now().timestamp(),
+                def: def.clone(),
+                cmd: cmd.clone(),
+                token: ulid::Ulid::new().to_string(),
+                created: chrono::Utc::now().timestamp(),
             };
             j.save(&id, &saved)?;
             saved
@@ -54,12 +61,18 @@ pub(super) fn start(
     if chrono::Utc::now().timestamp() - saved.created > (MAX_RUN + RETAIN) as i64 {
         return Err(ApiError::conflict("durable SSH checkpoint expired"));
     }
-    let root = saved.def.work_root.as_deref()
+    let root = saved
+        .def
+        .work_root
+        .as_deref()
         .unwrap_or(crate::target_roots::DEFAULT_BASE);
     crate::target_roots::check_base(root)?;
     let path = format!("{root}/.terrarium-runs/{}", saved.token);
     let script = script(&path, &saved.cmd);
-    *plan.args.last_mut().ok_or_else(|| ApiError::internal("empty SSH plan"))? = script;
+    *plan
+        .args
+        .last_mut()
+        .ok_or_else(|| ApiError::internal("empty SSH plan"))? = script;
     let mut process = tokio::process::Command::new(&plan.program);
     process.args(&plan.args);
     let mut raw = pump_process(process, plan.stdin_prefix, None, guard);
@@ -120,23 +133,46 @@ pub(super) fn start(
             }
         }
     });
-    Ok(Running { events, ctl, host_session: None })
+    Ok(Running {
+        events,
+        ctl,
+        host_session: None,
+    })
 }
 
 fn script(path: &str, cmd: &RemoteCmd) -> String {
-    let command = format!("{}exec {}", cmd.cwd.as_ref().map(|cwd| format!("cd {} && ", sh_quote(cwd))).unwrap_or_default(),
-        cmd.argv.iter().map(|arg| sh_quote(arg)).collect::<Vec<_>>().join(" "));
-    let timeout = cmd.timeout_secs.filter(|n| *n > 0).unwrap_or(MAX_RUN).min(MAX_RUN);
-    let janitor = format!(r#"
+    let command = format!(
+        "{}exec {}",
+        cmd.cwd
+            .as_ref()
+            .map(|cwd| format!("cd {} && ", sh_quote(cwd)))
+            .unwrap_or_default(),
+        cmd.argv
+            .iter()
+            .map(|arg| sh_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let timeout = cmd
+        .timeout_secs
+        .filter(|n| *n > 0)
+        .unwrap_or(MAX_RUN)
+        .min(MAX_RUN);
+    let janitor = format!(
+        r#"
 p={path}
 echo $$ > "$p/janitor"
 sleep {expiry}
 rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit" "$p/exit.part" "$p/janitor"
 rmdir "$p"
-"#, path=sh_quote(path), expiry=MAX_RUN + RETAIN);
+"#,
+        path = sh_quote(path),
+        expiry = MAX_RUN + RETAIN
+    );
     // Each logger retains at most 64 MiB and then drains the rest. Output
     // limits do not impose a file-size limit on the user's other files.
-    let supervisor = format!(r#"
+    let supervisor = format!(
+        r#"
 umask 077
 p={path}
 mkdir "$p" 2>/dev/null || exit 0
@@ -157,11 +193,18 @@ kill "$w" 2>/dev/null
 wait "$o" "$e" 2>/dev/null
 printf '%s\n' "$code" > "$p/exit.part"
 mv "$p/exit.part" "$p/exit"
-"#, path=sh_quote(path), command=sh_quote(&command), janitor=sh_quote(&janitor));
-    let env = if cmd.env.is_empty() { "" } else {
+"#,
+        path = sh_quote(path),
+        command = sh_quote(&command),
+        janitor = sh_quote(&janitor)
+    );
+    let env = if cmd.env.is_empty() {
+        ""
+    } else {
         "IFS= read -r __terrarium_env && eval \"$(printf '%s' \"$__terrarium_env\" | base64 -d)\" && unset __terrarium_env;"
     };
-    format!(r#"{env}
+    format!(
+        r#"{env}
 umask 077
 p={path}
 mkdir -p {parent} || exit 1
@@ -183,5 +226,14 @@ while :; do
     printf X; cat "$p/exit"; exit
   fi
   sleep 0.1
-done"#, path=sh_quote(path), parent=sh_quote(&format!("{}/.terrarium-runs", path.rsplit_once("/.terrarium-runs/").map(|(root, _)| root).unwrap_or(""))), supervisor=sh_quote(&supervisor))
+done"#,
+        path = sh_quote(path),
+        parent = sh_quote(&format!(
+            "{}/.terrarium-runs",
+            path.rsplit_once("/.terrarium-runs/")
+                .map(|(root, _)| root)
+                .unwrap_or("")
+        )),
+        supervisor = sh_quote(&supervisor)
+    )
 }

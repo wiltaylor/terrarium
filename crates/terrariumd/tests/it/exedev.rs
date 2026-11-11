@@ -264,10 +264,15 @@ async fn durable_exedev_finishes_offline_once_with_real_exit() {
     td.post("/api/targets", def).await.ok();
     td.post_empty("/api/targets/restart-ex/up").await.ok();
     let (aid, wid) = super::ssh_restart::start(&td, "restart-ex", root.to_str().unwrap()).await;
-    super::ssh_restart::wait_file(&root.join("launches")).await;
+    super::ssh_restart::started(&td, &wid, &root).await;
     td.daemon.take().unwrap().shutdown_and_wait().await;
     std::fs::write(root.join("go"), "go").unwrap();
-    let spool = std::fs::read_dir(root.join(".terrarium-runs")).unwrap().next().unwrap().unwrap().path();
+    let spool = std::fs::read_dir(root.join(".terrarium-runs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
     super::ssh_restart::wait_file(&spool.join("exit")).await;
     assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "23\n");
     reboot(&mut td, &url, &ssh).await;
