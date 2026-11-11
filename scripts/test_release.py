@@ -646,6 +646,8 @@ class Release(unittest.TestCase):
                 self.assertIn(("gh", "release"), self.tools())
                 self.assertEqual(self.summary()["release"]["tag"], "v" + version)
                 self.assertIn("Tested at cut: TEST-101 TEST-102", (self.out / "notes.md").read_text())
+                # Stamping changes these fixture files, not the release commit.
+                git(self.repo, "checkout", "HEAD", "--", "Cargo.toml", "Cargo.lock")
 
     def test_prerelease_without_cut_runs_the_gate(self):
         git(self.repo, "commit", "-q", "--allow-empty", "-m", "fix: cut",
