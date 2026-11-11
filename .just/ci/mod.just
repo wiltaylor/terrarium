@@ -10,7 +10,7 @@ main:
 [group('ci')]
 check: fmt-check lint test scripts-test dashboard-check
 
-# The validation gate for a card: every part GitHub CI runs (ci.yml check job), in CI's order, with CI's toolchain and cargo env. Run it on a clean checkout of the pushed commit (AGENTS.md)
+# Full validation for build-changing cards and the version cut, with the pinned toolchain and cargo env. Run it on a clean checkout of the pushed commit (AGENTS.md)
 [group('ci')]
 validate: require-uv
 	#!/usr/bin/env bash
@@ -73,7 +73,7 @@ fmt-check: require-cargo
 lint: require-cargo
 	cargo clippy --workspace --all-targets -- -D warnings
 
-# Install the same pinned runner locally, in merge jobs, and in GitHub CI.
+# Install the pinned runner for local validation and release gates.
 [group('ci')]
 install-nextest: require-cargo
 	#!/usr/bin/env bash
@@ -110,7 +110,7 @@ test-nextest: require-cargo
 	fi
 	python3 scripts/rust_tests.py --nextest --workspace --no-fail-fast
 
-# Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer, the deploy, the CI workflow)
+# Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer, deploy and local release)
 [group('ci')]
 scripts-test: require-uv
 	uv run python -m unittest discover -s scripts -p 'test_*.py'

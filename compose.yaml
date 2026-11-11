@@ -191,7 +191,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       # The image check of a release: cosign (the default: the release key,
       # docker/release/cosign.pub in the image), gh (the build provenance of
-      # the GitHub workflow, the releases up to TER-613), cosign-keyless, off,
+      # the retired GitHub workflow, for historical releases), cosign-keyless, off,
       # or command:<shell command> (docs/api.md §34.4, docs/release.md).
       TERRARIUM_UPDATE_VERIFY: ${TERRARIUM_UPDATE_VERIFY:-cosign}
       TERRARIUM_UPDATE_COSIGN_KEY: ${TERRARIUM_UPDATE_COSIGN_KEY:-/opt/terrarium/release/cosign.pub}
