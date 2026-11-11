@@ -2,7 +2,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use crate::common::TestDaemon;
 use serde_json::json;
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 pub(crate) struct RemoteCleanup(pub PathBuf);
 
@@ -130,9 +133,13 @@ pub(crate) async fn completed(td: &TestDaemon, aid: &str, wid: &str, physical: &
 }
 
 pub(crate) fn cleanup(physical: &Path) {
-    let Ok(dirs) = std::fs::read_dir(physical.join(".terrarium-runs")) else { return; };
+    let Ok(dirs) = std::fs::read_dir(physical.join(".terrarium-runs")) else {
+        return;
+    };
     for dir in dirs.flatten() {
-        let Ok(pid) = std::fs::read_to_string(dir.path().join("janitor")) else { continue; };
+        let Ok(pid) = std::fs::read_to_string(dir.path().join("janitor")) else {
+            continue;
+        };
         // Only the cleanup process group created by this fixture.
         let _ = std::process::Command::new("kill")
             .args(["-KILL", "--", &format!("-{}", pid.trim())])
