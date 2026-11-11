@@ -29,16 +29,26 @@ pub(crate) async fn start(td: &TestDaemon, target: &str, root: &str) -> (String,
 
 pub(crate) async fn started(td: &TestDaemon, wid: &str, root: &Path) {
     for _ in 0..100 {
-        if root.join("launches").exists() { return; }
+        if root.join("launches").exists() {
+            return;
+        }
         let wait = td.get(&format!("/api/waits/{wid}")).await;
-        assert_eq!(wait.ok()["state"], "open", "command ended before launch: {}", wait.body);
+        assert_eq!(
+            wait.ok()["state"],
+            "open",
+            "command ended before launch: {}",
+            wait.body
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let mut debug = String::new();
     if let Ok(dirs) = std::fs::read_dir(root.join(".terrarium-runs")) {
         for dir in dirs.flatten() {
             for name in ["out", "err", "pid", "exit"] {
-                debug.push_str(&format!("{name}: {:?}\n", std::fs::read_to_string(dir.path().join(name))));
+                debug.push_str(&format!(
+                    "{name}: {:?}\n",
+                    std::fs::read_to_string(dir.path().join(name))
+                ));
             }
         }
     }
