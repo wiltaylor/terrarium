@@ -3269,6 +3269,24 @@ one step, and the agent gets all answers in one mail. A bundle is a row of
 the same table, with the rights, limits, and endpoints of a question,
 except for the differences in "Bundles" below.
 
+**Checkbox questions.** Set `multi_select: true` when asking a question,
+or on an individual bundle item. It defaults to false and cannot be set
+on notices, tool approvals, or the bundle summary. The CLI flags are
+`question ask --multi-select` and `thread ask --multi-select`. For bundles,
+use `"multi_select": true` on each desired item in `--items-file`.
+
+Answer a checkbox question with `{"options": [0, 2], "answer": "notes"}`.
+Each entry is a 0-based index or an exact option label. Duplicate and
+unknown entries are rejected. `option` (singular) is only for single-choice
+questions. Both the list and text may be empty, including `{"options": []}`
+or `{}`. Bundle answers use the same fields on each entry in `items`.
+The response retains the text in `answer` and the sorted selected indices
+in `answer_options`. The answer mail and CLI show both choices and text.
+The dashboard renders checkboxes and a text box in every question view.
+CLI answers use repeatable `--select <label|number-from-1>` or `options`
+arrays in `--answers-file` (numbers there are also from 1). With no text or
+`--select`, `admin question answer <id> --select-none` submits an empty checkbox answer.
+
 ```json
 {"id":"01JQ...","agent":"01M5...","agent_name":"demo/lead","project":"demo",
  "text":"Ship v2 on Friday?","options":["yes","no"],"context":"**CI** is green.",

@@ -230,6 +230,8 @@ async fn show(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ItemBody {
+    #[serde(default)]
+    multi_select: bool,
     text: String,
     #[serde(default)]
     options: Vec<String>,
@@ -240,6 +242,7 @@ struct ItemBody {
 impl From<ItemBody> for BundleItem {
     fn from(b: ItemBody) -> Self {
         BundleItem {
+            multi_select: b.multi_select,
             text: b.text,
             options: b.options,
             context: b.context,
@@ -256,6 +259,8 @@ fn items_of(items: Vec<ItemBody>) -> Vec<BundleItem> {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AskBody {
+    #[serde(default)]
+    multi_select: bool,
     /// `question` (the default), `notice`, or `bundle`.
     #[serde(default)]
     kind: QuestionKind,
@@ -388,6 +393,7 @@ async fn ask(
         (true, None) => Some(rt::from_now(tuning.default_timeout)),
     };
     let new = NewQuestion {
+        multi_select: b.multi_select,
         agent: key.clone(),
         kind: b.kind,
         text: b.text,
@@ -498,6 +504,8 @@ async fn update(
 #[serde(deny_unknown_fields)]
 struct AnswerBody {
     #[serde(default)]
+    options: Vec<OptionRef>,
+    #[serde(default)]
     answer: Option<String>,
     /// A label, or a 0-based index.
     #[serde(default)]
@@ -522,6 +530,7 @@ async fn answer(
     let by = Address::from_actor(&actor);
     let qid = q.id.clone();
     let a = Answer {
+        options: b.options,
         text: b.answer,
         option: b.option,
         items: b.items,
