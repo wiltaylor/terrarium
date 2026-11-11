@@ -310,7 +310,10 @@ fn print_job(c: &Ctx, v: &Value) {
                 field(log, "expires_at")
             ));
             if log["cleanup_state"] == "conflict" {
-                c.line(format!("quarantine conflict: {} (not retried automatically)",field(log,"quarantine")));
+                c.line(format!(
+                    "quarantine conflict: {} (not retried automatically)",
+                    field(log, "quarantine")
+                ));
             }
         }
     }

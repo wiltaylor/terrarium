@@ -207,8 +207,20 @@ pub(crate) fn remove_script(
     {
         return "exit 1".into();
     }
-    let Some(trash) = std::path::Path::new(quarantine).file_name().and_then(|p|p.to_str()) else { return "exit 1".into(); };
-    if std::path::Path::new(quarantine).parent().and_then(|p|p.to_str()) != Some(root) || !trash.starts_with(".retention-delete-") { return "exit 1".into(); }
+    let Some(trash) = std::path::Path::new(quarantine)
+        .file_name()
+        .and_then(|p| p.to_str())
+    else {
+        return "exit 1".into();
+    };
+    if std::path::Path::new(quarantine)
+        .parent()
+        .and_then(|p| p.to_str())
+        != Some(root)
+        || !trash.starts_with(".retention-delete-")
+    {
+        return "exit 1".into();
+    }
     format!(
         r#"root={root}
 name={name}
@@ -299,19 +311,40 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
         .db
         .write("system", move |c| {
             use rusqlite::OptionalExtension;
-            let (total,cursor) = c.query_row("SELECT bytes,reconcile_cursor FROM job_log_budgets WHERE project=?",[&p],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).optional()?.unwrap_or((0,0));
+            let (total, cursor) = c
+                .query_row(
+                    "SELECT bytes,reconcile_cursor FROM job_log_budgets WHERE project=?",
+                    [&p],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .optional()?
+                .unwrap_or((0, 0));
             // Reconcile first, independently paginated so inaccessible attempts
             // cannot starve later quarantines. Both seeks are indexed and bounded.
-            let mut recovery = c.prepare(CANDIDATES)?.query_map(params![p,"quarantining",cursor,BATCH],row)?.collect::<Result<Vec<_>,_>>()?;
-            let cursor = if recovery.len()==BATCH as usize { recovery.last().map(|r|r.id).unwrap_or(0) } else {0};
-            c.execute("UPDATE job_log_budgets SET reconcile_cursor=? WHERE project=?",params![cursor,p])?;
+            let mut recovery = c
+                .prepare(CANDIDATES)?
+                .query_map(params![p, "quarantining", cursor, BATCH], row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            let cursor = if recovery.len() == BATCH as usize {
+                recovery.last().map(|r| r.id).unwrap_or(0)
+            } else {
+                0
+            };
+            c.execute(
+                "UPDATE job_log_budgets SET reconcile_cursor=? WHERE project=?",
+                params![cursor, p],
+            )?;
             let logs = c
                 .prepare(CANDIDATES)?
                 .query_map(params![p, "retained", after, BATCH], row)?
                 .collect::<Result<Vec<_>, _>>()?;
-            let next = if logs.len()==BATCH as usize {logs.last().map(|r|r.id).unwrap_or(0)} else {0};
+            let next = if logs.len() == BATCH as usize {
+                logs.last().map(|r| r.id).unwrap_or(0)
+            } else {
+                0
+            };
             recovery.extend(logs);
-            Ok((recovery, jobs::delivery(c, &p)?, total,next))
+            Ok((recovery, jobs::delivery(c, &p)?, total, next))
         })
         .await?;
     let limit = def
@@ -321,7 +354,9 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
     let mut removed = 0;
     let mut skipped = 0;
     for log in &logs {
-        if log.cleanup_state != "quarantining" && !due(log, &chrono::Utc::now().to_rfc3339(), total, limit) {
+        if log.cleanup_state != "quarantining"
+            && !due(log, &chrono::Utc::now().to_rfc3339(), total, limit)
+        {
             continue;
         }
         let jid = log.job.clone();
@@ -354,9 +389,13 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
             skipped += 1;
             continue;
         };
-        let id=log.id;
-        let quarantine=if log.cleanup_state=="quarantining" { log.quarantine.clone() } else { format!("{}/.retention-delete-{}",log.root,log.id) };
-        let q=quarantine.clone();
+        let id = log.id;
+        let quarantine = if log.cleanup_state == "quarantining" {
+            log.quarantine.clone()
+        } else {
+            format!("{}/.retention-delete-{}", log.root, log.id)
+        };
+        let q = quarantine.clone();
         state.db.write("system",move |t| {
             t.execute("UPDATE job_logs SET cleanup_state='quarantining',quarantine=? WHERE id=? AND cleanup_state='retained'",params![q,id])?;
             Ok(())
@@ -365,7 +404,13 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
             argv: vec![
                 "sh".into(),
                 "-c".into(),
-                remove_script(&log.path, &log.root, &log.root_identity, &log.file_identity,&quarantine),
+                remove_script(
+                    &log.path,
+                    &log.root,
+                    &log.root_identity,
+                    &log.file_identity,
+                    &quarantine,
+                ),
             ],
             timeout_secs: Some(10),
             ..RemoteCmd::default()
@@ -375,19 +420,22 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
             continue;
         };
         let result = run.collect(128).await;
-        let outcome=String::from_utf8_lossy(&result.stdout);
+        let outcome = String::from_utf8_lossy(&result.stdout);
         if !result.end.as_ref().is_some_and(|e| e.success()) {
             skipped += 1;
             continue;
         }
-        if outcome.trim()=="conflict" {
+        if outcome.trim() == "conflict" {
             state.db.write("system",move |t| {
                 t.execute("UPDATE job_logs SET cleanup_state='conflict' WHERE id=? AND cleanup_state='quarantining'",[id])?;
                 Ok(())
             }).await?;
             continue;
         }
-        if outcome.trim()!="expired" { skipped+=1; continue; }
+        if outcome.trim() != "expired" {
+            skipped += 1;
+            continue;
+        }
         let id = log.id;
         let p = project.clone();
         let bytes = log.bytes;
@@ -410,9 +458,18 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
         total = total.saturating_sub(bytes);
         removed += 1;
     }
-    let p=project.clone();
-    let conflicts=state.db.read(move |c|Ok(c.prepare(CANDIDATES)?.query_map(params![p,"conflict",0,BATCH],row)?.collect::<Result<Vec<_>,_>>()?)).await?;
-    Ok(serde_json::json!({"removed":removed,"skipped":skipped,"scanned":logs.len(),"next":next,"conflicts":conflicts}))
+    let p = project.clone();
+    let conflicts = state
+        .db
+        .read(move |c| {
+            Ok(c.prepare(CANDIDATES)?
+                .query_map(params![p, "conflict", 0, BATCH], row)?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await?;
+    Ok(
+        serde_json::json!({"removed":removed,"skipped":skipped,"scanned":logs.len(),"next":next,"conflicts":conflicts}),
+    )
 }
 
 /// One indexed project seek and one bounded page per minute.
@@ -463,7 +520,8 @@ mod tests {
             expires_at: "b".into(),
             bytes: 10,
             expired: false,
-            cleanup_state: "retained".into(), quarantine: String::new(),
+            cleanup_state: "retained".into(),
+            quarantine: String::new(),
         };
         assert!(!due(&log, "a", 10, 10));
         assert!(due(&log, "b", 10, 10));
@@ -580,32 +638,43 @@ mod tests {
 
     #[test]
     fn interruption_after_move_is_reconciled_on_retry() {
-        let dir=tempfile::tempdir().unwrap();
-        let path=dir.path().join("attempt.log");
-        std::fs::write(&path,"owned bytes").unwrap();
-        let script=test_remove_script(&path);
-        let interrupted=script.replace("# AFTER_MOVE:","exit 99\n# AFTER_MOVE:");
-        let run=|script:&str|std::process::Command::new("sh").args(["-c",script]).output().unwrap();
-        assert_eq!(run(&interrupted).status.code(),Some(99));
-        let captured=dir.path().join(".retention-delete-1/log");
-        assert_eq!(std::fs::read_to_string(&captured).unwrap(),"owned bytes");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("attempt.log");
+        std::fs::write(&path, "owned bytes").unwrap();
+        let script = test_remove_script(&path);
+        let interrupted = script.replace("# AFTER_MOVE:", "exit 99\n# AFTER_MOVE:");
+        let run = |script: &str| {
+            std::process::Command::new("sh")
+                .args(["-c", script])
+                .output()
+                .unwrap()
+        };
+        assert_eq!(run(&interrupted).status.code(), Some(99));
+        let captured = dir.path().join(".retention-delete-1/log");
+        assert_eq!(std::fs::read_to_string(&captured).unwrap(), "owned bytes");
         assert!(!path.exists());
-        let retry=run(&script);
-        assert!(retry.status.success(),"{retry:?}");
-        assert_eq!(retry.stdout,b"expired\n");
+        let retry = run(&script);
+        assert!(retry.status.success(), "{retry:?}");
+        assert_eq!(retry.stdout, b"expired\n");
         assert!(!captured.exists());
     }
 
     #[test]
     fn occupied_restore_preserves_both_files_as_conflict() {
-        let dir=tempfile::tempdir().unwrap();
-        let path=dir.path().join("attempt.log");
-        std::fs::write(&path,"owned").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("attempt.log");
+        std::fs::write(&path, "owned").unwrap();
         let script=test_remove_script(&path).replace("mv -- \"$name\" \"$trash/log\"", "mv -- \"$name\" old-log; printf captured > \"$name\"; mv -- \"$name\" \"$trash/log\"; printf occupied > \"$name\"");
-        let result=std::process::Command::new("sh").args(["-c",&script]).output().unwrap();
-        assert!(result.status.success(),"{result:?}");
-        assert_eq!(result.stdout,b"conflict\n");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(),"occupied");
-        assert_eq!(std::fs::read_to_string(dir.path().join(".retention-delete-1/log")).unwrap(),"captured");
+        let result = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(result.stdout, b"conflict\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "occupied");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".retention-delete-1/log")).unwrap(),
+            "captured"
+        );
     }
 }
