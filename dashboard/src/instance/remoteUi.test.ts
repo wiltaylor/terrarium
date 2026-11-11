@@ -35,13 +35,12 @@ it("names the remote in confirmation controls, portal dialogs and page identity"
   expect(document.querySelector('[role="dialog"]')?.getAttribute("aria-label")).toBe("Stop worker on lab");
 });
 
-it("shows remote artifacts as external links without fetching or embedding their bytes", async () => {
-  const fetch = vi.fn(async (_url: string) => new Response('{"url":"/a/A1/report.html?sig=signed","exp":123,"expires_at":""}'));
+it("previews remote artifacts through a home capability in a sandbox", async () => {
+  const fetch = vi.fn(async (_url: string) => new Response('{"url":"/ra/cap/123/sig/","exp":123,"expires_at":""}'));
   vi.stubGlobal("fetch", fetch);
   const root = mount(() => createComponent(ArtifactViewer, { artifact: { id: "ART-1", uid: "A1", name: "report.html", kind: "file", content_type: "text/html", size: 10 } }));
-  await waitFor(() => expect(root.querySelector("a")?.href).toBe("https://lab.example/a/A1/report.html?sig=signed"));
-  expect(root.textContent).toContain("external");
-  expect(root.querySelector("iframe, img")).toBeNull();
+  await waitFor(() => expect(root.querySelector("iframe")?.getAttribute("src")).toBe("/ra/cap/123/sig/"));
+  expect(root.querySelector("iframe")?.getAttribute("sandbox")).toBe("allow-scripts");
   expect(fetch).toHaveBeenCalledTimes(1);
-  expect(fetch.mock.calls[0]?.[0]).toBe("/api/remotes/lab/proxy/api/artifacts/A1/url");
+  expect(fetch.mock.calls[0]?.[0]).toBe("/api/remotes/lab/artifacts/A1/url");
 });

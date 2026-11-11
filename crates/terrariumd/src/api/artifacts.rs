@@ -58,6 +58,7 @@ pub fn routes() -> Router<Shared> {
 /// the CORS answer for the dashboard origin.
 pub fn serving_routes(state: &Shared) -> Router<Shared> {
     Router::new()
+        .merge(super::remotes::artifacts::serving_routes())
         .route("/a/{id}", get(serve_root))
         .route("/a/{id}/", get(serve_root))
         .route("/a/{id}/{*path}", get(serve_path))
