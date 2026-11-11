@@ -387,6 +387,44 @@ fn state(td: &TestDaemon) -> terrariumd::api::Shared {
     td.daemon.as_ref().unwrap().state.clone()
 }
 
+#[tokio::test]
+async fn workspace_sync_path_failure_on_exedev_explains_the_workaround() {
+    let (td, _, _, _, ssh) = daemon().await;
+    let mut definition = target("sync", 3600);
+    definition["sync_workspace"] = json!(true);
+    td.post("/api/targets", definition).await.ok();
+    td.patch("/api/targets/sync", json!({"sync_workspace":true}))
+        .await
+        .ok();
+    td.post_empty("/api/targets/sync/up").await.ok();
+    td.project("p").await;
+    let agent = td.agent("p", "worker", json!({})).await;
+    let agent = agent["id"].as_str().unwrap();
+    // Simulate the remote user's refusal to create the absolute sandbox path.
+    std::fs::write(&ssh, "#!/bin/sh\nexit 1\n").unwrap();
+    let response = td
+        .post(
+            "/api/targets/sync/exec",
+            json!({"agent":agent,"cmd":["true"]}),
+        )
+        .await;
+    response.err(422, "invalid");
+    assert!(
+        response
+            .body
+            .to_string()
+            .contains("cannot write the sandbox workspace path"),
+        "{}",
+        response.body
+    );
+    assert!(response.body.to_string().contains("sync_workspace = false"));
+    assert!(response.body.to_string().contains("TER-873"));
+    assert_eq!(
+        td.get("/api/targets/sync").await.ok()["sync_workspace"],
+        true
+    );
+}
+
 async fn started_agent(td: &TestDaemon, project: &str, name: &str) -> String {
     let a = td.agent(project, name, json!({})).await;
     let id = a["id"].as_str().unwrap().to_owned();

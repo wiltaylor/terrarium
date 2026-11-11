@@ -5,6 +5,8 @@
 // sandboxed iframe on the artifact origin.
 
 import { Marked, type Tokens } from "marked";
+import emoji from "./emoji.json";
+import { highlightCode } from "./highlight";
 
 export type WikiTarget =
   | { kind: "page"; project: string; path: string }
@@ -171,6 +173,17 @@ export function renderWiki(src: string, opts: RenderOptions): string {
 
   md.use({
     extensions: [
+      {
+        name: "emoji",
+        level: "inline",
+        start: (s: string) => s.search(/:[\w+-]+:/),
+        tokenizer(s: string) {
+          const m = /^:([\w+-]+):/.exec(s);
+          if (!m || !Object.hasOwn(emoji, m[1]!)) return undefined;
+          return { type: "emoji", raw: m[0], text: emoji[m[1]! as keyof typeof emoji] };
+        },
+        renderer(token) { return esc(String(token.text)); },
+      },
       ...(opts.textBody ? [{
         name: "globpath",
         level: "inline" as const,
@@ -200,6 +213,51 @@ export function renderWiki(src: string, opts: RenderOptions): string {
       ...(opts.cardKeys ? [cardKeyExtension(opts.cardKeys)] : []),
     ],
     renderer: {
+      blockquote(token: Tokens.Blockquote) {
+        const match = /^\[!(CHAT|EMAIL)\][ \t]*(.*)(?:\n|$)/.exec(token.text);
+        if (!match) return `<blockquote>\n${this.parser.parse(token.tokens)}</blockquote>\n`;
+        const kind = match[1]!.toLowerCase();
+        const content = token.text.slice(match[0].length);
+        const renderBody = (text: string) => renderWiki(text, { ...opts, textBody: true });
+        const stateOf = (text: string) => /^(draft|sent|received)$/i.test(text.trim()) ? text.trim().toLowerCase() : "received";
+        const stateLabel = (state: string) => state === "draft" ? "Draft, not sent" : state === "sent" ? "Sent" : "Received";
+        let items = "";
+        if (kind === "chat") {
+          let author = "", time = "", state = "received", lines: string[] = [];
+          let active = false;
+          const flush = () => {
+            if (!active && !lines.some((line) => line.trim())) return;
+            items += `<div class="comm-item comm-${state}"><div class="comm-meta"><strong>${esc(author)}</strong>${time ? ` · ${esc(time)}` : ""} · ${stateLabel(state)}</div>${renderBody(lines.join("\n"))}</div>`;
+          };
+          for (const line of content.split("\n")) {
+            const header = /^\*\*(.+?)\*\*(?:\s*·\s*(.*))?$/.exec(line);
+            if (!header) { lines.push(line); continue; }
+            flush();
+            const parts = (header[2] ?? "").split("·").map((part) => part.trim()).filter(Boolean);
+            author = header[1]!;
+            const last = parts.at(-1) ?? "";
+            state = stateOf(last);
+            if (/^(draft|sent|received)$/i.test(last)) parts.pop();
+            time = parts.join(" · ");
+            lines = [];
+            active = true;
+          }
+          flush();
+        } else {
+          for (const mail of content.split(/^---[ \t]*$/m)) {
+            const lines = mail.trim().split("\n");
+            let headers = "", state = "received", index = 0;
+            for (; index < lines.length; index++) {
+              const header = /^(From|To|Cc|Subject|Date|Status):[ \t]*(.*)$/i.exec(lines[index]!);
+              if (!header) break;
+              if (header[1]!.toLowerCase() === "status") state = stateOf(header[2]!);
+              else headers += `<div><strong>${esc(header[1]!)}:</strong> ${esc(header[2]!)}</div>`;
+            }
+            items += `<div class="comm-item comm-${state}"><div class="comm-meta">${headers}<div>${stateLabel(state)}</div></div>${renderBody(lines.slice(index).join("\n"))}</div>`;
+          }
+        }
+        return `<div class="comm-block comm-${kind}"><div class="comm-title">${esc(match[2] || (kind === "chat" ? "Chat" : "Email"))}</div>${items}</div>\n`;
+      },
       html(token: Tokens.HTML | Tokens.Tag) {
         return esc(token.text);
       },
@@ -210,7 +268,8 @@ export function renderWiki(src: string, opts: RenderOptions): string {
         // A DB query block (docs/api.md §27): the component reads the query as text from the attribute.
         if (lang === "db") return `<div class="db-embed" data-db-query="${esc(dbQueryText(token.text))}"></div>\n`;
         const cls = lang ? ` class="language-${esc(lang.split(/\s/)[0]!)}"` : "";
-        return `<pre><code${cls}>${esc(token.text)}</code></pre>\n`;
+        const highlighted = highlightCode(token.text, lang.split(/\s/)[0]!.toLowerCase());
+        return `<pre><code${cls}>${highlighted ?? esc(token.text)}</code></pre>\n`;
       },
       link(token: Tokens.Link) {
         const text = this.parser.parseInline(token.tokens);

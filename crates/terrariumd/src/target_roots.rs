@@ -170,7 +170,7 @@ fn warn_fallback(def: &TargetDef, fallback: &str) {
 
 /// Only machine/path identity matters. Credentials and limits may be rotated
 /// without stranding roots or preventing live agents from starting work.
-fn same_location(old: &str, def: &TargetDef) -> bool {
+pub(crate) fn same_location(old: &str, def: &TargetDef) -> bool {
     let Ok(old) = serde_json::from_str::<TargetDef>(old) else {
         return false;
     };

@@ -12,6 +12,8 @@ pub struct Remote {
     pub url: String,
     pub instance_id: String,
     pub pin_sha256: Option<String>,
+    pub artifact_origin: Option<String>,
+    pub artifact_pin_sha256: Option<String>,
     pub ca_pem: Option<String>,
     pub label: String,
     pub read_only: bool,
@@ -22,7 +24,7 @@ pub struct Remote {
     pub calls_today: i64,
 }
 
-const COLUMNS: &str = "id,name,url,instance_id,pin_sha256,ca_pem,label,read_only,created_at,last_ok_at,last_error,status,CASE WHEN calls_day=date('now') THEN calls_today ELSE 0 END";
+const COLUMNS: &str = "id,name,url,instance_id,pin_sha256,ca_pem,label,read_only,created_at,last_ok_at,last_error,status,CASE WHEN calls_day=date('now') THEN calls_today ELSE 0 END,artifact_origin,artifact_pin_sha256";
 pub const MAX_REMOTES: usize = 64;
 pub const EXISTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM remotes WHERE name=?1)";
 
@@ -33,6 +35,8 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Remote> {
         url: r.get(2)?,
         instance_id: r.get(3)?,
         pin_sha256: r.get(4)?,
+        artifact_origin: r.get(13)?,
+        artifact_pin_sha256: r.get(14)?,
         ca_pem: r.get(5)?,
         label: r.get(6)?,
         read_only: r.get(7)?,

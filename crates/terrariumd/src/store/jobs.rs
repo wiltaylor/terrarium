@@ -293,7 +293,7 @@ pub struct NewJob {
 }
 
 /// The end of a job.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JobEnd {
     pub passed: bool,
     pub outcome: Option<String>,

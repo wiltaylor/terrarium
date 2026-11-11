@@ -14,9 +14,9 @@
 //! the DB lock; the write goes through `crate::store::rules::put`, which
 //! checks the board and the hash again under the lock.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use terrarium_core::config::BoardFlow;
@@ -30,13 +30,33 @@ use crate::policy;
 use crate::store::projects;
 use crate::store::rules::{self, Rules};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/projects/{name}/rules/effective", get(effective))
-        .route("/projects/{name}/rules/lint", post(lint))
-        .route("/projects/{name}/rules/migrate", post(migrate))
-        .route("/projects/{name}/rules/{rule}/enable", post(enable))
-        .route("/projects/{name}/rules/{rule}/disable", post(disable))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/projects/{name}/rules/effective",
+            get(effective),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/rules/lint",
+            post(lint),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/rules/migrate",
+            post(migrate),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/rules/{rule}/enable",
+            post(enable),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/rules/{rule}/disable",
+            post(disable),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 /// What the tools read of a project: its rules file (with the rules read

@@ -4,12 +4,12 @@ mod event_feed;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::Json;
 use axum::body::{Body, to_bytes};
 use axum::extract::{FromRequestParts, Path, Request, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
-use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
@@ -21,15 +21,111 @@ use crate::error::{ApiError, ApiResult, Code};
 use crate::remotes::{self as net, Limits};
 use crate::store::remotes::{self as store, Remote};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/remotes", get(list).post(add))
-        .route("/remotes/{name}", get(show).delete(remove))
-        .route("/remotes/{name}/repin", post(repin))
-        .route("/remotes/{name}/pair", post(repair))
-        .route("/remotes/{name}/artifacts/{id}/url", post(artifacts::mint))
-        .route("/remotes/{name}/proxy/{*rest}", any(proxy))
-        .route_layer(axum::middleware::from_fn(operator_guard))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/remotes",
+            get(list).post(add),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::POST,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+            ],
+        )
+        .route(
+            "/remotes/{name}",
+            get(show).delete(remove),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+            ],
+        )
+        .route(
+            "/remotes/{name}/repin",
+            post(repin),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/remotes/{name}/pair",
+            post(repair),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/remotes/{name}/artifacts/{id}/url",
+            post(artifacts::mint),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/remotes/{name}/artifact-repin",
+            post(artifacts::repin),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/remotes/{name}/proxy/{*rest}",
+            any(proxy),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::HEAD,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::POST,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::PUT,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::OPTIONS,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::TRACE,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::CONNECT,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+            ],
+        )
+        .map_router(|router| router.route_layer(axum::middleware::from_fn(operator_guard)))
 }
 
 async fn operator_guard(actor: Actor, req: Request, next: axum::middleware::Next) -> Response {
@@ -188,6 +284,8 @@ async fn add(
         url,
         instance_id: b.instance_id,
         pin_sha256: b.pin_sha256,
+        artifact_origin: None,
+        artifact_pin_sha256: None,
         ca_pem: b.ca_pem,
         label,
         read_only: false,
