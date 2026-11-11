@@ -3441,7 +3441,8 @@ async fn steps(
     }
     let c = step_redacted(x.state, &job.id, x.def, &recipe_cmd, RECIPE_MAX, None, &own).await?;
     if let Some(identity) = log_target {
-        crate::job_logs::record_output(x.state, job, delivery, &log, &identity, &c.stdout).await?;
+        crate::job_logs::record_output(x.state, job, delivery, &saved.log, &identity, &c.stdout)
+            .await?;
     }
     if let Some(tunnel) = tunnel {
         tunnel.close().await;
