@@ -6,7 +6,7 @@ import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
-import { LinkText } from "../../components/LinkText";
+import { TextMarkdown } from "../../components/TextMarkdown";
 import type { Card, CardSummary, Column, NewCard, Question } from "../../api/types";
 import { ago, compact } from "../../lib/format";
 import { projectBase } from "../../lib/url";
@@ -816,11 +816,11 @@ function CardDrawer(props: {
         fallback={
           <div class="stack" style={{ gap: "6px" }}>
             <h2 style={{ margin: 0 }}>{props.card.title}</h2>
-            <p style={{ margin: 0, "white-space": "pre-wrap" }}>
+            <div>
               <Show when={props.card.body} fallback={<span class="muted">No description.</span>}>
-                <LinkText text={props.card.body} project={props.card.project} />
+                <TextMarkdown text={props.card.body} project={props.card.project} />
               </Show>
-            </p>
+            </div>
             <div>
               <button
                 class="small"
@@ -984,8 +984,8 @@ function CardDrawer(props: {
                   )}
                 </Show>
               </div>
-              <div style={{ "white-space": "pre-wrap" }}>
-                <LinkText text={c.body} project={props.card.project} />
+              <div>
+                <TextMarkdown text={c.body} project={props.card.project} />
               </div>
             </div>
           )}

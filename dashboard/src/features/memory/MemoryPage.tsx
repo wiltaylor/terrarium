@@ -11,6 +11,7 @@ import { RELATIONS, type Memory, type MemoryEdge, type Relation } from "../../ap
 import { ago, humanize } from "../../lib/format";
 
 import { MemoryGraph } from "./MemoryGraph";
+import { TextMarkdown } from "../../components/TextMarkdown";
 
 const FIRST: Relation[] = ["contradicts", "supersedes"];
 
@@ -120,7 +121,7 @@ export default function MemoryPage() {
                 <div class="muted small">
                   {m().author_name ?? m().author} · updated {ago(m().updated_at)} · {m().tags.map((t) => `#${t}`).join(" ")}
                 </div>
-                <p style={{ margin: 0, "white-space": "pre-wrap" }}>{m().body}</p>
+                <TextMarkdown text={m().body} project={params.project} />
                 <Show when={m().sources.length}>
                   <div class="small">
                     Sources:{" "}

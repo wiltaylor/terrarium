@@ -5,7 +5,7 @@ import { useInstance } from "../../instance";
 
 import { A } from "../../instance/navigation";
 import { createResource, For, Show } from "solid-js";
-import { LinkText } from "../../components/LinkText";
+import { TextMarkdown } from "../../components/TextMarkdown";
 import { Drawer, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { targetHref } from "../../lib/markdown";
@@ -44,11 +44,11 @@ export function CardPeek() {
                       Open on the board
                     </A>
                   </div>
-                  <p style={{ margin: 0, "white-space": "pre-wrap" }}>
+                  <div>
                     <Show when={c().body} fallback={<span class="muted">No description.</span>}>
-                      <LinkText text={c().body} project={c().project} />
+                      <TextMarkdown text={c().body} project={c().project} />
                     </Show>
-                  </p>
+                  </div>
                   <section class="stack" style={{ gap: "8px" }}>
                     <h3 style={{ margin: 0 }}>Comments</h3>
                     <For each={c().comments} fallback={<p class="muted">No comments.</p>}>
@@ -57,8 +57,8 @@ export function CardPeek() {
                           <div class="small muted">
                             <strong style={{ color: "var(--text)" }}>{m.author_name ?? m.author}</strong> · {ago(m.created_at)}
                           </div>
-                          <div style={{ "white-space": "pre-wrap" }}>
-                            <LinkText text={m.body} project={c().project} />
+                          <div>
+                            <TextMarkdown text={m.body} project={c().project} />
                           </div>
                         </div>
                       )}
