@@ -386,6 +386,19 @@ pub fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
 /// (TER-146): a link never shows a card, or its project, to a reader of
 /// the thread who cannot read that project.
 pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
+    let request_project = match actor {
+        Actor::Agent(a)
+            if th.request
+                && th.status != ThreadStatus::Closed
+                && th.agent.as_deref() == Some(&a.id) =>
+        {
+            th.report_to_name
+                .as_deref()
+                .and_then(|n| n.split_once('/'))
+                .map(|(p, _)| p.to_owned())
+        }
+        _ => None,
+    };
     if th.monitor.as_ref().is_some_and(|m| {
         m.split_once(':')
             .is_none_or(|(p, _)| policy::read_project(actor, p).is_err())
@@ -393,7 +406,10 @@ pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
         th.monitor = None;
     }
     if let Some(cards) = th.cards.as_mut() {
-        cards.retain(|c| policy::read_project(actor, &c.project).is_ok());
+        cards.retain(|c| {
+            policy::read_project(actor, &c.project).is_ok()
+                || request_project.as_deref() == Some(c.project.as_str())
+        });
     }
     th
 }
@@ -419,15 +435,38 @@ fn cards_of(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadCard>> {
     Ok(rows)
 }
 
-/// Link card `card` (`<project>:<card>` or `<card>`) to thread `id` for
-/// `actor` (TER-146, TER-144 D2). `actor` must read the thread (else `404`)
-/// and the card's project (else `404`, the same answer as for a card that
-/// does not exist); the link gives neither. A closed thread is `409
-/// conflict`; a card that is not in the named project is `404`; an
-/// archived card is `422 invalid`. A card that is linked already stays as
-/// it is. Writes the audit row `thread.card_link` under the card's project.
-/// Emits a `thread` event `card_linked`, which wakes no agent. The thread
-/// with the cards that `actor` may read.
+/// Card-only read access. An attached request agent may also read its
+/// report-to lead's project while the request is open. For a link, `thread`
+/// restricts that exception to the agent's own request. No project-wide
+/// read or card-write capability is granted.
+pub fn read_card_project(
+    conn: &Connection,
+    actor: &Actor,
+    project: &str,
+    thread: Option<&str>,
+) -> ApiResult<()> {
+    let denied = match policy::read_project(actor, project) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    if let Actor::Agent(a) = actor {
+        let allowed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM threads th JOIN agents lead ON lead.id = th.report_to
+             WHERE th.request = 1 AND th.agent = ?1 AND th.status != 'closed'
+             AND lead.project = ?2 AND (?3 IS NULL OR th.id = ?3))",
+            rusqlite::params![a.id, project, thread],
+            |r| r.get(0),
+        )?;
+        if allowed {
+            return Ok(());
+        }
+    }
+    Err(denied)
+}
+
+/// Link `<project>:<card>` or `<card>` to a readable, open thread.
+/// The card must be readable and unarchived. Cross-project request access
+/// applies only to the attached agent's own thread.
 pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResult<Thread> {
     let th = readable(actor, get_bare(t, id)?)?;
     not_closed(&th, "a card link")?;
@@ -454,7 +493,7 @@ pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResu
         )
         .optional()?
         .ok_or_else(missing)?;
-    policy::read_project(actor, &project).map_err(|_| missing())?;
+    read_card_project(t, actor, &project, Some(id)).map_err(|_| missing())?;
     if want.is_some_and(|p| p != project) {
         return Err(ApiError::not_found(format!(
             "no card `{key}` in project `{}`",
