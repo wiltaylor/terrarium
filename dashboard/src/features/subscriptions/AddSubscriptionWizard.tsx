@@ -353,6 +353,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
   const [projectId, setProjectId] = createSignal("");
   const [resource, setResource] = createSignal("");
   const [cloudModels, setCloudModels] = createSignal<Record<string, string>>({});
+  const [budgetUsd, setBudgetUsd] = createSignal("");
   const [baseUrl, setBaseUrl] = createSignal("");
   const [plan, setPlan] = createSignal(defaultPlan(props.setup.provider ?? "openrouter"));
   const [models, setModels] = createSignal("");
@@ -365,7 +366,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
     setBusy(true);
     try {
       const n = name().trim();
-      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models(), keyId: keyId(), region: region(), projectId: projectId(), resource: resource(), cloudModels: cloudModels() }));
+      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models(), keyId: keyId(), region: region(), projectId: projectId(), resource: resource(), cloudModels: cloudModels(), budgetUsd: budgetUsd() }));
       setKey("");
       setKeyId("");
       props.onSaved(n);
@@ -469,6 +470,12 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
             <input value={cloudModels()[tier] ?? ""} onInput={(e) => setCloudModels({ ...cloudModels(), [tier]: e.currentTarget.value })} />
           </label>
         )}</For>
+      </Show>
+      <Show when={["bedrock", "gcp", "foundry"].includes(provider())}>
+        <label>Monthly budget (USD)
+          <input type="number" min="1" max="4294967295" step="1" value={budgetUsd()} onInput={(e) => setBudgetUsd(e.currentTarget.value)} />
+        </label>
+        <p class="muted small">Optional. Local estimate, UTC month. Sends mail at 80% and 100%, never holds agents.</p>
       </Show>
       <Show when={takesPlan(provider())}>
         <label>

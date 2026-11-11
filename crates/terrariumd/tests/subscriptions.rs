@@ -45,6 +45,7 @@ async fn litellm_is_claude_only_and_keeps_the_key_private() {
     assert_eq!(sub["selfhosted"]["api"], "anthropic");
     assert_eq!(sub["selfhosted"]["models"], json!(["team-model"]));
     assert_eq!(sub["no_quota"], false);
+    assert_eq!(sub["probe"], "litellm-key-spend");
     assert!(!sub.to_string().contains("E2E-lite-secret"));
     let r = td
         .post(
@@ -3406,6 +3407,39 @@ async fn cloud_settings_response_never_reads_the_key_file() {
         .await;
     assert_eq!(r.ok()["has_api_key"], true);
     assert_eq!(r.body["cloud"]["region"], "us-west-2");
+    assert_eq!(r.body["month_spend_usd"], 0.0);
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    state
+        .db
+        .write("t", |t| {
+            terrariumd::store::cloud_spend::record(
+                t,
+                "estimate-agent",
+                "s1",
+                Some("aws"),
+                &terrarium_core::cloud::month_key(chrono::Utc::now()),
+                12.5,
+            )
+        })
+        .await
+        .unwrap();
+    let unbudgeted = td.get("/api/subscriptions/aws").await;
+    assert_eq!(unbudgeted.ok()["month_spend_usd"], 12.5);
+    let r = td
+        .put(
+            "/api/subscriptions/aws/cloud",
+            json!({"region": "us-west-2", "budget_usd": 50}),
+        )
+        .await;
+    assert_eq!(r.ok()["cloud"]["budget_usd"], 50);
+    let r = td
+        .put(
+            "/api/subscriptions/aws/cloud",
+            json!({"region": "us-west-2", "budget_usd": null}),
+        )
+        .await;
+    assert!(r.ok()["cloud"]["budget_usd"].is_null());
+    assert_eq!(r.body["month_spend_usd"], 12.5);
     assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
 
     // Reading this FIFO blocks until the writer closes. A metadata-only

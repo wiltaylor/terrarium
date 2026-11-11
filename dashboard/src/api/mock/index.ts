@@ -3471,6 +3471,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     },
 
     subscriptions: {
+      setCloud: (name, input) => reply(() => {
+        const s = sub(name);
+        if (s.source === "file") fail(409, "file_managed", "Edit the cloud settings in the subscription file");
+        if (!["bedrock", "gcp", "foundry"].includes(s.provider)) fail(422, "invalid", "Not a cloud subscription");
+        s.cloud = { ...input };
+        return subView(s);
+      }),
       list: () => reply(() => w.subscriptions.map(subView)),
       get: (name) => reply(() => subView(sub(name))),
       create: (def) =>
