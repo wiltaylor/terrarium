@@ -1843,6 +1843,14 @@ a.chip.card-link:hover {
 .text-markdown { min-width: 0; max-width: 100%; contain: inline-size; overflow-wrap: anywhere; white-space: normal; }
 .text-markdown .prose > :first-child { margin-top: 0; }
 .text-markdown .prose > :last-child { margin-bottom: 0; }
+.comm-block { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 12px 0; }
+.comm-title { font-weight: 600; margin-bottom: 12px; }
+.comm-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 8px 0; min-width: 0; }
+.comm-meta { color: var(--muted); font-size: 0.85em; overflow-wrap: anywhere; }
+.comm-chat { display: flex; flex-direction: column; }
+.comm-chat > .comm-item { max-width: 90%; align-self: flex-start; }
+.comm-chat > .comm-sent, .comm-chat > .comm-draft { align-self: flex-end; }
+.comm-draft { border-style: dashed; }
 .prose pre { max-width: 100%; overflow-x: auto; padding: 10px; background: var(--bg); white-space: pre; }
 .prose pre code { font-family: var(--font-mono, monospace); white-space: pre; overflow-wrap: normal; }
 .prose .code-block { min-width: 0; max-width: 100%; }
