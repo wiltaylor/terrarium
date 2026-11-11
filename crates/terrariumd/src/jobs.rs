@@ -164,7 +164,7 @@ use crate::git;
 use crate::policy;
 use crate::secrets::{self, RunDirs};
 use crate::store::board::{self, CardPatch};
-use crate::store::jobs::{self, BatchCard, Job, JobEnd, JobKind};
+use crate::store::jobs::{self, BatchCard, Job, JobEnd, JobKind, JobState};
 use crate::store::mail::{self, Address, Outgoing};
 use crate::store::{repos, targets};
 

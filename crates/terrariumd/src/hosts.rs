@@ -181,7 +181,24 @@ struct Slot {
     events: u64,
     terminal: bool,
     ended_at: Option<i64>,
+    output_events: VecDeque<(u64, usize)>,
+    replay_start: u64,
     restored: Option<mpsc::UnboundedReceiver<SessionEvent>>,
+}
+
+impl Slot {
+    fn prune_count(&self) -> usize {
+        let mut bytes: usize = self.output_events.iter().map(|(_, bytes)| bytes).sum();
+        let mut count = self.output_events.len();
+        let mut prune = 0;
+        for (_, len) in &self.output_events {
+            if bytes <= crate::executor::SESSION_BUFFER && count <= 4096 { break }
+            bytes -= len;
+            count -= 1;
+            prune += 1;
+        }
+        prune
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -327,7 +344,17 @@ impl HostRegistry {
             };
             for (id, saved) in saved.sessions {
                 let (tx, rx) = mpsc::unbounded_channel();
-                for (_, ev) in journal.scan::<SessionEvent>(&format!("event/{host}/{id}/"))? {
+                let mut output_events = VecDeque::new();
+                let mut replay_bytes = 0;
+                for (key, ev) in journal.scan::<SessionEvent>(&format!("event/{host}/{id}/"))? {
+                    if let SessionEvent::Data { stream, bytes } = &ev {
+                        replay_bytes += bytes.len() as u64;
+                        if matches!(stream, StreamTag::Stdout | StreamTag::Stderr) {
+                            let seq = key.rsplit('/').next().and_then(|seq| seq.parse().ok())
+                                .ok_or_else(|| ApiError::internal("bad replay event sequence"))?;
+                            output_events.push_back((seq, bytes.len()));
+                        }
+                    }
                     let _ = tx.send(ev);
                 }
                 entry.sessions.insert(
@@ -339,6 +366,8 @@ impl HostRegistry {
                         events: saved.events,
                         terminal: saved.terminal,
                         ended_at: saved.ended_at,
+                        output_events,
+                        replay_start: saved.received.saturating_sub(replay_bytes),
                         restored: Some(rx),
                     },
                 );
@@ -409,7 +438,12 @@ impl HostRegistry {
         if let Some((key, id)) = binding {
             values.push((format!("bound/{key}"), json!((host, id))));
         }
-        journal.save_many(&values)
+        let removed: Vec<_> = event.into_iter().flat_map(|(id, _)| {
+            let slot = &entry.sessions[&id];
+            slot.output_events.iter().take(slot.prune_count())
+                .map(move |(seq, _)| format!("event/{host}/{id}/{seq:020}"))
+        }).collect();
+        journal.replace(&values, &removed, &[])
     }
 
     /// Forget an explicitly closed or expired exec and its replay together.
@@ -516,21 +550,18 @@ impl HostRegistry {
 
     /// Claim the replay channel of a session from the previous daemon.
     pub fn reattach(self: &Arc<Self>, host: &str, id: SessionId) -> Option<HostSession> {
-        let rx = self
-            .lock()
-            .get_mut(host)?
-            .sessions
-            .get_mut(&id)?
-            .restored
-            .take()?;
+        let mut entries = self.lock();
+        let slot = entries.get_mut(host)?.sessions.get_mut(&id)?;
+        let rx = slot.restored.take()?;
+        let start = slot.replay_start;
         Some(HostSession {
             registry: self.clone(),
             host: host.to_owned(),
             id,
             rx,
             finished: false,
-            consumed: 0,
-            acked: 0,
+            consumed: start,
+            acked: start,
         })
     }
 
@@ -790,6 +821,8 @@ impl HostRegistry {
                 events: 0,
                 terminal: false,
                 ended_at: None,
+                output_events: VecDeque::new(),
+                replay_start: 0,
                 restored: None,
             },
         );
@@ -1006,9 +1039,14 @@ impl HostRegistry {
         if let SessionEvent::Data { bytes, .. } = &event {
             s.received += bytes.len() as u64;
         }
+        let output = matches!(&event, SessionEvent::Data { stream: StreamTag::Stdout | StreamTag::Stderr, .. });
+        if output && let SessionEvent::Data { bytes, .. } = &event {
+            s.output_events.push_back((s.events, bytes.len()));
+        }
         if self.persist(host, entry, Some((id, &event))).is_err() {
             let s = entry.sessions.get_mut(&id).unwrap();
             (s.received, s.held, s.events, s.terminal, s.ended_at) = old;
+            if output { s.output_events.pop_back(); }
             if let Some(c) = &entry.conn {
                 let _ = c.tx.send(Outgoing::Close(None));
             }
@@ -1019,6 +1057,9 @@ impl HostRegistry {
             );
             return false;
         }
+        let s = entry.sessions.get_mut(&id).unwrap();
+        let prune = s.prune_count();
+        s.output_events.drain(..prune);
         let _ = entry.sessions[&id].tx.send(event);
         true
     }
@@ -2123,6 +2164,34 @@ mod tests {
             },
         );
         reg
+    }
+
+    #[tokio::test]
+    async fn reconnect_journal_bounds_output_tail_without_losing_exit_or_resume_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&db, dir.path()).unwrap();
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore(dir.path()).unwrap();
+        let session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let id = session.id();
+        let chunk = crate::executor::SESSION_BUFFER / 4;
+        for byte in 0..6 {
+            reg.on_data("lab1", DataFrame::new(id, StreamTag::Stdout, vec![byte; chunk]));
+        }
+        reg.on_session_frame("lab1", HostFrame::Exit { session: id, code: Some(23), signal: None, reason: ExitReason::Exited });
+        drop(session);
+        drop(reg);
+        let restored = Arc::new(HostRegistry::default());
+        restored.restore(dir.path()).unwrap();
+        assert_eq!(restored.lock()["lab1"].sessions[&id].received, (6 * chunk) as u64);
+        let mut session = restored.reattach("lab1", id).unwrap();
+        assert_eq!(session.consumed, (2 * chunk) as u64);
+        for byte in 2..6 {
+            assert_eq!(session.recv().await, Some(SessionEvent::Data { stream: StreamTag::Stdout, bytes: vec![byte; chunk] }));
+        }
+        assert!(matches!(session.recv().await, Some(SessionEvent::Exit { code: Some(23), .. })));
+        assert_eq!(session.consumed, (6 * chunk) as u64);
     }
 
     #[tokio::test]
