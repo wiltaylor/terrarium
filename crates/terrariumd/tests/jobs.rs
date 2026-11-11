@@ -3715,9 +3715,8 @@ async fn ordinary_jobs_stay_off_a_protected_release_target() {
     let validate = move |branch: &'static str| async move {
         let head = l.branch(branch, "next", &[("OK", "yes\n")]);
         let card = l.card(branch, branch).await;
-        let r = l
-            .td
-            .post_as(
+        let r =
+            l.td.post_as(
                 &l.w1,
                 &format!("/api/cards/{card}/validate"),
                 json!({"commit": head}),
@@ -3784,9 +3783,8 @@ async fn a_target_write_read_before_the_protection_is_refused_at_its_write() {
     let rule = "release target runs release jobs only";
     let l = &lab;
     let protect = move |release: &'static str| async move {
-        let r = l
-            .td
-            .put(
+        let r =
+            l.td.put(
                 "/api/projects/p/delivery",
                 json!({"target": "p-box", "recipe": "true", "release_target": release}),
             )
