@@ -6,6 +6,7 @@
 
 import { Marked, type Tokens } from "marked";
 import emoji from "./emoji.json";
+import { highlightCode } from "./highlight";
 
 export type WikiTarget =
   | { kind: "page"; project: string; path: string }
@@ -222,7 +223,8 @@ export function renderWiki(src: string, opts: RenderOptions): string {
         // A DB query block (docs/api.md §27): the component reads the query as text from the attribute.
         if (lang === "db") return `<div class="db-embed" data-db-query="${esc(dbQueryText(token.text))}"></div>\n`;
         const cls = lang ? ` class="language-${esc(lang.split(/\s/)[0]!)}"` : "";
-        return `<pre><code${cls}>${esc(token.text)}</code></pre>\n`;
+        const highlighted = highlightCode(token.text, lang.split(/\s/)[0]!.toLowerCase());
+        return `<pre><code${cls}>${highlighted ?? esc(token.text)}</code></pre>\n`;
       },
       link(token: Tokens.Link) {
         const text = this.parser.parseInline(token.tokens);
