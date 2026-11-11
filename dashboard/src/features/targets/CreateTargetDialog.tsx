@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Define a target (docs/api.md §17.2): `POST /api/targets`. The scope is
 // the selected project by default; "global" is an explicit choice. The
 // daemon answers `403 forbidden` when the viewer may not define a target in
@@ -9,7 +10,7 @@
 import { createResource, For, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Target, TargetKind } from "../../api/types";
-import { api, projects } from "../../stores";
+
 import { capSentence } from "../../lib/target-runtime";
 import { createCreateTargetDialog, GLOBAL, LAB_SOURCES, showsField, type CreateOutcome, type CreateTargetForm, type LIMIT_FIELDS } from "./create";
 import { CredentialSelect } from "../secrets/CredentialSelect";
@@ -17,6 +18,7 @@ import { CredentialSelect } from "../secrets/CredentialSelect";
 const KINDS: readonly TargetKind[] = ["docker", "vmlab", "host", "ssh", "vnc", "rdp", "desktop"];
 
 export function CreateTargetDialog(props: { project: string | null; onClose: () => void; onCreated: (t: Target) => void }) {
+  const { api, projects } = useInstance();
   const dlg = createCreateTargetDialog(api, props.project);
   const f = dlg.form;
   const shows = (k: Parameters<typeof showsField>[1]) => showsField(f().kind, k, f().labSource);

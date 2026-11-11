@@ -7,7 +7,7 @@ import { allHome, type HomeCard } from "../../api/home";
 const home = { cards: vi.fn(), monitors: vi.fn(), pipelines: vi.fn() };
 const open = vi.fn();
 let refresh: (e: { kind: string }) => void;
-vi.mock("../../stores", () => ({ api: { home }, cardPeek: { open }, projects: { projects: () => [{ name: "one" }, { name: "two" }] }, events: { on: (fn: typeof refresh) => { refresh = fn; return () => {}; } } }));
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({ api: { home }, cardPeek: { open }, projects: { projects: () => [{ name: "one" }, { name: "two" }] }, events: { on: (fn: typeof refresh) => { refresh = fn; return () => {}; } } })); });
 vi.mock("@solidjs/router", () => ({ A: (p: { children: unknown }) => p.children }));
 const { HomeBoard } = await import("./HomeBoard");
 let dispose: (() => void) | undefined;

@@ -1,7 +1,9 @@
+import { useInstance } from "../../instance";
 // The Wiki tab of the knowledge screen (app/nav.ts KNOWLEDGE_TABS): the page
 // tree and the page of the URL (/p/:project/knowledge/wiki/*path).
 
-import { A, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createMemo, createResource, createSignal, For, Match, Show, Switch, type JSX } from "solid-js";
 import { Markdown } from "../../components/Markdown";
 import { Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";
@@ -10,8 +12,8 @@ import { ago, humanize } from "../../lib/format";
 import { renderWiki, splitFrontMatter } from "../../lib/markdown";
 import { isMissingEndpoint } from "../../api/http";
 import type { WikiPage as Page } from "../../api/types";
-import { api, projects } from "../../stores";
-import { bookmarks } from "../../stores";
+
+
 import { bookmarkAddError } from "../../stores/bookmarks";
 import { buildTree, type TreeNode } from "./tree";
 
@@ -51,6 +53,7 @@ function Tree(props: { nodes: TreeNode[]; project: string; current: string }): J
 export const wikiHref = (project: string, path: string) => `/p/${encodeURIComponent(project)}/knowledge/wiki/${path.split("/").map(encodeURIComponent).join("/")}`;
 
 export default function WikiPage() {
+  const { api, projects, bookmarks } = useInstance();
   const params = useParams<{ project: string; path?: string }>();
   const path = () => (params.path && params.path.length ? decodeURIComponent(params.path) : "index");
   const bookmarkUrl = () => wikiHref(params.project, path());
@@ -285,6 +288,7 @@ export default function WikiPage() {
 
 /** No page at this path yet: offer to create it. */
 function NewPage(props: { project: string; path: string; onCreated: (p: Page) => void }) {
+  const { api } = useInstance();
   const [body, setBody] = createSignal(`# ${props.path.split("/").pop()}\n`);
   const [summary, setSummary] = createSignal("Create page");
   const [error, setError] = createSignal<unknown>(null);

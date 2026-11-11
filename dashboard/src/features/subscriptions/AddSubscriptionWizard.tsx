@@ -1,3 +1,5 @@
+import { InstanceAnchor } from "../../instance/navigation";
+import { useInstance } from "../../instance";
 // Add subscription wizard (PLAN §16.1, docs/api.md §16.4). One path per kind.
 // The state machine is in ./wizard.ts. The login terminal is operator-only;
 // the daemon tears it down on completion or after ten minutes. Closing the
@@ -10,7 +12,7 @@ import { Terminal } from "../../components/Terminal";
 import { isLocalOnly } from "../../components/UsageTile";
 import { CopyButton, ErrorBanner, Modal, useNow } from "../../components/ui";
 import { humanize, orderWindows, subscriptionTitle, windowLabel } from "../../lib/format";
-import { api, subscriptions } from "../../stores";
+
 import {
   apiKeyBody,
   countdown,
@@ -46,7 +48,7 @@ export const PATHS: { path: WizardPath; title: string; detail: string }[] = [
   { path: "claude", title: "Claude Code", detail: "Anthropic plan. Runs claude auth login; paste the code back." },
   { path: "codex", title: "Codex", detail: "ChatGPT plan. Device code with codex login --device-auth." },
   { path: "copilot", title: "Copilot", detail: "GitHub plan. Device code with copilot login --device-code." },
-  { path: "api_key", title: "API key", detail: "Amazon Bedrock (Claude Code), Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, Z.ai (GLM), Moonshot, or a GitHub PAT. pi uses API keys only." },
+  { path: "api_key", title: "API key", detail: "Amazon Bedrock or Google Cloud Vertex AI (Claude Code), Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, Z.ai (GLM), Moonshot, or a GitHub PAT. pi uses API keys only." },
   { path: "selfhosted", title: "Self-hosted model", detail: "Your own model server (vLLM, Ollama, llama.cpp, SGLang): OpenAI or Anthropic API style, the models, and the limits." },
   { path: "define", title: "Define only", detail: "Write the definition now; log in or add a key later." },
 ];
@@ -65,6 +67,7 @@ const STATE_CHIP: Record<LoginSession["state"], string> = {
 };
 
 export function AddSubscriptionWizard(props: { path?: WizardPath; setup?: WizardSetup; onClose: () => void }) {
+  const { api, subscriptions } = useInstance();
   const [state, setState] = createSignal<WizardState>(initialWizard(props.path, props.setup));
   const [error, setError] = createSignal<unknown>(null);
   const send = (a: WizardAction) => setState((s) => wizardReduce(s, a));
@@ -248,6 +251,7 @@ function LoginSetup(props: { kind: WizardLogin; setup: WizardSetup; onSetup: (s:
 }
 
 function LiveLogin(props: { kind: WizardLogin; session: LoginSession; onError: (e: unknown) => void; onCancel: () => void }) {
+  const { api } = useInstance();
   const now = useNow(1000);
   const [code, setCode] = createSignal("");
   const [sent, setSent] = createSignal(false);
@@ -289,9 +293,9 @@ function LiveLogin(props: { kind: WizardLogin; session: LoginSession; onError: (
       </Show>
       <Show when={props.session.url} fallback={<p class="muted small">Waiting for the login URL in the terminal…</p>}>
         <div class="copy-row">
-          <a href={props.session.url} target="_blank" rel="noopener noreferrer" class="ellipsis">
+          <InstanceAnchor href={props.session.url} target="_blank" rel="noopener noreferrer" class="ellipsis">
             {props.session.url}
-          </a>
+          </InstanceAnchor>
           <CopyButton text={props.session.url!} label="Copy URL" />
         </div>
       </Show>
@@ -339,11 +343,13 @@ function LiveLogin(props: { kind: WizardLogin; session: LoginSession; onError: (
 }
 
 function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (name: string) => void }) {
+  const { api } = useInstance();
   const [provider, setProvider] = createSignal(props.setup.provider ?? "openrouter");
   const [name, setName] = createSignal(props.setup.name ?? `${props.setup.provider ?? "openrouter"}-key`);
   const [key, setKey] = createSignal("");
   const [keyId, setKeyId] = createSignal("");
-  const [region, setRegion] = createSignal("us-east-1");
+  const [region, setRegion] = createSignal(props.setup.provider === "gcp" ? "us-east5" : "us-east-1");
+  const [projectId, setProjectId] = createSignal("");
   const [cloudModels, setCloudModels] = createSignal<Record<string, string>>({});
   const [baseUrl, setBaseUrl] = createSignal("");
   const [plan, setPlan] = createSignal(defaultPlan(props.setup.provider ?? "openrouter"));
@@ -357,7 +363,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
     setBusy(true);
     try {
       const n = name().trim();
-      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models(), keyId: keyId(), region: region(), cloudModels: cloudModels() }));
+      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models(), keyId: keyId(), region: region(), projectId: projectId(), cloudModels: cloudModels() }));
       setKey("");
       setKeyId("");
       props.onSaved(n);
@@ -389,6 +395,9 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
               setProvider(e.currentTarget.value);
               setKey("");
               setKeyId("");
+              setRegion(e.currentTarget.value === "gcp" ? "us-east5" : "us-east-1");
+              setProjectId("");
+              setCloudModels({});
               setPlan(defaultPlan(e.currentTarget.value));
               if (!fixedName) setName(`${e.currentTarget.value}-key`);
             }}
@@ -401,10 +410,36 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
           <input value={name()} onInput={(e) => setName(e.currentTarget.value)} required disabled={fixedName} />
         </label>
       </div>
-      <label>
+      <Show when={provider() === "gcp"} fallback={<label>
         {provider() === "bedrock" ? "AWS secret access key" : provider() === "github" ? "Fine-grained PAT (Copilot Requests permission)" : "API key"}
         <input type="password" value={key()} onInput={(e) => setKey(e.currentTarget.value)} autocomplete="off" required />
-      </label>
+      </label>}>
+        <label>Service-account JSON file
+          <input type="file" accept=".json,application/json" onChange={async (e) => {
+            const file = e.currentTarget.files?.[0];
+            if (!file) return;
+            try {
+              if (file.size > 65536) throw new Error("The service-account JSON file is too large.");
+              const text = await file.text();
+              if (provider() === "gcp") setKey(text);
+            } catch (err) { setError(err); }
+          }} />
+        </label>
+        <label>Service-account JSON (or paste here)
+          <textarea value={key()} onInput={(e) => setKey(e.currentTarget.value)} autocomplete="off" spellcheck={false} rows={4} required />
+        </label>
+        <label>Google Cloud project ID
+          <input value={projectId()} onInput={(e) => setProjectId(e.currentTarget.value)} required />
+        </label>
+        <label>Vertex region
+          <input value={region()} onInput={(e) => setRegion(e.currentTarget.value)} placeholder="us-east5, global, us, or eu" required />
+        </label>
+        <For each={["opus", "sonnet", "haiku"]}>{(tier) => (
+          <label>{tier} Vertex model ID (optional override)
+            <input value={cloudModels()[tier] ?? ""} onInput={(e) => setCloudModels({ ...cloudModels(), [tier]: e.currentTarget.value })} />
+          </label>
+        )}</For>
+      </Show>
       <Show when={provider() === "bedrock"}>
         <label>AWS access key ID
           <input type="password" value={keyId()} onInput={(e) => setKeyId(e.currentTarget.value)} autocomplete="off" required />
@@ -461,6 +496,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
 }
 
 function DefineForm(props: { onBack: () => void; onSaved: (name: string) => void }) {
+  const { api } = useInstance();
   const [name, setName] = createSignal("");
   const [provider, setProvider] = createSignal("anthropic");
   const [plan, setPlan] = createSignal("");
@@ -541,6 +577,7 @@ function DefineForm(props: { onBack: () => void; onSaved: (name: string) => void
 }
 
 function DoneStep(props: { name: string; onClose: () => void }) {
+  const { api } = useInstance();
   const [sub] = createResource(() => props.name, (n) => api.subscriptions.get(n));
   return (
     <div class="stack">
@@ -595,6 +632,7 @@ function DoneStep(props: { name: string; onClose: () => void }) {
  * the form has one (`POST .../api-key`).
  */
 function SelfHostedSetup(props: { onBack: () => void; onSaved: (name: string) => void }) {
+  const { api } = useInstance();
   const [f, setF] = createSignal<SelfHostedForm>(emptySelfHostedForm());
   const [error, setError] = createSignal<unknown>(null);
   const [fetchNote, setFetchNote] = createSignal<string | null>(null);

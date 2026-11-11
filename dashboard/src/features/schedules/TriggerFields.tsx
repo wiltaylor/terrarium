@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The spec part of the trigger dialog (docs/api.md §19.4): the kinds with
 // suggestions, the match rules, the optional dedupe and escalation, and
 // max_per_hour. The state and the mapping to the spec are in ./form and
@@ -5,12 +6,13 @@
 
 import { For, Index, Show } from "solid-js";
 import type { MatchOp } from "../../api/types";
-import { agents, projects } from "../../stores";
+
 import type { ScheduleDialogState } from "./form";
 import type { FieldKit } from "./fields";
 import { KIND_SUGGESTIONS, MATCH_OPS, PATH_SUGGESTIONS, splitList, TEMPLATE_PLACEHOLDERS } from "./trigger";
 
 export function TriggerSpecFields(props: { dlg: ScheduleDialogState; kit: FieldKit }) {
+  const { projects, agents } = useInstance();
   const dlg = props.dlg;
   const f = dlg.form;
   const { field, text, recipient } = props.kit;

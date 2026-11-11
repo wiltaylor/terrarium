@@ -2090,6 +2090,30 @@ before the request, as for the probe. The daemon never refreshes a token.
 
 ### Cloud providers for Claude Code: from docs, not verified live
 
+**Vertex setup (TER-632).** Rechecked the Claude Code
+[Vertex documentation](https://code.claude.com/docs/en/google-vertex-ai.md)
+on 2026-11-11. Enable the Vertex AI API (`aiplatform.googleapis.com`), enable
+the Claude models in Model Garden, and give a dedicated service account the
+Vertex AI User role (`roles/aiplatform.user`) on the request project. Download
+its JSON key. Terrarium stores the key separately from subscription settings
+and delivers it to the sandbox only through the credential env protocol as a
+0600 file. `GOOGLE_APPLICATION_CREDENTIALS` names that file, never the JSON.
+
+The Vertex wizard asks for the project, region (`us-east5` by default), and
+JSON key. It pins `opus` to `claude-opus-5-5`, `sonnet` to
+`claude-sonnet-4-6`, and `haiku` to `claude-haiku-4-5@20251001`. Model access
+and availability vary by region. Override the IDs when your project needs a
+different model. Saving from the wizard tests a one-output-token Haiku request
+before writing the credential or settings. This bills a small number of tokens.
+An authentication or model-access failure leaves the previous values intact.
+
+The check exchanges a short-lived signed service-account assertion at Google's
+fixed OAuth endpoint and invokes the canonical Vertex endpoint. It refuses a
+custom `cloud.base_url` without sending a request. Redirects are disabled, the
+check is time-bounded, and upstream response bodies are not shown in errors.
+There is no live-cloud proof yet: unit and mocked tests do not prove access to
+an operator's Google Cloud account. A real Claude Code turn remains manual.
+
 Bedrock setup (TER-631, docs rechecked 2026-11-11): the API-key wizard
 accepts an IAM access key pair and region. It tests the haiku profile before
 saving with one paid `InvokeModel` call (`max_tokens: 1`). A failed test saves

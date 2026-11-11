@@ -11,7 +11,7 @@ const query = vi.fn(async () => {
   if (answer instanceof Error) throw answer;
   return answer;
 });
-vi.mock("../stores", () => ({ api: { db: { query: (...a: unknown[]) => (query as (...x: unknown[]) => unknown)(...a) } }, events: { on: () => () => {} } }));
+vi.mock("../stores", async () => { const { instanceTestStores } = await import("../test/instance"); return instanceTestStores(({ api: { db: { query: (...a: unknown[]) => (query as (...x: unknown[]) => unknown)(...a) } }, events: { on: () => () => {} } })); });
 const { DbEmbed } = await import("./DbEmbed");
 
 const rec = (id: string, data: Record<string, unknown>) => ({ id, project: "p", type: "bug", data, revision: 1, created_by: "operator", created_by_name: "operator", updated_by: "operator", updated_by_name: "operator", created_at: "2026-10-01T00:00:00.000Z", updated_at: "2026-10-01T00:00:00.000Z" });

@@ -1,8 +1,10 @@
+import { useInstance } from "../../instance";
 import { createResource } from "solid-js";
-import { api } from "../../stores";
+
 
 /** A preference lookup must not prevent composing when an older daemon lacks it. */
 export function useDefaultAgent() {
+  const { api } = useInstance();
   const [preference] = createResource(async () => {
     try {
       return (await api.account.preferences()).default_agent ?? "";

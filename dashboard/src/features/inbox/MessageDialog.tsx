@@ -1,13 +1,15 @@
+import { useInstance } from "../../instance";
 // Message a lead through a dedicated request thread (TER-687).
 
 import { createSignal, For } from "solid-js";
 import type { Thread } from "../../api/types";
 import { ErrorBanner, Modal } from "../../components/ui";
-import { agents, api } from "../../stores";
+
 import { ASK_TEXT_MAX, messageBody } from "./model";
 import { useDefaultAgent } from "./defaultAgent";
 
 export function MessageDialog(props: { onClose: () => void; onSent: (m: Thread) => void }) {
+  const { agents, api } = useInstance();
   const defaultAgent = useDefaultAgent();
   const [picked, setTo] = createSignal<string>();
   const to = () => picked() ?? (choices().includes(defaultAgent() ?? "") ? defaultAgent()! : "");

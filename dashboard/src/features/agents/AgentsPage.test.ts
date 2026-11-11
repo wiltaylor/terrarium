@@ -17,13 +17,13 @@ const list = [
   { id: "A2", name: "worker", project: "my app", harness: "codex", status: "working", roles: [], paused: false },
 ];
 
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   agents: { inProject: (p: string) => list.filter((a) => a.project === p), byId: () => undefined, refresh: async () => {}, state: { error: null, loading: false } },
   api: { agents: { list: async () => [{ ...list[0], id: "E1", name: "ter-1", ephemeral: true }] } },
   events: { on: () => () => {} },
   leases: { loadAll: async () => {} },
   pins: { isPinned: (id: string) => pinned().includes(id), toggle },
-}));
+})); });
 vi.mock("../../components/Leases", () => ({ LeaseChips: () => null }));
 vi.mock("../../components/HoldBadge", () => ({ HoldBadge: () => null }));
 vi.mock("./NewAgentDialog", () => ({

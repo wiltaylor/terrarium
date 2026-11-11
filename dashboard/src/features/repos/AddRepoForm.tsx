@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Add repo form (`POST /api/projects/{name}/repos`, project_admin, docs/api.md §5).
 // The Repos page shows it in a card; the "+" of the Repos node of the sidebar
 // tree shows it in a dialog (AddRepoDialog). Both put the new repo into the
@@ -6,7 +7,7 @@
 import { createSignal } from "solid-js";
 import type { NewRepo, Repo } from "../../api/types";
 import { ErrorBanner, Modal } from "../../components/ui";
-import { api, repos } from "../../stores";
+
 
 /** The request body of a form: the URL, and only the other fields that have text. */
 export function newRepoBody(f: NewRepo): NewRepo {
@@ -17,6 +18,7 @@ export function newRepoBody(f: NewRepo): NewRepo {
 
 /** Attach a repo. Attaching does not clone. `bare` drops the card and the heading (for a dialog). */
 export function AddRepoForm(props: { project: string; onAdded: (repo: Repo) => void; bare?: boolean }) {
+  const { api, repos } = useInstance();
   const [form, setForm] = createSignal<NewRepo>({ url: "" });
   const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal(false);

@@ -10,7 +10,7 @@ import { waitFor } from "../../test/wait";
 import type { Schedule } from "../../api/types";
 
 const run = vi.fn();
-vi.mock("../../stores", () => ({ api: { schedules: { run } } }));
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({ api: { schedules: { run } } })); });
 vi.mock("@solidjs/router", () => ({
   A: (p: { href: string; children?: unknown }) => {
     const a = document.createElement("a");
