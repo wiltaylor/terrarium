@@ -2234,7 +2234,9 @@ pub(crate) fn create_card_with_author(
     )?;
     if let Some(wait) = &new.wait {
         if !new.depends_on.is_empty() {
-            return Err(ApiError::invalid("wait and depends_on are mutually exclusive"));
+            return Err(ApiError::invalid(
+                "wait and depends_on are mutually exclusive",
+            ));
         }
         card_waits::set(t, actor, &id, wait)?;
     } else {
@@ -2434,7 +2436,9 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
     let card = find_row(t, id)?;
     policy::write_project(actor, &card.project)?;
     if p.wait.is_some() && p.depends_on.is_some() {
-        return Err(ApiError::invalid("wait and depends_on are mutually exclusive"));
+        return Err(ApiError::invalid(
+            "wait and depends_on are mutually exclusive",
+        ));
     }
     let mut p = p;
     // `add_labels` and `remove_labels` change the current labels in this

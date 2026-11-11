@@ -77,9 +77,18 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             "/cards/{id}/wait-on",
             get(show_wait).put(set_wait).delete(clear_wait),
             &[
-                (axum::http::Method::GET, super::link_registry::Access::OperatorOnly),
-                (axum::http::Method::PUT, super::link_registry::Access::OperatorOnly),
-                (axum::http::Method::DELETE, super::link_registry::Access::OperatorOnly),
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::PUT,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::OperatorOnly,
+                ),
             ],
         )
         .route(
@@ -252,25 +261,44 @@ async fn active_cards(
 }
 
 async fn show_wait(
-    State(state): State<Shared>, actor: Actor, Path(id): Path<String>,
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(state.db.read(move |c| card_waits::view(c, &actor, &id)).await?))
+    Ok(Json(
+        state
+            .db
+            .read(move |c| card_waits::view(c, &actor, &id))
+            .await?,
+    ))
 }
 
 async fn set_wait(
-    State(state): State<Shared>, actor: Actor, Path(id): Path<String>,
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
     ApiJson(wait): ApiJson<card_waits::Wait>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(state.db.write(actor.label(), move |t| {
-        card_waits::set(t, &actor, &id, &wait)?;
-        card_waits::view(t, &actor, &id)
-    }).await?))
+    Ok(Json(
+        state
+            .db
+            .write(actor.label(), move |t| {
+                card_waits::set(t, &actor, &id, &wait)?;
+                card_waits::view(t, &actor, &id)
+            })
+            .await?,
+    ))
 }
 
 async fn clear_wait(
-    State(state): State<Shared>, actor: Actor, Path(id): Path<String>,
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    state.db.write(actor.label(), move |t| card_waits::clear(t, &actor, &id)).await?;
+    state
+        .db
+        .write(actor.label(), move |t| card_waits::clear(t, &actor, &id))
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

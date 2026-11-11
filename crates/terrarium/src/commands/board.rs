@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 
 use super::{delimited, event_line, print_table, set_list, set_opt, set_replace_list};
 use crate::api::{CliError, query};
-use crate::cli::{BoardCmd, CardCmd, CardEditArgs, CardFilesCmd, CardNewArgs, CardWaitArgs, CardWaitCmd, ColumnCmd};
+use crate::cli::{
+    BoardCmd, CardCmd, CardEditArgs, CardFilesCmd, CardNewArgs, CardWaitArgs, CardWaitCmd,
+    ColumnCmd,
+};
 use crate::commands::projects::project_path;
 use crate::commands::system::as_items;
 use crate::ctx::{Ctx, Waiter};
@@ -672,7 +675,8 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                     ctx.emit(&value, print_wait)
                 }
                 CardWaitCmd::Set { wait } => {
-                    let value = wait_body(wait)?.ok_or_else(|| CliError::usage("give at least one --on CARD:TARGET"))?;
+                    let value = wait_body(wait)?
+                        .ok_or_else(|| CliError::usage("give at least one --on CARD:TARGET"))?;
                     let value = ctx.api.put(&path, value).await?;
                     ctx.emit(&value, print_wait)
                 }
@@ -743,36 +747,76 @@ async fn edit(ctx: &Ctx, a: &CardEditArgs) -> anyhow::Result<()> {
 }
 
 fn wait_body(a: &CardWaitArgs) -> anyhow::Result<Option<Value>> {
-    if a.on.is_empty() { return Ok(None); }
+    if a.on.is_empty() {
+        return Ok(None);
+    }
     let mut dependencies = Vec::new();
     for on in &a.on {
-        let (card, target) = on.rsplit_once(':').ok_or_else(|| CliError::usage("use --on CARD:TARGET or PROJECT:CARD:TARGET"))?;
-        if card.is_empty() || target.is_empty() || card.split(':').any(str::is_empty) || card.matches(':').count() > 1 {
-            return Err(CliError::usage("use --on CARD:TARGET or PROJECT:CARD:TARGET"));
+        let (card, target) = on
+            .rsplit_once(':')
+            .ok_or_else(|| CliError::usage("use --on CARD:TARGET or PROJECT:CARD:TARGET"))?;
+        if card.is_empty()
+            || target.is_empty()
+            || card.split(':').any(str::is_empty)
+            || card.matches(':').count() > 1
+        {
+            return Err(CliError::usage(
+                "use --on CARD:TARGET or PROJECT:CARD:TARGET",
+            ));
         }
         dependencies.push(json!({"card": card, "target": target}));
     }
-    Ok(Some(json!({"dependencies": dependencies, "mode": if a.any {"any"} else {"all"},
-        "action": {"move_to": a.move_to, "wake": a.wake, "comment": null}})))
+    Ok(Some(
+        json!({"dependencies": dependencies, "mode": if a.any {"any"} else {"all"},
+        "action": {"move_to": a.move_to, "wake": a.wake, "comment": null}}),
+    ))
 }
 
 fn add_wait(body: &mut Value, a: &CardWaitArgs, deps: &[String]) -> anyhow::Result<()> {
     if let Some(wait) = wait_body(a)? {
-        if !deps.is_empty() { return Err(CliError::usage("--on and --depends-on are mutually exclusive")); }
+        if !deps.is_empty() {
+            return Err(CliError::usage(
+                "--on and --depends-on are mutually exclusive",
+            ));
+        }
         body["wait"] = wait;
     }
     Ok(())
 }
 
 fn print_wait(ctx: &Ctx, wait: &Value) {
-    if wait.is_null() { return; }
-    ctx.line(format!("wait: {} [{}]", field(wait, "mode"), if wait["met_at"].is_string() {"met"} else {"pending"}));
-    for dep in as_items(&wait["dependencies"]) {
-        ctx.line(format!("  {}:{} [{}]", field(dep, "card"), field(dep, "target"),
-            match dep["met"].as_bool() { Some(true) => "met", Some(false) => "pending", None => "hidden" }));
+    if wait.is_null() {
+        return;
     }
-    ctx.line(format!("  action: move to {}, wake {}", field(&wait["action"], "move_to"), field(&wait["action"], "wake")));
-    if let Some(comment) = wait["action"]["comment"].as_str() { delimited(ctx, "WAIT ACTION COMMENT", comment); }
+    ctx.line(format!(
+        "wait: {} [{}]",
+        field(wait, "mode"),
+        if wait["met_at"].is_string() {
+            "met"
+        } else {
+            "pending"
+        }
+    ));
+    for dep in as_items(&wait["dependencies"]) {
+        ctx.line(format!(
+            "  {}:{} [{}]",
+            field(dep, "card"),
+            field(dep, "target"),
+            match dep["met"].as_bool() {
+                Some(true) => "met",
+                Some(false) => "pending",
+                None => "hidden",
+            }
+        ));
+    }
+    ctx.line(format!(
+        "  action: move to {}, wake {}",
+        field(&wait["action"], "move_to"),
+        field(&wait["action"], "wake")
+    ));
+    if let Some(comment) = wait["action"]["comment"].as_str() {
+        delimited(ctx, "WAIT ACTION COMMENT", comment);
+    }
 }
 
 /// Wait for a card change.

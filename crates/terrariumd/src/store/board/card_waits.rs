@@ -170,7 +170,9 @@ pub fn clear(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
     policy::write_project(actor, &card.project)?;
     not_archived(&card)?;
     if !policy::is_admin_of(actor, &card.project) && !owns(actor, &card) {
-        return Err(ApiError::forbidden("only the owner or a project admin clears a card wait"));
+        return Err(ApiError::forbidden(
+            "only the owner or a project admin clears a card wait",
+        ));
     }
     t.execute("DELETE FROM card_deps WHERE card=?1", [&card.id])?;
     t.execute("DELETE FROM card_waits WHERE card=?1", [&card.id])?;
@@ -181,11 +183,15 @@ pub fn clear(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
 pub fn view(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<serde_json::Value> {
     let card = find_row(conn, id)?;
     crate::store::threads::read_card_project(conn, actor, &card.project, None)?;
-    let Some(wait) = get(conn, &card.id)? else { return Ok(json!(null)); };
+    let Some(wait) = get(conn, &card.id)? else {
+        return Ok(json!(null));
+    };
     let mut result = json!(wait);
     let (generation, setter): (String, String) = conn.query_row(
-        "SELECT generation, setter FROM card_waits WHERE card=?1", [&card.id],
-        |r| Ok((r.get(0)?, r.get(1)?)))?;
+        "SELECT generation, setter FROM card_waits WHERE card=?1",
+        [&card.id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     result["generation"] = json!(generation);
     result["wake_recipient"] = json!(wake_recipient(conn, &card, &setter)?.key());
     let mut dependencies = Vec::new();
@@ -196,7 +202,9 @@ pub fn view(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<serde_json:
              THEN coalesce(k.role,k.name) IN ('accepted','done')
              ELSE k.name=?2 OR coalesce(k.role=?2,0) END
              FROM cards c JOIN board_columns k ON k.id=c.column_id WHERE c.id=?1",
-            params![dep.card, dep.target], |r| r.get(0))?;
+            params![dep.card, dep.target],
+            |r| r.get(0),
+        )?;
         dependencies.push(if policy::read_project(actor, &row.project).is_err() {
             json!({"card": null, "hidden": true, "met": met})
         } else {
@@ -209,7 +217,9 @@ pub fn view(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<serde_json:
 
 fn wake_recipient(conn: &Connection, row: &CardRow, setter: &str) -> ApiResult<Address> {
     let target = [row.assignee.as_deref(), Some(setter)]
-        .into_iter().flatten().filter(|a| *a != "operator")
+        .into_iter()
+        .flatten()
+        .filter(|a| *a != "operator")
         .find_map(|a| mail::resolve(conn, a, None).ok());
     match target {
         Some(to) => Ok(to),

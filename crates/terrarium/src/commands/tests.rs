@@ -19,26 +19,66 @@ const ME: &str = "01AGENTAGENTAGENTAGENTAGEN";
 #[tokio::test]
 async fn card_wait_on_commands_and_show() {
     let wait = json!({"dependencies":[{"card":"TER-1","target":"review","met":false}],"mode":"any","action":{"move_to":"ready","wake":true},"met_at":null});
-    let run = exec(true, &["card","wait-on","TER-2","set","--on","TER-1:review","--on","thevault:TV-3:done","--any","--move-to","ready","--wake"], vec![(200,wait.clone())], None).await;
+    let run = exec(
+        true,
+        &[
+            "card",
+            "wait-on",
+            "TER-2",
+            "set",
+            "--on",
+            "TER-1:review",
+            "--on",
+            "thevault:TV-3:done",
+            "--any",
+            "--move-to",
+            "ready",
+            "--wake",
+        ],
+        vec![(200, wait.clone())],
+        None,
+    )
+    .await;
     run.result.unwrap();
     assert_eq!(run.reqs[0].method, Method::Put);
     assert_eq!(run.reqs[0].path, "/api/cards/TER-2/wait-on");
-    assert_eq!(run.reqs[0].body.as_ref().unwrap()["dependencies"][1], json!({"card":"thevault:TV-3","target":"done"}));
+    assert_eq!(
+        run.reqs[0].body.as_ref().unwrap()["dependencies"][1],
+        json!({"card":"thevault:TV-3","target":"done"})
+    );
     assert!(run.out.contains("TER-1:review [pending]"));
-    let run = exec(true, &["card","wait-on","TER-2","list"], vec![(200,wait.clone())], None).await;
+    let run = exec(
+        true,
+        &["card", "wait-on", "TER-2", "list"],
+        vec![(200, wait.clone())],
+        None,
+    )
+    .await;
     run.result.unwrap();
     assert_eq!(run.reqs[0].method, Method::Get);
-    let run = exec(true, &["card","wait-on","TER-2","clear"], vec![(204,Value::Null)], None).await;
+    let run = exec(
+        true,
+        &["card", "wait-on", "TER-2", "clear"],
+        vec![(204, Value::Null)],
+        None,
+    )
+    .await;
     run.result.unwrap();
     assert_eq!(run.reqs[0].method, Method::Delete);
-    for args in [vec!["card","new","T","--on","TER-1:review"], vec!["card","edit","TER-2","--on","TER-1:review"]] {
-        let run = exec(true, &args, vec![(200,json!({"id":"TER-2"}))], None).await;
+    for args in [
+        vec!["card", "new", "T", "--on", "TER-1:review"],
+        vec!["card", "edit", "TER-2", "--on", "TER-1:review"],
+    ] {
+        let run = exec(true, &args, vec![(200, json!({"id":"TER-2"}))], None).await;
         run.result.unwrap();
         assert_eq!(run.reqs[0].body.as_ref().unwrap()["wait"]["mode"], "all");
     }
     let card = json!({"id":"TER-2","wait":wait});
-    for args in [vec!["card","show","TER-2"], vec!["--json","card","show","TER-2"]] {
-        let run = exec(true, &args, vec![(200,card.clone())], None).await;
+    for args in [
+        vec!["card", "show", "TER-2"],
+        vec!["--json", "card", "show", "TER-2"],
+    ] {
+        let run = exec(true, &args, vec![(200, card.clone())], None).await;
         run.result.unwrap();
         assert!(run.out.contains("review"));
         assert!(run.out.contains("wake"));
