@@ -12800,6 +12800,51 @@ A batch merge:
 - Any other failure (`error`) runs the batch once more with the merged
   cards, then fails each of them.
 
+The failed tests of the full suite run once more in a release validation
+(TER-683), in the recipe, so the run stays one run. The daemon takes no
+part in it: it reads nothing of it from the job log, and files no card.
+
+- The switch: `TERRARIUM_VALIDATE_CONTEXT=release` (the full suite at the
+  version cut, [release.md](release.md)), or `TERRARIUM_JOB_KIND=merge` (a
+  merge job). Either one makes `ci::validate` run the uid 1001 pass
+  (`ci::test-unprivileged`) after `ci::test`, and makes both passes rerun.
+  Without either (a card check, a validate job) nothing reruns.
+- When `ci::test` (the root pass) or `ci::test-unprivileged` (the uid 1001
+  pass) fails, `scripts/rerun_tests.py` takes the names of the failed tests
+  from the libtest output (the console output, or the libtest JSON when
+  `RESULTS_DIR` is set) and runs exactly those tests once more: the same
+  cargo command with the test names and `--exact` (and `--tests`, so no
+  doctest), or for uid 1001 the same test binary as the same uid, from the
+  same directory, with the same env and a new private HOME. With
+  `RESULTS_DIR` the rerun writes `rust-rerun.json` and
+  `rust-unprivileged-rerun.json`; `rust.json` keeps the first run.
+- Every rerun test passes: the step passes, and the suite goes on. One
+  fails again, does not run, or the rerun ends otherwise: the step fails.
+- No rerun, the step fails at once, unless every failure is a failed test.
+  The script counts each test run that cargo starts (`Running`,
+  `Doc-tests` on its stderr) or that it starts itself (uid 1001), and each
+  end: cargo itself ending with a status other than 101 (a signal or any
+  other code), a build error or any other cargo `error` line, a test run that ended
+  with a signal or an exit code other than 101, a run that has no test
+  result (a crash or a panic before `running`), a failed run with no failed
+  test result, a failed doctest, or more than 5 failed tests in the step.
+- With `RESULTS_DIR`, each step that failed writes its entry to
+  `$RESULTS_DIR/reruns.json`: `{version: 1, context, steps: [{step,
+  outcome, reason?, tests: [{name, first, rerun, tail}]}]}`, `step` `test`
+  or `test-unprivileged`, `outcome` `green`, `red` or `no_rerun` (with the
+  `reason`), `first` `failed`, `rerun` `ok`, `failed`, `missing`, or `null`
+  with no rerun, `tail` the end (1500 bytes) of the first failure's output.
+  The names and the results come from the script's own count of the runs
+  it started, never from a line that a test prints. `ci::validate` removes
+  the file when it starts.
+- The flaky-test cards come from that file:
+  `just ci::flaky-cards "$RESULTS_DIR/reruns.json" "<the run>"`
+  (`scripts/flaky_cards.py`) prints, for each test with `rerun: ok`, the
+  `terrarium` commands for its card: a comment on the open card with the
+  label `flaky-test:<hash of the name>` (not in `done`), or a new card
+  `Flaky test: <name>` in `backlog` with the labels `flaky`,
+  `flaky-test:<hash>`, `version:vnext` and `type:small`. It runs nothing.
+
 The card writes of the queue are made as the operator. Their comments
 start with `Job queue:`.
 
