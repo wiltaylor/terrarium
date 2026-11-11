@@ -164,6 +164,44 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Option<Wait>> {
     }))
 }
 
+/// Clear configuration and dependencies with exactly the setter's ownership gate.
+pub fn clear(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
+    let card = find_row(t, id)?;
+    policy::write_project(actor, &card.project)?;
+    not_archived(&card)?;
+    if !policy::is_admin_of(actor, &card.project) && !owns(actor, &card) {
+        return Err(ApiError::forbidden("only the owner or a project admin clears a card wait"));
+    }
+    t.execute("DELETE FROM card_deps WHERE card=?1", [&card.id])?;
+    t.execute("DELETE FROM card_waits WHERE card=?1", [&card.id])?;
+    card_event(t, &card, "edited", json!({"fields": ["wait"]}))
+}
+
+/// Authorized presentation. Completion is latched, dependency conditions are live.
+pub fn view(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<serde_json::Value> {
+    let card = find_row(conn, id)?;
+    crate::store::threads::read_card_project(conn, actor, &card.project, None)?;
+    let Some(wait) = get(conn, &card.id)? else { return Ok(json!(null)); };
+    let mut result = json!(wait);
+    let mut dependencies = Vec::new();
+    for dep in &wait.dependencies {
+        let row = find_row(conn, &dep.card)?;
+        if policy::read_project(actor, &row.project).is_err() {
+            dependencies.push(json!({"card": null, "target": null, "met": null}));
+            continue;
+        }
+        let met: bool = conn.query_row(
+            "SELECT c.archived = 0 AND CASE WHEN ?2 IS NULL
+             THEN coalesce(k.role,k.name) IN ('accepted','done')
+             ELSE k.name=?2 OR coalesce(k.role=?2,0) END
+             FROM cards c JOIN board_columns k ON k.id=c.column_id WHERE c.id=?1",
+            params![dep.card, dep.target], |r| r.get(0))?;
+        dependencies.push(json!({"card": dep.card, "target": dep.target, "met": met}));
+    }
+    result["dependencies"] = json!(dependencies);
+    Ok(result)
+}
+
 pub(super) fn evaluate(t: &mut Tx<'_>, id: &str, broken: bool) -> ApiResult<()> {
     let open: bool = t.query_row(
         "SELECT EXISTS(SELECT 1 FROM card_waits WHERE card=?1 AND met_at IS NULL)",

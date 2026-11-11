@@ -15,6 +15,56 @@ async fn setup() -> TestDaemon {
     td
 }
 
+#[tokio::test]
+async fn api_wait_set_show_clear_and_atomic_card_writes() {
+    let td = setup().await;
+    let dep = card(&td).await;
+    let id = card(&td).await;
+    let path = format!("/api/cards/{id}/wait-on");
+    assert!(td.get(&path).await.ok().is_null());
+    let body = json!({"dependencies":[{"card":dep,"target":"review"}],"mode":"any","action":{"wake":true}});
+    let configured = td.put(&path, body.clone()).await;
+    assert_eq!(configured.ok()["dependencies"][0]["met"], false);
+    assert_eq!(td.get(&format!("/api/cards/{id}")).await.ok()["wait"], *configured.ok());
+    td.post(&format!("/api/cards/{dep}/move"), json!({"column":"review"})).await.ok();
+    let met = td.get(&path).await;
+    assert_eq!(met.ok()["dependencies"][0]["met"], true);
+    assert!(met.ok()["met_at"].is_string());
+    td.delete(&path).await.ok();
+    assert!(td.get(&path).await.ok().is_null());
+    assert_eq!(td.get(&format!("/api/cards/{id}")).await.ok()["depends_on"], json!([]));
+    let created = td.post("/api/projects/p/cards", json!({"title":"new wait","wait":body})).await;
+    let new_id = created.ok()["id"].as_str().unwrap();
+    assert_eq!(td.get(&format!("/api/cards/{new_id}/wait-on")).await.ok()["mode"], "any");
+    td.patch(&format!("/api/cards/{id}"), json!({"wait":body})).await.ok();
+    assert_eq!(td.get(&path).await.ok()["mode"], "any");
+    let failed = td.patch(&format!("/api/cards/{id}"), json!({"title":"must roll back","wait":{"dependencies":[]}})).await;
+    assert_eq!(failed.status.as_u16(), 422);
+    assert_eq!(td.get(&format!("/api/cards/{id}")).await.ok()["title"], "wait test");
+    let conflict = td.patch(&format!("/api/cards/{id}"), json!({"depends_on":[],"wait":body})).await;
+    assert_eq!(conflict.status.as_u16(), 422);
+}
+
+#[tokio::test]
+async fn api_wait_permissions_and_cross_project_redaction() {
+    let td = setup().await;
+    let agent = td.agent("p", "worker", json!({})).await["id"].as_str().unwrap().to_owned();
+    td.post("/api/projects", json!({"name":"secret","card_prefix":"S"})).await.ok();
+    let secret = td.post("/api/projects/secret/cards", json!({"title":"private"})).await.ok()["id"].as_str().unwrap().to_owned();
+    let own = td.post_as(&agent, "/api/projects/p/cards", json!({"title":"mine"})).await.ok()["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/cards/{own}/wait-on");
+    let body = json!({"dependencies":[{"card":format!("secret:{secret}"),"target":"done"}]});
+    assert_eq!(td.put_as(&agent, &path, body.clone()).await.status.as_u16(), 403);
+    td.put(&path, body).await.ok();
+    let hidden = td.get_as(&agent, &path).await;
+    assert_eq!(hidden.ok()["dependencies"][0], json!({"card":null,"target":null,"met":null}));
+    assert_eq!(td.get_as(&agent, &format!("/api/cards/{secret}/wait-on")).await.status.as_u16(), 403);
+    let foreign = card(&td).await;
+    assert_eq!(td.put_as(&agent, &format!("/api/cards/{foreign}/wait-on"), json!({"dependencies":[{"card":own}]})).await.status.as_u16(), 403);
+    assert_eq!(td.delete_as(&agent, &format!("/api/cards/{foreign}/wait-on")).await.status.as_u16(), 403);
+    td.delete_as(&agent, &path).await.ok();
+}
+
 async fn card(td: &TestDaemon) -> String {
     td.post("/api/projects/p/cards", json!({"title":"wait test"}))
         .await

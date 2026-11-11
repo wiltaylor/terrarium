@@ -15,6 +15,7 @@ use crate::events::{self, EventFilter};
 use crate::policy;
 use crate::store::Page;
 use crate::store::accepted_heads;
+use crate::store::board::card_waits;
 use crate::store::board::{self, Board, Card, CardFilter, CardPatch, ColumnSpec, NewCard, NewLink};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
@@ -70,6 +71,15 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
                     axum::http::Method::DELETE,
                     super::link_registry::Access::Conditional,
                 ),
+            ],
+        )
+        .route(
+            "/cards/{id}/wait-on",
+            get(show_wait).put(set_wait).delete(clear_wait),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::OperatorOnly),
+                (axum::http::Method::PUT, super::link_registry::Access::OperatorOnly),
+                (axum::http::Method::DELETE, super::link_registry::Access::OperatorOnly),
             ],
         )
         .route(
@@ -241,16 +251,60 @@ async fn active_cards(
     ))
 }
 
+#[derive(Deserialize)]
+struct NewCardWait {
+    wait: Option<card_waits::Wait>,
+    #[serde(flatten)]
+    card: NewCard,
+}
+
+#[derive(Deserialize)]
+struct CardPatchWait {
+    wait: Option<card_waits::Wait>,
+    #[serde(flatten)]
+    card: CardPatch,
+}
+
+async fn show_wait(
+    State(state): State<Shared>, actor: Actor, Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(state.db.read(move |c| card_waits::view(c, &actor, &id)).await?))
+}
+
+async fn set_wait(
+    State(state): State<Shared>, actor: Actor, Path(id): Path<String>,
+    ApiJson(wait): ApiJson<card_waits::Wait>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(state.db.write(actor.label(), move |t| {
+        card_waits::set(t, &actor, &id, &wait)?;
+        card_waits::view(t, &actor, &id)
+    }).await?))
+}
+
+async fn clear_wait(
+    State(state): State<Shared>, actor: Actor, Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state.db.write(actor.label(), move |t| card_waits::clear(t, &actor, &id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn create_card(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
-    ApiJson(body): ApiJson<NewCard>,
+    ApiJson(body): ApiJson<NewCardWait>,
 ) -> ApiResult<(StatusCode, Json<Card>)> {
     let card = state
         .db
         .write(actor.label(), move |t| {
-            board::create_card(t, &actor, &name, body)
+            if body.wait.is_some() && !body.card.depends_on.is_empty() {
+                return Err(crate::error::ApiError::invalid("wait and depends_on are mutually exclusive"));
+            }
+            let card = board::create_card(t, &actor, &name, body.card)?;
+            if let Some(wait) = body.wait {
+                card_waits::set(t, &actor, &card.id, &wait)?;
+            }
+            board::get_card(t, &card.id)
         })
         .await?;
     Ok((StatusCode::CREATED, Json(card)))
@@ -267,9 +321,11 @@ async fn show(
         .read(move |c| {
             let card = board::get_card(c, &id)?;
             crate::store::threads::read_card_project(c, &who, &card.project, None)?;
-            Ok(card)
+            let wait = card_waits::view(c, &who, &card.id)?;
+            Ok((card, wait))
         })
         .await?;
+    let (card, wait) = card;
     let id = card.id.clone();
     let mut questions = state
         .db
@@ -286,6 +342,7 @@ async fn show(
     questions.retain(|q| policy::read_questions(&actor, &q.agent, &q.project).is_ok());
     let mut result = serde_json::json!(card);
     result["questions"] = serde_json::json!(questions);
+    result["wait"] = wait;
     Ok(Json(result))
 }
 
@@ -293,12 +350,19 @@ async fn update(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-    ApiJson(patch): ApiJson<CardPatch>,
+    ApiJson(patch): ApiJson<CardPatchWait>,
 ) -> ApiResult<Json<Card>> {
     let card = state
         .db
         .write(actor.label(), move |t| {
-            board::update_card(t, &actor, &id, patch)
+            if patch.wait.is_some() && patch.card.depends_on.is_some() {
+                return Err(crate::error::ApiError::invalid("wait and depends_on are mutually exclusive"));
+            }
+            let card = board::update_card(t, &actor, &id, patch.card)?;
+            if let Some(wait) = patch.wait {
+                card_waits::set(t, &actor, &card.id, &wait)?;
+            }
+            board::get_card(t, &card.id)
         })
         .await?;
     Ok(Json(card))
