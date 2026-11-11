@@ -13626,3 +13626,25 @@ and on a 10 min background interval. Remote rows include `status`,
 `auth_failed`, `pin_mismatch` and `mismatch`. Writes produce `remote.call`
 audit rows with method, path, status and duration, never bodies or keys.
 
+# Read positions
+
+`POST /api/read-positions/{kind}/{item}` is operator-only, including refusal
+of link keys. `kind` is `thread` (Inbox thread ID), `mail` (mail thread ID), or
+`card` (card ID). The item must exist. Body: `{"through":"<RFC3339 timestamp>"}`,
+the newest post timestamp in the displayed snapshot, not the browser clock.
+Future and invalid timestamps return 400. Missing items return 404.
+The response is `{"previous":null|"<timestamp>","read_at":"<timestamp>"}`.
+The previous position is returned and the position is advanced atomically,
+never backwards. Positions survive browser/device changes. The current
+daemon has one operator identity (`operator`), shared by its operator sessions.
+Storage is one indexed upsert row per operator, kind, and item, without
+per-visit events or audit rows. This does not change mail delivery/read receipts.
+
+The dashboard records the opening snapshot once per page opening, including
+card side panels, and keeps the returned previous position across live reloads.
+It inserts “New since your last visit” before the first post newer than that
+position and scrolls there, unless an explicit permalink has a scroll target.
+There is no line on a first visit or when no posts are newer. Empty conversations
+have no cursor until their first post. Posts arriving after the opening snapshot
+remain new on the next visit.
+
