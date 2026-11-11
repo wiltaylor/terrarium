@@ -57,7 +57,22 @@ async fn setup() -> World {
     }
 }
 
-async fn ask(td: &TestDaemon, agent: &str, body: Value) -> Value {
+async fn ask(td: &TestDaemon, agent: &str, mut body: Value) -> Value {
+    // Independent decisions need independent work cards. Tests of missing
+    // context use the API directly, not this successful-creation helper.
+    if body.get("card").is_none() && body.get("thread").is_none() && body["kind"] != "notice" {
+        let project = td.get(&format!("/api/agents/{agent}")).await.ok()["project"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let card = td
+            .post(
+                &format!("/api/projects/{project}/cards"),
+                json!({"title": "Question decision"}),
+            )
+            .await;
+        body["card"] = card.ok()["id"].clone();
+    }
     let r = td
         .post_as(agent, &format!("/api/agents/{agent}/questions"), body)
         .await;
@@ -66,7 +81,88 @@ async fn ask(td: &TestDaemon, agent: &str, body: Value) -> Value {
 }
 
 #[tokio::test]
-async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
+async fn questions_require_work_context_and_save_answers_on_the_card() {
+    let World { td, lead, .. } = setup().await;
+    let path = format!("/api/agents/{lead}/questions");
+    for priority in ["normal", "urgent", "critical"] {
+        for kind in ["question", "bundle"] {
+            let mut body = json!({"text": "Decision?", "kind": kind, "priority": priority});
+            if kind == "bundle" {
+                body["items"] = json!([{"text": "First?"}, {"text": "Second?"}]);
+            }
+            let r = td.post_as(&lead, &path, body).await;
+            r.err(422, "invalid");
+            assert!(
+                r.body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("--card")
+            );
+        }
+    }
+    let card = id(td
+        .post("/api/projects/p/cards", json!({"title": "Decision"}))
+        .await
+        .ok());
+    let q = ask(&td, &lead, json!({"text": "Proceed?", "card": card})).await;
+    let qid = id(&q);
+    let shown = td.get(&format!("/api/cards/{card}")).await;
+    assert_eq!(shown.body["questions"][0]["id"], qid);
+    td.post(
+        &format!("/api/questions/{qid}/answer"),
+        json!({"answer": "Proceed"}),
+    )
+    .await
+    .ok();
+    let shown = td.get(&format!("/api/cards/{card}")).await;
+    assert_eq!(shown.body["questions"][0]["status"], "answered");
+    let comments = shown.body["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 1);
+    assert!(comments[0]["body"].as_str().unwrap().contains("Proceed"));
+    assert!(
+        td.get("/api/questions?status=open")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn question_and_bundle_updates_cannot_remove_their_only_context() {
+    let World { td, lead, sys, .. } = setup().await;
+    for kind in ["question", "bundle"] {
+        for priority in ["normal", "urgent", "critical"] {
+            let mut body =
+                json!({"kind": kind, "text": format!("{kind} {priority}?"), "priority": priority});
+            if kind == "bundle" {
+                body["items"] = json!([{"text": "First?"}, {"text": "Second?"}]);
+            }
+            let q = ask(&td, &lead, body).await;
+            let path = format!("/api/questions/{}", id(&q));
+            for patch in [
+                json!({"card": null}),
+                json!({"card": null, "text": "Changed?", "priority": priority}),
+            ] {
+                td.patch_as(&lead, &path, patch).await.err(422, "invalid");
+            }
+            td.patch(&path, json!({"card": null}))
+                .await
+                .err(422, "invalid");
+            td.patch_as(&sys, &path, json!({"card": null}))
+                .await
+                .err(422, "invalid");
+            let unchanged = td.get(&path).await;
+            assert_eq!(unchanged.body["card"], q["card"]);
+            assert_eq!(unchanged.body["revision"], q["revision"]);
+            assert_eq!(unchanged.body["text"], q["text"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn inbox_noise_requires_notice_context_and_allows_questions_per_card() {
     let World { td, lead, sys, .. } = setup().await;
     let path = format!("/api/agents/{lead}/questions");
     let r = td
@@ -108,14 +204,7 @@ async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
             "items": [{"text": "A?"}, {"text": "B?"}]}),
     ] {
         let r = td.post_as(&lead, &path, body).await;
-        r.err(409, "conflict");
-        assert_eq!(r.body["error"]["details"]["question"], q["id"]);
-        assert!(
-            r.body["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("terrarium question update")
-        );
+        assert_eq!(r.status, 201, "{}", r.body);
     }
     // A different agent may ask on this card. No card remains unrestricted.
     let peer = id(&td
@@ -150,9 +239,7 @@ async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
         "items": [{"text": "C?"}, {"text": "D?"}]}),
     )
     .await;
-    td.post_as(&lead, &path, json!({"text": "Follow up?", "card": card}))
-        .await
-        .err(409, "conflict");
+    ask(&td, &lead, json!({"text": "Follow up?", "card": card})).await;
     let bid = id(&bundle);
     td.post_as(
         &lead,
@@ -183,7 +270,7 @@ async fn inbox_noise_updates_and_operator_mail_replies() {
         assert_eq!(r.body["error"]["details"]["question"], first["id"]);
         let unchanged = td.get(&path).await;
         assert_eq!(unchanged.body["revision"], 1);
-        assert_eq!(unchanged.body["card"], Value::Null);
+        assert_eq!(unchanged.body["card"], second["card"]);
         assert_eq!(unchanged.body["text"], "Second?");
     }
     td.patch_as(&lead, &path, json!({"text": "Valid follow-up?"}))
@@ -444,7 +531,11 @@ async fn limits_updates_and_retracts() {
     let qid = id(&q);
     // The same question again: a conflict that names the open one.
     let r = td
-        .post_as(&lead, &path, json!({"text": "use postgres?"}))
+        .post_as(
+            &lead,
+            &path,
+            json!({"text": "use postgres?", "card": q["card"]}),
+        )
         .await;
     r.err(409, "conflict");
     assert_eq!(r.body["error"]["details"]["question"], qid.as_str());
@@ -575,11 +666,18 @@ async fn at_most_fifty_open_questions() {
     for i in 0..50 {
         ask(&td, &lead, json!({"text": format!("question {i}")})).await;
     }
+    let card = id(td
+        .post(
+            "/api/projects/p/cards",
+            json!({"title": "Another decision"}),
+        )
+        .await
+        .ok());
     let r = td
         .post_as(
             &lead,
             &format!("/api/agents/{lead}/questions"),
-            json!({"text": "one more"}),
+            json!({"text": "one more", "card": card}),
         )
         .await;
     r.err(429, "rate_limited");
@@ -872,7 +970,7 @@ async fn a_bundle_is_asked_with_its_items_and_checked() {
     td.post_as(
         &lead,
         &path,
-        json!({"kind": "bundle", "text": "release plan for v0.3", "items": items(2)}),
+        json!({"kind": "bundle", "text": "release plan for v0.3", "items": items(2), "card": q["card"]}),
     )
     .await
     .err(409, "conflict");
@@ -1194,8 +1292,8 @@ async fn a_question_is_linked_to_a_card_and_unlinked() {
         404
     );
 
-    // A closed question: the leader may not unlink it; the operator and a
-    // sysadmin may.
+    // A closed question: the leader cannot change its card. The operator
+    // and a sysadmin may relink it, but cannot remove its only context.
     td.post(&format!("{path}/answer"), json!({"answer": "yes"}))
         .await
         .ok();
@@ -1204,9 +1302,10 @@ async fn a_question_is_linked_to_a_card_and_unlinked() {
         .err(409, "conflict");
     let v = td.patch_as(&sys, &path, json!({"card": c1})).await;
     assert_eq!(v.ok()["card"], c1.as_str());
-    let v = td.patch(&path, json!({"card": null})).await;
-    assert_eq!(v.ok()["card"], Value::Null);
-    assert!(of(&c1).await.iter().all(|q| *q != qid));
+    td.patch(&path, json!({"card": null}))
+        .await
+        .err(422, "invalid");
+    assert!(of(&c1).await.contains(&qid));
 
     // The `question` event names the new card and the old one.
     let ev = td.get("/api/events?kind=question&limit=100").await;
@@ -1219,8 +1318,8 @@ async fn a_question_is_linked_to_a_card_and_unlinked() {
         .unwrap()
         .clone();
     assert_eq!(last["data"]["change"], "updated");
-    assert_eq!(last["data"]["previous_card_id"], c1.as_str());
-    assert!(last["data"].get("card_id").is_none());
+    assert_eq!(last["data"]["previous_card_id"], c2.as_str());
+    assert_eq!(last["data"]["card_id"], c1.as_str());
     // The audit log has each change of the card.
     let audit = td.get("/api/audit?action=question.update&limit=50").await;
     let cards = audit
@@ -1230,7 +1329,7 @@ async fn a_question_is_linked_to_a_card_and_unlinked() {
         .iter()
         .filter(|a| a["detail"]["changed"] == json!(["card"]))
         .count();
-    assert_eq!(cards, 4, "{}", audit.body);
+    assert_eq!(cards, 3, "{}", audit.body);
 }
 
 /// `GET /api/projects/{name}/counts` (TER-154): the blocked cards and the

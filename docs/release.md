@@ -1,15 +1,10 @@
 # Releases
 
 This document tells you how to make a Terrarium release and how to verify
-what a release publishes. Two paths make a release:
-
-- The local release build, `just release::publish` (`scripts/release.py`):
-  the lead's release step runs it in the release build container on a
-  build target. It signs with cosign and the release key pair. See
-  "The local release build" below.
-- The GitHub workflow `.github/workflows/ci.yml`: it publishes the releases
-  until the switch to the local build is done (TER-622), and it stays the
-  fallback until then. It attests with GitHub build provenance.
+what a release publishes. Releases use the local release job (TER-623),
+`terrarium job release`, which runs `just release::publish` on the release
+client and signs with cosign and the release key pair. GitHub Actions no
+longer tests or releases Terrarium. See "The local release build" below.
 
 The host agent self-update that uses the release binary is in
 [host-protocol.md, "Self-update"](host-protocol.md#self-update).
@@ -33,17 +28,14 @@ The image has these parts:
   `.description`, and `.licenses`.
 - A BuildKit SBOM and a BuildKit provenance attestation (`mode=max`) in
   the image index.
-- A GitHub build provenance attestation for the image digest. It is a
-  Sigstore bundle with a keyless certificate for the identity of the
-  workflow (`actions/attest-build-provenance`). The bundle is pushed to
-  the registry and is also stored on GitHub.
+- A cosign signature for the image digest, checked with the release public key.
 - Each binary reports `<version>+<commit>` (`TERRARIUM_GIT_REF` is the
   commit; [CONVENTIONS.md](CONVENTIONS.md), "Build version").
 
 The host agent asset comes out of the pushed image
 (`/opt/terrarium/dist/terrarium-host-x86_64-linux`). Thus the release
 binary and the binary that a daemon of this image serves at
-`GET /install/terrarium-host` have the same bytes. CI does these checks
+`GET /install/terrarium-host` have the same bytes. The local release build does these checks
 before the upload:
 
 1. The SHA-256 of the binary is the same as the `.sha256` file in the
@@ -54,21 +46,60 @@ before the upload:
 The host helper (`terrarium-host-helper`, the root helper of native GPU
 enforcement) is built in the same Dockerfile stage as the host agent
 (static musl, `cargo build --locked`) and comes out of the same directory
-(`/opt/terrarium/dist/terrarium-host-helper-x86_64-linux`). CI makes the
+(`/opt/terrarium/dist/terrarium-host-helper-x86_64-linux`). The local release build makes the
 same two checks for it. `SHA256SUMS` lists both binaries.
 
-Both binaries also get a GitHub build provenance attestation.
+Both binaries and SHA256SUMS also get cosign signature bundles.
 
 ## How to make a release
 
-A release occurs only for a push to `main` when the head commit has a
-trailer:
+### Version branch e2e at the cut
+
+After pushing `release/X.Y.Z`, the project admin queues the cut-time gate
+on the open version group's header card (not a member card):
+
+```text
+POST /api/cards/TER-<header>/e2e
+{"branch":"release/X.Y.Z","repo":"terrarium","eta":"20m"}
+```
+
+The daemon pins the remote branch head and runs
+`TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py` on that tree. The job
+shares the merge lane. Only e2e jobs receive the Docker relay. Merge and
+validate jobs cannot request a reset or tunnel, whatever their recipe sets.
+It does not merge or push a branch, move the header or change membership.
+It records the job and tested commit on the group's `version branch e2e`
+step, marking it done only on success, failed on failure or cancellation.
+Do not pre-release until this step is done on the final release commit.
+After a blocker fix, queue it again on the same group and release branch.
+
+The gate runs the full validation suite, then the two ignored live Docker
+tests named in `scripts/docker_ci.py`. It rejects skipped or unmatched live
+tests. Results are written under `results/` in the job slot. Upload
+`results/docker.json` and the suite's result files with
+`terrarium test push --card <header> --label version:X.Y.Z`.
+Device-IO and Claude live tests still need their separate hardware or
+credentials. If applicable, run them on the same release commit and record
+their evidence on the group before publishing. They are not silently
+enabled by the Docker job.
+
+The delivery principal needs the existing Docker CI tunnel and reset run
+grants and pinned endpoints. Both keys stay inside the daemon. Branch code
+gets only a job-scoped Unix relay endpoint. Never fetch a VM key or run the
+gate manually against the real VM. Card validation remains ineligible.
+
+### Publishing
+
+After the version cut passes, the lead merges the release branch to `main`
+with `tested-at-cut: <test run id>` and a release trailer, then starts
+`terrarium job release <version card> --commit <main commit>`. A push alone
+publishes nothing. The release job reads these trailers:
 
 | Trailer | Result |
 |---|---|
 | `release: true` | A stable release `X.Y.Z`. The image gets `:latest`. |
 | `pre-release: true` | A pre-release `X.Y.Z-alpha`. The image gets `:pre`. |
-| `bump: major\|minor\|patch` | Optional. It overrides the bump that CI finds in the conventional-commit subjects since the last `v*` tag. |
+| `bump: major\|minor\|patch` | Optional. It overrides the bump that the release script finds in the conventional-commit subjects since the last `v*` tag. |
 
 A `release: true` commit on top of the last tag `vX.Y.Z-alpha` promotes that
 pre-release: the version is `X.Y.Z` with no bump. A `bump:` trailer on the same
@@ -76,44 +107,14 @@ commit still bumps. A release also bumps when `vX.Y.Z` already exists. With a
 `pre-release: true` trailer too, the commit stays a pre-release. The last tag
 `vX.Y.Z` (a full release) gives the normal bump.
 
-With no trailer, CI runs only the tests. Example:
+The full suite and end-to-end tests run on the release branch at the version
+cut. Run `TERRARIUM_JOB_KIND=merge just ci::validate` for the full suite,
+including the uid 1001 pass, and push the results with the version label.
+Only a green cut permits the `tested-at-cut` trailer. Card checks still run
+before review. The merge queue merges without tests.
 
-```sh
-git commit -m "feat(board): card templates" -m "release: true"
-git push origin main
-```
-
-The jobs run in this sequence:
-
-1. `check`: `just ci::check`, one part in each step.
-2. `version`: it calculates the version from the last `v*` tag (0.x
-   semantics: a breaking change bumps the minor).
-3. `image`: it stamps the version into `Cargo.toml`, builds and pushes
-   the image, attests it, takes the host agent and the host helper out
-   of it, writes `SHA256SUMS`, and attests both binaries.
-4. `release`: it pushes the tag and makes the GitHub release with the
-   host agent, the host helper, `SHA256SUMS`, and notes that give the image digest.
-
-The `image` job pushes the image before the `release` job makes the tag.
-If `release` fails, the image exists with no release. Run the `release`
-job again (re-run failed jobs), or delete the package version.
-
-### Permissions
-
-The workflow gives `contents: read` to each job by default. Only these
-jobs get more:
-
-| Job | Permissions | For |
-|---|---|---|
-| `image` | `packages: write` | the push to `ghcr.io` |
-| | `id-token: write` | the Sigstore certificate of the attestations |
-| | `attestations: write` | the storage of the attestations on GitHub |
-| `release` | `contents: write` | the tag and the release |
-
-Each action is pinned to a full commit SHA. A comment gives the version.
-To update an action, find the commit of the new tag
-(`gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`). Then change the
-SHA and the comment together.
+With no release trailer the local release job publishes nothing. See the
+local release steps below for build, signing and publication order.
 
 ### Make the package public (one time)
 
@@ -123,11 +124,6 @@ time:
 
 1. Open `https://github.com/users/wiltaylor/packages/container/terrarium/settings`.
 2. In **Danger Zone**, select **Change visibility**, then **Public**.
-3. Make sure that **Manage Actions access** gives the repository
-   `wiltaylor/terrarium` the role **Write**. The
-   `org.opencontainers.image.source` label links the package to the
-   repository, and the first push from the workflow usually sets this
-   role.
 
 To check the visibility, pull the image with no login:
 `docker logout ghcr.io && docker pull ghcr.io/wiltaylor/terrarium:latest`.
@@ -151,7 +147,7 @@ sha256sum -c SHA256SUMS
 cosign also checks the entry of each signature in the public transparency
 log. The release notes give the digest and these commands.
 
-### A release of the workflow (GitHub attestation)
+### Historical workflow releases (GitHub attestation)
 
 You need the GitHub CLI (`gh`) 2.49 or later. `gh attestation verify`
 checks the Sigstore bundle. It also checks that the certificate identity
@@ -196,6 +192,26 @@ the daemon has the `SHA256SUMS` of the release, the host agent also
 checks the release hash ([host-protocol.md, "Self-update"](host-protocol.md#self-update)).
 The host agent does not verify the attestation itself: the image that
 holds the binary is the item to verify.
+
+## The full suite at the version cut
+
+Merge jobs run no tests: the full suite runs once at the version cut, on
+the version branch, as a release validation (TER-683):
+
+```sh
+mkdir -p /src/<cut>-results
+TERRARIUM_VALIDATE_CONTEXT=release RESULTS_DIR=/src/<cut>-results just ci::validate
+just ci::flaky-cards /src/<cut>-results/reruns.json "the <X.Y.Z> cut"   # read it, then run it with | sh
+```
+
+`TERRARIUM_VALIDATE_CONTEXT=release` runs the uid 1001 pass after
+`ci::test` (as root; the host needs uid 1001, see AGENTS.md) and lets both
+test passes rerun their failed tests once. A test that passes on the rerun
+keeps the run green and is listed in `reruns.json`; one that fails again is
+red. A build error, a crash, a failed doctest, or more than 5 failed tests
+gets no rerun ([api.md](api.md) 35.3). `ci::flaky-cards` prints the
+`terrarium` commands that file or comment on the `flaky` card of each test
+that passed on the rerun; it runs nothing itself.
 
 ## The local release build
 
@@ -315,31 +331,15 @@ build context, in an image layer, or on the release VM: docker (the gate and
 the image build, and the `--version` checks) gets an env without them, and the client runs no code of the
 release (`scripts/test_release.py` checks each of these).
 
-### The switch from the workflow to the local build
+### Fallback if the local release fails
 
-A daemon checks a new release with the updater of the image that it runs.
-An updater before TER-613 checks with `gh` and can only accept a release
-that the workflow made. The order:
-
-1. Merge TER-613 (cosign and `docker/release/cosign.pub` in the image, the
-   updater's `cosign` default, the release build). The workflow stays.
-2. Release N with the workflow. The daemons install it with their `gh`
-   check.
-3. On each daemon on N, set `TERRARIUM_UPDATE_VERIFY=cosign` in `.env`
-   (an older `compose.yaml` passes `gh` by itself) and recreate the
-   updater.
-4. Remove the workflow (TER-622).
-5. Release N+1 with `just release::publish`. The updaters of N check it
-   with cosign.
-
-A daemon that still checks with `gh` at step 5 refuses N+1 (fail closed)
-until step 3. Do step 3 just before step 5, and put no `release:` or
-`pre-release:` trailer on `main` between steps 3 and 5: the workflow would
-publish a release with no cosign signature, and the daemons that check with
-cosign refuse it (fail closed). If the local build fails after step 4, the fallback is a
-revert of the TER-622 commit and a release with the workflow; that release
-has no cosign signature, so the daemons set `TERRARIUM_UPDATE_VERIFY=gh`
-for it.
+Revert the TER-622 merge commit on both `next` and `main` to restore
+`.github/workflows/ci.yml`, then release through that workflow. The lead
+performs those reverts through the delivery process. Workflow releases have
+GitHub attestations, not cosign signatures. Daemons must use
+`TERRARIUM_UPDATE_VERIFY=gh` for that fallback release. Switch back to
+`cosign` before installing a local release. An older updater that only
+supports `gh` refuses local releases until it is upgraded.
 
 ## Not in this document
 

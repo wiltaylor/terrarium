@@ -69,10 +69,10 @@ export function LanesBoard(props: {
 
   /** One cell: the cards of a lane in a column, with the drop handlers. */
   const Cell = (p: { lane: Lane; col: Column }) => {
-    const cards = () => laneCells(p.lane, p.col.name);
+    const cards = () => laneCells(p.lane, p.col.name).filter((c) => c.kind !== "group");
     const filtered = () => {
       const ids = new Set(filteredColumn(p.col.name).slice(0, limit(p.col.name)).map(c => c.id));
-      return cards().filter(c => ids.has(c.id));
+      return laneCells(p.lane, p.col.name).filter(c => ids.has(c.id));
     };
     const isDrop = () => drop()?.lane === p.lane.key && drop()?.column === p.col.name;
     return (
@@ -102,7 +102,7 @@ export function LanesBoard(props: {
         }}
       >
         <Show when={cards().length}>
-          <span class="lane-cell-count muted small" title={`${cards().length} of the ${cardsIn(props.board, p.col.name).length} cards of ${columnTitle(p.col)}`}>
+          <span class="lane-cell-count muted small" title={`${cards().length} of the ${cardsIn(props.board, p.col.name).filter((c) => c.kind !== "group").length} cards of ${columnTitle(p.col)}`}>
             {cards().length}
           </span>
         </Show>
@@ -206,7 +206,7 @@ export function LanesBoard(props: {
         <div class="board" ref={props.boardRef} onScroll={() => props.onScroll?.()}>
           <For each={props.board.columns}>
             {(col) => (
-              <section id={`board-col-${col.name}`} data-column={col.name} class="column lanes-column" classList={{ "over-limit": overLimit(col, cardsIn(props.board, col.name).length) }} aria-label={columnTitle(col)}>
+              <section id={`board-col-${col.name}`} data-column={col.name} class="column lanes-column" classList={{ "over-limit": overLimit(col, cardsIn(props.board, col.name).filter((c) => c.kind !== "group").length) }} aria-label={columnTitle(col)}>
                 <ColumnHead col={col} />
                 <For each={props.lanes}>
                   {(lane) => (

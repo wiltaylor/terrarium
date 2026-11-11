@@ -45,6 +45,89 @@ fn bin() -> Command {
     c
 }
 
+#[test]
+fn questions_require_card_even_when_urgent_or_critical() {
+    for verb in ["ask", "bundle"] {
+        for priority in [None, Some("--urgent"), Some("--critical")] {
+            let mut command = bin();
+            command.args(["question", verb, "Decision?"]);
+            if verb == "bundle" {
+                command.args(["--item", "First?", "--item", "Second?"]);
+            }
+            if let Some(priority) = priority {
+                command.arg(priority);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("--card"));
+        }
+    }
+}
+
+#[test]
+fn multiple_question_blocks_are_sent_for_one_card_or_thread() {
+    let dir = temp_dir("question-blocks");
+    let (socket, seen) = fake_runner(
+        &dir,
+        |_| json!({"status": 201, "headers": {}, "body": {"id": "Q1", "priority": "normal", "thread_id": "M1"}}),
+    );
+    for context in ["card", "thread"] {
+        for n in 0..2 {
+            for bundle in [false, true] {
+                let text = format!("Decision {context} {n} {bundle}?");
+                let mut args = if context == "card" {
+                    vec![
+                        "question",
+                        if bundle { "bundle" } else { "ask" },
+                        &text,
+                        "--card",
+                        "TER-1",
+                    ]
+                } else {
+                    vec!["thread", "ask", "T1", &text]
+                };
+                if bundle {
+                    if context == "thread" {
+                        args.push("--bundle");
+                    }
+                    args.extend(["--item", "First?", "--item", "Second?"]);
+                }
+                let out = bin()
+                    .env("TERRARIUM_AGENT", "01AGENT")
+                    .env("TERRARIUM_SOCKET", &socket)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
+    }
+    let requests = seen.lock().unwrap();
+    let posts: Vec<_> = requests
+        .iter()
+        .filter(|r| r["params"]["method"] == "POST")
+        .collect();
+    assert_eq!(posts.len(), 8);
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|r| r["params"]["body"]["card"] == "TER-1")
+            .count(),
+        4
+    );
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|r| r["params"]["body"]["thread"] == "T1")
+            .count(),
+        4
+    );
+}
+
 fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }

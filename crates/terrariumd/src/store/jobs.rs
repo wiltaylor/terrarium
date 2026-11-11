@@ -51,6 +51,7 @@ pub const LIST_MAX: usize = 200;
 pub enum JobKind {
     Validate,
     Merge,
+    E2e,
     /// A release (TER-623): the release recipe on the release client
     /// target, on a commit of `main`, with the release secrets in its env.
     Release,
@@ -61,6 +62,7 @@ impl JobKind {
         match self {
             Self::Validate => "validate",
             Self::Merge => "merge",
+            Self::E2e => "e2e",
             Self::Release => "release",
         }
     }
@@ -69,6 +71,7 @@ impl JobKind {
         match s {
             "validate" => Some(Self::Validate),
             "merge" => Some(Self::Merge),
+            "e2e" => Some(Self::E2e),
             "release" => Some(Self::Release),
             _ => None,
         }
@@ -1054,7 +1057,7 @@ pub fn pick(
             *on_host.entry(h).or_default() += 1;
         }
         match j.kind {
-            JobKind::Merge => {
+            JobKind::Merge | JobKind::E2e => {
                 merging.insert(j.project.clone());
             }
             JobKind::Release => {
@@ -1073,7 +1076,8 @@ pub fn pick(
         let Some(q) = queues.get(&j.project) else {
             continue;
         };
-        let merge = j.kind == JobKind::Merge;
+        // Both kinds own the project's Docker VM and must never overlap.
+        let merge = matches!(j.kind, JobKind::Merge | JobKind::E2e);
         let release = j.kind == JobKind::Release;
         if merge && !merging.insert(j.project.clone()) {
             // A merge of the project runs, or an older one comes first,
@@ -1198,7 +1202,7 @@ pub fn startable(
 pub fn job_delivery(def: &DeliveryDef, kind: JobKind) -> Option<DeliveryDef> {
     match kind {
         JobKind::Release => def.release_view(),
-        JobKind::Validate | JobKind::Merge => Some(def.clone()),
+        JobKind::Validate | JobKind::Merge | JobKind::E2e => Some(def.clone()),
     }
 }
 
@@ -1581,7 +1585,7 @@ pub fn create_onto(t: &mut Tx<'_>, n: NewJob, onto: Option<&str>) -> ApiResult<J
             [card],
             |r| r.get(0),
         )?;
-        if is_group {
+        if is_group && n.kind != JobKind::E2e {
             return Err(ApiError::invalid(
                 "group cards cannot be validated or merged",
             ));
@@ -2590,6 +2594,26 @@ mod tests {
         let queued = vec![job("1", "a", JobKind::Validate, "app", "t1")];
         let p = pick(queued, &run, &q, &none);
         assert_eq!(p[0].0.slot, Some(1));
+    }
+
+    #[test]
+    fn release_e2e_and_merge_share_one_lane() {
+        let q = queues(&[("a", 3, "h")]);
+        for kind in [JobKind::Merge, JobKind::E2e] {
+            let run = [running(job("0", "a", kind, "app", "release/1.2.3"), "h")];
+            let queued = vec![
+                job("1", "a", JobKind::E2e, "app", "release/1.2.3"),
+                job("2", "a", JobKind::Merge, "app", "t2"),
+            ];
+            assert!(pick(queued, &run, &q, &HashMap::new()).is_empty());
+        }
+        let picked = pick(
+            vec![job("1", "a", JobKind::E2e, "app", "release/1.2.3")],
+            &[],
+            &q,
+            &HashMap::new(),
+        );
+        assert_eq!(picked[0].0.slot, Some(MERGE_SLOT));
     }
 
     #[test]

@@ -168,6 +168,7 @@ async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
         AdminCmd::Role { command } => agents::role(ctx, command).await,
         AdminCmd::Target { command } => system::admin_target(ctx, command).await,
         AdminCmd::Host { command } => system::hosts(ctx, command).await,
+        AdminCmd::Link { command } => system::links(ctx, command).await,
         AdminCmd::Harness { command } => system::harnesses(ctx, command).await,
         AdminCmd::Update { command } => update::update(ctx, command).await,
         AdminCmd::Subscription { command } => system::subscriptions(ctx, command).await,

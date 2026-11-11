@@ -27,6 +27,103 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(300);
 
+#[tokio::test]
+async fn release_e2e_rejects_card_branches_members_and_missing_docker_config() {
+    use terrariumd::store::groups;
+    let lab = lab(1).await;
+    let card = lab.card("ordinary", "ordinary").await;
+    let path = format!("/api/cards/{card}/e2e");
+    let response = lab
+        .td
+        .post_as(&lab.lead, &path, json!({"branch":"ter-719"}))
+        .await;
+    assert_eq!(response.status, 422, "{}", response.body);
+    let response = lab
+        .td
+        .post_as(&lab.lead, &path, json!({"branch":"release/1.2.3"}))
+        .await;
+    assert!(!response.status.is_success(), "{}", response.body);
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let header = state
+        .db
+        .write("system", |t| {
+            groups::open(
+                t,
+                groups::Open {
+                    project: "p",
+                    rule: "version-cut",
+                    key: "version:test",
+                    title: "Version test",
+                    column: "accepted",
+                    done_when: "done",
+                    eta: None,
+                    close_after: None,
+                },
+            )?;
+            Ok(groups::by_key(t, "p", "version:test")?.unwrap().id)
+        })
+        .await
+        .unwrap();
+    let response = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{header}/e2e"),
+            json!({"branch":"release/1.2.3"}),
+        )
+        .await;
+    assert_eq!(response.status, 422, "{}", response.body);
+    assert!(response.body.to_string().contains("Docker CI"));
+    let response = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{header}/e2e"),
+            json!({"branch":"release/1.2.3"}),
+        )
+        .await;
+    assert_eq!(response.status, 403, "{}", response.body);
+    // Queue without a recipe run to exercise cancellation without a Docker VM.
+    let group_id = header.clone();
+    let job = state
+        .db
+        .write("operator", move |t| {
+            use terrariumd::store::jobs::{self, JobKind, NewJob};
+            jobs::create(
+                t,
+                NewJob {
+                    project: "p".into(),
+                    card: group_id,
+                    kind: JobKind::E2e,
+                    repo: "app".into(),
+                    branch: "release/1.2.3".into(),
+                    commit: None,
+                    by_agent: None,
+                    batch: Vec::new(),
+                    planned_secs: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    lab.td.delete(&format!("/api/jobs/{}", job.id)).await.ok();
+    let group = state
+        .db
+        .read(move |c| groups::get(c, &header))
+        .await
+        .unwrap();
+    assert_eq!(group.column, "accepted");
+    assert_eq!(
+        group
+            .steps
+            .iter()
+            .find(|s| s.name == "version branch e2e")
+            .unwrap()
+            .state,
+        "failed"
+    );
+}
+
 /// A wait on the queue or a card that fails after [`DEADLINE`] without
 /// progress, or after two of them in all. Under merge-job load (load 39,
 /// IO pressure 40%) a queue that still moved took longer than
@@ -1053,6 +1150,7 @@ impl Lab {
             &["checkout", "-q", "-B", name, &format!("origin/{base}")],
         );
         for (f, text) in files {
+            std::fs::create_dir_all(self.work.join(f).parent().unwrap()).unwrap();
             std::fs::write(self.work.join(f), text).unwrap();
         }
         git(&self.work, &["add", "-A"]);
@@ -1484,12 +1582,31 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["job"]["kind"], "merge");
+    let group_key = format!("merge:{}", r.body["job"]["id"].as_str().unwrap());
     lab.until_card(&b, "accepted", |c| c["column"] == "accepted")
         .await;
     let next = git(&lab.origin, &["rev-parse", "next"]);
     assert_ne!(next, head);
     lab.settle().await;
     assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
+    if flow == "rules" {
+        let g = lab
+            .td
+            .daemon
+            .as_ref()
+            .unwrap()
+            .state
+            .db
+            .read(move |c| Ok(terrariumd::store::groups::by_key(c, "p", &group_key)?.unwrap()))
+            .await
+            .unwrap();
+        let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
+        assert!(
+            recipe.started_at.is_some(),
+            "the real jobs.rs recipe boundary started e2e"
+        );
+        assert_eq!(recipe.state, "done");
+    }
 }
 
 both_flows!(validate_replaces_stale_validation_and_by_labels);
@@ -2536,7 +2653,7 @@ fn daemon_trace_capture() -> TraceCapture {
 }
 
 #[tokio::test]
-async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
+async fn e2e_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
     use std::os::unix::fs::PermissionsExt;
     // The failed resets are infra failures that run once more after
     // `INFRA_RETRY`: 5 min by default, which only another test of this
@@ -2636,7 +2753,29 @@ while True:
         marker.display()
     );
     let mut config = json!({"target":"p-box", "recipe":recipe, "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm", "DOCKER_CI_RESET_KEY":"@secret:reset"}, "docker_ci":{"destination":"root@test-vm", "port":2250, "known_hosts":"test-vm ssh-ed25519 public-test-pin\n", "reset_destination":"reset@test-host", "reset_port":22,"reset_known_hosts":"test-host ssh-ed25519 public-test-pin\n"}});
-    for (branch, status, expected) in [
+    // Ordinary jobs cannot request the relay, even with delivery run grants.
+    let mut ordinary_config = config.clone();
+    ordinary_config["recipe"] =
+        json!("test -z \"${TERRARIUM_DOCKER_HOST:-}${DOCKER_CI_KEY:-}${DOCKER_CI_RESET_KEY:-}\"");
+    lab.td
+        .put("/api/projects/p/delivery", ordinary_config)
+        .await
+        .ok();
+    for kind in ["merge", "validate"] {
+        lab.branch(kind, "next", &[(kind, "yes\n")]);
+        let card = lab.card(kind, kind).await;
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/{kind}"), json!({}))
+            .await
+            .ok();
+        let jobs = lab.until_idle().await;
+        assert_eq!(
+            jobs.iter().find(|j| j["card"] == card).unwrap()["state"],
+            "passed"
+        );
+        assert!(!fixtures.path().join("order").exists());
+    }
+    for (index, (branch, status, expected)) in [
         ("secret-ok", 0, true),
         ("secret-reset-failed", 1, false),
         ("secret-reset-busy", 75, true),
@@ -2644,7 +2783,10 @@ while True:
         ("secret-reset-unknown-pin", 255, false),
         ("secret-reset-wrong-pin", 256, false),
         ("secret-revoked", 0, false),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         std::fs::write(fixtures.path().join("status"), status.to_string()).unwrap();
         let order_before = std::fs::read_to_string(fixtures.path().join("order"))
             .unwrap_or_default()
@@ -2665,10 +2807,45 @@ while True:
                 .await
                 .ok();
         }
-        lab.branch(branch, "next", &[(branch, "yes\n")]);
-        let card = lab.card(branch, branch).await;
+        let release_branch = format!("release/0.0.{index}");
+        let script = format!(
+            "import subprocess\nraise SystemExit(subprocess.call(['sh', '-c', {}]))\n",
+            serde_json::to_string(&recipe).unwrap()
+        );
+        lab.branch(
+            &release_branch,
+            "next",
+            &[("scripts/docker_ci.py", &script)],
+        );
+        let state = lab.td.daemon.as_ref().unwrap().state.clone();
+        let key = format!("version:{branch}");
+        let card = state
+            .db
+            .write("system", move |t| {
+                use terrariumd::store::groups;
+                groups::open(
+                    t,
+                    groups::Open {
+                        project: "p",
+                        rule: "version-cut",
+                        key: &key,
+                        title: &key,
+                        column: "accepted",
+                        done_when: "done",
+                        eta: None,
+                        close_after: None,
+                    },
+                )?;
+                Ok(groups::by_key(t, "p", &key)?.unwrap().id)
+            })
+            .await
+            .unwrap();
         lab.td
-            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .post_as(
+                &lab.lead,
+                &format!("/api/cards/{card}/e2e"),
+                json!({"branch":release_branch}),
+            )
             .await
             .ok();
         let jobs = lab.until_idle().await;
@@ -2722,6 +2899,8 @@ while True:
                 "OLDPWD",
                 "SHLVL",
                 "_",
+                "RESULTS_DIR",
+                "TERRARIUM_DOCKER_CI",
             ];
             let added: Vec<_> = env
                 .keys()
@@ -6720,10 +6899,15 @@ async fn a_lost_run_reruns_only_after_its_slot_lock_is_free() {
     let lab = lab(1).await;
     let marks = tempfile::tempdir().unwrap();
     let (c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 6, None).await;
+    let waiting = Instant::now();
     let card = lab
         .until_card(&c1, "accepted", |c| c["column"] == "accepted")
         .await;
     stop_group(holder);
+    assert!(
+        waiting.elapsed() >= Duration::from_secs(3),
+        "the rerun did not wait for the held slot"
+    );
     let text = comments(&card);
     assert!(!text.contains("is held by another job"), "{card}");
     assert!(!text.contains("failed before its tests"), "{card}");
@@ -6767,6 +6951,76 @@ async fn a_lost_run_whose_slot_stays_held_ends_with_the_lock_in_its_tail() {
     assert!(tail.contains("slot-0.lock"), "{tail}");
     let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
     assert_eq!(runs.lines().count(), 1, "the job reran: {runs}");
+}
+
+/// As after a restart, only the running DB row remains. Recovery must
+/// retain its slot while waiting, and respect a cancel received then.
+async fn recover_a_lost_run_with_a_held_slot(cancel: bool) {
+    if !flock_waits() {
+        return;
+    }
+    let lab = lab(1).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let head = lab.branch("ter-recover-slot", "next", &[("OK", "yes\n")]);
+    let card = lab.card("recover-slot", "ter-recover-slot").await;
+    let id = ulid::Ulid::new().to_string();
+    let lock = lab._dirs.path().join("jobs/p/slot-0.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    let holder = slot_holder(&lock, 120);
+    // Wait until the independent holder actually owns the lock.
+    let start = Instant::now();
+    loop {
+        let status = std::process::Command::new("flock")
+            .arg("-n")
+            .arg(&lock)
+            .arg("true")
+            .status()
+            .unwrap();
+        if !status.success() {
+            break;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "holder did not acquire the slot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (jid, cid) = (id.clone(), card.clone());
+    state.db.write("operator", move |t| {
+        t.execute("INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state, slot, host, attempt, created_by, created_at, started_at) VALUES (?1, 'p', ?2, 'validate', 'app', 'ter-recover-slot', ?3, 'running', 0, 'lab1', 1, 't', datetime('now'), datetime('now'))", rusqlite::params![jid, cid, head])?;
+        Ok(())
+    }).await.unwrap();
+    let recovery = terrariumd::jobs::recover_lost(&state).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !recovery.is_finished(),
+        "recovery did not wait for the slot"
+    );
+    let j = lab.td.get(&format!("/api/jobs/{id}")).await;
+    assert_eq!(j.ok()["state"], "running");
+    if cancel {
+        let r = lab.td.delete(&format!("/api/jobs/{id}")).await;
+        assert_eq!(r.ok()["state"], "cancelled");
+    }
+    stop_group(holder);
+    tokio::time::timeout(DEADLINE, recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    lab.until_idle().await;
+    let j = lab.td.get(&format!("/api/jobs/{id}")).await;
+    assert_eq!(j.ok()["state"], if cancel { "cancelled" } else { "passed" });
+    assert_eq!(j.ok()["attempt"], 1);
+}
+
+#[tokio::test]
+async fn a_lost_run_recovers_after_restart_with_a_held_slot() {
+    recover_a_lost_run_with_a_held_slot(false).await;
+}
+
+#[tokio::test]
+async fn a_lost_run_cancelled_while_waiting_for_its_slot_does_not_rerun() {
+    recover_a_lost_run_with_a_held_slot(true).await;
 }
 
 /// TER-196 review 2, major 1: a run that the infrastructure lost past
