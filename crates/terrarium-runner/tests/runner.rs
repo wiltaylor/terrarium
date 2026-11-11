@@ -1128,7 +1128,10 @@ async fn check_turn_waits_for_startup(adapter: Option<Arc<dyn Adapter>>) {
         Opts {
             env: vec![
                 ("FAKE_TUI_STARTUP_GATE", gate.display().to_string()),
-                ("FAKE_TUI_CLAUDE_PROMPT", if claude { "1" } else { "0" }.into()),
+                (
+                    "FAKE_TUI_CLAUDE_PROMPT",
+                    if claude { "1" } else { "0" }.into(),
+                ),
             ],
             startup_hook: true,
             session: Some("s1"),
