@@ -36,6 +36,8 @@ use crate::store::mail::{self, Address, Outgoing};
 use crate::store::session_refs::{self, SessionRef};
 use crate::store::{Page, Paged, agents, github_gate, json_col, questions};
 
+pub mod card_waits;
+
 /// The columns of a new board, in order, with their roles.
 pub const DEFAULT_COLUMNS: [(&str, Option<&str>); 9] = [
     ("backlog", None),
@@ -583,12 +585,7 @@ fn deps(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
 /// Dependencies that are neither done nor archived.
 fn unmet(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT d.depends_on FROM card_deps d
-         JOIN cards c ON c.id = d.depends_on
-         JOIN board_columns k ON k.id = c.column_id
-         WHERE d.card = ?1 AND c.archived = 0
-           AND coalesce(k.role, k.name) NOT IN ('accepted', 'done')
-         ORDER BY d.depends_on",
+        "SELECT depends_on FROM card_dependency_unmet WHERE card = ?1 ORDER BY depends_on LIMIT 129",
     )?;
     let rows = stmt
         .query_map([id], |r| r.get(0))?
@@ -876,10 +873,8 @@ pub fn board_summary(
           'comment_count', (SELECT count(*) FROM card_comments WHERE card = c.id),
           'last_comment_at', (SELECT max(created_at) FROM card_comments WHERE card = c.id),
           'depends_on', (SELECT json_group_array(depends_on) FROM card_deps WHERE card = c.id),
-          'blocked_by', (SELECT json_group_array(d.depends_on) FROM card_deps d
-            CROSS JOIN cards dc ON dc.id = d.depends_on JOIN board_columns dk ON dk.id = dc.column_id
-            WHERE d.card = c.id AND dc.archived = 0
-              AND coalesce(dk.role, dk.name) NOT IN ('accepted', 'done')))
+          'blocked_by', (SELECT json_group_array(d.depends_on) FROM card_dependency_unmet d
+            WHERE d.card = c.id))
          FROM cards c JOIN board_columns k ON k.id = c.column_id
          LEFT JOIN agents a ON a.id = c.assignee
          LEFT JOIN agents_removed ar ON ar.id = c.assignee
@@ -1845,6 +1840,7 @@ fn apply_move(
             notify_done(t, &moved, &closing)?;
         }
     }
+    card_waits::on_dependency_changed(t, &card.id, false)?;
     Ok(())
 }
 
@@ -2081,33 +2077,30 @@ pub struct NewCard {
     pub inbox_thread: Option<String>,
 }
 
-fn set_deps(t: &mut Tx<'_>, card: &str, wanted: &[String]) -> ApiResult<()> {
+fn set_deps(t: &mut Tx<'_>, actor: &Actor, card: &str, wanted: &[String]) -> ApiResult<()> {
+    if wanted.len() > 128 {
+        return Err(ApiError::invalid("at most 128 dependencies per card"));
+    }
     let wanted: Vec<String> = wanted.iter().map(|d| normalise_id(d)).collect();
     for d in &wanted {
         if *d == card {
             return Err(ApiError::invalid(format!("{card} cannot depend on itself")));
         }
-        find_row(t, d)?;
-        // A cycle: `d` reaches `card` through existing dependencies.
-        let mut seen = HashSet::new();
-        let mut stack = vec![d.clone()];
-        while let Some(next) = stack.pop() {
-            if next == card {
-                return Err(ApiError::invalid(format!(
-                    "{card} -> {d} makes a dependency cycle"
-                )));
-            }
-            if seen.insert(next.clone()) {
-                stack.extend(deps(t, &next)?);
-            }
-        }
+        let dependency = find_row(t, d)?;
+        policy::read_project(actor, &dependency.project)?;
     }
+    card_waits::check_cycles(t, card, &wanted)?;
     t.execute("DELETE FROM card_deps WHERE card = ?1", [card])?;
     for d in &wanted {
         t.execute(
             "INSERT OR IGNORE INTO card_deps (card, depends_on) VALUES (?1, ?2)",
             params![card, d],
         )?;
+    }
+    t.execute("DELETE FROM card_waits WHERE card=?1", [card])?;
+    if !wanted.is_empty() {
+        t.execute("INSERT INTO card_waits(card, generation, mode, action, setter) VALUES (?1, ?2, 'all', '{}', ?3)",
+            params![card, ulid::Ulid::new().to_string(), actor.address()])?;
     }
     Ok(())
 }
@@ -2228,7 +2221,7 @@ pub(crate) fn create_card_with_author(
             at
         ],
     )?;
-    set_deps(t, &id, &new.depends_on)?;
+    set_deps(t, actor, &id, &new.depends_on)?;
     if let Some(th) = new.inbox_thread.as_deref().filter(|s| !s.trim().is_empty()) {
         let th = crate::store::threads::link_card(t, actor, th, &id)?;
         // A card made after the agent's hand-off message moves the thread
@@ -2249,6 +2242,7 @@ pub(crate) fn create_card_with_author(
         "created",
         json!({"from_mail": new.from_mail, "thread_id": thread}),
     )?;
+    card_waits::evaluate(t, &id, false)?;
     if let Some(agent) = &held_for {
         hold(t, actor, agent.as_ref(), &row, verified_author)?;
         if let Some(c) = new.comment.as_deref().filter(|c| !c.trim().is_empty()) {
@@ -2475,7 +2469,8 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
             ],
         )?;
         if let Some(d) = &p.depends_on {
-            set_deps(t, &card.id, d)?;
+            set_deps(t, actor, &card.id, d)?;
+            card_waits::evaluate(t, &card.id, false)?;
         }
         let fields: Vec<&str> = [
             p.title.as_ref().map(|_| "title"),
@@ -2703,6 +2698,7 @@ pub fn archive_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
     }
     card_event(t, &card, "archived", json!({}))?;
     crate::store::threads::on_card_archived(t, &card.id)?;
+    card_waits::on_dependency_changed(t, &card.id, true)?;
     Ok(())
 }
 
