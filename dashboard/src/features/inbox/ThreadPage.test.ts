@@ -158,6 +158,36 @@ describe("the Threads screen (TER-466)", () => {
 });
 
 describe("the chat page of a thread", () => {
+  it("numbers full-width typed posts, quotes text and previews the reply without sending it", async () => {
+    const t = (await api.threads.list())[0]!;
+    const { el } = mount(`/threads/${t.id}`);
+    await waitFor(() => expect(el.querySelectorAll(".thread-post").length).toBeGreaterThan(0));
+    const posts = [...el.querySelectorAll<HTMLElement>(".thread-post")];
+    posts.forEach((post, i) => {
+      expect(post.id).toBe(`post-${i + 1}`);
+      expect(post.querySelector(`a[aria-label='Permalink to post ${i + 1}']`)?.getAttribute("href")).toBe(`/threads/${t.id}#post-${i + 1}`);
+      expect(post.querySelector("header svg")).not.toBeNull();
+    });
+    expect(posts.some((p) => p.classList.contains("post-question"))).toBe(true);
+    expect(el.textContent).toContain("Waiting on you");
+    button("Quote", posts[0])!.click();
+    const editor = el.querySelector<HTMLTextAreaElement>("textarea[aria-label='Message text']")!;
+    expect(editor.value).toContain("> ");
+    const form = el.querySelector("form[aria-label=Message]")!;
+    button("Preview", form)!.click();
+    expect(form.querySelector("[aria-label='Message preview'] blockquote")).not.toBeNull();
+    button("Write", form)!.click();
+    const text = posts[0]!.querySelector(".prose")!.firstChild!;
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    const selected = window.getSelection()!.toString();
+    button("Quote", posts[0])!.click();
+    expect(editor.value).toContain(selected.split("\n").map((line) => `> ${line}`).join("\n"));
+    window.getSelection()!.removeAllRanges();
+  });
+
   it("replies, answers the inline questions, sends the response, and closes with the confirmation", async () => {
     const t = (await api.threads.list())[0]!;
     expect(t.status).toBe("waiting_operator");
@@ -166,7 +196,7 @@ describe("the chat page of a thread", () => {
     expect(status(el)).toBe("waiting on you");
     // The questions are inline, after the messages.
     const log = el.querySelector("[aria-label=Conversation]")!;
-    expect([...log.children].map((c) => (c.matches("article[aria-label^='Message ']") ? "m" : "q"))).toEqual(["m", "m", "q", "q"]);
+    expect([...log.children].map((c) => (c.matches(".post-message") ? "m" : "q"))).toEqual(["m", "m", "q", "q"]);
 
     // Answer the first question with an option, the second in own words.
     const [q1, q2] = [...log.querySelectorAll("article[aria-label^='Question ']")] as HTMLElement[];
@@ -192,7 +222,7 @@ describe("the chat page of a thread", () => {
     setValue("textarea[aria-label='Response text']", "Approved: prune after 90 days, keep audit rows.");
     button("Send response")!.click();
     await waitFor(() => expect(el.querySelector("section[aria-label='Your response']")?.textContent).toContain("Approved: prune after 90 days"));
-    expect(log.querySelector("article.response .chip")!.textContent).toBe("response");
+    expect(log.querySelector(".post-response .thread-post-header .chip")!.textContent).toBe("Response");
 
     // Close: a confirmation with the handoff; Cancel keeps it open.
     button("Close the thread")!.click();

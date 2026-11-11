@@ -134,9 +134,9 @@ export default function ThreadPage() {
                     <article ref={post} id={`post-${index() + 1}`} class={`thread-post post-${label().toLowerCase().replaceAll(" ", "-")}`}>
                       <header class="thread-post-header">
                         <ThreadIcon icon={operator() ? "you" : "agent"} />
-                        <strong>{author()}</strong>
+                        <strong>{operator() ? "You" : author()}</strong>
                         <span class="chip">{label()}</span>
-                        <Show when={entry.kind === "question" && entry.question.status === "open"}><span class="chip warn">Waiting on you</span></Show>
+                        <Show when={entry.kind === "question" && (entry.question.status === "open" || entry.question.status === "in_thread")}><span class="chip warn">Waiting on you</span></Show>
                         <time class="muted" dateTime={entry.at} title={entry.at}>{ago(entry.at, now())}</time>
                         <A href={`/threads/${encodeURIComponent(t().id)}#post-${index() + 1}`} aria-label={`Permalink to post ${index() + 1}`}>#{index() + 1}</A>
                         <Show when={!closed()}><button type="button" onClick={() => quote(text(), post)}>Quote</button></Show>
@@ -146,7 +146,7 @@ export default function ThreadPage() {
                       <Match when={entry.kind === "message" && entry.message}>
                         {(m) => (
                           <article class={`card-box stack thread-msg${byOperator(m()) ? " mine" : ""}${m().kind === "response" ? " response" : ""}`} style={{ gap: "4px" }} aria-label={`Message ${m().id}`}>
-                            <SafeHtml class="prose" html={renderMarkdown(m().text, project())} />
+                            <section aria-label={m().kind === "response" ? "Your response" : undefined}><SafeHtml class="prose" html={renderMarkdown(m().text, project())} /></section>
                           </article>
                         )}
                       </Match>
