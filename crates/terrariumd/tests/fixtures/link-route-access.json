@@ -880,8 +880,16 @@
     {
       "source": "api/jobs.rs",
       "registration": "\"/projects/{name}/jobs/cleanup\",post(cleanup_logs)",
-      "access": "conditional",
-      "cases": []
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/projects/p/jobs/cleanup",
+          "body": {
+            "after": 0
+          }
+        }
+      ]
     },
     {
       "source": "api/jobs.rs",

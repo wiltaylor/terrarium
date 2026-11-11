@@ -163,7 +163,7 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             post(cleanup_logs),
             &[(
                 axum::http::Method::POST,
-                super::link_registry::Access::Conditional,
+                super::link_registry::Access::OperatorOnly,
             )],
         )
 }
