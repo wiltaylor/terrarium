@@ -13,6 +13,17 @@ const item = (id: string, over: Partial<InboxItem> = {}): InboxItem => ({
 });
 
 describe("inbox model", () => {
+  it("keeps only open questions and critical notices in the default Inbox", () => {
+    const rows = [
+      item("question"), item("normal", { kind: "notice" }),
+      item("urgent", { kind: "notice", urgent: true }),
+      item("critical", { kind: "notice", urgent: true, critical: true }),
+      item("mail", { kind: "mail" }), item("system", { kind: "system" }),
+      item("closed", { open: false }),
+    ];
+    expect(rows.filter((i) => matchesTabs(i, "all", "open")).map((i) => i.id)).toEqual(["question", "critical"]);
+    expect(countItems(rows)).toMatchObject({ open: 2, question: 1, notice: 1, critical: 1, urgent: 1 });
+  });
   it("sorts urgent first, then the newest", () => {
     const list = [
       item("old", { at: "2026-10-28T08:00:00.000Z" }),
@@ -83,16 +94,16 @@ describe("inbox model", () => {
       item("s", { kind: "system" }),
       item("done", { open: false, kind: "mail" }),
     ]);
-    expect(c).toEqual({ open: 5, urgent: 1, critical: 0, question: 2, notice: 1, mail: 1, system: 1, watch: 0, thread: 0, thread_urgent: 0, thread_critical: 0 });
-    expect(badge(c)).toEqual({ n: 5, cls: "nav-count", title: "Waiting for you: 2 question, 1 notice, 1 mail, 1 paused thread. 1 urgent" });
+    expect(c).toEqual({ open: 2, urgent: 1, critical: 0, question: 2, notice: 0, mail: 1, system: 1, watch: 0, thread: 0, thread_urgent: 0, thread_critical: 0 });
+    expect(badge(c)).toEqual({ n: 2, cls: "nav-count", title: "Waiting for you: 2 question. 1 urgent" });
     expect(badge({ ...c, urgent: 0 })!.cls).toBe("nav-count info");
     expect(badge(EMPTY_COUNTS)).toBeNull();
   });
 
   it("leaves the threads out of the Inbox badge: they count for the Threads badge (TER-466)", () => {
     const c = countItems([item("m", { kind: "mail" }), item("t1", { kind: "thread", urgent: true }), item("t2", { kind: "thread", urgent: true, critical: true }), item("t3", { kind: "thread", open: false })]);
-    expect(c).toMatchObject({ open: 1, urgent: 0, critical: 0, thread: 2, thread_urgent: 2, thread_critical: 1 });
-    expect(badge(c)).toEqual({ n: 1, cls: "nav-count info", title: "Waiting for you: 1 mail" });
+    expect(c).toMatchObject({ open: 0, urgent: 0, critical: 0, thread: 2, thread_urgent: 2, thread_critical: 1 });
+    expect(badge(c)).toBeNull();
     expect(badge({ ...EMPTY_COUNTS, thread: 3, thread_urgent: 1 })).toBeNull();
   });
 
@@ -136,7 +147,7 @@ describe("ask and forward (GitHub #24)", () => {
     expect(matchesTabs(mail, "all", "asked")).toBe(false);
     // Open: never a waiting ask; the reply (a mail) shows there.
     expect(matchesTabs(watchItem(), "all", "open")).toBe(false);
-    expect(matchesTabs(mail, "all", "open")).toBe(true);
+    expect(matchesTabs(mail, "all", "open")).toBe(false);
     // Done: an answered or cancelled ask.
     expect(matchesTabs(watchItem({ open: false }), "all", "done")).toBe(true);
     expect(matchesTabs(watchItem(), "all", "done")).toBe(false);

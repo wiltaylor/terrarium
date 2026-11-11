@@ -335,16 +335,6 @@ pub fn built(
     }
     groups::status(t, &g, Some(&status), None)?;
     groups::close(t, &g, &status)?;
-    let mut update = format!("Pre-release {version}\n\nWhat changed:\n");
-    for id in g.members.iter().chain(extra.iter()) {
-        let card = board::get_card(t, id)?;
-        update.push_str(&format!("- {id}: {}\n", card.title));
-    }
-    update.push_str(
-        "\nHow to test: install this pre-release, exercise the changed cards above, \
-         and post results in the relevant open topic thread. See the releases wiki for details.",
-    );
-    crate::store::threads::version_post(t, project, &update)?;
     t.audit(
         "version.built",
         &g.id,

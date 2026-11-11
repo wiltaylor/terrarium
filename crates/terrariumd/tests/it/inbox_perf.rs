@@ -32,7 +32,7 @@ async fn inbox_pages_reach_every_item_across_projects() {
         Ok(())
     }).await.unwrap();
     let response = td.get("/api/inbox?project=p&limit=37").await;
-    assert_eq!(response.headers["x-inbox-open"], "1450");
+    assert_eq!(response.headers["x-inbox-open"], "250");
     assert_eq!(response.ok().as_array().unwrap().len(), 37);
     assert_eq!(response.body[0]["critical"], true);
     td.get("/api/inbox?limit=0").await.err(422, "invalid");
@@ -66,7 +66,7 @@ async fn inbox_pages_reach_every_item_across_projects() {
                 c.execute("DELETE FROM messages WHERE id = ?1", [&m.id])?;
             }
         }
-        assert_eq!(ids.len(), 1450);
+        assert_eq!(ids.len(), 250);
         Ok(())
     })
     .await
@@ -159,6 +159,6 @@ async fn inbox_live_and_tenfold_load() {
         assert_eq!(counts["mail"], 257 * scale);
         assert_eq!(counts["thread"], 100 * scale);
         // The threads have their own badge (TER-466): `open` leaves them out.
-        assert_eq!(counts["open"], (257 + 30) * scale - 10);
+        assert_eq!(counts["open"], 20 * scale - 5);
     }
 }

@@ -92,7 +92,8 @@ tag.
 - Notify only for an answer, one done per request, or a real problem:
   `terrarium notify --card <id>` (only `--critical` permits no card).
   Otherwise post in an open topic thread, or open one as lead. Versions
-  get one quiet post in the standing project Versions thread. Keep the releases wiki.
+  get one quiet post with `thread version <version> --changed <text> --test <steps>`
+  in the standing project Versions thread. Keep the releases wiki.
   No progress, release, or deploy notices. Update an open question instead
   of asking another on the same card or Inbox thread.
 

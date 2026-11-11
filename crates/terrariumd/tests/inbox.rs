@@ -139,6 +139,40 @@ async fn inbox(td: &TestDaemon, query: &str) -> (Vec<Value>, Value) {
 }
 
 #[tokio::test]
+async fn version_posts_reuse_a_quiet_project_thread_without_a_badge() {
+    let World { td, lead, w1, sys, .. } = setup().await;
+    let path = "/api/projects/p/version-thread/messages";
+    let body = json!({"version": "1.2.3-alpha", "changed": "C1: card notices", "test": "Run notify without a card"});
+    td.post_as(&w1, path, body.clone()).await.err(403, "forbidden");
+    td.post_as(&lead, "/api/projects/ops/version-thread/messages", body.clone()).await.err(403, "forbidden");
+    let first = td.post_as(&lead, path, body.clone()).await;
+    assert_eq!(first.status, 201, "{}", first.body);
+    let thread = id(&first.body);
+    assert_eq!(first.body["status"], "tracking");
+    assert_eq!(first.body["messages"].as_array().unwrap().len(), 1);
+    let text = first.body["messages"][0]["text"].as_str().unwrap();
+    assert!(text.contains("1.2.3-alpha") && text.contains("C1: card notices") && text.contains("Run notify without a card"));
+    td.post_as(&lead, path, body).await.err(409, "conflict");
+    let second = td.post_as(&lead, path, json!({"version": "1.2.4-alpha", "changed": "Inbox filter", "test": "Open Inbox"})).await;
+    assert_eq!(second.status, 201, "{}", second.body);
+    assert_eq!(second.body["id"], thread);
+    assert_eq!(second.body["messages"].as_array().unwrap().len(), 2);
+    let (rows, counts) = inbox(&td, "").await;
+    assert!(rows.is_empty());
+    assert_eq!(counts["open"], 0);
+    assert_eq!(counts["thread"], 0);
+    td.agent("ops", "lead", json!({"roles": ["project_admin"]})).await;
+    let other = td.post_as(&sys, "/api/projects/ops/version-thread/messages", json!({"version": "1", "changed": "Other project", "test": "Check"})).await;
+    assert_ne!(other.ok()["id"], thread);
+    for invalid in [
+        json!({"version": "2", "changed": "", "test": "Check"}),
+        json!({"version": "2", "changed": "Change", "test": ""}),
+    ] {
+        td.post_as(&lead, path, invalid).await.err(422, "invalid");
+    }
+}
+
+#[tokio::test]
 async fn a_lead_sends_a_notice_and_the_rights_follow_the_roles() {
     let World {
         td, lead, w1, sys, ..
@@ -428,7 +462,7 @@ async fn chatty_thread(td: &TestDaemon, from: &str, to: &str) -> (String, Value)
 /// The Inbox mixes the kinds, urgent first, with the counts; the filters
 /// work; an agent cannot read it.
 #[tokio::test]
-async fn the_inbox_mixes_the_kinds_with_the_counts() {
+async fn the_default_inbox_only_lists_open_questions_and_critical_notices() {
     let World {
         td, lead, w1, w2, ..
     } = setup().await;
@@ -464,25 +498,26 @@ async fn the_inbox_mixes_the_kinds_with_the_counts() {
 
     let (rows, counts) = inbox(&td, "").await;
     let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 4, "{rows:#?}");
-    // Urgent first.
-    assert_eq!(ids[0], format!("notice:{}", id(&n)));
+    assert_eq!(ids.len(), 1, "{rows:#?}");
     assert!(ids.contains(&format!("question:{}", id(&q)).as_str()));
-    assert!(ids.contains(&format!("mail:{}", id(&m)).as_str()));
-    assert!(ids.contains(&format!("thread:{thread}").as_str()));
+    assert!(!ids.contains(&format!("notice:{}", id(&n)).as_str()));
+    assert!(!ids.contains(&format!("mail:{}", id(&m)).as_str()));
+    assert!(!ids.contains(&format!("thread:{thread}").as_str()));
     assert_eq!(
         counts,
-        json!({"open": 4, "urgent": 1, "critical": 0, "question": 1, "notice": 1, "mail": 1, "system": 1, "watch": 0,
+        json!({"open": 1, "urgent": 0, "critical": 0, "question": 1, "notice": 0, "mail": 1, "system": 1, "watch": 0,
                "thread": 0, "thread_urgent": 0, "thread_critical": 0})
     );
     // The pause notice to the operator is the system item, not a mail item.
-    let sys = rows.iter().find(|r| r["kind"] == "system").unwrap();
+    let (system, _) = inbox(&td, "?kind=system").await;
+    let sys = &system[0];
     assert_eq!(sys["project"], "p");
     assert_eq!(sys["system"]["paused"], true);
     assert_eq!(sys["system"]["held"].as_array().unwrap().len(), 1);
     assert_eq!(sys["system"]["limit"], 6);
     assert_eq!(sys["system"]["agent_run"], 7);
-    let mail_item = rows.iter().find(|r| r["kind"] == "mail").unwrap();
+    let (mail, _) = inbox(&td, "?kind=mail").await;
+    let mail_item = &mail[0];
     assert_eq!(mail_item["project"], "p");
     assert_eq!(mail_item["message"]["body"], "a long story");
 
@@ -510,7 +545,7 @@ async fn the_inbox_mixes_the_kinds_with_the_counts() {
         .await
         .ok();
     let (rows, counts) = inbox(&td, "").await;
-    assert_eq!(rows.len(), 2, "{rows:#?}");
+    assert!(rows.is_empty(), "{rows:#?}");
     assert_eq!(counts["urgent"], 0);
     let (done, _) = inbox(&td, "?status=done").await;
     let kinds: Vec<&str> = done.iter().map(|r| r["kind"].as_str().unwrap()).collect();
@@ -572,7 +607,6 @@ async fn a_critical_notice_goes_first_and_counts() {
         ids,
         vec![
             format!("notice:{}", id(&critical)),
-            format!("notice:{}", id(&urgent)),
             format!("question:{}", id(&normal)),
         ],
         "{rows:#?}"
@@ -583,11 +617,10 @@ async fn a_critical_notice_goes_first_and_counts() {
     );
     assert_eq!(
         (rows[1]["critical"].clone(), rows[1]["urgent"].clone()),
-        (json!(false), json!(true))
+        (json!(false), json!(false))
     );
-    assert_eq!(rows[2]["critical"], false);
     assert_eq!(counts["critical"], 1);
-    assert_eq!(counts["urgent"], 2);
+    assert_eq!(counts["urgent"], 1);
     let r = td.get("/api/inbox").await;
     assert_eq!(r.headers["x-inbox-critical"], "1");
 

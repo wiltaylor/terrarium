@@ -52,6 +52,28 @@ pub fn routes() -> Router<Shared> {
         .route("/threads/{id}/track", post(track))
         .route("/threads/{id}/status", post(set_status))
         .route("/threads/{id}/cards", post(link_card))
+        .route("/projects/{project}/version-thread/messages", post(post_version))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionPostBody {
+    version: String,
+    changed: String,
+    test: String,
+}
+
+async fn post_version(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(project): Path<String>,
+    ApiJson(b): ApiJson<VersionPostBody>,
+) -> ApiResult<Response> {
+    policy::admin_project(&actor, &project, "posting a version update")?;
+    let th = state.db.write(actor.label(), move |t| {
+        threads::version_post(t, &project, &b.version, &b.changed, &b.test)
+    }).await?;
+    Ok((StatusCode::CREATED, Json(th)).into_response())
 }
 
 #[derive(Debug, Deserialize)]

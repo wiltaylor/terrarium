@@ -184,7 +184,8 @@ you ask, run `terrarium question ls`. Do not ask the same thing twice.
   problem (security, data loss, outage, spent budget). Use
   `terrarium notify "<text>" --card <id>` (only `--critical` permits no card).
   Otherwise post in an open topic thread, or open one as lead. Versions
-  get one quiet post in the standing project Versions thread. Keep the releases wiki.
+  get one quiet post with `thread version <version> --changed <text> --test <steps>`
+  in the standing project Versions thread. Keep the releases wiki.
   No progress, release, or deploy
   notices. The operator acknowledges it in the Inbox. Update an open question
   with `terrarium question update <id>` instead of asking another question

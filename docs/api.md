@@ -3283,9 +3283,14 @@ The rules:
   Otherwise it is `422 invalid`, including urgent notices and replies.
   Post in an open topic thread instead, or a lead opens one.
   The default Inbox lists only open questions and critical notices. Explicit
-  kind and history queries remain available. Version group completion posts
-  one quiet update to the project's standing Versions thread (no Threads
-  badge), with changed cards and test guidance. Keep the releases wiki.
+  kind and history queries remain available.
+  `POST /api/projects/{project}/version-thread/messages` takes
+  `{"version", "changed", "test"}` and requires project admin rights.
+  It creates or reuses the project's standing Versions thread and posts one
+  quiet update (no Threads badge), with the lead's changes and test guidance.
+  All three fields must be nonempty. A repeated version is `409 conflict`.
+  Post at each pre-release publish, alongside the releases wiki row.
+  Version group completion posts nothing.
   `reply_to` (notices only) names an
   operator mail or Inbox-thread message to the sender, or an answered
   question owned by the sender. Invalid references are `422 invalid`.

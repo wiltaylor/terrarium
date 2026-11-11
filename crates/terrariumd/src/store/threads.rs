@@ -1087,7 +1087,22 @@ pub fn open(t: &mut Tx<'_>, n: NewThread) -> ApiResult<Thread> {
 
 /// One standing project thread for quiet version updates. Posting in tracking
 /// keeps the update off the Threads badge, without hiding its history.
-pub fn version_post(t: &mut Tx<'_>, project: &str, text: &str) -> ApiResult<Thread> {
+pub fn version_post(
+    t: &mut Tx<'_>,
+    project: &str,
+    version: &str,
+    changed: &str,
+    test: &str,
+) -> ApiResult<Thread> {
+    let version = check_text("version", version, 128)?;
+    if version.chars().any(char::is_control) {
+        return Err(ApiError::invalid("version must be one line"));
+    }
+    let changed = check_text("changed", changed, MAX_MESSAGE)?;
+    let test = check_text("test", test, MAX_MESSAGE)?;
+    let heading = format!("Pre-release {version}\n\n");
+    let text = format!("{heading}What changed:\n{changed}\n\nHow to test:\n{test}");
+    check_text("text", &text, MAX_MESSAGE)?;
     let lead = lead_of(t, project)?
         .ok_or_else(|| ApiError::conflict("a version thread needs a project lead"))?;
     let existing: Option<String> = t
@@ -1113,7 +1128,16 @@ pub fn version_post(t: &mut Tx<'_>, project: &str, text: &str) -> ApiResult<Thre
         )?
         .id,
     };
-    post(t, &id, &lead, text, Some(ThreadStatus::Tracking))
+    let duplicate: bool = t.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_messages WHERE thread = ?1
+         AND substr(text, 1, length(?2)) = ?2)",
+        params![id, heading],
+        |r| r.get(0),
+    )?;
+    if duplicate {
+        return Err(ApiError::conflict("this pre-release already has a version post"));
+    }
+    post(t, &id, &lead, &text, Some(ThreadStatus::Tracking))
 }
 
 fn insert_message(

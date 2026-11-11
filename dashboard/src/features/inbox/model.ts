@@ -97,7 +97,7 @@ export function putItem(list: InboxItem[], item: InboxItem, keep: (i: InboxItem)
  */
 export function countItems(items: InboxItem[]): InboxCounts {
   const all = items.filter((i) => i.open);
-  const open = all.filter((i) => i.kind !== "watch" && i.kind !== "thread");
+  const open = all.filter((i) => i.kind === "question" || (i.kind === "notice" && isCritical(i)));
   const threads = all.filter((i) => i.kind === "thread");
   const n = (k: InboxKind) => all.filter((i) => i.kind === k).length;
   return {
@@ -105,7 +105,7 @@ export function countItems(items: InboxItem[]): InboxCounts {
     urgent: open.filter((i) => i.urgent).length,
     critical: open.filter(isCritical).length,
     question: n("question"),
-    notice: n("notice"),
+    notice: open.filter((i) => i.kind === "notice").length,
     mail: n("mail"),
     system: n("system"),
     watch: n("watch"),
@@ -118,7 +118,7 @@ export function countItems(items: InboxItem[]): InboxCounts {
 /** The nav badge: no badge when nothing is open; red when one item is urgent or critical, else the info style. */
 export function badge(c: InboxCounts): { n: number; cls: string; title: string } | null {
   if (c.open <= 0) return null;
-  const parts = (["question", "notice", "mail", "system"] as const).filter((k) => (c[k] ?? 0) > 0).map((k) => `${c[k]} ${KIND_LABELS[k]}`);
+  const parts = (["question", "notice"] as const).filter((k) => (c[k] ?? 0) > 0).map((k) => `${c[k]} ${KIND_LABELS[k]}`);
   return {
     n: c.open,
     cls: c.urgent > 0 || (c.critical ?? 0) > 0 ? "nav-count" : "nav-count info",
