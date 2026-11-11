@@ -1296,27 +1296,38 @@ async fn prepare_hosts_with(
         };
         guard
     };
-    let names = db.read(move |c| {
-        let names = jobs::unresolved_hosts(c, extra)?;
-        let mut selected = Vec::new();
-        for name in names {
-            if !retry {
-                // An indexed point lookup, not a scan of historical pins.
-                let exists: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)", [&name], |r| r.get(0))?;
-                if exists {
-                    continue;
+    let names = db
+        .read(move |c| {
+            let names = jobs::unresolved_hosts(c, extra)?;
+            let mut selected = Vec::new();
+            for name in names {
+                if !retry {
+                    // An indexed point lookup, not a scan of historical pins.
+                    let exists: bool = c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)",
+                        [&name],
+                        |r| r.get(0),
+                    )?;
+                    if exists {
+                        continue;
+                    }
                 }
+                selected.push(name);
             }
-            selected.push(name);
-        }
-        Ok(selected)
-    }).await?;
+            Ok(selected)
+        })
+        .await?;
     if retry {
         retries.retain(|name, _| names.binary_search(name).is_ok());
     }
-    let names: Vec<_> = names.into_iter().filter(|name| {
-        retries.get(name).is_none_or(|(deadline, _)| Instant::now() >= *deadline)
-    }).collect();
+    let names: Vec<_> = names
+        .into_iter()
+        .filter(|name| {
+            retries
+                .get(name)
+                .is_none_or(|(deadline, _)| Instant::now() >= *deadline)
+        })
+        .collect();
     if names.is_empty() {
         return Ok(());
     }
@@ -1344,9 +1355,11 @@ async fn prepare_hosts_with(
             continue;
         }
         let guard = Lookup(name.clone());
-        let delay = retries.get(&name).map_or(Duration::from_secs(60), |(_, delay)| {
-            (*delay * 2).min(Duration::from_secs(15 * 60))
-        });
+        let delay = retries
+            .get(&name)
+            .map_or(Duration::from_secs(60), |(_, delay)| {
+                (*delay * 2).min(Duration::from_secs(15 * 60))
+            });
         retries.insert(name.clone(), (Instant::now() + delay, delay));
         let resolve = resolve.clone();
         let task = tokio::task::spawn_blocking(move || {
@@ -6013,10 +6026,13 @@ mod tests {
         );
         for seconds in [60, 120, 240, 480, 900, 900] {
             prepare_hosts_with(&db, Some("backoff.invalid".into()), true, str::to_owned)
-                .await.unwrap();
+                .await
+                .unwrap();
             prepare_hosts_with(&db, Some("backoff.invalid".into()), true, |_| {
                 panic!("not due yet")
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             let mut retries = db.host_pins().lock().await;
             let (deadline, delay) = retries.get_mut("backoff.invalid").unwrap();
             assert_eq!(*delay, Duration::from_secs(seconds));
@@ -6134,9 +6150,12 @@ mod tests {
             crate::db::open(&path).unwrap(),
             crate::events::EventHub::default(),
         );
-        prepare_hosts_with(&reopened, Some("ROUND-ROBIN.INVALID:2222".into()), false, |_| {
-            panic!("must not resolve again")
-        })
+        prepare_hosts_with(
+            &reopened,
+            Some("ROUND-ROBIN.INVALID:2222".into()),
+            false,
+            |_| panic!("must not resolve again"),
+        )
         .await
         .unwrap();
         let key: String = reopened
@@ -6150,9 +6169,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(key, "192.0.2.1");
-        prepare_hosts_with(&reopened, Some("failed.invalid".into()), false, str::to_owned)
-            .await
-            .unwrap();
+        prepare_hosts_with(
+            &reopened,
+            Some("failed.invalid".into()),
+            false,
+            str::to_owned,
+        )
+        .await
+        .unwrap();
         prepare_hosts_with(&reopened, Some("FAILED.INVALID".into()), false, |_| {
             panic!("API calls must not retry failed pins")
         })
