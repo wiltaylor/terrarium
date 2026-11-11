@@ -463,17 +463,20 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
         }
     };
     let completed: Vec<_> = checkpoints.iter().cloned().collect();
-    let completed = state.db.read(move |conn| {
-        let mut out = Vec::new();
-        for id in completed {
-            if let Ok(job) = jobs::get(conn, &id)
-                && matches!(job.state, JobState::Passed | JobState::Failed)
-            {
-                out.push(id);
+    let completed = state
+        .db
+        .read(move |conn| {
+            let mut out = Vec::new();
+            for id in completed {
+                if let Ok(job) = jobs::get(conn, &id)
+                    && matches!(job.state, JobState::Passed | JobState::Failed)
+                {
+                    out.push(id);
+                }
             }
-        }
-        Ok(out)
-    }).await;
+            Ok(out)
+        })
+        .await;
     if let Ok(completed) = completed {
         for id in completed {
             if let Err(error) = state.executor.hosts.forget_job(&id) {
