@@ -334,6 +334,34 @@ class ConsolidatedTargets(unittest.TestCase):
         for name in ("board.rs", "it/main.rs"):
             self.assertEqual(self.plan(self.base + name).daemon_targets, {"it"})
 
+    def test_module_filter_and_entry_point_fallback(self):
+        p = self.plan(self.base + "board.rs")
+        self.assertEqual(p.daemon_filters, {"it": {"board::"}})
+        self.assertIn(["cargo", "test", "-p", "terrariumd", "--test", "it",
+                       "--no-fail-fast", "--", "board::"], affected.commands(p))
+        self.assertEqual(self.plan(self.base + "it/main.rs").daemon_filters, {})
+
+    def test_source_reference_filters_module(self):
+        p = self.plan("crates/terrariumd/src/calendar.rs")
+        self.assertEqual(p.daemon_filters, {"it": {"board::"}})
+
+    def test_multiple_modules_join_and_entry_point_wins(self):
+        paths = [self.base + "board.rs", self.base + "spawns.rs"]
+        def selected(items):
+            return affected.plan(items, self.crates, read=self.files.__getitem__,
+                                 common=[], embedded={})
+        self.assertEqual(selected(paths).daemon_filters,
+                         {"it": {"board::", "spawns::"}})
+        for items in (paths + [self.base + "it/main.rs"],
+                      [self.base + "it/main.rs"] + paths):
+            self.assertEqual(selected(items).daemon_filters, {})
+
+    def test_implicit_module_is_indexed(self):
+        self.files[self.base + "it/main.rs"] += 'mod local;\n'
+        self.files[self.base + "it/local.rs"] = ""
+        self.assertEqual(self.plan(self.base + "it/local.rs").daemon_filters,
+                         {"it": {"local::"}})
+
     def test_source_references_and_module_names_select_binary_and_guard(self):
         for module in ("board", "calendar", "spawn"):
             self.assertEqual(

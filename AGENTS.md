@@ -154,6 +154,11 @@ updated `defaults/manifest.json` committed with it.
 
 ## Branches
 
+New daemon integration test files go under `crates/terrariumd/tests/it/`.
+Register each module in `tests/it/main.rs` and use `use crate::common`
+instead of declaring another `mod common`. Run one module with
+`cargo test -p terrariumd --test it <module>::`.
+
 New card branches start from `next`, not from `main`:
 
 ```sh

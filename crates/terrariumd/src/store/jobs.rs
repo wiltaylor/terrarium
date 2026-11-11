@@ -1585,7 +1585,7 @@ pub fn create_onto(t: &mut Tx<'_>, n: NewJob, onto: Option<&str>) -> ApiResult<J
             [card],
             |r| r.get(0),
         )?;
-        if is_group && n.kind != JobKind::E2e {
+        if is_group && !matches!(n.kind, JobKind::E2e | JobKind::Release) {
             return Err(ApiError::invalid(
                 "group cards cannot be validated or merged",
             ));
