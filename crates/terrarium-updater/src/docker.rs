@@ -37,8 +37,8 @@ pub const LABEL_COMPOSE_IMAGE: &str = "com.docker.compose.image";
 pub const SERVICE: &str = "terrarium";
 /// The OCI label of the version.
 pub const LABEL_VERSION: &str = "org.opencontainers.image.version";
-/// The stop timeout when the container sets none (compose.yaml: 40 s).
-pub const DEFAULT_STOP_TIMEOUT: u64 = 40;
+/// The stop timeout when the container sets none (compose.yaml: 650 s).
+pub const DEFAULT_STOP_TIMEOUT: u64 = 650;
 
 /// The Docker engine.
 #[derive(Debug, Clone)]

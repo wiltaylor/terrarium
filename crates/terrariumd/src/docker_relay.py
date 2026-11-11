@@ -17,7 +17,8 @@ import socket
 import sys
 import threading
 
-MAX_FRAME = 65536
+CHUNK_SIZE = 256 * 1024
+MAX_FRAME = 512 * 1024
 MAX_CONNECTIONS = 32
 # Queued after the last data of a direction: shut down the write side.
 EOF = object()
@@ -79,7 +80,7 @@ def serve(directory):
     def read(ident, connection, credit):
         try:
             while True:
-                data = connection.recv(16384)
+                data = connection.recv(CHUNK_SIZE)
                 if not data:
                     # The client half-closed. Keep its read side open for
                     # the rest of the answer.
