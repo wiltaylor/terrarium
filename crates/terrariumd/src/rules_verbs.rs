@@ -291,8 +291,9 @@ pub fn perform(
         "card.move" => card_move(t, actor, ctx, &a, &mut effects)?,
         "card.wait_action" => {
             let card = the_card(ctx, verb)?;
+            let generation = ctx.event.as_ref().and_then(|e| e.data["wait_generation"].as_str()).unwrap_or_default();
             Done {
-                changed: board::card_waits::act(t, actor, &card.id)?,
+                changed: board::card_waits::act(t, actor, &card.id, generation)?,
                 detail: json!({"card": card.id}),
             }
         }

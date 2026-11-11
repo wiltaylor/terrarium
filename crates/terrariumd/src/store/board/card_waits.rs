@@ -94,10 +94,10 @@ pub fn set(t: &mut Tx<'_>, actor: &Actor, id: &str, wait: &Wait) -> ApiResult<()
     for (dep, target) in wanted {
         t.execute("INSERT INTO card_deps(card, depends_on, target) VALUES (?1, ?2, ?3)", params![card.id, dep, target])?;
     }
-    t.execute("INSERT INTO card_waits(card, mode, action, setter) VALUES (?1, ?2, ?3, ?4)
+    t.execute("INSERT INTO card_waits(card, mode, action, setter, generation) VALUES (?1, ?2, ?3, ?4, ?5)
         ON CONFLICT(card) DO UPDATE SET mode=excluded.mode, action=excluded.action,
-        setter=excluded.setter, met_at=NULL, acted_at=NULL, broken=0",
-        params![card.id, if wait.mode == Mode::All { "all" } else { "any" }, serde_json::to_string(&wait.action)?, actor.address()])?;
+        setter=excluded.setter, generation=excluded.generation, met_at=NULL, acted_at=NULL, broken=0",
+        params![card.id, if wait.mode == Mode::All { "all" } else { "any" }, serde_json::to_string(&wait.action)?, actor.address(), ulid::Ulid::new().to_string()])?;
     card_event(t, &card, "edited", json!({"fields": ["wait"]}))?;
     evaluate(t, &card.id, false)
 }
@@ -112,12 +112,18 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Option<Wait>> {
     Ok(Some(Wait { dependencies, mode: if mode == "any" { Mode::Any } else { Mode::All }, action: serde_json::from_str(&action).map_err(|e| ApiError::invalid(e.to_string()))?, met_at }))
 }
 
-fn evaluate(t: &mut Tx<'_>, id: &str, broken: bool) -> ApiResult<()> {
+pub(super) fn evaluate(t: &mut Tx<'_>, id: &str, broken: bool) -> ApiResult<()> {
     let open: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM card_waits WHERE card=?1 AND met_at IS NULL)", [id], |r| r.get(0))?;
     if !open || (!broken && !unmet(t, id)?.is_empty()) { return Ok(()) }
     t.execute("UPDATE card_waits SET met_at=?2, broken=?3 WHERE card=?1 AND met_at IS NULL", params![id, now(), broken])?;
     let row = find_row(t, id)?;
-    card_event(t, &row, "wait_met", json!({"broken": broken}))
+    let generation: String = t.query_row("SELECT generation FROM card_waits WHERE card=?1", [id], |r| r.get(0))?;
+    card_event(t, &row, "wait_met", json!({"broken": broken, "wait_generation": generation}))?;
+    if !crate::store::projects::rules_flow(t, &row.project)? {
+        let actor = crate::rules_engine::rule_actor(&row.project, "card-wait-met");
+        act(t, &actor, id, &generation)?;
+    }
+    Ok(())
 }
 
 pub(super) fn on_dependency_changed(t: &mut Tx<'_>, id: &str, broken: bool) -> ApiResult<()> {
@@ -136,9 +142,9 @@ pub(super) fn on_dependency_changed(t: &mut Tx<'_>, id: &str, broken: bool) -> A
 }
 
 /// Pack rule action. The latch survives a restart and duplicate event delivery.
-pub fn act(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<bool> {
+pub fn act(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiResult<bool> {
     let config: Option<(String, String, bool)> = t.query_row("SELECT action, setter, broken FROM card_waits
-        WHERE card=?1 AND met_at IS NOT NULL AND acted_at IS NULL", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        WHERE card=?1 AND generation=?2 AND met_at IS NOT NULL AND acted_at IS NULL", params![id, generation], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
     let Some((action, setter, broken)) = config else { return Ok(false) };
     let action: Action = serde_json::from_str(&action).map_err(|e| ApiError::invalid(e.to_string()))?;
     let row = find_row(t, id)?;
@@ -149,9 +155,12 @@ pub fn act(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<bool> {
     if !broken {
         if let Some(to) = action.move_to {
             // check_move runs before writes, so a refusal leaves the move untouched.
-            let destination = column(t, &row.project, &to)?;
-            match check_move(t, actor, &row, &destination, action.comment.as_deref()) {
-                Ok(()) => apply_move(t, actor, &row, &destination, None, action.comment.as_deref())?,
+            let checked = column(t, &row.project, &to).and_then(|destination| {
+                check_move(t, actor, &row, &destination, action.comment.as_deref())?;
+                Ok(destination)
+            });
+            match checked {
+                Ok(destination) => apply_move(t, actor, &row, &destination, None, action.comment.as_deref())?,
                 Err(e) => { reason = format!("wait met, move refused: {e}"); refused = true; }
             }
         } else if let Some(comment) = action.comment {

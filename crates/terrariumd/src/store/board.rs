@@ -2077,13 +2077,17 @@ pub struct NewCard {
     pub inbox_thread: Option<String>,
 }
 
-fn set_deps(t: &mut Tx<'_>, card: &str, wanted: &[String]) -> ApiResult<()> {
+fn set_deps(t: &mut Tx<'_>, actor: &Actor, card: &str, wanted: &[String]) -> ApiResult<()> {
+    if wanted.len() > 128 {
+        return Err(ApiError::invalid("at most 128 dependencies per card"));
+    }
     let wanted: Vec<String> = wanted.iter().map(|d| normalise_id(d)).collect();
     for d in &wanted {
         if *d == card {
             return Err(ApiError::invalid(format!("{card} cannot depend on itself")));
         }
-        find_row(t, d)?;
+        let dependency = find_row(t, d)?;
+        policy::read_project(actor, &dependency.project)?;
         // A cycle: `d` reaches `card` through existing dependencies.
         let mut seen = HashSet::new();
         let mut stack = vec![d.clone()];
@@ -2094,6 +2098,9 @@ fn set_deps(t: &mut Tx<'_>, card: &str, wanted: &[String]) -> ApiResult<()> {
                 )));
             }
             if seen.insert(next.clone()) {
+                if seen.len() > 4096 {
+                    return Err(ApiError::invalid("dependency graph exceeds 4096 cards"));
+                }
                 stack.extend(deps(t, &next)?);
             }
         }
@@ -2104,6 +2111,11 @@ fn set_deps(t: &mut Tx<'_>, card: &str, wanted: &[String]) -> ApiResult<()> {
             "INSERT OR IGNORE INTO card_deps (card, depends_on) VALUES (?1, ?2)",
             params![card, d],
         )?;
+    }
+    t.execute("DELETE FROM card_waits WHERE card=?1", [card])?;
+    if !wanted.is_empty() {
+        t.execute("INSERT INTO card_waits(card, generation, mode, action, setter) VALUES (?1, ?2, 'all', '{}', ?3)",
+            params![card, ulid::Ulid::new().to_string(), actor.address()])?;
     }
     Ok(())
 }
@@ -2224,7 +2236,7 @@ pub(crate) fn create_card_with_author(
             at
         ],
     )?;
-    set_deps(t, &id, &new.depends_on)?;
+    set_deps(t, actor, &id, &new.depends_on)?;
     if let Some(th) = new.inbox_thread.as_deref().filter(|s| !s.trim().is_empty()) {
         let th = crate::store::threads::link_card(t, actor, th, &id)?;
         // A card made after the agent's hand-off message moves the thread
@@ -2245,6 +2257,7 @@ pub(crate) fn create_card_with_author(
         "created",
         json!({"from_mail": new.from_mail, "thread_id": thread}),
     )?;
+    card_waits::evaluate(t, &id, false)?;
     if let Some(agent) = &held_for {
         hold(t, actor, agent.as_ref(), &row, verified_author)?;
         if let Some(c) = new.comment.as_deref().filter(|c| !c.trim().is_empty()) {
@@ -2471,8 +2484,8 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
             ],
         )?;
         if let Some(d) = &p.depends_on {
-            set_deps(t, &card.id, d)?;
-            t.execute("DELETE FROM card_waits WHERE card = ?1", [&card.id])?;
+            set_deps(t, actor, &card.id, d)?;
+            card_waits::evaluate(t, &card.id, false)?;
         }
         let fields: Vec<&str> = [
             p.title.as_ref().map(|_| "title"),
