@@ -1404,7 +1404,10 @@ mechanism above is read, not verified.
 
 Only the refusal of the provider blocks an agent (PLAN §16.2,
 `crates/terrariumd/src/usage_limit.rs`); a probe window at 100 percent only
-sends a mail. An adapter gives `Event::UsageLimit` for the usage-limit
+sends a mail. Cloud monthly and project daily budgets also send mail only,
+including at 100 percent, for every subscription. Startup releases old budget
+holds with audited `quota.resumed` events, preserving vendor-limit holds
+and auto-swap. An adapter gives `Event::UsageLimit` for the usage-limit
 error of its harness. Read on 2026-10-30 in the installed versions (Claude
 Code 2.1.312, Codex 0.165.0, Copilot CLI 1.0.105, pi 1.4.0). No harness ran
 a turn, and no limit was hit live.
