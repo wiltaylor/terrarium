@@ -40,10 +40,11 @@ fn link_gate_lines(source: &str) -> Vec<String> {
             } else if marker(item.to_token_stream()) {
                 let tokens = item.to_token_stream().to_string();
                 let label = tokens.chars().take(100).collect::<String>();
-                out.push(format!(
-                    "{label}:sha256:{:x}",
-                    Sha256::digest(tokens.as_bytes())
-                ));
+                let digest: String = Sha256::digest(tokens.as_bytes())
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                out.push(format!("{label}:sha256:{digest}"));
             }
         }
     }
