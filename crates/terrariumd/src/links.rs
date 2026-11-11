@@ -86,10 +86,13 @@ pub fn operator_only(what: &str) -> ApiResult<()> {
 /// Store transactions also retain provenance in `Tx::link`, including when
 /// the caller passed an audit label after leaving the original request task.
 pub fn operator_only_with_provenance(link: bool, what: &str) -> ApiResult<()> {
-    if !link || OPERATOR_ROUTE.try_with(|allowed| *allowed).unwrap_or(false) {
+    if !(link || is_link_call()) || OPERATOR_ROUTE.try_with(|allowed| *allowed).unwrap_or(false) {
         Ok(())
     } else {
-        Err(ApiError::new(crate::error::Code::LinkForbidden, format!("a link key may not {what}")))
+        Err(ApiError::new(
+            crate::error::Code::LinkForbidden,
+            format!("a link key may not {what}"),
+        ))
     }
 }
 

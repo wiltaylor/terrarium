@@ -2936,7 +2936,7 @@
       "Actor::Operator=>{",
       "Actor::Operatorift.actor!=\"operator\"=>\"system\".to_owned(),",
       "apply_move(t,&Actor::Operator,&row,&backlog,None,Some(&comment))?;",
-      "crate::links::operator_only_with_provenance(t.link.is_some(),\"assigningaGitHub-heldcard\")?;",
+      "crate::links::operator_only_with_provenance(",
       "crate::links::operator_only_with_provenance(t.link.is_some(),\"movingaGitHub-heldcard\")?;",
       "if!actor.is_operator(){",
       "ifto.id!=card.column_id&&!actor.is_operator()&&card_is_held(card){",
@@ -2965,7 +2965,7 @@
       "to:&Address::Operator,"
     ],
     "store/questions.rs": [
-      "crate::links::operator_only_with_provenance(t.link.is_some(),\"answeringaGitHubholdquestion\")?;",
+      "crate::links::operator_only_with_provenance(",
       "crate::links::operator_only_with_provenance(t.link.is_some(),\"approvingatoolrun\")?;",
       "from:&mail::Address::Operator,",
       "from:&mail::Address::Operator,",

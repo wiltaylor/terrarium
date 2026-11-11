@@ -1447,7 +1447,10 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
         }
     }
     if q.hold_card.is_some() {
-        crate::links::operator_only_with_provenance(t.link.is_some(), "answering a GitHub hold question")?;
+        crate::links::operator_only_with_provenance(
+            t.link.is_some(),
+            "answering a GitHub hold question",
+        )?;
         if *by != mail::Address::Operator {
             return Err(ApiError::forbidden(
                 "only the operator answers a hold question of the GitHub author gate",

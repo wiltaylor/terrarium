@@ -1941,7 +1941,10 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
     // The GitHub author gate (TER-85): only the operator assigns a held
     // card. Unassigning stays open: it gives no one the card.
     if to.is_some() && card_is_held(&card) {
-        crate::links::operator_only_with_provenance(t.link.is_some(), "assigning a GitHub-held card")?;
+        crate::links::operator_only_with_provenance(
+            t.link.is_some(),
+            "assigning a GitHub-held card",
+        )?;
     }
     if to.is_some() && !actor.is_operator() && card_is_held(&card) {
         return Err(ApiError::forbidden(format!(
@@ -2181,7 +2184,7 @@ pub(crate) fn create_card_with_author(
                 policy::operator_only(actor, "bypassing the GitHub author gate on creation")?;
             }
             None
-        },
+        }
     };
     if held_for.is_some() {
         github_gate::hold_labels(&mut new.labels);
