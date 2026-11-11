@@ -3247,7 +3247,17 @@ async fn conflict_repair_spawns_once_and_returns_conflicts_to_live_worker() {
     assert_eq!(count, 1);
     td.wait_status(&sp.id, "idle").await;
     let id = sp.id.clone();
-    let before = state(&td).db.read(move |c| Ok(c.query_row("SELECT count(*) FROM deliveries WHERE agent_id = ?1 AND origin = 'system'", [id], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    let before = state(&td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM deliveries WHERE agent_id = ?1 AND origin = 'system'",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
     // A later conflict must go to the same worker, not spawn another.
     let next = store_job(&td, JobKind::Merge, &[&a]).await;
     let next = fail_job(&td, &next, "conflict").await;
@@ -3277,8 +3287,22 @@ async fn conflict_repair_spawns_once_and_returns_conflicts_to_live_worker() {
         .unwrap();
     assert_eq!(done, 2);
     let id = sp.id.clone();
-    let after = state(&td).db.read(move |c| Ok(c.query_row("SELECT count(*) FROM deliveries WHERE agent_id = ?1 AND origin = 'system'", [id], |r| r.get::<_, i64>(0))?)).await.unwrap();
-    assert_eq!(after, before + 1, "the live worker receives a conflict turn");
+    let after = state(&td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM deliveries WHERE agent_id = ?1 AND origin = 'system'",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        after,
+        before + 1,
+        "the live worker receives a conflict turn"
+    );
 }
 
 #[tokio::test]
@@ -3288,18 +3312,23 @@ async fn conflict_repair_excludes_other_jobs_and_release_branches() {
     let a = new_card(&td, "p", json!({"title": "a"})).await;
     let job = store_job(&td, JobKind::Merge, &[&a]).await;
     let mut job = fail_job(&td, &job, "conflict").await;
-    state(&td).db.write("system", move |t| {
-        for kind in [JobKind::Validate, JobKind::Release, JobKind::E2e] {
-            job.kind = kind;
+    state(&td)
+        .db
+        .write("system", move |t| {
+            for kind in [JobKind::Validate, JobKind::Release, JobKind::E2e] {
+                job.kind = kind;
+                terrariumd::conflict_fixes::enqueue(t, &job)?;
+            }
+            job.kind = JobKind::Merge;
+            job.onto = Some("release/0.1.0".into());
             terrariumd::conflict_fixes::enqueue(t, &job)?;
-        }
-        job.kind = JobKind::Merge;
-        job.onto = Some("release/0.1.0".into());
-        terrariumd::conflict_fixes::enqueue(t, &job)?;
-        let count: i64 = t.query_row("SELECT count(*) FROM conflict_fixes", [], |r| r.get(0))?;
-        assert_eq!(count, 0);
-        Ok(())
-    }).await.unwrap();
+            let count: i64 =
+                t.query_row("SELECT count(*) FROM conflict_fixes", [], |r| r.get(0))?;
+            assert_eq!(count, 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 const BUSY_RERUN: &str = r#"rule "again" {
