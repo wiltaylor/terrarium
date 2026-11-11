@@ -2216,20 +2216,46 @@ a.chip.card-link:hover {
   }
 }
 .thread-msg {
-  max-width: 85%;
-  justify-self: start;
+  width: 100%;
+  min-width: 0;
 }
 .thread-msg.mine {
-  justify-self: end;
-  background: var(--accent-soft);
+  background: transparent;
 }
 .thread-msg.response {
   border-color: var(--link);
   border-width: 2px;
 }
 .thread-question {
-  max-width: 85%;
+  width: 100%;
+  min-width: 0;
 }
+.thread-post {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  scroll-margin-top: 70px;
+}
+.thread-post:target { outline: 2px solid var(--link); }
+.thread-post-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.thread-post-header svg { width: 18px; height: 18px; }
+.thread-post-header time { margin-left: auto; }
+.thread-post-body { padding: 12px; overflow-wrap: anywhere; }
+.thread-post-body > .thread-msg { border: 0; padding: 0; }
+.post-question, .post-question-bundle { border-color: var(--warn); }
+.post-response { border-color: var(--info); }
+.post-close-proposal { border-color: var(--st-restarting); }
+.post-handoff { border-color: var(--accent); }
+.thread-page textarea { width: 100%; box-sizing: border-box; }
 /* The linked cards of a thread (TER-147): a mini kanban, one row per project with its board columns. An empty column is narrow. */
 .tracked-cards > summary {
   cursor: pointer;

@@ -131,6 +131,23 @@ describe("Inbox threads", () => {
     expect(timeline(thread())).toEqual([]);
   });
 
+  it("keeps response, proposal and handoff posts in time order without duplicating the response", () => {
+    const response = { by: "operator", text: "Approved", at: "2026-11-06T09:02:00.000Z" };
+    const proposal = { by: "A1", summary: "Done", links: [], at: "2026-11-06T09:03:00.000Z" };
+    const t = thread({
+      messages: [msg("m1", "2026-11-06T09:00:00.000Z"), msg("m2", "2026-11-06T09:04:00.000Z")],
+      response, close_proposal: proposal,
+    });
+    expect(timeline(t).map((e) => e.kind)).toEqual(["message", "response", "proposal", "message"]);
+    t.messages!.push({ ...msg("r", response.at), kind: "response" });
+    expect(timeline(t).filter((e) => e.kind === "response")).toHaveLength(0);
+    t.status = "closed";
+    t.closed_at = "2026-11-06T09:05:00.000Z";
+    t.handoff = proposal;
+    expect(timeline(t).some((e) => e.kind === "proposal")).toBe(false);
+    expect(timeline(t).at(-1)?.kind).toBe("handoff");
+  });
+
   it("checks a message by bytes", () => {
     expect(threadText("  hi  ", 10)).toEqual({ text: "hi" });
     expect(threadText("   ", 10, "response")).toEqual({ error: "Write the response." });

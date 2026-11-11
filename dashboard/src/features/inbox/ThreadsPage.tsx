@@ -193,7 +193,7 @@ function ThreadTableRow(props: { thread: Thread; now: number; boards: Record<str
 }
 
 /** The status icons: inline SVG, no icon library (TER-466). */
-function ThreadIcon(props: { icon: ThreadIconId }) {
+export function ThreadIcon(props: { icon: ThreadIconId }) {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <Switch>
