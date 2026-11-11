@@ -1582,12 +1582,31 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["job"]["kind"], "merge");
+    let group_key = format!("merge:{}", r.body["job"]["id"].as_str().unwrap());
     lab.until_card(&b, "accepted", |c| c["column"] == "accepted")
         .await;
     let next = git(&lab.origin, &["rev-parse", "next"]);
     assert_ne!(next, head);
     lab.settle().await;
     assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
+    if flow == "rules" {
+        let g = lab
+            .td
+            .daemon
+            .as_ref()
+            .unwrap()
+            .state
+            .db
+            .read(move |c| Ok(terrariumd::store::groups::by_key(c, "p", &group_key)?.unwrap()))
+            .await
+            .unwrap();
+        let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
+        assert!(
+            recipe.started_at.is_some(),
+            "the real jobs.rs recipe boundary started e2e"
+        );
+        assert_eq!(recipe.state, "done");
+    }
 }
 
 both_flows!(validate_replaces_stale_validation_and_by_labels);
