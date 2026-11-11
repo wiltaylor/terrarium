@@ -1840,6 +1840,12 @@ a.chip.card-link:hover {
   line-height: 1.6;
   overflow-wrap: break-word;
 }
+.text-markdown { min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.text-markdown .prose > :first-child { margin-top: 0; }
+.text-markdown .prose > :last-child { margin-bottom: 0; }
+.text-markdown pre { max-width: 100%; overflow-x: auto; padding: 10px; background: var(--bg); white-space: pre; }
+.text-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.text-markdown th, .text-markdown td { padding: 6px 10px; border: 1px solid var(--border); }
 .prose img {
   max-width: 100%;
   border-radius: var(--radius-sm);
