@@ -118,8 +118,8 @@ async fn open(
         },
     };
     policy::open_thread(&actor, &scope)?;
-    if b.report_to.is_some() && !actor.is_operator() {
-        return Err(ApiError::forbidden("only the operator opens a request"));
+    if b.report_to.is_some() {
+        crate::policy::operator_only(&actor, "opening a request")?;
     }
     let opener = actor.agent().cloned();
     if opener.is_some() {
@@ -365,11 +365,7 @@ async fn respond(
     Path(id): Path<String>,
     ApiJson(b): ApiJson<TextBody>,
 ) -> ApiResult<Json<Thread>> {
-    if !actor.is_operator() {
-        return Err(ApiError::forbidden(
-            "responding to a thread: the overall response is the operator's",
-        ));
-    }
+    crate::policy::operator_only(&actor, "responding to a thread")?;
     Ok(Json(
         state
             .db
@@ -402,6 +398,9 @@ async fn close(
     } else {
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
     };
+    if b.confirm {
+        crate::policy::operator_only(&actor, "confirming a thread close")?;
+    }
     let by = actor.address();
     let label = actor.label();
     Ok(Json(

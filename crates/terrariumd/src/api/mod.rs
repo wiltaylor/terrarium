@@ -876,12 +876,13 @@ async fn link_request(
     req.extensions_mut().insert(caller.clone());
     req.extensions_mut().insert(guard.clone());
     let g = guard.clone();
-    let run = CALLER.scope(caller, async move {
+    let operator_route = crate::links::operator_route_allowed(&method, &path);
+    let run = CALLER.scope(caller, crate::links::OPERATOR_ROUTE.scope(operator_route, async move {
         tokio::select! {
             r = next.run(req) => Some(r),
             () = g.revoked() => None,
         }
-    });
+    }));
     let Some(mut resp) = run.await else {
         return unauthorized("the link was revoked");
     };
@@ -3035,6 +3036,78 @@ mod tests {
         let r = send_body(link_app(s), "POST", "/api/links/pair", &[], &body).await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         (v["link_id"].as_str().unwrap().to_owned(), key)
+    }
+
+    #[tokio::test]
+    async fn link_operator_routes_deny_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        seed_sysadmin(&s).await;
+        let (_, key) = paired(&s, false).await;
+        let auth = format!("Bearer {key}");
+        let h = [("authorization", auth.as_str())];
+        // Inventory of unconditional operator-only HTTP gates. Bodies are
+        // valid so rejection cannot be an extractor error before the gate.
+        let empty = serde_json::json!({});
+        for (method, path, body) in [
+            ("GET", "/api/inbox", empty.clone()),
+            ("POST", "/api/inbox/mail/x/ack", empty.clone()),
+            ("POST", "/api/inbox/asks", serde_json::json!({"to":"p/dev", "text":"x"})),
+            ("DELETE", "/api/inbox/watches/x", empty.clone()),
+            ("PUT", "/api/pins/x", empty.clone()),
+            ("DELETE", "/api/pins/x", empty.clone()),
+            ("PUT", "/api/bookmarks", serde_json::json!({"title":"x", "href":"https://example.com"})),
+            ("DELETE", "/api/bookmarks", serde_json::json!({"href":"https://example.com"})),
+            ("PUT", "/api/preferences", empty.clone()),
+            ("GET", "/api/backups", empty.clone()),
+            ("POST", "/api/backups", empty.clone()),
+            ("GET", "/api/backups/x", empty.clone()),
+            ("GET", "/api/agents/operator/spawned", empty.clone()),
+            ("DELETE", "/api/release-targets/x", empty.clone()),
+            ("POST", "/api/exedev/sweep", empty.clone()),
+            ("POST", "/api/mail/x/release", empty.clone()),
+            ("POST", "/api/mail/threads/x/resume", empty.clone()),
+            ("POST", "/api/threads/x/respond", serde_json::json!({"text":"x"})),
+            ("POST", "/api/questions/x/to-thread", empty.clone()),
+            ("GET", "/api/system/update", empty.clone()),
+            ("POST", "/api/system/update", empty.clone()),
+            ("POST", "/api/system/update/check", empty.clone()),
+            ("POST", "/api/system/update/rollback", empty.clone()),
+            ("POST", "/api/system/update/drain", empty.clone()),
+            ("POST", "/api/system/update/resume", empty.clone()),
+            ("GET", "/api/links", empty.clone()),
+            ("GET", "/api/links/x", empty.clone()),
+            ("POST", "/api/links", empty.clone()),
+            ("POST", "/api/links/x/rotate", empty.clone()),
+            ("DELETE", "/api/links/x", empty.clone()),
+            ("DELETE", "/api/session", empty.clone()),
+            ("DELETE", "/api/sessions", empty.clone()),
+            ("POST", "/api/calendar/global/watches", empty.clone()),
+            ("POST", "/api/calendar/global/watches", serde_json::json!({"watcher":"operator"})),
+            ("POST", "/api/projects/p/calendar/watches", empty.clone()),
+            ("PATCH", "/api/projects/p", serde_json::json!({"github_authors":[]})),
+        ] {
+            let r = send_body(link_app(&s), method, path, &h, &body).await;
+            let status = r.status();
+            let v = json_of(r).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {v}");
+        }
+        for path in [
+            "/api/admin/x", "/api/secrets", "/api/audit", "/api/subscriptions",
+            "/api/credentials", "/api/targets", "/api/hosts",
+        ] {
+            let r = send(link_app(&s), "GET", path, &h).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+        for path in [
+            "/api/inbox/counts", "/api/pins", "/api/bookmarks", "/api/preferences",
+            "/api/calendar/global/watches", "/api/projects/p/calendar/watches",
+        ] {
+            for method in ["GET", "HEAD"] {
+                let r = send(link_app(&s), method, path, &h).await;
+                assert_eq!(r.status(), StatusCode::OK, "{method} {path}");
+            }
+        }
     }
 
     #[tokio::test]

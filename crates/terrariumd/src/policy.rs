@@ -275,6 +275,7 @@ pub fn manage_subscriptions(actor: &Actor, what: &str) -> ApiResult<()> {
 /// Logins, logouts, and API keys (PLAN §10: credentials are operator-only;
 /// PLAN §16.1: the login terminal is never for agents).
 pub fn operator_only(actor: &Actor, what: &str) -> ApiResult<()> {
+    crate::links::operator_only(what)?;
     if actor.is_operator() {
         Ok(())
     } else {
