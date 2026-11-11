@@ -663,6 +663,33 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Event> {
     complete(conn, e)
 }
 
+/// Freeze inputs only: expansion needs recurrence exceptions, not display names
+/// or assignees. Both calendar scopes are read in one indexed query.
+pub(crate) fn freeze_events(conn: &Connection, project: &str) -> ApiResult<Vec<Event>> {
+    let mut st = conn.prepare(
+        "SELECT e.*, (SELECT json_group_array(occurrence) FROM calendar_exceptions
+                      WHERE event = e.id) AS skipped
+         FROM calendar_events e
+         WHERE (project IS ?1 OR project IS NULL) AND kind = 'freeze'
+         LIMIT ?2",
+    )?;
+    let events = st
+        .query_map(params![project, 2 * MAX_EVENTS + 1], |r| {
+            let mut event = row(r)?;
+            let skipped: String = r.get("skipped")?;
+            event.exceptions = serde_json::from_str(&skipped).unwrap_or_default();
+            Ok(event)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let global = events.iter().filter(|e| e.global).count();
+    if global > MAX_EVENTS || events.len() - global > MAX_EVENTS {
+        return Err(ApiError::conflict(
+            "calendar freeze check exceeds event limit",
+        ));
+    }
+    Ok(events)
+}
+
 /// Which events a list reads.
 #[derive(Debug, Clone)]
 pub enum Filter {
