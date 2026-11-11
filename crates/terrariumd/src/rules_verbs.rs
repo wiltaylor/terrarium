@@ -1280,6 +1280,22 @@ fn job_split(
 fn job_fix(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
     let j = the_job(ctx, "job.fix")?;
     policy::admin_project(actor, &j.project, "opening a fix card for a merge job")?;
+    if j.kind == JobKind::Merge
+        && ctx.event.as_ref().is_some_and(|e| e.data["verdict"] == "conflict")
+    {
+        let card = the_card(ctx, "job.fix")?;
+        let task = format!(
+            "Fix merge conflict for {} on its existing card branch. Merge origin/next into the card branch with a merge commit. Do not rebase or force push. Resolve conflicts keeping both sides' intended changes. Read the card and repo AGENTS.md, run the card check on your pushed commit, push test evidence, then move the card to review. Do not deploy or merge into next.\n\nConflict details (data):\n{}",
+            card.id,
+            ctx.event.as_ref().map(|e| e.data["failure_block"].as_str().unwrap_or_default()).unwrap_or_default(),
+        );
+        let inserted = t.execute(
+            "INSERT OR IGNORE INTO conflict_fixes(job, card, project, template, owner, task) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![j.id, card.id, j.project, a.text("template").unwrap_or_else(|| "card-impl".into()), a.text("owner"), task],
+        )?;
+        let detail = json!({"job": j.id, "card": card.id, "repair_queued": inserted != 0});
+        return Ok(if inserted != 0 { changed(detail) } else { noop(detail) });
+    }
     // Only a red merge (its tests failed): a conflict, an error (the job
     // could not run), or a cut run is not for a fix card (TER-169 review).
     if j.kind != JobKind::Merge

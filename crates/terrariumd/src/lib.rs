@@ -14,6 +14,7 @@ pub mod bound;
 pub mod calendar;
 pub mod card_delivery;
 pub mod card_dispatcher;
+pub mod conflict_fixes;
 pub mod card_reminder;
 pub mod cloud_budget;
 pub mod config_repo;

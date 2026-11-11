@@ -281,6 +281,8 @@ pub const VERBS: &[Verb] = &[
             ("to", Arg::Column),
             ("labels", Arg::List),
             ("max", Arg::Count),
+            ("template", Arg::Text),
+            ("owner", Arg::Text),
         ],
         required: &[],
     },
