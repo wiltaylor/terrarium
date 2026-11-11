@@ -61,7 +61,13 @@ fn assertion(key: &str) -> ApiResult<String> {
     ))
 }
 
-fn endpoint(settings: &CloudSettings) -> ApiResult<String> {
+struct VertexEndpoint {
+    token: String,
+    predict: String,
+}
+
+impl VertexEndpoint {
+fn regional(settings: &CloudSettings) -> ApiResult<Self> {
     // Do not send a newly entered key or token to a user-controlled endpoint.
     if settings.base_url.is_some() {
         return Err(failure(
@@ -97,30 +103,36 @@ fn endpoint(settings: &CloudSettings) -> ApiResult<String> {
             "Project and model IDs must be single path components.",
         ));
     }
-    Ok(format!(
+    Ok(Self { token: TOKEN_URL.into(), predict: format!(
         "https://{host}/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:rawPredict"
-    ))
+    ) })
+}
+
+#[cfg(test)]
+fn mock(url: String) -> Self {
+    Self { token: url.clone(), predict: url }
+}
 }
 
 pub(super) async fn test(key: &ApiKey, settings: &CloudSettings) -> ApiResult<()> {
-    let url = endpoint(settings)?;
+    let endpoint = VertexEndpoint::regional(settings)?;
     let jwt = assertion(key.key.trim())?;
     tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        invoke(&jwt, TOKEN_URL, &url),
+        invoke(&jwt, &endpoint),
     )
     .await
     .map_err(|_| failure("The request timed out."))?
 }
 
-async fn invoke(jwt: &str, token_url: &str, url: &str) -> ApiResult<()> {
+async fn invoke(jwt: &str, endpoint: &VertexEndpoint) -> ApiResult<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| failure("Cannot create the test client."))?;
     let mut response = client
-        .post(token_url)
+        .post(&endpoint.token)
         .form(&[
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
             ("assertion", jwt),
@@ -150,7 +162,7 @@ async fn invoke(jwt: &str, token_url: &str, url: &str) -> ApiResult<()> {
     }
     let token: Token = serde_json::from_slice(&bytes)
         .map_err(|_| failure("Invalid Google authentication response."))?;
-    let response = client.post(url).bearer_auth(token.access_token)
+    let response = client.post(&endpoint.predict).bearer_auth(token.access_token)
         .header("content-type", "application/json")
         .body(json!({"anthropic_version": "vertex-2023-10-16", "max_tokens": 1, "messages": [{"role": "user", "content": "Hi"}]}).to_string())
         .send().await.map_err(|_| failure("Cannot reach Vertex. Check the region."))?;
@@ -221,30 +233,30 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            endpoint(&s)
-                .unwrap()
+            VertexEndpoint::regional(&s)
+                .unwrap().predict
                 .starts_with("https://aiplatform.googleapis.com/")
         );
         s.region = Some("us-east5".into());
         assert!(
-            endpoint(&s)
-                .unwrap()
+            VertexEndpoint::regional(&s)
+                .unwrap().predict
                 .starts_with("https://us-east5-aiplatform.googleapis.com/")
         );
         for region in ["us", "eu"] {
             s.region = Some(region.into());
             assert!(
-                endpoint(&s)
-                    .unwrap()
+                VertexEndpoint::regional(&s)
+                    .unwrap().predict
                     .starts_with(&format!("https://aiplatform.{region}.rep.googleapis.com/"))
             );
         }
         s.base_url = Some("https://attacker.invalid".into());
-        assert!(endpoint(&s).is_err());
+        assert!(VertexEndpoint::regional(&s).is_err());
         s.base_url = None;
         for id in ["../other", "a?x", "a#b", ".."] {
             s.models.insert("haiku".into(), id.into());
-            assert!(endpoint(&s).is_err());
+            assert!(VertexEndpoint::regional(&s).is_err());
         }
         assert!(assertion(r#"{"type":"authorized_user"}"#).is_err());
     }
@@ -272,7 +284,7 @@ mod tests {
                     stream.write_all(format!("HTTP/1.1 {code} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                 }
             });
-            let result = invoke("FAKE-JWT", &url, &url).await;
+            let result = invoke("FAKE-JWT", &VertexEndpoint::mock(url.clone())).await;
             if status == 200 {
                 assert!(result.is_ok());
             } else {
