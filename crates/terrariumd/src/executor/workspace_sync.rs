@@ -154,11 +154,44 @@ fn workspace_lock(path: &Path) -> Arc<AsyncMutex<()>> {
 
 pub(super) struct Sync {
     root: PathBuf,
+    basis: PathBuf,
     remote: String,
     shell: String,
     before: Snapshot,
     _key: Option<crate::secrets::RunDir>,
     _lock: OwnedMutexGuard<()>,
+}
+
+fn supported_rsync(version: &str) -> bool {
+    let Some(version) = version.strip_prefix("rsync  version ").and_then(|s| s.split_whitespace().next()) else {
+        return false;
+    };
+    let parts: Vec<_> = version.split('.').map(str::parse::<u32>).collect();
+    matches!(parts.as_slice(), [Ok(major), Ok(minor), Ok(patch)] if (*major, *minor, *patch) >= (3, 4, 0))
+}
+
+#[test]
+fn rsync_version_floor() {
+    for version in ["3.4.0", "3.4.1", "4.0.0"] {
+        assert!(supported_rsync(&format!("rsync  version {version}  protocol version 32\n")));
+    }
+    for version in ["3.3.0", "3.2.7", "2.6.9", "3.4", "3.4.x", ""] {
+        assert!(!supported_rsync(&format!("rsync  version {version}  protocol version 32\n")));
+    }
+    assert!(!supported_rsync("unrecognized output"));
+}
+
+async fn check_rsync() -> ApiResult<()> {
+    let mut cmd = tokio::process::Command::new("rsync");
+    cmd.arg("--version").kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), cmd.output())
+        .await
+        .map_err(|_| ApiError::invalid("local rsync version check timed out"))?
+        .map_err(|_| ApiError::invalid("workspace sync requires local rsync 3.4.0 or newer"))?;
+    if !output.status.success() || !supported_rsync(&String::from_utf8_lossy(&output.stdout)) {
+        return Err(ApiError::invalid("workspace sync requires local rsync 3.4.0 or newer (CVE-2024-12086/12087)"));
+    }
+    Ok(())
 }
 
 async fn rsync(source: &str, destination: &str, shell: Option<&str>) -> ApiResult<()> {
@@ -233,6 +266,7 @@ pub(super) async fn prepare(
     if !def.sync_workspace {
         return Ok(None);
     }
+    check_rsync().await?;
     // An exedev target comes here as the ssh target of its VM
     // (`executor::resolved_def`).
     if def.kind != TargetKind::Ssh {
@@ -251,6 +285,13 @@ pub(super) async fn prepare(
     let lock = workspace_lock(&root)
         .try_lock_owned()
         .map_err(|_| ApiError::invalid("workspace sync already in progress for this agent"))?;
+    // The state directory is daemon-private, unlike the agent workspace.
+    // Keep the mirror across sessions so rsync copies only changed files.
+    let basis = state.state_dir.join("workspace-bases").join(
+        terrarium_host::protocol::hex(&Sha256::digest(root.as_os_str().as_encoded_bytes())),
+    );
+    crate::secrets::private_dir(&state.state_dir.join("workspace-bases"))?;
+    crate::secrets::private_dir(&basis)?;
     let key = if let Some(name) = &def.credential {
         match crate::secrets::load_now(state, crate::store::targets::owner(def), name)? {
             Secret::SshKey(k) => {
@@ -312,6 +353,7 @@ pub(super) async fn prepare(
     rsync(&format!("{}/", root.display()), &remote, Some(&shell)).await?;
     Ok(Some(Sync {
         root,
+        basis,
         remote,
         shell,
         before,
@@ -322,14 +364,12 @@ pub(super) async fn prepare(
 
 impl Sync {
     async fn download(&self, stage: &Path) -> ApiResult<String> {
-        let basis =
-            tempfile::tempdir().map_err(|e| ApiError::invalid(format!("sync basis: {e}")))?;
         // rsync must never resolve live-workspace symlinks as basis paths.
-        // Seed a private, symlink-free copy. No other process can replace its
+        // Refresh a private, symlink-free copy. No other process can replace its
         // directories during the remote transfer, and no hard links are used.
         rsync_basis(
             &format!("{}/", self.root.display()),
-            &format!("{}/", basis.path().display()),
+            &format!("{}/", self.basis.display()),
             None,
             None,
             true,
@@ -339,7 +379,7 @@ impl Sync {
             &self.remote,
             &format!("{}/", stage.display()),
             Some(&self.shell),
-            Some(basis.path()),
+            Some(&self.basis),
             false,
         )
         .await
@@ -544,6 +584,7 @@ mod tests {
         std::fs::write(remote.path().join("result"), "remote").unwrap();
         let sync = Sync {
             root: local.path().to_owned(),
+            basis: remote.path().join(".terrarium-stage"),
             remote: format!("{}/", remote.path().display()),
             shell: "ssh".into(),
             before: snapshot(local.path()).unwrap(),
@@ -574,6 +615,7 @@ mod tests {
 
         let sync = Sync {
             root: local.path().to_owned(),
+            basis: remote.path().join(".terrarium-stage"),
             remote: format!("{}/", remote.path().display()),
             shell: "ssh".into(),
             before: snapshot(local.path()).unwrap(),
@@ -602,6 +644,7 @@ mod tests {
 
         let sync = Sync {
             root: local.path().to_owned(),
+            basis: remote.path().join(".terrarium-stage"),
             remote: format!("{}/", remote.path().display()),
             shell: "ssh".into(),
             before: snapshot(local.path()).unwrap(),
@@ -753,8 +796,10 @@ mod tests {
             "fixture build failed: {:?}",
             built.end()
         );
+        let basis = tempfile::tempdir().unwrap();
         let sync = Sync {
             root: local.clone(),
+            basis: basis.path().to_owned(),
             remote: remote_spec,
             shell,
             before: snapshot(&local).unwrap(),

@@ -327,6 +327,29 @@ async fn ssh_api_exec_run_copy_and_conflict() {
         format!("{}private", "Q".repeat(65536))
     );
 
+    // Negative control: modern rsync rejects symlinked basis paths before
+    // sending checksums. Model the exposed file as a regular basis file so
+    // this control reaches the checksum assertion even on patched rsync.
+    let unsafe_basis = tempfile::tempdir().unwrap();
+    std::fs::create_dir(unsafe_basis.path().join("escape")).unwrap();
+    std::fs::copy(outside.join("secret"), unsafe_basis.path().join("escape/secret")).unwrap();
+    let stage = tempfile::tempdir().unwrap();
+    let shell = format!(
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i {} -p {}",
+        ssh.key.display(), ssh.port
+    );
+    let control = tokio::process::Command::new("rsync")
+        .args(["-a", "--checksum", "--no-whole-file", "--copy-dest"])
+        .arg(unsafe_basis.path().join("escape"))
+        .args(["-e", &shell])
+        .arg(format!("root@127.0.0.1:{}/escape/", root.display()))
+        .arg(format!("{}/escape/", stage.path().display()))
+        .output().await.unwrap();
+    assert!(control.status.success(), "negative control: {}", String::from_utf8_lossy(&control.stderr));
+    let debug = std::fs::read_to_string(ssh.jail.join("tmp/rsync-debug")).unwrap();
+    assert!(debug.split_whitespace().filter_map(|word| word.strip_prefix("count=")).any(|count| count != "0"),
+        "negative control did not expose outside-file checksums: {debug}");
+
     let run = td
         .post_as(
             agent,
