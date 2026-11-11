@@ -1074,7 +1074,8 @@ mod tests {
             // 1015 (2026-10-30): `--card` on a question about a card
             // (PLAN §12e).
             let words = persona.split_whitespace().count();
-            assert!(words < 1015, "{file}: {words} words");
+            // Card Markdown and quoted chat/email instructions (TER-699).
+            assert!(words < 1100, "{file}: {words} words");
             // Each persona says how to read a tagged turn (PLAN §8.5).
             for needle in [
                 "## Messages you receive",
@@ -1163,7 +1164,8 @@ mod tests {
                 &std::fs::read_to_string(dir.join(format!("{harness}.md"))).unwrap(),
             );
             let words = text.split_whitespace().count();
-            assert!(words < 700, "{harness}: {words} words");
+            // Card Markdown and quoted chat/email instructions (TER-699).
+            assert!(words < 800, "{harness}: {words} words");
             let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
             for name in *names {
                 assert!(!text.contains(name), "{harness} offers {name}");

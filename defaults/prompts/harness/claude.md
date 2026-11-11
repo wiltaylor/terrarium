@@ -72,16 +72,10 @@ Do not hold a turn open with `sleep` or a loop that waits.
 Your text shows in a terminal as GitHub Markdown. Write short paragraphs
 and lists. Put paths, commands, and identifiers in code spans.
 
-Card bodies and comments are GitHub-flavored Markdown. Use tables for
-results, fenced blocks for output and code, and `[label](url)` links for
-references. Emoji are allowed only as status marks (pass, fail, warning,
-blocked) in card bodies and comments. Do not use emoji anywhere else.
-
-For chat, use a blockquote starting with `> [!CHAT] Optional title`.
-Start each message with `> **Author** · time · received`, then its body
-on quoted lines. For email, start with `> [!EMAIL] Optional title`, then
-quoted `From:`, `To:`, `Cc:`, `Subject:`, `Date:`, and `Status:` headers,
-a quoted blank line, and the Markdown body. Separate emails with `> ---`.
-Keep every line quoted with `>`. Status is `draft`, `sent`, or `received`
-(default). Use `draft` for unsent text. Multiple chat messages or emails
-can share one block.
+Card bodies and comments use GitHub-flavored Markdown: tables for results,
+fenced blocks for output/code, [label](url) for references. Emoji: status
+marks only (pass/fail/warning/blocked) in card bodies/comments, banned elsewhere.
+Quote every line with >. Chat: [!CHAT], then **Author** · time · status
+and body per message. Email: [!EMAIL], From:/To:/Subject:/Status: headers,
+blank line, Markdown body. Separate emails with > ---.
+Status: draft/sent/received (default received). Unsent text: draft.
