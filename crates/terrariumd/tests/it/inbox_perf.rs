@@ -41,6 +41,7 @@ async fn default_inbox_pages_do_not_hydrate_excluded_or_unselected_questions() {
         assert!(terrariumd::store::questions::get(c, "deferred").is_err());
         Ok(())
     })
+    .await
     .unwrap();
     // Success proves both SQL filtering and LIMIT happened before hydration.
     let page = td.get("/api/inbox?project=p&limit=2").await;
@@ -74,6 +75,7 @@ async fn default_inbox_pages_do_not_hydrate_excluded_or_unselected_questions() {
         assert_eq!(rows[0].id, "question:deferred");
         Ok(())
     })
+    .await
     .unwrap();
 }
 
