@@ -3910,6 +3910,10 @@ async fn a_release_blocker_card_goes_first_as_a_batch_of_one() {
 #[tokio::test]
 async fn a_release_blocker_waits_for_the_lane_then_goes_first_and_alone() {
     let td = queue_lab().await;
+    // Only the explicit timer checks below may queue the blocker. Under
+    // load an engine tick after cancellation can otherwise take the free
+    // lane before our check, which then reports it busy (TER-764).
+    state(&td).rule_timers.hold(true);
     put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
     let x = new_card(&td, "p", json!({"title": "x", "column": "review"})).await;
     let mut ids = Vec::new();
