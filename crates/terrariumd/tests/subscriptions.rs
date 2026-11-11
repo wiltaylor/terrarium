@@ -65,9 +65,25 @@ async fn litellm_settings_patch_keeps_default_probe() {
     )
     .await
     .ok();
+    // Exercise the store guard with a legacy row carrying a probe. PATCH
+    // does not accept a probe field in its request body.
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("system", |t| {
+            t.execute(
+                "UPDATE subscriptions SET probe = 'litellm-key-spend' WHERE name = 'generic-edit'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     td.patch(
         "/api/subscriptions/generic-edit",
-        json!({"probe": "litellm-key-spend", "selfhosted": {"max_concurrent": 4}}),
+        json!({"selfhosted": {"max_concurrent": 4}}),
     )
     .await
     .err(422, "invalid");
