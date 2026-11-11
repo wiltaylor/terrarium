@@ -391,6 +391,7 @@ export function BoardPage(props: { done?: boolean }) {
       <Show when={newCardIn()}>
         {(column) => (
           <NewCardModal
+            project={params.project}
             prefix={board.prefix()}
             column={column()}
             columns={boardColumns()}
@@ -590,6 +591,7 @@ function KCard(props: {
  * "Create and add another" keeps it open for the next card (newCard.ts nextNewCardForm).
  */
 function NewCardModal(props: {
+  project: string;
   prefix: string | null;
   column: string;
   columns: Column[];
@@ -661,6 +663,7 @@ function NewCardModal(props: {
             </span>
           </Show>
         </label>
+        <PostEditor label="Description" text={form.body} project={props.project} textBody>
         <label>
           Description (Markdown)
           <textarea
@@ -675,6 +678,7 @@ function NewCardModal(props: {
             }}
           />
         </label>
+        </PostEditor>
         <div class="row">
           <label class="drawer-field">
             Column
@@ -845,10 +849,12 @@ function CardDrawer(props: {
           Title
           <input value={edit().title} onInput={editField("title")} />
         </label>
+        <PostEditor label="Body" text={edit().body} project={props.card.project} textBody>
         <label>
           Body
           <textarea value={edit().body} onInput={editField("body")} />
         </label>
+        </PostEditor>
         <label>
           Labels
           <input value={edit().labels} onInput={editField("labels")} placeholder="bug, ui" />
