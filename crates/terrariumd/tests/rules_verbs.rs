@@ -3657,6 +3657,10 @@ async fn one_card_goes_30_minutes_after_it_came() {
 #[tokio::test]
 async fn no_batch_goes_while_the_merge_lane_is_busy() {
     let td = queue_lab().await;
+    // Only the timer checks of the test may queue the batch. An engine
+    // tick (every 10 s) after the cancel queued it first under load, and
+    // the check of the test then found the lane busy again (TER-685).
+    state(&td).rule_timers.hold(true);
     put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
     let x = new_card(&td, "p", json!({"title": "x", "column": "review"})).await;
     let mut ids = Vec::new();
