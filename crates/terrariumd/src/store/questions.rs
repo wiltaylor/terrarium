@@ -1315,8 +1315,9 @@ fn resolve_multiple(
         .unwrap_or_default();
     let mut indices = Vec::new();
     for option in options {
-        let (_, index) = resolve(labels, None, Some(option), what)?.expect("an option resolves");
-        let index = index.expect("an option has an index");
+        let Some((_, Some(index))) = resolve(labels, None, Some(option), what)? else {
+            return Err(ApiError::invalid("the selected option has no index"));
+        };
         if indices.contains(&index) {
             return Err(ApiError::invalid("an option is selected twice"));
         }
