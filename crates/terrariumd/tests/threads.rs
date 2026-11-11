@@ -548,8 +548,12 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
         .ok();
     let th = lab.thread(&tid).await;
     assert_eq!(th["status"], "waiting_agent");
-    let bundle = th["questions"].as_array().unwrap().iter()
-        .find(|q| q["id"] == bid).unwrap();
+    let bundle = th["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q["id"] == bid)
+        .unwrap();
     assert_eq!(bundle["items"][0]["answer_option"], 0);
     assert_eq!(bundle["items"][0]["answer"], "Every night.");
     assert_eq!(bundle["items"][1]["answer_option"], 0);

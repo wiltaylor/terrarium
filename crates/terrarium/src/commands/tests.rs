@@ -10600,14 +10600,28 @@ async fn thread_show_preserves_options_and_answer_text() {
             {"text": "Backups?", "options": ["daily", "weekly"],
              "answer_option": 0, "answer": "Every night."}]});
     let full = json!({"id": "T1", "questions": [question, bundle]});
-    let out = ok(true, &["thread", "show", "T1"], vec![(200, full.clone())],
-        vec![req(Get, "/api/threads/T1")]).await;
-    for needle in ["chosen option: 2. us", "For latency.",
-        "item 1 chosen option: 1. daily", "Every night."] {
+    let out = ok(
+        true,
+        &["thread", "show", "T1"],
+        vec![(200, full.clone())],
+        vec![req(Get, "/api/threads/T1")],
+    )
+    .await;
+    for needle in [
+        "chosen option: 2. us",
+        "For latency.",
+        "item 1 chosen option: 1. daily",
+        "Every night.",
+    ] {
         assert!(out.contains(needle), "{out}");
     }
-    let out = ok(true, &["--json", "thread", "show", "T1"], vec![(200, full.clone())],
-        vec![req(Get, "/api/threads/T1")]).await;
+    let out = ok(
+        true,
+        &["--json", "thread", "show", "T1"],
+        vec![(200, full.clone())],
+        vec![req(Get, "/api/threads/T1")],
+    )
+    .await;
     assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), full);
 }
 
