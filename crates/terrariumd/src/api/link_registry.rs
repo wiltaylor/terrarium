@@ -47,9 +47,10 @@ impl Registry {
         }
         let mut matcher = matchit::Router::new();
         for (path, methods) in &paths {
-            matcher
-                .insert(path.clone(), methods.clone())
-                .expect("link patterns must match axum's syntax");
+            assert!(
+                matcher.insert(path.clone(), methods.clone()).is_ok(),
+                "link patterns must match axum's syntax"
+            );
         }
         Self {
             matcher,
