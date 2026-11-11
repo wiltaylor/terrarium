@@ -51,7 +51,11 @@ impl Registry {
                 .insert(path.clone(), methods.clone())
                 .expect("link patterns must match axum's syntax");
         }
-        Self { matcher, patterns: paths, entries }
+        Self {
+            matcher,
+            patterns: paths,
+            entries,
+        }
     }
 
     pub fn access(&self, method: &Method, path: &str) -> Option<Access> {

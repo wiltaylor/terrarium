@@ -1136,7 +1136,11 @@ pub fn tcp_router_with(state: Shared, mut auth: TokenAuth, serve_artifacts: bool
 }
 
 fn authenticated_router(state: Shared, app: Router, auth: TokenAuth) -> Router {
-    let mut app = app.layer(middleware::from_fn_with_state(auth.registry.clone(), registered_endpoint))
+    let mut app = app
+        .layer(middleware::from_fn_with_state(
+            auth.registry.clone(),
+            registered_endpoint,
+        ))
         .layer(Extension(Transport::Tcp));
     if let Some(s) = &auth.sessions {
         app = app.layer(Extension(s.clone()));
@@ -1160,10 +1164,16 @@ async fn registered_endpoint(
     next: Next,
 ) -> Response {
     if crate::links::is_link_call() {
-        let access = req.extensions().get::<axum::extract::MatchedPath>()
+        let access = req
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
             .and_then(|path| registry.pattern_access(req.method(), path.as_str()));
         if matches!(access, None | Some(link_registry::Access::OperatorOnly)) {
-            return ApiError::new(Code::LinkForbidden, "a link key may not call an unregistered endpoint").into_response();
+            return ApiError::new(
+                Code::LinkForbidden,
+                "a link key may not call an unregistered endpoint",
+            )
+            .into_response();
         }
     }
     next.run(req).await

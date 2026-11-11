@@ -258,10 +258,13 @@ async fn link_unregistered_routes_never_reach_handlers() {
             runtime: s.links.clone(),
         });
         auth.registry = registry;
-        let real = real.nest("/api/unregistered", plain).route("/api/agents/shadow", axum::routing::get(move || async move {
-            shadow_called.fetch_add(1, Ordering::SeqCst);
-            StatusCode::OK
-        }));
+        let real = real.nest("/api/unregistered", plain).route(
+            "/api/agents/shadow",
+            axum::routing::get(move || async move {
+                shadow_called.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }),
+        );
         authenticated_router(s.clone(), real, auth)
     };
     let bearer = format!("Bearer {key}");
@@ -274,7 +277,13 @@ async fn link_unregistered_routes_never_reach_handlers() {
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(called.load(Ordering::SeqCst), 0);
-    let response = send(app(), "GET", "/api/agents/shadow", &[("authorization", &bearer)]).await;
+    let response = send(
+        app(),
+        "GET",
+        "/api/agents/shadow",
+        &[("authorization", &bearer)],
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(called.load(Ordering::SeqCst), 0);
     let response = send(
