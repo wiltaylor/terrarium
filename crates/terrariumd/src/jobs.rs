@@ -690,6 +690,12 @@ async fn end_lost(state: &Shared, l: Lost) {
         // with its attempt and its place, as TER-160 does for a host that
         // could not be reached. TER-196: the same for a run lost to the
         // infrastructure; a batch reruns whole.
+        // This is an intentional rerun after kill/slot recovery, not a
+        // daemon reattachment. Its prior replay channel was consumed.
+        if let Err(error) = state.executor.hosts.forget_job(&job.id) {
+            warn!(job = %job.id, %error, "cannot discard lost recipe checkpoint");
+            return;
+        }
         let id = job.id.clone();
         let cards = job.cards();
         let back = state
@@ -1854,6 +1860,10 @@ async fn requeue(state: &Shared, job: &Job, why: String, ssh: bool) {
 /// keeps the output and the failed step in its tail, and each card gets
 /// them in a comment.
 async fn requeue_before_tests(state: &Shared, job: &Job, end: &JobEnd) {
+    if let Err(error) = state.executor.hosts.forget_job(&job.id) {
+        warn!(job = %job.id, %error, "cannot discard failed setup checkpoint");
+        return;
+    }
     let wait = infra_retry();
     let tail = end.tail.clone().unwrap_or_default();
     let why = tail
