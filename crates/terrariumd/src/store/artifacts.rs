@@ -1380,4 +1380,64 @@ mod tests {
         assert!(!ctx.verify("A", 101, &sig, 50), "other expiry");
         assert!(!ctx.verify("A", 100, "zz", 50));
     }
+
+    /// The shape of the upload store task (`api::artifacts::store_upload`):
+    /// it owns its permit as an argument and waits for the digest lock.
+    async fn hold_permit(
+        ctx: Arc<ArtifactCtx>,
+        sha: String,
+        end: &'static str,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<(), &'static str> {
+        let _guard = ctx.digest_lock(&sha).lock_owned().await;
+        match end {
+            "error" => Err("the row failed"),
+            "panic" => panic!("the store task panics"),
+            _ => Ok(()),
+        }
+    }
+
+    /// TER-682: a store task gives its upload permit back when it ends by
+    /// an error, by a panic, and when it is cancelled while it waits for
+    /// the digest lock.
+    #[tokio::test]
+    async fn upload_permits_come_back_on_error_panic_and_cancel() {
+        let ctx = Arc::new(ArtifactCtx {
+            dir: PathBuf::from("/nonexistent"),
+            limits: Limits::default(),
+            secret: vec![7; 32],
+            locks: new_locks(),
+            uploads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_UPLOADS)),
+        });
+        let wait = std::time::Duration::from_secs(5);
+        let sha = sha256_hex(b"permit test");
+        for end in ["error", "panic", "cancel"] {
+            let guard = ctx.digest_lock(&sha).lock_owned().await;
+            let permit = ctx.upload_permit(wait).await.unwrap();
+            assert_eq!(ctx.free_upload_permits(), MAX_CONCURRENT_UPLOADS - 1);
+            let task = tokio::spawn(hold_permit(ctx.clone(), sha.clone(), end, permit));
+            tokio::task::yield_now().await;
+            assert_eq!(ctx.free_upload_permits(), MAX_CONCURRENT_UPLOADS - 1);
+            match end {
+                "cancel" => {
+                    task.abort();
+                    assert!(task.await.unwrap_err().is_cancelled());
+                    drop(guard);
+                }
+                "panic" => {
+                    drop(guard);
+                    assert!(task.await.unwrap_err().is_panic());
+                }
+                _ => {
+                    drop(guard);
+                    assert_eq!(task.await.unwrap(), Err("the row failed"));
+                }
+            }
+            assert_eq!(
+                ctx.free_upload_permits(),
+                MAX_CONCURRENT_UPLOADS,
+                "the permit of a store task that ends by {end} is still held"
+            );
+        }
+    }
 }

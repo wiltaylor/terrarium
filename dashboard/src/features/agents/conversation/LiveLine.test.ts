@@ -5,6 +5,7 @@
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../../test/wait";
 import type { Agent, AgentStatus, QueuedTurn } from "../../../api/types";
 import { ApiError } from "../../../api/http";
 
@@ -112,7 +113,7 @@ describe("the queued turns", () => {
     sessions.mockResolvedValue({ items: [] });
     queued.mockResolvedValue({ items: [turn(1, "stored")], queues: { runner: "unavailable" } });
     const { el, items } = mountConversation(agent("working"));
-    await vi.waitFor(() => expect(items()).toEqual(["stored"]));
+    await waitFor(() => expect(items()).toEqual(["stored"]));
     expect(el.textContent).toContain("Runner queue: unavailable");
   });
 
@@ -140,10 +141,10 @@ describe("the queued turns", () => {
     queued.mockResolvedValue({ items: [{ ...turn(1, "live"), id: "opaque-id", source }] });
     removeQueued.mockResolvedValue(undefined);
     const { items, button, box } = mountConversation(agent("working"));
-    await vi.waitFor(() => expect(items()).toEqual(["live"]));
+    await waitFor(() => expect(items()).toEqual(["live"]));
     button(0, "Edit").click();
     expect(removeQueued).toHaveBeenCalledWith("A1", "opaque-id", source);
-    await vi.waitFor(() => expect(items()).toEqual([]));
+    await waitFor(() => expect(items()).toEqual([]));
     expect(box().value).toBe("live");
   });
 
@@ -152,15 +153,15 @@ describe("the queued turns", () => {
     queued.mockResolvedValue({ items: [turn(1, "first"), turn(2, "second")] });
     removeQueued.mockResolvedValue(undefined);
     const { items, button, box } = mountConversation(agent("stopped", { queued: 2, paused: true }));
-    await vi.waitFor(() => expect(items()).toEqual(["first", "second"]));
+    await waitFor(() => expect(items()).toEqual(["first", "second"]));
     expect(queued).toHaveBeenCalledWith("A1");
     button(1, "Edit").click();
     expect(removeQueued).toHaveBeenCalledWith("A1", 2, "store");
-    await vi.waitFor(() => expect(items()).toEqual(["first"]));
+    await waitFor(() => expect(items()).toEqual(["first"]));
     expect(box().value).toBe("second");
     // A second edit joins the draft on a new line.
     button(0, "Edit").click();
-    await vi.waitFor(() => expect(items()).toEqual([]));
+    await waitFor(() => expect(items()).toEqual([]));
     expect(box().value).toBe("second\nfirst");
   });
 
@@ -169,10 +170,10 @@ describe("the queued turns", () => {
     queued.mockResolvedValue({ items: [turn(1, "first"), turn(2, "second")] });
     removeQueued.mockResolvedValue(undefined);
     const { items, button, box } = mountConversation(agent("stopped", { queued: 2, paused: true }));
-    await vi.waitFor(() => expect(items()).toEqual(["first", "second"]));
+    await waitFor(() => expect(items()).toEqual(["first", "second"]));
     button(0, "Remove").click();
     expect(removeQueued).toHaveBeenCalledWith("A1", 1, "store");
-    await vi.waitFor(() => expect(items()).toEqual(["second"]));
+    await waitFor(() => expect(items()).toEqual(["second"]));
     expect(box().value).toBe("");
   });
 
@@ -181,10 +182,10 @@ describe("the queued turns", () => {
     queued.mockResolvedValueOnce({ items: [turn(1, "first")] }).mockResolvedValue({ items: [] });
     removeQueued.mockRejectedValue(new ApiError(404, "turn 1 does not wait for the agent", undefined, "not_found"));
     const { el, items, button, box } = mountConversation(agent("stopped", { queued: 1 }));
-    await vi.waitFor(() => expect(items()).toEqual(["first"]));
+    await waitFor(() => expect(items()).toEqual(["first"]));
     button(0, "Edit").click();
-    await vi.waitFor(() => expect(el.textContent).toContain("went to the agent already"));
-    await vi.waitFor(() => expect(items()).toEqual([]));
+    await waitFor(() => expect(el.textContent).toContain("went to the agent already"));
+    await waitFor(() => expect(items()).toEqual([]));
     expect(box().value).toBe("");
   });
 
@@ -196,6 +197,6 @@ describe("the queued turns", () => {
     expect(el.querySelector(".convo-queued")).toBeNull();
     queued.mockResolvedValue({ items: [turn(5, "later")] });
     setA(agent("stopped", { queued: 1 }));
-    await vi.waitFor(() => expect(el.querySelector(".convo-queued")?.textContent).toContain("later"));
+    await waitFor(() => expect(el.querySelector(".convo-queued")?.textContent).toContain("later"));
   });
 });

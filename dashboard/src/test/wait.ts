@@ -6,8 +6,10 @@ import { onTestFinished, vi } from "vitest";
 /**
  * Runs `check` until it does not throw (an `expect` in it passes), then gives
  * its value. Use it for "this event comes": it waits only as long as needed.
+ * Use it, not a bare `vi.waitFor`: the 1 s default of `vi.waitFor` fails on a
+ * loaded merge host (TER-707). The 10 s default only slows a test that fails.
  */
-export function waitFor<T>(check: () => T | Promise<T>, timeout = 2000): Promise<T> {
+export function waitFor<T>(check: () => T | Promise<T>, timeout = 10_000): Promise<T> {
   return vi.waitFor(check, { timeout, interval: 2 });
 }
 

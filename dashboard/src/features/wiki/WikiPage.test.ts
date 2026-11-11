@@ -3,6 +3,7 @@ import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import { createBookmarksStore } from "../../stores/bookmarks";
 
 const bookmarks = createBookmarksStore(null, window.location.origin);
@@ -44,7 +45,7 @@ function mount() {
 it("pins and unpins using the same encoded URL as the wiki tree", async () => {
   const root = mount();
   const button = () => [...root.querySelectorAll("button")].find((b) => /Pin to bookmarks|Unpin bookmark/.test(b.textContent ?? ""))!;
-  await vi.waitFor(() => expect(button()).toBeTruthy());
+  await waitFor(() => expect(button()).toBeTruthy());
   expect(wikiHref("my project", "guide/start here")).toBe("/p/my%20project/knowledge/wiki/guide/start%20here");
   button().click();
   expect(button().textContent).toBe("Unpin bookmark");
@@ -61,7 +62,7 @@ it("explains why a blank-title page cannot be pinned", async () => {
   title = " ";
   const root = mount();
   const button = () => [...root.querySelectorAll("button")].find((b) => b.textContent === "Pin to bookmarks")!;
-  await vi.waitFor(() => expect(button()).toBeTruthy());
+  await waitFor(() => expect(button()).toBeTruthy());
   button().click();
   expect(root.textContent).toContain("This page needs a title before it can be pinned.");
   expect(bookmarks.items()).toEqual([]);

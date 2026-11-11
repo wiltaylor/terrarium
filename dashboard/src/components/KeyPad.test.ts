@@ -4,6 +4,7 @@
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../test/wait";
 import { ApiError } from "../api/http";
 import { KeyPad } from "./KeyPad";
 import { KeyRate, type Modifier } from "./terminalKeys";
@@ -87,7 +88,7 @@ describe("KeyPad", () => {
     const send = vi.fn().mockRejectedValue(new ApiError(429, "more than 20 keys in one second", undefined, "rate_limited"));
     const { el, button } = mount(send, { rate: new KeyRate(1) });
     button("Escape").click();
-    await vi.waitFor(() => expect(el.querySelector('[role="status"]')?.textContent).toMatch(/Too many keys/));
+    await waitFor(() => expect(el.querySelector('[role="status"]')?.textContent).toMatch(/Too many keys/));
     send.mockClear();
     button("Escape").click();
     expect(send).not.toHaveBeenCalled();

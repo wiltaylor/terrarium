@@ -1349,6 +1349,18 @@ async fn a_green_validation_moves_the_card_to_review(flow: &'static str) {
         .find(|c| c["body"] == "done by w1")
         .unwrap();
     assert_eq!(own["author"], lab.w1.as_str(), "{own:#}");
+    let queued = c["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["body"].as_str().is_some_and(|b| b.contains("queued")))
+        .expect("queue note");
+    let expected_author = if flow == "rules" {
+        "rule:p/validate-queued-move"
+    } else {
+        "system"
+    };
+    assert_eq!(queued["author"], expected_author, "{queued:#}");
     std::fs::write(&gate, "").unwrap();
     let c = lab
         .until_card(&id, "review", |c| c["column"] == "review")
