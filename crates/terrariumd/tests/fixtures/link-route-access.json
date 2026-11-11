@@ -14,31 +14,7 @@
     },
     {
       "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/start\",post(start)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/stop\",post(stop)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/restart\",post(restart)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/pause\",post(pause)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/unpause\",post(unpause)",
+      "registration": "\"/agents/{id}/answer\",post(answer)",
       "access": "other",
       "cases": []
     },
@@ -50,19 +26,7 @@
     },
     {
       "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/new-session\",post(new_session)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/send\",post(send)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/keys\",post(keys)",
+      "registration": "\"/agents/{id}/events\",get(streams::agent_events)",
       "access": "other",
       "cases": []
     },
@@ -74,31 +38,25 @@
     },
     {
       "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/answer\",post(answer)",
+      "registration": "\"/agents/{id}/keys\",post(keys)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/events\",get(streams::agent_events)",
+      "registration": "\"/agents/{id}/new-session\",post(new_session)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/pause\",post(pause)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/agents.rs",
       "registration": "\"/agents/{id}/pty\",get(streams::pty)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/roles\",get(roles).put(set_roles)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/agents.rs",
-      "registration": "\"/agents/{id}/subscription\",post(swap)",
       "access": "other",
       "cases": []
     },
@@ -115,14 +73,62 @@
       "cases": []
     },
     {
-      "source": "api/artifacts.rs",
-      "registration": "\"/projects/{name}/artifacts\",get(list).post(upload).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),",
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/restart\",post(restart)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/roles\",get(roles).put(set_roles)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/send\",post(send)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/start\",post(start)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/stop\",post(stop)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/subscription\",post(swap)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/agents.rs",
+      "registration": "\"/agents/{id}/unpause\",post(unpause)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/artifacts.rs",
-      "registration": "\"/projects/{name}/artifacts/usage\",get(usage)",
+      "registration": "\"/a/{id}\",get(serve_root)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/a/{id}/\",get(serve_root)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/artifacts.rs",
+      "registration": "\"/a/{id}/{*path}\",get(serve_path)",
       "access": "other",
       "cases": []
     },
@@ -152,19 +158,13 @@
     },
     {
       "source": "api/artifacts.rs",
-      "registration": "\"/a/{id}\",get(serve_root)",
+      "registration": "\"/projects/{name}/artifacts\",get(list).post(upload).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/artifacts.rs",
-      "registration": "\"/a/{id}/\",get(serve_root)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/artifacts.rs",
-      "registration": "\"/a/{id}/{*path}\",get(serve_path)",
+      "registration": "\"/projects/{name}/artifacts/usage\",get(usage)",
       "access": "other",
       "cases": []
     },
@@ -220,33 +220,6 @@
     },
     {
       "source": "api/board.rs",
-      "registration": "\"/projects/{name}/board\",get(show_board).patch(patch_board)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/board.rs",
-      "registration": "\"/projects/{name}/cards\",get(list_cards).post(create_card)",
-      "access": "conditional",
-      "cases": [
-        {
-          "method": "POST",
-          "path": "/api/projects/p/cards",
-          "body": {
-            "title": "GitHub #2: untrusted"
-          },
-          "approval": false
-        }
-      ]
-    },
-    {
-      "source": "api/board.rs",
-      "registration": "\"/projects/{name}/github-issues/import\",post(import_issue)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/board.rs",
       "registration": "\"/cards\",get(active_cards)",
       "access": "other",
       "cases": []
@@ -263,21 +236,6 @@
             "remove_labels": [
               "hold"
             ]
-          },
-          "approval": false
-        }
-      ]
-    },
-    {
-      "source": "api/board.rs",
-      "registration": "\"/cards/{id}/move\",post(move_card)",
-      "access": "conditional",
-      "cases": [
-        {
-          "method": "POST",
-          "path": "/api/cards/$card/move",
-          "body": {
-            "column": "backlog"
           },
           "approval": false
         }
@@ -311,13 +269,55 @@
     },
     {
       "source": "api/board.rs",
+      "registration": "\"/cards/{id}/events\",get(card_events)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/board.rs",
       "registration": "\"/cards/{id}/links\",post(link)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/board.rs",
-      "registration": "\"/cards/{id}/events\",get(card_events)",
+      "registration": "\"/cards/{id}/move\",post(move_card)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/cards/$card/move",
+          "body": {
+            "column": "backlog"
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/projects/{name}/board\",get(show_board).patch(patch_board)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/projects/{name}/cards\",get(list_cards).post(create_card)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/projects/p/cards",
+          "body": {
+            "title": "GitHub #2: untrusted"
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/board.rs",
+      "registration": "\"/projects/{name}/github-issues/import\",post(import_issue)",
       "access": "other",
       "cases": []
     },
@@ -366,6 +366,36 @@
     {
       "source": "api/calendar.rs",
       "registration": "\"/calendar\",get(combined)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/events/{id}\",get(show).patch(update).delete(remove),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/events/{id}/assignees/{agent}\",put(assign).delete(unassign),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/events/{id}/notices\",get(notices)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/events/{id}/skip\",post(skip)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/calendar/events/{id}/unskip\",post(unskip)",
       "access": "other",
       "cases": []
     },
@@ -427,36 +457,6 @@
     },
     {
       "source": "api/calendar.rs",
-      "registration": "\"/calendar/events/{id}\",get(show).patch(update).delete(remove),",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/calendar.rs",
-      "registration": "\"/calendar/events/{id}/skip\",post(skip)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/calendar.rs",
-      "registration": "\"/calendar/events/{id}/unskip\",post(unskip)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/calendar.rs",
-      "registration": "\"/calendar/events/{id}/assignees/{agent}\",put(assign).delete(unassign),",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/calendar.rs",
-      "registration": "\"/calendar/events/{id}/notices\",get(notices)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/calendar.rs",
       "registration": "\"/projects/{name}/calendar\",get(project_view)",
       "access": "other",
       "cases": []
@@ -464,6 +464,18 @@
     {
       "source": "api/calendar.rs",
       "registration": "\"/projects/{name}/calendar/events\",post(create_project)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/projects/{name}/calendar/grants\",get(grants)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/calendar.rs",
+      "registration": "\"/projects/{name}/calendar/grants/{agent}\",put(grant).delete(revoke),",
       "access": "other",
       "cases": []
     },
@@ -504,18 +516,6 @@
       ]
     },
     {
-      "source": "api/calendar.rs",
-      "registration": "\"/projects/{name}/calendar/grants\",get(grants)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/calendar.rs",
-      "registration": "\"/projects/{name}/calendar/grants/{agent}\",put(grant).delete(revoke),",
-      "access": "other",
-      "cases": []
-    },
-    {
       "source": "api/card_files.rs",
       "registration": "\"/cards/{id}/files\",get(list).post(upload).layer(DefaultBodyLimit::max(body_limit)),",
       "access": "other",
@@ -535,7 +535,31 @@
     },
     {
       "source": "api/config.rs",
-      "registration": "\"/config/status\",get(status)",
+      "registration": "\"/config/abort\",post(abort)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/commit\",post(commit)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/defaults\",get(defaults_pending)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/defaults/accept\",post(defaults_accept)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/defaults/keep\",post(defaults_keep)",
       "access": "other",
       "cases": []
     },
@@ -548,12 +572,6 @@
     {
       "source": "api/config.rs",
       "registration": "\"/config/log\",get(log)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/config.rs",
-      "registration": "\"/config/commit\",post(commit)",
       "access": "other",
       "cases": []
     },
@@ -580,6 +598,18 @@
     },
     {
       "source": "api/config.rs",
+      "registration": "\"/config/remote\",axum::routing::put(remote_set).delete(remote_clear),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
+      "registration": "\"/config/status\",get(status)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/config.rs",
       "registration": "\"/config/sync\",post(sync)",
       "access": "conditional",
       "cases": [
@@ -592,36 +622,6 @@
           "approval": false
         }
       ]
-    },
-    {
-      "source": "api/config.rs",
-      "registration": "\"/config/abort\",post(abort)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/config.rs",
-      "registration": "\"/config/remote\",axum::routing::put(remote_set).delete(remote_clear),",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/config.rs",
-      "registration": "\"/config/defaults\",get(defaults_pending)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/config.rs",
-      "registration": "\"/config/defaults/accept\",post(defaults_accept)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/config.rs",
-      "registration": "\"/config/defaults/keep\",post(defaults_keep)",
-      "access": "other",
-      "cases": []
     },
     {
       "source": "api/event_sources.rs",
@@ -649,7 +649,13 @@
     },
     {
       "source": "api/fleet.rs",
-      "registration": "\"/fleet/validate\",post(validate)",
+      "registration": "\"/fleet/apply\",post(apply)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/fleet.rs",
+      "registration": "\"/fleet/export\",get(export)",
       "access": "other",
       "cases": []
     },
@@ -661,13 +667,7 @@
     },
     {
       "source": "api/fleet.rs",
-      "registration": "\"/fleet/apply\",post(apply)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/fleet.rs",
-      "registration": "\"/fleet/export\",get(export)",
+      "registration": "\"/fleet/validate\",post(validate)",
       "access": "other",
       "cases": []
     },
@@ -697,13 +697,13 @@
     },
     {
       "source": "api/hosts.rs",
-      "registration": "\"/hosts/{name}/rotate\",axum::routing::post(rotate)",
+      "registration": "\"/hosts/{name}/metrics\",get(metrics)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/hosts.rs",
-      "registration": "\"/hosts/{name}/metrics\",get(metrics)",
+      "registration": "\"/hosts/{name}/rotate\",axum::routing::post(rotate)",
       "access": "other",
       "cases": []
     },
@@ -722,6 +722,22 @@
           "method": "HEAD",
           "path": "/api/inbox",
           "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/inbox.rs",
+      "registration": "\"/inbox/asks\",post(ask)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/inbox/asks",
+          "body": {
+            "to": "p/dev",
+            "text": "x"
+          },
           "allowed": false
         }
       ]
@@ -760,22 +776,6 @@
     },
     {
       "source": "api/inbox.rs",
-      "registration": "\"/inbox/asks\",post(ask)",
-      "access": "operator-only",
-      "cases": [
-        {
-          "method": "POST",
-          "path": "/api/inbox/asks",
-          "body": {
-            "to": "p/dev",
-            "text": "x"
-          },
-          "allowed": false
-        }
-      ]
-    },
-    {
-      "source": "api/inbox.rs",
       "registration": "\"/inbox/watches/{thread}\",delete(cancel_watch)",
       "access": "operator-only",
       "cases": [
@@ -789,12 +789,6 @@
     },
     {
       "source": "api/install.rs",
-      "registration": "SCRIPT_PATH,get(script)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/install.rs",
       "registration": "BINARY_PATH,get(binary)",
       "access": "other",
       "cases": []
@@ -802,6 +796,66 @@
     {
       "source": "api/install.rs",
       "registration": "CHECKSUM_PATH,get(checksum)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/install.rs",
+      "registration": "SCRIPT_PATH,get(script)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/cards/{id}/e2e\",post(e2e)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/cards/{id}/merge\",post(merge)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/cards/{id}/release\",post(release)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/cards/{id}/validate\",post(validate)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/job-hosts\",get(list_hosts)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/job-hosts/{host}\",put(set_host).delete(clear_host)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/job-hosts/{host}/aliases\",put(set_aliases)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/jobs/{id}\",get(show).delete(cancel)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
+      "registration": "\"/merges\",post(merge_batch)",
       "access": "other",
       "cases": []
     },
@@ -825,36 +879,6 @@
     },
     {
       "source": "api/jobs.rs",
-      "registration": "\"/jobs/{id}\",get(show).delete(cancel)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/jobs.rs",
-      "registration": "\"/cards/{id}/validate\",post(validate)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/jobs.rs",
-      "registration": "\"/cards/{id}/merge\",post(merge)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/jobs.rs",
-      "registration": "\"/cards/{id}/e2e\",post(e2e)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/jobs.rs",
-      "registration": "\"/cards/{id}/release\",post(release)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/jobs.rs",
       "registration": "\"/release-targets\",get(list_release_targets)",
       "access": "other",
       "cases": []
@@ -871,36 +895,6 @@
           "allowed": false
         }
       ]
-    },
-    {
-      "source": "api/jobs.rs",
-      "registration": "\"/merges\",post(merge_batch)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/jobs.rs",
-      "registration": "\"/job-hosts\",get(list_hosts)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/jobs.rs",
-      "registration": "\"/job-hosts/{host}\",put(set_host).delete(clear_host)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/jobs.rs",
-      "registration": "\"/job-hosts/{host}/aliases\",put(set_aliases)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/links.rs",
-      "registration": "\"/system/instance\",get(instance)",
-      "access": "other",
-      "cases": []
     },
     {
       "source": "api/links.rs",
@@ -978,10 +972,29 @@
       ]
     },
     {
+      "source": "api/links.rs",
+      "registration": "\"/system/instance\",get(instance)",
+      "access": "other",
+      "cases": []
+    },
+    {
       "source": "api/mail.rs",
       "registration": "\"/mail\",get(list).post(send)",
       "access": "other",
       "cases": []
+    },
+    {
+      "source": "api/mail.rs",
+      "registration": "\"/mail/threads/{thread}/resume\",post(resume)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/mail/threads/x/resume",
+          "body": {},
+          "allowed": false
+        }
+      ]
     },
     {
       "source": "api/mail.rs",
@@ -992,12 +1005,6 @@
     {
       "source": "api/mail.rs",
       "registration": "\"/mail/{id}/read\",post(read)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/mail.rs",
-      "registration": "\"/mail/{id}/reply\",post(reply)",
       "access": "other",
       "cases": []
     },
@@ -1016,16 +1023,9 @@
     },
     {
       "source": "api/mail.rs",
-      "registration": "\"/mail/threads/{thread}/resume\",post(resume)",
-      "access": "operator-only",
-      "cases": [
-        {
-          "method": "POST",
-          "path": "/api/mail/threads/x/resume",
-          "body": {},
-          "allowed": false
-        }
-      ]
+      "registration": "\"/mail/{id}/reply\",post(reply)",
+      "access": "other",
+      "cases": []
     },
     {
       "source": "api/mail.rs",
@@ -1048,12 +1048,6 @@
     {
       "source": "api/mail.rs",
       "registration": "\"/projects/{name}/inbox/{id}/reply\",post(inbox_reply)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/memory.rs",
-      "registration": "\"/projects/{name}/memories\",get(list).post(create)",
       "access": "other",
       "cases": []
     },
@@ -1082,14 +1076,39 @@
       "cases": []
     },
     {
-      "source": "api/mod.rs",
-      "registration": "\"/health\",get(system::health)",
+      "source": "api/memory.rs",
+      "registration": "\"/projects/{name}/memories\",get(list).post(create)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/mod.rs",
-      "registration": "\"/system/version\",get(system::version)",
+      "registration": "\"/audit\",get(system::audit)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/auth/password\",axum::routing::put(session::set_password)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "PUT",
+          "path": "/api/auth/password",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/events\",get(streams::firehose).post(event_sources::emit)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/events/latest\",get(streams::latest)",
       "access": "other",
       "cases": []
     },
@@ -1101,19 +1120,13 @@
     },
     {
       "source": "api/mod.rs",
-      "registration": "\"/harnesses/update\",post(system::harness_update_all)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/mod.rs",
-      "registration": "\"/harnesses/{name}/update\",post(system::harness_update)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/mod.rs",
       "registration": "\"/harnesses/check\",post(system::harness_check)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/harnesses/update\",post(system::harness_update_all)",
       "access": "other",
       "cases": []
     },
@@ -1131,25 +1144,19 @@
     },
     {
       "source": "api/mod.rs",
+      "registration": "\"/harnesses/{name}/update\",post(system::harness_update)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
+      "registration": "\"/health\",get(system::health)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/mod.rs",
       "registration": "\"/reload\",post(system::reload)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/mod.rs",
-      "registration": "\"/audit\",get(system::audit)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/mod.rs",
-      "registration": "\"/events\",get(streams::firehose).post(event_sources::emit)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/mod.rs",
-      "registration": "\"/events/latest\",get(streams::latest)",
       "access": "other",
       "cases": []
     },
@@ -1187,20 +1194,43 @@
     },
     {
       "source": "api/mod.rs",
-      "registration": "\"/auth/password\",axum::routing::put(session::set_password)",
-      "access": "operator-only",
-      "cases": [
-        {
-          "method": "PUT",
-          "path": "/api/auth/password",
-          "body": {},
-          "allowed": false
-        }
-      ]
+      "registration": "\"/system/version\",get(system::version)",
+      "access": "other",
+      "cases": []
     },
     {
       "source": "api/mod.rs",
       "registration": "terrarium_host::protocol::CONNECT_PATH,get(crate::hosts::connect),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/monitors/{id}\",get(show).patch(update).delete(remove)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/monitors/{id}/results\",get(results)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/monitors/{id}/run\",post(run_now)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/projects/{name}/dashboard\",get(dashboard).put(put_dashboard),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/monitors.rs",
+      "registration": "\"/projects/{name}/eta-accuracy\",get(eta_accuracy)",
       "access": "other",
       "cases": []
     },
@@ -1213,36 +1243,6 @@
     {
       "source": "api/monitors.rs",
       "registration": "\"/projects/{name}/monitors/test\",post(test_run)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/monitors.rs",
-      "registration": "\"/projects/{name}/eta-accuracy\",get(eta_accuracy)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/monitors.rs",
-      "registration": "\"/projects/{name}/dashboard\",get(dashboard).put(put_dashboard),",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/monitors.rs",
-      "registration": "\"/monitors/{id}\",get(show).patch(update).delete(remove)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/monitors.rs",
-      "registration": "\"/monitors/{id}/run\",post(run_now)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/monitors.rs",
-      "registration": "\"/monitors/{id}/results\",get(results)",
       "access": "other",
       "cases": []
     },
@@ -1286,18 +1286,6 @@
     },
     {
       "source": "api/pipelines.rs",
-      "registration": "\"/projects/{name}/pipelines\",get(list).post(create)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/pipelines.rs",
-      "registration": "\"/projects/{name}/pipelines/test\",post(test_poll)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/pipelines.rs",
       "registration": "\"/pipelines/{id}\",get(show).patch(update).delete(remove)",
       "access": "other",
       "cases": []
@@ -1317,6 +1305,18 @@
     {
       "source": "api/pipelines.rs",
       "registration": "\"/pipelines/{id}/runs/{run}\",get(run_detail)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/pipelines.rs",
+      "registration": "\"/projects/{name}/pipelines\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/pipelines.rs",
+      "registration": "\"/projects/{name}/pipelines/test\",post(test_poll)",
       "access": "other",
       "cases": []
     },
@@ -1398,7 +1398,7 @@
     },
     {
       "source": "api/projects.rs",
-      "registration": "\"/projects/{name}/targets\",get(list_targets)",
+      "registration": "\"/projects/{name}/repos\",get(list_repos).post(attach_repo)",
       "access": "other",
       "cases": []
     },
@@ -1416,7 +1416,7 @@
     },
     {
       "source": "api/projects.rs",
-      "registration": "\"/projects/{name}/repos\",get(list_repos).post(attach_repo)",
+      "registration": "\"/projects/{name}/targets\",get(list_targets)",
       "access": "other",
       "cases": []
     },
@@ -1435,6 +1435,12 @@
     {
       "source": "api/questions.rs",
       "registration": "\"/questions/{id}\",get(show).patch(update)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/questions.rs",
+      "registration": "\"/questions/{id}/ack\",post(ack)",
       "access": "other",
       "cases": []
     },
@@ -1463,12 +1469,6 @@
     },
     {
       "source": "api/questions.rs",
-      "registration": "\"/questions/{id}/ack\",post(ack)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/questions.rs",
       "registration": "\"/questions/{id}/retract\",post(retract)",
       "access": "other",
       "cases": []
@@ -1488,13 +1488,7 @@
     },
     {
       "source": "api/records.rs",
-      "registration": "\"/projects/{name}/db/types\",get(list_types).post(create_type),",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/records.rs",
-      "registration": "\"/projects/{name}/db/types/{type}\",get(show_type).patch(update_type).delete(delete_type),",
+      "registration": "\"/projects/{name}/db/query\",get(query)",
       "access": "other",
       "cases": []
     },
@@ -1512,7 +1506,13 @@
     },
     {
       "source": "api/records.rs",
-      "registration": "\"/projects/{name}/db/query\",get(query)",
+      "registration": "\"/projects/{name}/db/types\",get(list_types).post(create_type),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/records.rs",
+      "registration": "\"/projects/{name}/db/types/{type}\",get(show_type).patch(update_type).delete(delete_type),",
       "access": "other",
       "cases": []
     },
@@ -1561,19 +1561,6 @@
         {
           "method": "HEAD",
           "path": "/api/remotes/x",
-          "body": {},
-          "allowed": false
-        }
-      ]
-    },
-    {
-      "source": "api/remotes.rs",
-      "registration": "\"/remotes/{name}/repin\",post(repin)",
-      "access": "operator-only",
-      "cases": [
-        {
-          "method": "POST",
-          "path": "/api/remotes/x/repin",
           "body": {},
           "allowed": false
         }
@@ -1636,26 +1623,21 @@
       ]
     },
     {
+      "source": "api/remotes.rs",
+      "registration": "\"/remotes/{name}/repin\",post(repin)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/remotes/x/repin",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
       "source": "api/repo_trees.rs",
       "registration": "\"/repos/{id}/trees\",get(trees)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/repo_trees.rs",
-      "registration": "\"/repos/{id}/trees/{tree}/files\",get(files)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/repo_trees.rs",
-      "registration": "\"/repos/{id}/trees/{tree}/file\",get(file)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/repo_trees.rs",
-      "registration": "\"/repos/{id}/trees/{tree}/diff\",get(diff)",
       "access": "other",
       "cases": []
     },
@@ -1668,6 +1650,24 @@
     {
       "source": "api/repo_trees.rs",
       "registration": "\"/repos/{id}/trees/{tree}/commits/{sha}\",get(commit)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repo_trees.rs",
+      "registration": "\"/repos/{id}/trees/{tree}/diff\",get(diff)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repo_trees.rs",
+      "registration": "\"/repos/{id}/trees/{tree}/file\",get(file)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/repo_trees.rs",
+      "registration": "\"/repos/{id}/trees/{tree}/files\",get(files)",
       "access": "other",
       "cases": []
     },
@@ -1715,12 +1715,6 @@
     },
     {
       "source": "api/rules.rs",
-      "registration": "\"/rules/schema\",get(schema)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/rules.rs",
       "registration": "\"/projects/{name}/rules\",get(show).put(put).delete(remove)",
       "access": "other",
       "cases": []
@@ -1744,6 +1738,12 @@
       "cases": []
     },
     {
+      "source": "api/rules.rs",
+      "registration": "\"/rules/schema\",get(schema)",
+      "access": "other",
+      "cases": []
+    },
+    {
       "source": "api/rules_tools.rs",
       "registration": "\"/projects/{name}/rules/effective\",get(effective)",
       "access": "other",
@@ -1763,13 +1763,13 @@
     },
     {
       "source": "api/rules_tools.rs",
-      "registration": "\"/projects/{name}/rules/{rule}/enable\",post(enable)",
+      "registration": "\"/projects/{name}/rules/{rule}/disable\",post(disable)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/rules_tools.rs",
-      "registration": "\"/projects/{name}/rules/{rule}/disable\",post(disable)",
+      "registration": "\"/projects/{name}/rules/{rule}/enable\",post(enable)",
       "access": "other",
       "cases": []
     },
@@ -1787,13 +1787,13 @@
     },
     {
       "source": "api/schedules.rs",
-      "registration": "\"/schedules/{id}/run\",post(run_now)",
+      "registration": "\"/schedules/{id}/deliveries\",get(deliveries)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/schedules.rs",
-      "registration": "\"/schedules/{id}/enable\",post(enable)",
+      "registration": "\"/schedules/{id}/deliveries/{delivery}/redeliver\",post(redeliver),",
       "access": "other",
       "cases": []
     },
@@ -1805,19 +1805,19 @@
     },
     {
       "source": "api/schedules.rs",
+      "registration": "\"/schedules/{id}/enable\",post(enable)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
+      "registration": "\"/schedules/{id}/run\",post(run_now)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/schedules.rs",
       "registration": "\"/schedules/{id}/runs\",get(runs)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/schedules.rs",
-      "registration": "\"/schedules/{id}/deliveries\",get(deliveries)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/schedules.rs",
-      "registration": "\"/schedules/{id}/deliveries/{delivery}/redeliver\",post(redeliver),",
       "access": "other",
       "cases": []
     },
@@ -1835,13 +1835,13 @@
     },
     {
       "source": "api/secret_grants.rs",
-      "registration": "\"/secrets/{scope}/{name}/grants\",get(list).post(create).delete(revoke),",
+      "registration": "\"/agent/secrets\",get(mine)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/secret_grants.rs",
-      "registration": "\"/agent/secrets\",get(mine)",
+      "registration": "\"/agent/secrets/env\",post(launch_env)",
       "access": "other",
       "cases": []
     },
@@ -1853,7 +1853,19 @@
     },
     {
       "source": "api/secret_grants.rs",
-      "registration": "\"/agent/secrets/env\",post(launch_env)",
+      "registration": "\"/secrets/{scope}/{name}/grants\",get(list).post(create).delete(revoke),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secrets.rs",
+      "registration": "\"/credentials\",get(list_credentials).post(put_credential)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/secrets.rs",
+      "registration": "\"/credentials/{name}\",delete(delete_credential)",
       "access": "other",
       "cases": []
     },
@@ -1876,20 +1888,14 @@
       "cases": []
     },
     {
-      "source": "api/secrets.rs",
-      "registration": "\"/credentials\",get(list_credentials).post(put_credential)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/secrets.rs",
-      "registration": "\"/credentials/{name}\",delete(delete_credential)",
-      "access": "other",
-      "cases": []
-    },
-    {
       "source": "api/secrets_generate.rs",
       "registration": "\"/secrets/{scope}/{name}/generate\",post(generate)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/session_links.rs",
+      "registration": "\"/cards/{id}/sessions\",get(card_sessions)",
       "access": "other",
       "cases": []
     },
@@ -1902,12 +1908,6 @@
     {
       "source": "api/session_links.rs",
       "registration": "\"/sessions/{id}/transcript\",get(transcript)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/session_links.rs",
-      "registration": "\"/cards/{id}/sessions\",get(card_sessions)",
       "access": "other",
       "cases": []
     },
@@ -1926,6 +1926,18 @@
     {
       "source": "api/skills.rs",
       "registration": "\"/skills/{name}/usage\",get(usage)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/spawns.rs",
+      "registration": "\"/agents/{id}/cancel\",post(cancel)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/spawns.rs",
+      "registration": "\"/agents/{id}/done\",post(done)",
       "access": "other",
       "cases": []
     },
@@ -1950,18 +1962,6 @@
     },
     {
       "source": "api/spawns.rs",
-      "registration": "\"/agents/{id}/done\",post(done)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/spawns.rs",
-      "registration": "\"/agents/{id}/cancel\",post(cancel)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/spawns.rs",
       "registration": "\"/spawns/{id}\",get(show)",
       "access": "conditional",
       "cases": [
@@ -1970,6 +1970,270 @@
           "path": "/api/spawns/$spawn",
           "body": {},
           "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions\",get(list).post(create)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/subscriptions"
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/subscriptions"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subscriptions"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/detect\",get(detect)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/subscriptions/detect"
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/subscriptions/detect"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/fetch-models\",post(fetch_models)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/fetch-models"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/login\",post(login_start)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/login"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/login/{id}\",get(login_show).delete(login_cancel),",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/subscriptions/login/missing"
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/subscriptions/login/missing"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/subscriptions/login/missing"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/login/{id}/input\",post(login_input)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/login/missing/input"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/login/{id}/pty\",get(login_pty)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/subscriptions/login/missing/pty"
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/subscriptions/login/missing/pty"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}\",get(show).delete(remove).patch(update),",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/subscriptions/missing"
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/subscriptions/missing"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/subscriptions/missing"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/subscriptions/missing"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/api-key\",post(api_key)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/missing/api-key"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/cloud\",axum::routing::put(set_cloud)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "PUT",
+          "path": "/api/subscriptions/missing/cloud"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/default\",post(make_default)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/missing/default"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/disable\",post(disable)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/missing/disable"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/enable\",post(enable)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/missing/enable"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/label\",axum::routing::put(set_label)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "PUT",
+          "path": "/api/subscriptions/missing/label"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/logout\",post(logout)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/missing/logout"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/models\",get(models)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/subscriptions/missing/models"
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/subscriptions/missing/models"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/probe\",post(probe)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/missing/probe"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/quota\",get(quota)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "GET",
+          "path": "/api/subscriptions/missing/quota"
+        },
+        {
+          "method": "HEAD",
+          "path": "/api/subscriptions/missing/quota"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/stop-all\",post(stop_all)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/missing/stop-all"
+        }
+      ]
+    },
+    {
+      "source": "api/subscriptions.rs",
+      "registration": "\"/subscriptions/{name}/verify\",post(verify)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/subscriptions/missing/verify"
         }
       ]
     },
@@ -2025,19 +2289,6 @@
     },
     {
       "source": "api/system_update.rs",
-      "registration": "\"/system/update/rollback\",post(rollback)",
-      "access": "operator-only",
-      "cases": [
-        {
-          "method": "POST",
-          "path": "/api/system/update/rollback",
-          "body": {},
-          "allowed": false
-        }
-      ]
-    },
-    {
-      "source": "api/system_update.rs",
       "registration": "\"/system/update/drain\",post(drain)",
       "access": "operator-only",
       "cases": [
@@ -2063,6 +2314,38 @@
       ]
     },
     {
+      "source": "api/system_update.rs",
+      "registration": "\"/system/update/rollback\",post(rollback)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/system/update/rollback",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/agents/{id}/leases\",get(leases_of_agent)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/exedev/sweep\",post(exedev_sweep)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/exedev/sweep",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
       "source": "api/targets.rs",
       "registration": "\"/targets\",get(list).post(create)",
       "access": "other",
@@ -2076,13 +2359,43 @@
     },
     {
       "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/test\",post(test)",
+      "registration": "\"/targets/{name}/cp\",post(cp)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/up\",post(up)",
+      "registration": "\"/targets/{name}/display/info\",get(display_info).post(display_info_post),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/display/{op}\",post(display_op)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/down\",post(down)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/exec\",post(exec)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/leases\",get(leases_of_target).post(grant)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/targets.rs",
+      "registration": "\"/targets/{name}/leases/{agent}\",axum::routing::patch(extend).delete(revoke),",
       "access": "other",
       "cases": []
     },
@@ -2113,49 +2426,7 @@
     },
     {
       "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/down\",post(down)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/snapshot\",post(snapshot)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/targets.rs",
       "registration": "\"/targets/{name}/restore\",post(restore)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/status\",post(status)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/snapshots\",get(snapshots_list)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/snapshots/{snap}\",axum::routing::delete(snapshot_delete),",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/exec\",post(exec)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/cp\",post(cp)",
       "access": "other",
       "cases": []
     },
@@ -2185,50 +2456,49 @@
     },
     {
       "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/display/info\",get(display_info).post(display_info_post),",
+      "registration": "\"/targets/{name}/snapshot\",post(snapshot)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/display/{op}\",post(display_op)",
+      "registration": "\"/targets/{name}/snapshots\",get(snapshots_list)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/leases\",get(leases_of_target).post(grant)",
+      "registration": "\"/targets/{name}/snapshots/{snap}\",axum::routing::delete(snapshot_delete),",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/targets.rs",
-      "registration": "\"/targets/{name}/leases/{agent}\",axum::routing::patch(extend).delete(revoke),",
+      "registration": "\"/targets/{name}/status\",post(status)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/targets.rs",
-      "registration": "\"/agents/{id}/leases\",get(leases_of_agent)",
+      "registration": "\"/targets/{name}/test\",post(test)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/targets.rs",
-      "registration": "\"/exedev/sweep\",post(exedev_sweep)",
-      "access": "operator-only",
-      "cases": [
-        {
-          "method": "POST",
-          "path": "/api/exedev/sweep",
-          "body": {},
-          "allowed": false
-        }
-      ]
+      "registration": "\"/targets/{name}/up\",post(up)",
+      "access": "other",
+      "cases": []
     },
     {
       "source": "api/templates.rs",
       "registration": "\"/templates\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/templates.rs",
+      "registration": "\"/templates/from-agent/{agent}\",post(from_agent)",
       "access": "other",
       "cases": []
     },
@@ -2251,12 +2521,6 @@
       "cases": []
     },
     {
-      "source": "api/templates.rs",
-      "registration": "\"/templates/from-agent/{agent}\",post(from_agent)",
-      "access": "other",
-      "cases": []
-    },
-    {
       "source": "api/test_runs.rs",
       "registration": "\"/projects/{name}/test-runs\",get(list).post(upload).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),",
       "access": "other",
@@ -2270,12 +2534,6 @@
     },
     {
       "source": "api/test_runs.rs",
-      "registration": "\"/test-runs/{id}/raw\",get(raw)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/test_runs.rs",
       "registration": "\"/test-runs/{id}/compare\",get(compare)",
       "access": "other",
       "cases": []
@@ -2283,6 +2541,18 @@
     {
       "source": "api/test_runs.rs",
       "registration": "\"/test-runs/{id}/links\",axum::routing::patch(links)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/test_runs.rs",
+      "registration": "\"/test-runs/{id}/raw\",get(raw)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/projects/{project}/version-thread/messages\",post(post_version),",
       "access": "other",
       "cases": []
     },
@@ -2310,7 +2580,34 @@
     },
     {
       "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/cards\",post(link_card)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/close\",post(close)",
+      "access": "conditional",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/threads/x/close",
+          "body": {
+            "confirm": true
+          },
+          "approval": false
+        }
+      ]
+    },
+    {
+      "source": "api/threads.rs",
       "registration": "\"/threads/{id}/messages\",post(post_message)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/reopen\",post(reopen)",
       "access": "other",
       "cases": []
     },
@@ -2331,46 +2628,7 @@
     },
     {
       "source": "api/threads.rs",
-      "registration": "\"/threads/{id}/close\",post(close)",
-      "access": "conditional",
-      "cases": [
-        {
-          "method": "POST",
-          "path": "/api/threads/x/close",
-          "body": {
-            "confirm": true
-          },
-          "approval": false
-        }
-      ]
-    },
-    {
-      "source": "api/threads.rs",
-      "registration": "\"/threads/{id}/track\",post(track)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/threads.rs",
       "registration": "\"/threads/{id}/status\",post(set_status)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/threads.rs",
-      "registration": "\"/threads/{id}/cards\",post(link_card)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/threads.rs",
-      "registration": "\"/projects/{project}/version-thread/messages\",post(post_version),",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/threads.rs",
-      "registration": "\"/threads/{id}/reopen\",post(reopen)",
       "access": "other",
       "cases": []
     },
@@ -2381,8 +2639,32 @@
       "cases": []
     },
     {
+      "source": "api/threads.rs",
+      "registration": "\"/threads/{id}/track\",post(track)",
+      "access": "other",
+      "cases": []
+    },
+    {
       "source": "api/tools.rs",
       "registration": "\"/tools\",get(list).post(create)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/tools.rs",
+      "registration": "\"/tools/sessions/{id}\",axum::routing::delete(session_close)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/tools.rs",
+      "registration": "\"/tools/sessions/{id}/input\",post(session_input)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/tools.rs",
+      "registration": "\"/tools/sessions/{id}/output\",get(session_output)",
       "access": "other",
       "cases": []
     },
@@ -2413,24 +2695,6 @@
       ]
     },
     {
-      "source": "api/tools.rs",
-      "registration": "\"/tools/sessions/{id}\",axum::routing::delete(session_close)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/tools.rs",
-      "registration": "\"/tools/sessions/{id}/output\",get(session_output)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/tools.rs",
-      "registration": "\"/tools/sessions/{id}/input\",post(session_input)",
-      "access": "other",
-      "cases": []
-    },
-    {
       "source": "api/transcripts.rs",
       "registration": "\"/agents/{id}/sessions\",get(sessions)",
       "access": "other",
@@ -2445,6 +2709,24 @@
     {
       "source": "api/transcripts.rs",
       "registration": "\"/agents/{id}/sessions/{session}/transcript/stream\",get(stream),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/usage.rs",
+      "registration": "\"/agents/{id}/status\",post(self_report)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/usage.rs",
+      "registration": "\"/cards/{id}/usage\",get(card_usage)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/usage.rs",
+      "registration": "\"/projects/{name}/trouble\",get(trouble_settings).put(update_trouble_settings),",
       "access": "other",
       "cases": []
     },
@@ -2467,20 +2749,8 @@
       "cases": []
     },
     {
-      "source": "api/usage.rs",
-      "registration": "\"/cards/{id}/usage\",get(card_usage)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/usage.rs",
-      "registration": "\"/projects/{name}/trouble\",get(trouble_settings).put(update_trouble_settings),",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/usage.rs",
-      "registration": "\"/agents/{id}/status\",post(self_report)",
+      "source": "api/version_groups.rs",
+      "registration": "\"/projects/{project}/version-groups/{key}/add\",post(add)",
       "access": "other",
       "cases": []
     },
@@ -2492,19 +2762,19 @@
     },
     {
       "source": "api/version_groups.rs",
-      "registration": "\"/projects/{project}/version-groups/{key}/status\",post(status),",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/version_groups.rs",
       "registration": "\"/projects/{project}/version-groups/{key}/remove\",post(remove),",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/version_groups.rs",
-      "registration": "\"/projects/{project}/version-groups/{key}/add\",post(add)",
+      "registration": "\"/projects/{project}/version-groups/{key}/status\",post(status),",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/waits.rs",
+      "registration": "\"/agents/{id}/run\",post(run)",
       "access": "other",
       "cases": []
     },
@@ -2523,12 +2793,6 @@
           "approval": false
         }
       ]
-    },
-    {
-      "source": "api/waits.rs",
-      "registration": "\"/agents/{id}/run\",post(run)",
-      "access": "other",
-      "cases": []
     },
     {
       "source": "api/waits.rs",
@@ -2599,13 +2863,37 @@
     },
     {
       "source": "api/wiki.rs",
-      "registration": "\"/wiki/{id}/section\",post(section)",
+      "registration": "\"/wiki/{id}/append\",post(append)",
       "access": "other",
       "cases": []
     },
     {
       "source": "api/wiki.rs",
-      "registration": "\"/wiki/{id}/append\",post(append)",
+      "registration": "\"/wiki/{id}/backlinks\",get(backlinks)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/diff\",get(diff)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/move\",post(move_page)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/restore\",post(restore)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/wiki.rs",
+      "registration": "\"/wiki/{id}/review\",post(review)",
       "access": "other",
       "cases": []
     },
@@ -2623,37 +2911,13 @@
     },
     {
       "source": "api/wiki.rs",
-      "registration": "\"/wiki/{id}/diff\",get(diff)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/wiki.rs",
-      "registration": "\"/wiki/{id}/restore\",post(restore)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/wiki.rs",
-      "registration": "\"/wiki/{id}/move\",post(move_page)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/wiki.rs",
-      "registration": "\"/wiki/{id}/backlinks\",get(backlinks)",
-      "access": "other",
-      "cases": []
-    },
-    {
-      "source": "api/wiki.rs",
-      "registration": "\"/wiki/{id}/review\",post(review)",
+      "registration": "\"/wiki/{id}/section\",post(section)",
       "access": "other",
       "cases": []
     },
     {
       "source": "git_proxy/mod.rs",
-      "registration": "\"/git/{project}/{repo}/info/refs\",get(info_refs)",
+      "registration": "\"/git/{project}/{repo}/git-receive-pack\",post(receive_pack)",
       "access": "other",
       "cases": []
     },
@@ -2665,7 +2929,7 @@
     },
     {
       "source": "git_proxy/mod.rs",
-      "registration": "\"/git/{project}/{repo}/git-receive-pack\",post(receive_pack)",
+      "registration": "\"/git/{project}/{repo}/info/refs\",get(info_refs)",
       "access": "other",
       "cases": []
     },
@@ -2677,13 +2941,13 @@
     },
     {
       "source": "ingest.rs",
-      "registration": "\"/hooks/{project}/{source}\",post(hook)",
+      "registration": "\"/healthz\",get(healthz)",
       "access": "other",
       "cases": []
     },
     {
       "source": "ingest.rs",
-      "registration": "\"/healthz\",get(healthz)",
+      "registration": "\"/hooks/{project}/{source}\",post(hook)",
       "access": "other",
       "cases": []
     }

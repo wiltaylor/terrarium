@@ -71,26 +71,6 @@ fn link_route_inventory_is_complete() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut sources = std::collections::BTreeMap::new();
     link_inventory_sources(&root, &root, &mut sources);
-    if std::env::var_os("TERRARIUM_DUMP_LINK_INVENTORY").is_some() {
-        let gates: std::collections::BTreeMap<_, _> = sources
-            .iter()
-            .filter_map(|(name, source)| {
-                let lines = link_gate_lines(source);
-                (!lines.is_empty()).then(|| (name.clone(), lines))
-            })
-            .collect();
-        let compositions: std::collections::BTreeMap<_, _> = sources
-            .iter()
-            .filter_map(|(name, source)| {
-                let calls = link_syntax_inventory(source).1;
-                (!calls.is_empty()).then(|| (name.clone(), calls))
-            })
-            .collect();
-        println!(
-            "INVENTORY_DUMP={}",
-            serde_json::json!({"gates": gates, "compositions": compositions})
-        );
-    }
     let inventory = link_inventory();
     let actual: std::collections::BTreeSet<_> = sources
         .iter()
