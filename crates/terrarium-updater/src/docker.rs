@@ -121,82 +121,76 @@ impl Docker {
     }
 
     async fn compose_config(&self, container: &Value, reference: &str) -> Res<(Value, String)> {
-    let me = std::env::var("HOSTNAME").map_err(|_| {
-        "cannot inspect updater deployment mounts (values hidden)".to_owned()
-    })?;
-    let own = self.inspect(&me).await?;
-    let mounts = &own["Mounts"];
-    for required in ["/compose", "/deployment"] {
-        if !mounts
+        let me = std::env::var("HOSTNAME")
+            .map_err(|_| "cannot inspect updater deployment mounts (values hidden)".to_owned())?;
+        let own = self.inspect(&me).await?;
+        let mounts = &own["Mounts"];
+        for required in ["/compose", "/deployment"] {
+            if !mounts
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|m| m["Destination"] == required && m["RW"] == false)
+            {
+                return Err("read-only deployment mounts are missing; recreate the updater with the current compose.yaml; differing keys unavailable (values hidden)".into());
+            }
+        }
+        let labels = &container["Config"]["Labels"];
+        let work = labels["com.docker.compose.project.working_dir"]
+            .as_str()
+            .ok_or_else(|| "missing Compose working directory (values hidden)".to_owned())?;
+        let directory = mounted_path(work, mounts)?;
+        let files = labels["com.docker.compose.project.config_files"]
+            .as_str()
+            .ok_or_else(|| "missing Compose configuration paths (values hidden)".to_owned())?;
+        let project = labels[LABEL_PROJECT]
+            .as_str()
+            .ok_or_else(|| "missing Compose project (values hidden)".to_owned())?;
+        let service = labels[LABEL_SERVICE]
+            .as_str()
+            .ok_or_else(|| "missing Compose service (values hidden)".to_owned())?;
+        let mut cmd = compose_command();
+        cmd.args(["compose", "--project-name", project, "--project-directory"])
+            .arg(&directory)
+            .current_dir(&directory);
+        for file in files.split(',') {
+            cmd.arg("--file").arg(mounted_path(file, mounts)?);
+        }
+        // Compose records explicit --env-file paths. With no explicit
+        // override, the project .env is the source (source checkouts).
+        if let Some(files) = labels["com.docker.compose.project.environment_file"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            for file in files.split(',') {
+                cmd.arg("--env-file").arg(mounted_path(file, mounts)?);
+            }
+        } else {
+            cmd.arg("--env-file").arg(directory.join(".env"));
+        }
+        // The deploy wrapper supplies these independently of .env.
+        if let Some(root) = mounts
             .as_array()
             .into_iter()
             .flatten()
-            .any(|m| m["Destination"] == required && m["RW"] == false)
+            .find(|m| m["Destination"] == "/deployment")
+            .and_then(|m| m["Source"].as_str())
         {
-            return Err("read-only deployment mounts are missing; recreate the updater with the current compose.yaml; differing keys unavailable (values hidden)".into());
+            cmd.env("TERRARIUM_DATA_DIR", root);
         }
-    }
-    let labels = &container["Config"]["Labels"];
-    let work = labels["com.docker.compose.project.working_dir"]
-        .as_str()
-        .ok_or_else(|| "missing Compose working directory (values hidden)".to_owned())?;
-    let directory = mounted_path(work, mounts)?;
-    let files = labels["com.docker.compose.project.config_files"]
-        .as_str()
-        .ok_or_else(|| "missing Compose configuration paths (values hidden)".to_owned())?;
-    let project = labels[LABEL_PROJECT]
-        .as_str()
-        .ok_or_else(|| "missing Compose project (values hidden)".to_owned())?;
-    let service = labels[LABEL_SERVICE]
-        .as_str()
-        .ok_or_else(|| "missing Compose service (values hidden)".to_owned())?;
-    let mut cmd = compose_command();
-    cmd.args(["compose", "--project-name", project, "--project-directory"])
-        .arg(&directory)
-        .current_dir(&directory);
-    for file in files.split(',') {
-        cmd.arg("--file").arg(mounted_path(file, mounts)?);
-    }
-    // Compose records explicit --env-file paths. With no explicit
-    // override, the project .env is the source (source checkouts).
-    if let Some(files) = labels["com.docker.compose.project.environment_file"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-    {
-        for file in files.split(',') {
-            cmd.arg("--env-file").arg(mounted_path(file, mounts)?);
-        }
-    } else {
-        cmd.arg("--env-file").arg(directory.join(".env"));
-    }
-    // The deploy wrapper supplies these independently of .env.
-    if let Some(root) = mounts
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|m| m["Destination"] == "/deployment")
-        .and_then(|m| m["Source"].as_str())
-    {
-        cmd.env("TERRARIUM_DATA_DIR", root);
-    }
-    cmd.env("TERRARIUM_IMAGE", reference);
-    cmd.args(["config", "--format", "json"]);
-    let output =
-        tokio::time::timeout(Duration::from_secs(60), cmd.kill_on_drop(true).output())
+        cmd.env("TERRARIUM_IMAGE", reference);
+        cmd.args(["config", "--format", "json"]);
+        let output = tokio::time::timeout(Duration::from_secs(60), cmd.kill_on_drop(true).output())
             .await
-            .map_err(|_| {
-                "Compose environment resolution timed out (values hidden)".to_owned()
-            })?
-            .map_err(|_| {
-                "cannot run Compose environment resolution (values hidden)".to_owned()
-            })?;
-    // Compose diagnostics and parse errors can contain secrets. Do not
-    // include stdout, stderr, or serde's error in logs or run history.
-    if !output.status.success() {
-        return Err("Compose environment resolution failed; update stopped before swap; differing keys unavailable (values hidden)".into());
-    }
-    let config: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|_| "invalid Compose configuration (values hidden)".to_owned())?;
+            .map_err(|_| "Compose environment resolution timed out (values hidden)".to_owned())?
+            .map_err(|_| "cannot run Compose environment resolution (values hidden)".to_owned())?;
+        // Compose diagnostics and parse errors can contain secrets. Do not
+        // include stdout, stderr, or serde's error in logs or run history.
+        if !output.status.success() {
+            return Err("Compose environment resolution failed; update stopped before swap; differing keys unavailable (values hidden)".into());
+        }
+        let config: Value = serde_json::from_slice(&output.stdout)
+            .map_err(|_| "invalid Compose configuration (values hidden)".to_owned())?;
         Ok((config, service.to_owned()))
     }
 
@@ -1085,13 +1079,19 @@ mod tests {
         ] {
             let container = json!({"Config": {"StopTimeout": old}});
             let config = json!({"services": {SERVICE: {"stop_grace_period": grace}}});
-            assert_eq!(stop_timeout(&container, &config, SERVICE).unwrap(), expected);
+            assert_eq!(
+                stop_timeout(&container, &config, SERVICE).unwrap(),
+                expected
+            );
         }
-        assert!(stop_timeout(
-            &json!({"Config": {"StopTimeout": 40}}),
-            &json!({"services": {SERVICE: {"stop_grace_period": "invalid"}}}),
-            SERVICE,
-        ).is_err());
+        assert!(
+            stop_timeout(
+                &json!({"Config": {"StopTimeout": 40}}),
+                &json!({"services": {SERVICE: {"stop_grace_period": "invalid"}}}),
+                SERVICE,
+            )
+            .is_err()
+        );
     }
 
     #[test]
