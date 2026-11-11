@@ -2,7 +2,7 @@ import { createEffect, createSignal, on, Show, type JSX } from "solid-js";
 import { SafeHtml } from "./SafeHtml";
 import { renderMarkdown } from "../lib/markdown";
 
-export function PostEditor(props: { label: string; text: string; project: string; children: JSX.Element }) {
+export function PostEditor(props: { label: string; text: string; project: string; textBody?: boolean; children: JSX.Element }) {
   const [preview, setPreview] = createSignal(false);
   createEffect(on(() => props.text, () => setPreview(false), { defer: true }));
   return <div class="stack post-editor" style={{ width: "100%" }}>
@@ -11,6 +11,6 @@ export function PostEditor(props: { label: string; text: string; project: string
       <button type="button" role="tab" aria-selected={preview()} onClick={() => setPreview(true)}>Preview</button>
     </div>
     <div role="tabpanel" hidden={preview()}>{props.children}</div>
-    <Show when={preview()}><div role="tabpanel" aria-label={`${props.label} preview`}><SafeHtml class="prose" html={renderMarkdown(props.text, props.project, { textBody: true })} /></div></Show>
+    <Show when={preview()}><div role="tabpanel" aria-label={`${props.label} preview`}><SafeHtml class="prose" html={renderMarkdown(props.text, props.project, { textBody: props.textBody ?? false })} /></div></Show>
   </div>;
 }

@@ -82,7 +82,7 @@ export function CardPeek() {
                       } catch (err) { setError(err); }
                       finally { setSending(false); }
                     }}>
-                      <PostEditor label="Comment" text={text()} project={c().project}>
+                      <PostEditor label="Comment" text={text()} project={c().project} textBody>
                         <textarea ref={editor} aria-label="Comment" value={text()} onInput={(e) => setText(e.currentTarget.value)} placeholder="Comment as operator" />
                       </PostEditor>
                       <button type="submit" disabled={!text().trim() || sending()}>Comment</button>

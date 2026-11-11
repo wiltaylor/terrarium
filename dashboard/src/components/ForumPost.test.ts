@@ -61,7 +61,7 @@ it("card comment previews preserve single newlines like posted comments", () => 
   const body = "first line\nsecond line\nthird line";
   const el = mount(() => [
     createComponent(CommentPost, { card: "TER-1", project: "terrarium", index: 0, comment: { author: "lead", body, created_at: "2026-11-11T00:00:00Z" } }),
-    createComponent(PostEditor, { label: "Comment", project: "terrarium", text: body, children: document.createElement("textarea") }),
+    createComponent(PostEditor, { label: "Comment", project: "terrarium", text: body, textBody: true, children: document.createElement("textarea") }),
   ]);
   [...el.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Preview")!.click();
   const preview = el.querySelector('[aria-label="Comment preview"] .prose')!;
@@ -73,4 +73,11 @@ it("mail preserves a leading front-matter-like block as body text", () => {
   const el = mount(() => createComponent(MessageView, { message }));
   expect(el.querySelector(".prose")?.textContent).toContain("private: keep this line");
   expect(el.querySelectorAll(".prose br")).toHaveLength(1);
+});
+it("previews keep wiki mode unless textBody is enabled", () => {
+  const el = mount(() => createComponent(PostEditor, { label: "Wiki", project: "terrarium", text: "---\ntitle: hidden\n---\nfirst\nsecond", children: document.createElement("textarea") }));
+  [...el.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Preview")!.click();
+  const preview = el.querySelector('[aria-label="Wiki preview"]')!;
+  expect(preview.textContent).not.toContain("title: hidden");
+  expect(preview.querySelector("br")).toBeNull();
 });
