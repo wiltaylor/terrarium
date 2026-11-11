@@ -895,7 +895,7 @@ pub async fn remotes(ctx: &Ctx, cmd: &RemoteCmd) -> anyhow::Result<()> {
         RemoteCmd::Ls => ctx.api.get("/api/remotes", vec![]).await?,
         RemoteCmd::Add {
             name,
-            url,
+            remote_url,
             instance_id,
             pin_sha256,
             ca_file,
@@ -905,7 +905,7 @@ pub async fn remotes(ctx: &Ctx, cmd: &RemoteCmd) -> anyhow::Result<()> {
                 .post(
                     "/api/remotes",
                     Some(json!({
-                        "name": name, "url": url, "instance_id": instance_id,
+                        "name": name, "url": remote_url, "instance_id": instance_id,
                         "pin_sha256": pin_sha256, "ca_pem": ca(ca_file)?, "label": label,
                         "code": code()?,
                     })),

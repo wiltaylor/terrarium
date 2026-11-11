@@ -4594,7 +4594,8 @@ pub enum RemoteCmd {
     /// Pair a remote. Read the one-time code from stdin, not argv
     Add {
         name: String,
-        url: String,
+        #[arg(value_name = "URL")]
+        remote_url: String,
         /// Compare this ID with the remote's Links screen
         #[arg(long)]
         instance_id: String,
@@ -5034,6 +5035,14 @@ mod tests {
             walk(s, &globals, s.get_name(), &mut bad);
         }
         assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    #[test]
+    fn remote_add_keeps_the_home_and_remote_urls_separate() {
+        let cli = parse(&["--url", "https://home.example", "remote", "add", "lab", "https://remote.example", "--instance-id", "confirmed-id"]);
+        assert_eq!(cli.url.as_deref(), Some("https://home.example"));
+        let Command::Remote { command: RemoteCmd::Add { remote_url, .. } } = cli.command else { panic!("expected remote add"); };
+        assert_eq!(remote_url, "https://remote.example");
     }
 
     /// Design D3: a tool link runs `tool run <name> -- args`; the CLI and
