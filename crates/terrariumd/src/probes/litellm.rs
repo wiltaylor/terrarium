@@ -1,5 +1,6 @@
 //! LiteLLM virtual-key budget, from the subscription's own proxy only.
 use std::path::Path;
+use std::net::{SocketAddr, ToSocketAddrs};
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -10,25 +11,37 @@ use super::{Credentials, HttpRequest, ProbeError, QuotaProbe, QuotaWindow};
 pub const NAME: &str = "litellm-key-spend";
 const NO_SPEND: &str = "no spend from LiteLLM";
 
-/// HTTP is deliberately limited to literal private addresses. No DNS lookup
-/// or environment proxy may move an unencrypted credential to another host.
+/// HTTP requires every resolved address to be private. Call again at connect
+/// time and pin the result. This does not pin a harness's independent client.
 pub fn check_base_url(base: &str) -> Result<(), String> {
+    checked_address(base, None).map(|_| ())
+}
+
+fn checked_address(
+    base: &str,
+    resolver: Option<crate::webhooks::net::Resolver>,
+) -> Result<Option<SocketAddr>, String> {
     let base = terrarium_core::selfhosted::check_http_url("base_url", base, false)?;
     let url = reqwest::Url::parse(&base).map_err(|_| "invalid LiteLLM base URL")?;
     if url.scheme() == "https" {
-        return Ok(());
+        return Ok(None);
     }
-    let private = match url.host() {
-        Some(url::Host::Ipv4(ip)) => private_ip(ip.into()),
-        Some(url::Host::Ipv6(ip)) => private_ip(ip.into()),
-        _ => {
-            return Err(
-                "LiteLLM HTTP needs a private literal IP address; hostnames require HTTPS".into(),
-            );
-        }
+    let port = url.port_or_known_default().ok_or("missing port")?;
+    let ips = match url.host() {
+        Some(url::Host::Ipv4(ip)) => vec![ip.into()],
+        Some(url::Host::Ipv6(ip)) => vec![ip.into()],
+        Some(url::Host::Domain(host)) => match resolver {
+            Some(resolve) => resolve(host, port),
+            None => (host, port)
+                .to_socket_addrs()
+                .map_err(|_| "cannot resolve LiteLLM HTTP host")?
+                .map(|addr| addr.ip())
+                .collect(),
+        },
+        None => return Err("missing host".into()),
     };
-    if private {
-        Ok(())
+    if !ips.is_empty() && ips.iter().all(|ip| private_ip(*ip)) {
+        Ok(Some(SocketAddr::new(ips[0], port)))
     } else {
         Err("LiteLLM HTTP needs a private network address; public and link-local addresses require HTTPS".into())
     }
@@ -136,12 +149,29 @@ pub async fn fetch(
     probe: &LiteLlmKeySpend,
     creds: &Credentials,
 ) -> Result<Vec<QuotaWindow>, ProbeError> {
+    fetch_with_resolver(probe, creds, None).await
+}
+
+async fn fetch_with_resolver(
+    probe: &LiteLlmKeySpend,
+    creds: &Credentials,
+    resolver: Option<crate::webhooks::net::Resolver>,
+) -> Result<Vec<QuotaWindow>, ProbeError> {
     creds.check_fresh(Utc::now())?;
-    check_base_url(&probe.url).map_err(|_| unavailable())?;
-    let client = reqwest::Client::builder()
+    let base = probe.url.clone();
+    let addr = tokio::task::spawn_blocking(move || checked_address(&base, resolver))
+        .await
+        .map_err(|_| unavailable())?
+        .map_err(|_| unavailable())?;
+    let url = reqwest::Url::parse(&probe.url).map_err(|_| unavailable())?;
+    let mut builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(20));
+    if let (Some(addr), Some(url::Host::Domain(host))) = (addr, url.host()) {
+        builder = builder.resolve(host, addr);
+    }
+    let client = builder
         .build()
         .map_err(|_| unavailable())?;
     let mut response = client
@@ -208,20 +238,29 @@ mod tests {
             "[64:ff9b::a00:1]",
             "[2002:a00:1::]",
             "private.lan",
-            "localhost",
             "public.example",
         ] {
             assert!(check_base_url(&format!("http://{ip}")).is_err(), "{ip}");
         }
         assert!(check_base_url("https://public.example").is_ok());
+        assert!(check_base_url("http://localhost").is_ok());
     }
 
     #[tokio::test]
     async fn probe_private_http() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let probe =
-            LiteLlmKeySpend::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        // This name cannot resolve in real DNS. A successful request proves
+        // the client uses the checked override, retaining the original Host.
+        let base = format!("http://private.invalid:{}", listener.local_addr().unwrap().port());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        let resolver: crate::webhooks::net::Resolver = std::sync::Arc::new(move |_, _| {
+            let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            vec![if n < 2 { "127.0.0.1" } else { "8.8.8.8" }.parse().unwrap()]
+        });
+        assert!(checked_address(&base, Some(resolver.clone())).is_ok());
+        let probe = LiteLlmKeySpend { url: format!("{base}/key/info") };
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = vec![0; 4096];
@@ -229,6 +268,7 @@ mod tests {
             let request = String::from_utf8_lossy(&request[..n]);
             assert!(request.starts_with("GET /key/info "));
             assert!(request.contains("Bearer test-key"));
+            assert!(request.contains("host: private.invalid:"));
             let body = r#"{"info":{"spend":2,"max_budget":10}}"#;
             socket
                 .write_all(
@@ -241,9 +281,32 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let windows = fetch(&probe, &Credentials::new("test-key")).await.unwrap();
+        let windows = fetch_with_resolver(&probe, &Credentials::new("test-key"), Some(resolver.clone())).await.unwrap();
         assert_eq!(windows[0].used_pct, 20.0);
         server.await.unwrap();
+        // A subsequent connection rechecks DNS and refuses the rebound answer.
+        assert!(fetch_with_resolver(&probe, &Credentials::new("test-key"), Some(resolver)).await.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn all_dns_answers_must_be_private() {
+        for answers in [
+            vec![],
+            vec!["127.0.0.1", "8.8.8.8"],
+            vec!["8.8.8.8", "127.0.0.1"],
+            vec!["10.0.0.1", "fe80::1"],
+            vec!["10.0.0.1", "::ffff:127.0.0.1"],
+        ] {
+            let resolver: crate::webhooks::net::Resolver = std::sync::Arc::new(move |_, _| {
+                answers.iter().map(|ip| ip.parse().unwrap()).collect()
+            });
+            assert!(checked_address("http://private.invalid", Some(resolver)).is_err());
+        }
+        let resolver: crate::webhooks::net::Resolver = std::sync::Arc::new(|_, _| {
+            vec!["10.0.0.1".parse().unwrap(), "fd00::1".parse().unwrap()]
+        });
+        assert_eq!(checked_address("http://private.invalid:8000", Some(resolver)).unwrap().unwrap(), "10.0.0.1:8000".parse().unwrap());
     }
     #[test]
     fn budget_and_reset() {
