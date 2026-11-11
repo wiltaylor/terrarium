@@ -653,6 +653,7 @@ fn reconcile(t: &mut Tx<'_>, change: &Change, reminder_default: bool) -> ApiResu
             // lead still receives this signal and all other worker signals
             // keep their existing mail behavior. Honor the agent override.
             let eta_reminder = signal == "eta_overdue"
+                && board_reminder_covers(t, &card.id, agent)?
                 && t.query_row(
                     "SELECT card_reminder FROM agents WHERE id = ?1",
                     [agent],
@@ -692,6 +693,15 @@ fn reconcile(t: &mut Tx<'_>, change: &Change, reminder_default: bool) -> ApiResu
         )?;
     }
     Ok(())
+}
+
+fn board_reminder_covers(c: &Connection, card: &str, agent: &str) -> ApiResult<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM cards c JOIN board_columns k ON k.id = c.column_id
+         WHERE c.id = ?1 AND c.assignee = ?2 AND k.role = 'working' AND c.archived = 0)",
+        params![card, agent],
+        |r| r.get(0),
+    )?)
 }
 
 fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
@@ -1286,25 +1296,22 @@ mod tests {
 
     #[test]
     fn history_plans_search_indexes_after_analyze_with_large_prior_history() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, at TEXT, kind TEXT, agent_id TEXT, card TEXT, payload TEXT);
-            CREATE INDEX events_card ON events(card, seq);
-            CREATE TABLE waits(id TEXT PRIMARY KEY, due_at TEXT);
-            CREATE TABLE card_trouble_baseline(singleton INTEGER PRIMARY KEY, seq INTEGER);
-            INSERT INTO card_trouble_baseline VALUES (1, 0);
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        c.execute_batch("INSERT OR REPLACE INTO card_trouble_baseline VALUES (1, 0);
             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
-            INSERT INTO events SELECT x, '2026-11-01T00:00:00Z', CASE WHEN x%5=0 THEN 'status' ELSE 'output' END,
+            INSERT INTO events (seq, id, at, kind, agent_id, card, payload) SELECT x, 'event-'||x, '2026-11-01T00:00:00Z', CASE WHEN x%5=0 THEN 'status' ELSE 'output' END,
                 CASE WHEN x%7=0 THEN 'other' ELSE 'worker' END, NULL, '{\"status\":\"working\"}' FROM n;
             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
-            INSERT INTO waits SELECT 'w'||x, '2026-11-01T00:00:00Z' FROM n;
-            INSERT INTO events VALUES
+            INSERT INTO waits (id, agent, project, kind, spec, summary, created_by, created_at, due_at)
+            SELECT 'w'||x, 'worker', 'p', 'time', '{}', '', 'operator', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z' FROM n;
+            INSERT INTO events (seq, at, kind, agent_id, card, payload, id)
+            SELECT column1, column2, column3, column4, column5, column6, 'event-'||column1 FROM (VALUES
                 (100001,'2026-11-02T00:00:00Z','card','worker','P-1','{\"change\":\"moved\",\"to_role\":\"working\",\"column_role\":\"working\",\"assignee\":\"worker\"}'),
                 (100002,'2026-11-02T00:00:01Z','status','worker',NULL,'{\"status\":\"working\"}'),
                 (100003,'2026-11-02T00:00:02Z','output','worker',NULL,'{}'),
                 (100004,'2026-11-02T00:00:03Z','status','other',NULL,'{\"status\":\"working\"}'),
-                (100005,'2026-11-02T00:00:04Z','card','lead','P-1','{\"change\":\"commented\"}');").unwrap();
-        c.execute_batch(include_str!("../migrations/ter-79-trouble-agent-index.sql"))
-            .unwrap();
+                (100005,'2026-11-02T00:00:04Z','card','lead','P-1','{\"change\":\"commented\"}'));").unwrap();
         c.execute_batch("ANALYZE;").unwrap();
         for (sql, key, index) in [
             (START_SQL, "P-1", "events_card"),
