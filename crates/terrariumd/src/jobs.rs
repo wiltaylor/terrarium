@@ -2769,12 +2769,11 @@ async fn steps(
         x.lifetime = Some(Arc::new(lifetime));
     }
     drop(guard);
-    let (head, batch, base) = match prepared
-        .ok_or_else(|| ApiError::internal("the prepare loop did not run"))?
-    {
-        Prepared::Ready { head, batch, base } => (head, batch, base),
-        Prepared::End(end) => return Ok(end),
-    };
+    let (head, batch, base) =
+        match prepared.ok_or_else(|| ApiError::internal("the prepare loop did not run"))? {
+            Prepared::Ready { head, batch, base } => (head, batch, base),
+            Prepared::End(end) => return Ok(end),
+        };
     check_commit(&head)?;
     // The tree that the slot's work tree must have (TER-190 review,
     // finding 1), from the daemon's repo, not from the slot.
