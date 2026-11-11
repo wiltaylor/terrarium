@@ -798,8 +798,14 @@ fn invalidate_root_plan(t: &mut Tx<'_>, old: &TargetDef, new: Option<&TargetDef>
     {
         return Ok(());
     }
-    t.execute("DELETE FROM agent_target_roots WHERE target=?1", [&old.name])?;
-    t.execute("DELETE FROM agent_target_root_warnings WHERE target=?1", [&old.name])?;
+    t.execute(
+        "DELETE FROM agent_target_roots WHERE target=?1",
+        [&old.name],
+    )?;
+    t.execute(
+        "DELETE FROM agent_target_root_warnings WHERE target=?1",
+        [&old.name],
+    )?;
     Ok(())
 }
 
