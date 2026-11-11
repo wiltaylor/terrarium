@@ -53,6 +53,18 @@ pub const AWS_SECRET_ACCESS_KEY: &str = "AWS_SECRET_ACCESS_KEY";
 pub const AWS_BEARER_TOKEN_BEDROCK: &str = "AWS_BEARER_TOKEN_BEDROCK";
 /// GCP: the path of the service-account JSON.
 pub const GOOGLE_APPLICATION_CREDENTIALS: &str = "GOOGLE_APPLICATION_CREDENTIALS";
+
+/// Vertex publisher model IDs. Explicit settings override these defaults.
+pub fn vertex_models() -> BTreeMap<String, String> {
+    [
+        ("opus", "claude-opus-5-5"),
+        ("sonnet", "claude-sonnet-4-6"),
+        ("haiku", "claude-haiku-4-5@20251001"),
+    ]
+    .into_iter()
+    .map(|(tier, id)| (tier.into(), id.into()))
+    .collect()
+}
 /// Foundry: the API key.
 pub const ANTHROPIC_FOUNDRY_API_KEY: &str = "ANTHROPIC_FOUNDRY_API_KEY";
 
@@ -539,6 +551,7 @@ mod tests {
         let s = CloudSettings {
             region: Some("global".into()),
             project_id: Some("proj-1".into()),
+            models: vertex_models(),
             ..Default::default()
         };
         let json = r#"{"type":"service_account","private_key":"PK"}"#;
@@ -554,6 +567,17 @@ mod tests {
             [("GOOGLE_APPLICATION_CREDENTIALS".to_owned(), json.to_owned())]
         );
         assert!(env.vars.iter().all(|(_, v)| !v.contains("PK")));
+        assert_eq!(s.models.len(), 3);
+        for (tier, id) in [
+            ("opus", "claude-opus-5-5"),
+            ("sonnet", "claude-sonnet-4-6"),
+            ("haiku", "claude-haiku-4-5@20251001"),
+        ] {
+            assert_eq!(model_for(&s.models, Some(tier)).as_deref(), Some(id));
+        }
+        for pair in tier_env(&s.models) {
+            assert!(env.vars.contains(&pair));
+        }
     }
 
     #[test]
