@@ -276,7 +276,11 @@ async fn the_agent_retracts_from_the_thread_and_asks_a_revised_question() {
 #[tokio::test]
 async fn a_notice_moves_and_is_acknowledged_and_a_close_retracts_in_thread() {
     let lab = lab().await;
-    let card = id(lab.td.post("/api/projects/p/cards", json!({"title": "Backup recovery"})).await.ok());
+    let card = id(lab
+        .td
+        .post("/api/projects/p/cards", json!({"title": "Backup recovery"}))
+        .await
+        .ok());
     let n = lab
         .ask(json!({"kind": "notice", "text": "The backup failed twice.", "priority": "urgent", "card": card}))
         .await;

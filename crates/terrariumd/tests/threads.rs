@@ -88,9 +88,22 @@ async fn one_open_question_or_bundle_per_thread_and_notice_replies() {
     }
     let r = lab.td.post_as(&lab.p_lead, &path, json!({"kind": "notice", "text": "Answer to your request", "reply_to": t["messages"][0]["id"]})).await;
     r.err(422, "invalid");
-    let r = lab.td.post_as(&lab.p_lead, &format!("/api/threads/{tid}/messages"), json!({"text": "Answer to your request"})).await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.p_lead,
+            &format!("/api/threads/{tid}/messages"),
+            json!({"text": "Answer to your request"}),
+        )
+        .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    assert!(r.body["messages"].as_array().unwrap().iter().any(|m| m["text"] == "Answer to your request"));
+    assert!(
+        r.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["text"] == "Answer to your request")
+    );
     let other = lab
         .open(json!({"topic": "Other decision", "scope": "p", "agent": "lead"}))
         .await;
