@@ -1700,7 +1700,10 @@ pub(crate) mod tests {
                 ..
             }))
         ));
-        client.on_text(r#"{"type":"ping","nonce":7}"#, &tx).await.unwrap();
+        client
+            .on_text(r#"{"type":"ping","nonce":7}"#, &tx)
+            .await
+            .unwrap();
         assert!(matches!(
             rx.recv().await,
             Some(Outgoing::Control(HostFrame::Pong { .. }))
