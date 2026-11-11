@@ -3025,15 +3025,30 @@ async fn docker_rm(state: &Shared, def: &TargetDef) -> ApiResult<()> {
     Ok(())
 }
 
-/// Explicit consent to lose the stopped container's writable layer, never volumes.
-pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
+/// Explicit recreation overrides. Neither option accepts mount sources.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecreateOpts {
+    #[serde(default)]
+    pub force: bool,
+    /// Exact names of volumes whose attachment may be discarded, not deleted.
+    #[serde(default)]
+    pub discard_volumes: Vec<String>,
+}
+
+/// Explicit consent to lose the container's writable layer, never volume data.
+pub async fn recreate(state: &Shared, def: &TargetDef, opts: &RecreateOpts) -> ApiResult<Value> {
     if def.kind != TargetKind::Docker || def.container.is_some() || def.image.is_none() {
         return Err(ApiError::invalid(
             "recreate needs a managed Docker target with an image",
         ));
     }
     host_online(state, def)?;
-    if state.executor.live_on(&def.name) > 0 {
+    let _resource_verb = {
+        let _admission = state.executor.target_resource_lock(def).lock_owned().await;
+        state.executor.begin_resource_verb(def)?
+    };
+    if state.executor.live_on(&def.name) > 0 && !opts.force {
         return Err(ApiError::conflict(
             "recreate refused: exec sessions are live on the target",
         ));
@@ -3042,7 +3057,7 @@ pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
     if st == "absent" {
         return Err(ApiError::conflict("no container yet; up creates it"));
     }
-    if st != "stopped" {
+    if st != "stopped" && !(st == "running" && opts.force) {
         return Err(ApiError::conflict(
             "recreate refused: bring the container down first",
         ));
@@ -3051,7 +3066,7 @@ pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
     docker_limits(state, def)?;
     check_running_cap(state, def, None).await?;
     let mut preserved = Vec::new();
-    if st == "stopped" {
+    if st == "stopped" || st == "running" {
         let container = container_name(def);
         let inspect_container = container.clone();
         let inspected = verb_ok(state, def, "docker.inspect", move |session| {
@@ -3076,13 +3091,35 @@ pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
             .result
             .as_ref()
             .and_then(|r| r["workspace_mounts"].as_object());
-        if mounts.len() != rt.attached.len()
+        let mut dropped = BTreeMap::new();
+        let mut retained = Vec::new();
+        for mount in mounts {
+            if mount["Type"] == "volume" {
+                let name = mount["Name"].as_str().filter(|s| !s.is_empty());
+                let destination = mount["Destination"].as_str().filter(|s| s.starts_with('/'));
+                let (Some(name), Some(destination)) = (name, destination) else {
+                    return Err(ApiError::conflict("recreate refused: incomplete volume metadata"));
+                };
+                dropped.entry(name.to_owned()).or_insert_with(Vec::new).push(destination.to_owned());
+            } else {
+                retained.push(mount.clone());
+            }
+        }
+        let requested: std::collections::BTreeSet<_> = opts.discard_volumes.iter().cloned().collect();
+        let actual: std::collections::BTreeSet<_> = dropped.keys().cloned().collect();
+        if requested != actual || requested.len() != opts.discard_volumes.len() {
+            return Err(ApiError::conflict(format!(
+                "recreate refused: --discard-volumes must name exactly the volumes whose attachments would be lost: {}",
+                json!(dropped)
+            )).with_details(json!({"volumes": dropped})));
+        }
+        if retained.len() != rt.attached.len()
             || rt.attached.iter().any(|path| {
                 !verified
                     .and_then(|v| v.get(path))
-                    .is_some_and(|mount| mounts.contains(mount))
+                    .is_some_and(|mount| retained.contains(mount))
             })
-            || mounts.iter().any(|mount| {
+            || retained.iter().any(|mount| {
                 !rt.attached
                     .iter()
                     .any(|path| verified.and_then(|v| v.get(path)) == Some(mount))
@@ -3093,23 +3130,45 @@ pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
             ));
         }
         preserved = rt.attached;
+        // Recheck immediately before removal. A changed container or mount set
+        // needs fresh consent. Never trust mount sources supplied by a caller.
+        let check_container = container.clone();
+        let checked = verb_ok(state, def, "docker.inspect", move |session| {
+            DaemonFrame::DockerInspect(DockerInspect {
+                session,
+                container: check_container,
+                timeout_secs: Some(60),
+            })
+        }).await?;
+        let before = inspected.result.as_ref().unwrap();
+        let after = checked.result.as_ref();
+        if !after.is_some_and(|after| {
+            before["id"] == after["id"] && before["mounts"] == after["mounts"]
+                && before["workspace_mounts"] == after["workspace_mounts"]
+                && before["state"] == after["state"]
+        }) || (!opts.force && state.executor.live_on(&def.name) > 0) {
+            return Err(ApiError::conflict("recreate refused: container changed during inspection; retry"));
+        }
+        let force = opts.force;
         verb_ok(state, def, "docker.rm", move |session| {
             DaemonFrame::DockerRm(DockerRm {
                 session,
                 container,
-                force: false,
+                force,
                 volumes: false,
                 timeout_secs: Some(120),
             })
         })
         .await?;
     }
-    let opts = LifecycleOpts {
+    let lifecycle_opts = LifecycleOpts {
         recreate_workspaces: Some(preserved),
         ..LifecycleOpts::default()
     };
-    let mut out = lifecycle(state, def, LifecycleVerb::Up, &opts).await?;
+    let mut out = lifecycle(state, def, LifecycleVerb::Up, &lifecycle_opts).await?;
     out["verb"] = "recreate".into();
+    out["force"] = json!(opts.force);
+    out["discarded_volumes"] = json!(opts.discard_volumes);
     Ok(out)
 }
 

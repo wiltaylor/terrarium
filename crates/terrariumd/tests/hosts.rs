@@ -4694,6 +4694,53 @@ async fn docker_recreate_requires_admin_and_refuses_live_sessions() {
 }
 
 #[tokio::test]
+async fn docker_recreate_exact_discard_consent_and_force() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let admin = lab.td.agent("terra", "lead", json!({"roles":["project_admin"]})).await;
+    let worker = lab.td.agent("terra", "worker", json!({})).await;
+    lab.target(json!({"name":"dbox","kind":"docker","host":"lab1","image":"alpine:3","project":"terra"})).await;
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    let mounts = json!([
+        {"Type":"volume","Name":"data","Destination":"/data"},
+        {"Type":"volume","Name":"cache","Destination":"/cache"}
+    ]);
+    std::fs::write(lab.bins.path().join("docker.mounts"), mounts.to_string()).unwrap();
+    for actor in [admin["id"].as_str().unwrap(), worker["id"].as_str().unwrap()] {
+        for body in [json!({"force":true}), json!({"discard_volumes":["data","cache"]})] {
+            lab.td.req(hyper::Method::POST, "/api/targets/dbox/recreate", Some(body), Some(actor)).await.err(403,"forbidden");
+        }
+    }
+    // Running containers still refuse without explicit force, even with consent.
+    lab.td.post("/api/targets/dbox/recreate", json!({"discard_volumes":["data","cache"]})).await.err(409,"conflict");
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    let refused = lab.td.post_empty("/api/targets/dbox/recreate").await;
+    refused.err(409,"conflict");
+    assert!(refused.body["error"]["message"].as_str().unwrap().contains("/data"));
+    assert!(refused.body["error"]["message"].as_str().unwrap().contains("/cache"));
+    for names in [json!(["data"]), json!(["data","cache","extra"]), json!(["data","cache","data"])] {
+        lab.td.post("/api/targets/dbox/recreate", json!({"discard_volumes":names})).await.err(409,"conflict");
+    }
+    assert!(!lab.log().contains("docker rm"));
+    let recreated = lab.td.post("/api/targets/dbox/recreate", json!({"discard_volumes":["cache","data"]})).await.ok().clone();
+    assert_eq!(recreated["discarded_volumes"], json!(["cache","data"]));
+    assert!(lab.log().contains("docker rm terrarium-dbox"));
+    assert!(!lab.log().contains("docker rm -v"));
+    // Force does not bypass bind validation or unknown metadata.
+    std::fs::write(lab.bins.path().join("docker.mounts"), json!([{"Type":"bind","Source":"/etc","Destination":"/data"}]).to_string()).unwrap();
+    lab.td.post("/api/targets/dbox/recreate", json!({"force":true})).await.err(409,"conflict");
+    std::fs::write(lab.bins.path().join("docker.mounts"), "null").unwrap();
+    lab.td.post("/api/targets/dbox/recreate", json!({"force":true})).await.err(409,"conflict");
+    std::fs::write(lab.bins.path().join("docker.mounts"), "[]").unwrap();
+    let sid = exec(&lab.td, "dbox", json!({"cmd":["sleeper"]})).await;
+    lab.td.post("/api/targets/dbox/recreate", json!({"force":true})).await.ok();
+    assert!(lab.log().contains("docker rm -f terrarium-dbox"));
+    std::fs::write(lab.bins.path().join("sleeper.end"), "").unwrap();
+    drain(&lab.td, "dbox", &sid).await;
+}
+
+#[tokio::test]
 async fn docker_recreate_refuses_mounts_and_unknown_mount_metadata() {
     let lab = Lab::start().await;
     let _h = lab.host("lab1").await;

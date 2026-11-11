@@ -459,11 +459,6 @@ async fn update(
         && current.def.container.is_none()
         && current.runtime.docker_settings.is_none()
         && (patch.get("image").is_some() || patch.get("limits").is_some())
-        && (state
-            .executor
-            .hosts
-            .is_online(current.def.host.as_deref().unwrap_or(""))
-            || matches!(current.state.as_str(), "stopped" | "running"))
     {
         Some(executor::docker_baseline(&state, &current.def).await?)
     } else {
@@ -661,10 +656,15 @@ async fn recreate(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
+    OptBody(opts): OptBody<executor::RecreateOpts>,
 ) -> ApiResult<Json<Value>> {
+    let opts = opts.unwrap_or_default();
+    if opts.force || !opts.discard_volumes.is_empty() {
+        policy::operator_only(&actor, "overriding Docker recreation safety checks")?;
+    }
     let r = load(&state, &actor, name).await?;
     policy::define_target(&actor, r.def.project.as_deref())?;
-    let out = executor::recreate(&state, &r.def).await?;
+    let out = executor::recreate(&state, &r.def, &opts).await?;
     let detail = out.clone();
     state
         .db
