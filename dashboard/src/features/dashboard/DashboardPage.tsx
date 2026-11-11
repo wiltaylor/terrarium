@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The project dashboard (/p/:project/dashboard, docs/api.md §30): a grid of
 // blocks that show the monitors of the project, and the Monitors tab
 // (`?tab=monitors`) that manages them. "Edit dashboard" edits a draft of the
@@ -11,7 +12,7 @@ import { useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { DashboardBlock, DashboardView, Monitor } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
-import { api, events } from "../../stores";
+
 import { ActionButtons } from "../actions/ActionButtons";
 import { projectActions } from "../actions/model";
 import { BlockDialog } from "./BlockDialog";
@@ -27,6 +28,7 @@ const TABS = [
 ] as const;
 
 export default function DashboardPage() {
+  const { api, events } = useInstance();
   const params = useParams<{ project: string }>();
   const [search, setSearch] = useSearchParams<{ tab?: string }>();
   const tab = () => (search.tab === "monitors" ? "monitors" : "blocks");

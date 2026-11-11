@@ -285,8 +285,14 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
 
 /// A signed preview URL: `POST /api/artifacts/{id}/url`.
 async fn mint_url(ctx: &Ctx, id: &str) -> anyhow::Result<Value> {
+    // Short artifact IDs are project-local. Qualified keys and ULIDs already
+    // identify their project, and the daemon checks read access to that project.
+    let key = match ctx.project.as_deref() {
+        Some(project) if id.starts_with("ART-") => format!("{project}/{id}"),
+        _ => id.to_owned(),
+    };
     ctx.api
-        .post(&format!("/api/artifacts/{}/url", encode(id)), None)
+        .post(&format!("/api/artifacts/{}/url", encode(&key)), None)
         .await
 }
 

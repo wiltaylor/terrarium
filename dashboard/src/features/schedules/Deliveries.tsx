@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Deliveries panel of a webhook trigger (docs/api.md §19.5): the
 // deliveries, newest first (status chips, HTTP status, time taken, attempt,
 // time, the answer), Redeliver, and Send test with the request and the
@@ -6,11 +7,12 @@
 import { For, onCleanup, onMount, Show } from "solid-js";
 import type { Schedule } from "../../api/types";
 import { ErrorBanner, LoadMore } from "../../components/ui";
-import { api, events } from "../../stores";
+
 import { createDeliveries, touchesDeliveries } from "./deliveries";
 import { canRedeliver, DELIVERY_CHIP, deliveryStatusWords, prettyBody } from "./webhook";
 
 export function DeliveriesPanel(props: { schedule: Schedule }) {
+  const { api, events } = useInstance();
   // The panel belongs to one schedule; a new schedule mounts a new panel.
   const d = createDeliveries(api, props.schedule.id);
   onMount(() => {

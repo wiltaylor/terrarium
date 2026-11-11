@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The open questions and notices of one agent, on the agent page. Only a leader
 // asks or sends a notice, so the panel shows for a leader, or when the agent
 // has items. `question` events of the agent read the list again.
@@ -5,12 +6,13 @@
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Agent, Question } from "../../api/types";
 import { Empty, ErrorBanner, useNow } from "../../components/ui";
-import { api, events, inbox } from "../../stores";
+
 import { BundleCard } from "./BundleCard";
 import { QuestionCard } from "./QuestionCard";
 import { isQuestionEvent, putQuestion, sortQuestions } from "./questions";
 
 export function QuestionsPanel(props: { agent: Agent }) {
+  const { api, events, inbox } = useInstance();
   const now = useNow(30_000);
   const [list, setList] = createSignal<Question[]>([]);
   const [loading, setLoading] = createSignal(false);

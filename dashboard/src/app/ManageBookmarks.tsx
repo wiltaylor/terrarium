@@ -1,9 +1,11 @@
+import { useInstance } from "../instance";
 import { createSignal, For, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../components/ui";
-import { bookmarks } from "../stores";
+
 import type { Bookmark } from "../stores/bookmarks";
 
 export default function ManageBookmarks() {
+  const { bookmarks } = useInstance();
   const [editing, setEditing] = createSignal<Bookmark | null | undefined>();
   const [title, setTitle] = createSignal("");
   const [url, setUrl] = createSignal("");

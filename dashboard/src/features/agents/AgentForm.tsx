@@ -1,10 +1,11 @@
+import { useInstance } from "../../instance";
 // Edit an agent: every AgentDef field (docs/api.md §6.1). The create of a
 // new agent is NewAgentDialog.tsx; it uses the same fields.
 
 import { createSignal, For, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Agent } from "../../api/types";
-import { agents, api, projects } from "../../stores";
+
 import { agentToForm, formToPatch, validateAgentForm, type AgentFormValues } from "./form";
 import { AgentFields } from "./AgentFields";
 import { SpawnRightsFields } from "./Spawned";
@@ -18,6 +19,7 @@ export function AgentFormFields(props: {
   editing: boolean;
   nameRef?: (el: HTMLInputElement) => void;
 }) {
+  const { projects } = useInstance();
   const v = () => props.value;
   const set = <K extends keyof AgentFormValues>(k: K, value: AgentFormValues[K]) => props.onChange({ ...v(), [k]: value });
   const problems = () => validateAgentForm(v());
@@ -57,6 +59,7 @@ export function AgentFormFields(props: {
 }
 
 export function AgentForm(props: { agent: Agent; onClose: () => void; onSaved: (a: Agent) => void }) {
+  const { api, agents } = useInstance();
   const [v, setV] = createSignal<AgentFormValues>(agentToForm(props.agent));
   const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal(false);

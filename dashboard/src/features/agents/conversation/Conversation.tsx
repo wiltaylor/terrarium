@@ -1,3 +1,4 @@
+import { useInstance } from "../../../instance";
 // The Conversation tab of the agent page: the transcript of the agent's
 // current session as blocks (docs/api.md §6, transcripts), with the live
 // tail and the composer. It follows a new session. The Sessions tab opens
@@ -10,7 +11,7 @@ import type { Agent, QueuedTurn, Session } from "../../../api/types";
 import { ApiError } from "../../../api/http";
 import { StatusBadge } from "../../../components/StatusBadge";
 import { ErrorBanner } from "../../../components/ui";
-import { api } from "../../../stores";
+
 import { currentSession } from "../sessions";
 import { bytes } from "../../../lib/format";
 import { canSend, imageProblem, imagesFromFiles, imagesFromItems, submitTurn, thumbnailOf, type DraftImage } from "./attachments";
@@ -29,6 +30,7 @@ const NEWEST = 5;
  * the composer (the agent page's quota line).
  */
 export function Conversation(props: { agent: Agent; onOpenTerminal?: () => void; footer?: JSX.Element }) {
+  const { api } = useInstance();
   // ----- the current session -----
   const [session, setSession] = createSignal<Session | undefined>(undefined);
   const [loaded, setLoaded] = createSignal(false);
@@ -150,6 +152,7 @@ export function LiveLine(props: { agent: Agent }) {
  * drops it. The list reads again when the agent's `queued` count or status changes.
  */
 export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => void }) {
+  const { api } = useInstance();
   const [items, setItems] = createSignal<QueuedTurn[]>([]);
   const [runnerStatus, setRunnerStatus] = createSignal<string | null>(null);
   const [error, setError] = createSignal<unknown>(null);
@@ -234,6 +237,7 @@ export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => voi
  * turn go (TER-44: a turn wakes a stopped agent, so liveness does not matter).
  */
 export function Composer(props: { agent: Agent; sessionActive: boolean; current: boolean; draft?: { text: string; n: number } }) {
+  const { api } = useInstance();
   const [text, setText] = createSignal("");
   const [images, setImages] = createSignal<DraftImage[]>([]);
   const [busy, setBusy] = createSignal(false);

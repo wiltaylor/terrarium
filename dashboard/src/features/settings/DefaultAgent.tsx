@@ -1,8 +1,10 @@
+import { useInstance } from "../../instance";
 import { createResource, createSignal, For, Show } from "solid-js";
 import { ErrorBanner } from "../../components/ui";
-import { agents, api } from "../../stores";
+
 
 export function DefaultAgent() {
+  const { api, agents } = useInstance();
   const [preferences, { mutate }] = createResource(() => api.account.preferences());
   const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal(false);

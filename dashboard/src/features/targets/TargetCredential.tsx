@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The login of an ssh, vnc, or rdp target (PLAN §16b.6a, docs/api.md
 // §17.2): the secret name, the fingerprint of an ssh key, and the
 // `credential_info.warning` when the credential does not work. Change sends
@@ -8,7 +9,7 @@
 import { createSignal, Show } from "solid-js";
 import type { Target, TargetTestReport } from "../../api/types";
 import { ErrorBanner } from "../../components/ui";
-import { api } from "../../stores";
+
 import { CredentialSelect } from "../secrets/CredentialSelect";
 import { credentialKind, GLOBAL, TEST_RESULT } from "../secrets/model";
 
@@ -39,6 +40,7 @@ export function CredentialCell(props: { target: Target }) {
 }
 
 export function TargetCredential(props: { target: Target; onChanged: () => void; onNotice: (s: string) => void }) {
+  const { api } = useInstance();
   const t = () => props.target;
   const [editing, setEditing] = createSignal(false);
   const [value, setValue] = createSignal(t().credential ?? "");

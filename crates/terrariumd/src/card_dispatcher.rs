@@ -37,7 +37,7 @@ fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
     Ok(Some(actor(v.agent)))
 }
 
-fn template(labels: &[String]) -> Option<String> {
+pub(crate) fn template(labels: &[String]) -> Option<String> {
     // Only known worker types, not arbitrary labels used as template names.
     let types: Vec<_> = labels
         .iter()
@@ -71,11 +71,12 @@ pub const CANDIDATE_PAGE: i64 = 16;
 /// after the keyset `(?4, ?5)`. Keep the indexed query public for plan
 /// regression tests.
 pub const CANDIDATES: &str = "
-SELECT c.id, c.position, c.title, c.labels FROM cards c INDEXED BY cards_column
+SELECT c.id, c.position, c.title, c.labels FROM cards c INDEXED BY cards_dispatch_order
 WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
   AND c.archived = 0 AND c.kind = 'card' AND c.assignee IS NULL
   AND NOT EXISTS (SELECT 1 FROM spawns s WHERE s.bound_kind = 'card'
       AND s.bound_id = c.id AND s.finished_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM conflict_fixes f WHERE f.card = c.id AND f.done = 0)
   AND NOT EXISTS (SELECT 1 FROM card_dispatch_retries d WHERE d.card = c.id AND d.retry_at > ?3)
   AND NOT EXISTS (SELECT 1 FROM card_deps e JOIN cards dc ON dc.id = e.depends_on
       JOIN board_columns k ON k.id = dc.column_id

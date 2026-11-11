@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Reveal (PLAN §16b.5, docs/api.md §5.2): the operator only, with the
 // operator password, asked in the page. The values show for 30 seconds,
 // then go. They live in this panel only: never in a store, the URL, or
@@ -6,10 +7,11 @@
 import { createSignal, For, onCleanup, Show } from "solid-js";
 import type { Secret } from "../../api/types";
 import { CopyButton } from "../../components/ui";
-import { api } from "../../stores";
+
 import { createRevealHold, revealError } from "./model";
 
 export function RevealPanel(props: { secret: Secret; onClose: () => void }) {
+  const { api } = useInstance();
   const [password, setPassword] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);

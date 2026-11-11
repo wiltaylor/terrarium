@@ -1,15 +1,16 @@
+import { useInstance } from "../../instance";
 // The cards of the Inbox page that are not questions: mail to the operator,
 // a thread that the loop guard paused, and a watch (an ask or a forward
 // that waits for an agent). A mail body and a subject are the
 // sender's words: they go into the page as text nodes only.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createSignal, For, Show } from "solid-js";
 import type { InboxWatch, Message, PausedThread } from "../../api/types";
 import { ApiError } from "../../api/http";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { api } from "../../stores";
+
 import { MessageView } from "../mail/parts";
 import { answerLine, systemMailLink, watchState, watchTitle } from "./model";
 
@@ -51,6 +52,7 @@ export function MailItemCard(props: {
   onOpenQuestion?: (questionId: string) => void;
   onUseAsAnswer?: (questionId: string, text: string) => void;
 }) {
+  const { api } = useInstance();
   const m = () => props.message;
   const [reply, setReply] = createSignal("");
   const a = useAction();
@@ -149,6 +151,7 @@ export function MailItemCard(props: {
 
 /** A thread that the loop guard paused: release the held messages one at a time, or resume the thread. */
 export function PausedThreadCard(props: { system: PausedThread; onChange: () => void }) {
+  const { api } = useInstance();
   const s = () => props.system;
   const [note, setNote] = createSignal("");
   const a = useAction();
@@ -219,6 +222,7 @@ export function PausedThreadCard(props: { system: PausedThread; onChange: () => 
  * last; Cancel stops waiting (the mail stays).
  */
 export function WatchCard(props: { watch: InboxWatch; now: number; onChange: (w: InboxWatch) => void }) {
+  const { api } = useInstance();
   const w = () => props.watch;
   const a = useAction();
   const st = () => watchState(w());

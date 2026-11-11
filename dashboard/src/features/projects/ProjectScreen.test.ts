@@ -14,7 +14,7 @@ const state = vi.hoisted(() => ({
   listeners: [] as ((e: AgentEvent) => void)[],
   reads: [] as string[],
 }));
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   agents: { inProject: (p: string) => state.agents.filter((a) => a.project === p) },
   api: {
     projects: {
@@ -30,7 +30,7 @@ vi.mock("../../stores", () => ({
       return () => state.listeners.splice(state.listeners.indexOf(fn), 1);
     },
   },
-}));
+})); });
 
 const { default: ProjectScreen } = await import("./ProjectScreen");
 

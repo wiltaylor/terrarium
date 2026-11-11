@@ -1,3 +1,4 @@
+import { useInstance } from "../instance";
 // The event log after `?since=`, page by page (docs/api.md §9.1). Newest
 // first, the list starts at the newest event, Load more adds older events
 // at the bottom, and live frames go on top. Oldest first, the list starts
@@ -8,7 +9,7 @@
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
 import type { Page } from "../api/http";
 import type { AgentEvent, EventQuery } from "../api/types";
-import { events } from "../stores";
+
 import { EventList } from "./EventList";
 import { historyQuery, livePlace } from "./historyPaging";
 import { createLive, createScrollKeeper, LiveControl, NewAbove, type Live } from "./Live";
@@ -28,6 +29,7 @@ export function EventHistory(props: {
   /** The live mode of the page, with its control in the page's toolbar. Absent: the list has its own. */
   live?: Live;
 }) {
+  const { events } = useInstance();
   // Default: the last few hundred events of the log. `since` is the lower
   // bound in both orders, so the two orders show the same events.
   const recentSince = () => Math.max(0, events.status().lastSeq - RECENT_WINDOW);

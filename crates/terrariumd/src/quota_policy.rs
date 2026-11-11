@@ -10,10 +10,7 @@
 //! - The refusal of the provider blocks an agent: [`crate::usage_limit`]
 //!   moves the agent to the next account of its pool, or holds its turns.
 //! - A project may set daily budgets on tokens or turns. The same alert
-//!   applies. At 100 percent, the daemon holds new turns of the agents of
-//!   the project: [`Supervisor::hold_turns`] marks the agent `blocked`
-//!   with the next UTC midnight as the reset, and turns wait. After the
-//!   reset, the hold ends and the waiting turns go out.
+//!   applies. Budgets send mail only, even at 100 percent.
 //! - A hold of an older version from a probe window at 100 percent (the
 //!   cause `quota:<subscription>`) ends at the daemon start ([`reapply`]).
 //!
@@ -35,7 +32,7 @@
 
 use std::path::Path;
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::AgentId;
@@ -310,20 +307,12 @@ pub async fn evaluate_subscription(state: &Shared, name: &str) -> ApiResult<()> 
         .await
 }
 
-fn next_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
-    let day = now.date_naive() + ChronoDuration::days(1);
-    day.and_hms_opt(0, 0, 0)
-        .map(|t| t.and_utc())
-        .unwrap_or(now + ChronoDuration::days(1))
-}
-
 /// Apply the daily budgets of a project.
 pub async fn check_budgets(state: &Shared, project: &str) -> ApiResult<()> {
     let list = budgets(&state.config_dir, project);
     if list.is_empty() {
         return Ok(());
     }
-    let now = Utc::now();
     let today = ustore::today_start();
     for b in list {
         let filter = UsageFilter {
@@ -338,7 +327,6 @@ pub async fn check_budgets(state: &Shared, project: &str) -> ApiResult<()> {
             None => format!("project:{project}"),
         };
         let alert_at = f64::from(b.alert_at.unwrap_or(80));
-        let mut over = false;
         let mut alerts = Vec::new();
         for (window, used, limit) in [
             ("tokens_per_day", totals.tokens(), b.tokens_per_day),
@@ -362,7 +350,7 @@ pub async fn check_budgets(state: &Shared, project: &str) -> ApiResult<()> {
                     body: format!(
                         "Project `{project}` has used {used} of its {limit} {window} budget ({pct:.0}%).{}\n\nOpen: {}\n",
                         if level == "exhausted" {
-                            " New turns wait until the next UTC day."
+                            " Agents keep their turns."
                         } else {
                             ""
                         },
@@ -373,21 +361,8 @@ pub async fn check_budgets(state: &Shared, project: &str) -> ApiResult<()> {
                     project: Some(project.to_owned()),
                 });
             }
-            over |= pct >= 100.0;
         }
         raise(state, alerts).await?;
-        if over {
-            let (p, s) = (project.to_owned(), b.subscription.clone());
-            let agents = state
-                .db
-                .read(move |c| ustore::agents_of(c, &p, s.as_deref()))
-                .await?;
-            let until = next_midnight(now);
-            let reason = format!("the daily budget of `{scope}` is used up");
-            for (id, _, _) in &agents {
-                hold(state, id, &format!("budget:{scope}"), Some(until), &reason).await?;
-            }
-        }
     }
     Ok(())
 }
@@ -428,16 +403,19 @@ fn turn_hold(h: &ustore::Hold) -> TurnHold {
 
 /// Give the stored holds to the supervisor again after a daemon start.
 ///
-/// A hold of an older version from a probe window (cause `quota:...`)
+/// A hold of an older version from a probe window or a budget
+/// (causes `quota:...`, `cloud-budget:...`, `budget:project:...`)
 /// ends here: the supervisor gets it first, so that the release returns
 /// an idle agent from `blocked` to `idle`, with a `quota.resumed` event.
 /// The other holds go to the supervisor after that, so that the reason of
 /// an agent with two holds is the one that stays.
 pub async fn reapply(state: &Shared) -> ApiResult<usize> {
     let holds = state.db.read(ustore::holds).await?;
-    let (legacy, keep): (Vec<_>, Vec<_>) = holds
-        .into_iter()
-        .partition(|h| h.cause.starts_with(LEGACY_QUOTA_CAUSE));
+    let (legacy, keep): (Vec<_>, Vec<_>) = holds.into_iter().partition(|h| {
+        h.cause.starts_with(LEGACY_QUOTA_CAUSE)
+            || h.cause.starts_with("cloud-budget:")
+            || h.cause.starts_with("budget:project:")
+    });
     for h in &legacy {
         if let Ok(id) = h.agent.parse::<AgentId>()
             && let Err(e) = state.supervisor.hold_turns(id, Some(turn_hold(h))).await
@@ -451,7 +429,7 @@ pub async fn reapply(state: &Shared) -> ApiResult<usize> {
     if !legacy.is_empty() {
         info!(
             holds = legacy.len(),
-            "the holds of probe windows at 100 percent ended: only a usage-limit error holds turns now"
+            "legacy probe and budget holds ended: only a usage-limit error holds turns now"
         );
     }
     for h in keep {
@@ -479,7 +457,7 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                 Ok(n) => info!(holds = n, "quota holds ended after their reset"),
                 Err(e) => warn!("cannot release expired quota holds: {e}"),
             }
-            // A raised budget ends the hold of a cloud subscription here.
+            // Update cloud budget windows and send their notices.
             crate::cloud_budget::check_all(&state).await;
         }
     })
@@ -489,6 +467,7 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use chrono::Duration as ChronoDuration;
 
     #[test]
     fn budgets_read_both_forms() {
@@ -522,7 +501,5 @@ mod tests {
         assert_eq!(effective_pct(100.0, Some(&past), now), 0.0);
         assert_eq!(effective_pct(100.0, Some(&future), now), 100.0);
         assert_eq!(effective_pct(90.0, None, now), 90.0);
-        let m = next_midnight(now);
-        assert!(m > now && m - now <= ChronoDuration::days(1));
     }
 }

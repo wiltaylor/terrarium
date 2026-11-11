@@ -13,13 +13,13 @@ import type { InboxItem } from "../../api/types";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const inboxRefresh = vi.fn();
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api,
   events: { on: () => () => {} },
   inbox: { refresh: inboxRefresh },
   projects: { projects: () => [] },
   agents: { state: { agents: [] } },
-}));
+})); });
 
 const { default: InboxPage } = await import("./InboxPage");
 

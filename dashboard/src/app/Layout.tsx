@@ -1,25 +1,28 @@
+import { useInstance } from "../instance";
 // The app shell: sidebar with Home, Inbox, Threads, Logs, and Schedules, the project
 // tree, the Settings section, and the footer; on the right, the side bar of
 // pinned conversations (./PinnedBar).
 
-import { A, useLocation, type RouteSectionProps } from "@solidjs/router";
+import { type RouteSectionProps } from "@solidjs/router";
+import { A, useLocation } from "../instance/navigation";
 import { createEffect, createResource, createSignal, ErrorBoundary, For, on, onCleanup, onMount, Show } from "solid-js";
 import { isMock } from "../api";
 import { CriticalBanner } from "../components/CriticalBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
-import { agents, api, auth, cardPeek, events, inbox, pins, projectFolders, projects, signOutNow, subscriptions, theme } from "../stores";
+
 import { CardPeek } from "../features/board/CardPeek";
 import { badge } from "../features/inbox/model";
 import { threadsBadge } from "../features/inbox/threads";
 import { SETTINGS_ITEMS, TOP_ITEMS } from "./nav";
 import { ProjectTree } from "./ProjectTree";
-import { bookmarks } from "../stores";
+
 import { projectFromPath } from "./treeModel";
 import { LoginScreen } from "./LoginScreen";
 import { PinnedBar } from "./PinnedBar";
 
 export function Layout(props: RouteSectionProps) {
+  const { api, projects, agents, inbox, pins, bookmarks, projectFolders, subscriptions, events, cardPeek, auth, theme, signOutNow } = useInstance();
   const location = useLocation();
   const [open, setOpen] = createSignal(false);
   const [health, { refetch }] = createResource(() => api.health().catch(() => null));
@@ -187,6 +190,7 @@ export function Layout(props: RouteSectionProps) {
 
 /** A strip across the top while the events socket is down. */
 function ConnectionBanner() {
+  const { events } = useInstance();
   const now = useNow(1000);
   const retry = () => {
     const at = events.status().retryAt;

@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Create or edit an agent template (docs/api.md §21): the template name, its
 // scope (a project, or global), a description, and the agent fields of the
 // agent form. The scope does not change after the create. A save writes the
@@ -7,11 +8,12 @@
 import { createSignal, For, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { AgentTemplate } from "../../api/types";
-import { api, projects } from "../../stores";
+
 import { AgentFields } from "../agents/AgentFields";
 import { emptyTemplateForm, formToNewTemplate, formToTemplatePatch, pathKey, templateToForm, validateTemplateForm, type TemplateFormValues } from "./model";
 
 export function TemplateDialog(props: { template?: AgentTemplate; scope?: string; onClose: () => void; onSaved: (t: AgentTemplate) => void }) {
+  const { api, projects } = useInstance();
   const editing = () => !!props.template;
   const [v, setV] = createSignal<TemplateFormValues>(props.template ? templateToForm(props.template) : emptyTemplateForm(props.scope ?? ""));
   const [error, setError] = createSignal<unknown>(null);
@@ -88,6 +90,7 @@ export function TemplateDialog(props: { template?: AgentTemplate; scope?: string
 
 /** "Save as template" on an agent page: a template from the agent's settings now. */
 export function SaveAsTemplateDialog(props: { agent: { id: string; name: string; project: string }; onClose: () => void; onSaved: (t: AgentTemplate) => void }) {
+  const { api } = useInstance();
   const [name, setName] = createSignal(props.agent.name);
   const [scope, setScope] = createSignal(props.agent.project);
   const [description, setDescription] = createSignal("");

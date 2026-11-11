@@ -12,7 +12,7 @@ import { ApiError } from "../../../api/http";
 const queued = vi.fn();
 const removeQueued = vi.fn();
 const sessions = vi.fn();
-vi.mock("../../../stores", () => ({
+vi.mock("../../../stores", async () => { const { instanceTestStores } = await import("../../../test/instance"); return instanceTestStores(({
   api: {
     agents: {
       queued,
@@ -25,7 +25,7 @@ vi.mock("../../../stores", () => ({
       interrupt: vi.fn(),
     },
   },
-}));
+})); });
 
 const { LiveLine, Conversation } = await import("./Conversation");
 const { footerState } = await import("./model");

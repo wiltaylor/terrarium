@@ -2,7 +2,7 @@
 // shell shows it on every /p/:project page, and the agent page shows it with
 // Agents active (TER-153), since /agents/:id sits outside /p.
 
-import { A, useLocation } from "@solidjs/router";
+import { A, useLocation } from "../../instance/navigation";
 import { createEffect, For, on, Show } from "solid-js";
 import { PROJECT_TABS } from "../../app/nav";
 import type { TabBadge } from "./tabCounts";
