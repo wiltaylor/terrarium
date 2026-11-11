@@ -55,7 +55,8 @@ async fn artifact_capability_serves_without_credentials_and_ends_on_logout() {
     let login = client
         .post(format!("{base}/api/session"))
         .bearer_auth("test-home-operator")
-        .json(&json!({}))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body("{}")
         .send()
         .await
         .unwrap();
@@ -67,7 +68,7 @@ async fn artifact_capability_serves_without_credentials_and_ends_on_logout() {
         .next()
         .unwrap()
         .to_owned();
-    let login: Value = login.json().await.unwrap();
+    let login: Value = serde_json::from_slice(&login.bytes().await.unwrap()).unwrap();
     let csrf = login["csrf"].as_str().unwrap();
     let signed = client
         .post(&mint)
@@ -82,7 +83,7 @@ async fn artifact_capability_serves_without_credentials_and_ends_on_logout() {
         "{}",
         signed.text().await.unwrap()
     );
-    let signed: Value = signed.json().await.unwrap();
+    let signed: Value = serde_json::from_slice(&signed.bytes().await.unwrap()).unwrap();
     let url = signed["url"].as_str().unwrap();
     let url = if url.starts_with('/') {
         format!("{base}{url}")
