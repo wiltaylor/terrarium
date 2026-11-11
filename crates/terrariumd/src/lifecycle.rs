@@ -510,13 +510,42 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
     }
 }
 
-/// [`wake`] in a task of its own.
+/// The longest time a [`wake_soon`] that found another wake on the way
+/// waits to wake the agent again.
+const BUSY_REWAKE: Duration = Duration::from_secs(120);
+
+/// [`wake`] in a task of its own. A wake that finds another wake on the
+/// way ([`Woke::Busy`]) while the agent does not run wakes again when that
+/// one ends: the other wake can have read the agent before the change that
+/// made this one, and then refused it. A wake for new mail read a parked
+/// agent, the unpark committed, and its wake found the first one on the
+/// way: the agent stayed stopped with its return turn (TER-685).
 pub fn wake_soon(state: &Shared, id: AgentId, cause: &'static str) {
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
-        if let Some(state) = weak.upgrade() {
+        let start = Instant::now();
+        loop {
+            let Some(state) = weak.upgrade() else { return };
             let woke = wake(&state, id, cause).await;
             debug!(agent = %id, %cause, ?woke, "wake");
+            if woke != Woke::Busy || runs(&state, id).await {
+                return;
+            }
+            // Only the weak reference waits: a daemon that shuts down
+            // lets its state go.
+            drop(state);
+            loop {
+                if start.elapsed() >= BUSY_REWAKE {
+                    debug!(agent = %id, %cause, "another wake stays on the way; no wake again");
+                    return;
+                }
+                let Some(state) = weak.upgrade() else { return };
+                if !state.lifecycle.waking(id) {
+                    break;
+                }
+                drop(state);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         }
     });
 }
