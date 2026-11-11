@@ -39,6 +39,23 @@ def request(url, key, body=None):
         return json.load(response)
 
 
+def certificates(ip):
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(ROOT / "ca.key"), "-out", str(ROOT / "ca.crt"),
+                    "-days", "1", "-subj", "/CN=ter-798-ca"],
+                   check=True, capture_output=True)
+    subprocess.run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(ROOT / "tls.key"), "-out", str(ROOT / "tls.csr"),
+                    "-subj", "/CN=ter-798"], check=True, capture_output=True)
+    (ROOT / "tls.ext").write_text(
+        f"subjectAltName=IP:{ip},DNS:localhost\nbasicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
+    subprocess.run(["openssl", "x509", "-req", "-in", str(ROOT / "tls.csr"),
+                    "-CA", str(ROOT / "ca.crt"), "-CAkey", str(ROOT / "ca.key"),
+                    "-CAcreateserial", "-out", str(ROOT / "tls.crt"), "-days", "1",
+                    "-extfile", str(ROOT / "tls.ext")], check=True, capture_output=True)
+
+
 def start(ip):
     ROOT.mkdir(mode=0o700)  # Refuse to overwrite a previous run.
     pulled = []
@@ -51,11 +68,7 @@ def start(ip):
     master = "sk-" + secrets.token_hex(24)
     control = secrets.token_hex(32)
     (ROOT / "control").write_text(control)
-    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                    "-keyout", str(ROOT / "tls.key"), "-out", str(ROOT / "tls.crt"),
-                    "-days", "1", "-subj", "/CN=ter-798",
-                    "-addext", f"subjectAltName=IP:{ip},DNS:localhost"],
-                   check=True, capture_output=True)
+    certificates(ip)
     config = """model_list:
   - model_name: claude-sonnet-4-5
     litellm_params:
@@ -100,7 +113,7 @@ general_settings:
     # The Rust fixture client trusts this cert. The production probe deliberately
     # does not: that exercises its sanitized failure and the allowed fallback.
     connection = {"base_url": f"https://{ip}:17988", "key": key,
-                  "control": control, "certificate": (ROOT / "tls.crt").read_text()}
+                  "control": control, "certificate": (ROOT / "ca.crt").read_text()}
     (ROOT / "connection.json").write_text(json.dumps(connection))
     docker("run", "-d", "--name", CONTAINERS[0], "--network", NETWORK,
            "-v", str(ROOT) + ":/fixture:ro", "-p", "17988:8443", IMAGE)
@@ -130,7 +143,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             assert supplied["ANTHROPIC_AUTH_TOKEN"] == expected["key"]
             with tempfile.TemporaryDirectory() as home:
                 env = {"PATH": os.environ["PATH"], "HOME": home,
-                       "NODE_EXTRA_CA_CERTS": "/fixture/tls.crt",
+                       "NODE_EXTRA_CA_CERTS": "/fixture/ca.crt",
                        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", **supplied}
                 proc = subprocess.run(
                     ["claude", "-p", "Say TER798_MOCK_OK. Do not use tools.",

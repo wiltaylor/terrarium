@@ -66,6 +66,14 @@ async fn litellm_live_claude_and_fallback_mail_only() {
 
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "live-lite", "provider": "litellm", "harnesses": ["claude"],
+               "selfhosted": {"api": "anthropic", "base_url": base,
+                              "models": ["claude-sonnet-4-5"], "budget_usd": 100}}),
+    )
+    .await
+    .ok();
     let created = td
         .post(
             "/api/subscriptions/live-lite/api-key",
@@ -75,12 +83,6 @@ async fn litellm_live_claude_and_fallback_mail_only() {
         .await;
     created.ok();
     assert!(!created.body.to_string().contains(key));
-    td.patch(
-        "/api/subscriptions/live-lite",
-        json!({"selfhosted": {"budget_usd": 100}}),
-    )
-    .await
-    .ok();
     // Production probe uses public roots. The private fixture CA is trusted
     // only by this fixture client and Claude, so this exercises real failure.
     let probe = td.post_empty("/api/subscriptions/live-lite/probe").await;
