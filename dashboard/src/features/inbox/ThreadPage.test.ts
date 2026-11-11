@@ -67,6 +67,19 @@ const icon = (r: HTMLElement) => r.querySelector<HTMLElement>("[data-testid=thre
 const status = (el: HTMLElement) => el.querySelector("[aria-label='Thread details'] [data-testid=thread-status]")?.textContent?.trim();
 
 describe("the Threads screen (TER-466)", () => {
+  it("shows a failed request's mail fallback and its reason in the handoff", async () => {
+    const seeded = api.world.threads!.find((t) => t.status === "closed")!;
+    const id = "01JBTHRDFALLBACK00000000001";
+    const summary = "Request agent fallback: delivered the operator's request as mail to p/lead. Reason: template global:request not found";
+    api.world.threads!.push({ ...seeded, id, close_reason: "failed_start", handoff: { summary, links: [], by: "system", at: seeded.closed_at! } });
+    try {
+      const { el } = mount(`/threads/${id}`);
+      await waitFor(() => expect(el.querySelector("section[aria-label=Handoff]")?.textContent).toContain(summary));
+    } finally {
+      api.world.threads = api.world.threads!.filter((t) => t.id !== id);
+    }
+  });
+
   it("lists the open threads in a table, the one that waits on you first with the person icon; Archived lists the closed ones", async () => {
     let { el } = mount("/threads");
     await waitFor(() => expect(rows(el).length).toBe(2));

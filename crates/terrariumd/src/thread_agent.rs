@@ -458,7 +458,10 @@ pub async fn start(
                 .db
                 .write("system", move |t| {
                     let current = threads::get_bare(t, &tid)?;
-                    if current.request_epoch != epoch || current.agent.is_some() || current.status == ThreadStatus::Closed {
+                    if current.request_epoch != epoch
+                        || current.agent.is_some()
+                        || current.status == ThreadStatus::Closed
+                    {
                         return threads::get(t, &tid);
                     }
                     let summary = if threads::get_bare(t, &tid)?.request {
@@ -506,10 +509,15 @@ fn request_fallback(t: &mut crate::db::Tx<'_>, id: &str, why: &str) -> ApiResult
     );
     let delivered: bool = t.query_row(
         "SELECT EXISTS(SELECT 1 FROM request_fallbacks WHERE thread = ?1 AND epoch = ?2)",
-        rusqlite::params![id, th.request_epoch], |r| r.get(0),
+        rusqlite::params![id, th.request_epoch],
+        |r| r.get(0),
     )?;
-    if delivered { return Ok(summary); }
-    let lead = th.report_to.as_deref()
+    if delivered {
+        return Ok(summary);
+    }
+    let lead = th
+        .report_to
+        .as_deref()
         .ok_or_else(|| ApiError::conflict("request has no report-to lead"))?;
     let to = mail::resolve(t, lead, None)?;
     let mut body = format!("{summary}\n\nInbox thread {id}: {}\n\n", th.topic);
@@ -519,12 +527,21 @@ fn request_fallback(t: &mut crate::db::Tx<'_>, id: &str, why: &str) -> ApiResult
             body.push_str("\n\n");
         }
     }
-    let sent = mail::send(t, Outgoing {
-        from: &Address::Operator, to: &to, subject: &th.topic, body: &body,
-        thread: None, in_reply_to: None,
-    })?;
-    t.execute("INSERT INTO request_fallbacks(thread, epoch, mail) VALUES (?1, ?2, ?3)",
-        rusqlite::params![id, th.request_epoch, sent.id])?;
+    let sent = mail::send(
+        t,
+        Outgoing {
+            from: &Address::Operator,
+            to: &to,
+            subject: &th.topic,
+            body: &body,
+            thread: None,
+            in_reply_to: None,
+        },
+    )?;
+    t.execute(
+        "INSERT INTO request_fallbacks(thread, epoch, mail) VALUES (?1, ?2, ?3)",
+        rusqlite::params![id, th.request_epoch, sent.id],
+    )?;
     t.audit("thread.request_fallback", id, th.project(),
         serde_json::json!({"reason": why, "mail": sent.id, "lead": lead, "epoch": th.request_epoch}))?;
     Ok(summary)
@@ -538,17 +555,34 @@ pub async fn recover_failed_requests(state: &Shared) -> ApiResult<()> {
         Ok(st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
     }).await?;
     for id in ids {
-        state.db.write("system", move |t| {
-            let th = threads::get(t, &id)?;
-            if !th.request || th.status != ThreadStatus::Closed || th.close_reason.as_deref() != Some("failed_start") { return Ok(()); }
-            let why = th.handoff.as_ref().map(|h| h.summary.as_str()).unwrap_or("request agent failed to start before upgrade");
-            let summary = request_fallback(t, &id, why)?;
-            let mut handoff = th.handoff.ok_or_else(|| ApiError::conflict("failed request has no handoff"))?;
-            handoff.summary = summary;
-            t.execute("UPDATE threads SET handoff = ?2 WHERE id = ?1", rusqlite::params![id, serde_json::to_string(&handoff)?])?;
-            threads::emit(t, &threads::get_bare(t, &id)?, "request_fallback")?;
-            Ok(())
-        }).await?;
+        state
+            .db
+            .write("system", move |t| {
+                let th = threads::get(t, &id)?;
+                if !th.request
+                    || th.status != ThreadStatus::Closed
+                    || th.close_reason.as_deref() != Some("failed_start")
+                {
+                    return Ok(());
+                }
+                let why = th
+                    .handoff
+                    .as_ref()
+                    .map(|h| h.summary.as_str())
+                    .unwrap_or("request agent failed to start before upgrade");
+                let summary = request_fallback(t, &id, why)?;
+                let mut handoff = th
+                    .handoff
+                    .ok_or_else(|| ApiError::conflict("failed request has no handoff"))?;
+                handoff.summary = summary;
+                t.execute(
+                    "UPDATE threads SET handoff = ?2 WHERE id = ?1",
+                    rusqlite::params![id, serde_json::to_string(&handoff)?],
+                )?;
+                threads::emit(t, &threads::get_bare(t, &id)?, "request_fallback")?;
+                Ok(())
+            })
+            .await?;
     }
     Ok(())
 }
