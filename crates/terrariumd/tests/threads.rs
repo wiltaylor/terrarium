@@ -100,7 +100,8 @@ async fn multiple_open_questions_and_bundles_per_thread_and_notice_replies() {
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    let another = lab.td
+    let another = lab
+        .td
         .post_as(
             &lab.p_lead,
             &path,
@@ -108,7 +109,13 @@ async fn multiple_open_questions_and_bundles_per_thread_and_notice_replies() {
         )
         .await;
     assert_eq!(another.status, 201, "{}", another.body);
-    lab.td.post(&format!("/api/questions/{}/answer", q.body["id"].as_str().unwrap()), json!({"answer": "Yes"})).await.ok();
+    lab.td
+        .post(
+            &format!("/api/questions/{}/answer", q.body["id"].as_str().unwrap()),
+            json!({"answer": "Yes"}),
+        )
+        .await
+        .ok();
     assert_eq!(lab.thread(tid).await["status"], "waiting_operator");
 }
 
@@ -424,7 +431,16 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
         .await
         .ok();
     assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
-    lab.td.post(&format!("/api/questions/{}/answer", another.body["id"].as_str().unwrap()), json!({"answer": "Yes"})).await.ok();
+    lab.td
+        .post(
+            &format!(
+                "/api/questions/{}/answer",
+                another.body["id"].as_str().unwrap()
+            ),
+            json!({"answer": "Yes"}),
+        )
+        .await
+        .ok();
     assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
     // A bundle can follow the answered question.
     let r = ask(json!({"kind": "bundle", "text": "Two more", "thread": tid,
