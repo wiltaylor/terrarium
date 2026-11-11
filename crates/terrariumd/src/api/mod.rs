@@ -635,8 +635,10 @@ async fn require_token(
     // `session::delete` checks a cookie and a CLI token itself: with no
     // cookie, a logout needs no proof; with a session cookie, it needs
     // `X-CSRF-Token`.
-    if session_path && req.method() == axum::http::Method::DELETE
-        && !session::bearer_value(req.headers()).is_some_and(|t| t.starts_with(crate::store::links::KEY_PREFIX))
+    if session_path
+        && req.method() == axum::http::Method::DELETE
+        && !session::bearer_value(req.headers())
+            .is_some_and(|t| t.starts_with(crate::store::links::KEY_PREFIX))
     {
         return next.run(req).await;
     }
@@ -3053,23 +3055,55 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = state_at(dir.path());
         let caller = crate::links::LinkCaller {
-            id: "L1".into(), label: "home".into(), read_only: false, key_hash: "h".into(),
+            id: "L1".into(),
+            label: "home".into(),
+            read_only: false,
+            key_hash: "h".into(),
         };
-        crate::links::CALLER.scope(caller, async {
-            // A new operator-only action is closed without changing any
-            // route deny list. Both helpers must agree.
-            assert!(crate::policy::operator_only(&crate::actor::Actor::Operator, "new feature").is_err());
-            assert!(!crate::actor::Actor::Operator.is_operator());
-            assert!(!s.db.read(|_| Ok(crate::actor::Actor::Operator.is_operator())).await.unwrap());
-            assert!(!s.db.write("operator", |_| Ok(crate::actor::Actor::Operator.is_operator())).await.unwrap());
-            crate::links::OPERATOR_ROUTE.scope(true, async {
-                assert!(crate::actor::Actor::Operator.is_operator());
-                assert!(s.db.read(|_| Ok(crate::actor::Actor::Operator.is_operator())).await.unwrap());
-                // Spawned work does not inherit a read route exception.
-                assert!(!crate::links::spawn(async { crate::actor::Actor::Operator.is_operator() }).await.unwrap());
-            }).await;
-            assert!(!crate::actor::Actor::Operator.is_operator());
-        }).await;
+        crate::links::CALLER
+            .scope(caller, async {
+                // A new operator-only action is closed without changing any
+                // route deny list. Both helpers must agree.
+                assert!(
+                    crate::policy::operator_only(&crate::actor::Actor::Operator, "new feature")
+                        .is_err()
+                );
+                assert!(!crate::actor::Actor::Operator.is_operator());
+                assert!(
+                    !s.db
+                        .read(|_| Ok(crate::actor::Actor::Operator.is_operator()))
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    !s.db
+                        .write("operator", |_| Ok(
+                            crate::actor::Actor::Operator.is_operator()
+                        ))
+                        .await
+                        .unwrap()
+                );
+                crate::links::OPERATOR_ROUTE
+                    .scope(true, async {
+                        assert!(crate::actor::Actor::Operator.is_operator());
+                        assert!(
+                            s.db.read(|_| Ok(crate::actor::Actor::Operator.is_operator()))
+                                .await
+                                .unwrap()
+                        );
+                        // Spawned work does not inherit a read route exception.
+                        assert!(
+                            !crate::links::spawn(async {
+                                crate::actor::Actor::Operator.is_operator()
+                            })
+                            .await
+                            .unwrap()
+                        );
+                    })
+                    .await;
+                assert!(!crate::actor::Actor::Operator.is_operator());
+            })
+            .await;
         // No leaked task-local restriction on ordinary operator requests.
         assert!(crate::actor::Actor::Operator.is_operator());
     }
@@ -3084,8 +3118,13 @@ mod tests {
         let h = [("authorization", auth.as_str())];
         // No link-to-link chaining: neither pairing nor proxying a second
         // remote may use the home's stored credentials.
-        for path in ["/api/remotes", "/api/remotes/other", "/api/remotes/other/repin",
-            "/api/remotes/other/pair", "/api/remotes/other/proxy/agents"] {
+        for path in [
+            "/api/remotes",
+            "/api/remotes/other",
+            "/api/remotes/other/repin",
+            "/api/remotes/other/pair",
+            "/api/remotes/other/proxy/agents",
+        ] {
             for method in ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] {
                 let r = send(link_app(&s), method, path, &h).await;
                 assert_eq!(r.status(), StatusCode::FORBIDDEN, "{method} {path}");
