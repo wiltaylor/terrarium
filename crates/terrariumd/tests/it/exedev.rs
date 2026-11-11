@@ -401,11 +401,11 @@ async fn workspace_sync_roundtrip(work_root: bool) {
     // These round trips use real rsync on both sides of the fake SSH transport.
     // Keep the production security floor, but allow hosts with older rsync to
     // run the rest of the exe.dev tests with their default PATH.
-    let output = tokio::process::Command::new("rsync")
+    let version_output = tokio::process::Command::new("rsync")
         .arg("--version")
         .output()
         .await;
-    let supported = output.is_ok_and(|output| {
+    let supported = version_output.is_ok_and(|output| {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let version = stdout
             .strip_prefix("rsync  version ")
