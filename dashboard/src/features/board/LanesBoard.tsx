@@ -69,10 +69,10 @@ export function LanesBoard(props: {
 
   /** One cell: the cards of a lane in a column, with the drop handlers. */
   const Cell = (p: { lane: Lane; col: Column }) => {
-    const cards = () => laneCells(p.lane, p.col.name);
+    const cards = () => laneCells(p.lane, p.col.name).filter((c) => c.kind !== "group");
     const filtered = () => {
       const ids = new Set(filteredColumn(p.col.name).slice(0, limit(p.col.name)).map(c => c.id));
-      return cards().filter(c => ids.has(c.id));
+      return laneCells(p.lane, p.col.name).filter(c => ids.has(c.id));
     };
     const isDrop = () => drop()?.lane === p.lane.key && drop()?.column === p.col.name;
     return (
