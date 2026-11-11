@@ -1430,6 +1430,12 @@ pub enum CardCmd {
     },
     /// Body, comments, links, and dependencies
     Show { id: String },
+    /// Configure persistent dependency waits (not the one-shot card wait)
+    WaitOn {
+        id: String,
+        #[command(subcommand)]
+        command: CardWaitCmd,
+    },
     /// Create a card
     ///
     /// Bodies use GitHub-flavored Markdown: tables for results, fenced blocks
@@ -1655,8 +1661,36 @@ pub enum CardFilesCmd {
     Versions { id: String, name: String },
 }
 
+#[derive(Debug, Default, Args)]
+pub struct CardWaitArgs {
+    /// Dependency as CARD:TARGET or PROJECT:CARD:TARGET; repeat for more
+    #[arg(long)]
+    pub on: Vec<String>,
+    /// Complete when any dependency matches, rather than all
+    #[arg(long, requires = "on")]
+    pub any: bool,
+    /// Move this card to the column when the wait completes
+    #[arg(long, requires = "on")]
+    pub move_to: Option<String>,
+    /// Wake the assignee, setter, or project lead when complete
+    #[arg(long, requires = "on")]
+    pub wake: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CardWaitCmd {
+    Set {
+        #[command(flatten)]
+        wait: CardWaitArgs,
+    },
+    List,
+    Clear,
+}
+
 #[derive(Debug, Args)]
 pub struct CardNewArgs {
+    #[command(flatten)]
+    pub wait: CardWaitArgs,
     /// The title. `--from-mail` can give it.
     pub title: Option<String>,
     /// The GitHub-flavored Markdown body, or `-` for stdin
@@ -1697,6 +1731,8 @@ pub struct CardNewArgs {
 
 #[derive(Debug, Args)]
 pub struct CardEditArgs {
+    #[command(flatten)]
+    pub wait: CardWaitArgs,
     pub id: String,
     #[arg(long)]
     pub title: Option<String>,

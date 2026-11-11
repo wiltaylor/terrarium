@@ -15,6 +15,158 @@ async fn setup() -> TestDaemon {
     td
 }
 
+#[tokio::test]
+async fn api_wait_set_show_clear_and_atomic_card_writes() {
+    let td = setup().await;
+    let dep = card(&td).await;
+    let id = card(&td).await;
+    let path = format!("/api/cards/{id}/wait-on");
+    assert!(td.get(&path).await.ok().is_null());
+    let body = json!({"dependencies":[{"card":dep,"target":"review"}],"mode":"any","action":{"wake":true}});
+    let configured = td.put(&path, body.clone()).await;
+    assert_eq!(configured.ok()["dependencies"][0]["met"], false);
+    assert!(configured.ok()["generation"].is_string());
+    assert!(configured.ok()["wake_recipient"].is_string());
+    assert_eq!(configured.ok()["dependencies"][0]["hidden"], false);
+    let board = td.get("/api/projects/p/board").await;
+    let tile = board.ok()["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap();
+    assert_eq!(
+        tile["wait"],
+        json!({"mode":"any","met":false,"deps_met":0,"deps_total":1})
+    );
+    assert_eq!(
+        td.get(&format!("/api/cards/{id}")).await.ok()["wait"],
+        *configured.ok()
+    );
+    td.post(
+        &format!("/api/cards/{dep}/move"),
+        json!({"column":"review"}),
+    )
+    .await
+    .ok();
+    let met = td.get(&path).await;
+    assert_eq!(met.ok()["dependencies"][0]["met"], true);
+    assert!(met.ok()["met_at"].is_string());
+    td.delete(&path).await.ok();
+    assert!(td.get(&path).await.ok().is_null());
+    assert_eq!(
+        td.get(&format!("/api/cards/{id}")).await.ok()["depends_on"],
+        json!([])
+    );
+    let created = td
+        .post(
+            "/api/projects/p/cards",
+            json!({"title":"new wait","wait":body}),
+        )
+        .await;
+    let new_id = created.ok()["id"].as_str().unwrap();
+    assert_eq!(
+        td.get(&format!("/api/cards/{new_id}/wait-on")).await.ok()["mode"],
+        "any"
+    );
+    td.patch(&format!("/api/cards/{id}"), json!({"wait":body}))
+        .await
+        .ok();
+    assert_eq!(td.get(&path).await.ok()["mode"], "any");
+    let failed = td
+        .patch(
+            &format!("/api/cards/{id}"),
+            json!({"title":"must roll back","wait":{"dependencies":[]}}),
+        )
+        .await;
+    assert_eq!(failed.status.as_u16(), 422);
+    assert_eq!(
+        td.get(&format!("/api/cards/{id}")).await.ok()["title"],
+        "wait test"
+    );
+    let conflict = td
+        .patch(
+            &format!("/api/cards/{id}"),
+            json!({"depends_on":[],"wait":body}),
+        )
+        .await;
+    assert_eq!(conflict.status.as_u16(), 422);
+    let pending = card(&td).await;
+    let failed = td
+        .post(
+            "/api/projects/p/cards",
+            json!({"title":"blocked initial move","column":"working",
+        "wait":{"dependencies":[{"card":pending}]}}),
+        )
+        .await;
+    assert_eq!(failed.status.as_u16(), 409);
+}
+
+#[tokio::test]
+async fn api_wait_permissions_and_cross_project_redaction() {
+    let td = setup().await;
+    let agent = td.agent("p", "worker", json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    td.post("/api/projects", json!({"name":"secret","card_prefix":"S"}))
+        .await
+        .ok();
+    let secret = td
+        .post("/api/projects/secret/cards", json!({"title":"private"}))
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let own = td
+        .post_as(&agent, "/api/projects/p/cards", json!({"title":"mine"}))
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = format!("/api/cards/{own}/wait-on");
+    let body = json!({"dependencies":[{"card":format!("secret:{secret}"),"target":"done"}]});
+    assert_eq!(
+        td.put_as(&agent, &path, body.clone()).await.status.as_u16(),
+        403
+    );
+    td.put(&path, body).await.ok();
+    let hidden = td.get_as(&agent, &path).await;
+    assert_eq!(
+        hidden.ok()["dependencies"][0],
+        json!({"card":null,"hidden":true,"met":false})
+    );
+    assert_eq!(
+        td.get_as(&agent, &format!("/api/cards/{secret}/wait-on"))
+            .await
+            .status
+            .as_u16(),
+        403
+    );
+    let foreign = card(&td).await;
+    assert_eq!(
+        td.put_as(
+            &agent,
+            &format!("/api/cards/{foreign}/wait-on"),
+            json!({"dependencies":[{"card":own}]})
+        )
+        .await
+        .status
+        .as_u16(),
+        403
+    );
+    assert_eq!(
+        td.delete_as(&agent, &format!("/api/cards/{foreign}/wait-on"))
+            .await
+            .status
+            .as_u16(),
+        403
+    );
+    td.delete_as(&agent, &path).await.ok();
+}
+
 async fn card(td: &TestDaemon) -> String {
     td.post("/api/projects/p/cards", json!({"title":"wait test"}))
         .await
@@ -245,6 +397,135 @@ async fn refused_move_stays_met_and_wakes_with_reason() {
             .as_str()
             .is_some_and(|s| s.contains("move refused"))
     }));
+}
+
+#[tokio::test]
+async fn calendar_freezes_refuse_once_without_changing_manual_moves() {
+    for scope in [
+        "/api/projects/p/calendar/events",
+        "/api/calendar/global/events",
+    ] {
+        let td = setup().await;
+        let at = chrono::Utc::now();
+        let event = td
+            .post(
+                scope,
+                json!({
+                    "title":"release freeze", "kind":"freeze", "tz":"UTC",
+                    "start":(at - chrono::Duration::hours(1)).to_rfc3339(),
+                    "end":(at + chrono::Duration::hours(1)).to_rfc3339()
+                }),
+            )
+            .await
+            .ok()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let a = card(&td).await;
+        let b = card(&td).await;
+        set(
+            &td,
+            &b,
+            wait(
+                &[(&a, Some("review"))],
+                Mode::All,
+                Action {
+                    move_to: Some("ready".into()),
+                    ..Action::default()
+                },
+            ),
+        )
+        .await;
+        move_to(&td, &a, "review").await;
+        assert!(met(&td, &b).await);
+        assert_eq!(
+            td.get(&format!("/api/cards/{b}")).await.ok()["column"],
+            "backlog"
+        );
+        assert!(
+            td.get("/api/mail?to=p/lead")
+                .await
+                .ok()
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["subject"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("calendar freeze")))
+        );
+        // Manual moves remain allowed even during the freeze.
+        move_to(&td, &b, "ready").await;
+        move_to(&td, &b, "backlog").await;
+        td.delete(&format!("/api/calendar/events/{event}"))
+            .await
+            .ok();
+        move_to(&td, &a, "backlog").await;
+        move_to(&td, &a, "review").await;
+        assert!(met(&td, &b).await);
+        let id = b.clone();
+        td.daemon.as_ref().unwrap().state.db.write("operator", move |t| {
+            let generation: String = t.query_row("SELECT generation FROM card_waits WHERE card=?1", [&id], |r| r.get(0))?;
+            assert!(!card_waits::act(t, &Actor::Operator, &id, &generation)?);
+            let audited: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM audit WHERE action='card.wait_action_failed' AND target=?1)", [&id], |r| r.get(0))?;
+            assert!(audited);
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(
+            td.get(&format!("/api/cards/{b}")).await.ok()["column"],
+            "backlog"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unrelated_and_expired_freezes_do_not_block_wait_moves() {
+    let td = setup().await;
+    td.project("other").await;
+    let at = chrono::Utc::now();
+    for (scope, hours) in [
+        ("/api/projects/other/calendar/events", 1),
+        ("/api/projects/p/calendar/events", -1),
+    ] {
+        td.post(
+            scope,
+            json!({
+                "title":"freeze", "kind":"freeze", "tz":"UTC",
+                "start":(at - chrono::Duration::hours(2)).to_rfc3339(),
+                "end":(at + chrono::Duration::hours(hours)).to_rfc3339()
+            }),
+        )
+        .await
+        .ok();
+    }
+    let a = card(&td).await;
+    let b = card(&td).await;
+    set(
+        &td,
+        &b,
+        wait(
+            &[(&a, Some("review"))],
+            Mode::All,
+            Action {
+                move_to: Some("ready".into()),
+                ..Action::default()
+            },
+        ),
+    )
+    .await;
+    move_to(&td, &a, "review").await;
+    assert!(met(&td, &b).await);
+    assert_eq!(
+        td.get(&format!("/api/cards/{b}")).await.ok()["column"],
+        "ready"
+    );
+    td.daemon.as_ref().unwrap().state.db.read(|c| {
+        for scope in [Some("p"), None] {
+            let mut stmt = c.prepare("EXPLAIN QUERY PLAN SELECT id FROM calendar_events WHERE project IS ?1 ORDER BY start_at, id LIMIT 1001")?;
+            let plan = stmt.query_map([scope], |r| r.get::<_, String>(3))?.collect::<Result<Vec<_>, _>>()?;
+            assert!(plan.iter().any(|p| p.contains("SEARCH calendar_events USING INDEX calendar_events_project")), "{plan:?}");
+        }
+        Ok(())
+    }).await.unwrap();
 }
 
 #[tokio::test]

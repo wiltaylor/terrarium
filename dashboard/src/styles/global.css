@@ -1841,6 +1841,10 @@ a.chip.card-link:hover {
   overflow-wrap: break-word;
 }
 .text-markdown { min-width: 0; max-width: 100%; contain: inline-size; overflow-wrap: anywhere; white-space: normal; }
+.card-wait { gap: 10px; min-width: 0; overflow-wrap: anywhere; }
+.card-wait > h3, .card-wait > p, .card-wait > ul, .card-wait > dl { margin: 0; }
+.card-wait > ul { padding-left: 24px; }
+.card-wait li + li { margin-top: 8px; }
 .text-markdown .prose > :first-child { margin-top: 0; }
 .text-markdown .prose > :last-child { margin-bottom: 0; }
 .comm-block { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 12px 0; }
