@@ -40,11 +40,12 @@ impl Journal {
                 r.get(0)
             })
             .optional()?;
+        let key = crate::secrets::key(&self.state_dir)?;
+        tx.commit()?;
         let value =
             match sealed {
                 None => None,
                 Some(sealed) => {
-                    let key = crate::secrets::key(&self.state_dir)?;
                     let plain = key.open(&sealed, &super::resume_aad(id)).ok_or_else(|| {
                         ApiError::internal("cannot decrypt the host reconnect journal")
                     })?;
@@ -53,7 +54,6 @@ impl Journal {
                     })?)
                 }
             };
-        tx.commit()?;
         Ok(value)
     }
 
@@ -87,8 +87,8 @@ impl Journal {
         }
         for prefix in prefixes {
             tx.execute(
-                "DELETE FROM host_resume WHERE substr(id,1,length(?1))=?1",
-                [prefix],
+                "DELETE FROM host_resume WHERE id>=?1 AND id<?2",
+                params![prefix, prefix_end(prefix)?],
             )?;
         }
         for (id, value) in values {
@@ -109,20 +109,26 @@ impl Journal {
 
     pub fn scan<T: DeserializeOwned>(&self, prefix: &str) -> ApiResult<Vec<(String, T)>> {
         let mut conn = self.connect()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
-            .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
-        let key = crate::secrets::key(&self.state_dir)?;
+        let end = prefix_end(prefix)?;
+        let mut cursor = String::new();
         let mut out = Vec::new();
-        {
-            let mut stmt = tx.prepare(
-                "SELECT id,sealed FROM host_resume WHERE substr(id,1,length(?1))=?1 ORDER BY id",
-            )?;
-            let rows = stmt.query_map([prefix], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
-            })?;
-            for row in rows {
-                let (id, sealed) = row?;
+        loop {
+            // Capture the key and one sealed page under the rotation lock,
+            // then release the writer before decrypting or decoding anything.
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
+                .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
+            let key = crate::secrets::key(&self.state_dir)?;
+            let rows = {
+                let mut stmt = tx.prepare(SCAN_PAGE)?;
+                stmt.query_map(params![prefix, end, cursor], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                })?.collect::<Result<Vec<_>, _>>()?
+            };
+            tx.commit()?;
+            let count = rows.len();
+            for (id, sealed) in rows {
+                cursor.clone_from(&id);
                 let plain = key.open(&sealed, &super::resume_aad(&id)).ok_or_else(|| {
                     ApiError::internal("cannot decrypt the host reconnect journal")
                 })?;
@@ -130,16 +136,60 @@ impl Journal {
                     .map_err(|_| ApiError::internal("cannot decode the host reconnect journal"))?;
                 out.push((id, value));
             }
+            if count < 256 {
+                break;
+            }
         }
-        tx.commit()?;
         Ok(out)
     }
+}
+
+const SCAN_PAGE: &str = "SELECT id,sealed FROM host_resume
+    WHERE id>=?1 AND id<?2 AND id>?3 ORDER BY id LIMIT 256";
+
+// Journal namespaces are nonempty ASCII paths. Reject other prefixes rather
+// than constructing an invalid UTF-8 bound or silently scanning the table.
+fn prefix_end(prefix: &str) -> ApiResult<String> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    if !prefix.is_ascii() || bytes.is_empty() || bytes.last() == Some(&127) {
+        return Err(ApiError::internal("invalid host journal prefix"));
+    }
+    if let Some(last) = bytes.last_mut() {
+        *last += 1;
+    }
+    String::from_utf8(bytes).map_err(|_| ApiError::internal("invalid host journal prefix"))
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn journal_prefix_pages_use_primary_key_range_at_scale() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let journal = Journal::new(dir.path());
+        let rows: Vec<_> = (0..32).flat_map(|host| {
+            (0..600).map(move |seq| (
+                format!("event/host-{host:03}/1/{seq:020}"), serde_json::json!(seq)
+            ))
+        }).collect();
+        journal.save_many(&rows).unwrap();
+        let plan: Vec<String> = conn.prepare(&format!("EXPLAIN QUERY PLAN {SCAN_PAGE}"))
+            .unwrap().query_map(params!["event/host-016/", "event/host-0160", ""], |r| r.get(3))
+            .unwrap().collect::<Result<_, _>>().unwrap();
+        assert!(plan.iter().any(|s| s.contains("SEARCH host_resume") && s.contains("id>?") && s.contains("id<?")), "{plan:?}");
+        for host in 0..32 {
+            let found = journal.scan::<u32>(&format!("event/host-{host:03}/")).unwrap();
+            assert_eq!(found.len(), 600);
+            assert_eq!(found[599].1, 599);
+        }
+        journal.replace(&[], &[], &["event/host-016/".into()]).unwrap();
+        assert!(journal.scan::<u32>("event/host-016/").unwrap().is_empty());
+        assert_eq!(journal.scan::<u32>("event/host-017/").unwrap().len(), 600);
+    }
 
     #[test]
     fn journal_survives_reopen_and_master_key_rotation() {

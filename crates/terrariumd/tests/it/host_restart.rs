@@ -7,7 +7,20 @@ use terrarium_host::{Client, ClientOptions};
 
 #[tokio::test]
 async fn native_merge_keeps_recipe_exit_tail_slot_and_junit_across_restart() {
-    crate::jobs::native_merge_restart_keeps_recipe_exit_tail_and_junit().await;
+    crate::jobs::native_merge_restart_keeps_recipe_exit_tail_and_junit(false).await;
+}
+
+#[tokio::test]
+async fn native_merge_finishes_while_daemon_is_offline() {
+    crate::jobs::native_merge_restart_keeps_recipe_exit_tail_and_junit(true).await;
+}
+
+pub(crate) async fn wait_pid_gone(pid: &str) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while std::path::Path::new(&format!("/proc/{}", pid.trim())).exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
 }
 
 async fn online(td: &TestDaemon) {
@@ -26,6 +39,15 @@ async fn online(td: &TestDaemon) {
 
 #[tokio::test]
 async fn native_process_wait_retains_real_exit_and_tail_across_daemon_restart() {
+    process_restart(false).await;
+}
+
+#[tokio::test]
+async fn native_process_wait_finishes_while_daemon_is_offline() {
+    process_restart(true).await;
+}
+
+async fn process_restart(offline: bool) {
     let mut td = TestDaemon::start().await;
     td.project("p").await;
     let agent = td
@@ -79,6 +101,11 @@ async fn native_process_wait_retains_real_exit_and_tail_across_daemon_restart() 
     let pid = std::fs::read_to_string(&pidfile).unwrap();
     listener.abort();
     let _ = listener.await;
+    if offline {
+        td.daemon.take().unwrap().shutdown_and_wait().await;
+        std::fs::write(&go, b"go").unwrap();
+        wait_pid_gone(&pid).await;
+    }
     td.boot(None, None).await;
     let new_state = td.daemon.as_ref().unwrap().state.clone();
     assert!(!std::sync::Arc::ptr_eq(
@@ -90,8 +117,10 @@ async fn native_process_wait_retains_real_exit_and_tail_across_daemon_restart() 
         .unwrap();
     online(&td).await;
     assert_eq!(std::fs::read_to_string(&pidfile).unwrap(), pid);
-    assert!(std::path::Path::new(&format!("/proc/{}", pid.trim())).exists());
-    std::fs::write(go, b"go").unwrap();
+    if !offline {
+        assert!(std::path::Path::new(&format!("/proc/{}", pid.trim())).exists());
+        std::fs::write(go, b"go").unwrap();
+    }
     let done = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let wait = td.get(&format!("/api/waits/{wid}")).await;
@@ -110,6 +139,19 @@ async fn native_process_wait_retains_real_exit_and_tail_across_daemon_restart() 
     let log = td.get_as(aid, &format!("/api/waits/{wid}/log")).await;
     assert_eq!(log.ok()["running"], false);
     assert!(log.body["output"].as_str().unwrap().contains("before"));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let mail = td.get(&format!("/api/mail?to={aid}&from=system")).await;
+            let count = mail.ok().as_array().unwrap().iter().filter(|m| {
+                m["body"].as_str().unwrap_or("").contains(&wid)
+            }).count();
+            if count > 0 {
+                assert_eq!(count, 1, "{}", mail.body);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
     td.delete(&format!("/api/targets/p-box/sessions/{sid}"))
         .await
         .ok();

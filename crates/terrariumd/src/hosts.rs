@@ -303,6 +303,7 @@ pub struct HostRegistry {
     journal: OnceLock<resume::Journal>,
     online_changed: tokio::sync::Notify,
     stopped: std::sync::atomic::AtomicBool,
+    ownership_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl Default for HostRegistry {
@@ -329,6 +330,7 @@ impl HostRegistry {
             journal: OnceLock::new(),
             online_changed: tokio::sync::Notify::new(),
             stopped: std::sync::atomic::AtomicBool::new(false),
+            ownership_epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -336,7 +338,7 @@ impl HostRegistry {
     pub fn restore(&self, state_dir: &std::path::Path) -> crate::error::ApiResult<()> {
         let journal = resume::Journal::new(state_dir);
         let saved = journal.scan::<SavedHost>("host/")?;
-        let mut entries = self.lock();
+        let mut entries = HashMap::new();
         for (key, saved) in saved {
             let host = key
                 .strip_prefix("host/")
@@ -382,6 +384,7 @@ impl HostRegistry {
             }
             entries.insert(host, entry);
         }
+        *self.lock() = entries;
         self.journal
             .set(journal)
             .map_err(|_| ApiError::internal("host journal already restored"))?;
@@ -444,6 +447,7 @@ impl HostRegistry {
             ));
         }
         if let Some((key, id)) = binding {
+            self.ownership_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             values.push((format!("bound/{key}"), json!((host, id))));
         }
         let removed: Vec<_> = event
@@ -508,28 +512,30 @@ impl HostRegistry {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
+        let mut prefixes = vec![format!("prepare/{job}/"), format!("recipe/{job}/")];
+        let mut removed = Vec::new();
+        for phase in ["recipe", "receive"] {
+            let prefix = format!("bound/{phase}/{job}/");
+            for (_, (host, id)) in journal.scan::<(String, SessionId)>(&prefix)? {
+                removed.push((host, id));
+            }
+            prefixes.push(prefix);
+        }
         let mut entries = self.lock();
         if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ApiError::internal("host registry is stopping"));
         }
-        let mut prefixes = vec![format!("prepare/{job}/"), format!("recipe/{job}/")];
-        let mut removed = Vec::new();
         let mut hosts = HashMap::<String, SavedHost>::new();
-        for phase in ["recipe", "receive"] {
-            let prefix = format!("bound/{phase}/{job}/");
-            for (_, (host, id)) in journal.scan::<(String, SessionId)>(&prefix)? {
-                if !hosts.contains_key(&host)
+        for (host, id) in &removed {
+                if !hosts.contains_key(host)
                     && let Some(saved) = journal.load::<SavedHost>(&format!("host/{host}"))?
                 {
                     hosts.insert(host.clone(), saved);
                 }
-                if let Some(saved) = hosts.get_mut(&host) {
-                    saved.sessions.remove(&id);
+                if let Some(saved) = hosts.get_mut(host) {
+                    saved.sessions.remove(id);
                 }
                 prefixes.push(format!("event/{host}/{id}/"));
-                removed.push((host, id));
-            }
-            prefixes.push(prefix);
         }
         let mut values = Vec::new();
         for (host, saved) in hosts {
@@ -611,10 +617,7 @@ impl HostRegistry {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
-        let mut entries = self.lock();
-        if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
-            return Ok(());
-        }
+        let epoch = self.ownership_epoch.load(std::sync::atomic::Ordering::SeqCst);
         #[derive(Deserialize)]
         struct Binding {
             host_session: Option<(String, SessionId)>,
@@ -630,6 +633,15 @@ impl HostRegistry {
                 .into_iter()
                 .map(|(_, saved)| saved),
         );
+        let mut entries = self.lock();
+        // A new owner may have appeared while the scan ran without this lock.
+        // Leave cleanup to the next tick rather than deleting its replay.
+        if epoch != self.ownership_epoch.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
         for (host, entry) in entries.iter_mut() {
             let ids: Vec<_> = entry
                 .sessions
@@ -664,6 +676,18 @@ impl HostRegistry {
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn save_exec(&self, id: &str, value: &impl Serialize) -> crate::error::ApiResult<()> {
+        let _entries = self.lock();
+        if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ApiError::internal("host registry is stopping"));
+        }
+        self.ownership_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(journal) = self.journal.get() {
+            journal.save(&format!("exec/{id}"), value)?;
+        }
+        Ok(())
     }
 
     /// Is the host connected now?

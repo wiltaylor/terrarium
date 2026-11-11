@@ -1227,6 +1227,9 @@ another host. A TLS proxy in front of the host listener must pass
 5. It stops admitting new sessions and waits until it holds no session
    (it looks every 10 seconds). Existing sessions retain control traffic.
    A failed update reopens admission. An update does not kill live sessions.
+   Each drain is bounded by `auto_update_drain_secs` (default 600 seconds).
+   If sessions remain at that bound, admission reopens and `.new` stays
+   staged. The agent retries after 10 seconds, without another download.
 6. It keeps the running binary as `<binary>.prev` (a hard link), writes the
    new version to `<binary>.pending`, and renames `.new` over the binary.
    The rename is atomic: the binary is always the old one or the new one.
@@ -1402,6 +1405,7 @@ allowed_cwd_roots = ["/home/alice/labs", "/srv/build"]   # optional; absent mean
 # repos_dir = "/srv/terrarium/repos"        # the host path of TERRARIUM_REPOS_DIR, for a local lab_repo; default ./repos
 # max_running_targets = 4                   # docker and vmlab targets that may run at one time
 # auto_update = true                        # take the daemon's build (see "Self-update")
+# auto_update_drain_secs = 600              # reopen admission after this bound and retry
 
 # [display]                                 # target displays (see "display"); all optional
 # enabled = false                           # open THIS machine's desktop to `desktop` targets

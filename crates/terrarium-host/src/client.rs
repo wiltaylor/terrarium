@@ -292,6 +292,9 @@ pub struct SelfUpdateOptions {
     pub supervised: bool,
     /// How often to look for a moment with no session.
     pub idle_poll: Duration,
+    /// Maximum admission drain per attempt. Expiry keeps the staged binary
+    /// and reopens admission before retrying after `idle_poll`.
+    pub drain_timeout: Duration,
 }
 
 /// The host agent's client. Cheap to clone.
@@ -573,26 +576,33 @@ impl Client {
         let sha = u::verify(&data, offer)?;
         u::stage(&su.binary, &data, &offer.version).await?;
         tracing::info!(sha256 = %sha, bytes = data.len(), "self-update: the new binary checks out");
-        {
+        self.drain_for_update(su).await;
+        u::swap(&su.binary, &offer.version)?;
+        tracing::info!(version = %offer.version, binary = %su.binary.display(), "self-update: installed");
+        Ok(())
+    }
+
+    async fn drain_for_update(&self, su: &SelfUpdateOptions) {
+        loop {
             let _admission = self.shared.admission.lock().await;
             self.shared
                 .draining
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        let mut said = false;
-        while self.session_count() > 0 {
-            if !said {
-                tracing::info!(
-                    sessions = self.session_count(),
-                    "self-update: waiting until no session runs"
-                );
-                said = true;
+            drop(_admission);
+            let drained = tokio::time::timeout(su.drain_timeout, async {
+                while self.session_count() > 0 {
+                    tokio::time::sleep(su.idle_poll).await;
+                }
+            }).await;
+            if drained.is_ok() {
+                return;
             }
+            let _admission = self.shared.admission.lock().await;
+            self.shared.draining.store(false, std::sync::atomic::Ordering::SeqCst);
+            drop(_admission);
+            tracing::info!(sessions = self.session_count(), "self-update: drain expired; admission reopened, staged update will retry");
             tokio::time::sleep(su.idle_poll).await;
         }
-        u::swap(&su.binary, &offer.version)?;
-        tracing::info!(version = %offer.version, binary = %su.binary.display(), "self-update: installed");
-        Ok(())
     }
 
     /// One connection, from dial to drop. `Ok` means the daemon welcomed us.
@@ -1681,6 +1691,39 @@ pub fn ensure_crypto_provider() {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn staged_update_drain_expires_reopens_and_retries_without_discarding_stage() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("host");
+        let staged = crate::selfupdate::stage(&binary, b"#!/bin/sh\necho 'terrarium-host 0.3.0+bbbbbbb'\n", "0.3.0+bbbbbbb").await.unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        client.sessions().insert(1, Entry {
+            outbox: client.new_outbox(1, &tx), input: None, push: None, detached_since: None,
+        });
+        let su = SelfUpdateOptions {
+            binary, enabled: true, supervised: true,
+            idle_poll: Duration::from_millis(50), drain_timeout: Duration::from_millis(20),
+        };
+        let worker = client.clone();
+        let task = tokio::spawn(async move { worker.drain_for_update(&su).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !client.shared.draining.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            while client.shared.draining.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(client.admit(2, &tx));
+        assert_eq!(client.session_count(), 1, "drain expiry must not kill sessions");
+        assert!(!task.is_finished());
+        assert!(staged.exists(), "staged binary retained");
+        client.sessions().remove(&1);
+        tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap();
+        assert!(client.shared.draining.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn staged_update_refuses_new_sessions_but_keeps_control_frames() {

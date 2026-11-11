@@ -2592,7 +2592,7 @@ exit 101"#;
 
 /// Queue a merge of a new card on `branch` with `recipe`, wait for the
 /// end, and return the job.
-pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit() {
+pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit(offline: bool) {
     let mut lab = lab(1).await;
     let marks = tempfile::tempdir().unwrap();
     let pid = marks.path().join("pid");
@@ -2633,6 +2633,11 @@ pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit() {
     listener.abort();
     let _ = listener.await;
     // Keep the same host client alive. Only the daemon is replaced.
+    if offline {
+        lab.td.daemon.take().unwrap().shutdown_and_wait().await;
+        std::fs::write(&go, b"go").unwrap();
+        crate::host_restart::wait_pid_gone(&original_pid).await;
+    }
     lab.td.boot(None, None).await;
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
     let (listener, _) = terrariumd::hosts::serve(state, &lab.hosts_addr.to_string())
@@ -2642,12 +2647,16 @@ pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit() {
     lab.until_online(true).await;
     wait_admission(&lab.td, "lab1").await;
     let resumed = lab.td.get(&format!("/api/jobs/{jid}")).await.body;
-    assert_eq!(resumed["state"], "running", "{resumed}");
+    if !offline {
+        assert_eq!(resumed["state"], "running", "{resumed}");
+    }
     assert_eq!(resumed["attempt"], original["attempt"]);
     assert_eq!(resumed["slot"], original["slot"]);
     assert_eq!(resumed["started_at"], original["started_at"]);
     assert_eq!(std::fs::read_to_string(&pid).unwrap(), original_pid);
-    std::fs::write(go, b"go").unwrap();
+    if !offline {
+        std::fs::write(go, b"go").unwrap();
+    }
     let jobs = lab.until_idle().await;
     let ended = jobs.iter().find(|j| j["id"] == jid).unwrap();
     assert_eq!(ended["exit_code"], 7, "{ended}");
@@ -2655,6 +2664,12 @@ pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit() {
     assert!(tail.contains("before-restart"), "{tail}");
     assert!(tail.contains("after-restart"), "{tail}");
     assert_eq!(ended["attempt"], original["attempt"]);
+    let finished_card = lab.td.get(&format!("/api/cards/{card}")).await;
+    let notifications = finished_card.ok()["comments"].as_array().unwrap().iter().filter(|c| {
+        let body = c["body"].as_str().unwrap_or("");
+        body.contains(&jid) && body.contains("attempt 1") && body.contains("failed")
+    }).count();
+    assert_eq!(notifications, 1, "{}", finished_card.body);
     assert_eq!(std::fs::read_to_string(xml).unwrap(), original_xml);
     let parsed = lab
         .td
