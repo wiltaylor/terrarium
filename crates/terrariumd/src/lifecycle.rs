@@ -510,13 +510,42 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
     }
 }
 
-/// [`wake`] in a task of its own.
+/// The longest time a [`wake_soon`] that found another wake on the way
+/// waits to wake the agent again.
+const BUSY_REWAKE: Duration = Duration::from_secs(120);
+
+/// [`wake`] in a task of its own. A wake that finds another wake on the
+/// way ([`Woke::Busy`]) while the agent does not run wakes again when that
+/// one ends: the other wake can have read the agent before the change that
+/// made this one, and then refused it. A wake for new mail read a parked
+/// agent, the unpark committed, and its wake found the first one on the
+/// way: the agent stayed stopped with its return turn (TER-685).
 pub fn wake_soon(state: &Shared, id: AgentId, cause: &'static str) {
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
-        if let Some(state) = weak.upgrade() {
+        let start = Instant::now();
+        loop {
+            let Some(state) = weak.upgrade() else { return };
             let woke = wake(&state, id, cause).await;
             debug!(agent = %id, %cause, ?woke, "wake");
+            if woke != Woke::Busy || runs(&state, id).await {
+                return;
+            }
+            // Only the weak reference waits: a daemon that shuts down
+            // lets its state go.
+            drop(state);
+            loop {
+                if start.elapsed() >= BUSY_REWAKE {
+                    debug!(agent = %id, %cause, "another wake stays on the way; no wake again");
+                    return;
+                }
+                let Some(state) = weak.upgrade() else { return };
+                if !state.lifecycle.waking(id) {
+                    break;
+                }
+                drop(state);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         }
     });
 }
@@ -540,11 +569,16 @@ pub async fn wake_with_work(state: &Shared, only: Option<AgentId>, cause: &'stat
 }
 
 /// Give the queued turns of a running agent to the supervisor, in order,
-/// and delete them. A turn that the supervisor refuses stays, with the
-/// turns after it. Each turn goes under the agent's turn lock
-/// ([`Lifecycle::turn_lock`]): a turn that was removed meanwhile is
+/// and delete the row of each turn that went out. A turn that the
+/// supervisor refuses stays, with the turns after it. Each turn goes
+/// under the agent's turn lock ([`Lifecycle::turn_lock`]): a turn that was removed meanwhile is
 /// skipped, and the row of a turn goes only after the supervisor took it,
-/// so a later turn cannot pass it (TER-25).
+/// so a later turn cannot pass it (TER-25). A turn that the supervisor
+/// keeps for later ([`Supervisor::send_queued_turn`]) keeps its row: the
+/// supervisor deletes it when it types the turn, and a daemon restart
+/// before then delivers it again (TER-542).
+///
+/// [`Supervisor::send_queued_turn`]: crate::supervisor::Supervisor::send_queued_turn
 async fn deliver_turns(state: &Shared, id: AgentId) {
     let key = id.to_string();
     let turns = match state.db.read(move |c| agents::queued_turns(c, &key)).await {
@@ -570,15 +604,20 @@ async fn deliver_turns(state: &Shared, id: AgentId) {
                 return;
             }
         }
-        if let Err(e) = state.supervisor.send_turn(id, t.text).await {
-            debug!(agent = %id, "a queued turn waits: {e}");
-            break;
+        match state.supervisor.send_queued_turn(id, turn, t.text).await {
+            Ok(false) => {}
+            Ok(true) => continue,
+            Err(e) => {
+                debug!(agent = %id, "a queued turn waits: {e}");
+                break;
+            }
         }
+        // Only this row: a row before it may wait in the supervisor.
         let key = id.to_string();
         if let Err(e) = state
             .db
             .write("system", move |tx| {
-                agents::forget_queued_turns(tx, &key, turn)
+                agents::remove_queued_turn(tx, &key, turn).map(|_| ())
             })
             .await
         {

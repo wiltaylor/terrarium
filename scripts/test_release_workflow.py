@@ -2,7 +2,8 @@
 
 They read the workflow as text (and as YAML when PyYAML is there) and check
 the rules of the release: the image goes to GHCR with an attestation, the
-host agent asset comes out of the image with SHA256SUMS, each action is
+host agent and host helper assets come out of the image with SHA256SUMS
+(a dry run of the extract step with a fake docker), each action is
 pinned to a full commit SHA, and each job has the least permissions.
 
 Run: uv run python -m unittest discover -s scripts -p 'test_*.py'
@@ -10,6 +11,7 @@ Run: uv run python -m unittest discover -s scripts -p 'test_*.py'
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -23,10 +25,10 @@ TEXT = (REPO / ".github/workflows/ci.yml").read_text()
 DOCKERFILE = (REPO / "docker/Dockerfile").read_text()
 
 
-def calc_script() -> str:
-    """The run script of the `calc` step of the version job."""
+def run_script(marker: str) -> str:
+    """The run script of the step whose first line is `marker`."""
     lines = TEXT.splitlines()
-    start = lines.index("      - id: calc")
+    start = lines.index(marker)
     run = lines.index("        run: |", start)
     body = []
     for line in lines[run + 1 :]:
@@ -34,6 +36,24 @@ def calc_script() -> str:
             break
         body.append(line)
     return textwrap.dedent("\n".join(body))
+
+
+def calc_script() -> str:
+    """The run script of the `calc` step of the version job."""
+    return run_script("      - id: calc")
+
+
+EXTRACT_STEP = "      - name: Take the host agent and the host helper out of the image"
+
+# A fake docker for the extract step: `cp <cid>:<path> <dest>` copies from
+# $FAKE_IMAGE/<path>; pull, create, and rm only log.
+FAKE_DOCKER = """#!/bin/sh
+echo "docker $*" >> "$FAKE_LOG"
+case "$1" in
+  create) echo fakecid ;;
+  cp) cp "$FAKE_IMAGE/${2#*:}" "$3" ;;
+esac
+"""
 
 
 def git(cwd, *args):
@@ -97,8 +117,9 @@ class Release(unittest.TestCase):
         self.assertIn("subject-path: terrarium-host-*-linux-x86_64", TEXT)
 
     def test_the_asset_comes_out_of_the_image(self):
-        self.assertIn("/opt/terrarium/dist/terrarium-host-x86_64-linux", TEXT)
-        self.assertIn("sha256sum \"$asset\" > SHA256SUMS", TEXT)
+        self.assertIn("/opt/terrarium/dist/$bin-x86_64-linux", TEXT)
+        self.assertIn("for bin in terrarium-host terrarium-host-helper; do", TEXT)
+        self.assertIn("sha256sum \"$asset\" >> SHA256SUMS", TEXT)
         # The Dockerfile puts the binary and its .sha256 there.
         self.assertIn("COPY --from=host-build /dist/ /payload/dist/", DOCKERFILE)
         # docker create/cp in release CI does not run the entrypoint, so this
@@ -106,6 +127,16 @@ class Release(unittest.TestCase):
         self.assertIn("ln -s /opt/terrarium/bundled/dist /opt/terrarium/dist", DOCKERFILE)
         self.assertIn("TERRARIUM_HOST_DIST_DIR=/state/releases/current/dist", DOCKERFILE)
         self.assertIn('sha256sum "$dist" > "$dist.sha256"', DOCKERFILE)
+
+    def test_the_dockerfile_builds_the_helper_with_the_host_agent(self):
+        self.assertIn("--bin terrarium-host --bin terrarium-host-helper", DOCKERFILE)
+        self.assertRegex(DOCKERFILE, r"cargo build --release --locked --target \"\$target\" -p terrarium-host")
+        self.assertIn("for bin in terrarium-host terrarium-host-helper; do", DOCKERFILE)
+
+    def test_the_notes_verify_the_helper(self):
+        self.assertIn(
+            "gh attestation verify terrarium-host-helper-$VERSION-linux-x86_64 --repo $GITHUB_REPOSITORY", TEXT
+        )
 
     def test_the_dockerfile_labels_the_image(self):
         for label in ("source", "licenses", "revision", "version"):
@@ -146,6 +177,79 @@ class Release(unittest.TestCase):
                 if "run" in step:
                     with self.subTest(job=name, step=step.get("name")):
                         self.assertNotIn("${{", step["run"])
+
+
+class ExtractDryRun(unittest.TestCase):
+    """Runs the extract step of the image job with a fake docker and fake binaries."""
+
+    VERSION = "0.36.0-alpha"
+    BINS = ("terrarium-host", "terrarium-host-helper")
+
+    def extract(self, corrupt=None, missing=None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        dist = root / "image/opt/terrarium/dist"
+        dist.mkdir(parents=True)
+        for name in self.BINS:
+            if name == missing:
+                continue
+            asset = f"{name}-x86_64-linux"
+            (dist / asset).write_text(f"#!/bin/sh\necho '{name} {self.VERSION}+abc123'\n")
+            digest = hashlib.sha256((dist / asset).read_bytes()).hexdigest()
+            if name == corrupt:
+                digest = "0" * 64
+            (dist / f"{asset}.sha256").write_text(f"{digest}  {asset}\n")
+        bindir = root / "bin"
+        bindir.mkdir()
+        (bindir / "docker").write_text(FAKE_DOCKER)
+        (bindir / "docker").chmod(0o755)
+        work = root / "work"
+        work.mkdir()
+        env = {
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "HOME": tmp.name,
+            "VERSION": self.VERSION,
+            "IMAGE": "ghcr.io/o/terrarium",
+            "DIGEST": "sha256:" + "a" * 64,
+            "FAKE_IMAGE": str(root / "image"),
+            "FAKE_LOG": str(root / "docker.log"),
+        }
+        proc = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", run_script(EXTRACT_STEP)],
+            cwd=work,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        return proc, work
+
+    def test_both_assets_and_their_sums(self):
+        proc, work = self.extract()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        assets = [f"{name}-{self.VERSION}-linux-x86_64" for name in self.BINS]
+        self.assertEqual(sorted(p.name for p in work.iterdir()), sorted(assets + ["SHA256SUMS"]))
+        sums = (work / "SHA256SUMS").read_text().splitlines()
+        self.assertEqual([line.split("  ", 1)[1] for line in sums], assets)
+        check = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=work, capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        for asset in assets:
+            self.assertTrue(os.access(work / asset, os.X_OK), asset)
+            # The attest and upload globs pick up each asset.
+            self.assertTrue(Path(asset).match("terrarium-host-*-linux-x86_64"), asset)
+
+    def test_a_helper_hash_mismatch_fails(self):
+        proc, _ = self.extract(corrupt="terrarium-host-helper")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("the image's terrarium-host-helper is", proc.stdout + proc.stderr)
+
+    def test_an_image_without_the_helper_fails(self):
+        # The loop names both binaries, so the copy of the missing helper
+        # fails under set -e before the SHA256SUMS line count check.
+        proc, work = self.extract(missing="terrarium-host-helper")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse((work / f"terrarium-host-helper-{self.VERSION}-linux-x86_64").exists())
+        self.assertEqual(len((work / "SHA256SUMS").read_text().splitlines()), 1)
 
 
 class VersionCalc(unittest.TestCase):

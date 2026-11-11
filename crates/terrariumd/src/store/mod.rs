@@ -2,6 +2,7 @@
 //! `&Connection` to read or a `&mut Tx` to write; the API layer runs them
 //! through [`crate::db::Db`].
 
+pub mod accepted_heads;
 pub mod agents;
 pub mod artifacts;
 pub mod audit;
@@ -9,6 +10,7 @@ pub mod board;
 pub mod calendar;
 pub mod card_files;
 pub mod card_history;
+pub mod cloud_spend;
 pub mod event_sources;
 pub mod github_gate;
 pub mod groups;

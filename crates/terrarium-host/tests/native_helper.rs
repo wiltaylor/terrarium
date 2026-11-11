@@ -8,7 +8,7 @@
 //! of TER-345.
 
 use std::collections::{BTreeMap, HashMap};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,17 +32,6 @@ impl DeviceNodes for FakeNodes {
             .copied()
             .ok_or_else(|| format!("{} missing", path.display()))
     }
-}
-
-/// `native::bind` sets the process umask to 0o177 while it binds. The umask
-/// is per process, so a directory that another test creates in that window
-/// gets mode 0600: no search bit, and a non-root user then gets EACCES in
-/// it (root ignores the mode). Each fixture setup and each bind holds this
-/// lock.
-static UMASK: Mutex<()> = Mutex::new(());
-
-fn umask_lock() -> std::sync::MutexGuard<'static, ()> {
-    UMASK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 struct Fake {
@@ -100,7 +89,6 @@ impl Fake {
     }
 
     async fn with(rights: Vec<Right>, agent_uid: u32, gpu: Result<(), String>) -> Self {
-        let umask = umask_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let d = dir.path();
@@ -108,7 +96,7 @@ impl Fake {
             &d.join("systemd-run"),
             &format!(
                 "printf '%s\\n' \"$@\" >> '{run}'\n\
-                 for a; do case \"$a\" in EnvironmentFile=*) cp \"${{a#EnvironmentFile=}}\" '{env}';; esac; done\n\
+                 for a; do case \"$a\" in EnvironmentFile=*) cp \"${{a#EnvironmentFile=}}\" '{env}'; stat -c %a \"${{a#EnvironmentFile=}}\" > '{env}.mode';; esac; done\n\
                  while [ $# -gt 0 ]; do a=$1; shift; [ \"$a\" = -- ] && break; done\n\
                  exec \"$@\"\n",
                 run = d.join("run.log").display(),
@@ -169,7 +157,6 @@ impl Fake {
         });
         let socket = d.join("helper.sock");
         let listener = native::bind(&socket, nix::unistd::getuid().as_raw()).unwrap();
-        drop(umask);
         tokio::spawn(native::serve(helper.clone(), listener));
         Self {
             dir,
@@ -307,6 +294,49 @@ async fn without_the_session_right_nothing_starts() {
         Some(ErrorKind::Forbidden)
     );
     assert!(f.log("run.log").is_empty() && f.log("ctl.log").is_empty());
+}
+
+/// TER-566: the daemon sends multi-line values (git trailers, known hosts,
+/// a commit hook) on every exec. The helper accepts them and writes them
+/// to the 0600 environment file in systemd's double-quoted form, never to
+/// the `systemd-run` command line; NUL stays refused.
+#[tokio::test]
+async fn a_session_takes_multi_line_environment_values() {
+    let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
+    let trailers = "Card: TER-566\nAgent: p/a\n";
+    let hook = "#!/bin/sh\nexec \"$1\" `x`\r\n";
+    let mut req = f.start("p/a", None, &[], &[], &["true"]);
+    req.env = BTreeMap::from([
+        ("TERRARIUM_GIT_TRAILERS".into(), trailers.into()),
+        ("TERRARIUM_COMMIT_HOOK".into(), hook.into()),
+    ]);
+    let (s, r) = send(&f.socket, &Request::Start(req.clone())).await;
+    assert!(matches!(r, Reply::Started { .. }), "{r:?}");
+    let (mut rd, _wr) = s.into_split();
+    let exit = loop {
+        match native::read_frame(&mut rd).await.unwrap() {
+            Some((Kind::Exit, d)) => break serde_json::from_slice::<Exit>(&d).unwrap(),
+            Some(_) => {}
+            None => panic!("no exit"),
+        }
+    };
+    assert_eq!(exit.code, Some(0));
+    assert_eq!(
+        f.log("env.copy"),
+        "TERRARIUM_COMMIT_HOOK=\"#!/bin/sh\nexec \\\"\\$1\\\" \\`x\\`\r\n\"\n\
+         TERRARIUM_GIT_TRAILERS=\"Card: TER-566\nAgent: p/a\n\"\n"
+    );
+    assert_eq!(f.log("env.copy.mode").trim(), "600");
+    let run = f.log("run.log");
+    assert!(
+        !run.contains("TER-566") && !run.contains("#!/bin/sh"),
+        "{run}"
+    );
+    f.wait_idle().await;
+
+    req.env = BTreeMap::from([("TERRARIUM_GIT_TRAILERS".into(), "a\n\0b".into())]);
+    let (_, r) = send(&f.socket, &Request::Start(req)).await;
+    assert_eq!(code(&r), Some(ErrorKind::Invalid), "{r:?}");
 }
 
 #[tokio::test]
@@ -479,7 +509,6 @@ fn shim(f: &Fake, req: &Request) -> std::process::Command {
 async fn a_shim_stop_also_stops_the_user_slice() {
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
     let bin = f.dir.path().join("userbin");
-    let umask = umask_lock();
     std::fs::create_dir(&bin).unwrap();
     // The user manager's systemctl: exit 5 (not loaded) unless `user.code`.
     script(
@@ -491,7 +520,6 @@ async fn a_shim_stop_also_stops_the_user_slice() {
             d = f.dir.path().display()
         ),
     );
-    drop(umask);
     let path = format!(
         "{}:{}",
         bin.display(),
@@ -791,10 +819,7 @@ async fn a_unit_not_confirmed_stopped_keeps_its_gpu() {
 async fn a_failed_unit_with_a_populated_cgroup_keeps_its_gpu() {
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
     let cg = f.dir.path().join("cgroupfs/system.slice/u.service");
-    {
-        let _umask = umask_lock();
-        std::fs::create_dir_all(&cg).unwrap();
-    }
+    std::fs::create_dir_all(&cg).unwrap();
     std::fs::write(cg.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
     f.write("state", "failed\n");
     f.write("cgroup", "/system.slice/u.service\n");
@@ -911,7 +936,6 @@ fn the_socket_belongs_to_the_agent_user() {
         eprintln!("skipped: needs root to give the socket to another UID");
         return;
     }
-    let _umask = umask_lock();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("h.sock");
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -930,6 +954,75 @@ fn the_socket_belongs_to_the_agent_user() {
         std::fs::write(&file, "").unwrap();
         assert!(native::bind(&file, 4242).is_err());
     });
+}
+
+/// The process umask, from the Umask line of /proc/self/status. Reading it
+/// there does not change it (umask(2) would, for a moment).
+fn process_umask() -> u32 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let line = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Umask:"))
+        .expect("a Umask line");
+    u32::from_str_radix(line.trim(), 8).unwrap()
+}
+
+/// `native::bind` gives the socket mode 0600 and the caller's owner without
+/// a change of the process umask (TER-500): a second thread samples the
+/// umask while bind runs many times and never sees another value. It also
+/// leaves no temporary directory behind.
+#[tokio::test]
+async fn bind_sets_the_mode_without_the_process_umask() {
+    use std::sync::atomic::AtomicUsize;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("h.sock");
+    let uid = nix::unistd::getuid().as_raw();
+    let before = process_umask();
+    let stop = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicUsize::new(0));
+    let sampler = {
+        let (stop, seen) = (stop.clone(), seen.clone());
+        std::thread::spawn(move || {
+            let mut other = Vec::new();
+            while !stop.load(Ordering::Relaxed) {
+                let m = process_umask();
+                seen.fetch_add(1, Ordering::Relaxed);
+                if m != before {
+                    other.push(m);
+                }
+            }
+            other
+        })
+    };
+    // Bind until the sampler has read the umask often enough to see a
+    // change (and at least 200 times).
+    let mut binds = 0;
+    while binds < 200 || (seen.load(Ordering::Relaxed) < 20_000 && binds < 20_000) {
+        drop(native::bind(&socket, uid).unwrap());
+        binds += 1;
+    }
+    let listener = native::bind(&socket, uid).unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let other = sampler.join().unwrap();
+    assert!(
+        other.is_empty(),
+        "the umask changed during bind: {:o} -> {:?} ({binds} binds)",
+        before,
+        other.iter().map(|m| format!("{m:o}")).collect::<Vec<_>>()
+    );
+    assert_eq!(process_umask(), before);
+    let meta = std::fs::symlink_metadata(&socket).unwrap();
+    assert!(meta.file_type().is_socket());
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(meta.uid(), uid);
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("h.sock")]);
+    // The socket accepts at the final path.
+    let (_client, accepted) = tokio::join!(UnixStream::connect(&socket), listener.accept());
+    accepted.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

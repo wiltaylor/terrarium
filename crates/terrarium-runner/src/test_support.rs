@@ -28,7 +28,22 @@ const RUNNER: &str = "terrarium-runner";
 /// A completed delivery for a fake `RunnerHandle` in another crate.
 pub fn delivered_turn() -> crate::Delivery {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let _ = tx.send(Ok(()));
+    let _ = tx.send(Ok(None));
+    crate::Delivery::from_parts(0, rx)
+}
+
+/// A completed delivery whose turn started at event seq `seq`, for a fake
+/// `RunnerHandle` in another crate.
+pub fn delivered_turn_at(seq: u64) -> crate::Delivery {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = tx.send(Ok(Some(seq)));
+    crate::Delivery::from_parts(0, rx)
+}
+
+/// A failed delivery (`DeliveryError::Dropped`) for a fake `RunnerHandle`
+/// in another crate.
+pub fn failed_turn() -> crate::Delivery {
+    let (_, rx) = tokio::sync::oneshot::channel();
     crate::Delivery::from_parts(0, rx)
 }
 

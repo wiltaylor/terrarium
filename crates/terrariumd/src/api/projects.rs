@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::targets::TargetView;
@@ -14,14 +14,16 @@ use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
 use crate::store::projects::{self, NewProject, NewRepo, Project, ProjectPatch, Repo};
+use crate::store::questions::{self, QuestionKind};
 use crate::store::target_grants::{self, Purpose, TargetGrant};
-use crate::store::{Page, agents};
+use crate::store::{Page, agents, board};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/projects", get(list).post(create))
         .route("/projects/{name}", get(show).patch(update).delete(remove))
         .route("/projects/{name}/agents", get(list_agents))
+        .route("/projects/{name}/counts", get(counts))
         .route("/projects/{name}/targets", get(list_targets))
         .route(
             "/projects/{name}/target-grants",
@@ -72,6 +74,72 @@ async fn show(
 ) -> ApiResult<Json<Project>> {
     policy::read_project(&actor, &name)?;
     Ok(Json(state.db.read(move |c| projects::get(c, &name)).await?))
+}
+
+/// The open questions of [`Counts`]: questions, bundles, and tool run
+/// approvals, also those in a thread. A notice needs no decision.
+#[derive(Debug, Serialize)]
+struct QuestionCounts {
+    open: usize,
+    /// The urgent and the critical ones.
+    urgent: usize,
+    critical: usize,
+}
+
+/// The answer of `GET /api/projects/{name}/counts`.
+#[derive(Debug, Serialize)]
+struct Counts {
+    /// The cards in the `blocked` role columns.
+    blocked_cards: i64,
+    /// `null` for an actor who may not list the questions of the project.
+    questions: Option<QuestionCounts>,
+}
+
+/// `GET /api/projects/{name}/counts`: the counts for the project tabs of the
+/// dashboard (TER-154). Indexed counts only, no row reads: the dashboard
+/// reads it again on each card and question event of the project.
+async fn counts(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Counts>> {
+    policy::read_project(&actor, &name)?;
+    // The rule of `GET /api/questions?project=`.
+    let questions_allowed =
+        policy::is_admin_of(&actor, &name) || matches!(&actor, Actor::Agent(a) if a.reads_all());
+    Ok(Json(
+        state
+            .db
+            .read(move |c| {
+                projects::get(c, &name)?;
+                let blocked_cards = board::blocked_count(c, &name)?;
+                let questions = if questions_allowed {
+                    let mut out = QuestionCounts {
+                        open: 0,
+                        urgent: 0,
+                        critical: 0,
+                    };
+                    for kind in [
+                        QuestionKind::Question,
+                        QuestionKind::Bundle,
+                        QuestionKind::ToolRun,
+                    ] {
+                        let t = questions::open_total(c, Some(&name), Some(kind))?;
+                        out.open += t.open;
+                        out.urgent += t.urgent;
+                        out.critical += t.critical;
+                    }
+                    Some(out)
+                } else {
+                    None
+                };
+                Ok(Counts {
+                    blocked_cards,
+                    questions,
+                })
+            })
+            .await?,
+    ))
 }
 
 fn file_managed(p: &Project) -> ApiError {

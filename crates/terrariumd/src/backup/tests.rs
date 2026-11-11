@@ -327,6 +327,175 @@ fn a_manifest_path_out_of_the_root_is_refused() {
     assert!(check_paths(&m).is_err());
 }
 
+fn entry(path: &str, kind: EntryKind, link: Option<&str>) -> Entry {
+    Entry {
+        path: path.into(),
+        kind,
+        mode: 0o600,
+        size: 0,
+        mtime_ns: 0,
+        sha256: None,
+        link: link.map(str::to_owned),
+        stored_in: None,
+    }
+}
+
+#[test]
+fn a_manifest_path_below_a_symlink_entry_is_refused() {
+    // The link comes after the file in the manifest: the order does not
+    // matter.
+    for entries in [
+        vec![
+            entry("state/a", EntryKind::Symlink, Some("/etc")),
+            entry("state/a/passwd", EntryKind::File, None),
+        ],
+        vec![
+            entry("state/a/b/c", EntryKind::File, None),
+            entry("state/a", EntryKind::Symlink, Some("/etc")),
+        ],
+        vec![
+            entry("work/p", EntryKind::Symlink, Some("../../x")),
+            entry("work/p/d", EntryKind::Dir, None),
+        ],
+    ] {
+        let m = Manifest {
+            id: "X".into(),
+            entries,
+        };
+        let err = check_paths(&m).unwrap_err();
+        assert!(format!("{err:#}").contains("below the symlink"), "{err:#}");
+    }
+    // Plain form only: `a/./x` or `a//x` would hide the link prefix.
+    for path in ["state/a/./x", "state/a//x", "state/a/x/"] {
+        let m = Manifest {
+            id: "X".into(),
+            entries: vec![
+                entry("state/a", EntryKind::Symlink, Some("/etc")),
+                entry(path, EntryKind::File, None),
+            ],
+        };
+        assert!(check_paths(&m).is_err(), "{path}");
+    }
+    // The same path twice, of any kinds: a dir entry on a symlink entry
+    // would chmod the link target.
+    for kinds in [
+        [EntryKind::Symlink, EntryKind::Dir],
+        [EntryKind::Dir, EntryKind::Symlink],
+        [EntryKind::File, EntryKind::File],
+        [EntryKind::Dir, EntryKind::Dir],
+    ] {
+        let m = Manifest {
+            id: "X".into(),
+            entries: kinds
+                .iter()
+                .map(|k| entry("state/a", *k, Some("/root/.ssh")))
+                .collect(),
+        };
+        let err = check_paths(&m).unwrap_err();
+        assert!(format!("{err:#}").contains("twice"), "{kinds:?}: {err:#}");
+    }
+    // A symlink next to a file of the same prefix is fine.
+    let m = Manifest {
+        id: "X".into(),
+        entries: vec![
+            entry("state/a", EntryKind::Symlink, Some("b")),
+            entry("state/ab/x", EntryKind::File, None),
+            entry("state/b/x", EntryKind::File, None),
+        ],
+    };
+    check_paths(&m).unwrap();
+}
+
+#[test]
+fn a_restore_with_a_dir_entry_on_a_symlink_entry_changes_nothing() {
+    let fx = fixture();
+    let full = fx.make(Kind::Full, false, None);
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+    // A dir outside every root, for a link with an absolute target.
+    let outside = fx._tmp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
+    let outside_link = outside.to_str().unwrap().to_owned();
+    // (the symlink path, its new target when the backup does not have it,
+    // the dir that the dir entry would change)
+    let cases = [
+        (
+            "state/agents/A1/harness/cred/account",
+            None,
+            fx.state.join("credentials/accounts/claude/a"),
+        ),
+        (
+            "state/agents/A1/escape",
+            Some(outside_link),
+            outside.clone(),
+        ),
+    ];
+    for (n, (link, new_target, target)) in cases.into_iter().enumerate() {
+        let before = mode(&target);
+        // Copy the zip with a second manifest entry on the symlink: a dir of
+        // mode 0777.
+        let bad = fx.dir.join(format!("dup{n}.zip"));
+        {
+            let mut src = ZipArchive::new(File::open(&full.path).unwrap()).unwrap();
+            let mut out = ZipWriter::new(File::create(&bad).unwrap());
+            for i in 0..src.len() {
+                let mut f = src.by_index(i).unwrap();
+                let name = f.name().unwrap().into_owned();
+                let mut data = Vec::new();
+                f.read_to_end(&mut data).unwrap();
+                if name == MANIFEST {
+                    let mut m: Manifest = serde_json::from_slice(&data).unwrap();
+                    match &new_target {
+                        None => assert!(
+                            m.entries
+                                .iter()
+                                .any(|e| e.path == link && e.kind == EntryKind::Symlink)
+                        ),
+                        Some(t) => {
+                            assert!(
+                                Path::new(t).is_absolute() && !Path::new(t).starts_with(&fx.state)
+                            );
+                            m.entries
+                                .push(entry(link, EntryKind::Symlink, Some(t.as_str())));
+                        }
+                    }
+                    let mut dir = entry(link, EntryKind::Dir, None);
+                    dir.mode = 0o777;
+                    m.entries.push(dir);
+                    data = serde_json::to_vec(&m).unwrap();
+                }
+                out.start_file(name, SimpleFileOptions::default()).unwrap();
+                out.write_all(&data).unwrap();
+            }
+            out.finish().unwrap();
+        }
+        let err = restore(&bad, &fx.roots(false), &RestoreOptions::default()).unwrap_err();
+        assert!(format!("{err:#}").contains("twice"), "{link}: {err:#}");
+        assert_eq!(mode(&target), before, "{link}");
+        assert!(
+            !fx.state
+                .join(format!("{STAGING_PREFIX}{}", full.header.id))
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn a_backup_skips_the_secret_run_dirs() {
+    let fx = fixture();
+    let run = crate::secrets::RunDirs::base(&fx.state).join("01RUN");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("askpass"), "echo tok").unwrap();
+    // A `.run` dir elsewhere is data.
+    fs::create_dir_all(fx.work.join("p/a/.run")).unwrap();
+    fs::write(fx.work.join("p/a/.run/pid"), "1").unwrap();
+    let full = fx.make(Kind::Full, true, None);
+    let n = names(&full);
+    assert!(!n.iter().any(|x| x.contains("credentials/.run")), "{n:?}");
+    assert!(n.contains(&"files/work/p/a/.run/pid".to_owned()));
+    assert!(n.contains(&"files/state/credentials/accounts/claude/a/.credentials.json".to_owned()));
+}
+
 #[test]
 fn list_and_prune_keep_the_newest_fulls_and_their_diffs() {
     let fx = fixture();
@@ -337,10 +506,90 @@ fn list_and_prune_keep_the_newest_fulls_and_their_diffs() {
     assert_eq!(d2.header.base.as_ref().unwrap().id, f2.header.id);
     let l = list(&fx.dir).unwrap();
     assert_eq!(l.len(), 4);
-    let removed = prune(&fx.dir, 1).unwrap();
+    // Nothing goes before the newest full backup is verified.
+    assert!(prune(&fx.dir, 1, &f1.header.id).is_err());
+    assert_eq!(list(&fx.dir).unwrap().len(), 4);
+    let removed = prune(&fx.dir, 1, &f2.header.id).unwrap();
     assert_eq!(removed.len(), 2);
     assert!(removed.contains(&f1.name) && removed.contains(&d1.name));
     assert!(f2.path.exists() && d2.path.exists());
     assert!(is_backup_name(&f2.name));
     assert!(!is_backup_name("../x.zip") && !is_backup_name(".x.zip.partial"));
+}
+
+#[test]
+fn the_drill_restores_a_sealed_diff_into_a_scratch_dir_and_checks_it() {
+    let fx = fixture();
+    fx.make(Kind::Full, true, Some("pw"));
+    fs::write(fx.config.join("prompts/lead.md"), "lead v2").unwrap();
+    let d = fx.make(Kind::Diff, true, Some("pw"));
+    let scratch = fx.dir.join(format!("{DRILL_PREFIX}t"));
+    let r = drill(&d.path, None, Some("pw"), &scratch).unwrap();
+    assert_eq!(r.id, d.header.id);
+    assert_eq!(r.kind, Kind::Diff);
+    assert_eq!(r.integrity, "ok");
+    assert_eq!(r.db_user_version, 57);
+    assert!(r.secrets_key);
+    assert!(r.files > 0);
+    assert_eq!(
+        fs::read_to_string(scratch.join("config/prompts/lead.md")).unwrap(),
+        "lead v2"
+    );
+    let c = rusqlite::Connection::open(scratch.join("state").join(DB_FILE)).unwrap();
+    let v: String = c.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, "one");
+    // The live data did not change.
+    assert_eq!(
+        fs::read_to_string(fx.config.join("prompts/lead.md")).unwrap(),
+        "lead v2"
+    );
+    assert!(fs::read_dir(&fx.state).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(PRE_RESTORE_PREFIX)
+    }));
+    // A dir with content is refused; a wrong passphrase fails.
+    assert!(drill(&d.path, None, Some("pw"), &scratch).is_err());
+    let other = fx.dir.join(format!("{DRILL_PREFIX}u"));
+    assert!(drill(&d.path, None, Some("bad"), &other).is_err());
+    // A drill dir is not a backup in the list.
+    assert!(
+        list(&fx.dir)
+            .unwrap()
+            .iter()
+            .all(|l| !l.name.starts_with('.'))
+    );
+}
+
+#[test]
+fn the_drill_refuses_a_dir_it_cannot_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Absent and empty dirs pass.
+    check_drill_dir(&tmp.path().join("none")).unwrap();
+    let empty = tmp.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    check_drill_dir(&empty).unwrap();
+    // A symlink to an empty dir is refused.
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&empty, &link).unwrap();
+    let e = check_drill_dir(&link).unwrap_err().to_string();
+    assert!(e.contains("symlink"), "{e}");
+    // A file is not a drill dir.
+    let file = tmp.path().join("file");
+    fs::write(&file, "mine").unwrap();
+    assert!(check_drill_dir(&file).is_err());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "mine");
+    // A dir that cannot be read may hold files: refused, not deleted.
+    let locked = tmp.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::write(locked.join("mine"), "x").unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads it anyway; then the dir is not empty, also refused.
+    let e = check_drill_dir(&locked).unwrap_err().to_string();
+    if fs::read_dir(&locked).is_err() {
+        assert!(e.contains("cannot read"), "{e}");
+    }
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(locked.join("mine").exists());
 }

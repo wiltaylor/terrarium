@@ -4,6 +4,7 @@
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 
 const attachRepo = vi.fn();
 const added = vi.fn();
@@ -46,7 +47,7 @@ describe("AddRepoForm", () => {
     expect(form.querySelector("h2")?.textContent).toBe("Add a repo");
     type(form.querySelector<HTMLInputElement>("input")!, "https://x/infra.git");
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(onAdded).toHaveBeenCalledWith(repo));
+    await waitFor(() => expect(onAdded).toHaveBeenCalledWith(repo));
     expect(attachRepo).toHaveBeenCalledWith("alpha", { url: "https://x/infra.git" });
     expect(added).toHaveBeenCalledWith(repo);
   });
@@ -58,7 +59,7 @@ describe("AddRepoForm", () => {
     const form = el.querySelector<HTMLFormElement>("form")!;
     type(form.querySelector<HTMLInputElement>("input")!, "https://x/infra.git");
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(el.textContent).toContain("exists"));
+    await waitFor(() => expect(el.textContent).toContain("exists"));
     expect(onAdded).not.toHaveBeenCalled();
     expect(added).not.toHaveBeenCalled();
   });

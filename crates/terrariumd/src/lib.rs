@@ -15,6 +15,7 @@ pub mod calendar;
 pub mod card_delivery;
 pub mod card_dispatcher;
 pub mod card_reminder;
+pub mod cloud_budget;
 pub mod config_repo;
 pub mod conflict_hints;
 pub mod db;
@@ -24,6 +25,7 @@ mod docker_tunnel;
 pub mod error;
 pub mod events;
 pub mod executor;
+pub mod exedev;
 pub mod fleet;
 pub mod git;
 pub mod git_identity;
@@ -57,6 +59,7 @@ pub mod research_helpers;
 pub mod reservations;
 pub mod reset;
 pub mod review_dispatcher;
+pub mod rule_script;
 pub mod rules_engine;
 pub mod rules_verbs;
 pub mod run_kill;
@@ -146,6 +149,8 @@ pub struct DaemonConfig {
 /// A running daemon.
 pub struct Daemon {
     pub state: Shared,
+    /// The `flock` on [`STATE_LOCK`], held until the daemon drops.
+    _state_lock: nix::fcntl::Flock<std::fs::File>,
     pub socket: PathBuf,
     pub tcp_addr: Option<std::net::SocketAddr>,
     /// The bound address of the artifact origin, when it listens.
@@ -167,6 +172,58 @@ impl Daemon {
         self.state.supervisor.shutdown();
         if let Err(e) = std::fs::remove_file(&self.socket) {
             warn!(socket = %self.socket.display(), "cannot remove socket: {e}");
+        }
+    }
+
+    /// [`Daemon::shutdown`], but it waits until the tasks have ended and no
+    /// database call of them still runs, before it lets the state lock go.
+    /// For a start again on the same state dir in the same process (tests):
+    /// an aborted task ends at its next await, but a database call that it
+    /// started runs on to its end on the blocking pool (TER-646).
+    pub async fn shutdown_and_wait(mut self) {
+        let tasks = std::mem::take(&mut self.tasks);
+        for t in &tasks {
+            t.abort();
+        }
+        for t in tasks {
+            let _ = t.await;
+        }
+        // The connection mutex: a call on the blocking pool holds it.
+        let _ = self.state.db.read(|_| Ok(())).await;
+        self.shutdown();
+    }
+}
+
+/// The lock file in the state dir: the running daemon holds an exclusive
+/// `flock` on it.
+pub const STATE_LOCK: &str = "daemon.lock";
+
+/// Take the exclusive lock of `state_dir`, or fail when another daemon
+/// holds it. The CLI restore holds it too, so that no daemon starts on the
+/// state dir while it is replaced.
+pub fn lock_state_dir(
+    state_dir: &std::path::Path,
+) -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
+    use nix::fcntl::{Flock, FlockArg};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = state_dir.join(STATE_LOCK);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("cannot open the state lock {}", path.display()))?;
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(lock) => Ok(lock),
+        Err((_, nix::errno::Errno::EWOULDBLOCK)) => anyhow::bail!(
+            "another daemon uses the state dir {} ({} is locked): stop it first",
+            state_dir.display(),
+            path.display()
+        ),
+        Err((_, e)) => {
+            Err(std::io::Error::from(e)).with_context(|| format!("cannot lock {}", path.display()))
         }
     }
 }
@@ -217,9 +274,20 @@ async fn start_with_usage_and_executor(
 ) -> anyhow::Result<Daemon> {
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("cannot create state dir {}", cfg.state_dir.display()))?;
+    // One daemon per state dir, for its whole life: a second one stops
+    // here, before it opens the database or clears the run dirs.
+    let state_lock = lock_state_dir(&cfg.state_dir)?;
     let db_path = cfg.state_dir.join("terrarium.db");
     let conn = db::open(&db_path)?;
     info!(path = %db_path.display(), "database ready");
+    // The run dirs of a daemon that stopped without its drops: before any
+    // request or job can make a new one. The lock above makes sure that no
+    // live daemon owns them.
+    match secrets::RunDirs::clear_stale(&cfg.state_dir) {
+        Ok(0) => {}
+        Ok(n) => info!(count = n, "removed stale secret run dirs"),
+        Err(e) => warn!(error = %e, "cannot clear the secret run dirs"),
+    }
 
     let (defs, errors) = Definitions::load(&cfg.config_dir);
     let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
@@ -364,6 +432,7 @@ async fn start_with_usage_and_executor(
     }
     Ok(Daemon {
         state,
+        _state_lock: state_lock,
         socket: cfg.socket,
         tcp_addr,
         artifact_addr,
@@ -446,6 +515,7 @@ async fn activate(
 
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
+    tasks.push(spawn_artifact_sweep(state.clone()));
     tasks.push(target_roots::spawn(state.clone()));
     tasks.push(leases::spawn_timer(&state));
     tasks.push(reservations::spawn_timer(&state));
@@ -465,6 +535,8 @@ async fn activate(
     tasks.push(card_delivery::spawn(&state));
     // The agents bound to cards: park, unpark, and end (TER-74).
     tasks.push(bound::spawn(&state));
+    // The exe.dev sweep (TER-294): VMs past their life, unheld, or left.
+    tasks.push(exedev::spawn(&state));
     tasks.extend(start_usage(&state).await);
     Ok(std::mem::take(&mut owned.0))
 }
@@ -622,6 +694,18 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
     })
 }
 
+/// Remove the artifact blobs no row owns, once at start
+/// ([`api::sweep_orphans`]).
+fn spawn_artifact_sweep(state: Shared) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        match api::sweep_orphans(&state).await {
+            Ok(n) if n > 0 => info!(entries = n, "artifact orphan sweep done"),
+            Ok(_) => {}
+            Err(e) => warn!("artifact orphan sweep failed: {e}"),
+        }
+    })
+}
+
 /// Run the artifact retention prune (PLAN §15.2): first one hour after the
 /// start, then every `[artifacts] prune_interval_hours` (default 24). The
 /// same timer prunes the trash of deleted agents (`TERRARIUM_TRASH_DAYS`,
@@ -631,7 +715,8 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
 /// schedule runs past the newest 500 of each schedule, and the webhook
 /// delivery IDs older than 7 days, the turn attachments older than 7
 /// days ([`api::attachments::prune`]), and the removed card files past
-/// the trash days with their blobs ([`api::card_files::prune`]).
+/// the trash days with their blobs ([`api::card_files::prune`]), and the
+/// agent write answers past a day ([`agent_rpc::prune_answers`]).
 fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = std::time::Duration::from_secs(3600);
@@ -725,6 +810,11 @@ fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
                 Ok(n) if n > 0 => info!(deliveries = n, "webhook delivery prune done"),
                 Ok(_) => {}
                 Err(e) => warn!("cannot prune the webhook deliveries: {e}"),
+            }
+            match agent_rpc::prune_answers(&state.db, chrono::Utc::now()).await {
+                Ok(n) if n > 0 => info!(answers = n, "agent write answer prune done"),
+                Ok(_) => {}
+                Err(e) => warn!("cannot prune the agent write answers: {e}"),
             }
             let hours = store::artifacts::context(&state.state_dir, &state.config_dir)
                 .map(|c| c.limits.prune_interval_hours)
@@ -882,6 +972,8 @@ pub async fn apply_definitions(
         })
         .await?;
     rule_errors.extend(stored);
+    // TER-243: merge_queue into the wait overrides of older migrations.
+    rule_errors.extend(store::rules::add_merge_queue(&state.db).await);
     report.errors.extend(rule_errors);
     // The template files, before the fleets: a fleet agent may name one.
     match template_files::refresh(state).await {

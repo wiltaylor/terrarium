@@ -128,6 +128,20 @@ pub struct Page {
     pub next: Option<String>,
 }
 
+/// The tries of [`Api::post_upload`] in all, the first one included.
+pub const UPLOAD_TRIES: u32 = 5;
+
+/// The wait before the next try of a `429`: the `Retry-After` header in
+/// seconds, else `details.retry_after`, else 2 s; at most 60 s.
+fn retry_after(resp: &ApiResponse) -> std::time::Duration {
+    let secs = resp
+        .header("retry-after")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .or_else(|| resp.body["error"]["details"]["retry_after"].as_u64())
+        .unwrap_or(2);
+    std::time::Duration::from_secs(secs.min(60))
+}
+
 #[derive(Clone)]
 pub struct Api {
     transport: Arc<dyn Transport>,
@@ -181,6 +195,49 @@ impl Api {
 
     pub async fn post(&self, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         self.call(Method::Post, path, Vec::new(), body).await
+    }
+
+    /// `POST` an upload. A `429` is tried again after its `Retry-After`
+    /// (the header, else `details.retry_after`, else 2 s; at most 60 s), at
+    /// most [`UPLOAD_TRIES`] tries in all. The daemon answers `429` when all
+    /// its upload slots are busy (TER-605, TER-661).
+    pub async fn post_upload(&self, path: &str, body: Value) -> anyhow::Result<Value> {
+        let mut tries = 1;
+        loop {
+            let resp = self
+                .transport
+                .send(ApiRequest {
+                    method: Method::Post,
+                    path: path.to_owned(),
+                    query: Vec::new(),
+                    body: Some(body.clone()),
+                })
+                .await?;
+            if (200..300).contains(&resp.status) {
+                return Ok(resp.body);
+            }
+            let mut err = ServerError::from_response(&resp);
+            if resp.status != 429 {
+                return Err(err.into());
+            }
+            if tries >= UPLOAD_TRIES {
+                err.message = format!(
+                    "{} (gave up after {tries} tries; the daemon is busy with other uploads, \
+                     try again later)",
+                    err.message
+                );
+                return Err(err.into());
+            }
+            let wait = retry_after(&resp);
+            eprintln!(
+                "terrarium: the daemon is busy ({}); try {} of {UPLOAD_TRIES} in {} s",
+                err.message,
+                tries + 1,
+                wait.as_secs()
+            );
+            tokio::time::sleep(wait).await;
+            tries += 1;
+        }
     }
 
     pub async fn put(&self, path: &str, body: Value) -> anyhow::Result<Value> {

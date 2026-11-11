@@ -38,7 +38,7 @@ pub fn has_display(def: &TargetDef) -> bool {
         TargetKind::Vnc | TargetKind::Rdp | TargetKind::Desktop => true,
         TargetKind::Docker => def.display.is_some(),
         TargetKind::Vmlab => def.machine.is_some(),
-        TargetKind::Host | TargetKind::Ssh => false,
+        TargetKind::Host | TargetKind::Ssh | TargetKind::Exedev => false,
     }
 }
 
@@ -141,6 +141,8 @@ pub async fn rights(state: &Shared, actor: &Actor, row: &TargetRow) -> ApiResult
     let (standing, active) = state
         .db
         .read(move |c| {
+            // TER-623: no agent uses a release target.
+            crate::store::jobs::check_not_release_target(c, &name, "using the target")?;
             Ok((
                 leases::standing(c, &name, &me)?,
                 leases::active_on(c, &name)?,
@@ -293,7 +295,9 @@ pub fn display_target(state: &Shared, def: &TargetDef) -> ApiResult<DisplayTarge
                 password,
             }
         }
-        TargetKind::Host | TargetKind::Ssh => return Err(no_display(def)),
+        TargetKind::Host | TargetKind::Ssh | TargetKind::Exedev => {
+            return Err(no_display(def));
+        }
     })
 }
 

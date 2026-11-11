@@ -485,6 +485,15 @@ pub fn exec_limits(
     }))
 }
 
+/// A `host` target whose host agent reported enforced native GPU support
+/// (TER-345): its commands run through the root helper.
+pub fn native_enforced(def: &TargetDef, caps: Option<&HostCapabilities>) -> bool {
+    def.kind == TargetKind::Host
+        && caps
+            .and_then(|c| c.native_gpu.as_ref())
+            .is_some_and(|n| n.enforced)
+}
+
 /// On a host agent with enforced native GPU support (TER-345), every
 /// command on a `host` target runs through the root helper: with no
 /// reservation it gets no GPU. Elsewhere the grant is dropped, so a host
@@ -500,11 +509,7 @@ pub fn native_gpu_limits(
     operator: bool,
     limits: Option<ExecLimits>,
 ) -> ApiResult<Option<ExecLimits>> {
-    let native = def.kind == TargetKind::Host
-        && caps
-            .and_then(|c| c.native_gpu.as_ref())
-            .is_some_and(|n| n.enforced);
-    if !native {
+    if !native_enforced(def, caps) {
         return Ok(limits.map(|l| ExecLimits {
             native_gpu: None,
             ..l
@@ -775,8 +780,10 @@ pub fn host_frame(
             timeout_secs: cmd.timeout_secs,
         }),
         // `no_exec` refused the display-only kinds above.
+        // An exedev target never reaches a host agent: it runs over ssh.
         TargetKind::Host
         | TargetKind::Ssh
+        | TargetKind::Exedev
         | TargetKind::Vnc
         | TargetKind::Rdp
         | TargetKind::Desktop => DaemonFrame::Exec(ExecRequest {
@@ -1309,6 +1316,11 @@ pub struct Executor {
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
     pub max_per_agent: usize,
     pub ssh_bin: String,
+    /// The exe.dev HTTPS API of `exedev` targets ([`crate::exedev`]).
+    /// Tests point it at a fake.
+    pub exedev_api: String,
+    /// The locks and the sweep timer of `exedev` targets.
+    pub exedev: crate::exedev::Locks,
     pub buffer_limit: usize,
     reaper: AtomicBool,
     /// The input rate limit of target displays (docs/api.md §17.10).
@@ -1325,6 +1337,8 @@ impl Default for Executor {
             sessions: Mutex::default(),
             max_per_agent: MAX_SESSIONS_PER_AGENT,
             ssh_bin: std::env::var("TERRARIUM_SSH").unwrap_or_else(|_| "ssh".into()),
+            exedev_api: crate::exedev::DEFAULT_API.into(),
+            exedev: crate::exedev::Locks::default(),
             buffer_limit: SESSION_BUFFER,
             reaper: AtomicBool::new(false),
             display_limiter: crate::display::Limiter::default(),
@@ -1797,6 +1811,11 @@ pub(crate) fn start_cmd_locked(
     cmd: &RemoteCmd,
 ) -> ApiResult<Running> {
     no_exec(def)?;
+    // An exedev target runs its commands over ssh on its VM.
+    if def.kind == TargetKind::Exedev {
+        let d = crate::exedev::exec_def(state, def)?;
+        return start_cmd_locked(state, &d, cmd);
+    }
     // SSH takes a separate execution path, but must not bypass a host's
     // exclusive reservation policy.
     if def.kind == TargetKind::Ssh {
@@ -1943,7 +1962,12 @@ pub async fn usable(state: &Shared, actor: &Actor, name: &str) -> ApiResult<Targ
         .read(move |c| {
             let row = targets::get(c, &n)?;
             let lease = match &agent {
-                Some(a) => leases::standing(c, &n, a)?,
+                Some(a) => {
+                    // TER-623: a release target is for the release job
+                    // and the operator only, whatever the policy or lease.
+                    crate::store::jobs::check_not_release_target(c, &n, "using the target")?;
+                    leases::standing(c, &n, a)?
+                }
                 None => leases::Standing::None,
             };
             Ok((row, lease))
@@ -2166,7 +2190,15 @@ pub async fn start_tool_exec(
     run: ToolRun,
 ) -> ApiResult<Arc<ExecSession>> {
     let n = name.to_owned();
-    let row = state.db.read(move |c| targets::get(c, &n)).await?;
+    let row = state
+        .db
+        .read(move |c| {
+            // TER-623: a tool defined before its target became a release
+            // target (or its machine one) does not run there.
+            crate::store::jobs::check_not_release_target(c, &n, "running a tool on the target")?;
+            targets::get(c, &n)
+        })
+        .await?;
     check_cap(state, actor)?;
     let def = resolved_def(state, &row, Some(actor), None).await?;
     let mut cmd = cmd;
@@ -2548,7 +2580,8 @@ pub async fn start_cp(
             };
             tokio::spawn(attach(pump_host(hs), sess.clone(), ctl, push, !push));
         }
-        TargetKind::Docker | TargetKind::Ssh => {
+        // `resolved_def` made an exedev target the ssh target of its VM.
+        TargetKind::Docker | TargetKind::Ssh | TargetKind::Exedev => {
             let st = state.clone();
             let d = def.clone();
             let start = move |c: RemoteCmd| start_cmd(&st, &d, &c);
@@ -3310,6 +3343,12 @@ pub async fn lifecycle(
                 V::Snapshot | V::Restore => return unsupported("snapshot"),
             }
         }
+        TargetKind::Exedev => match verb_kind {
+            V::Status => crate::exedev::status(state, def).await?,
+            V::Up => crate::exedev::up(state, def).await?,
+            V::Down | V::Destroy => crate::exedev::destroy(state, def).await?,
+            V::Snapshot | V::Restore => return unsupported("snapshot"),
+        },
         TargetKind::Vmlab => {
             host_online(state, def)?;
             match verb_kind {
@@ -4137,6 +4176,9 @@ pub async fn resolved_def(
     actor: Option<&Actor>,
     agent: Option<&str>,
 ) -> ApiResult<TargetDef> {
+    if row.def.kind == TargetKind::Exedev {
+        return crate::exedev::exec_def(state, &row.def);
+    }
     if !is_instance_kind(&row.def) {
         return Ok(row.def.clone());
     }
@@ -4473,6 +4515,14 @@ async fn instance_lifecycle(
 /// the container of an ephemeral docker target, and the lab instances of a
 /// vmlab instance target. Best effort: a failure is logged.
 pub async fn teardown(state: &Shared, row: &TargetRow) {
+    if row.def.kind == TargetKind::Exedev {
+        // A failed `rm` keeps the VM's record, which outlives the target:
+        // the sweep removes the VM on the account it was made on.
+        if let Err(e) = crate::exedev::destroy(state, &row.def).await {
+            warn!(target = %row.def.name, "cannot remove the exe.dev VM; the sweep will: {e}");
+        }
+        return;
+    }
     if !is_instance_kind(&row.def)
         || !row
             .def
@@ -4934,8 +4984,9 @@ pub async fn on_agent_stop(
 /// branch, depth. The secret comes in the env: `TERRARIUM_GIT_USERNAME` and
 /// `TERRARIUM_GIT_PASSWORD` for a token (a credential helper of `-c` reads
 /// them; the helper text holds no secret), or `TERRARIUM_GIT_SSH_KEY`
-/// (written to a 0600 file in a 0700 temp dir for `GIT_SSH_COMMAND`,
-/// removed at exit). ssh reads no config file (`-F /dev/null`), and its
+/// (base64 on one line, [`checkout_script_env`]; decoded with `base64 -d`
+/// into a 0600 file in a 0700 temp dir for `GIT_SSH_COMMAND`, removed at
+/// exit). ssh reads no config file (`-F /dev/null`), and its
 /// known hosts are a file in that dir, seeded from
 /// `TERRARIUM_GIT_KNOWN_HOSTS` ([`git_known_hosts`]).
 ///
@@ -4989,7 +5040,10 @@ if [ -n "${TERRARIUM_GIT_PASSWORD:-}" ]; then
 fi
 if [ -n "${TERRARIUM_GIT_SSH_KEY:-}" ]; then
   keyfile=$sshdir/key
-  (umask 077 && printf '%s\n' "$TERRARIUM_GIT_SSH_KEY" > "$keyfile")
+  # The key comes base64-encoded on one line (TER-577), as the env of an ssh
+  # target does: a docker target then keeps it in its 0600 env file.
+  (umask 077 && printf '%s' "$TERRARIUM_GIT_SSH_KEY" | base64 -d > "$keyfile") \
+    || { echo "cannot decode the SSH key: the target needs base64 -d"; exit 2; }
   export GIT_SSH_COMMAND="$sshbase -i $keyfile -o IdentitiesOnly=yes"
 fi
 unset TERRARIUM_GIT_SSH_KEY
@@ -5000,7 +5054,8 @@ G() {
     -c protocol.git.allow=never -c protocol.ext.allow=never -c protocol.fd.allow=never \
     -c protocol.ftp.allow=never -c protocol.ftps.allow=never -c fetch.recurseSubmodules=false \
     -c submodule.recurse=false -c gc.auto=0 -c maintenance.auto=false \
-    -c merge.verifySignatures=false -c advice.detachedHead=false -c core.pager=cat "$@"
+    -c merge.verifySignatures=false -c advice.detachedHead=false -c core.pager=cat \
+    ${safe:+-c "safe.directory=$safe"} "$@"
 }
 g() {
   if [ -n "$helper" ]; then G -c "credential.helper=$helper" "$@"; else G "$@"; fi
@@ -5032,7 +5087,12 @@ check_config() {
   done
 }
 note=
+safe=
 if [ -d "$dest/.git" ]; then
+  # Another UID can own the repo: on a native host the sessions of one
+  # agent run as different pool UIDs (TER-635). Its config is checked
+  # below and runs with the overrides of G, so trust this one path.
+  safe=$(cd "$dest" && pwd -P)
   bad=$(check_config)
   if [ -n "$bad" ]; then
     forget
@@ -5092,6 +5152,19 @@ pub fn checkout_env(secret: Option<&Secret>) -> BTreeMap<String, String> {
     env
 }
 
+/// The env of [`CHECKOUT_SCRIPT`] for a secret: [`checkout_env`], with the
+/// SSH key base64-encoded on one line (TER-577). A multi-line value on a
+/// docker target would go into the env of the host's `docker` CLI; one line
+/// goes into the 0600 env file. The vmlab prepare reads [`checkout_env`] on
+/// the host agent and keeps the plain key.
+pub fn checkout_script_env(secret: Option<&Secret>) -> BTreeMap<String, String> {
+    let mut env = checkout_env(secret);
+    if let Some(k) = env.get_mut("TERRARIUM_GIT_SSH_KEY") {
+        *k = base64::engine::general_purpose::STANDARD.encode(format!("{k}\n"));
+    }
+    env
+}
+
 /// The checkout command, without the secret: that goes in `env`.
 pub fn checkout_cmd(
     url: &str,
@@ -5131,7 +5204,7 @@ pub fn checkout_cmd(
             branch.unwrap_or_default().into(),
             depth.map(|d| d.to_string()).unwrap_or_default(),
         ],
-        env: checkout_env(secret),
+        env: checkout_script_env(secret),
         timeout_secs: Some(VERB_TIMEOUT),
         ..RemoteCmd::default()
     })
@@ -5420,6 +5493,84 @@ mod tests {
         assert_eq!(
             v,
             json!({"action": "cloned", "head": "abc", "branch": "main", "path": "/h/work/r"})
+        );
+    }
+
+    /// TER-577: the SSH key goes to the checkout script base64-encoded on
+    /// one line, so a docker target keeps it in its env file and never in
+    /// the env of the `docker` CLI. The script decodes it into the key file
+    /// that ssh gets; the vmlab prepare keeps the plain key.
+    #[test]
+    fn checkout_sends_the_ssh_key_on_one_line() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        let key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE=\n-----END OPENSSH PRIVATE KEY-----\n";
+        let s = Secret::SshKey(zeroize::Zeroizing::new(key.into()));
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dest = root.join("dest");
+        let c = checkout_cmd(
+            "ssh://git@h.invalid/r.git",
+            dest.to_str().unwrap(),
+            None,
+            None,
+            Some(&s),
+        )
+        .unwrap();
+        let v = c.env["TERRARIUM_GIT_SSH_KEY"].clone();
+        assert!(!v.contains(['\n', '\r']), "{v}");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&v)
+                .unwrap(),
+            key.as_bytes()
+        );
+        assert_eq!(
+            checkout_env(Some(&s))["TERRARIUM_GIT_SSH_KEY"],
+            key.trim_end()
+        );
+        // A fake ssh first in PATH copies the key file that it gets.
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let got = root.join("got");
+        std::fs::write(
+            bin.join("ssh"),
+            format!(
+                "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -i ]; then cp \"$2\" {}; fi; shift; done\nexit 1\n",
+                got.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("ssh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let run = |env: &BTreeMap<String, String>| {
+            Command::new(&c.argv[0])
+                .args(&c.argv[1..])
+                .env_clear()
+                .env("PATH", &path)
+                .env("HOME", root)
+                .envs(env)
+                .output()
+                .unwrap()
+        };
+        let out = run(&c.env);
+        assert_eq!(
+            std::fs::read_to_string(&got).unwrap_or_default(),
+            key,
+            "{out:?}"
+        );
+        // A value that is not base64 stops the script before git runs.
+        let mut bad = c.env.clone();
+        bad.insert("TERRARIUM_GIT_SSH_KEY".into(), "not base64!".into());
+        let out = run(&bad);
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("cannot decode the SSH key"),
+            "{out:?}"
         );
     }
 

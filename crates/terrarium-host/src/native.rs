@@ -778,9 +778,33 @@ fn valid_env_name(k: &str) -> bool {
         && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
 }
 
-/// One line of a systemd environment file. In double quotes, systemd
-/// takes a backslash before `"`, `\`, `` ` ``, and `$` as the plain
-/// character, and expands nothing.
+/// A value that [`env_line`] carries to the unit byte for byte. Newlines,
+/// carriage returns, and other control characters are fine (TER-566: the
+/// daemon sends multi-line git trailers and hooks). Refused: NUL, which no
+/// environment can hold, and the characters that systemd's UTF-8 check
+/// (`unichar_is_valid`, v254) rejects, so that a request fails here with a
+/// clear error, not at unit start. Control characters are fine only because
+/// [`MIN_SYSTEMD`] is at least 248: from v248, systemd's `env_value_is_valid`
+/// accepts them, v239 to v247 drop a value with a carriage return, and older
+/// versions drop every control character but tab.
+fn valid_env_value(v: &str) -> bool {
+    !v.chars().any(|c| {
+        let u = u32::from(c);
+        u == 0 || (0xFDD0..=0xFDEF).contains(&u) || u & 0xFFFE == 0xFFFE
+    })
+}
+
+/// One assignment of a systemd environment file, in double quotes. In
+/// double quotes, systemd (`parse_env_file_internal`, v254) keeps every
+/// character as it is, also a newline or a carriage return, takes a
+/// backslash before `"`, `\`, `` ` ``, and `$` as the plain character,
+/// and expands nothing. systemd's own `write_env_var` writes a value with
+/// control characters the same way. Each of the four is escaped here, so
+/// no other backslash pair (and no backslash before a newline, which
+/// systemd would drop as a line continuation) can occur. A multi-line
+/// value reaches the unit only because [`MIN_SYSTEMD`] is at least 248, the
+/// first systemd whose `env_value_is_valid` keeps control characters (see
+/// `valid_env_value`).
 pub fn env_line(key: &str, value: &str) -> String {
     let mut out = format!("{key}=\"");
     for c in value.chars() {
@@ -844,13 +868,11 @@ pub fn plan_start(
     if req.env.len() > MAX_ENV {
         return Err(Refusal::invalid("too many environment variables"));
     }
-    let mut env = String::new();
     for (k, v) in &req.env {
-        if !valid_env_name(k) || v.contains(['\0', '\n', '\r']) {
+        if !valid_env_name(k) || !valid_env_value(v) {
             return Err(Refusal::invalid(format!("bad environment variable {k:?}")));
         }
         size += k.len() + v.len() + 2;
-        env.push_str(&env_line(k, v));
     }
     if size > MAX_FRAME {
         return Err(Refusal::invalid("command and environment too large"));
@@ -878,6 +900,14 @@ pub fn plan_start(
             req.holder
         )));
     }
+
+    let mut vars = req.env.clone();
+    if let Some(w) = &own
+        && *w != ctx.workspace_root
+    {
+        add_safe_directory(&mut vars)?;
+    }
+    let env: String = vars.iter().map(|(k, v)| env_line(k, v)).collect();
 
     let mut devices = Vec::new();
     if !req.gpus.is_empty() {
@@ -940,6 +970,18 @@ pub fn plan_start(
         "CapabilityBoundingSet=",
         "AmbientCapabilities=",
         "RestrictSUIDSGID=yes",
+        // The unit's /proc shows only the processes of its own UID
+        // (hidepid=invisible, TER-638): a session sees neither the host's
+        // processes nor their command lines, and cannot open
+        // /proc/<pid>/root or cwd of a session of another UID. The UID is
+        // that of one holder only ([`Sessions::admit`]), so every process
+        // that stays visible is of the same holder and has the same
+        // workspace scope. ProcSubset=pid is not set: CUDA and nvidia-smi
+        // read /proc/driver/nvidia, and build tools read /proc/meminfo.
+        // PrivatePIDs= needs systemd 257 (above [`MIN_SYSTEMD`]) and makes
+        // the command PID 1, which ignores SIGINT and SIGTERM without a
+        // handler.
+        "ProtectProc=invisible",
         // A pool UID passes to another holder when its holder's last
         // session ends. What the UID can reach from one holder to the next:
         // /tmp and /var/tmp are private to the unit; systemd removes the
@@ -950,10 +992,27 @@ pub fn plan_start(
         // with only this holder's workspace scope bound in (below,
         // [`holder_workspace`]): a file that an earlier holder of the UID
         // left in another trust domain, also a 0600 one, does not exist in
-        // the unit.
+        // the unit. PrivateIPC gives each unit its own IPC namespace
+        // (System V and POSIX message queues): a session does not see the
+        // IPC objects of the host users or of other sessions (TER-641).
+        // ProtectHome=tmpfs puts an empty read-only tmpfs over /home,
+        // /root and /run/user: git trusts every repo (safe.directory=*),
+        // so a repo there that the UID can read would run its config
+        // (core.fsmonitor, hooks) as the UID (TER-659). The pool users
+        // have no home directory, so nothing of theirs is hidden.
         "PrivateTmp=yes",
+        "PrivateIPC=yes",
+        // The sessions of one holder can run as different pool UIDs (one
+        // per session, TER-635). What one of them makes in the holder's
+        // workspace must stay writable for the others: they share the
+        // group terrarium-ws, which the setgid workspace root passes on to
+        // each new directory. UMask=0007 keeps the group bits and drops
+        // the other bits. The holder's directory stays private to the
+        // holder through the mount view (below), not through the owner.
+        "UMask=0007",
         "RemoveIPC=yes",
         "ProtectSystem=strict",
+        "ProtectHome=tmpfs",
         "KillMode=control-group",
         "DevicePolicy=closed",
         "DeviceAllow=char-pts rw",
@@ -1014,6 +1073,31 @@ pub fn plan_start(
     })
 }
 
+/// Add `safe.directory=*` to git's command-line config scope
+/// (`GIT_CONFIG_COUNT`), after the entries that the request already has
+/// (TER-635). A holder's repos can be owned by another pool UID
+/// of the same holder (one per session), which git refuses as "dubious
+/// ownership". `*`, not the workspace path: git before 2.46 (Debian 12 has
+/// 2.39) matches no path prefix, and the repos are anywhere under the
+/// workspace. The unit sees only its holder's workspace scope (the
+/// workspace root is a read-only tmpfs with only that scope bound in), so
+/// the repos it can write there belong to its own trust domain. The
+/// operator, which sees every holder's workspace, gets no override.
+fn add_safe_directory(env: &mut BTreeMap<String, String>) -> Result<(), Refusal> {
+    let n = match env.get("GIT_CONFIG_COUNT") {
+        None => 0,
+        Some(c) => c
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n < 1000)
+            .ok_or_else(|| Refusal::invalid("bad environment variable \"GIT_CONFIG_COUNT\""))?,
+    };
+    env.insert("GIT_CONFIG_COUNT".into(), (n + 1).to_string());
+    env.insert(format!("GIT_CONFIG_KEY_{n}"), "safe.directory".into());
+    env.insert(format!("GIT_CONFIG_VALUE_{n}"), "*".into());
+    Ok(())
+}
+
 /// `systemctl set-property --runtime` of a slice, from typed limits only.
 pub fn slice_args(slice: &str, l: &RuntimeLimits) -> Result<Vec<String>, Refusal> {
     let mut a = vec![
@@ -1037,7 +1121,8 @@ pub fn safe_cwd(root: &Path, cwd: &str) -> Result<PathBuf, Refusal> {
         .map_err(|e| Refusal::invalid(format!("working directory {cwd}: {e}")))?;
     if !real.starts_with(root) || !real.is_dir() {
         return Err(Refusal::invalid(format!(
-            "working directory {cwd} is not under the workspace root"
+            "working directory {cwd} is not under the workspace root {}",
+            root.display()
         )));
     }
     let s = real.to_string_lossy();
@@ -1133,13 +1218,23 @@ pub fn holder_workspace(root: &Path, holder: &str) -> Result<Option<PathBuf>, Re
 }
 
 /// `workspace_root` at helper start: not under /tmp or /var/tmp, which
-/// `PrivateTmp=yes` replaces in each unit (every session would fail).
+/// `PrivateTmp=yes` replaces in each unit, and not under /home, /root or
+/// /run/user, which `ProtectHome=tmpfs` hides (every session would fail).
 pub fn check_workspace_root(root: &Path) -> Result<(), String> {
     for tmp in ["/tmp", "/var/tmp"] {
         if root.starts_with(tmp) {
             return Err(format!(
                 "workspace_root {} is under {tmp}, which each session gets a private copy of \
                  (PrivateTmp=yes): put the workspace elsewhere, for example /srv/terrarium/work",
+                root.display()
+            ));
+        }
+    }
+    for home in ["/home", "/root", "/run/user"] {
+        if root.starts_with(home) {
+            return Err(format!(
+                "workspace_root {} is under {home}, which each session hides \
+                 (ProtectHome=tmpfs): put the workspace elsewhere, for example /srv/terrarium/work",
                 root.display()
             ));
         }
@@ -2018,12 +2113,28 @@ pub fn bind(socket: &Path, agent_uid: u32) -> std::io::Result<UnixListener> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let old = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o177));
-    let listener = UnixListener::bind(socket);
-    nix::sys::stat::umask(old);
-    let listener = listener?;
-    std::os::unix::fs::chown(socket, Some(agent_uid), None)?;
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    // Bind in a private 0700 directory next to the socket, give the socket
+    // its owner and mode there, then rename it into place. Nobody else can
+    // reach it before it has mode 0600, and the process umask stays as it
+    // is (it is per process: other threads would create files with it).
+    // The short names keep the temporary path near the length of `socket`
+    // (a socket path has a limit of about 108 bytes).
+    let parent = match socket.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let private = tempfile::Builder::new().prefix(".b").tempdir_in(parent)?;
+    std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700))?;
+    let tmp = private.path().join("s");
+    let listener = UnixListener::bind(&tmp)?;
+    std::os::unix::fs::chown(&tmp, Some(agent_uid), None)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&tmp, socket)?;
+    // The socket is in place: a failed removal of the empty directory is
+    // not a failed bind.
+    if let Err(e) = private.close() {
+        tracing::warn!(error = %e, "cannot remove the private bind directory");
+    }
     Ok(listener)
 }
 

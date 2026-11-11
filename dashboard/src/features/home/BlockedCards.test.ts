@@ -6,6 +6,7 @@
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import type { ActiveCard } from "../../api/types";
 
 const active = vi.fn();
@@ -57,7 +58,7 @@ async function mount(now: number) {
   const el = document.createElement("div");
   document.body.append(el);
   dispose = render(() => createComponent(BlockedCards, { now }), el);
-  await vi.waitFor(() => expect(active).toHaveBeenCalled());
+  await waitFor(() => expect(active).toHaveBeenCalled());
   await new Promise((r) => setTimeout(r, 0));
   return el;
 }
@@ -76,7 +77,7 @@ describe("BlockedCards", () => {
     ]);
     const el = await mount(Date.parse("2026-11-06T12:00:00Z"));
     expect(active).toHaveBeenCalledWith({ columns: ["blocked"] });
-    await vi.waitFor(() => expect(el.querySelectorAll("tr[data-card]").length).toBe(2));
+    await waitFor(() => expect(el.querySelectorAll("tr[data-card]").length).toBe(2));
 
     expect(el.querySelectorAll("table").length).toBe(1);
     const cols = [...el.querySelectorAll("table > colgroup > col")].map((c) => c.className);
@@ -101,6 +102,6 @@ describe("BlockedCards", () => {
   it("shows the empty state", async () => {
     active.mockResolvedValue([]);
     const el = await mount(Date.now());
-    await vi.waitFor(() => expect(el.textContent).toContain("Nothing is blocked."));
+    await waitFor(() => expect(el.textContent).toContain("Nothing is blocked."));
   });
 });

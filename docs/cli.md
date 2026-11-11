@@ -161,6 +161,7 @@ terrarium project repo-add <url> [--name n] [--branch b] [--credential key] [--p
 terrarium repo ls
 terrarium repo add <url> ...                  the same as project repo-add
 terrarium repo checkout <repo> [--target T] [--branch b] [--path p] [--depth n] [--agent a]
+terrarium repo rm <repo>                      project_admin; no confirm prompt
 ```
 
 `repo checkout` takes a repo name or ID. It clones or updates the repo in
@@ -1576,9 +1577,9 @@ wakes the agent. A worker gets `403` (exit 3): it mails its lead.
 
 ```
 terrarium question ask "<text>" [--option <label>]... [--context <text|-> | --context-file <path>]
-                       [--card <id>] [--urgent | --critical] [--wait [--timeout 2h]]
+                       --card <id> [--urgent | --critical] [--wait [--timeout 2h]]
 terrarium question bundle "<summary>" (--item "<text>"... | --items-file <path|->)
-                       [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
+                       [--context <text|-> | --context-file <path>] --card <id> [--urgent | --critical]
                        [--wait [--timeout 2h]]
 terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
                  [--reply-to <id>] [--wait [--timeout 2h]]

@@ -30,7 +30,15 @@ async fn lab() -> Lab {
 }
 
 impl Lab {
-    async fn ask(&self, body: Value) -> Value {
+    async fn ask(&self, mut body: Value) -> Value {
+        if body.get("card").is_none() && body.get("thread").is_none() {
+            body["card"] = self
+                .td
+                .post("/api/projects/p/cards", json!({"title": "Decision"}))
+                .await
+                .ok()["id"]
+                .clone();
+        }
         let r = self
             .td
             .post_as(
@@ -240,9 +248,9 @@ async fn the_agent_retracts_from_the_thread_and_asks_a_revised_question() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let tid = id(&r.body["thread"]);
-    // No card, no message: the first message has the question only.
+    // The decision's work card follows it into the thread.
     let th = lab.thread(&tid).await;
-    assert!(th["cards"].as_array().unwrap().is_empty());
+    assert_eq!(th["cards"].as_array().unwrap().len(), 1);
 
     // A question wait of the agent on the moved question stays open.
     // The agent retracts it from the thread, and asks a revised one there.
@@ -394,8 +402,11 @@ async fn a_deleted_agent_retracts_its_moved_questions() {
     lab.td
         .post_empty(&format!("/api/questions/{qid}/to-thread"))
         .await;
+    // The to-thread call starts a turn for the asking agent, so its session
+    // can be live here. The test is about the retraction, not the confirm
+    // guard (TER-594).
     lab.td
-        .delete(&format!("/api/agents/{}", lab.lead))
+        .delete(&format!("/api/agents/{}?confirm=true", lab.lead))
         .await
         .ok();
     assert_eq!(lab.question(&qid).await["status"], "retracted");

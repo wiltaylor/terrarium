@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { waitFor } from "../test/wait";
 import type { Repo } from "../api/types";
 import { createReposStore } from "./repos";
 
@@ -12,7 +13,7 @@ describe("createReposStore", () => {
     expect(st.inProject("alpha")).toEqual([]);
     st.load("alpha");
     st.load("alpha");
-    await vi.waitFor(() => expect(st.loaded("alpha")).toBe(true));
+    await waitFor(() => expect(st.loaded("alpha")).toBe(true));
     expect(list).toHaveBeenCalledTimes(1);
     expect(st.inProject("alpha").map((r) => r.name)).toEqual(["infra", "web"]);
   });

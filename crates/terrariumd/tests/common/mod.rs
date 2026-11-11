@@ -24,6 +24,70 @@ pub const DELAY: Duration = Duration::from_millis(20);
 /// load 90 on 32 cores, agent starts stayed `starting` and stops stayed
 /// `idle` for over 15 s, and each test passed alone (TER-471).
 pub const WAIT: Duration = Duration::from_secs(60);
+/// The longest time a [`Stall`] wait goes on while it still makes progress.
+pub const HARD_WAIT: Duration = Duration::from_secs(180);
+
+/// The deadline of a wait that counts only time without progress. Under
+/// merge-job load (load 40 to 60 on 32 cores) real runner starts and
+/// restarts went past a fixed deadline from the start of the wait while
+/// the agent still moved (TER-647). The wait fails after [`WAIT`] with
+/// the same mark, or after [`HARD_WAIT`] in all.
+pub struct Stall<M> {
+    mark: M,
+    since: std::time::Instant,
+    start: std::time::Instant,
+    window: Duration,
+    hard: Duration,
+}
+
+impl<M: PartialEq + std::fmt::Debug> Stall<M> {
+    pub fn new(mark: M) -> Self {
+        Self::with_limits(mark, WAIT, HARD_WAIT)
+    }
+
+    /// A wait that fails after `window` without progress, or after `hard`
+    /// in all.
+    pub fn with_limits(mark: M, window: Duration, hard: Duration) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            mark,
+            since: now,
+            start: now,
+            window,
+            hard,
+        }
+    }
+
+    /// True when the window went by since the last progress: read a new
+    /// mark and give it to [`Stall::moved`].
+    pub fn due(&self) -> bool {
+        self.since.elapsed() >= self.window
+    }
+
+    /// Takes a new mark. A changed mark is progress and starts a new
+    /// window. False: the wait has failed.
+    pub fn moved(&mut self, mark: M) -> bool {
+        if mark == self.mark || self.start.elapsed() >= self.hard {
+            return false;
+        }
+        self.mark = mark;
+        self.since = std::time::Instant::now();
+        true
+    }
+}
+
+impl<M: std::fmt::Debug> std::fmt::Display for Stall<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no progress for {:.0}s after {:.0}s, last mark {:?}",
+            self.since.elapsed().as_secs_f64(),
+            self.start.elapsed().as_secs_f64(),
+            self.mark
+        )
+    }
+}
+
 /// The longest time daemon boot waits for job queue recovery.
 pub const RECOVERY_WAIT: Duration = Duration::from_secs(90);
 
@@ -107,6 +171,51 @@ impl Resp {
 /// UTC midnight, the first line lands on midnight instead (so a run in the
 /// first seconds of a day can get stamps a few seconds in the future). Lines
 /// that are not JSON stay as they are. The source fixture file is not changed.
+/// A local bare repo for tests of the merge queue (TER-553): the API and
+/// the review accept read the head of each card branch with `git
+/// ls-remote`, so the repo of such a test needs the branches. It has `next`
+/// and the branches of the cards of projects `p`, `q`, `coded`, and
+/// `ruled` (`p-1` to `p-40`, and so on), all at one commit. Its directory
+/// lives until the test process ends. Returns its path, for a repo `url`.
+pub fn branch_remote() -> String {
+    let dir = std::env::temp_dir().join(format!("terrarium-remote-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str], input: Option<&str>| -> String {
+        use std::io::Write;
+        let mut c = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin
+            .take()
+            .unwrap()
+            .write_all(input.unwrap_or("").as_bytes())
+            .unwrap();
+        let out = c.wait_with_output().unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q", "--bare", "-b", "main"], None);
+    let tree = git(&["mktree"], Some(""));
+    let commit = git(&["commit-tree", &tree, "-m", "base"], None);
+    let mut refs = format!("update refs/heads/main {commit}\nupdate refs/heads/next {commit}\n");
+    for prefix in ["p", "q", "cod", "rul"] {
+        for i in 1..=40 {
+            refs.push_str(&format!("update refs/heads/{prefix}-{i} {commit}\n"));
+        }
+    }
+    git(&["update-ref", "--stdin"], Some(&refs));
+    dir.display().to_string()
+}
+
 pub fn restamp_transcript(text: &str) -> String {
     use chrono::{DateTime, Utc};
     let stamps: Vec<DateTime<Utc>> = text
@@ -305,14 +414,28 @@ impl TestDaemon {
         token: Option<&str>,
         ssh: Option<&str>,
     ) {
+        self.boot_with_executor(listen, token, |executor| {
+            if let Some(ssh) = ssh {
+                executor.ssh_bin = ssh.to_owned();
+            }
+        })
+        .await;
+    }
+
+    /// Start (or start again) the daemon with an executor that `f` sets up
+    /// (a fake `ssh`, a fake exe.dev API).
+    pub async fn boot_with_executor(
+        &mut self,
+        listen: Option<&str>,
+        token: Option<&str>,
+        f: impl FnOnce(&mut terrariumd::executor::Executor),
+    ) {
         if let Some(d) = self.daemon.take() {
-            d.shutdown();
+            d.shutdown_and_wait().await;
         }
         seed_database(&self.state);
         let mut executor = terrariumd::executor::Executor::default();
-        if let Some(ssh) = ssh {
-            executor.ssh_bin = ssh.to_owned();
-        }
+        f(&mut executor);
         let daemon = terrariumd::start_with_executor(
             DaemonConfig {
                 socket: self.socket.clone(),
@@ -423,6 +546,9 @@ impl TestDaemon {
     pub async fn put_as(&self, agent: &str, path: &str, body: Value) -> Resp {
         self.req(Method::PUT, path, Some(body), Some(agent)).await
     }
+    pub async fn delete_as(&self, agent: &str, path: &str) -> Resp {
+        self.req(Method::DELETE, path, None, Some(agent)).await
+    }
 
     /// Open a WebSocket on the Unix socket.
     pub async fn ws(
@@ -461,21 +587,46 @@ impl TestDaemon {
         self.post("/api/agents", def).await.ok().clone()
     }
 
-    /// Poll until the agent has `status`.
+    /// The newest event `seq` of the whole daemon: what moves while a
+    /// start, a turn, a job or a rule run goes on.
+    pub async fn last_seq(&self) -> i64 {
+        let db = self.daemon.as_ref().unwrap().state.db.clone();
+        db.read(terrariumd::events::last_seq).await.unwrap()
+    }
+
+    /// The progress of agent `agent`: its newest event `seq`, its status,
+    /// and the newest event of the daemon.
+    pub async fn agent_progress(&self, agent: &str) -> (Value, Value, i64) {
+        let newest = self
+            .get(&format!("/api/agents/{agent}/events?order=desc&limit=1"))
+            .await;
+        let status = self.get(&format!("/api/agents/{agent}")).await;
+        (
+            newest.body[0]["seq"].clone(),
+            status.body["status"].clone(),
+            self.last_seq().await,
+        )
+    }
+
+    /// Poll until the agent has `status`. The wait counts only time
+    /// without progress ([`Stall`]): under merge-job load a fake start
+    /// stayed `starting` for over [`WAIT`] while the daemon still moved
+    /// (TER-674).
     pub async fn wait_status(&self, agent: &str, status: &str) {
-        // A deadline, not a count of tries: on a loaded machine each GET is
-        // slow, and a start can take seconds. Only a failing test waits it out.
-        let start = std::time::Instant::now();
+        let mut stall = Stall::new(self.agent_progress(agent).await);
         loop {
             let r = self.get(&format!("/api/agents/{agent}")).await;
             if r.body["status"] == status {
                 return;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "agent {agent} never reached {status}; last {}",
-                r.body["status"]
-            );
+            if stall.due() {
+                let mark = self.agent_progress(agent).await;
+                assert!(
+                    stall.moved(mark),
+                    "agent {agent} never reached {status}; last {} ({stall})",
+                    r.body["status"]
+                );
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }

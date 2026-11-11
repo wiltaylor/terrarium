@@ -162,25 +162,42 @@ async fn boot(config: impl FnOnce(&Path), tune: impl FnOnce(&mut UsageConfig, &P
 }
 
 /// The `login_sessions` row of an ended login has no URL and no device
-/// code (`docs/security-review.md` F6).
+/// code (`docs/security-review.md` F6). The API answers from the session
+/// view, and the row is written just after it: wait for the row, up to
+/// [`common::WAIT`]. Under load the check read the row before that write
+/// (TER-667).
 async fn assert_login_row_clean(td: &TestDaemon, id: &str) {
-    let key = id.to_owned();
-    let (url, code): (Option<String>, Option<String>) = td
-        .daemon
-        .as_ref()
-        .unwrap()
-        .state
-        .db
-        .read(move |c| {
-            Ok(c.query_row(
-                "SELECT url, device_code FROM login_sessions WHERE id = ?1",
-                [&key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .await
-        .unwrap();
-    assert_eq!((url, code), (None, None), "login {id}");
+    let row = || async {
+        let key = id.to_owned();
+        let row: (Option<String>, Option<String>) = td
+            .daemon
+            .as_ref()
+            .unwrap()
+            .state
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT url, device_code FROM login_sessions WHERE id = ?1",
+                    [&key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        row
+    };
+    let start = std::time::Instant::now();
+    loop {
+        let (url, code) = row().await;
+        if url.is_none() && code.is_none() {
+            return;
+        }
+        assert!(
+            start.elapsed() < common::WAIT,
+            "login {id} row kept url {url:?} and device code {code:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 fn claude_creds(home: &Path) {
@@ -2941,6 +2958,8 @@ async fn openai_compatible_rows_become_selfhosted() {
         plan: None,
         base_url: Some("http://old.lan:8000/v1".into()),
         models: vec!["m1".into()],
+        key_id: None,
+        cloud: None,
     };
     terrariumd::login_session::store_key(&td.state, "old", &key).unwrap();
     state
@@ -2983,4 +3002,276 @@ async fn openai_compatible_rows_become_selfhosted() {
         .await
         .unwrap();
     assert!(again.is_empty());
+}
+
+/// TER-630: a cloud subscription with a monthly budget. The key endpoint
+/// stores the key and the `[cloud]` settings; the answer and the window
+/// have no secret. At 100 percent of the budget, the agents on it are held
+/// until the next month; a raised budget ends the hold at the next check.
+#[tokio::test]
+async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.project("p").await;
+    let r = td
+        .post(
+            "/api/subscriptions/aws/api-key",
+            json!({"provider": "bedrock", "key": "E2E-SECRET-bedrock-1", "key_id": "AKIAE2E1",
+                   "cloud": {"region": "us-east-1", "budget_usd": 10,
+                             "models": {"opus": "us.anthropic.claude-opus-5-5"}}}),
+        )
+        .await;
+    let sub = r.ok().clone();
+    let text = sub.to_string();
+    assert!(
+        !text.contains("E2E-SECRET") && !text.contains("AKIAE2E1"),
+        "{text}"
+    );
+    assert_eq!(sub["provider"], "bedrock");
+    assert_eq!(sub["harnesses"], json!(["claude"]));
+    assert_eq!(sub["cloud"]["budget_usd"], 10);
+    // A key of another kind, a bad setting, or pi: refused.
+    td.post(
+        "/api/subscriptions/aws/api-key",
+        json!({"provider": "foundry", "key": "k", "cloud": {"resource": "r"}}),
+    )
+    .await
+    .err(422, "invalid");
+    td.post(
+        "/api/subscriptions/gcp1/api-key",
+        json!({"provider": "gcp", "key": "{\"type\":\"service_account\"}"}),
+    )
+    .await
+    .err(422, "invalid");
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "aws-pi", "provider": "bedrock", "harnesses": ["claude", "pi"]}),
+    )
+    .await
+    .err(422, "invalid");
+
+    let a = td
+        .agent("p", "worker", json!({"subscription": "aws"}))
+        .await;
+    let id = a["id"].as_str().unwrap().to_owned();
+    td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
+    td.wait_status(&id, "idle").await;
+
+    // 12 USD of a 10 USD budget: used up, the turns wait.
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let month = terrarium_core::cloud::month_key(chrono::Utc::now());
+    let (agent, m) = (id.clone(), month.clone());
+    state
+        .db
+        .write("t", move |t| {
+            terrariumd::store::cloud_spend::record(t, &agent, "s1", Some("aws"), &m, 12.0)
+        })
+        .await
+        .unwrap();
+    terrariumd::cloud_budget::check(&state, "aws")
+        .await
+        .unwrap();
+    td.wait_status(&id, "blocked").await;
+    let blocked = events_of(td, "quota.blocked").await;
+    assert_eq!(blocked.len(), 1, "{blocked:?}");
+    assert_eq!(blocked[0]["data"]["cause"], "cloud-budget:aws");
+    let until = blocked[0]["data"]["until"].as_str().unwrap();
+    assert!(until.ends_with("-01T00:00:00Z"), "{until}");
+    let win = td.get("/api/subscriptions/aws").await.ok().clone();
+    let budget = win["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["window"] == "budget")
+        .unwrap_or_else(|| panic!("no budget window: {win}"))
+        .clone();
+    assert_eq!(budget["used_pct"], 100.0);
+    assert_eq!(budget["balance"]["used"], 12.0);
+    assert_eq!(budget["balance"]["remaining"], 0.0);
+    assert_eq!(budget["balance"]["total"], 10.0);
+    assert_eq!(budget["balance"]["currency"], "USD");
+    // A second check holds nothing twice.
+    terrariumd::cloud_budget::check(&state, "aws")
+        .await
+        .unwrap();
+    assert_eq!(events_of(td, "quota.blocked").await.len(), 1);
+
+    // The operator raises the budget: the next check ends the hold.
+    td.put(
+        "/api/subscriptions/aws/cloud",
+        json!({"region": "us-east-1", "budget_usd": 50,
+               "models": {"opus": "us.anthropic.claude-opus-5-5"}}),
+    )
+    .await
+    .ok();
+    // A settings-only replacement needs no credential.
+    let sub = td.get("/api/subscriptions/aws").await.ok().clone();
+    assert_eq!(sub["cloud"]["budget_usd"], 50);
+    assert_eq!(
+        sub["cloud"]["models"]["opus"],
+        "us.anthropic.claude-opus-5-5"
+    );
+    // An agent model that is neither an alias nor in the map: refused at
+    // create, naming the sub and the key.
+    let r = td
+        .post(
+            "/api/agents",
+            json!({"name": "typo", "project": "p", "harness": "claude",
+                   "subscription": "aws", "model": "claude-sonet-5"}),
+        )
+        .await;
+    r.err(422, "invalid");
+    let msg = r.body.to_string();
+    assert!(
+        msg.contains("`aws`") && msg.contains("cloud.models.claude-sonet-5"),
+        "{msg}"
+    );
+    td.agent(
+        "p",
+        "aliased",
+        json!({"subscription": "aws", "model": "sonnet"}),
+    )
+    .await;
+    let rejected = td
+        .patch(&format!("/api/agents/{id}"), json!({"model": "unmapped"}))
+        .await;
+    rejected.err(422, "invalid");
+    assert!(rejected.body.to_string().contains("cloud.models.unmapped"));
+    let rejected = td
+        .post(
+            "/api/templates",
+            json!({"name": "bad-cloud", "spec": {"harness": "claude",
+                   "subscription": "aws", "model": "unmapped"}}),
+        )
+        .await;
+    rejected.err(422, "invalid");
+    assert!(rejected.body.to_string().contains("cloud.models.unmapped"));
+    terrariumd::cloud_budget::check(&state, "aws")
+        .await
+        .unwrap();
+    wait_for("the release", || async {
+        events_of(td, "quota.resumed").await.len() == 1
+    })
+    .await;
+    td.wait_status(&id, "idle").await;
+}
+
+/// TER-665: settings responses use metadata, not the credential contents.
+#[tokio::test]
+async fn cloud_settings_response_never_reads_the_key_file() {
+    use std::io::Write;
+
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.post(
+        "/api/subscriptions/aws/api-key",
+        json!({"provider": "bedrock", "key": "E2E-bedrock-token",
+               "cloud": {"region": "us-east-1"}}),
+    )
+    .await
+    .ok();
+    let path = terrariumd::login_session::key_path(&td.state, "aws");
+    // Invalid UTF-8 cannot be read as a stored key. Presence is metadata only.
+    std::fs::write(&path, [0xff]).unwrap();
+    let r = td
+        .put(
+            "/api/subscriptions/aws/cloud",
+            json!({"region": "us-west-2"}),
+        )
+        .await;
+    assert_eq!(r.ok()["has_api_key"], true);
+    assert_eq!(r.body["cloud"]["region"], "us-west-2");
+    assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
+
+    // Reading this FIFO blocks until the writer closes. A metadata-only
+    // response completes while it is still open. Release it even on failure
+    // so a regression cannot leave the daemon's DB thread stuck.
+    std::fs::remove_file(&path).unwrap();
+    nix::unistd::mkfifo(
+        &path,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        td.put(
+            "/api/subscriptions/aws/cloud",
+            json!({"region": "us-east-1"}),
+        ),
+    )
+    .await;
+    writer.write_all(&[0xff]).unwrap();
+    drop(writer);
+    let r = response.expect("settings response attempted to read the key FIFO");
+    assert_eq!(r.ok()["has_api_key"], false);
+    assert_eq!(r.body["cloud"]["region"], "us-east-1");
+}
+
+/// A settings change can remove a model after an agent was created.
+#[tokio::test]
+async fn an_unmapped_cloud_model_is_refused_at_start_and_sync() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.project("p").await;
+    td.post(
+        "/api/subscriptions/aws/api-key",
+        json!({"provider": "bedrock", "key": "E2E-bedrock-token",
+               "cloud": {"region": "us-east-1", "models": {"custom": "vendor-model"}}}),
+    )
+    .await
+    .ok();
+    let a = td
+        .agent(
+            "p",
+            "custom",
+            json!({"subscription": "aws", "model": "custom"}),
+        )
+        .await;
+    let id = a["id"].as_str().unwrap().to_owned();
+    td.put(
+        "/api/subscriptions/aws/cloud",
+        json!({"region": "us-east-1"}),
+    )
+    .await
+    .ok();
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    // Use the real supervisor: the daemon fixture uses an in-memory one.
+    use terrariumd::runner_supervisor::{RunnerSupervisor, RunnerSupervisorConfig};
+    use terrariumd::supervisor::{Supervisor, SupervisorError};
+    let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+        td.state.clone(),
+        td.dir.path().join("run"),
+        td.config.join("prompts"),
+        terrariumd::sandbox::SandboxConfig::default(),
+        HashMap::new(),
+    ));
+    sup.bind(&state);
+    let key = id.clone();
+    let agent = state
+        .db
+        .read(move |c| Ok(terrariumd::store::agents::get(c, &key)?.agent))
+        .await
+        .unwrap();
+    let error = sup.start(agent, None).await.unwrap_err();
+    assert!(
+        matches!(&error, SupervisorError::NotReady(m) if m.contains("cloud.models.custom") && m.contains("aws")),
+        "{error}"
+    );
+    let def = serde_json::from_value::<terrarium_core::config::AgentDef>(json!({
+        "name": "custom", "project": "p", "harness": "claude", "subscription": "aws", "model": "custom"
+    }))
+    .unwrap();
+    let error = state
+        .db
+        .write("operator", move |t| {
+            terrariumd::store::agents::sync_def(t, &id, &def)
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("cloud.models.custom"), "{error}");
 }

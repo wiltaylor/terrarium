@@ -15,7 +15,7 @@ use crate::api::Shared;
 use crate::error::{ApiError, ApiResult};
 use crate::executor::{Control, Ev, RemoteCmd, Stream};
 use crate::secrets::{RunDir, RunDirs};
-use terrarium_core::config::{DockerCiDef, TargetDef};
+use terrarium_core::config::{DockerCiDef, DockerReleaseDef, TargetDef};
 
 const RELAY: &str = include_str!("docker_relay.py");
 
@@ -30,6 +30,53 @@ pub const ENDPOINT_ENV: &str = "TERRARIUM_DOCKER_HOST";
 const RESET_TIMEOUT: Duration = Duration::from_secs(180);
 /// Time for the VM's Docker daemon to answer through the tunnel after a reset.
 const PING_DEADLINE: Duration = Duration::from_secs(90);
+
+/// The longest Unix socket path: `sun_path` holds 108 bytes with the NUL.
+const MAX_SOCKET_PATH: usize = 107;
+
+/// The daemon end of the SSH forward (TER-626). It goes in the run dir
+/// when the path fits. A long state dir (a long TMPDIR in tests) can push
+/// `<state>/credentials/.run/<ulid>/docker.sock` past the socket limit, and
+/// SSH then failed with only "tunnel failed". Then the socket goes in a new
+/// 0700 dir under `/tmp`, which the returned guard removes.
+fn forward_socket(dir: &RunDir) -> ApiResult<(PathBuf, Option<tempfile::TempDir>)> {
+    let socket = dir.path().join("docker.sock");
+    if socket.as_os_str().len() <= MAX_SOCKET_PATH {
+        return Ok((socket, None));
+    }
+    let short = tempfile::Builder::new()
+        .prefix("terrarium-d-")
+        .tempdir_in("/tmp")
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "Docker SSH forward socket path {} is over the {MAX_SOCKET_PATH}-byte \
+                 Unix socket limit, and a short dir in /tmp failed: {e}",
+                socket.display()
+            ))
+        })?;
+    // `tempdir_in` uses the umask (often 0755): make it private before the
+    // SSH client binds the socket in it.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(short.path(), std::fs::Permissions::from_mode(0o700)).map_err(
+        |e| ApiError::internal(format!("cannot make the Docker forward dir private: {e}")),
+    )?;
+    let socket = short.path().join("docker.sock");
+    Ok((socket, Some(short)))
+}
+
+/// The target dir of the relay socket: `<work_dir>/.git/terrarium/d-<ulid>`.
+/// When `docker.sock` in it would pass the socket limit (a long work dir,
+/// TER-626), it is `/tmp/terrarium-d-<ulid>` on the target. The relay makes
+/// the dir 0700 with `mkdir`, which fails on a dir that exists, and removes
+/// it when it stops.
+fn relay_dir(work_dir: &str) -> String {
+    let id = ulid::Ulid::new();
+    let dir = format!("{work_dir}/.git/terrarium/d-{id}");
+    if dir.len() + "/docker.sock".len() <= MAX_SOCKET_PATH {
+        return dir;
+    }
+    format!("/tmp/terrarium-d-{id}")
+}
 
 /// META-104 forced command. No recipe code or remote command is involved.
 pub async fn reset(state: &Shared, key: &str, config: &DockerCiDef) -> ApiResult<()> {
@@ -137,6 +184,8 @@ pub struct Tunnel {
     relay: mpsc::UnboundedSender<Control>,
     task: tokio::task::JoinHandle<()>,
     _dir: RunDir,
+    /// The short dir of the forward socket, when the run dir is too long.
+    _short_dir: Option<tempfile::TempDir>,
 }
 
 impl Drop for Tunnel {
@@ -166,18 +215,48 @@ impl Tunnel {
     }
 }
 
+/// The SSH end of a tunnel: the Docker CI VM (`docker_ci`) or the release
+/// VM (`docker_release`, TER-623), each pinned by its known_hosts line.
+#[derive(Debug, Clone, Copy)]
+pub struct Endpoint<'a> {
+    pub destination: &'a str,
+    pub port: u16,
+    pub known_hosts: &'a str,
+}
+
+impl<'a> From<&'a DockerCiDef> for Endpoint<'a> {
+    fn from(c: &'a DockerCiDef) -> Self {
+        Endpoint {
+            destination: &c.destination,
+            port: c.port,
+            known_hosts: &c.known_hosts,
+        }
+    }
+}
+
+impl<'a> From<&'a DockerReleaseDef> for Endpoint<'a> {
+    fn from(c: &'a DockerReleaseDef) -> Self {
+        Endpoint {
+            destination: &c.destination,
+            port: c.port,
+            known_hosts: &c.known_hosts,
+        }
+    }
+}
+
 pub async fn open(
     state: &Shared,
     target: &TargetDef,
     key: &str,
     work_dir: &str,
     timeout: u64,
-    config: &DockerCiDef,
+    config: Endpoint<'_>,
 ) -> ApiResult<Tunnel> {
+    let target_dir = relay_dir(work_dir);
     let dir = RunDirs::new(&state.state_dir).run_dir()?;
     let keyfile = dir.write_private("identity", key.as_bytes())?;
     let hosts = dir.write_private("known_hosts", config.known_hosts.as_bytes())?;
-    let socket = dir.path().join("docker.sock");
+    let (socket, short_dir) = forward_socket(&dir)?;
     let forward = format!("{}:/var/run/docker.sock", socket.display());
     let mut ssh = tokio::process::Command::new(&state.executor.ssh_bin)
         .args([
@@ -210,7 +289,7 @@ pub async fn open(
         .arg(keyfile)
         .arg("-L")
         .arg(forward)
-        .arg(&config.destination)
+        .arg(config.destination)
         .env_remove("SSH_AUTH_SOCK")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -252,7 +331,6 @@ pub async fn open(
         return Err(e);
     }
     info!(destination = %config.destination, "docker ci: tunnel up, Docker answers /_ping");
-    let target_dir = format!("{work_dir}/.git/terrarium/d-{}", ulid::Ulid::new());
     let cmd = RemoteCmd {
         argv: vec![
             "python3".into(),
@@ -276,6 +354,7 @@ pub async fn open(
         relay,
         task,
         _dir: dir,
+        _short_dir: short_dir,
     };
     if !matches!(
         tokio::time::timeout(Duration::from_secs(15), rx).await,
@@ -374,7 +453,26 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
     // One data frame in flight per connection. Acknowledgement comes only
     // after the target socket has accepted it, not after enqueueing stdin.
     let mut credits = HashMap::<u64, mpsc::Sender<()>>::new();
-    while let Some(event) = run.events.recv().await {
+    let mut aborts = HashMap::<u64, tokio::task::AbortHandle>::new();
+    loop {
+        let event = tokio::select! {
+            event = run.events.recv() => event,
+            Some(ended) = tasks.join_next(), if !tasks.is_empty() => {
+                // A connection task ended on its own (both halves done, or a
+                // connect, read, or write error). The relay does not answer
+                // that "close", so free the id here, or dead entries fill
+                // the cap below (TER-540 review). Ids are never reused.
+                if let Ok(id) = ended {
+                    connections.remove(&id);
+                    credits.remove(&id);
+                    aborts.remove(&id);
+                }
+                continue;
+            }
+        };
+        let Some(event) = event else {
+            break;
+        };
         let Ev::Data(Stream::Stdout, data) = event else {
             if matches!(event, Ev::End(_)) {
                 break;
@@ -408,22 +506,31 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
                 let (credit, credit_rx) = mpsc::channel(1);
                 credits.insert(id, credit);
                 connections.insert(id, tx);
-                tasks.spawn(connection(
+                let task = tasks.spawn(connection(
                     id,
                     socket.clone(),
                     run.ctl.clone(),
                     rx,
                     credit_rx,
                 ));
+                aborts.insert(id, task);
             } else if event["ack"] == true {
                 if let Some(credit) = credits.get(&id)
                     && credit.send(()).await.is_err()
                 {
                     credits.remove(&id);
                 }
+            } else if event["eof"] == true {
+                // The target client half-closed. Dropping the sender lets the
+                // write half drain the queued data, then shut down; the read
+                // half still forwards Docker's answer (TER-540).
+                connections.remove(&id);
             } else if event["close"] == true {
                 connections.remove(&id);
                 credits.remove(&id);
+                if let Some(task) = aborts.remove(&id) {
+                    task.abort();
+                }
             } else if let Some(data) = event["data"].as_str() {
                 let Ok(data) = STANDARD.decode(data) else {
                     return;
@@ -449,45 +556,108 @@ async fn connection(
     ctl: mpsc::UnboundedSender<Control>,
     mut input: mpsc::Receiver<Vec<u8>>,
     mut credit: mpsc::Receiver<()>,
-) {
-    if let Ok(socket) = tokio::net::UnixStream::connect(path).await {
-        let (mut reader, mut writer) = socket.into_split();
-        let write_ctl = ctl.clone();
-        let write = async move {
-            while let Some(data) = input.recv().await {
-                if writer.write_all(&data).await.is_err() {
-                    break;
-                }
-                if !send(&write_ctl, json!({"id":id,"ack":true})) {
-                    break;
-                }
+) -> u64 {
+    let Ok(socket) = tokio::net::UnixStream::connect(path).await else {
+        send(&ctl, json!({"id":id,"close":true}));
+        return id;
+    };
+    let (mut reader, mut writer) = socket.into_split();
+    let write_ctl = ctl.clone();
+    // Each half ends on its own. The input ends on the target's "eof": pass
+    // the half-close on to Docker and keep reading its answer.
+    let write = async move {
+        while let Some(data) = input.recv().await {
+            writer.write_all(&data).await.ok()?;
+            if !send(&write_ctl, json!({"id":id,"ack":true})) {
+                return None;
             }
-        };
-        let read = async {
-            let mut data = vec![0; 16384];
-            loop {
-                match reader.read(&mut data).await {
-                    Ok(n) if n > 0 => {
-                        if !send(&ctl, json!({"id":id,"data":STANDARD.encode(&data[..n])})) {
-                            break;
-                        }
-                        if credit.recv().await.is_none() {
-                            break;
-                        }
+        }
+        writer.shutdown().await.ok()
+    };
+    let read = async {
+        let mut data = vec![0; 16384];
+        loop {
+            match reader.read(&mut data).await {
+                Ok(0) => return send(&ctl, json!({"id":id,"eof":true})),
+                Ok(n) => {
+                    if !send(&ctl, json!({"id":id,"data":STANDARD.encode(&data[..n])})) {
+                        return false;
                     }
-                    _ => break,
+                    if credit.recv().await.is_none() {
+                        return false;
+                    }
                 }
+                Err(_) => return false,
             }
-        };
-        tokio::select! { _ = write => {}, _ = read => {} }
+        }
+    };
+    tokio::pin!(write, read);
+    let (mut wrote, mut drained) = (false, false);
+    while !(wrote && drained) {
+        tokio::select! {
+            done = &mut write, if !wrote => {
+                if done.is_none() {
+                    break;
+                }
+                wrote = true;
+            }
+            done = &mut read, if !drained => {
+                if !done {
+                    break;
+                }
+                drained = true;
+            }
+        }
     }
-    send(&ctl, json!({"id":id,"close":true}));
+    // After two clean half-closes the target closes and sends "close".
+    if !(wrote && drained) {
+        send(&ctl, json!({"id":id,"close":true}));
+    }
+    id
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forward_socket_stays_under_the_unix_socket_limit() {
+        let base = tempfile::tempdir().unwrap();
+        // A short state dir keeps the socket in the run dir.
+        let run = RunDirs::new(base.path()).run_dir().unwrap();
+        let (socket, short) = forward_socket(&run).unwrap();
+        assert!(short.is_none());
+        assert_eq!(socket, run.path().join("docker.sock"));
+        // A long one (a long TMPDIR) moves it to a private dir in /tmp.
+        let long = base.path().join("x".repeat(80));
+        let run = RunDirs::new(&long).run_dir().unwrap();
+        assert!(run.path().join("docker.sock").as_os_str().len() > MAX_SOCKET_PATH);
+        let (socket, short) = forward_socket(&run).unwrap();
+        let short = short.unwrap();
+        assert!(socket.starts_with("/tmp"));
+        assert!(socket.as_os_str().len() <= MAX_SOCKET_PATH);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(short.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+        std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let path = short.path().to_owned();
+        drop(short);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn relay_dir_stays_under_the_unix_socket_limit() {
+        let dir = relay_dir("/w/slot-1");
+        assert!(dir.starts_with("/w/slot-1/.git/terrarium/d-"));
+        let long = format!("/w/{}", "x".repeat(60));
+        let dir = relay_dir(&long);
+        assert!(dir.starts_with("/tmp/terrarium-d-"), "{dir}");
+        assert!(dir.len() + "/docker.sock".len() <= MAX_SOCKET_PATH);
+    }
 
     #[test]
     fn forced_reset_has_no_remote_command_and_fails_closed() {
@@ -641,6 +811,285 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// TER-540: `docker exec` half-closes the hijacked connection and then
+    /// reads the output. The half-close must reach Docker, and the answer
+    /// that Docker sends after it must still reach the target.
+    #[tokio::test]
+    async fn hijacked_exec_answer_after_client_half_close_is_forwarded() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let request =
+                b"POST /exec/x/start HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n";
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut got = vec![0; request.len()];
+                socket.read_exact(&mut got).await.unwrap();
+                assert_eq!(&got, request);
+                socket
+                    .write_all(
+                        b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                // The forwarded half-close: EOF on Docker's read side.
+                assert_eq!(socket.read(&mut [0; 16]).await.unwrap(), 0);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                socket.write_all(b"\x01\0\0\0\0\0\0\x04seed").await.unwrap();
+            });
+            let (events, rx) = mpsc::channel(8);
+            let (ctl, mut controls) = mpsc::unbounded_channel();
+            let (ready, _) = oneshot::channel();
+            let task = tokio::spawn(bridge(
+                crate::executor::Running { events: rx, ctl },
+                path,
+                ready,
+            ));
+            let frame = |event: Value| Ev::Data(Stream::Stdout, format!("{event}\n").into_bytes());
+            events
+                .send(frame(json!({"id":7,"open":true})))
+                .await
+                .unwrap();
+            events
+                .send(frame(json!({"id":7,"data":STANDARD.encode(request)})))
+                .await
+                .unwrap();
+            events
+                .send(frame(json!({"id":7,"eof":true})))
+                .await
+                .unwrap();
+            let mut answer = Vec::new();
+            loop {
+                let Control::Stdin(bytes) = controls.recv().await.unwrap() else {
+                    panic!("expected stdin");
+                };
+                let event: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(event["id"], 7);
+                assert_ne!(event["close"], true, "closed before the answer");
+                if let Some(data) = event["data"].as_str() {
+                    answer.extend(STANDARD.decode(data).unwrap());
+                    events
+                        .send(frame(json!({"id":7,"ack":true})))
+                        .await
+                        .unwrap();
+                } else if event["eof"] == true {
+                    break;
+                }
+            }
+            assert!(answer.starts_with(b"HTTP/1.1 101 UPGRADED\r\n"));
+            assert!(answer.ends_with(b"\x01\0\0\0\0\0\0\x04seed"));
+            server.await.unwrap();
+            // Both halves ended cleanly: the daemon leaves the close to the
+            // target and sends nothing more for this connection.
+            events
+                .send(frame(json!({"id":7,"close":true})))
+                .await
+                .unwrap();
+            drop(events);
+            task.await.unwrap();
+            while let Ok(control) = controls.try_recv() {
+                if let Control::Stdin(bytes) = control {
+                    let event: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_ne!(event["close"], true);
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// TER-540 live check: the release relay script and [`bridge`] between
+    /// a local docker CLI and a real Docker socket, without SSH or a key.
+    /// Runs `TERRARIUM_RELAY_RUN` with `DOCKER_HOST` on the relay socket.
+    #[tokio::test]
+    #[ignore = "requires a Docker socket in TERRARIUM_RELAY_UPSTREAM (the leased scratch VM)"]
+    async fn live_command_through_the_relay_and_bridge() {
+        let upstream = PathBuf::from(std::env::var("TERRARIUM_RELAY_UPSTREAM").unwrap());
+        let run = std::env::var("TERRARIUM_RELAY_RUN").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let relay_dir = dir.path().join("relay");
+        let mut relay = tokio::process::Command::new("python3")
+            .args(["-I", "-u", "-c", RELAY])
+            .arg(&relay_dir)
+            .arg("7200")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = relay.stdin.take().unwrap();
+        let mut stdout = relay.stdout.take().unwrap();
+        let (events, rx) = mpsc::channel(64);
+        let (ctl, mut controls) = mpsc::unbounded_channel();
+        let (ready, ready_rx) = oneshot::channel();
+        let task = tokio::spawn(bridge(
+            crate::executor::Running { events: rx, ctl },
+            upstream,
+            ready,
+        ));
+        tokio::spawn(async move {
+            let mut chunk = vec![0; 65536];
+            while let Ok(n) = stdout.read(&mut chunk).await {
+                if n == 0
+                    || events
+                        .send(Ev::Data(Stream::Stdout, chunk[..n].to_vec()))
+                        .await
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            while let Some(Control::Stdin(bytes)) = controls.recv().await {
+                if stdin.write_all(&bytes).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(15), ready_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let status = tokio::process::Command::new("sh")
+            .args(["-c", &run])
+            .env(
+                "DOCKER_HOST",
+                format!("unix://{}", relay_dir.join("docker.sock").display()),
+            )
+            .status()
+            .await
+            .unwrap();
+        task.abort();
+        let _ = relay.kill().await;
+        assert!(status.success(), "{run}: {status}");
+    }
+
+    /// The next daemon frame for `id`, skipping acks; `None` after `wait`.
+    async fn frame_for(
+        controls: &mut mpsc::UnboundedReceiver<Control>,
+        id: u64,
+        wait: Duration,
+    ) -> Option<Value> {
+        let end = tokio::time::Instant::now() + wait;
+        loop {
+            let control = tokio::time::timeout_at(end, controls.recv()).await.ok()??;
+            let Control::Stdin(bytes) = control else {
+                continue;
+            };
+            let event: Value = serde_json::from_slice(&bytes).unwrap();
+            if event["id"] == id && event["ack"] != true {
+                return Some(event);
+            }
+        }
+    }
+
+    /// TER-540 review: a connection that ends on its own (here: no Docker
+    /// socket) frees its id, so 33 failed opens leave the cap of 32 free.
+    #[tokio::test]
+    async fn failed_connections_free_their_slot_for_later_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docker.sock");
+        let (events, rx) = mpsc::channel(8);
+        let (ctl, mut controls) = mpsc::unbounded_channel();
+        let (ready, _) = oneshot::channel();
+        let task = tokio::spawn(bridge(
+            crate::executor::Running { events: rx, ctl },
+            path.clone(),
+            ready,
+        ));
+        let frame = |event: Value| Ev::Data(Stream::Stdout, format!("{event}\n").into_bytes());
+        for id in 1..=33 {
+            events
+                .send(frame(json!({"id":id,"open":true})))
+                .await
+                .unwrap();
+            let event = frame_for(&mut controls, id, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert_eq!(event["close"], true, "{event}");
+        }
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4];
+            socket.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b"ping");
+            socket.write_all(b"pong").await.unwrap();
+        });
+        events
+            .send(frame(json!({"id":34,"open":true})))
+            .await
+            .unwrap();
+        events
+            .send(frame(json!({"id":34,"data":STANDARD.encode(b"ping")})))
+            .await
+            .unwrap();
+        let event = frame_for(&mut controls, 34, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            STANDARD.decode(event["data"].as_str().unwrap()).unwrap(),
+            b"pong",
+            "{event}"
+        );
+        server.await.unwrap();
+        drop(events);
+        task.await.unwrap();
+    }
+
+    /// A relay "close" ends the connection task at once: Docker sees the
+    /// socket closed, and an answer it sends later is not forwarded.
+    #[tokio::test]
+    async fn relay_close_aborts_the_connection_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let (accepted, accepted_rx) = oneshot::channel();
+        let (closed, closed_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            accepted.send(()).unwrap();
+            assert_eq!(socket.read(&mut [0; 16]).await.unwrap(), 0);
+            let _ = socket.write_all(b"late").await;
+            closed.send(()).unwrap();
+        });
+        let (events, rx) = mpsc::channel(8);
+        let (ctl, mut controls) = mpsc::unbounded_channel();
+        let (ready, _) = oneshot::channel();
+        let task = tokio::spawn(bridge(
+            crate::executor::Running { events: rx, ctl },
+            path,
+            ready,
+        ));
+        let frame = |event: Value| Ev::Data(Stream::Stdout, format!("{event}\n").into_bytes());
+        events
+            .send(frame(json!({"id":5,"open":true})))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        events
+            .send(frame(json!({"id":5,"close":true})))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closed_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // Without the abort the read half would forward "late" as data.
+        assert_eq!(
+            frame_for(&mut controls, 5, Duration::from_millis(500)).await,
+            None
+        );
+        server.await.unwrap();
+        drop(events);
+        task.await.unwrap();
     }
 
     #[tokio::test]

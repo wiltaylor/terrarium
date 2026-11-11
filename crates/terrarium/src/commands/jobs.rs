@@ -1,7 +1,8 @@
 //! The job queue of a project (TER-71): `job ls | show | cancel`,
 //! `job stats` (TER-135),
 //! `job hosts | host-cap` (TER-97), `job host-alias` (TER-105),
-//! `project delivery show | set`, and `card validate | merge`.
+//! `job release` (TER-623), `project delivery show | set`, and
+//! `card validate | merge`.
 
 use serde_json::{Value, json};
 
@@ -109,6 +110,68 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
             let aliases: &[String] = if *clear { &[] } else { aliases };
             let v = ctx.api.put(&path, json!({ "aliases": aliases })).await?;
             ctx.emit(&v, print_hosts)
+        }
+        JobCmd::ReleaseTargets => {
+            let v = ctx.api.get("/api/release-targets", vec![]).await?;
+            ctx.emit(&v, |c, v| {
+                let items = v["release_targets"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                print_table(
+                    c,
+                    items,
+                    &[
+                        ("TARGET", "target"),
+                        ("MACHINE", "machine"),
+                        ("PROJECT", "project"),
+                        ("BY", "added_by"),
+                        ("AT", "added_at"),
+                    ],
+                    "no protected release targets",
+                );
+            })
+        }
+        JobCmd::ReleaseRetire { target } => {
+            let v = ctx
+                .api
+                .delete(&format!("/api/release-targets/{}", encode(target)), vec![])
+                .await?;
+            ctx.emit(&v, |c, v| {
+                let n = v["retired"].as_array().map_or(0, Vec::len);
+                c.line(format!("retired release target {target} ({n} entries)"));
+            })
+        }
+        JobCmd::Release {
+            card,
+            repo,
+            commit,
+            eta,
+        } => {
+            let eta = planned(eta)?;
+            let mut body = json!({});
+            for (k, v) in [("repo", repo), ("commit", commit), ("eta", &eta)] {
+                if let Some(v) = v {
+                    body[k] = json!(v);
+                }
+            }
+            let v = ctx
+                .api
+                .post(&format!("/api/cards/{}/release", encode(card)), Some(body))
+                .await?;
+            ctx.emit(&v, |c, v| {
+                let j = &v["job"];
+                c.line(format!(
+                    "queued release job {} for {} ({} {} at {}): {}",
+                    field(j, "id"),
+                    field(j, "card"),
+                    field(j, "repo"),
+                    field(j, "branch"),
+                    field(j, "commit"),
+                    field(&v["queue"], "note")
+                ));
+                c.line("The card does not move: the end comes as a comment on it.");
+            })
         }
         JobCmd::Cancel { id } => {
             let v = ctx
@@ -265,6 +328,8 @@ fn merged(cur: &Value, a: &DeliverySetArgs) -> anyhow::Result<Value> {
     put("slots", a.slots.map(Value::from));
     put("work_dir", a.work_dir.clone().map(Value::from));
     put("timeout_secs", a.timeout.map(Value::from));
+    put("release_target", a.release_target.clone().map(Value::from));
+    put("release_recipe", a.release_recipe.clone().map(Value::from));
     if !a.next_repos.is_empty() {
         d["next_repos"] = json!(a.next_repos);
     }
@@ -281,7 +346,21 @@ fn merged(cur: &Value, a: &DeliverySetArgs) -> anyhow::Result<Value> {
         }
         d["merge_secrets"] = Value::Object(refs);
     }
+    if a.clear_release_secrets || !a.release_secrets.is_empty() {
+        let mut refs = serde_json::Map::new();
+        for entry in &a.release_secrets {
+            let (name, reference) = entry.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("--release-secret needs NAME=@secret:name[.field]")
+            })?;
+            if name.is_empty() || !reference.starts_with("@secret:") {
+                anyhow::bail!("--release-secret needs NAME=@secret:name[.field]");
+            }
+            refs.insert(name.to_owned(), Value::from(reference));
+        }
+        d["release_secrets"] = Value::Object(refs);
+    }
     merged_docker_ci(&mut d, a)?;
+    merged_docker_release(&mut d, a)?;
     if let Some(o) = d.as_object_mut() {
         o.retain(|_, v| !v.is_null());
     }
@@ -346,6 +425,63 @@ fn merged_docker_ci(d: &mut Value, a: &DeliverySetArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The four fields of the daemon's `docker_release` object (TER-623), with
+/// the flag that sets each: all-or-nothing, as `docker_ci`.
+const DOCKER_RELEASE_FIELDS: [(&str, &str); 4] = [
+    ("destination", "--docker-release-destination"),
+    ("port", "--docker-release-port"),
+    ("known_hosts", "--docker-release-known-hosts"),
+    ("key", "--docker-release-key"),
+];
+
+/// Lay the `--docker-release-*` flags over `d`, or remove the object with
+/// `--clear-docker-release`. With no flag the object stays as it is.
+fn merged_docker_release(d: &mut Value, a: &DeliverySetArgs) -> anyhow::Result<()> {
+    if a.clear_docker_release {
+        if let Some(o) = d.as_object_mut() {
+            o.remove("docker_release");
+        }
+        return Ok(());
+    }
+    let given = [
+        a.docker_release_destination.clone().map(Value::from),
+        a.docker_release_port.map(Value::from),
+        a.docker_release_known_hosts.clone().map(Value::from),
+        a.docker_release_key.clone().map(Value::from),
+    ];
+    if given.iter().all(Option::is_none) {
+        return Ok(());
+    }
+    if let Some(k) = &a.docker_release_key
+        && !k.starts_with("@secret:")
+    {
+        anyhow::bail!("--docker-release-key needs @secret:name[.field], never the key");
+    }
+    let mut docker = if d["docker_release"].is_object() {
+        d["docker_release"].clone()
+    } else {
+        json!({})
+    };
+    for ((field, _), v) in DOCKER_RELEASE_FIELDS.iter().zip(given) {
+        if let Some(v) = v {
+            docker[field] = v;
+        }
+    }
+    let missing: Vec<&str> = DOCKER_RELEASE_FIELDS
+        .iter()
+        .filter(|(f, _)| docker[f].is_null())
+        .map(|(_, flag)| *flag)
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "docker_release needs all four values, also set {}",
+            missing.join(", ")
+        );
+    }
+    d["docker_release"] = docker;
+    Ok(())
+}
+
 fn print_delivery(c: &Ctx, v: &Value) {
     let d = &v["delivery"];
     let on = v["enabled"].as_bool() == Some(true);
@@ -383,6 +519,36 @@ fn print_delivery(c: &Ctx, v: &Value) {
         ));
     } else {
         c.line("docker ci:  -");
+    }
+    c.line(format!("release target: {}", field(d, "release_target")));
+    c.line(format!("release recipe: {}", field(d, "release_recipe")));
+    let secrets: Vec<String> = d["release_secrets"]
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or("?")))
+                .collect()
+        })
+        .unwrap_or_default();
+    c.line(format!(
+        "release secrets: {}",
+        if secrets.is_empty() {
+            "-".to_owned()
+        } else {
+            secrets.join(", ")
+        }
+    ));
+    let release = &d["docker_release"];
+    if release.is_object() {
+        c.line(format!(
+            "docker release: {}:{} (key {})",
+            field(release, "destination"),
+            field(release, "port"),
+            field(release, "key")
+        ));
+        c.line(format!("release pin: {}", field(release, "known_hosts")));
+    } else {
+        c.line("docker release: -");
     }
 }
 
@@ -423,10 +589,16 @@ pub async fn merge(
     repo: &Option<String>,
     branch: &Option<String>,
     eta: &Option<String>,
+    onto: &Option<String>,
 ) -> anyhow::Result<()> {
     let eta = planned(eta)?;
     let mut body = json!({});
-    for (k, v) in [("repo", repo), ("branch", branch), ("eta", &eta)] {
+    for (k, v) in [
+        ("repo", repo),
+        ("branch", branch),
+        ("eta", &eta),
+        ("onto", onto),
+    ] {
         if let Some(v) = v {
             body[k] = json!(v);
         }
@@ -535,6 +707,84 @@ mod tests {
             "reset_destination": "reset@reset.example", "reset_port": 22,
             "reset_known_hosts": "reset.example ssh-ed25519 AAAAplace-holder-reset\n",
         })
+    }
+
+    #[test]
+    fn release_flags_set_keep_and_clear() {
+        // TER-623 F5: the release flags, all four docker_release values at
+        // the first set, and @secret references only.
+        let args = parse_set(&[
+            "--release-target",
+            "p-client",
+            "--release-secret",
+            "GH_TOKEN=@secret:release-github",
+            "--release-secret",
+            "COSIGN_PASSWORD=@secret:release-cosign.password",
+            "--docker-release-destination",
+            "root@vm.example",
+            "--docker-release-port",
+            "2251",
+            "--docker-release-known-hosts",
+            "vm.example ssh-ed25519 AAAAplace-holder-pin\n",
+            "--docker-release-key",
+            "@secret:docker-release-vm",
+        ])
+        .unwrap();
+        let cur = serde_json::json!({"target": "p-box"});
+        let value = super::merged(&cur, &args.delivery).unwrap();
+        assert_eq!(value["release_target"], "p-client");
+        assert_eq!(
+            value["release_secrets"],
+            serde_json::json!({"GH_TOKEN": "@secret:release-github",
+                               "COSIGN_PASSWORD": "@secret:release-cosign.password"})
+        );
+        let want = serde_json::json!({"destination": "root@vm.example", "port": 2251,
+            "known_hosts": "vm.example ssh-ed25519 AAAAplace-holder-pin\n",
+            "key": "@secret:docker-release-vm"});
+        assert_eq!(value["docker_release"], want);
+        assert_eq!(value["target"], "p-box");
+
+        // One flag keeps the other three.
+        let args = parse_set(&["--docker-release-port", "2252"]).unwrap();
+        let cur = serde_json::json!({"docker_release": want});
+        let value = super::merged(&cur, &args.delivery).unwrap();
+        assert_eq!(value["docker_release"]["port"], 2252);
+        assert_eq!(value["docker_release"]["key"], "@secret:docker-release-vm");
+
+        // The first set needs all four.
+        let args = parse_set(&["--docker-release-destination", "root@vm"]).unwrap();
+        let e = super::merged(&serde_json::json!({}), &args.delivery).unwrap_err();
+        assert!(e.to_string().contains("--docker-release-port"), "{e}");
+
+        // A key or a secret that is not a reference is refused.
+        let args = parse_set(&["--docker-release-key", "plain-private-key"]).unwrap();
+        assert!(
+            super::merged(&serde_json::json!({"docker_release": want}), &args.delivery).is_err()
+        );
+        for bad in ["GH_TOKEN=ghp_plain", "GH_TOKEN", "=@secret:x"] {
+            let args = parse_set(&["--release-secret", bad]).unwrap();
+            assert!(
+                super::merged(&serde_json::json!({}), &args.delivery).is_err(),
+                "{bad}"
+            );
+        }
+
+        // Clear and reset.
+        let args = parse_set(&[
+            "--clear-docker-release",
+            "--clear-release-secrets",
+            "--release-target",
+            "",
+        ])
+        .unwrap();
+        let cur = serde_json::json!({"target": "p-box", "release_target": "p-client",
+            "release_secrets": {"GH_TOKEN": "@secret:release-github"}, "docker_release": want});
+        let value = super::merged(&cur, &args.delivery).unwrap();
+        assert!(value.get("docker_release").is_none(), "{value}");
+        assert!(value.get("release_target").is_none(), "{value}");
+        assert_eq!(value["release_secrets"], serde_json::json!({}));
+        assert_eq!(value["target"], "p-box");
+        assert!(parse_set(&["--clear-docker-release", "--docker-release-port", "1"]).is_err());
     }
 
     #[test]

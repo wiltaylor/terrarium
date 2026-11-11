@@ -795,6 +795,14 @@ async fn manual_compaction_rights_and_states() {
     // Not idle: a compaction runs. The next request waits for its end.
     td.sup.set_compact(aid(&w), FakeCompact::Silent);
     td.post_empty(&path).await.ok();
+    // The third compaction can answer `queued`: the task of the second
+    // one can still hold the agent after the `idle`, and the lifecycle
+    // then runs it. Under load the next request came first and found the
+    // agent at rest (TER-685). Wait until the compaction runs.
+    until("the third compaction runs", || async {
+        td.sup.compactions(aid(&w)) == 3
+    })
+    .await;
     let r = td.post_empty(&path).await;
     assert_eq!(r.ok()["reset"]["state"], "queued", "{}", r.body);
     assert_eq!(td.sup.compactions(aid(&w)), 3, "not interrupted");
@@ -916,7 +924,14 @@ async fn a_compaction_without_an_end_times_out_and_the_turns_wait() {
         .await;
     assert_eq!(r.status, 202, "{}", r.body);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(!td.sup.prompts(aid(&w)).contains(&"[User] after".to_owned()));
+    // Read the prompts, then the end: when the compaction has not ended
+    // after the prompt read, it ran during the read, and the turn must
+    // wait. Under load the 3 s limit can pass before this point, and a
+    // turn that ran after the end is right (TER-610).
+    let prompts = td.sup.prompts(aid(&w));
+    if compactions(&td, &w).await.is_empty() {
+        assert!(!prompts.contains(&"[User] after".to_owned()));
+    }
     until("the time limit", || async {
         !compactions(&td, &w).await.is_empty()
     })

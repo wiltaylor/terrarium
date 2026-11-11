@@ -134,12 +134,33 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
       except the API trees (`/dev`, `/proc`, `/sys`), so no world-writable
       directory such as `/run/lock` or `/var/crash` keeps a file of the UID.
     - `PrivateTmp=yes` gives the unit its own `/tmp` and `/var/tmp`, removed
-      with the unit. `RemoveIPC=yes` makes systemd remove the System V and
+      with the unit. `PrivateIPC=yes` gives each unit its own IPC
+      namespace: a session sees only the System V objects and POSIX
+      message queues that it made, not those of the host users or of other
+      sessions. `RemoveIPC=yes` makes systemd remove the System V and
       POSIX IPC objects of the UID, also its files in `/dev/shm`, when the
       last unit of that UID stops.
-    - The pool users have no home directory (see the install steps).
+    - `ProtectHome=tmpfs` puts an empty read-only tmpfs over `/home`,
+      `/root`, and `/run/user`. Git in a session trusts every repo
+      (`safe.directory=*`), so a repo there that the UID could read (an
+      operator's home that is not 0700) would run its config
+      (`core.fsmonitor`, hooks) as the UID (TER-659).
+    - The pool users have no home directory (see the install steps). Their
+      passwd home (`/home/terrarium-w<n>` by default) does not exist, also
+      not in the unit.
+    - `ProtectProc=invisible` mounts the unit's `/proc` with
+      `hidepid=invisible`: a session sees only the processes of its own UID,
+      not the host's processes or their command lines, and cannot open
+      `/proc/<pid>/root` or `/proc/<pid>/cwd` of a session of another UID
+      (TER-638). The processes that stay visible are of the same pool UID,
+      and a pool UID serves one holder at a time (above), so they are the
+      holder's own sessions with the same workspace scope. `ProcSubset=pid`
+      is not set, since CUDA and `nvidia-smi` read `/proc/driver/nvidia`.
+      `PrivatePIDs=` is not set: it needs systemd 257, and the command
+      would run as PID 1, which ignores SIGINT and SIGTERM without a handler.
     - `workspace_root` must not be under `/tmp` or `/var/tmp` (each unit
-      gets a private copy of them): the helper refuses to start. A workspace
+      gets a private copy of them), nor under `/home`, `/root`, or
+      `/run/user` (hidden in each unit): the helper refuses to start. A workspace
       root or scope path with whitespace, quotes, `%`, `:`, or a backslash
       is refused, since it goes in systemd path lists. The working
       directory is not in such a list: only `%` and control characters are
@@ -149,13 +170,17 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   `KillMode=control-group` ends every descendant with the main process.
   Properties: `--uid`/`--gid` of the holder's workload user,
   `NoNewPrivileges=yes`, `CapabilityBoundingSet=`, `AmbientCapabilities=`,
-  `RestrictSUIDSGID=yes`, `PrivateTmp=yes`, `RemoveIPC=yes`,
-  `ProtectSystem=strict`, `TemporaryFileSystem=<workspace_root>:ro`,
+  `RestrictSUIDSGID=yes`, `PrivateTmp=yes`, `PrivateIPC=yes`,
+  `RemoveIPC=yes`, `ProtectSystem=strict`, `ProtectHome=tmpfs`,
+  `TemporaryFileSystem=<workspace_root>:ro`,
   `BindPaths=` and `ReadWritePaths=` of the holder's workspace scope,
   `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
-  each granted GPU and support node, `--expand-environment=no`. The
-  environment goes in a root-only `EnvironmentFile` under `state_dir`, not
-  on a command line.
+  each granted GPU and support node, `ProtectProc=invisible`,
+  `--expand-environment=no`. The
+  environment goes in a root-only (0600) `EnvironmentFile` under
+  `state_dir`, not on a command line. Each value is double-quoted with `"`,
+  `\`, `` ` ``, and `$` escaped, so systemd reads it back byte for byte,
+  also a multi-line value such as the git trailers (TER-566).
 - **The shim** (`terrarium-host native`, hidden subcommand) is what the
   host agent's session runner starts. The request travels in
   `TERRARIUM_NATIVE_REQUEST` (environment, readable only by the same UID).
@@ -276,7 +301,8 @@ a workload user that changed since the start, GPU sessions without a
 verified `nvidia-smi`, a trusted path with a writable parent, a working
 directory outside the root
 (directly or by a symlink), `%` in a path, control characters, NUL in argv,
-bad environment names and newlines in values, unknown GPUs, device nodes
+bad environment names, NUL or a character that systemd's UTF-8 check
+refuses (U+FDD0 to U+FDEF, U+xFFFE, U+xFFFF) in values, unknown GPUs, device nodes
 that do not match the inventory, missing support nodes, and `stop` of a
 shared parent slice.
 
@@ -301,7 +327,12 @@ Known limits:
   also daemon-internal ones (target root probes, workspace sync, monitors,
   pipelines). Its working directory must be under `workspace_root`: a
   `cwd` that `allowed_cwd_roots` permits outside it, or no `cwd` while
-  `work_dir` is outside it, fails with exit code 125 and the reason.
+  `work_dir` is outside it, fails with exit code 125 and the reason, which
+  names the workspace root. A card agent's `exec` or `run` with no
+  `--cwd` runs in its owned root `<work_root>/<project>/<agent>`, which
+  the daemon prepares first (TER-634): set `work_root` under
+  `workspace_root`. An explicit `--cwd` is kept as given. The daemon's
+  root scripts run in the `work_root` itself (TER-615).
 - A helper that goes away between two `hello`s makes each native command
   fail with exit code 125 until the next reconnect reports the loss; the
   daemon then refuses host commands while a native exclusive GPU
@@ -343,11 +374,35 @@ not run it on a shared target or a DGX Spark without that decision.
    done
    ```
 
-3. **The binary**, root-owned:
+3. **The binary**: download it from the GitHub release of the daemon's
+   version and verify it; do not build it. Each release has
+   `terrarium-host-helper-<version>-linux-x86_64` (static musl, built
+   with `--locked` in the release CI, next to `terrarium-host`) and its
+   line in `SHA256SUMS` ([release.md](release.md)). Then install it
+   root-owned:
 
    ```sh
-   install -o root -g root -m 0755 terrarium-host-helper /usr/local/libexec/terrarium-host-helper
+   v=<version>   # the version of the daemon and the host agent, without the v
+   gh release download "v$v" --repo wiltaylor/terrarium \
+     --pattern "terrarium-host-helper-$v-linux-x86_64" --pattern SHA256SUMS &&
+   sha256sum -c --ignore-missing SHA256SUMS &&
+   gh attestation verify "terrarium-host-helper-$v-linux-x86_64" --repo wiltaylor/terrarium \
+     --signer-workflow wiltaylor/terrarium/.github/workflows/ci.yml &&
+   install -o root -g root -m 0755 "terrarium-host-helper-$v-linux-x86_64" /usr/local/libexec/terrarium-host-helper &&
+   /usr/local/libexec/terrarium-host-helper --version
    ```
+
+   The commands are joined with `&&`: when the download or a check fails,
+   the install does not run.
+
+   Without `gh`, take both files from the release page with `curl -fLO`
+   and run the `sha256sum` check. `SHA256SUMS` comes from the same release
+   as the binary, so a matching hash proves only that the download is
+   whole, not where the binary comes from. Run the `gh attestation verify`
+   check before the install, on another machine with `gh` if this host has
+   none. A release up to v0.35.0-alpha has no
+   such file: build it from the tag with `cargo build
+   --release --locked -p terrarium-host --bin terrarium-host-helper`.
 
 4. **The workspace**: a group that both users share, with the setgid bit,
    so files stay writable for the host agent and the sessions:

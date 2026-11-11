@@ -7002,6 +7002,8 @@ async fn questions_ask_list_update_and_answer() {
             "question",
             "ask",
             "Ship v2 on Friday?",
+            "--card",
+            "TER-1",
             "-o",
             "yes",
             "--option",
@@ -7021,7 +7023,7 @@ async fn questions_ask_list_update_and_answer() {
             Some(
                 json!({"text": "Ship v2 on Friday?", "options": ["yes", "no"],
                         "context": "**CI** is green", "priority": "urgent", "wait": true,
-                        "timeout": "2h"}),
+                        "timeout": "2h", "card": "TER-1"}),
             ),
         )],
     )
@@ -7032,7 +7034,13 @@ async fn questions_ask_list_update_and_answer() {
     // --timeout needs --wait.
     assert!(Cli::try_parse_from(["terrarium", "question", "ask", "x", "--timeout", "2h"]).is_err());
     // The operator does not ask.
-    let r = exec(false, &["question", "ask", "x"], vec![], None).await;
+    let r = exec(
+        false,
+        &["question", "ask", "x", "--card", "TER-1"],
+        vec![],
+        None,
+    )
+    .await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
 
     let out = ok(
@@ -7253,6 +7261,8 @@ async fn question_bundles_ask_show_update_and_answer() {
             "question",
             "bundle",
             "Release plan",
+            "--card",
+            "TER-1",
             "--item",
             "Ship?",
             "--item",
@@ -7263,8 +7273,10 @@ async fn question_bundles_ask_show_update_and_answer() {
             Post,
             mine(),
             vec![],
-            Some(json!({"kind": "bundle", "text": "Release plan",
-                        "items": [{"text": "Ship?"}, {"text": "Region?"}]})),
+            Some(
+                json!({"kind": "bundle", "text": "Release plan", "card": "TER-1",
+                        "items": [{"text": "Ship?"}, {"text": "Region?"}]}),
+            ),
         )],
     )
     .await;
@@ -7283,6 +7295,8 @@ async fn question_bundles_ask_show_update_and_answer() {
             "question",
             "bundle",
             "Release plan",
+            "--card",
+            "TER-1",
             "--items-file",
             "-",
             "--urgent",
@@ -7295,7 +7309,7 @@ async fn question_bundles_ask_show_update_and_answer() {
             mine(),
             vec![],
             Some(
-                json!({"kind": "bundle", "text": "Release plan", "priority": "urgent",
+                json!({"kind": "bundle", "text": "Release plan", "priority": "urgent", "card": "TER-1",
                         "wait": true,
                         "items": [{"text": "Ship?", "options": ["yes", "no"]},
                                   {"text": "Notes?"}]}),
@@ -7327,7 +7341,15 @@ async fn question_bundles_ask_show_update_and_answer() {
     }
     let r = exec(
         true,
-        &["question", "bundle", "-", "--items-file", "-"],
+        &[
+            "question",
+            "bundle",
+            "-",
+            "--items-file",
+            "-",
+            "--card",
+            "TER-1",
+        ],
         vec![],
         Some("x"),
     )
@@ -7335,7 +7357,15 @@ async fn question_bundles_ask_show_update_and_answer() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     let r = exec(
         true,
-        &["question", "bundle", "x", "--items-file", "-"],
+        &[
+            "question",
+            "bundle",
+            "x",
+            "--items-file",
+            "-",
+            "--card",
+            "TER-1",
+        ],
         vec![],
         Some("{"),
     )
@@ -7343,7 +7373,7 @@ async fn question_bundles_ask_show_update_and_answer() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     let r = exec(
         false,
-        &["question", "bundle", "x", "--item", "a"],
+        &["question", "bundle", "x", "--item", "a", "--card", "TER-1"],
         vec![],
         None,
     )
@@ -7602,13 +7632,20 @@ async fn notify_and_the_admin_inbox() {
     assert!(Cli::try_parse_from(["terrarium", "notify", "x", "--urgent", "--critical"]).is_err());
     let out = ok(
         true,
-        &["question", "ask", "Roll back?", "--critical"],
+        &[
+            "question",
+            "ask",
+            "Roll back?",
+            "--critical",
+            "--card",
+            "TER-1",
+        ],
         vec![(201, crit)],
         vec![(
             Post,
             mine(),
             vec![],
-            Some(json!({"text": "Roll back?", "priority": "critical"})),
+            Some(json!({"text": "Roll back?", "priority": "critical", "card": "TER-1"})),
         )],
     )
     .await;
@@ -11136,4 +11173,102 @@ async fn admin_link_prints_the_pairing_code_alone() {
     )
     .await;
     assert_eq!(out, "revoked link L1\n");
+}
+
+/// Run `args` as an agent against `mock`: the result and the output.
+async fn exec_on(args: &[&str], mock: &MockTransport) -> (anyhow::Result<()>, String) {
+    let cli = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+        .unwrap_or_else(|e| panic!("{args:?}: {e}"));
+    let env = Some(AgentEnv {
+        agent: ME.into(),
+        socket: "/nonexistent.sock".into(),
+    });
+    let mut ctx = Ctx::for_test(Arc::new(mock.clone()), env).with_identity(json!({
+        "agent": ME, "name": "worker", "project": "terra",
+        "harness": "pi", "status": "idle", "roles": []
+    }));
+    ctx.json = cli.json;
+    let result = super::run(&ctx, &cli.command).await;
+    (result, ctx.out.captured())
+}
+
+/// TER-661: an upload that gets `429` (all upload slots of the daemon are
+/// busy, TER-605) is tried again after `Retry-After`, at most 5 tries.
+#[tokio::test]
+async fn uploads_retry_a_429_after_retry_after() {
+    let dir = std::env::temp_dir().join(format!("terrarium-retry-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("report.txt");
+    std::fs::write(&file, "ok").unwrap();
+    let path = file.to_string_lossy().into_owned();
+    let busy = |after: u64| {
+        json!({"error": {"code": "rate_limited", "message": "too many uploads in progress",
+            "details": {"retry_after": after, "max_concurrent_uploads": 8}}})
+    };
+    let pushed = json!({"id": "ART-1", "name": "report.txt", "kind": "file", "url": "http://a/1"});
+
+    // A 429 with `Retry-After: 0`, then 201: two identical requests, success.
+    let m = MockTransport::new();
+    m.reply_with(429, &[("retry-after", "0")], busy(0))
+        .reply(201, pushed.clone());
+    let (r, out) = exec_on(&["artifact", "push", &path], &m).await;
+    r.unwrap();
+    let reqs = m.requests();
+    assert_eq!(reqs.len(), 2);
+    for q in &reqs {
+        assert_eq!(q.method, Post);
+        assert_eq!(q.path, "/api/projects/terra/artifacts");
+    }
+    assert_eq!(reqs[0].body, reqs[1].body);
+    assert!(out.contains("pushed ART-1"), "{out}");
+
+    // Five 429s: it gives up after the fifth try with a clear message.
+    let m = MockTransport::new();
+    for _ in 0..5 {
+        m.reply_with(429, &[("retry-after", "0")], busy(0));
+    }
+    m.reply(201, pushed.clone());
+    let (r, _) = exec_on(&["artifact", "push", &path], &m).await;
+    let e = r.unwrap_err();
+    assert_eq!(m.requests().len(), 5);
+    assert_eq!(exit_code_of(&e), exit::SERVER);
+    let se = e.downcast_ref::<ServerError>().unwrap();
+    assert_eq!(se.status, 429);
+    assert_eq!(se.code, "rate_limited");
+    assert!(e.to_string().contains("gave up after 5 tries"), "{e}");
+
+    // Another error is not tried again.
+    let m = MockTransport::new();
+    m.reply(
+        413,
+        json!({"error": {"code": "too_large", "message": "over quota"}}),
+    )
+    .reply(201, pushed.clone());
+    let (r, _) = exec_on(&["artifact", "push", &path], &m).await;
+    assert!(r.is_err());
+    assert_eq!(m.requests().len(), 1);
+
+    // `test push` retries too; without the header, `details.retry_after`
+    // gives the wait.
+    let xml = dir.join("junit.xml");
+    std::fs::write(
+        &xml,
+        r#"<testsuite name="s" tests="1"><testcase name="a"/></testsuite>"#,
+    )
+    .unwrap();
+    let xml_path = xml.to_string_lossy().into_owned();
+    let m = MockTransport::new();
+    m.reply(429, busy(0)).reply(
+        201,
+        json!({"id": "01RUN", "name": "junit", "status": "passed",
+            "counts": {"passed": 1, "failed": 0, "errored": 0, "skipped": 0, "total": 1},
+            "url": "/tests/01RUN"}),
+    );
+    let (r, _) = exec_on(&["test", "push", &xml_path, "--format", "junit"], &m).await;
+    r.unwrap();
+    let reqs = m.requests();
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(reqs[1].path, "/api/projects/terra/test-runs");
+    assert_eq!(reqs[0].body, reqs[1].body);
+    std::fs::remove_dir_all(&dir).ok();
 }

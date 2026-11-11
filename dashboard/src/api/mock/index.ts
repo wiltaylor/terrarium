@@ -439,7 +439,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     ...t,
     has_display: hasDisplay(t),
     scope: t.project ? "project" : "global",
-    host_online: t.kind === "ssh" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online"),
+    host_online: t.kind === "ssh" || t.kind === "exedev" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online"),
     access: "operator",
     lease: null,
     runtime: t.runtime ?? {},
@@ -449,7 +449,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   // The checks of the daemon's `store/targets.rs` validate (docs/api.md §17.2): a bad value is `422 invalid`.
   const targetDef = (b: NewTarget): NewTarget => {
     if (!b || typeof b.name !== "string" || !/^[a-z0-9][a-z0-9._-]*$/i.test(b.name)) fail(422, "invalid", "bad target name");
-    if (!["host", "ssh", "docker", "vmlab", "vnc", "rdp", "desktop"].includes(b.kind)) fail(422, "invalid", "`kind` must be host, ssh, docker, vmlab, vnc, rdp, or desktop");
+    if (!["host", "ssh", "docker", "vmlab", "vnc", "rdp", "desktop", "exedev"].includes(b.kind)) fail(422, "invalid", "`kind` must be host, ssh, docker, vmlab, vnc, rdp, desktop, or exedev");
     for (const f of ["host", "address", "credential", "image", "container", "machine", "lab_ref", "username", "domain"] as const) {
       const v = b[f];
       if (v !== undefined && (typeof v !== "string" || !v || /\s/.test(v) || v.startsWith("-"))) fail(422, "invalid", `bad \`${f}\` \`${String(v)}\`: not empty, no spaces, no leading \`-\``);
@@ -465,6 +465,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       need("address", !!b.address);
     }
     if (b.kind === "desktop") need("host", !!b.host);
+    if (b.kind === "exedev") {
+      need("credential", !!b.credential);
+      if (!b.ephemeral || b.keep) fail(422, "invalid", "an exedev target needs `ephemeral = true` and no `keep`: its VM is made on agent start and removed on agent stop");
+    }
     if ((b.display || b.display_name) && b.kind !== "docker" && b.kind !== "desktop")
       fail(422, "invalid", `\`display\` and \`display_name\` are for a docker or desktop target, not \`${b.kind}\``);
     if (b.username && b.kind !== "vnc" && b.kind !== "rdp") fail(422, "invalid", `\`username\` is for a vnc or rdp target, not \`${b.kind}\``);
@@ -486,7 +490,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     } else if (b.lab_repo || b.lab_ref || b.lab_path || b.lab_from_workspace) {
       fail(422, "invalid", `\`lab_repo\`, \`lab_ref\`, \`lab_path\`, and \`lab_from_workspace\` are for a vmlab target, not \`${b.kind}\``);
     }
-    if (b.ephemeral && !(b.kind === "vmlab" || (b.kind === "docker" && b.image))) fail(422, "invalid", "an ephemeral target must be docker with `image`, or vmlab");
+    if (b.ephemeral && !(b.kind === "vmlab" || b.kind === "exedev" || (b.kind === "docker" && b.image))) fail(422, "invalid", "an ephemeral target must be docker with `image`, vmlab, or exedev");
     // docs/api.md §17.2, "Resource limits": `{}` is no limits.
     if (b.limits && !Object.keys(b.limits).length) delete b.limits;
     if (b.limits) {
@@ -2418,6 +2422,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           audit("project.delete", name, name, {});
         }),
       agents: (name) => reply(() => (project(name), w.agents.filter((a) => a.project === name).sort((a, b) => a.id.localeCompare(b.id)))),
+      // The mock operator reads every count: the open questions of the project, also those in a thread.
+      counts: (name) =>
+        reply(() => {
+          project(name);
+          const open = (w.questions ?? []).filter((q) => q.project === name && q.status === "open" && q.kind !== "notice");
+          return {
+            blocked_cards: w.cards.filter((c) => c.project === name && !c.archived && roleOf(name, c.column) === "blocked").length,
+            questions: {
+              open: open.length,
+              urgent: open.filter((q) => q.priority === "urgent" || q.priority === "critical").length,
+              critical: open.filter((q) => q.priority === "critical").length,
+            },
+          };
+        }),
       targets: (name) => reply(() => (project(name), w.targets.filter((t) => !t.project || t.project === name).map(targetView))),
       // The seed grants the global `pi-runner` to `terrarium` for its project-owned monitors.
       targetGrants: (name) =>

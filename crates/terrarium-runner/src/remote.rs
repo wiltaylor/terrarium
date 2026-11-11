@@ -112,7 +112,7 @@ impl SpawnOptions {
     }
 }
 
-type DeliveryTx = oneshot::Sender<Result<(), DeliveryError>>;
+type DeliveryTx = oneshot::Sender<crate::runner::DeliveryOutcome>;
 
 enum Slot {
     Reply(oneshot::Sender<Result<Value, RpcError>>),
@@ -288,11 +288,12 @@ impl Shared {
             ServerFrame::Delivery {
                 delivery,
                 ok,
+                seq,
                 error,
             } => {
                 if let Some(tx) = lock(&self.deliveries).remove(&delivery) {
                     let outcome = if ok {
-                        Ok(())
+                        Ok(seq)
                     } else {
                         Err(error
                             .map(DeliveryError::from)
@@ -610,7 +611,8 @@ impl RemoteRunner {
     /// stderr appended to `<state>/agents/<ulid>/private/runner.log`. The
     /// spec goes to `<state>/agents/<ulid>/private/runner.json` (mode
     /// `0600`; the directory is `0700` and the sandbox never binds it). A thread reaps
-    /// the process when it exits while this daemon runs.
+    /// the process when it exits while this daemon runs. A start that fails
+    /// (no control socket by `start_timeout`, or no connect) kills the process.
     pub async fn spawn_process(bin: &Path, opts: SpawnOptions) -> Result<Self> {
         let agent = opts.agent;
         if let Some(pid) = live_runner_pid(&opts.runtime_dir, agent) {
@@ -649,36 +651,33 @@ impl RemoteRunner {
             .stdout(log)
             .stderr(err_log);
         let mut child = cmd.spawn().map_err(|e| RunnerError::io("spawn", bin, e))?;
-        let (died_tx, died_rx) = watch::channel(None::<String>);
-        std::thread::Builder::new()
-            .name("terrarium-runner-reap".into())
-            .spawn(move || {
-                let how = match child.wait() {
-                    Ok(s) => s.to_string(),
-                    Err(e) => format!("wait failed: {e}"),
-                };
-                died_tx.send_replace(Some(how));
-            })
-            .map_err(|e| RunnerError::Other(format!("cannot start the reaper thread: {e}")))?;
 
+        // The child stays here until it is ready: a start that fails kills
+        // it, so no runner that this daemon gave up on lives on and holds
+        // the agent (TER-667). Only this task reaps it before then, so its
+        // pid is not reused while it can still get the kill.
         let control = control_socket_path(&opts.runtime_dir, agent);
         let deadline = Instant::now() + opts.start_timeout;
-        loop {
-            if let Some(how) = died_rx.borrow().clone() {
-                return Err(RunnerError::Other(format!(
-                    "the runner process ended before it was ready ({how}); see {}",
-                    log_path.display()
-                )));
+        let result = loop {
+            match child.try_wait() {
+                Ok(Some(how)) => {
+                    return Err(RunnerError::Other(format!(
+                        "the runner process ended before it was ready ({how}); see {}",
+                        log_path.display()
+                    )));
+                }
+                Ok(None) => {}
+                Err(e) => break Err(RunnerError::io("wait for", bin, e)),
             }
             if control.exists() {
                 match Self::connect_with(&opts.runtime_dir, agent, opts.connect.clone()).await {
-                    Ok(r) => return Ok(r),
-                    Err(e) if Instant::now() >= deadline => return Err(e),
+                    Ok(r) => break Ok(r),
+                    Err(e) if Instant::now() >= deadline => break Err(e),
                     Err(_) => {}
                 }
             }
             if Instant::now() >= deadline {
-                return Err(RunnerError::Other(format!(
+                break Err(RunnerError::Other(format!(
                     "the runner process did not open {} in {} ms; see {}",
                     control.display(),
                     opts.start_timeout.as_millis(),
@@ -686,7 +685,21 @@ impl RemoteRunner {
                 )));
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        if result.is_err() {
+            let _ = child.kill();
         }
+        // A runner that is up stays up when no reaper starts: it is only
+        // not reaped while this daemon runs.
+        if let Err(e) = std::thread::Builder::new()
+            .name("terrarium-runner-reap".into())
+            .spawn(move || {
+                let _ = child.wait();
+            })
+        {
+            tracing::warn!("cannot start the reaper thread of the runner process: {e}");
+        }
+        result
     }
 
     /// What the runner reported at connect time.

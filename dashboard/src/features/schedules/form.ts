@@ -14,7 +14,7 @@ import type { Api } from "../../api/client";
 import { ApiError } from "../../api/http";
 import type { Agent, AgentVerb, CardOp, CatchUp, NewSchedule, Project, Schedule, ScheduleAction, ScheduleActionType, ScheduleSpec, ScheduleSpecKind, Target } from "../../api/types";
 import { previewCron } from "../../lib/cron";
-import { commandLine, parseEvery, splitCommand } from "../../lib/schedule";
+import { commandLine, DAY_START_WEEKDAYS, parseEvery, splitCommand } from "../../lib/schedule";
 import { buildTriggerSpec, ciFailurePreset, emptyRow, emptyTriggerFields, isTriggerAction, triggerFieldsFromSpec, type MatchRow, type TriggerFields } from "./trigger";
 import { buildWebhookAction, emptyHeaderRow, emptyWebhookFields, webhookFieldsFromAction, type HeaderRow, type WebhookFields } from "./webhook";
 
@@ -65,6 +65,13 @@ export interface ScheduleForm extends TriggerFields, WebhookFields {
   every: string;
   /** A `datetime-local` value, in the browser's time zone. */
   at: string;
+  /** A `day_start` spec (TER-458): `HH:MM` or empty, in `tz`. */
+  notBefore: string;
+  notAfter: string;
+  /** A duration as `5m`, or empty. At most 12h. */
+  delay: string;
+  /** `mon` to `sun`; none is every day. */
+  weekdays: string[];
   actionType: ScheduleActionType;
   mailTo: string;
   mailSubject: string;
@@ -102,6 +109,10 @@ export const FIELD_OF: Record<string, FormKey> = {
   "spec.tz": "tz",
   "spec.every": "every",
   "spec.at": "at",
+  "spec.not_before": "notBefore",
+  "spec.not_after": "notAfter",
+  "spec.delay": "delay",
+  "spec.weekdays": "weekdays",
   action: "actionType",
   "action.type": "actionType",
   "action.to": "mailTo",
@@ -228,6 +239,10 @@ export const emptyScheduleForm = (selectedProject: string | null | undefined, in
   tz: "UTC",
   every: "15m",
   at: "",
+  notBefore: "",
+  notAfter: "",
+  delay: "",
+  weekdays: [],
   actionType: "mail",
   mailTo: "",
   mailSubject: "",
@@ -257,6 +272,8 @@ export function formFromSchedule(s: Schedule): ScheduleForm {
   if (s.spec.kind === "cron") Object.assign(f, { expr: s.spec.expr, tz: s.spec.tz || "UTC" }, presetOf(s.spec.expr));
   else if (s.spec.kind === "interval") f.every = s.spec.every;
   else if (s.spec.kind === "at") f.at = localInput(s.spec.at);
+  else if (s.spec.kind === "day_start")
+    Object.assign(f, { tz: s.spec.tz || "UTC", notBefore: s.spec.not_before ?? "", notAfter: s.spec.not_after ?? "", delay: s.spec.delay ?? "", weekdays: (s.spec.weekdays ?? []).map((d) => d.trim().slice(0, 3).toLowerCase()) });
   else if (s.spec.kind === "on") Object.assign(f, triggerFieldsFromSpec(s.spec));
   // A project action (`manual`) has no spec fields.
   const a = s.action;
@@ -284,9 +301,41 @@ function buildSpec(f: ScheduleForm): Built<ScheduleSpec> {
     return { value: { kind: "interval", every: f.every.trim() } };
   }
   if (f.specKind === "manual") return { value: { kind: "manual" } };
+  if (f.specKind === "day_start") return buildDayStartSpec(f);
   const at = new Date(f.at);
   if (!f.at || Number.isNaN(at.getTime())) return { error: "Choose the date and time.", field: "at" };
   return { value: { kind: "at", at: at.toISOString() } };
+}
+
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** The longest `delay` of a `day_start` spec. */
+export const MAX_DAY_START_DELAY_SECS = 12 * 3600;
+
+/** A `day_start` spec, with the daemon's checks (docs/api.md §19.3). Empty fields are left out. */
+function buildDayStartSpec(f: ScheduleForm): Built<ScheduleSpec> {
+  const notBefore = f.notBefore.trim();
+  const notAfter = f.notAfter.trim();
+  const delay = f.delay.trim();
+  if (notBefore && !HHMM.test(notBefore)) return { error: "Not before is a time as HH:MM.", field: "notBefore" };
+  if (notAfter && !HHMM.test(notAfter)) return { error: "Not after is a time as HH:MM.", field: "notAfter" };
+  if (notBefore && notAfter && notAfter < notBefore) return { error: "Not after is before not before.", field: "notAfter" };
+  if (delay) {
+    const sec = parseEvery(delay);
+    if (sec === null) return { error: "The delay is a duration such as 5m or 1h30m.", field: "delay" };
+    if (sec > MAX_DAY_START_DELAY_SECS) return { error: "The delay is at most 12h.", field: "delay" };
+  }
+  // Monday first, as the list of the dialog; all seven is every day.
+  const weekdays = DAY_START_WEEKDAYS.filter((d) => f.weekdays.includes(d));
+  return {
+    value: {
+      kind: "day_start",
+      tz: f.tz.trim() || "UTC",
+      ...(notBefore ? { not_before: notBefore } : {}),
+      ...(notAfter ? { not_after: notAfter } : {}),
+      ...(delay ? { delay } : {}),
+      ...(weekdays.length && weekdays.length < 7 ? { weekdays } : {}),
+    },
+  };
 }
 
 function buildAction(f: ScheduleForm): Built<ScheduleAction> {

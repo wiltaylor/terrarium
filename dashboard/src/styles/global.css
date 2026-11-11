@@ -783,6 +783,10 @@ a.project-name {
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
+/* The count of a project tab (TER-154). The words are in a .sr-only span. */
+.project-tabs .nav-count {
+  margin-left: 6px;
+}
 /* A phone: tabs of 40px or more, for a finger. */
 @media (max-width: 760px) {
   .tabs a,
@@ -879,6 +883,54 @@ a.project-name {
   font-size: 0.8rem;
   color: #fff;
   flex: none;
+}
+/* TER-642: a bundled vendor mark (components/providerLogos.ts) on a quiet plate. */
+.provider-logo.small {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  vertical-align: -4px;
+  display: inline-grid;
+}
+.provider-logo.mark,
+.provider-logo.glyph {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 3px;
+  box-sizing: border-box;
+}
+.provider-logo.small.mark,
+.provider-logo.small.glyph {
+  padding: 1px;
+}
+.provider-logo.mark.plate {
+  background: #fff;
+}
+.provider-logo img,
+.provider-logo svg {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.provider-logo .provider-mark-dark {
+  display: none;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .provider-logo .provider-mark-light:has(+ .provider-mark-dark) {
+    display: none;
+  }
+  :root:not([data-theme="light"]) .provider-logo .provider-mark-dark {
+    display: block;
+  }
+}
+:root[data-theme="dark"] .provider-logo .provider-mark-light:has(+ .provider-mark-dark) {
+  display: none;
+}
+:root[data-theme="dark"] .provider-logo .provider-mark-dark {
+  display: block;
 }
 .meter {
   display: grid;

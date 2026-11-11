@@ -24,6 +24,15 @@ jobs:
   # scripts/ tests, and the dashboard check), one part per step.
   check:
     name: fmt + lint + test
+    # Skipped only for a push to main whose head commit carries a
+    # `tested-at-cut:` trailer: the lead ran the same full suite on that
+    # commit at the version cut (operator, 2026-11-11, question
+    # 01M74RFDZ39SP9E3258VM6F48A). Pull requests and every other push run it.
+    # The version job reads the real git trailers of HEAD; on a pull
+    # request it is skipped, and the check runs.
+    needs: [version]
+    if: >-
+      always() && needs.version.outputs.tested_at_cut != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,6 +107,7 @@ jobs:
       version: ${{ steps.calc.outputs.version }}
       prerelease: ${{ steps.calc.outputs.prerelease }}
       do_release: ${{ steps.calc.outputs.do_release }}
+      tested_at_cut: ${{ steps.calc.outputs.tested_at_cut }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,9 +117,19 @@ jobs:
           IS_RELEASE=$(git log -1 --format='%(trailers:key=release,valueonly)')
           IS_PRERELEASE=$(git log -1 --format='%(trailers:key=pre-release,valueonly)')
           BUMP_TRAILER=$(git log -1 --format='%(trailers:key=bump,valueonly)' | tr -d '[:space:]')
+          # The lead's full suite on this commit at the cut (a real trailer,
+          # not text in the body); only a release commit may skip the check.
+          TESTED_AT_CUT=$(git log -1 --format='%(trailers:key=tested-at-cut,valueonly)' | tr -d '[:space:]')
+          if [[ -n "$TESTED_AT_CUT" && ( "$IS_RELEASE" == "true" || "$IS_PRERELEASE" == "true" ) ]]; then
+            echo "tested_at_cut=true" >> "$GITHUB_OUTPUT"
+            echo "Tested at the cut: $TESTED_AT_CUT (the check job is skipped)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "tested_at_cut=false" >> "$GITHUB_OUTPUT"
+          fi
 
           if [[ "$IS_RELEASE" != "true" && "$IS_PRERELEASE" != "true" ]]; then
             echo "do_release=false" >> "$GITHUB_OUTPUT"
+            echo "tested_at_cut=false" >> "$GITHUB_OUTPUT"
             echo "No release/pre-release trailer on HEAD — tests only." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -193,12 +213,19 @@ jobs:
   # The host agent asset of the release comes OUT of the pushed image
   # (/opt/terrarium/dist), so the release binary and the binary that the
   # daemon serves to host agents (GET /install/terrarium-host, self-update)
-  # are the same bytes. SHA256SUMS covers it, and it is attested too.
+  # are the same bytes. The host helper asset (terrarium-host-helper, native
+  # GPU enforcement) comes out of the same directory. SHA256SUMS covers
+  # both, and both are attested too.
   # docs/release.md says how to verify both.
   image:
     name: Build and push the image
     needs: [version, check]
-    if: needs.version.outputs.do_release == 'true'
+    # A check skipped by the tested-at-cut trailer does not stop the image;
+    # a failed or cancelled check does.
+    if: >-
+      always() && needs.version.outputs.do_release == 'true'
+      && needs.version.result == 'success'
+      && (needs.check.result == 'success' || needs.check.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -272,7 +299,7 @@ jobs:
           subject-name: ${{ steps.names.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
-      - name: Take the host agent out of the image
+      - name: Take the host agent and the host helper out of the image
         env:
           IMAGE: ${{ steps.names.outputs.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -281,23 +308,31 @@ jobs:
           ref="$IMAGE@$DIGEST"
           docker pull --platform linux/amd64 "$ref"
           cid=$(docker create --platform linux/amd64 "$ref")
-          docker cp "$cid:/opt/terrarium/dist/terrarium-host-x86_64-linux" host.bin
-          docker cp "$cid:/opt/terrarium/dist/terrarium-host-x86_64-linux.sha256" host.sha256
+          : > SHA256SUMS
+          # terrarium-host-helper: the root helper of native GPU enforcement
+          # (docs/native-gpu-helper.md), built with terrarium-host.
+          for bin in terrarium-host terrarium-host-helper; do
+            docker cp "$cid:/opt/terrarium/dist/$bin-x86_64-linux" "$bin.bin"
+            docker cp "$cid:/opt/terrarium/dist/$bin-x86_64-linux.sha256" "$bin.sha256"
+            # The hash in the image (the daemon serves it for terrarium-host) must be the hash of the asset.
+            want=$(cut -d' ' -f1 "$bin.sha256")
+            got=$(sha256sum "$bin.bin" | cut -d' ' -f1)
+            [[ "$want" == "$got" ]] || { echo "::error::the image's $bin is $got, its .sha256 says $want"; exit 1; }
+            asset="$bin-$VERSION-linux-x86_64"
+            mv "$bin.bin" "$asset"
+            rm "$bin.sha256"
+            chmod 0755 "$asset"
+            sha256sum "$asset" >> SHA256SUMS
+            # The binary in the image reports the release version.
+            "./$asset" --version | tee /dev/stderr | grep -q "^$bin $VERSION+"
+          done
           docker rm "$cid"
-          # The hash that the daemon in the image serves must be the hash of the asset.
-          want=$(cut -d' ' -f1 host.sha256)
-          got=$(sha256sum host.bin | cut -d' ' -f1)
-          [[ "$want" == "$got" ]] || { echo "::error::the image's terrarium-host is $got, its .sha256 says $want"; exit 1; }
-          asset="terrarium-host-$VERSION-linux-x86_64"
-          mv host.bin "$asset"
-          chmod 0755 "$asset"
-          sha256sum "$asset" > SHA256SUMS
           cat SHA256SUMS
-          # The binary in the image reports the release version.
-          "./$asset" --version | tee /dev/stderr | grep -q "^terrarium-host $VERSION+"
-      - name: Attest the host agent
+          [[ $(wc -l < SHA256SUMS) == 2 ]] || { echo "::error::SHA256SUMS must list the host agent and the host helper"; exit 1; }
+      - name: Attest the host agent and the host helper
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
+          # The glob matches terrarium-host-<v>-... and terrarium-host-helper-<v>-...
           subject-path: terrarium-host-*-linux-x86_64
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -308,8 +343,8 @@ jobs:
           retention-days: 1
 
   # ── Release ───────────────────────────────────────────────────────────────
-  # Tag the commit and cut a GitHub (pre-)release with the host agent and
-  # SHA256SUMS. The notes name the image and its digest.
+  # Tag the commit and cut a GitHub (pre-)release with the host agent, the
+  # host helper, and SHA256SUMS. The notes name the image and its digest.
   release:
     name: Create GitHub release
     needs: [version, image]
@@ -348,6 +383,7 @@ jobs:
           \`\`\`sh
           gh attestation verify oci://$IMAGE:$VERSION --repo $GITHUB_REPOSITORY
           gh attestation verify terrarium-host-$VERSION-linux-x86_64 --repo $GITHUB_REPOSITORY
+          gh attestation verify terrarium-host-helper-$VERSION-linux-x86_64 --repo $GITHUB_REPOSITORY
           sha256sum -c SHA256SUMS
           \`\`\`
           NOTES

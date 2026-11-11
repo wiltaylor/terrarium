@@ -233,6 +233,8 @@ pub(super) async fn prepare(
     if !def.sync_workspace {
         return Ok(None);
     }
+    // An exedev target comes here as the ssh target of its VM
+    // (`executor::resolved_def`).
     if def.kind != TargetKind::Ssh {
         return Err(ApiError::invalid("sync_workspace requires an ssh target"));
     }
@@ -487,7 +489,7 @@ mod tests {
             crate::store::targets::validate(&def)
                 .unwrap_err()
                 .message
-                .contains("requires an ssh target")
+                .contains("requires an ssh or exedev target")
         );
     }
 

@@ -32,7 +32,7 @@ export function cardQuestionBadges(questions: Question[]): Map<string, CardQuest
     const priority = qs.reduce<QuestionPriority>((p, q) => (priorityRank(q.priority) > priorityRank(p) ? q.priority : p), "normal");
     const noun = qs.length === 1 ? "open question" : "open questions";
     const lines = qs.map((q) => `${q.kind}${q.kind === "bundle" ? ` (${q.items?.length ?? 0} items)` : ""}${q.priority !== "normal" ? `, ${q.priority}` : ""}: ${shortQuestion(q.text, 80)}`);
-    out.set(card, { count: qs.length, priority, cls: priorityChip(priority), label: `? ${qs.length}`, title: `${qs.length} ${noun} on ${card}${priority !== "normal" ? ` (${priority})` : ""}:\n${lines.join("\n")}` });
+    out.set(card, { count: qs.length, priority, cls: priorityChip(priority), label: `waits on you (${qs.length})`, title: `${qs.length} ${noun} on ${card}${priority !== "normal" ? ` (${priority})` : ""}:\n${lines.join("\n")}` });
   }
   return out;
 }

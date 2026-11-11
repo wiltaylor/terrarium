@@ -408,6 +408,8 @@ pub fn request_deferred(
     at: i64,
     deferred: bool,
 ) -> ApiResult<Reservation> {
+    // TER-623: a release target is used by the release job only.
+    crate::store::jobs::check_not_release_target(t, &req.target, "reserving through the target")?;
     req.amounts.validate().map_err(ApiError::invalid)?;
     if (req.amounts.is_empty() && req.gpus.is_empty())
         || req.duration_ms <= 0

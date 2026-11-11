@@ -84,13 +84,16 @@ async fn binary_sha256(path: &Path) -> std::io::Result<String> {
 }
 
 /// The hash of the `arch` binary in a release `SHA256SUMS`: the line of
-/// `terrarium-host-<version>-linux-<arch>`.
+/// `terrarium-host-<version>-linux-<arch>`. The version starts with a
+/// digit, so the line of `terrarium-host-helper-<version>-linux-<arch>`
+/// (the same release) is not taken.
 pub fn release_sum(sums: &str, arch: &str) -> Option<String> {
     let suffix = format!("-linux-{arch}");
     sums.lines().find_map(|l| {
         let (hash, file) = l.trim().split_once(char::is_whitespace)?;
         let file = file.trim().trim_start_matches('*');
-        (file.starts_with("terrarium-host-") && file.ends_with(&suffix))
+        let version = file.strip_prefix("terrarium-host-")?;
+        (version.starts_with(|c: char| c.is_ascii_digit()) && file.ends_with(&suffix))
             .then(|| hex64(hash))
             .flatten()
     })
@@ -538,6 +541,28 @@ mod tests {
         assert_eq!(release_sum(&sums, "riscv64"), None);
         assert_eq!(
             release_sum("zz  terrarium-host-0.3.0-linux-x86_64", "x86_64"),
+            None
+        );
+    }
+
+    #[test]
+    fn release_sums_skip_the_host_helper() {
+        let a = "a".repeat(64);
+        let h = "c".repeat(64);
+        let sums = format!(
+            "{h}  terrarium-host-helper-0.3.0-linux-x86_64\n{a}  terrarium-host-0.3.0-linux-x86_64\n"
+        );
+        assert_eq!(release_sum(&sums, "x86_64"), Some(a.clone()));
+        // The order of the release CI: the host agent first, then the helper.
+        let sums = format!(
+            "{a}  terrarium-host-0.3.0-linux-x86_64\n{h}  terrarium-host-helper-0.3.0-linux-x86_64\n"
+        );
+        assert_eq!(release_sum(&sums, "x86_64"), Some(a));
+        assert_eq!(
+            release_sum(
+                &format!("{h}  terrarium-host-helper-0.3.0-linux-x86_64\n"),
+                "x86_64"
+            ),
             None
         );
     }

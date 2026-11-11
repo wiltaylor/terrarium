@@ -5,12 +5,19 @@
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../test/wait";
 import { MOVED_ROUTES, movedTo, PROJECT_TABS } from "./nav";
 
 const { stub } = vi.hoisted(() => ({ stub: (label: string) => () => label }));
 
 vi.mock("../api", () => ({ isMock: false }));
-vi.mock("../stores", () => ({ auth: { mode: () => "operator" } }));
+// The project shell reads the tab counts (TER-154): no agent, no count.
+vi.mock("../stores", () => ({
+  auth: { mode: () => "operator" },
+  agents: { inProject: () => [] },
+  api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) } },
+  events: { on: () => () => {} },
+}));
 vi.mock("./Layout", () => ({ Layout: (props: { children?: unknown }) => props.children }));
 vi.mock("./LoginScreen", () => ({ LoginScreen: stub("Login") }));
 vi.mock("../features/home/Home", () => ({ Home: stub("Home page") }));
@@ -77,7 +84,7 @@ function activeProjectTab(root: HTMLElement) {
 describe("App project routes", () => {
   it("opens Board at the project index in the real route tree", async () => {
     const root = mount("/p/my%20app");
-    await vi.waitFor(() => expect(root.textContent).toContain("Cards page"));
+    await waitFor(() => expect(root.textContent).toContain("Cards page"));
     expect(window.location.pathname).toBe("/p/my%20app/board");
     expect(root.querySelector("h1")?.textContent).toBe("my app");
     expect(activeProjectTab(root)).toEqual(["Board"]);
@@ -100,7 +107,7 @@ describe("App project routes", () => {
     ] as const;
     for (const [index, [path, page]] of cases.entries()) {
       const root = mount(path);
-      await vi.waitFor(() => expect(root.textContent).toContain(page));
+      await waitFor(() => expect(root.textContent).toContain(page));
       expect(root.textContent).not.toContain("Page not found.");
       expect(root.querySelector("h1")?.textContent).toBe("my app");
       expect(activeProjectTab(root)).toEqual([PROJECT_TABS[index]!.label]);
@@ -117,7 +124,7 @@ describe("App project routes", () => {
     ] as const;
     for (const [path, page, label, tab, href] of cases) {
       const root = mount(path);
-      await vi.waitFor(() => expect(root.textContent).toContain(page));
+      await waitFor(() => expect(root.textContent).toContain(page));
       const links = Array.from(root.querySelectorAll<HTMLAnchorElement>(`nav[aria-label="${label}"] a`));
       expect(links.find((a) => a.textContent === tab)?.getAttribute("href")).toBe(href);
       expect(links.filter((a) => a.classList.contains("active")).map((a) => a.textContent)).toEqual([tab]);
@@ -138,7 +145,7 @@ describe("App project routes", () => {
     ] as const;
     for (const [path, page, tab] of cases) {
       const root = mount(path);
-      await vi.waitFor(() => expect(root.textContent).toContain(page));
+      await waitFor(() => expect(root.textContent).toContain(page));
       expect(root.querySelectorAll("nav.tabs"), path).toHaveLength(1);
       expect(root.querySelector('nav[aria-label="Board"]'), path).toBeNull();
       expect(activeProjectTab(root), path).toEqual([tab]);
@@ -153,7 +160,7 @@ describe("App project routes", () => {
       const from = route.path.replace(":project", project).replace(":id", "x1").replace(":name", "code-review").replace("*path", "a/b");
       const to = movedTo(from)!;
       const root = mount(from);
-      await vi.waitFor(() => expect(window.location.pathname).toBe(to));
+      await waitFor(() => expect(window.location.pathname).toBe(to));
       expect(root.textContent, from).not.toContain("Page not found.");
       dispose?.();
       document.body.replaceChildren();
@@ -162,7 +169,7 @@ describe("App project routes", () => {
 
   it("renders a project URL with bad percent-encoding", async () => {
     const root = mount("/p/a%zz/board");
-    await vi.waitFor(() => expect(root.textContent).toContain("Cards page"));
+    await waitFor(() => expect(root.textContent).toContain("Cards page"));
     expect(root.querySelector("h1")?.textContent).toBe("a%zz");
     // The board has no screen title of its own (TER-507): the project title is the only one.
     expect(root.querySelector("h2")).toBeNull();

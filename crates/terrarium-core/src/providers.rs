@@ -65,6 +65,9 @@ pub fn status_url_of(
 //   the `level` of the usage probe answer: `user_level_name` of
 //   `GET /coding/v1/me`.
 // - OpenRouter: https://openrouter.ai/pricing ("OpenRouter").
+// - The cloud providers (`crate::cloud`): "Amazon Bedrock", "Google Cloud
+//   Vertex AI", "Microsoft Foundry", the names of the dashboard logos
+//   (TER-642).
 
 /// The name that Anthropic uses today for a Claude plan, from a
 /// `rateLimitTier` (`default_claude_max_20x`), a subscription type
@@ -203,6 +206,9 @@ pub fn display_name(
         "moonshot" if is_api_key(plan) => "Kimi API Platform".into(),
         "moonshot" => with("Kimi Code", tier.and_then(kimi_code_tier)),
         "openrouter" => "OpenRouter".into(),
+        "bedrock" | "gcp" | "foundry" => {
+            crate::cloud::kind(&p).map_or_else(|| p.clone(), |k| k.display_name().to_owned())
+        }
         _ => match plan {
             Some(pl) => format!("{} {pl}", provider.trim()),
             None if !provider.trim().is_empty() => provider.trim().to_owned(),
@@ -346,6 +352,9 @@ mod name_tests {
         assert_eq!(name("moonshot", Some("api")), "Kimi API Platform");
         assert_eq!(name("moonshot", Some("api-cn")), "Kimi API Platform");
         assert_eq!(name("openrouter", Some("API key")), "OpenRouter");
+        assert_eq!(name("bedrock", None), "Amazon Bedrock");
+        assert_eq!(name("gcp", None), "Google Cloud Vertex AI");
+        assert_eq!(name("foundry", Some("API key")), "Microsoft Foundry");
         assert_eq!(name("acme", Some("Gold")), "acme Gold");
         assert_eq!(name("acme", None), "acme");
         let sh = selfhosted::SelfHosted {

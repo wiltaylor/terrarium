@@ -279,7 +279,11 @@ fn svg_root(text: &str) -> bool {
                 return false;
             };
             rest = r[end + 3..].trim_start();
-        } else if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case("<!doctype") {
+        } else if rest
+            .as_bytes()
+            .get(..9)
+            .is_some_and(|b| b.eq_ignore_ascii_case(b"<!doctype"))
+        {
             let Some(end) = rest.find('>') else {
                 return false;
             };
@@ -857,6 +861,10 @@ mod tests {
         );
         assert!(ok("a.svg", b"<html><svg></svg></html>").is_err());
         assert!(ok("a.svg", b"<svgx>").is_err());
+        // A multi-byte character across byte 9 is not a doctype, and no panic.
+        assert!(ok("a.svg", "<abcdefg\u{e9}/>".as_bytes()).is_err());
+        assert!(ok("a.svg", "<!-- x --><abcdefg\u{20ac}>".as_bytes()).is_err());
+        assert!(!svg_root("<!doctyp\u{e9}>"));
     }
 
     #[test]

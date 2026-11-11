@@ -116,6 +116,9 @@ export default defineConfig(({ mode }) => {
     test: {
       environment: "node",
       include: ["src/**/*.test.ts"],
+      // Above the 10 s of the waitFor helper (src/test/wait.ts), so that a
+      // slow wait on a loaded host fails on its own check, not the 5 s default.
+      testTimeout: 30_000,
     },
   };
 });

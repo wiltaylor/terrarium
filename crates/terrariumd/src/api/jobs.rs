@@ -20,6 +20,18 @@
 //! - `POST /api/merges` {cards, repo?, eta?} (TER-112): a project admin. One
 //!   merge job for the cards of one project, merged in the given order and
 //!   validated once. One card is the same as `POST /api/cards/{id}/merge`.
+//! - `POST /api/cards/{id}/release` {repo?, commit?, eta?} (TER-623): a
+//!   project admin (the lead's release step). A queued release job on the
+//!   project's `release_target`, at the head of `main` on the remote
+//!   (`commit`, when given, must be that head). It runs `release_recipe`
+//!   with `release_secrets` in its env and the `docker_release` relay. The
+//!   card does not move: it gets a comment at the queue and at the end,
+//!   and no `job.verdict` event.
+//! - `GET /api/release-targets` (any actor) and `DELETE
+//!   /api/release-targets/{name}` (the operator, audited): the protected
+//!   release targets (TER-623). A set of `release_target` adds the target
+//!   and its machine; a switch or a clear keeps it protected until the
+//!   operator retires it.
 //! - With `board_flow = rules` (TER-170) a validate, a merge, a batch,
 //!   and a cancel only queue or cancel the job: its events are all, and
 //!   the board rules set the labels, move, and comment (the built-in pack
@@ -36,10 +48,12 @@
 //!   operator, TER-105): the addresses of a host agent, so an SSH target
 //!   on one of them counts on the host agent's cap.
 
+use std::collections::HashMap;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -52,7 +66,7 @@ use crate::jobs as rt;
 use crate::policy;
 use crate::store::board::{self, Card, CardPatch};
 use crate::store::jobs::{self, Job, JobKind, JobState, NewJob};
-use crate::store::{github_gate, hosts, projects, repos};
+use crate::store::{accepted_heads, github_gate, hosts, projects, repos};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -65,6 +79,9 @@ pub fn routes() -> Router<Shared> {
         .route("/jobs/{id}", get(show).delete(cancel))
         .route("/cards/{id}/validate", post(validate))
         .route("/cards/{id}/merge", post(merge))
+        .route("/cards/{id}/release", post(release))
+        .route("/release-targets", get(list_release_targets))
+        .route("/release-targets/{name}", delete(retire_release_target))
         .route("/merges", post(merge_batch))
         .route("/job-hosts", get(list_hosts))
         .route("/job-hosts/{host}", put(set_host).delete(clear_host))
@@ -418,6 +435,25 @@ struct MergeBody {
     /// The planned duration, as for a validate.
     #[serde(default)]
     eta: Option<String>,
+    /// The branch that the merge goes onto (TER-607): `next` (the
+    /// default), or a release branch `release/X.Y.Z` of a frozen
+    /// version, for a release-blocker fix.
+    #[serde(default)]
+    onto: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseBody {
+    #[serde(default)]
+    repo: Option<String>,
+    /// The release merge commit: the head of `main` on the remote. With
+    /// none, the head now.
+    #[serde(default)]
+    commit: Option<String>,
+    /// The planned duration, as for a validate.
+    #[serde(default)]
+    eta: Option<String>,
 }
 
 /// The planned duration of a body's `eta`: `None` without one.
@@ -666,17 +702,9 @@ async fn validate(
             let validating =
                 board::role_name(t, &card.project, board::VALIDATING, rt::COL_VALIDATING)?;
             if card.column != validating {
-                board::move_card(
-                    t,
-                    &Actor::Operator,
-                    &card.id,
-                    &validating,
-                    None,
-                    Some(&note),
-                )?;
-            } else {
-                board::add_comment(t, &Actor::Operator, &card.id, &note)?;
+                board::move_card(t, &Actor::Operator, &card.id, &validating, None, None)?;
             }
+            board::system_comment(t, &card.id, &note, None)?;
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
             Ok((job, (place, room)))
@@ -693,7 +721,19 @@ async fn merge(
     ApiJson(b): ApiJson<MergeBody>,
 ) -> ApiResult<Response> {
     let planned_secs = planned(b.eta.as_deref())?;
+    if let Some(o) = &b.onto {
+        jobs::check_onto(o)?;
+    }
     rt::prepare_hosts(&state.db, None).await?;
+    let commits = merge_commits(
+        &state,
+        &actor,
+        vec![id.clone()],
+        b.repo.clone(),
+        b.branch.clone(),
+        b.onto.clone(),
+    )
+    .await?;
     let job = state
         .db
         .write(actor.label(), move |t| {
@@ -712,7 +752,8 @@ async fn merge(
                 )));
             }
             let branch = branch_of(&card, b.branch)?;
-            let job = jobs::create(
+            let commit = merge_commit(&commits, &card.id, &branch)?;
+            let job = jobs::create_onto(
                 t,
                 NewJob {
                     project: card.project.clone(),
@@ -720,11 +761,12 @@ async fn merge(
                     kind: JobKind::Merge,
                     repo: repo.clone(),
                     branch: branch.clone(),
-                    commit: None,
+                    commit: Some(commit),
                     by_agent: rt::by_agent_of(&card.labels),
                     batch: Vec::new(),
                     planned_secs,
                 },
+                b.onto.as_deref(),
             )?;
             if rt::code_flow(t, &card.project)? {
                 let patch = CardPatch {
@@ -732,12 +774,7 @@ async fn merge(
                     ..CardPatch::default()
                 };
                 board::update_card(t, &Actor::Operator, &card.id, patch)?;
-                board::add_comment(
-                    t,
-                    &Actor::Operator,
-                    &card.id,
-                    &rt::queue_comment(&job, &card.id),
-                )?;
+                board::system_comment(t, &card.id, &rt::queue_comment(&job, &card.id), None)?;
             }
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
@@ -747,6 +784,229 @@ async fn merge(
         .await?;
     rt::kick(&state);
     Ok(queued_answer(job.0, job.1, job.2, job.3))
+}
+
+/// Queue a release job (TER-623): the lead's release step. A project
+/// admin queues it on the card of the release (for example the version
+/// card). It runs the release recipe on the project's release target, on
+/// the head of `main` on the remote, which must be the given commit. The
+/// card does not move; it gets a comment at the queue and at the end.
+async fn release(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(b): ApiJson<ReleaseBody>,
+) -> ApiResult<Response> {
+    if let Some(c) = &b.commit {
+        rt::check_commit(c)?;
+    }
+    let planned_secs = planned(b.eta.as_deref())?;
+    let card_id = board::normalise_id(&id);
+    let (a, given_repo) = (actor.clone(), b.repo.clone());
+    let (card, repo) = state
+        .db
+        .read(move |c| {
+            let card = board::get_card(c, &card_id)?;
+            policy::admin_project(&a, &card.project, "queueing a release")?;
+            release_ok(c, &card)?;
+            let repo = repo_of(c, &card, given_repo)?;
+            Ok((card, repo))
+        })
+        .await?;
+    // A release builds what is on `main`: the head on the remote now.
+    let head = rt::remote_head(&state, &card.project, &repo, jobs::RELEASE_BRANCH)
+        .await?
+        .ok_or_else(|| {
+            ApiError::conflict(format!(
+                "repo `{repo}` has no `{}` branch on its remote",
+                jobs::RELEASE_BRANCH
+            ))
+        })?;
+    rt::check_commit(&head)?;
+    if let Some(c) = &b.commit
+        && !head.starts_with(&c.to_lowercase())
+    {
+        return Err(ApiError::conflict(format!(
+            "commit {c} is not the head of `{}` on the remote (the head is {head}): a release takes the release merge commit at the head of `{}`",
+            jobs::RELEASE_BRANCH,
+            jobs::RELEASE_BRANCH
+        )));
+    }
+    let job = state
+        .db
+        .write(actor.label(), move |t| {
+            let card = board::get_card(t, &card.id)?;
+            policy::admin_project(&actor, &card.project, "queueing a release")?;
+            release_ok(t, &card)?;
+            let job = jobs::create(
+                t,
+                NewJob {
+                    project: card.project.clone(),
+                    card: card.id.clone(),
+                    kind: JobKind::Release,
+                    repo: repo.clone(),
+                    branch: jobs::RELEASE_BRANCH.into(),
+                    commit: Some(head),
+                    by_agent: actor.agent().map(|a| a.name.clone()),
+                    batch: Vec::new(),
+                    planned_secs,
+                },
+            )?;
+            board::add_comment(
+                t,
+                &Actor::Operator,
+                &card.id,
+                &rt::queue_comment(&job, &card.id),
+            )?;
+            let place = jobs::place(t, &job)?;
+            Ok((job, place))
+        })
+        .await?;
+    rt::kick(&state);
+    // Releases have their own lane of one (TER-623).
+    Ok(queued_answer(job.0, job.1, None, 1))
+}
+
+/// `GET /api/release-targets` (any actor, TER-623): the protected release
+/// targets, which no agent uses or defines until the operator retires them.
+async fn list_release_targets(
+    State(state): State<Shared>,
+    _actor: Actor,
+) -> ApiResult<Json<Value>> {
+    let rows = state.db.read(jobs::release_targets).await?;
+    Ok(Json(json!({"release_targets": rows})))
+}
+
+/// `DELETE /api/release-targets/{name}` (the operator only, TER-623):
+/// retire the protection of a target that is no longer a release target.
+/// Audited as `release_target.retire`.
+async fn retire_release_target(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    policy::operator_only(&actor, "retiring a protected release target")?;
+    let rows = state
+        .db
+        .write(actor.label(), move |t| {
+            jobs::retire_release_target(t, &name)
+        })
+        .await?;
+    Ok(Json(json!({"retired": rows})))
+}
+
+/// The checks of a release on `card`: a card that is not archived or
+/// held, of a project with a job queue and a release target.
+fn release_ok(c: &rusqlite::Connection, card: &Card) -> ApiResult<()> {
+    not_held(card)?;
+    if card.archived {
+        return Err(ApiError::conflict(format!("card {} is archived", card.id)));
+    }
+    let def = jobs::delivery(c, &card.project)?;
+    enabled(&def, &card.project)?;
+    if def.release_target().is_none() {
+        return Err(ApiError::conflict(format!(
+            "project `{}` has no release target: set `release_target` with `terrarium project delivery set --release-target`",
+            card.project
+        )));
+    }
+    Ok(())
+}
+
+/// The commit that a merge takes for each of the cards `ids`, with its
+/// branch, by card ID (TER-553): the reviewed commit that the merge queue
+/// recorded at the accept, else the head of the branch on its remote now.
+/// A card in the merge queue without a reviewed commit for the branch
+/// gets a 409 (TER-580): a round not recorded yet, a commit of another
+/// branch (a `branch` override, or a branch changed after the accept), or
+/// no round (a column given the role while it held cards). The head now
+/// could be a push after the review. The fallback is for cards outside
+/// the queue. The merge then takes that
+/// commit, never a later push. Read before the write of the job: the head
+/// is a `git ls-remote`.
+///
+/// With `onto` a release branch (TER-607), the commit is the one that the
+/// card's newest passed merge onto `next` took, never the head of the
+/// branch: a card without one gets a 409.
+async fn merge_commits(
+    state: &Shared,
+    actor: &Actor,
+    ids: Vec<String>,
+    repo: Option<String>,
+    branch: Option<String>,
+    onto: Option<String>,
+) -> ApiResult<HashMap<String, (String, String)>> {
+    let release = onto.filter(|o| o != jobs::NEXT);
+    let a = actor.clone();
+    let places = state
+        .db
+        .read(move |c| {
+            let mut out = Vec::new();
+            for id in &ids {
+                let card = board::get_card(c, &board::normalise_id(id))?;
+                // The checks of the write, in its order: a held or archived
+                // card gets that error, not one of its repo.
+                policy::admin_project(&a, &card.project, "queueing a merge onto next")?;
+                not_held(&card)?;
+                if card.archived {
+                    return Err(ApiError::conflict(format!("card {} is archived", card.id)));
+                }
+                enabled(&jobs::delivery(c, &card.project)?, &card.project)?;
+                let r = repo_of(c, &card, repo.clone())?;
+                let b = branch_of(&card, branch.clone())?;
+                if let Some(rel) = &release {
+                    let Some(tested) = jobs::passed_next_commit(c, &card.id, &b)? else {
+                        return Err(ApiError::conflict(format!(
+                            "card {} has no passed merge of branch `{b}` onto next: \
+                             merge it onto next first, then onto `{rel}`",
+                            card.id
+                        )));
+                    };
+                    out.push((card.id, card.project, r, b, Some(tested)));
+                    continue;
+                }
+                let recorded = accepted_heads::commit_for(c, &card.id, &b)?;
+                if recorded.is_none()
+                    && accepted_heads::is_queue(&card.column, card.column_role.as_deref())
+                {
+                    let why = accepted_heads::missing_reason(c, &card.id, &b)?;
+                    return Err(ApiError::conflict(format!("card {}: {why}", card.id)));
+                }
+                out.push((card.id, card.project, r, b, recorded));
+            }
+            Ok(out)
+        })
+        .await?;
+    let mut map = HashMap::new();
+    for (card, project, repo, branch, recorded) in places {
+        let commit = match recorded {
+            Some(c) => c,
+            None => match rt::remote_head(state, &project, &repo, &branch).await? {
+                Some(h) => h,
+                None => {
+                    return Err(ApiError::conflict(format!(
+                        "branch `{branch}` of card {card} is not on the remote of `{repo}`: push it first"
+                    )));
+                }
+            },
+        };
+        map.insert(card, (branch, commit));
+    }
+    Ok(map)
+}
+
+/// The commit of `card` from [`merge_commits`], for `branch`.
+fn merge_commit(
+    commits: &HashMap<String, (String, String)>,
+    card: &str,
+    branch: &str,
+) -> ApiResult<String> {
+    match commits.get(card) {
+        Some((b, c)) if b == branch => Ok(c.clone()),
+        _ => Err(ApiError::conflict(format!(
+            "card {card} changed while the merge was queued: queue it again"
+        ))),
+    }
 }
 
 /// One merge job for several cards (TER-112): merged onto `next` in the
@@ -764,6 +1024,8 @@ async fn merge_batch(
         ));
     }
     let planned_secs = planned(b.eta.as_deref())?;
+    let commits =
+        merge_commits(&state, &actor, b.cards.clone(), b.repo.clone(), None, None).await?;
     let job = state
         .db
         .write(actor.label(), move |t| {
@@ -791,6 +1053,20 @@ async fn merge_batch(
                 }
                 cards.push(card);
             }
+            // A release-blocker fix merges alone (TER-607).
+            if cards.len() > 1
+                && let Some(c) = cards.iter().find(|c| {
+                    c.labels
+                        .iter()
+                        .any(|l| l == crate::rules_verbs::RELEASE_BLOCKER)
+                })
+            {
+                return Err(ApiError::conflict(format!(
+                    "card {} has the label `{}`: it merges alone, as a batch of one",
+                    c.id,
+                    crate::rules_verbs::RELEASE_BLOCKER
+                )));
+            }
             let project = cards[0].project.clone();
             let def = jobs::delivery(t, &project)?;
             enabled(&def, &project)?;
@@ -807,10 +1083,13 @@ async fn merge_batch(
                     }
                     _ => repo = Some(r),
                 }
+                let branch = branch_of(card, None)?;
+                let commit = merge_commit(&commits, &card.id, &branch)?;
                 batch.push(jobs::BatchCard {
                     card: card.id.clone(),
-                    branch: branch_of(card, None)?,
+                    branch,
                     by_agent: rt::by_agent_of(&card.labels),
+                    commit: Some(commit),
                     outcome: None,
                     note: None,
                 });
@@ -830,7 +1109,7 @@ async fn merge_batch(
                     kind: JobKind::Merge,
                     repo: repo.clone(),
                     branch: first.branch.clone(),
-                    commit: None,
+                    commit: first.commit.clone(),
                     by_agent: first.by_agent.clone(),
                     batch: if batch.len() > 1 {
                         batch.clone()
@@ -847,12 +1126,7 @@ async fn merge_batch(
                     ..CardPatch::default()
                 };
                 board::update_card(t, &Actor::Operator, &c.card, patch)?;
-                board::add_comment(
-                    t,
-                    &Actor::Operator,
-                    &c.card,
-                    &rt::queue_comment(&job, &c.card),
-                )?;
+                board::system_comment(t, &c.card, &rt::queue_comment(&job, &c.card), None)?;
             }
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;

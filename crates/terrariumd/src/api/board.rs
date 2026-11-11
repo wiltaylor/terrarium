@@ -14,6 +14,7 @@ use crate::error::ApiResult;
 use crate::events::{self, EventFilter};
 use crate::policy;
 use crate::store::Page;
+use crate::store::accepted_heads;
 use crate::store::board::{self, Board, Card, CardFilter, CardPatch, ColumnSpec, NewCard, NewLink};
 
 pub fn routes() -> Router<Shared> {
@@ -173,10 +174,26 @@ async fn show(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-) -> ApiResult<Json<Card>> {
+) -> ApiResult<Json<serde_json::Value>> {
     let card = state.db.read(move |c| board::get_card(c, &id)).await?;
     policy::read_project(&actor, &card.project)?;
-    Ok(Json(card))
+    let id = card.id.clone();
+    let mut questions = state
+        .db
+        .read(move |c| {
+            crate::store::questions::list(
+                c,
+                &crate::store::questions::Filter {
+                    card: Some(id),
+                    ..Default::default()
+                },
+            )
+        })
+        .await?;
+    questions.retain(|q| policy::read_questions(&actor, &q.agent, &q.project).is_ok());
+    let mut result = serde_json::json!(card);
+    result["questions"] = serde_json::json!(questions);
+    Ok(Json(result))
 }
 
 async fn update(
@@ -222,12 +239,18 @@ async fn move_card(
     Path(id): Path<String>,
     ApiJson(m): ApiJson<MoveBody>,
 ) -> ApiResult<Json<Card>> {
+    let to = m.column.clone();
+    let head = head_before(&state, &actor, &id, move |_, cols| goes_to_queue(cols, &to)).await;
     let card = state
         .db
         .write(actor.label(), move |t| {
-            board::move_card(t, &actor, &id, &m.column, m.position, m.comment.as_deref())
+            let card =
+                board::move_card(t, &actor, &id, &m.column, m.position, m.comment.as_deref())?;
+            record_before(t, &card, head.as_ref())?;
+            board::get_card(t, &card.id)
         })
         .await?;
+    accepted_soon(&state, &card);
     Ok(Json(card))
 }
 
@@ -289,13 +312,114 @@ async fn comment(
     Path(id): Path<String>,
     ApiJson(c): ApiJson<CommentBody>,
 ) -> ApiResult<(StatusCode, Json<Card>)> {
+    // An accept verdict of a review agent moves the card into the merge
+    // queue in the write (`review_dispatcher::verdict`).
+    let first = c.body.trim().lines().next().unwrap_or_default().trim();
+    let accept = first.strip_prefix("Review verdict: ").unwrap_or(first) == "accept";
+    let head = if accept {
+        head_before(&state, &actor, &id, |card, cols| {
+            cols.iter()
+                .any(|(name, role)| *name == card.column && role.as_deref() == Some(board::REVIEW))
+                || card.column == board::REVIEW
+        })
+        .await
+    } else {
+        None
+    };
     let card = state
         .db
         .write(actor.label(), move |t| {
-            board::reply_comment(t, &actor, &id, &c.body, c.reply_to.as_deref())
+            let card = board::reply_comment(t, &actor, &id, &c.body, c.reply_to.as_deref())?;
+            record_before(t, &card, head.as_ref())?;
+            board::get_card(t, &card.id)
         })
         .await?;
+    // A review verdict in the comment can move the card into the merge
+    // queue (`review_dispatcher::verdict`).
+    accepted_soon(&state, &card);
     Ok((StatusCode::CREATED, Json(card)))
+}
+
+/// The branch and its head on the remote of card `id`, read before a write
+/// that can move the card into the merge queue (TER-553): `goes` says if
+/// it can, from the card and the board columns. The write then records the
+/// head as the reviewed commit, so the batch rule of the move sees it.
+/// `None` when the card cannot go there, or the head cannot be read: the
+/// background read records it after the move.
+async fn head_before<F>(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    goes: F,
+) -> Option<(String, String)>
+where
+    F: FnOnce(&Card, &[(String, Option<String>)]) -> bool + Send + 'static,
+{
+    let (a, id) = (actor.clone(), id.to_owned());
+    let place = state
+        .db
+        .read(move |c| {
+            let card = board::get_card(c, &board::normalise_id(&id))?;
+            policy::write_project(&a, &card.project)?;
+            let cols = board::column_roles(c, &card.project)?;
+            if accepted_heads::is_queue(&card.column, card.column_role.as_deref())
+                || !goes(&card, &cols)
+            {
+                return Ok(None);
+            }
+            let repo = crate::api::jobs::repo_of(c, &card, None)?;
+            let branch = crate::api::jobs::branch_of(&card, None)?;
+            Ok(Some((card.project, repo, branch)))
+        })
+        .await
+        .ok()
+        .flatten()?;
+    let (project, repo, branch) = place;
+    match crate::jobs::remote_head(state, &project, &repo, &branch).await {
+        Ok(Some(h)) if crate::jobs::check_commit(&h).is_ok() => Some((branch, h)),
+        _ => None,
+    }
+}
+
+/// Is `to`, as a move gives it, the merge queue of the board `cols`? The
+/// column named `to`, else the column with the role `to`, as
+/// `board::move_card` resolves it (TER-580).
+fn goes_to_queue(cols: &[(String, Option<String>)], to: &str) -> bool {
+    let by_name = cols.iter().find(|(name, _)| name == to);
+    let col = by_name.or_else(|| {
+        board::ROLES
+            .contains(&to)
+            .then(|| cols.iter().find(|(_, role)| role.as_deref() == Some(to)))
+            .flatten()
+    });
+    col.is_some_and(|(name, role)| accepted_heads::is_queue(name, role.as_deref()))
+}
+
+/// Record the head read by [`head_before`], when the write moved the card
+/// into the merge queue and the card branch is still the one read.
+fn record_before(
+    t: &mut crate::db::Tx<'_>,
+    card: &Card,
+    head: Option<&(String, String)>,
+) -> ApiResult<()> {
+    let Some((branch, commit)) = head else {
+        return Ok(());
+    };
+    if !accepted_heads::is_queue(&card.column, card.column_role.as_deref()) {
+        return Ok(());
+    }
+    if crate::api::jobs::branch_of(card, None).ok().as_ref() == Some(branch) {
+        accepted_heads::record_open(t, &card.id, branch, commit)?;
+    }
+    Ok(())
+}
+
+/// A card that is in the merge queue now: record its reviewed commit, the
+/// head of its branch, right after the move (TER-553).
+fn accepted_soon(state: &Shared, card: &Card) {
+    if crate::store::accepted_heads::is_queue(&card.column, card.column_role.as_deref()) {
+        crate::jobs::record_accepted_soon(state);
+    }
 }
 
 async fn link(

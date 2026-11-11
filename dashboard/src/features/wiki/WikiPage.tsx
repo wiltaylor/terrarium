@@ -12,6 +12,7 @@ import { isMissingEndpoint } from "../../api/http";
 import type { WikiPage as Page } from "../../api/types";
 import { api, projects } from "../../stores";
 import { bookmarks } from "../../stores";
+import { bookmarkAddError } from "../../stores/bookmarks";
 import { buildTree, type TreeNode } from "./tree";
 
 const TABS = [
@@ -138,7 +139,7 @@ export default function WikiPage() {
                   <h3 style={{ margin: 0 }}>{p().title}</h3>
                   <button aria-pressed={bookmarks.has(bookmarkUrl())} onClick={() => {
                     if (bookmarks.has(bookmarkUrl())) bookmarks.remove(bookmarkUrl());
-                    else if (!bookmarks.add(p().title, bookmarkUrl())) setError(new Error("This page needs a title before it can be pinned."));
+                    else if (!bookmarks.add(p().title, bookmarkUrl())) setError(new Error(bookmarkAddError(p().title, bookmarkUrl(), window.location.origin)));
                   }}>
                     {bookmarks.has(bookmarkUrl()) ? "Unpin bookmark" : "Pin to bookmarks"}
                   </button>

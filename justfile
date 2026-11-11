@@ -25,6 +25,8 @@ mod host '.just/host'
 mod deploy '.just/deploy'
 # Packaged defaults: the prompts and harness settings of the config repo
 mod defaults '.just/defaults'
+# The release build: test, build, sign, and publish a release (docs/release.md)
+mod release '.just/release'
 # Phase 0 spike scripts
 mod spikes '.just/spikes'
 

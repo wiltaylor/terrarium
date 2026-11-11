@@ -25,7 +25,8 @@ use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
 use crate::store::artifacts::{
-    self, Artifact, ArtifactCtx, NewArtifactLink, PruneReport, StoredBlob, Upload, Usage,
+    self, Artifact, ArtifactCtx, NewArtifactLink, PreparedBlob, PruneReport, StoredBlob, Upload,
+    Usage,
 };
 
 /// The request body limit of an upload: 32 MiB of data as base64 in JSON,
@@ -284,13 +285,56 @@ fn parse_upload(headers: &HeaderMap, body: &[u8], max: u64) -> ApiResult<Upload>
     ))
 }
 
+/// How long an upload waits for a permit ([`artifacts::MAX_CONCURRENT_UPLOADS`])
+/// before it is refused.
+const UPLOAD_PERMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The `Retry-After` of an upload refused for want of a permit, in seconds.
+const UPLOAD_RETRY_AFTER_SECS: u64 = 2;
+
+/// A `429 rate_limited` with `Retry-After`: all upload permits are taken.
+fn uploads_busy() -> Response {
+    let mut resp = ApiError::new(
+        Code::RateLimited,
+        format!(
+            "too many uploads in progress (at most {}); try again in {UPLOAD_RETRY_AFTER_SECS} s",
+            artifacts::MAX_CONCURRENT_UPLOADS
+        ),
+    )
+    .with_details(serde_json::json!({
+        "retry_after": UPLOAD_RETRY_AFTER_SECS,
+        "max_concurrent_uploads": artifacts::MAX_CONCURRENT_UPLOADS,
+    }))
+    .into_response();
+    resp.headers_mut().insert(
+        header::RETRY_AFTER,
+        HeaderValue::from(UPLOAD_RETRY_AFTER_SECS),
+    );
+    resp
+}
+
 async fn upload(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> ApiResult<(StatusCode, Json<Artifact>)> {
+) -> Response {
+    match upload_checked(state, actor, name, headers, body).await {
+        Ok(Some(a)) => (StatusCode::CREATED, Json(a)).into_response(),
+        Ok(None) => uploads_busy(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The upload, or `None` when no upload permit was free in time.
+async fn upload_checked(
+    state: Shared,
+    actor: Actor,
+    name: String,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Option<Artifact>> {
     policy::write_project(&actor, &name)?;
     let p = name.clone();
     state
@@ -298,22 +342,149 @@ async fn upload(
         .read(move |c| crate::store::projects::get(c, &p).map(|_| ()))
         .await?;
     let ctx = ctx(&state)?;
+    // The permit before the bytes are decoded. It moves into each task
+    // that holds the bytes, so it is free again only when they are
+    // dropped: on every error, on a client disconnect (the handler future
+    // drops), and when the store task ends (TER-605).
+    let Some(permit) = ctx.upload_permit(UPLOAD_PERMIT_WAIT).await else {
+        return Ok(None);
+    };
     let up = parse_upload(&headers, &body, ctx.limits.max_file_bytes)?;
     drop(body);
     let (c2, u2, r2) = (ctx.clone(), up.clone(), state.db.redactor().get());
     let view = crate::secrets::redact::view_of(&actor);
+    let (prepared, permit) = tokio::task::spawn_blocking(move || {
+        (artifacts::prepare_blob(&c2, &u2, &r2, &view), permit)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("upload task failed: {e}")))?;
+    let prepared: PreparedBlob = prepared?;
+    // The name and the quota before the blob is on disk: a refused upload
+    // leaves no blob. `create` checks both again in its transaction.
+    let (p, n, size, limits) = (
+        name.clone(),
+        up.name.clone(),
+        prepared.blob.size,
+        ctx.limits.clone(),
+    );
+    state
+        .db
+        .read(move |c| artifacts::check_upload(c, &p, &n, size, &limits).map(|_| ()))
+        .await?;
+    // One task owns the digest lock from the blob write to the committed
+    // row (or the removal of the blob again), so a delete of the same bytes
+    // cannot remove the blob under the new row. It is spawned, not awaited
+    // in place: when the client disconnects, the handler future drops, but
+    // the task still finishes the row or removes the blob before it
+    // releases the lock (TER-583).
+    let task = tokio::spawn(store_upload(state, ctx, actor, name, up, prepared, permit));
+    let a = task
+        .await
+        .map_err(|e| ApiError::internal(format!("upload task failed: {e}")))??;
+    Ok(Some(a))
+}
+
+/// Write the blob, create the row, and remove the blob again when the row
+/// fails, all under the digest lock of the blob. The upload permit is free
+/// again when the task ends.
+async fn store_upload(
+    state: Shared,
+    ctx: std::sync::Arc<ArtifactCtx>,
+    actor: Actor,
+    name: String,
+    up: Upload,
+    prepared: PreparedBlob,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) -> ApiResult<Artifact> {
+    let sha = prepared.blob.sha256.clone();
+    let _guard = ctx.digest_lock(&sha).lock_owned().await;
+    let (c2, u2) = (ctx.clone(), up.clone());
     let blob: StoredBlob =
-        tokio::task::spawn_blocking(move || artifacts::store_blob(&c2, &u2, &r2, &view))
+        tokio::task::spawn_blocking(move || artifacts::write_blob(&c2, &u2, &prepared))
             .await
             .map_err(|e| ApiError::internal(format!("upload task failed: {e}")))??;
     let limits = ctx.limits.clone();
-    let a = state
+    let kind = up.kind.clone();
+    let created = state
         .db
         .write(actor.label(), move |t| {
             artifacts::create(t, &actor, &name, &up, &blob, &limits)
         })
-        .await?;
-    Ok((StatusCode::CREATED, Json(a)))
+        .await;
+    if created.is_err() {
+        // No row: remove the blob unless another artifact uses it.
+        let c2 = ctx.clone();
+        if let Err(re) = state
+            .db
+            .read(move |c| {
+                artifacts::remove_blobs(&c2, c, &[(sha, kind)]);
+                Ok(())
+            })
+            .await
+        {
+            tracing::warn!("cannot remove the blob of a refused upload: {re}");
+        }
+    }
+    created
+}
+
+/// Remove the blobs no artifact uses any more, each under its digest lock.
+async fn remove_blobs_locked(
+    state: &Shared,
+    ctx: &std::sync::Arc<ArtifactCtx>,
+    blobs: Vec<(String, String)>,
+) -> ApiResult<()> {
+    for blob in blobs {
+        let lock = ctx.digest_lock(&blob.0);
+        let _guard = lock.lock().await;
+        let c2 = ctx.clone();
+        state
+            .db
+            .read(move |c| {
+                artifacts::remove_blobs(&c2, c, &[blob]);
+                Ok(())
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+/// The temp entries of a write younger than this are left to the sweep.
+const SWEEP_MIN_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Remove the blobs, bundles and old temp entries of the blob dir that no
+/// artifact row owns (left by a crash between the blob write and the row).
+/// The daemon runs it once at start. Returns the number removed.
+pub async fn sweep_orphans(state: &Shared) -> ApiResult<usize> {
+    let ctx = ctx(state)?;
+    let c2 = ctx.clone();
+    let entries = tokio::task::spawn_blocking(move || {
+        artifacts::sweep_candidates(&c2, std::time::SystemTime::now(), SWEEP_MIN_TEMP_AGE)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("sweep task failed: {e}")))?
+    .map_err(|e| ApiError::internal(format!("cannot read the artifact dir: {e}")))?;
+    let mut removed = 0;
+    for entry in entries {
+        let sha = match &entry {
+            artifacts::SweepEntry::Blob { sha, .. } | artifacts::SweepEntry::Temp { sha, .. } => {
+                sha.clone()
+            }
+        };
+        let lock = ctx.digest_lock(&sha);
+        let _guard = lock.lock().await;
+        let c2 = ctx.clone();
+        match state
+            .db
+            .read(move |c| artifacts::sweep_entry(&c2, c, &entry))
+            .await
+        {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(e) => tracing::warn!(sha, "artifact orphan sweep: {e}"),
+        }
+    }
+    Ok(removed)
 }
 
 // ---- reads and links ----
@@ -370,13 +541,7 @@ async fn remove(
         .write(actor.label(), move |t| artifacts::delete(t, &actor, &id))
         .await?;
     let ctx = ctx(&state)?;
-    state
-        .db
-        .read(move |c| {
-            artifacts::remove_blobs(&ctx, c, &[blob]);
-            Ok(())
-        })
-        .await?;
+    remove_blobs_locked(&state, &ctx, vec![blob]).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -669,14 +834,7 @@ pub async fn run_prune(
         .write(actor, move |t| artifacts::prune(t, now, days, dry_run))
         .await?;
     if !report.blobs.is_empty() {
-        let blobs = report.blobs.clone();
-        state
-            .db
-            .read(move |c| {
-                artifacts::remove_blobs(&ctx, c, &blobs);
-                Ok(())
-            })
-            .await?;
+        remove_blobs_locked(state, &ctx, report.blobs.clone()).await?;
     }
     Ok(report)
 }

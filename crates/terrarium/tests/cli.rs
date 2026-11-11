@@ -45,6 +45,25 @@ fn bin() -> Command {
     c
 }
 
+#[test]
+fn questions_require_card_even_when_urgent_or_critical() {
+    for verb in ["ask", "bundle"] {
+        for priority in [None, Some("--urgent"), Some("--critical")] {
+            let mut command = bin();
+            command.args(["question", verb, "Decision?"]);
+            if verb == "bundle" {
+                command.args(["--item", "First?", "--item", "Second?"]);
+            }
+            if let Some(priority) = priority {
+                command.arg(priority);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("--card"));
+        }
+    }
+}
+
 fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
@@ -785,7 +804,8 @@ fn version_group_actions_use_project_scoped_api() {
             "10m",
         ],
         vec!["group", "remove", "version:cut-1", "TER-7"],
-        vec!["group", "built", "version:cut-1", "v1.2.3"],
+        vec!["group", "built", "version:cut-1", "version:cut-2", "v1.2.3"],
+        vec!["group", "add", "version:cut-1", "TER-8"],
     ] {
         let o = bin()
             .env("TERRARIUM_AGENT", "01AGENT")
@@ -802,18 +822,26 @@ fn version_group_actions_use_project_scoped_api() {
         .filter(|r| r["method"] == "http")
         .map(|r| &r["params"])
         .collect();
-    assert_eq!(http.len(), 3);
-    for (r, action) in http.iter().zip(["status", "remove", "built"]) {
+    assert_eq!(http.len(), 5);
+    for (r, (key, action)) in http.iter().zip([
+        ("cut-1", "status"),
+        ("cut-1", "remove"),
+        ("cut-1", "built"),
+        ("cut-2", "built"),
+        ("cut-1", "add"),
+    ]) {
         assert_eq!(r["method"], "POST");
         assert_eq!(
             r["path"],
-            format!("/api/projects/terra/version-groups/version%3Acut-1/{action}")
+            format!("/api/projects/terra/version-groups/version%3A{key}/{action}")
         );
     }
     assert_eq!(http[0]["body"]["step"], "version branch e2e");
     assert_eq!(http[0]["body"]["eta"], "10m");
     assert_eq!(http[1]["body"]["card"], "TER-7");
     assert_eq!(http[2]["body"]["version"], "v1.2.3");
+    assert_eq!(http[3]["body"]["version"], "v1.2.3");
+    assert_eq!(http[4]["body"]["card"], "TER-8");
     std::fs::remove_dir_all(dir).ok();
 }
 

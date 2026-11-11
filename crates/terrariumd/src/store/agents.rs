@@ -421,11 +421,17 @@ pub struct QueuedTurn {
 
 /// Keep `text` as a turn for agent `id`, after the turns that wait already.
 pub fn queue_turn(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<()> {
-    t.execute(
-        "INSERT INTO queued_turns (agent, text, created_at) VALUES (?1, ?2, ?3)",
+    queue_turn_row(t, id, text).map(|_| ())
+}
+
+/// [`queue_turn`], and the ID of the new row.
+pub fn queue_turn_row(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<i64> {
+    Ok(t.query_row(
+        "INSERT INTO queued_turns (agent, text, created_at) VALUES (?1, ?2, ?3)
+             RETURNING id",
         params![id, text, now()],
-    )?;
-    Ok(())
+        |r| r.get(0),
+    )?)
 }
 
 /// True when agent `id` has a turn that waits in the store.
@@ -478,16 +484,6 @@ pub fn remove_queued_turn(t: &mut Tx<'_>, id: &str, turn: i64) -> ApiResult<Opti
         },
     )
     .optional()?)
-}
-
-/// Delete the queued turns of agent `id` up to `upto` (the ID of the
-/// last turn that went to the supervisor).
-pub fn forget_queued_turns(t: &mut Tx<'_>, id: &str, upto: i64) -> ApiResult<()> {
-    t.execute(
-        "DELETE FROM queued_turns WHERE agent = ?1 AND id <= ?2",
-        params![id, upto],
-    )?;
-    Ok(())
 }
 
 /// Set or clear the `paused` flag. Returns the flag before.
@@ -842,6 +838,7 @@ pub fn create_from(
         def.subscription.as_deref(),
         &def.subscription_pool,
     )?;
+    check_cloud_model(t, def.subscription.as_deref(), def.model.as_deref())?;
     // A new agent never takes a disabled subscription (PLAN §16).
     if let Some(n) = def.subscription.as_deref()
         && let Some(why) = crate::store::subscriptions::find(t, n)?
@@ -1106,6 +1103,10 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             &a.subscription_pool,
         )?;
     }
+    if p.subscription.is_some() || p.model.is_some() {
+        let a = get(t, id)?.agent;
+        check_cloud_model(t, a.subscription.as_deref(), a.model.as_deref())?;
+    }
     Ok(())
 }
 
@@ -1176,6 +1177,27 @@ pub fn check_plan_logins(
         {
             return Err(ApiError::invalid(why));
         }
+    }
+    Ok(())
+}
+
+/// A cloud subscription (`terrarium_core::cloud`) takes a model that is an
+/// alias (`opus`, `sonnet`, `haiku`) or a key of its model map: another
+/// name would fail only at the first turn. `422 invalid` names the
+/// subscription and the missing `cloud.models` key. No subscription, a
+/// missing one, or another provider passes here.
+pub fn check_cloud_model(
+    conn: &Connection,
+    subscription: Option<&str>,
+    model: Option<&str>,
+) -> ApiResult<()> {
+    let Some(name) = subscription else {
+        return Ok(());
+    };
+    if let Some(why) = crate::store::subscriptions::find(conn, name)?
+        .and_then(|s| crate::store::subscriptions::model_refusal(&s, model))
+    {
+        return Err(ApiError::invalid(why));
     }
     Ok(())
 }
@@ -1287,6 +1309,8 @@ pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     crate::secrets::grants::on_agent_deleted(t, id)?;
     // Its tool grants (`crate::store::tools`).
     crate::store::tools::on_agent_deleted(t, id)?;
+    // Its journaled write answers (`crate::agent_rpc`).
+    crate::agent_rpc::on_agent_deleted(t, id)?;
     // The sessions stay for the card links (migration 37); the session
     // files go to the archive after the commit (`crate::session_archive`).
     crate::store::session_refs::on_agent_deleted(t, id, a.agent.harness.as_str())?;
@@ -1454,6 +1478,14 @@ pub fn check_policy(
     old: Option<&Policy>,
     new: &Policy,
 ) -> ApiResult<()> {
+    // TER-623: no policy lists a release target, whoever writes it.
+    for t in &new.targets {
+        crate::store::jobs::check_not_release_target(
+            conn,
+            t,
+            "listing the target in policy.targets",
+        )?;
+    }
     crate::policy::set_policy(actor, project, old, new, &|n| {
         project_target(conn, project, n)
     })
@@ -1628,6 +1660,7 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
     let subscription = synced_subscription(before.agent.subscription.as_deref(), def);
     let pool = clean_pool(&def.subscription_pool);
     check_plan_logins(t, def.harness, subscription.as_deref(), &pool)?;
+    check_cloud_model(t, subscription.as_deref(), def.model.as_deref())?;
     let persona = stored_persona(def.persona.as_ref());
     let skills = stored_skills(&def.skills)?;
     let skills_off = stored_skills_off(&def.skills_off)?;

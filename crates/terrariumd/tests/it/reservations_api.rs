@@ -194,7 +194,9 @@ async fn setup_opts(
         });
     }
     let client = tokio::spawn(Client::new(options).run());
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // A precondition, not a timing check: under load the link and the
+    // admission of a new host agent took over 10 s (TER-674).
+    tokio::time::timeout(crate::common::WAIT, async {
         while !state.executor.hosts.is_online("h")
             || (!live && state.executor.resource_pending("h"))
         {
@@ -453,6 +455,19 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
         capacity.ok()["used"]["gpus"][0]["claim"]["uuid"],
         "GPU-abcd"
     );
+    // A worker of the project sees the reservation; the lead of another
+    // project sees the claim only (TER-558).
+    let own = td.get_as("p/worker", "/api/hosts/h/capacity").await;
+    assert_eq!(own.ok()["used"]["gpus"][0]["reservation"], id);
+    assert!(own.body["used"]["gpus"][0].get("holder").is_some());
+    td.agent("other", "lead", json!({"roles":["project_admin"]}))
+        .await;
+    let foreign = td.get_as("other/lead", "/api/hosts/h/capacity").await;
+    let gpu = &foreign.ok()["used"]["gpus"][0];
+    assert_eq!(gpu["claim"]["uuid"], "GPU-abcd");
+    assert!(gpu.get("reservation").is_none(), "{gpu}");
+    assert!(gpu.get("holder").is_none(), "{gpu}");
+    assert!(!foreign.body.to_string().contains(id), "{}", foreign.body);
     let mut def = state
         .db
         .read(|c| Ok(terrariumd::store::targets::get(c, "p-box")?.def))
@@ -849,12 +864,15 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
     let (td, server, client) = setup().await;
     let state = td.daemon.as_ref().unwrap().state.clone();
     let directory = td.dir.path();
-    // TER-526: the held pull must not outlive the test.
+    // TER-526: the held pull must not outlive the test. The guard kills
+    // it, so its gate can be longer than the test: with a 120 s gate the
+    // pull ended under merge-job load before the checks of the held `Up`
+    // below (TER-674).
     let fixtures = crate::common::FixtureGuard::new(directory);
     std::fs::write(directory.join("reservation-docker"), format!(
         "#!/bin/sh\ncase $1 in\ninspect) echo '[]'; echo 'Error: No such object' >&2; exit 1;;\nrun) touch '{0}/pull-entered'; {1};;\nupdate) exit 0;;\nesac\n",
         directory.display(),
-        crate::common::gate_wait(&directory.join("pull-release"), Duration::from_secs(120))
+        crate::common::gate_wait(&directory.join("pull-release"), Duration::from_secs(900))
     )).unwrap();
     let (server_b, address) = terrariumd::hosts::serve(state.clone(), "127.0.0.1:0")
         .await
@@ -871,7 +889,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         .into_owned();
     options.capabilities = state.executor.hosts.capabilities("h").unwrap();
     let client_b = tokio::spawn(Client::new(options).run());
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(crate::common::WAIT, async {
         while !state.executor.hosts.is_online("other-host")
             || state.executor.resource_pending("other-host")
         {
@@ -906,7 +924,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(crate::common::WAIT, async {
         while !directory.join("pull-entered").exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
