@@ -37,8 +37,8 @@ pub const LABEL_COMPOSE_IMAGE: &str = "com.docker.compose.image";
 pub const SERVICE: &str = "terrarium";
 /// The OCI label of the version.
 pub const LABEL_VERSION: &str = "org.opencontainers.image.version";
-/// The stop timeout when the container sets none (compose.yaml: 40 s).
-pub const DEFAULT_STOP_TIMEOUT: u64 = 40;
+/// The stop timeout when the container sets none (compose.yaml: 650 s).
+pub const DEFAULT_STOP_TIMEOUT: u64 = 650;
 
 /// The Docker engine.
 #[derive(Debug, Clone)]
@@ -395,6 +395,53 @@ fn resolved_env(config: &Value, service: &str) -> Res<Vec<String>> {
         .collect()
 }
 
+// Compose emits Go durations, including compound and fractional units.
+fn stop_grace_seconds(value: &str) -> Option<u64> {
+    let mut rest = value.strip_prefix('+').unwrap_or(value);
+    let mut seconds = 0.0_f64;
+    if rest.is_empty() {
+        return None;
+    }
+    if rest == "0" {
+        return Some(0);
+    }
+    while !rest.is_empty() {
+        let end = rest.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+        let number: f64 = rest[..end].parse().ok()?;
+        rest = &rest[end..];
+        let (unit, scale) = [
+            ("ns", 1e-9),
+            ("us", 1e-6),
+            ("µs", 1e-6),
+            ("μs", 1e-6),
+            ("ms", 1e-3),
+            ("s", 1.0),
+            ("m", 60.0),
+            ("h", 3600.0),
+        ]
+        .into_iter()
+        .find(|(unit, _)| rest.starts_with(unit))?;
+        seconds += number * scale;
+        rest = &rest[unit.len()..];
+    }
+    // Round up so Docker's integer seconds never shorten the grace period.
+    (seconds.is_finite() && seconds < i64::MAX as f64).then(|| seconds.ceil() as u64)
+}
+
+fn with_stop_grace(mut spec: Container, config: &Value, service: &str) -> Res<Container> {
+    let value = &config["services"][service]["stop_grace_period"];
+    let seconds = if value.is_null() {
+        DEFAULT_STOP_TIMEOUT
+    } else {
+        value
+            .as_str()
+            .and_then(stop_grace_seconds)
+            .ok_or_else(|| "invalid Compose stop grace period (values hidden)".to_owned())?
+    };
+    spec.spec["compose_stop_timeout"] = json!(seconds);
+    Ok(spec)
+}
+
 fn with_environment(spec: &Container, env: Vec<String>, image_config: &Value) -> Container {
     let old = env_map(&spec.spec["container"]["Config"]["Env"]);
     let mut new = env_map(&image_config["Env"]);
@@ -429,6 +476,11 @@ pub fn create_body(spec: &Value, reference: &str) -> Value {
     let img = &spec["image"];
     let mut cfg = c["Config"].as_object().cloned().unwrap_or_default();
     cfg.insert("Image".into(), json!(reference));
+    let timeout = spec["compose_stop_timeout"]
+        .as_u64()
+        .unwrap_or(DEFAULT_STOP_TIMEOUT)
+        .max(c["Config"]["StopTimeout"].as_u64().unwrap_or(0));
+    cfg.insert("StopTimeout".into(), json!(timeout));
     // The env of the old image: the new image brings its own.
     let image_env = strings(&img["Env"]);
     if let Some(env) = cfg.get_mut("Env").and_then(Value::as_array_mut) {
@@ -690,11 +742,15 @@ impl Engine for Docker {
                     "cannot inspect destination image environment (values hidden)".to_owned()
                 })?
                 .ok_or_else(|| "destination image is missing (values hidden)".to_owned())?;
-            Ok(with_environment(
-                spec,
-                resolved_env(&config, service)?,
-                &destination["Config"],
-            ))
+            with_stop_grace(
+                with_environment(
+                    spec,
+                    resolved_env(&config, service)?,
+                    &destination["Config"],
+                ),
+                &config,
+                service,
+            )
         })
     }
 
@@ -976,6 +1032,38 @@ mod tests {
                 "Labels": {"org.opencontainers.image.version": "0.1.0"}
             }
         })
+    }
+
+    #[test]
+    fn recreated_daemon_uses_compose_stop_grace_without_shortening_old_timeout() {
+        for (grace, old, expected) in [
+            (json!("650s"), 40, 650),
+            (json!("10m50s"), 40, 650),
+            (Value::Null, 40, 650),
+            (json!("650s"), 900, 900),
+            (Value::Null, 900, 900),
+            (json!("1m0.5s"), 40, 61),
+        ] {
+            let original = Container {
+                id: "old".into(),
+                name: "scratch".into(),
+                image: image_of(&Value::Null, "old:1"),
+                spec: json!({"container": {"Config": {"StopTimeout": old}}}),
+            };
+            let config = json!({"services": {SERVICE: {"stop_grace_period": grace}}});
+            let prepared = with_stop_grace(original, &config, SERVICE).unwrap();
+            assert_eq!(create_body(&prepared.spec, "new")["StopTimeout"], expected);
+        }
+    }
+
+    #[test]
+    fn stop_grace_duration_units_and_invalid_values() {
+        assert_eq!(stop_grace_seconds("1h2m3s"), Some(3723));
+        assert_eq!(stop_grace_seconds("500ms"), Some(1));
+        assert_eq!(stop_grace_seconds("0"), Some(0));
+        for invalid in ["", "-1s", "650", "1d", "1s junk", "1..2s"] {
+            assert_eq!(stop_grace_seconds(invalid), None, "{invalid}");
+        }
     }
 
     #[test]
