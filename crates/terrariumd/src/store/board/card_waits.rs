@@ -182,7 +182,7 @@ pub fn clear(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
 /// Authorized presentation. Completion is latched, dependency conditions are live.
 pub fn view(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<serde_json::Value> {
     let card = find_row(conn, id)?;
-    crate::store::threads::read_card_project(conn, actor, &card.project, None)?;
+    crate::store::threads::read_linked_card(conn, actor, &card.project, Some(&card.id))?;
     let Some(wait) = get(conn, &card.id)? else {
         return Ok(json!(null));
     };
