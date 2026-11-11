@@ -6259,6 +6259,10 @@ For Bedrock, `test_connection: true` makes a paid one-output-token test of
 the haiku inference profile before any write. The wizard always requests
 this. On failure the endpoint returns a safe diagnostic and saves nothing.
 API callers may omit it to store credentials without making a paid call.
+The test only connects to `https://bedrock-runtime.<region>.amazonaws.com`.
+It refuses regions outside `^[a-z]{2}(-[a-z]+)+-[0-9]+$` before signing.
+When `cloud.base_url` is set, the test is refused without connecting: save
+without `test_connection` instead. A gateway URL only reaches the sandbox.
 Missing Bedrock region defaults to `us-east-1`; missing model tiers get
 the US inference profiles listed in `docs/compat.md`. Explicit entries win.
 

@@ -171,7 +171,7 @@ export const defaultPlan = (provider: string): string => KEY_PLANS[provider]?.[0
 
 /** Where to get the key, for the providers that need a word of help. */
 export const KEY_HELP: Record<string, string> = {
-  bedrock: "Use an IAM access key pair with bedrock:InvokeModel and bedrock:InvokeModelWithResponseStream on your permitted models and inference profiles. Saving tests the haiku profile with a paid, one-output-token call before storing the key. US inference profiles are the defaults. For other geographies, enter profile IDs or ARNs for all three models.",
+  bedrock: "Use an IAM access key pair with bedrock:InvokeModel and bedrock:InvokeModelWithResponseStream on your permitted models and inference profiles. Saving tests the haiku profile with a paid, one-output-token call to the regional Bedrock endpoint before storing the key. US inference profiles are the defaults. For other geographies, enter profile IDs or ARNs for all three models. Gateway subscriptions with cloud.base_url cannot be tested here: save via the API without test_connection instead.",
   selfhosted: "The key of a self-hosted server that needs one. Add a new server with the Self-hosted model path: it sets the API style, the models, and the limits.",
   zai: "Make a key at z.ai/manage-apikey/apikey-list. The GLM Coding Plan and pay as you go use the same key; the plan picks the endpoint. Agents run on Claude Code and pi.",
   moonshot:

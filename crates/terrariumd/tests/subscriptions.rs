@@ -48,28 +48,45 @@ async fn bedrock_save_defaults_and_failed_test_leave_credentials_unchanged() {
         sub["cloud"]["models"]["haiku"],
         "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     );
-    // A local socket closes without TLS: no real AWS call, deterministic
-    // connection failure. The old key and settings must survive it.
+    // A caller-supplied endpoint must be refused without a connection.
+    // The old key and settings must survive it, for pairs and bearer keys.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("https://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.unwrap();
-        drop(socket);
-    });
+    for key_id in [Some("E2E-new-id"), None] {
+        let response = td
+            .post(
+                "/api/subscriptions/bedrock-setup/api-key",
+                json!({
+                    "provider": "bedrock", "key": "E2E-new-secret", "key_id": key_id,
+                    "test_connection": true, "cloud": {"base_url": endpoint}
+                }),
+            )
+            .await;
+        response.err(422, "invalid");
+        let text = response.body.to_string();
+        assert!(text.contains("Nothing was saved"), "{text}");
+        assert!(text.contains("save without test_connection"), "{text}");
+        assert!(!text.contains("E2E-") && !text.contains(&endpoint));
+        assert!(
+            matches!(listener.try_accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
     let response = td
         .post(
             "/api/subscriptions/bedrock-setup/api-key",
             json!({
                 "provider": "bedrock", "key": "E2E-new-secret", "key_id": "E2E-new-id",
-                "test_connection": true, "cloud": {"base_url": endpoint}
+                "test_connection": true, "cloud": {"region": "us-east"}
             }),
         )
         .await;
     response.err(422, "invalid");
-    let text = response.body.to_string();
-    assert!(text.contains("Nothing was saved"), "{text}");
-    assert!(!text.contains("E2E-") && !text.contains(&endpoint));
-    server.await.unwrap();
+    assert!(
+        response
+            .body
+            .to_string()
+            .contains("invalid Bedrock test region")
+    );
     let stored = terrariumd::login_session::read_key(&td.state, "bedrock-setup").unwrap();
     assert_eq!(stored.key, "E2E-old-secret");
     assert_eq!(stored.key_id.as_deref(), Some("E2E-old-id"));

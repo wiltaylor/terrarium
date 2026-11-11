@@ -31,15 +31,51 @@ fn encode(s: &str) -> String {
 }
 
 pub(super) async fn test(key: &ApiKey, settings: &CloudSettings) -> ApiResult<()> {
-    let region = settings.region.as_deref().unwrap_or("us-east-1");
-    let endpoint = settings
-        .base_url
-        .clone()
-        .unwrap_or_else(|| format!("https://bedrock-runtime.{region}.amazonaws.com"));
+    let endpoint = BedrockEndpoint::regional(settings)?;
     invoke(key, settings, &endpoint).await
 }
 
-async fn invoke(key: &ApiKey, settings: &CloudSettings, endpoint: &str) -> ApiResult<()> {
+struct BedrockEndpoint(String);
+
+impl BedrockEndpoint {
+    fn regional(settings: &CloudSettings) -> ApiResult<Self> {
+        if settings.base_url.is_some() {
+            return Err(ApiError::invalid(
+                "the test call runs only against the regional Bedrock endpoint; save without test_connection when base_url is set. Nothing was saved.",
+            ));
+        }
+        let region = settings.region.as_deref().unwrap_or("us-east-1");
+        // ^[a-z]{2}(-[a-z]+)+-[0-9]+$, before URL construction or signing.
+        let parts: Vec<_> = region.split('-').collect();
+        let lower = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase());
+        if parts.len() < 3
+            || parts[0].len() != 2
+            || !lower(parts[0])
+            || !parts[1..parts.len() - 1].iter().all(|p| lower(p))
+            || !parts
+                .last()
+                .is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return Err(ApiError::invalid(
+                "invalid Bedrock test region; expected a region such as us-east-1. Nothing was saved.",
+            ));
+        }
+        Ok(Self(format!(
+            "https://bedrock-runtime.{region}.amazonaws.com"
+        )))
+    }
+
+    #[cfg(test)]
+    fn mock(url: String) -> Self {
+        Self(url)
+    }
+}
+
+async fn invoke(
+    key: &ApiKey,
+    settings: &CloudSettings,
+    endpoint: &BedrockEndpoint,
+) -> ApiResult<()> {
     let region = settings.region.as_deref().unwrap_or("us-east-1");
     let model = settings
         .models
@@ -47,7 +83,7 @@ async fn invoke(key: &ApiKey, settings: &CloudSettings, endpoint: &str) -> ApiRe
         .ok_or_else(|| ApiError::invalid("Bedrock test needs cloud.models.haiku"))?;
     let url = reqwest::Url::parse(&format!(
         "{}/model/{}/invoke",
-        endpoint.trim_end_matches('/'),
+        endpoint.0.trim_end_matches('/'),
         encode(model)
     ))
     .map_err(|_| ApiError::invalid("invalid Bedrock test endpoint"))?;
@@ -146,7 +182,7 @@ mod tests {
                 models: terrarium_core::cloud::bedrock_models(),
                 ..Default::default()
             };
-            let result = invoke(&key, &settings, &endpoint).await;
+            let result = invoke(&key, &settings, &BedrockEndpoint::mock(endpoint.clone())).await;
             if status == 200 {
                 assert!(result.is_ok());
             } else {
@@ -156,6 +192,38 @@ mod tests {
                 assert!(error.contains("Nothing was saved"));
             }
             server.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn only_regional_endpoints_can_be_constructed_in_production() {
+        for region in ["us-east-1", "eu-west-2", "us-gov-west-1"] {
+            let settings = CloudSettings {
+                region: Some(region.into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                BedrockEndpoint::regional(&settings).unwrap().0,
+                format!("https://bedrock-runtime.{region}.amazonaws.com")
+            );
+        }
+        for region in [
+            "x",
+            "us-east",
+            "us-east-",
+            "us--1",
+            "us-1",
+            "usa-east-1",
+            "US-east-1",
+            "us-east-1.evil",
+            "us-east-1/path",
+            "us-east-1@host",
+        ] {
+            let settings = CloudSettings {
+                region: Some(region.into()),
+                ..Default::default()
+            };
+            assert!(BedrockEndpoint::regional(&settings).is_err(), "{region}");
         }
     }
 }
