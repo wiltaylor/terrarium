@@ -105,7 +105,7 @@ pub async fn list(state: &Shared, project: String, target: String, after: String
     let expires = (chrono::Utc::now()+chrono::Duration::minutes(15)).to_rfc3339();
     let encoded = serde_json::to_string(&observed).map_err(|e|ApiError::internal(e.to_string()))?;
     let nonce = ulid::Ulid::new().to_string();
-    let digest = format!("{:x}",Sha256::digest(serde_json::to_vec(&json!([project,target,identity,expires,encoded,nonce])).map_err(|e|ApiError::internal(e.to_string()))?));
+    let digest = terrarium_host::protocol::hex(&Sha256::digest(serde_json::to_vec(&json!([project,target,identity,expires,encoded,nonce])).map_err(|e|ApiError::internal(e.to_string()))?));
     let (p,t,d,e) = (project,target,digest.clone(),expires.clone());
     state.db.write("operator",move |tx| {
         tx.execute("INSERT INTO legacy_log_listings(digest,project,target,target_identity,expires_at,entries) VALUES (?,?,?,?,?,?)",params![d,p,t,identity,e,encoded])?;
@@ -140,7 +140,7 @@ pub async fn confirm(state: &Shared, project: String, target: String, digest: St
         for e in verified {
             let job = jobs::get(tx,&e.job)?;
             if job.project != p || job.state.is_open() || job.ended_at.is_none() || job.attempt != e.attempt || job.kind == jobs::JobKind::Release { changed += 1; continue; }
-            let n = tx.execute("INSERT OR IGNORE INTO job_logs(project,job,attempt,target,path,root,root_identity,file_identity,target_identity,written_at,expires_at,bytes,legacy_size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",params![p,e.job,e.attempt,target,e.path,e.root,e.root_identity,e.file_identity,identity,job.ended_at,"2000-01-01",e.size,e.size])?;
+            let n = tx.execute("INSERT OR IGNORE INTO job_logs(project,job,attempt,target,path,root,root_identity,file_identity,target_identity,written_at,expires_at,bytes,legacy_size,legacy_mtime) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![p,e.job,e.attempt,target,e.path,e.root,e.root_identity,e.file_identity,identity,job.ended_at,"2000-01-01",e.size,e.size,e.mtime])?;
             if n == 0 { changed += 1; continue; }
             let id = tx.last_insert_rowid();
             let quarantine = format!("{}/.retention-delete-{id}",e.root);

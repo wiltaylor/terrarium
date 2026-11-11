@@ -9,3 +9,4 @@ CREATE TABLE legacy_log_listings (
     consumed INTEGER NOT NULL DEFAULT 0
 );
 ALTER TABLE job_logs ADD COLUMN legacy_size INTEGER;
+ALTER TABLE job_logs ADD COLUMN legacy_mtime TEXT;

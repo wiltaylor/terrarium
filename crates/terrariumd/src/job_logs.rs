@@ -29,6 +29,7 @@ pub struct Log {
     pub cleanup_state: String,
     pub quarantine: String,
     pub legacy_size: Option<i64>,
+    pub legacy_mtime: Option<String>,
 }
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Log> {
@@ -49,11 +50,12 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Log> {
         cleanup_state: r.get(13)?,
         quarantine: r.get(14)?,
         legacy_size: r.get(15)?,
+        legacy_mtime: r.get(16)?,
     })
 }
 
-const FIELDS: &str = "id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine, legacy_size";
-const CANDIDATES: &str = "SELECT id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine, legacy_size FROM job_logs INDEXED BY job_logs_cleanup WHERE project=? AND cleanup_state=? AND id>? ORDER BY id LIMIT ?";
+const FIELDS: &str = "id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine, legacy_size, legacy_mtime";
+const CANDIDATES: &str = "SELECT id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine, legacy_size, legacy_mtime FROM job_logs INDEXED BY job_logs_cleanup WHERE project=? AND cleanup_state=? AND id>? ORDER BY id LIMIT ?";
 
 pub fn target_identity(row: &targets::TargetRow) -> String {
     // Name is the target primary key. Creation time distinguishes remove/recreate,
@@ -207,7 +209,7 @@ fn remove_script_checked(
     root_identity: &str,
     file_identity: &str,
     quarantine: &str,
-    expected_size: Option<i64>,
+    expected: Option<(i64, &str)>,
 ) -> String {
     let Some(name) = std::path::Path::new(path)
         .file_name()
@@ -291,7 +293,7 @@ reconcile
         root_identity = sh_quote(root_identity),
         file_identity = sh_quote(file_identity),
         trash = sh_quote(trash),
-        check_size = expected_size.map(|size| format!("[ \"$(stat -Lc '%s' /proc/self/fd/9)\" = '{size}' ] || {{ printf 'conflict\\n'; exit 0; }}")).unwrap_or_default(),
+        check_size = expected.map(|(size, mtime)| format!("[ \"$(stat -Lc '%s|%y' /proc/self/fd/9)\" = {} ] || {{ printf 'conflict\\n'; exit 0; }}", sh_quote(&format!("{size}|{mtime}")))).unwrap_or_default(),
     )
 }
 
@@ -439,7 +441,7 @@ pub(crate) async fn cleanup_selected(state: &Shared, project: String, after: i64
                     &log.root_identity,
                     &log.file_identity,
                     &quarantine,
-                    log.legacy_size,
+                    log.legacy_size.zip(log.legacy_mtime.as_deref()),
                 ),
             ],
             timeout_secs: Some(10),
@@ -558,6 +560,7 @@ mod tests {
             cleanup_state: "retained".into(),
             quarantine: String::new(),
             legacy_size: None,
+            legacy_mtime: None,
         };
         assert!(!due(&log, "a", 10, 10));
         assert!(due(&log, "b", 10, 10));
