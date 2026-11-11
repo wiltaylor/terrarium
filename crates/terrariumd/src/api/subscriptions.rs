@@ -294,6 +294,17 @@ fn view(
     state_dir: &std::path::Path,
     streams: &crate::stream_limit::StreamGate,
 ) -> ApiResult<SubscriptionView> {
+    let has_api_key = sub.env_var.is_some() && login::stored_key(state_dir, &sub.name).is_some();
+    view_with_key_presence(c, sub, state_dir, streams, has_api_key)
+}
+
+fn view_with_key_presence(
+    c: &rusqlite::Connection,
+    sub: Subscription,
+    state_dir: &std::path::Path,
+    streams: &crate::stream_limit::StreamGate,
+    has_api_key: bool,
+) -> ApiResult<SubscriptionView> {
     let windows: Vec<WindowView> = subs::latest_windows(c, &sub.name)?
         .into_iter()
         .map(WindowView::from)
@@ -346,7 +357,7 @@ fn view(
             &sub.provider,
             sub.selfhosted.as_ref(),
         ),
-        has_api_key: sub.env_var.is_some() && login::stored_key(state_dir, &sub.name).is_some(),
+        has_api_key,
         windows,
         held_agents,
         sub,
@@ -1344,7 +1355,18 @@ async fn set_cloud(
             t.audit("subscription.cloud", &n, None, json!({"cloud": settings}))
         })
         .await?;
-    Ok(Json(load(&state, name).await?))
+    let dir = state.state_dir.clone();
+    let st = state.clone();
+    let response = state
+        .db
+        .read(move |c| {
+            let sub = subs::get(c, &name)?;
+            // Settings updates need only file metadata, never its secret bytes.
+            let has_key = sub.env_var.is_some() && login::key_path(&dir, &name).is_file();
+            view_with_key_presence(c, sub, &dir, &st.usage.streams, has_key)
+        })
+        .await?;
+    Ok(Json(response))
 }
 
 /// `POST /api/subscriptions/{name}/api-key`. The answer never has the key.

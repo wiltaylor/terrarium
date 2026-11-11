@@ -3158,6 +3158,49 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
 
 /// A settings change can remove a model after an agent was created.
 #[tokio::test]
+async fn cloud_settings_response_never_reads_the_key_file() {
+    use std::io::Write;
+
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.post(
+        "/api/subscriptions/aws/api-key",
+        json!({"provider": "bedrock", "key": "E2E-bedrock-token",
+               "cloud": {"region": "us-east-1"}}),
+    )
+    .await
+    .ok();
+    let path = terrariumd::login_session::key_path(&td.state, "aws");
+    // Invalid UTF-8 cannot be read as a stored key. Presence is metadata only.
+    std::fs::write(&path, [0xff]).unwrap();
+    let r = td
+        .put("/api/subscriptions/aws/cloud", json!({"region": "us-west-2"}))
+        .await;
+    assert_eq!(r.ok()["has_api_key"], true);
+    assert_eq!(r.body["cloud"]["region"], "us-west-2");
+    assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
+
+    // Reading this FIFO blocks until the writer closes. A metadata-only
+    // response completes while it is still open. Release it even on failure
+    // so a regression cannot leave the daemon's DB thread stuck.
+    std::fs::remove_file(&path).unwrap();
+    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR)
+        .unwrap();
+    let mut writer = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        td.put("/api/subscriptions/aws/cloud", json!({"region": "us-east-1"})),
+    )
+    .await;
+    writer.write_all(&[0xff]).unwrap();
+    drop(writer);
+    let r = response.expect("settings response attempted to read the key FIFO");
+    assert_eq!(r.ok()["has_api_key"], false);
+    assert_eq!(r.body["cloud"]["region"], "us-east-1");
+}
+
+/// A settings change can remove a model after an agent was created.
+#[tokio::test]
 async fn an_unmapped_cloud_model_is_refused_at_start_and_sync() {
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;
