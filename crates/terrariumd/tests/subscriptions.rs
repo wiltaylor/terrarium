@@ -25,8 +25,10 @@ const ANTHROPIC: &str = "https://api.anthropic.com/api/oauth/usage";
 const OPENAI: &str = "https://chatgpt.com/backend-api/wham/usage";
 
 /// Manual, credential-free live proof. Start fixtures/litellm/live.py on the
-/// leased scratch VM, copy its private connection.json to build2, and set
-/// TER798_CONNECTION to that file. Never use a real provider or Docker CI.
+/// leased scratch VM and set TER798_CONNECTION to its private connection.json.
+/// Build on build2. If build2 cannot reach scratch, the lead may approve
+/// running only this binary in a scratch container on the fixture network.
+/// Never use a real provider or Docker CI, or install a toolchain on scratch.
 /// The daemon has the usual test supervisor. The fixture runs real Claude
 /// Code with the production subscription env, not a fake harness script.
 #[tokio::test]

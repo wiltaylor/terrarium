@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Card-owned scratch fixture. No provider credentials. Never prints keys.
 
-Run `start <scratch-IP>`, copy the private connection.json to build2, then
-`stop`. Only `serve` runs in the Claude container. Rust tests run on build2.
+Run `start <scratch-IP>`, then `stop`. Only `serve` runs in the Claude
+container. Build the Rust test binary on build2. With the lead's approval,
+copy it to scratch and run its single ignored test in a card-owned container
+on this network, with TER798_CONNECTION=/fixture/connection.json and the
+fixture directory mounted at /fixture. Never install a toolchain on scratch.
 The mock is not a provider/billing test. Do not use on Docker CI.
 """
 import argparse
