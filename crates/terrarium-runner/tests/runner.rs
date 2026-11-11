@@ -886,14 +886,19 @@ async fn a_dialog_preserves_the_person_mark() {
     tokio::time::sleep(ms(4_000)).await;
     h.runner.write(b"\x14").await.expect("restore draft");
     until_screen(&h, "[Pasted text #1 +2 lines]").await;
-    h.runner.answer("dialog", &Answer::Deny).await.expect("answer");
+    h.runner
+        .answer("dialog", &Answer::Deny)
+        .await
+        .expect("answer");
     tokio::time::sleep(ms(2_000)).await;
     assert_eq!(h.runner.status(), AgentStatus::Idle);
     h.runner.kill().expect("kill");
     h.runner.wait().await;
-    assert!(!blocked_reasons(h.runner.events_path()).iter().any(|r| {
-        r.as_deref() == Some(terrarium_core::adapter::INPUT_PENDING_REASON)
-    }));
+    assert!(
+        !blocked_reasons(h.runner.events_path())
+            .iter()
+            .any(|r| { r.as_deref() == Some(terrarium_core::adapter::INPUT_PENDING_REASON) })
+    );
 }
 
 /// TER-247 F2: a runner turn replaces the ownership of a recently cleared draft.
