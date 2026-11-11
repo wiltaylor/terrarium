@@ -599,7 +599,8 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
         .into_iter()
         .filter(|q| q.thread.is_none())
         .filter(|q| {
-            f.kind.is_some() || f.status != Status::Open
+            f.kind.is_some()
+                || f.status != Status::Open
                 || (q.status == QuestionStatus::Open
                     && (q.kind != QuestionKind::Notice || q.priority == Priority::Critical))
         })

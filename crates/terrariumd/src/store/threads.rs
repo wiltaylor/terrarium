@@ -1044,7 +1044,9 @@ pub fn open(t: &mut Tx<'_>, n: NewThread) -> ApiResult<Thread> {
             |r| r.get(0),
         )?;
         if exists {
-            return Err(ApiError::conflict("the project already has a Versions thread"));
+            return Err(ApiError::conflict(
+                "the project already has a Versions thread",
+            ));
         }
         ThreadStatus::Tracking
     } else if n.opened_by == "operator" && text.is_some() {
@@ -1115,18 +1117,20 @@ pub fn version_post(
         .optional()?;
     let id = match existing {
         Some(id) => id,
-        None => open(
-            t,
-            NewThread {
-                topic: "Versions".to_owned(),
-                scope: project.to_owned(),
-                template: Some("versions".to_owned()),
-                opened_by: lead.clone(),
-                agent: Some(lead.clone()),
-                text: None,
-            },
-        )?
-        .id,
+        None => {
+            open(
+                t,
+                NewThread {
+                    topic: "Versions".to_owned(),
+                    scope: project.to_owned(),
+                    template: Some("versions".to_owned()),
+                    opened_by: lead.clone(),
+                    agent: Some(lead.clone()),
+                    text: None,
+                },
+            )?
+            .id
+        }
     };
     let duplicate: bool = t.query_row(
         "SELECT EXISTS(SELECT 1 FROM thread_messages WHERE thread = ?1
@@ -1135,7 +1139,9 @@ pub fn version_post(
         |r| r.get(0),
     )?;
     if duplicate {
-        return Err(ApiError::conflict("this pre-release already has a version post"));
+        return Err(ApiError::conflict(
+            "this pre-release already has a version post",
+        ));
     }
     post(t, &id, &lead, &text, Some(ThreadStatus::Tracking))
 }

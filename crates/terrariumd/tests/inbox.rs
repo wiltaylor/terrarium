@@ -140,20 +140,40 @@ async fn inbox(td: &TestDaemon, query: &str) -> (Vec<Value>, Value) {
 
 #[tokio::test]
 async fn version_posts_reuse_a_quiet_project_thread_without_a_badge() {
-    let World { td, lead, w1, sys, .. } = setup().await;
+    let World {
+        td, lead, w1, sys, ..
+    } = setup().await;
     let path = "/api/projects/p/version-thread/messages";
     let body = json!({"version": "1.2.3-alpha", "changed": "C1: card notices", "test": "Run notify without a card"});
-    td.post_as(&w1, path, body.clone()).await.err(403, "forbidden");
-    td.post_as(&lead, "/api/projects/ops/version-thread/messages", body.clone()).await.err(403, "forbidden");
+    td.post_as(&w1, path, body.clone())
+        .await
+        .err(403, "forbidden");
+    td.post_as(
+        &lead,
+        "/api/projects/ops/version-thread/messages",
+        body.clone(),
+    )
+    .await
+    .err(403, "forbidden");
     let first = td.post_as(&lead, path, body.clone()).await;
     assert_eq!(first.status, 201, "{}", first.body);
     let thread = id(&first.body);
     assert_eq!(first.body["status"], "tracking");
     assert_eq!(first.body["messages"].as_array().unwrap().len(), 1);
     let text = first.body["messages"][0]["text"].as_str().unwrap();
-    assert!(text.contains("1.2.3-alpha") && text.contains("C1: card notices") && text.contains("Run notify without a card"));
+    assert!(
+        text.contains("1.2.3-alpha")
+            && text.contains("C1: card notices")
+            && text.contains("Run notify without a card")
+    );
     td.post_as(&lead, path, body).await.err(409, "conflict");
-    let second = td.post_as(&lead, path, json!({"version": "1.2.4-alpha", "changed": "Inbox filter", "test": "Open Inbox"})).await;
+    let second = td
+        .post_as(
+            &lead,
+            path,
+            json!({"version": "1.2.4-alpha", "changed": "Inbox filter", "test": "Open Inbox"}),
+        )
+        .await;
     assert_eq!(second.status, 201, "{}", second.body);
     assert_eq!(second.body["id"], thread);
     assert_eq!(second.body["messages"].as_array().unwrap().len(), 2);
@@ -161,8 +181,15 @@ async fn version_posts_reuse_a_quiet_project_thread_without_a_badge() {
     assert!(rows.is_empty());
     assert_eq!(counts["open"], 0);
     assert_eq!(counts["thread"], 0);
-    td.agent("ops", "lead", json!({"roles": ["project_admin"]})).await;
-    let other = td.post_as(&sys, "/api/projects/ops/version-thread/messages", json!({"version": "1", "changed": "Other project", "test": "Check"})).await;
+    td.agent("ops", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let other = td
+        .post_as(
+            &sys,
+            "/api/projects/ops/version-thread/messages",
+            json!({"version": "1", "changed": "Other project", "test": "Check"}),
+        )
+        .await;
     assert_ne!(other.ok()["id"], thread);
     for invalid in [
         json!({"version": "2", "changed": "", "test": "Check"}),

@@ -7524,7 +7524,14 @@ async fn notify_and_the_admin_inbox() {
     }
     ok(
         true,
-        &["notify", "Your answer", "--reply-to", "M1", "--card", "TER-1"],
+        &[
+            "notify",
+            "Your answer",
+            "--reply-to",
+            "M1",
+            "--card",
+            "TER-1",
+        ],
         vec![(
             201,
             json!({"id": "N1", "priority": "normal", "thread_id": "T1"}),
@@ -7533,7 +7540,9 @@ async fn notify_and_the_admin_inbox() {
             Post,
             Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()),
             vec![],
-            Some(json!({"kind": "notice", "text": "Your answer", "reply_to": "M1", "card": "TER-1"})),
+            Some(
+                json!({"kind": "notice", "text": "Your answer", "reply_to": "M1", "card": "TER-1"}),
+            ),
         )],
     )
     .await;
@@ -10426,14 +10435,35 @@ async fn owners_and_target_grants() {
 async fn thread_commands() {
     let out = ok_in(
         true,
-        &["thread", "version", "1.2.3-alpha", "--changed", "-", "--test", "Open Inbox"],
+        &[
+            "thread",
+            "version",
+            "1.2.3-alpha",
+            "--changed",
+            "-",
+            "--test",
+            "Open Inbox",
+        ],
         vec![(201, json!({"id": "V1", "status": "tracking"}))],
         Some("Card notices"),
-        vec![(Post, "/api/projects/terra/version-thread/messages", vec![],
-            Some(json!({"version": "1.2.3-alpha", "changed": "Card notices", "test": "Open Inbox"})))],
-    ).await;
+        vec![(
+            Post,
+            "/api/projects/terra/version-thread/messages",
+            vec![],
+            Some(
+                json!({"version": "1.2.3-alpha", "changed": "Card notices", "test": "Open Inbox"}),
+            ),
+        )],
+    )
+    .await;
     assert!(out.contains("quiet version post in thread V1 (tracking)"));
-    let invalid = exec(true, &["thread", "version", "1", "--changed", "-", "--test", "-"], vec![], Some("unused")).await;
+    let invalid = exec(
+        true,
+        &["thread", "version", "1", "--changed", "-", "--test", "-"],
+        vec![],
+        Some("unused"),
+    )
+    .await;
     assert!(invalid.result.unwrap_err().to_string().contains("only one"));
     let th = json!({"id": "T1", "topic": "Board columns", "scope": "terra", "status": "waiting_operator",
                     "opened_by_name": "terra/worker", "report_to_name": "terra/lead",
