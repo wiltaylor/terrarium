@@ -3132,6 +3132,20 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
         json!({"subscription": "aws", "model": "sonnet"}),
     )
     .await;
+    let rejected = td
+        .patch(&format!("/api/agents/{id}"), json!({"model": "unmapped"}))
+        .await;
+    rejected.err(422, "invalid");
+    assert!(rejected.body.to_string().contains("cloud.models.unmapped"));
+    let rejected = td
+        .post(
+            "/api/templates",
+            json!({"name": "bad-cloud", "spec": {"harness": "claude",
+                   "subscription": "aws", "model": "unmapped"}}),
+        )
+        .await;
+    rejected.err(422, "invalid");
+    assert!(rejected.body.to_string().contains("cloud.models.unmapped"));
     terrariumd::cloud_budget::check(&state, "aws")
         .await
         .unwrap();
@@ -3140,4 +3154,33 @@ async fn a_used_up_cloud_budget_holds_turns_until_it_is_raised() {
     })
     .await;
     td.wait_status(&id, "idle").await;
+}
+
+/// A settings change can remove a model after an agent was created.
+#[tokio::test]
+async fn an_unmapped_cloud_model_is_refused_at_start_and_sync() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.project("p").await;
+    td.post(
+        "/api/subscriptions/aws/api-key",
+        json!({"provider": "bedrock", "key": "E2E-bedrock-token",
+               "cloud": {"region": "us-east-1", "models": {"custom": "vendor-model"}}}),
+    )
+    .await
+    .ok();
+    let a = td.agent("p", "custom", json!({"subscription": "aws", "model": "custom"})).await;
+    let id = a["id"].as_str().unwrap().to_owned();
+    td.put("/api/subscriptions/aws/cloud", json!({"region": "us-east-1"})).await.ok();
+    let r = td.post_empty(&format!("/api/agents/{id}/start")).await;
+    r.err(422, "invalid");
+    assert!(r.body.to_string().contains("cloud.models.custom"), "{}", r.body);
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let def = serde_json::from_value::<terrarium_core::config::AgentDef>(json!({
+        "name": "custom", "harness": "claude", "subscription": "aws", "model": "custom"
+    })).unwrap();
+    let error = state.db.write("operator", move |t| {
+        terrariumd::store::agents::sync_def(t, &id, &def)
+    }).await.unwrap_err();
+    assert!(error.to_string().contains("cloud.models.custom"), "{error}");
 }
