@@ -1553,6 +1553,10 @@ impl Executor {
             .map(|s| s.id.clone())
             .collect();
         for id in old {
+            if let Err(error) = self.hosts.forget_exec(&id) {
+                warn!(%error, session = id, "cannot expire durable exec session");
+                continue;
+            }
             if let Some(s) = t.remove(&id) {
                 s.kill();
             }
@@ -1611,6 +1615,7 @@ impl Executor {
 
     pub fn close(&self, actor: &Actor, target: &str, id: &str) -> ApiResult<()> {
         let s = self.session(actor, target, id)?;
+        self.hosts.forget_exec(&s.id)?;
         s.kill();
         self.table().remove(&s.id);
         Ok(())

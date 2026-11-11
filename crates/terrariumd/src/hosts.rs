@@ -402,6 +402,42 @@ impl HostRegistry {
         journal.save_many(&values)
     }
 
+    /// Forget an explicitly closed or expired exec and its replay together.
+    pub fn forget_exec(&self, id: &str) -> crate::error::ApiResult<()> {
+        let Some(journal) = self.journal.get() else {
+            return Ok(());
+        };
+        #[derive(Deserialize)]
+        struct Binding {
+            host_session: Option<(String, SessionId)>,
+        }
+        let key = format!("exec/{id}");
+        let mut entries = self.lock();
+        let binding = journal.load::<Binding>(&key)?;
+        let mut values = Vec::new();
+        let mut prefixes = Vec::new();
+        let session = binding.and_then(|b| b.host_session);
+        if let Some((host, session)) = &session {
+            let host_key = format!("host/{host}");
+            if let Some(mut saved) = journal.load::<SavedHost>(&host_key)? {
+                saved.sessions.remove(session);
+                values.push((host_key, serde_json::to_value(saved)
+                    .map_err(|_| ApiError::internal("cannot encode host cleanup"))?));
+            }
+            prefixes.push(format!("event/{host}/{session}/"));
+        }
+        journal.replace(&values, &[key], &prefixes)?;
+        if let Some((host, session)) = session
+            && let Some(entry) = entries.get_mut(&host)
+        {
+            entry.sessions.remove(&session);
+            if let Some(conn) = &entry.conn {
+                let _ = conn.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
+            }
+        }
+        Ok(())
+    }
+
     /// Claim the replay channel of a session from the previous daemon.
     pub fn reattach(self: &Arc<Self>, host: &str, id: SessionId) -> Option<HostSession> {
         let rx = self
@@ -1941,6 +1977,34 @@ mod tests {
             },
         );
         reg
+    }
+
+    #[tokio::test]
+    async fn reconnect_journal_closed_exec_does_not_resurrect_or_delete_other_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&db, dir.path()).unwrap();
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore(dir.path()).unwrap();
+        let first = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let second = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let (first_id, second_id) = (first.id(), second.id());
+        let journal = resume::Journal::new(dir.path());
+        journal.save("exec/closed", &json!({"host_session": ["lab1", first_id]})).unwrap();
+        for id in [first_id, second_id] {
+            reg.on_data("lab1", DataFrame::new(id, StreamTag::Stdout, b"retained".to_vec()));
+        }
+        reg.forget_exec("closed").unwrap();
+        assert!(journal.load::<serde_json::Value>("exec/closed").unwrap().is_none());
+        assert!(journal.scan::<SessionEvent>(&format!("event/lab1/{first_id}/")).unwrap().is_empty());
+        assert_eq!(journal.scan::<SessionEvent>(&format!("event/lab1/{second_id}/")).unwrap().len(), 1);
+        drop(first);
+        drop(second);
+        drop(reg);
+        let restored = Arc::new(HostRegistry::default());
+        restored.restore(dir.path()).unwrap();
+        assert!(restored.reattach("lab1", first_id).is_none());
+        assert!(restored.reattach("lab1", second_id).is_some());
     }
 
     #[tokio::test]
