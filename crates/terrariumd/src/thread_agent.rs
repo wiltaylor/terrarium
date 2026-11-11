@@ -457,21 +457,32 @@ pub async fn start(
             let closed = state
                 .db
                 .write("system", move |t| {
-                    if threads::get_bare(t, &tid)?.request_epoch != epoch {
+                    let current = threads::get_bare(t, &tid)?;
+                    if current.request_epoch != epoch || current.agent.is_some() || current.status == ThreadStatus::Closed {
                         return threads::get(t, &tid);
                     }
+                    let summary = if threads::get_bare(t, &tid)?.request {
+                        request_fallback(t, &tid, &why)?
+                    } else {
+                        format!("The thread agent did not start: {why}")
+                    };
                     threads::close(
                         t,
                         &tid,
                         "system",
                         threads::CloseReason::FailedStart,
-                        Some(&format!("The thread agent did not start: {why}")),
+                        Some(&summary),
                         Vec::new(),
                     )
                 })
                 .await;
-            if let Err(c) = closed {
-                warn!(thread = %th.id, "cannot close the thread: {}", c.message);
+            match closed {
+                Ok(th) if th.request => return Ok(th),
+                Err(c) => {
+                    warn!(thread = %th.id, "cannot close the thread: {}", c.message);
+                    return Err(c);
+                }
+                _ => {}
             }
             Err(ApiError {
                 message: format!(
@@ -482,6 +493,64 @@ pub async fn start(
             })
         }
     }
+}
+
+/// Mail and record the receipt in the same transaction as the failure.
+/// The stored messages survive failed starts, including the pre-fix failures.
+fn request_fallback(t: &mut crate::db::Tx<'_>, id: &str, why: &str) -> ApiResult<String> {
+    use crate::store::mail::{self, Address, Outgoing};
+    let th = threads::get(t, id)?;
+    let summary = format!(
+        "Request agent fallback: delivered the operator's request as mail to {}. Reason: {why}",
+        th.report_to_name.as_deref().unwrap_or("the picked lead")
+    );
+    let delivered: bool = t.query_row(
+        "SELECT EXISTS(SELECT 1 FROM request_fallbacks WHERE thread = ?1 AND epoch = ?2)",
+        rusqlite::params![id, th.request_epoch], |r| r.get(0),
+    )?;
+    if delivered { return Ok(summary); }
+    let lead = th.report_to.as_deref()
+        .ok_or_else(|| ApiError::conflict("request has no report-to lead"))?;
+    let to = mail::resolve(t, lead, None)?;
+    let mut body = format!("{summary}\n\nInbox thread {id}: {}\n\n", th.topic);
+    for m in th.messages.as_deref().unwrap_or_default() {
+        if m.author == OPERATOR {
+            body.push_str(&m.text);
+            body.push_str("\n\n");
+        }
+    }
+    let sent = mail::send(t, Outgoing {
+        from: &Address::Operator, to: &to, subject: &th.topic, body: &body,
+        thread: None, in_reply_to: None,
+    })?;
+    t.execute("INSERT INTO request_fallbacks(thread, epoch, mail) VALUES (?1, ?2, ?3)",
+        rusqlite::params![id, th.request_epoch, sent.id])?;
+    t.audit("thread.request_fallback", id, th.project(),
+        serde_json::json!({"reason": why, "mail": sent.id, "lead": lead, "epoch": th.request_epoch}))?;
+    Ok(summary)
+}
+
+/// Recover old failed requests once per attempt after an upgrade. A failed
+/// delivery remains eligible, rather than recording a false success.
+pub async fn recover_failed_requests(state: &Shared) -> ApiResult<()> {
+    let ids = state.db.read(|c| {
+        let mut st = c.prepare("SELECT id FROM threads t WHERE request = 1 AND close_reason = 'failed_start' AND status = 'closed' AND NOT EXISTS (SELECT 1 FROM request_fallbacks f WHERE f.thread = t.id AND f.epoch = t.request_epoch) ORDER BY created_at LIMIT 64")?;
+        Ok(st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
+    }).await?;
+    for id in ids {
+        state.db.write("system", move |t| {
+            let th = threads::get(t, &id)?;
+            if !th.request || th.status != ThreadStatus::Closed || th.close_reason.as_deref() != Some("failed_start") { return Ok(()); }
+            let why = th.handoff.as_ref().map(|h| h.summary.as_str()).unwrap_or("request agent failed to start before upgrade");
+            let summary = request_fallback(t, &id, why)?;
+            let mut handoff = th.handoff.ok_or_else(|| ApiError::conflict("failed request has no handoff"))?;
+            handoff.summary = summary;
+            t.execute("UPDATE threads SET handoff = ?2 WHERE id = ?1", rusqlite::params![id, serde_json::to_string(&handoff)?])?;
+            threads::emit(t, &threads::get_bare(t, &id)?, "request_fallback")?;
+            Ok(())
+        }).await?;
+    }
+    Ok(())
 }
 
 /// True when thread `id` has an agent or an open bound spawn.
@@ -865,6 +934,9 @@ fn skills_lib(state: &Shared) -> Option<std::path::PathBuf> {
 /// thread agent that a missed event left parked while its thread waits on
 /// it, with a turn that points to `thread show`. Errors are logged.
 pub async fn retry_missed(state: &Shared) {
+    if let Err(e) = recover_failed_requests(state).await {
+        warn!("cannot recover failed requests: {e}");
+    }
     let before = crate::waits::from_now(Duration::ZERO);
     let before = chrono::DateTime::parse_from_rfc3339(&before)
         .map(|d| {
