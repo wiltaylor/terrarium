@@ -3147,15 +3147,8 @@ async fn steps(
         // Reuse the original writer identity. Calling begin here would revoke
         // this attempt's ledger row even though its recipe was not restarted.
         if let Some(identity) = &saved.log_target {
-            crate::job_logs::record_output(
-                x.state,
-                job,
-                delivery,
-                &saved.log,
-                identity,
-                &c.stdout,
-            )
-            .await?;
+            crate::job_logs::record_output(x.state, job, delivery, &saved.log, identity, &c.stdout)
+                .await?;
         }
         return finish_recipe(x, delivery, saved, c).await;
     }
