@@ -25,6 +25,79 @@ const ANTHROPIC: &str = "https://api.anthropic.com/api/oauth/usage";
 const OPENAI: &str = "https://chatgpt.com/backend-api/wham/usage";
 
 #[tokio::test]
+async fn litellm_settings_patch_keeps_default_probe() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.post(
+        "/api/subscriptions/lite-edit/api-key",
+        json!({"provider": "litellm", "key": "E2E-lite-edit",
+            "base_url": "https://proxy.example.com"}),
+    )
+    .await
+    .ok();
+    let r = td
+        .patch(
+            "/api/subscriptions/lite-edit",
+            json!({"selfhosted": {"budget_usd": 100}}),
+        )
+        .await;
+    assert_eq!(r.ok()["selfhosted"]["budget_usd"], 100);
+    assert_eq!(r.body["probe"], "litellm-key-spend");
+    let r = td
+        .patch(
+            "/api/subscriptions/lite-edit",
+            json!({"selfhosted": {"base_url": "https://new-proxy.example.com"}}),
+        )
+        .await;
+    assert_eq!(
+        r.ok()["selfhosted"]["base_url"],
+        "https://new-proxy.example.com"
+    );
+    assert_eq!(r.body["selfhosted"]["budget_usd"], 100);
+    assert_eq!(r.body["probe"], "litellm-key-spend");
+    let r = td.get("/api/subscriptions/lite-edit").await;
+    assert_eq!(r.ok()["probe"], "litellm-key-spend");
+
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "generic-edit", "provider": "selfhosted",
+            "selfhosted": {"base_url": "http://gpu/v1"}}),
+    )
+    .await
+    .ok();
+    // Exercise the store guard with a legacy row carrying a probe. PATCH
+    // does not accept a probe field in its request body.
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("system", |t| {
+            t.execute(
+                "UPDATE subscriptions SET probe = 'litellm-key-spend' WHERE name = 'generic-edit'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    td.patch(
+        "/api/subscriptions/generic-edit",
+        json!({"selfhosted": {"max_concurrent": 4}}),
+    )
+    .await
+    .err(422, "invalid");
+    // The LiteLLM exception must not allow the probe on generic definitions either.
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "generic-probe", "provider": "selfhosted",
+            "probe": "litellm-key-spend", "selfhosted": {"base_url": "http://gpu/v1"}}),
+    )
+    .await
+    .err(422, "invalid");
+}
+
+#[tokio::test]
 async fn litellm_is_claude_only_and_keeps_the_key_private() {
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;
