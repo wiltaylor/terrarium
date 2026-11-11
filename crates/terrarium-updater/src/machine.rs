@@ -68,6 +68,15 @@ fn budget_left(deadline: tokio::time::Instant, reserve: Duration) -> Res<Duratio
         .ok_or_else(|| "hot swap would exceed the 15-minute runner hold budget".into())
 }
 
+async fn switch_before_deadline<T>(
+    deadline: tokio::time::Instant,
+    work: impl std::future::Future<Output = Result<T, Fail>>,
+) -> Result<T, Fail> {
+    tokio::time::timeout_at(deadline, work)
+        .await
+        .unwrap_or_else(|_| Err(Fail("hot swap pause exceeded the runner hold safety deadline; resuming old daemon".into())))
+}
+
 fn bounded_command(argv: Vec<String>, deadline: tokio::time::Instant) -> Res<Vec<String>> {
     let left = budget_left(deadline, Duration::from_secs(5))?;
     let mut bounded = vec![
@@ -674,6 +683,22 @@ impl Updater {
             )
             .await
             .map_err(failed)?;
+        // VACUUM INTO in the daemon's backup CLI is safe while it is live.
+        // The ZIP is the manual pre-update restore point, not the exact
+        // automatic rollback point (the paused database snapshot below).
+        let backup_started = Utc::now();
+        let backup = self
+            .step(
+                "backup",
+                async {
+                    let out = self.exec_ok(&cur.id, backup_argv()).await?;
+                    backup_path(&out)
+                },
+                |p| format!("full backup {p}; began at {backup_started}; writes after that time may not be included; manual pre-update restore point"),
+            )
+            .await
+            .map_err(failed)?;
+        self.with_run(|r| r.backup = Some(backup.clone()));
         self.exec_ok(&cur.id, hot_argv("begin", &[&release]))
             .await
             .map_err(|e| failed(Fail(e)))?;
@@ -684,7 +709,14 @@ impl Updater {
         if let Err(f) = self
             .step(
                 "pause-daemon",
-                self.exec_ok(&cur.id, hot_argv("pause", &["660"])),
+                async {
+                    tokio::time::timeout_at(
+                        switch_deadline,
+                        self.exec_ok(&cur.id, hot_argv("pause", &["660"])),
+                    )
+                    .await
+                    .map_err(|_| "hot swap pause exceeded the runner hold safety deadline".to_owned())?
+                },
                 Clone::clone,
             )
             .await
@@ -709,38 +741,31 @@ impl Updater {
 
         // No daemon is running here. Hold/replay runners keep their processes,
         // while the snapshot includes every completed pre-upgrade write.
-        let backup = self
+        let snapshot = self
             .step(
-                "backup",
+                "snapshot-database",
                 async {
-                    let mut argv = backup_argv();
-                    argv[0] = "/opt/terrarium/bundled/bin/terrariumd".into();
-                    let out = self
-                        .engine
-                        .run_once(cur, &cur.image, bounded_command(argv, switch_deadline)?)
-                        .await?;
-                    if out.code != 0 {
-                        return Err(out.reason());
-                    }
-                    let path = backup_path(&out.stdout)?;
-                    let snapshot = self
-                        .engine
-                        .run_once(
+                    let snapshot = tokio::time::timeout_at(
+                        switch_deadline,
+                        self.engine.run_once(
                             cur,
                             &cur.image,
-                            bounded_command(hot_argv("snapshot", &[&path]), switch_deadline)?,
-                        )
-                        .await?;
+                            bounded_command(hot_argv("snapshot", &[&backup]), switch_deadline)?,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| "hot swap database snapshot exceeded the runner hold safety deadline".to_owned())?;
+                    let snapshot = snapshot?;
                     if snapshot.code != 0 {
                         return Err(snapshot.reason());
                     }
-                    Ok(path)
+                    Ok("exact paused database snapshot for automatic rollback".to_owned())
                 },
                 Clone::clone,
             )
             .await;
-        let backup = match backup {
-            Ok(path) => path,
+        match snapshot {
+            Ok(_) => (),
             Err(f) => {
                 // No new code or migrations have run. Resume the original release.
                 let recovery = async {
@@ -763,7 +788,6 @@ impl Updater {
                 ));
             }
         };
-        self.with_run(|r| r.backup = Some(backup.clone()));
         let attempt = async {
             let left = budget_left(switch_deadline, Duration::ZERO).map_err(Fail)?;
             let control_timeout = left.as_secs_f64().to_string();
@@ -790,8 +814,8 @@ impl Updater {
                 .set_image(&to.reference)
                 .map_err(|e| Fail(e.to_string()))?;
             Ok::<_, Fail>(())
-        }
-        .await;
+        };
+        let attempt = switch_before_deadline(switch_deadline, attempt).await;
         match attempt {
             Ok(()) => {
                 // Commit may have removed probation even if Docker loses the

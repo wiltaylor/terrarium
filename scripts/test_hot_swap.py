@@ -229,13 +229,47 @@ class HotSwapTests(unittest.TestCase):
                 self.assertLess(time.monotonic(), deadline, "supervisor timed out")
                 time.sleep(.02)
         wait(lambda: log.exists() and len(log.read_text().splitlines()) == 1)
+        # Default CI uses a small fixture. The production-size card check sets
+        # TERRARIUM_HOT_SWAP_SEED_MIB=2048 on the build target. SQLite allocates
+        # real pages, not a sparse file. Copy cost scales with DB bytes, not
+        # the size of the agent directories or logs in the full ZIP.
+        db = self.state / "terrarium.db"
+        seed_mib = int(os.environ.get("TERRARIUM_HOT_SWAP_SEED_MIB", "1"))
+        with sqlite3.connect(db) as conn:
+            conn.execute("CREATE TABLE payload(value BLOB)")
+            for _ in range(seed_mib):
+                conn.execute("INSERT INTO payload VALUES (zeroblob(1048576))")
+            conn.execute("CREATE TABLE journal(value TEXT)")
+            conn.execute("INSERT INTO journal VALUES ('before-backup')")
+        # Represent the write between the online ZIP and the pause. Automatic
+        # rollback must retain it, unlike manual restore of the earlier ZIP.
+        with sqlite3.connect(db) as conn:
+            conn.execute("INSERT INTO journal VALUES ('after-backup-before-pause')")
+        started = time.monotonic()
         (self.run / "upgrade-pause").touch()
         process.send_signal(signal.SIGUSR1)
         wait(lambda: (self.run / "upgrade-paused").exists())
         self.assertIsNone(process.poll())
         self.assertEqual(len(log.read_text().splitlines()), 1)
+        backup = str(self.state / "pre-update.zip")
+        copy_started = time.monotonic()
+        HOT.main(["snapshot", backup])
+        copy_seconds = time.monotonic() - copy_started
+        with sqlite3.connect(db) as conn:
+            conn.execute("DELETE FROM journal")
+            conn.execute("INSERT INTO journal VALUES ('new-release-write')")
+        restore_started = time.monotonic()
+        HOT.main(["restore-database", backup])
+        restore_seconds = time.monotonic() - restore_started
+        with sqlite3.connect(db) as conn:
+            self.assertEqual(conn.execute("SELECT value FROM journal ORDER BY value").fetchall(),
+                             [("after-backup-before-pause",), ("before-backup",)])
         (self.run / "upgrade-pause").unlink()
         wait(lambda: len(log.read_text().splitlines()) == 2)
+        pause_seconds = time.monotonic() - started
+        print(f"hot-swap seed_bytes={db.stat().st_size} snapshot_seconds={copy_seconds:.3f} "
+              f"restore_seconds={restore_seconds:.3f} pause_including_rollback_seconds={pause_seconds:.3f}")
+        self.assertLess(pause_seconds, 30, "paused snapshot and rollback exceeded 30 seconds")
         self.assertNotEqual(*log.read_text().splitlines())
 
         # Force a timeout after SIGUSR1. Cleanup must request a restart rather

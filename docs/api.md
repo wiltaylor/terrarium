@@ -12610,6 +12610,21 @@ wait for its end is cancelled with the job cancel.
 
 ### 34.8 Mail
 
+For a hot swap, the updater creates the full ZIP backup **before** pausing
+the daemon. The backup CLI uses SQLite `VACUUM INTO` for a consistent online
+database copy. The `backup` step records when backup creation began. This
+ZIP is the manual pre-update restore point: writes after that time may
+not be included (normally a few minutes). Other state files and logs are
+copied while the service is still running, not inside the pause.
+
+Once paused, only the database is copied to `.hot-swap.sqlite` for exact
+automatic rollback to the moment of the swap. That temporary snapshot is
+deleted on commit and is not part of the manual ZIP restore point. A failed
+switch restores this database before restarting the old daemon. The pause
+budget starts before `pause-daemon`: switching must finish before the
+15-minute runner hold limit minus a one-minute recovery reserve. Exceeding
+that safety deadline fails the update and attempts recovery of the old daemon.
+
 The daemon sends the operator Inbox mail (from `system`):
 
 - one mail for each new version of the channel, "Terrarium 0.2.0 is

@@ -189,6 +189,21 @@ fn a_full_backup_round_trips() {
 }
 
 #[test]
+fn online_zip_restore_is_the_pre_pause_point_not_the_swap_point() {
+    let fx = fixture();
+    let live = rusqlite::Connection::open(fx.state.join(DB_FILE)).unwrap();
+    live.execute_batch("PRAGMA journal_mode=WAL; INSERT INTO t VALUES ('before-backup');")
+        .unwrap();
+    let full = fx.make(Kind::Full, false, None);
+    live.execute_batch("INSERT INTO t VALUES ('after-backup-before-pause');")
+        .unwrap();
+    assert!(fx.db_value().contains(&"after-backup-before-pause".into()));
+    drop(live);
+    fx.restore(&full, None);
+    assert_eq!(fx.db_value(), ["before-backup", "one"]);
+}
+
+#[test]
 fn a_diff_stores_the_changes_and_restores_the_exact_tree() {
     let fx = fixture();
     let full = fx.make(Kind::Full, false, None);
