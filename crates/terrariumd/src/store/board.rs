@@ -3043,6 +3043,25 @@ pub fn set_columns(
     }
     // Free the names and the roles first, so that the UNIQUE indexes do
     // not see a half-done change (two columns that swap a role).
+    // Group completion anchors are stored by name. Resolve all renames
+    // from the old board at once, including swaps.
+    let renames: HashMap<String, String> = wanted
+        .iter()
+        .filter_map(|w| {
+            let old = current.iter().find(|c| Some(c.id) == w.keeps)?;
+            Some((old.name.clone(), w.name.clone()))
+        })
+        .collect();
+    let anchors: Vec<(String, String)> = {
+        let mut q = t.prepare("SELECT card, done_when FROM card_groups WHERE project = ?1")?;
+        q.query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?
+    };
+    for (card, anchor) in anchors {
+        if let Some(name) = renames.get(&anchor) {
+            t.execute("UPDATE card_groups SET done_when = ?2 WHERE card = ?1", params![card, name])?;
+        }
+    }
     t.execute(
         "UPDATE board_columns SET name = '#' || id, role = NULL WHERE project = ?1",
         [project],

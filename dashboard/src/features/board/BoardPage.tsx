@@ -335,7 +335,7 @@ export function BoardPage(props: { done?: boolean }) {
                   >
                     {columnTitle(col)}
                     {/* The cards that the filters show, so a phone finds the matches. */}
-                    <span class="nav-count">{cardsIn(b(), col.name).filter(visible).length}</span>
+                    <span class="nav-count">{cardsIn(b(), col.name).filter((c) => c.kind !== "group" && visible(c)).length}</span>
                   </button>
                 )}
               </For>

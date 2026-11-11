@@ -32,8 +32,11 @@ export interface Lane {
  */
 export function buildLanes(cards: readonly Card[], grouped: boolean): Lane[] {
   if (!grouped) return [{ key: ALL_LANE, cards: [...cards] }];
-  const lanes: Lane[] = boardVersions(cards).map((v) => ({ key: versionLabel(v), version: v, cards: cards.filter((c) => cardVersions(c.labels).includes(v)) }));
-  lanes.push({ key: NO_VERSION_LANE, cards: cards.filter((c) => cardVersions(c.labels).length === 0) });
+  const versions = (c: Card) => c.kind === "group" && c.group?.members.length
+    ? [...new Set(cards.filter((m) => c.group!.members.includes(m.id)).flatMap((m) => cardVersions(m.labels)))]
+    : cardVersions(c.labels);
+  const lanes: Lane[] = boardVersions(cards).map((v) => ({ key: versionLabel(v), version: v, cards: cards.filter((c) => versions(c).includes(v)) }));
+  lanes.push({ key: NO_VERSION_LANE, cards: cards.filter((c) => versions(c).length === 0 || (c.kind === "group" && cards.some((m) => c.group?.members.includes(m.id) && cardVersions(m.labels).length === 0))) }));
   return lanes;
 }
 

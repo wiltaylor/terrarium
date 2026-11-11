@@ -56,9 +56,10 @@ pub struct Group {
 pub fn for_card(conn: &Connection, card: &str) -> ApiResult<Option<Group>> {
     let id: Option<String> = conn
         .query_row(
-            "SELECT g.card FROM card_groups g WHERE g.card = ?1 OR
-         (g.closed_at IS NULL AND EXISTS(SELECT 1 FROM group_members m
-          WHERE m.group_card = g.card AND m.card = ?1)) LIMIT 1",
+            "SELECT card FROM card_groups WHERE card = ?1
+             UNION ALL SELECT g.card FROM group_members m
+             JOIN card_groups g ON g.card = m.group_card
+             WHERE m.card = ?1 AND g.closed_at IS NULL LIMIT 1",
             [card],
             |r| r.get(0),
         )

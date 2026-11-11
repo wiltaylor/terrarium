@@ -30,6 +30,13 @@ const cards = [
 ];
 
 describe("lanes", () => {
+  it("puts group headers in their members' version lanes", () => {
+    const member = card("P-1", ["version:vnext"]);
+    const header = { ...card("P-9"), kind: "group" as const, group: { members: [member.id] } } as Card;
+    const lanes = buildLanes([member, header], true);
+    expect(lanes[0]!.cards.map((c) => c.id)).toEqual(["P-1", "P-9"]);
+    expect(lanes.find((l) => l.key === NO_VERSION_LANE)!.cards).toEqual([]);
+  });
   it("shows one plain lane with every card when the board is not grouped", () => {
     const lanes = buildLanes(cards, false);
     expect(lanes.map((l) => l.key)).toEqual([ALL_LANE]);

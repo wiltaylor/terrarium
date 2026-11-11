@@ -27,6 +27,29 @@ fn state(td: &TestDaemon) -> Shared {
 const SOURCE: &str = "source:test/ping";
 
 #[tokio::test]
+async fn group_completion_anchor_survives_a_column_rename() {
+    use terrariumd::store::{board, groups};
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let member = new_card(&td, "p", json!({"title":"member", "column":"review"})).await;
+    state(&td).db.write("system", move |t| {
+        groups::open(t, groups::Open { project: "p", rule: "test", key: "batch", title: "Batch",
+            column: "review", done_when: "review", eta: None, close_after: None })?;
+        let g = groups::by_key(t, "p", "batch")?.unwrap();
+        groups::add(t, &g, &member)?;
+        assert_eq!(groups::get(t, &g.id)?.done, 1);
+        let specs = board::get_board(t, "p")?.columns.into_iter().map(|c| {
+            serde_json::from_value::<board::ColumnSpec>(if c.name == "review" {
+                json!({"name":"qa", "rename_from":"review"})
+            } else { json!({"name": c.name}) }).unwrap()
+        }).collect::<Vec<_>>();
+        board::set_columns(t, &Actor::Operator, "p", &specs)?;
+        assert_eq!(groups::get(t, &g.id)?.done, 1);
+        Ok(())
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn group_step_eta_uses_project_history_and_records_real_duration() {
     use terrariumd::store::groups;
     let td = TestDaemon::start().await;
