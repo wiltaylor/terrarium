@@ -3321,9 +3321,22 @@ The rights:
 
 The rules:
 
-- A notice needs `card`, `reply_to`, or an urgent (or critical) `priority`.
-  Otherwise it is `422 invalid`: only answers, one done per request, and
-  real problems belong in the Inbox. `reply_to` (notices only) names an
+- A notice needs `card`, except when `priority` is `critical`.
+  Otherwise it is `422 invalid`, including urgent notices and replies.
+  Post in an open topic thread instead, or a lead opens one.
+  The default Inbox lists only open questions and critical notices. Explicit
+  kind and status queries remain available for history and diagnostics,
+  reached only by an explicit UI filter, never by default.
+  `POST /api/projects/{project}/version-thread/messages` takes
+  `{"version", "changed", "test"}` and requires project admin rights.
+  It creates or reuses the project's standing Versions thread and posts one
+  quiet update (no Threads badge), with the lead's changes and test guidance.
+  All three fields must be nonempty. A repeated version is `409 conflict`.
+  The standing Versions thread cannot be closed, including by admins:
+  closing or proposing its close is `409 conflict` naming the thread.
+  Post at each pre-release publish, alongside the releases wiki row.
+  Version group completion posts nothing.
+  `reply_to` (notices only) names an
   operator mail or Inbox-thread message to the sender, or an answered
   question owned by the sender. Invalid references are `422 invalid`.
   The reply reference is recorded in the ask audit event.

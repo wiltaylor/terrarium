@@ -2696,6 +2696,16 @@ pub struct QuestionContext {
 /// `terrarium thread ...` (docs/api.md §6.13): Inbox threads.
 #[derive(Debug, Subcommand)]
 pub enum ThreadCmd {
+    /// Post one quiet pre-release update in the project's standing Versions thread (lead only)
+    Version {
+        version: String,
+        /// What changed, as Markdown (`-` reads stdin)
+        #[arg(long)]
+        changed: String,
+        /// How to test this pre-release, as Markdown (`-` reads stdin)
+        #[arg(long = "test")]
+        test: String,
+    },
     /// Reopen a closed request with a new request agent and its history
     Reopen {
         id: String,

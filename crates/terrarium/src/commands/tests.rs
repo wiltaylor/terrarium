@@ -7539,14 +7539,29 @@ async fn follow_up_questions_report_the_open_question() {
 
 #[tokio::test]
 async fn notify_and_the_admin_inbox() {
+    for exemption in [["--urgent", ""], ["--reply-to", "M1"]] {
+        let mut args = vec!["notify", "Unlinked", exemption[0]];
+        if !exemption[1].is_empty() {
+            args.push(exemption[1]);
+        }
+        let r = exec(true, &args, vec![], None).await;
+        assert!(r.result.unwrap_err().to_string().contains("--card"));
+    }
     let r = exec(true, &["notify", "Unsolicited update"], vec![], None).await;
     let error = r.result.unwrap_err().to_string();
-    for flag in ["--card", "--reply-to", "--urgent"] {
+    for flag in ["--card", "--critical", "thread post"] {
         assert!(error.contains(flag), "{error}");
     }
     ok(
         true,
-        &["notify", "Your answer", "--reply-to", "M1"],
+        &[
+            "notify",
+            "Your answer",
+            "--reply-to",
+            "M1",
+            "--card",
+            "TER-1",
+        ],
         vec![(
             201,
             json!({"id": "N1", "priority": "normal", "thread_id": "T1"}),
@@ -7555,7 +7570,9 @@ async fn notify_and_the_admin_inbox() {
             Post,
             Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()),
             vec![],
-            Some(json!({"kind": "notice", "text": "Your answer", "reply_to": "M1"})),
+            Some(
+                json!({"kind": "notice", "text": "Your answer", "reply_to": "M1", "card": "TER-1"}),
+            ),
         )],
     )
     .await;
@@ -7595,6 +7612,8 @@ async fn notify_and_the_admin_inbox() {
             "notify",
             "v2 is deployed.",
             "--urgent",
+            "--card",
+            "TER-1",
             "--wait",
             "--timeout",
             "1h",
@@ -7605,7 +7624,7 @@ async fn notify_and_the_admin_inbox() {
             mine(),
             vec![],
             Some(
-                json!({"kind": "notice", "text": "v2 is deployed.", "priority": "urgent",
+                json!({"kind": "notice", "text": "v2 is deployed.", "priority": "urgent", "card": "TER-1",
                         "wait": true, "timeout": "1h"}),
             ),
         )],
@@ -10451,6 +10470,38 @@ async fn owners_and_target_grants() {
 /// `close`, `ls`, and `show`, and a refused open (A1).
 #[tokio::test]
 async fn thread_commands() {
+    let out = ok_in(
+        true,
+        &[
+            "thread",
+            "version",
+            "1.2.3-alpha",
+            "--changed",
+            "-",
+            "--test",
+            "Open Inbox",
+        ],
+        vec![(201, json!({"id": "V1", "status": "tracking"}))],
+        Some("Card notices"),
+        vec![(
+            Post,
+            "/api/projects/terra/version-thread/messages",
+            vec![],
+            Some(
+                json!({"version": "1.2.3-alpha", "changed": "Card notices", "test": "Open Inbox"}),
+            ),
+        )],
+    )
+    .await;
+    assert!(out.contains("quiet version post in thread V1 (tracking)"));
+    let invalid = exec(
+        true,
+        &["thread", "version", "1", "--changed", "-", "--test", "-"],
+        vec![],
+        Some("unused"),
+    )
+    .await;
+    assert!(invalid.result.unwrap_err().to_string().contains("only one"));
     let th = json!({"id": "T1", "topic": "Board columns", "scope": "terra", "status": "waiting_operator",
                     "opened_by_name": "terra/worker", "report_to_name": "terra/lead",
                     "agent_name": "terra/consult-1"});
