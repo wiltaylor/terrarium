@@ -190,6 +190,11 @@ fn a_full_backup_round_trips() {
 
 #[test]
 fn online_zip_restore_is_the_pre_pause_point_not_the_swap_point() {
+    let legacy: Manifest = serde_json::from_value(serde_json::json!({
+        "id": "old-backup", "entries": []
+    }))
+    .unwrap();
+    assert!(legacy.excluded_paths.is_empty());
     let fx = fixture();
     let live = rusqlite::Connection::open(fx.state.join(DB_FILE)).unwrap();
     live.execute_batch("PRAGMA journal_mode=WAL; INSERT INTO t VALUES ('before-backup');")
@@ -221,6 +226,8 @@ fn online_zip_restore_is_the_pre_pause_point_not_the_swap_point() {
     fs::write(fx.state.join("trash/deleted-agent/log"), "deleted").unwrap();
     let started = std::time::Instant::now();
     let full = fx.make(Kind::Full, false, None);
+    let manifest = Archive::open(&full.path, None).unwrap().manifest().unwrap();
+    assert_eq!(manifest.excluded_paths, ["state/trash"]);
     eprintln!(
         "online ZIP: seed_mib={seed_mib} db_bytes={} stored_bytes={} stored_files={} zip_bytes={} seconds={:.3}",
         fs::metadata(fx.state.join(DB_FILE)).unwrap().len(),
@@ -372,6 +379,7 @@ fn a_bad_file_stops_the_restore_and_changes_nothing() {
 fn a_manifest_path_out_of_the_root_is_refused() {
     let m = Manifest {
         id: "X".into(),
+        excluded_paths: Vec::new(),
         entries: vec![Entry {
             path: "state/../../etc/passwd".into(),
             kind: EntryKind::File,
@@ -419,6 +427,7 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
     ] {
         let m = Manifest {
             id: "X".into(),
+            excluded_paths: Vec::new(),
             entries,
         };
         let err = check_paths(&m).unwrap_err();
@@ -428,6 +437,7 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
     for path in ["state/a/./x", "state/a//x", "state/a/x/"] {
         let m = Manifest {
             id: "X".into(),
+            excluded_paths: Vec::new(),
             entries: vec![
                 entry("state/a", EntryKind::Symlink, Some("/etc")),
                 entry(path, EntryKind::File, None),
@@ -445,6 +455,7 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
     ] {
         let m = Manifest {
             id: "X".into(),
+            excluded_paths: Vec::new(),
             entries: kinds
                 .iter()
                 .map(|k| entry("state/a", *k, Some("/root/.ssh")))
@@ -456,6 +467,7 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
     // A symlink next to a file of the same prefix is fine.
     let m = Manifest {
         id: "X".into(),
+        excluded_paths: Vec::new(),
         entries: vec![
             entry("state/a", EntryKind::Symlink, Some("b")),
             entry("state/ab/x", EntryKind::File, None),

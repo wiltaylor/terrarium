@@ -197,6 +197,10 @@ pub struct Entry {
 pub struct Manifest {
     pub id: String,
     pub entries: Vec<Entry>,
+    /// Policy exclusions in addition to the standard cache/runtime skips.
+    /// Optional metadata: older readers ignore it, older backups omit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_paths: Vec<String>,
 }
 
 /// The dirs to back up or to restore into.
@@ -621,6 +625,7 @@ pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
         let manifest = Manifest {
             id: id.clone(),
             entries,
+            excluded_paths: vec!["state/trash".into()],
         };
         let m = serde_json::to_vec(&manifest)?;
         match &key {

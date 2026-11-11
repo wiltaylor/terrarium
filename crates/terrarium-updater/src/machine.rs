@@ -832,7 +832,14 @@ impl Updater {
                 // response. Never rewind the journal after attempting admission.
                 self.step(
                     "commit",
-                    self.commit_with_retry(&cur.id, &[&backup, old.trim()]),
+                    async {
+                        tokio::time::timeout_at(
+                            switch_deadline,
+                            self.commit_with_retry(&cur.id, &[&backup, old.trim()]),
+                        )
+                        .await
+                        .map_err(|_| "hot swap admission exceeded the runner hold safety deadline; admission was attempted, automatic rollback is unsafe".to_owned())?
+                    },
                     Clone::clone,
                 )
                 .await
@@ -861,6 +868,16 @@ impl Updater {
                 Ok(Outcome::Succeeded)
             }
             Err(f) => {
+                // A deadline can cancel an engine call inside a step before
+                // step() gets its answer. Do not leave that step "running".
+                self.with_run(|r| {
+                    for step in &mut r.steps {
+                        if step.state == StepState::Running {
+                            step.state = StepState::Failed;
+                            step.detail = f.0.clone();
+                        }
+                    }
+                });
                 let recovery = async {
                     let left = budget_left(hold_deadline, Duration::ZERO)?
                         .as_secs_f64()

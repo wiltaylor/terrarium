@@ -11854,6 +11854,9 @@ the live database files (`terrarium.db`,
 dirs named `target`, `node_modules`, and `.cache`, at any depth. The tools
 dir is not a root. Symlinks stay symlinks. The manifest records the mode of
 each file and dir and the time of each file.
+The manifest's optional `excluded_paths` metadata records the `state/trash`
+policy exclusion. It does not change the ZIP format or restore procedure;
+older readers ignore this field and older manifests omit it.
 
 The entries of the zip:
 
@@ -12626,6 +12629,7 @@ switch restores this database before restarting the old daemon. The pause
 budget starts before `pause-daemon`: switching must finish before the
 15-minute runner hold limit minus a one-minute recovery reserve. Exceeding
 that safety deadline fails the update and attempts recovery of the old daemon.
+Once admission is attempted, errors never rewind the database automatically.
 
 The daemon sends the operator Inbox mail (from `system`):
 
