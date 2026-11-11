@@ -111,8 +111,13 @@
     {
       "source": "api/agents.rs",
       "registration": "\"/agents/{id}/queued/{turn}\",axum::routing::delete(remove_queued),",
-      "access": "other",
-      "cases": []
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "DELETE",
+          "path": "/api/agents/$dev/queued/1?source=hold"
+        }
+      ]
     },
     {
       "source": "api/artifacts.rs",
@@ -1600,6 +1605,31 @@
     },
     {
       "source": "api/remotes.rs",
+      "registration": "\"/remotes/{name}/artifacts/{id}/url\",post(artifacts::mint)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/remotes/x/artifacts/U1/url",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "source": "api/remotes/artifacts.rs",
+      "registration": "\"/ra/{cap}/{exp}/{sig}/\",get(root)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/remotes/artifacts.rs",
+      "registration": "\"/ra/{cap}/{exp}/{sig}/{*path}\",get(asset)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/remotes.rs",
       "registration": "\"/remotes/{name}/proxy/{*rest}\",any(proxy)",
       "access": "operator-only",
       "cases": [
@@ -2699,6 +2729,9 @@
       "_=>Actor::Operator,",
       "matches!(self,Self::Operator)&&crate::links::operator_only(\"actastheoperator\").is_ok()"
     ],
+    "api/agents.rs": [
+      "crate::links::operator_only(\"removingaqueuedturn\")?;"
+    ],
     "api/backups.rs": [
       "policy::operator_only(&actor,\"downloadingabackup\")?;",
       "policy::operator_only(&actor,\"listingthebackups\")?;",
@@ -2866,6 +2899,9 @@
       "actor.is_operator(),",
       "actor.is_operator(),",
       "actor.is_operator(),"
+    ],
+    "github_issues.rs": [
+      "returnimport_verified(t,&Actor::Operator,project,&repo.name,&target,issue);"
     ],
     "harness_auto_update.rs": [
       "to:&Address::Operator,"

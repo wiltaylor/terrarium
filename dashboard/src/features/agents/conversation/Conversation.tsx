@@ -182,7 +182,7 @@ export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => voi
     }),
   );
   const timer = setInterval(() => {
-    if (["working", "blocked"].includes(props.agent.status) || items().length > 0) void load();
+    if (["starting", "restarting", "waiting", "working", "blocked"].includes(props.agent.status) || items().length > 0) void load();
   }, 2000);
   onCleanup(() => { clearInterval(timer); gen++; });
   const take = async (turn: QueuedTurn, edit: boolean) => {

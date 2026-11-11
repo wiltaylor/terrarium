@@ -16,6 +16,8 @@ const BACKUP: &str = "/state/backups/terrarium-backup-1.zip";
 
 #[derive(Default)]
 struct State {
+    jobs_output: Option<String>,
+    jobs_hang: bool,
     fail_once: HashSet<String>,
     hot: bool,
     staged: Option<Image>,
@@ -180,13 +182,27 @@ impl Engine for Fake {
             }
             let what = match (argv[0].as_str(), argv.get(3).map(String::as_str)) {
                 ("terrarium", Some("drain")) => "drain".to_owned(),
+                ("terrarium", Some("drain-jobs")) => "drain-jobs".to_owned(),
                 ("terrarium", Some("resume")) => "resume".to_owned(),
                 ("terrariumd", _) => "backup".to_owned(),
                 _ => format!("status:{}", self.image_of(id).unwrap_or_default()),
             };
             let failed = self.call(format!("{what} {id}"));
+            if what == "drain-jobs" {
+                let hang = self.0.lock().unwrap().jobs_hang;
+                if hang {
+                    std::future::pending::<()>().await;
+                }
+            }
             let stdout = if what == "backup" {
                 format!(r#"{{"name": "terrarium-backup-1.zip", "path": "{BACKUP}"}}"#)
+            } else if what == "drain-jobs" {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .jobs_output
+                    .clone()
+                    .unwrap_or_else(|| r#"{"jobs":[]}"#.into())
             } else {
                 String::new()
             };
@@ -398,6 +414,61 @@ fn rig() -> Rig {
 }
 
 #[tokio::test]
+async fn missing_jobs_endpoint_warns_without_exposing_values_and_continues() {
+    let r = rig();
+    r.fake.fail("drain-jobs");
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded);
+    let step = run.steps.iter().find(|s| s.name == "drain-jobs").unwrap();
+    assert_eq!(step.state, StepState::Failed);
+    assert!(step.detail.contains("values hidden"));
+    assert!(!step.detail.contains("broke"));
+    let calls = r.fake.calls();
+    assert!(
+        calls.iter().position(|c| c == "drain-jobs c0").unwrap()
+            < calls.iter().position(|c| c == "stop c0").unwrap()
+    );
+    assert_eq!(calls.last().unwrap(), "resume c1");
+}
+
+#[tokio::test]
+async fn jobs_wait_expiry_records_remaining_jobs_and_continues() {
+    let r = rig();
+    r.fake.0.lock().unwrap().jobs_output = Some(r#"{"timed_out":true,"jobs":["job-123"]}"#.into());
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded);
+    assert!(
+        run.steps
+            .iter()
+            .find(|s| s.name == "drain-jobs")
+            .unwrap()
+            .detail
+            .contains("job-123")
+    );
+}
+
+#[tokio::test]
+async fn hung_jobs_drain_has_an_outer_deadline() {
+    let mut r = rig();
+    Arc::get_mut(&mut r.updater).unwrap().cfg.drain_wait = Duration::ZERO;
+    r.fake.0.lock().unwrap().jobs_hang = true;
+    let run = tokio::time::timeout(
+        Duration::from_secs(7),
+        r.updater.run_now(RunKind::Update, "latest", "operator"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.outcome, Outcome::Succeeded);
+    assert!(steps(&run).contains(&"!drain-jobs".into()));
+}
+
+#[tokio::test]
 async fn hot_swap_keeps_container_and_commits_only_after_health() {
     let r = rig();
     r.fake.0.lock().unwrap().hot = true;
@@ -410,9 +481,13 @@ async fn hot_swap_keeps_container_and_commits_only_after_health() {
     assert!(
         !calls
             .iter()
-            .any(|c| c.starts_with("drain") || c.starts_with("remove") || c.starts_with("stop"))
+            .any(|c| c.starts_with("drain ") || c.starts_with("remove") || c.starts_with("stop"))
     );
-    assert_eq!(calls.last().unwrap(), "hot:ready");
+    assert_eq!(calls.last().unwrap(), "resume c0");
+    assert!(
+        calls.iter().position(|c| c == "hot:ready").unwrap()
+            < calls.iter().position(|c| c == "resume c0").unwrap()
+    );
     assert!(
         calls.iter().position(|c| c == "hot:pause").unwrap()
             < calls.iter().position(|c| c == "offline-backup").unwrap()
@@ -570,12 +645,14 @@ async fn an_update_drains_backs_up_and_switches_the_image() {
             "pull",
             "environment",
             "hot-swap-eligibility",
+            "drain-jobs",
             "drain",
             "backup",
             "stop",
             "remove",
             "start",
-            "health"
+            "health",
+            "resume"
         ]
     );
     assert_eq!(r.verify.seen.lock().unwrap().clone(), [new_ref()]);
@@ -583,12 +660,14 @@ async fn an_update_drains_backs_up_and_switches_the_image() {
         r.fake.calls(),
         [
             format!("pull {}", new_ref()),
+            "drain-jobs c0".into(),
             "drain c0".into(),
             "backup c0".into(),
             "stop c0".into(),
             "remove c0".into(),
             format!("create:{} new", new_ref()),
             format!("status:{} c1", new_ref()),
+            "resume c1".into(),
         ]
     );
     assert_eq!(r.fake.running_image(), Some(new_ref()));
@@ -736,6 +815,7 @@ async fn a_failed_drain_or_backup_resumes_the_old_daemon() {
             "pull",
             "environment",
             "hot-swap-eligibility",
+            "drain-jobs",
             "drain",
             "!backup",
             "resume"
@@ -846,6 +926,7 @@ async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
             "pull",
             "environment",
             "hot-swap-eligibility",
+            "drain-jobs",
             "drain",
             "backup",
             "stop",
@@ -856,14 +937,15 @@ async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
             "remove",
             "restore",
             "start",
-            "health"
+            "health",
+            "resume"
         ]
     );
     let calls = r.fake.calls();
     let tail: Vec<&str> = calls
         .iter()
         .rev()
-        .take(4)
+        .take(5)
         .rev()
         .map(String::as_str)
         .collect();
@@ -874,6 +956,7 @@ async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
             &format!("restore {OLD} {BACKUP}"),
             &format!("create:{OLD} new"),
             &format!("status:{OLD} c2"),
+            "resume c2",
         ]
     );
     assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
@@ -928,13 +1011,15 @@ async fn a_rollback_restores_the_backup_of_the_last_switch() {
             "pull",
             "-verify",
             "environment",
+            "drain-jobs",
             "drain",
             "backup",
             "stop",
             "restore",
             "remove",
             "start",
-            "health"
+            "health",
+            "resume"
         ]
     );
     assert!(

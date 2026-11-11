@@ -2268,8 +2268,8 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/compact` | none, or `{"then"?: "<prompt>", "defer"?: false}` | `202` agent with `reset` (below). At rest: `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused or held. `409 not_running`: the agent does not run. |
 | `POST /api/agents/{id}/new-session` | none, or `{"then"?: "<prompt>", "recap"?: true, "defer"?: false}` | `202` agent with `reset` (below). A new harness session, not a resume. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run, or an earlier turn still waits in the store) |
-| `GET /api/agents/{id}/queued` | none | `200 {"items": [{"id", "source", "text", "body", "created_at"}]}`. Waiting turns in delivery order: `runner`, `supervisor`, then `store`, preserving each queue's order. Store IDs are numbers. Live IDs are opaque strings and are not reused on restart. `created_at` is empty for live turns. `text` includes the tag, `body` excludes it. Redacted for the caller, with the agent's read right. The snapshot can become stale during delivery. Recaps, mail pointers and quota-hold work are not included. |
-| `DELETE /api/agents/{id}/queued/{turn}?source=store` | none | `204`. Removes an untouched queued turn. Pass its ID and `source` from the list (`store` by default, also `supervisor` or `runner`). Unknown sources are `422`. Requires project_admin of the agent's project, sysadmin, or operator. `404` once dispatch takes the turn, including between list and delete. Never interrupts typing or cancels a retry of an already typed turn. Remaining turns keep their order. Audit `agent.queued.remove` includes the ID and source for live turns, or ID and byte length for store turns. |
+| `GET /api/agents/{id}/queued` | none | `200 {"items": [{"id", "source", "text", "body", "created_at"}], "queues": {"runner": "available"}}`. Waiting turns in delivery order: `runner`, `supervisor`, `hold`, then `store`, preserving each queue's order. Durable IDs are numbers. In-memory IDs are opaque strings and are not reused on restart. `created_at` is empty for in-memory turns. `text` includes the tag, `body` excludes it. Redacted for the caller, with the agent's read right. The snapshot can become stale during delivery or hold release. Recaps and mail pointers are not included. |
+| `DELETE /api/agents/{id}/queued/{turn}?source=store` | none | `204`. Removes an untouched queued turn. Pass its ID and `source` from the list (`store` by default, also `supervisor`, `runner`, or `hold`). Unknown sources are `422`. Requires the operator or project_admin of the agent's own project (not a sysadmin alone; link keys are refused). `404` once dispatch takes the turn, including between list and delete. Never interrupts typing or cancels a retry of an already typed turn. Remaining turns keep their order. Audit `agent.queued.remove` includes the ID and source for in-memory turns, or ID and byte length for durable turns. |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/interrupt` | none | `202 {"accepted": true, "interrupted": true}`. Stops the running turn; the harness keeps running (§6.5, "Interrupt"). |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
@@ -2282,6 +2282,13 @@ The queued-turn response also includes `queues.runner`: `available`,
 failure does not hide the supervisor or store items. The dashboard shows
 the marker and still allows editing those items. Empty idle queues are not
 polled repeatedly.
+
+Held turns backed by store rows appear once, with source `hold` and their
+durable row ID. Removing one deletes its row, so it cannot be delivered
+after release or a daemon restart. Budget holds are mail-only and add no
+turns here. Only vendor-refusal holds (`limit:<subscription>`) remain.
+Removing queued turns requires the operator or a project_admin of the
+agent's own project, not a sysadmin alone. Link keys may not remove turns.
 
 All need project_admin; an agent may `compact` and `new-session`
 itself. The work happens in the background. A `send` writes a row to the
@@ -13351,6 +13358,25 @@ with TLS in front of it, as for `terrarium --url https://... login`.
 - `version`: the crate version (as `cargo_version` of `GET /api/system/version`).
 
 ### 36.2 Link rows and pairing
+
+Remote artifact previews use `POST /api/remotes/{name}/artifacts/{id}/url`
+with an operator session. The home returns a signed `/ra/...` capability on
+its artifact origin, valid for at most 120 seconds and invalidated by logout
+or password changes. Fetches send no home cookies, tokens, or link keys.
+Targets must use the API's scheme and either its origin or the artifact
+origin declared by `GET /api/system/instance` (`artifact_origin`). Redirects
+are refused, responses are limited to 32 MiB and supported MIME types, and
+served content has a sandbox CSP. Download/Open links stay on the home.
+
+The remote artifact origin must present the linked API's pinned leaf
+certificate. An independent certificate or missing HTTPS leaf pin fails
+closed: remote artifacts do not load. Separate artifact-origin pins are
+not supported yet. Private destinations are allowed only for a remote
+linked with a private IP literal or `localhost`. DNS-named remotes have a
+public-only artifact policy, independent of `TERRARIUM_WEBHOOK_PRIVATE`.
+Each artifact connection resolves once, checks the IP address, and pins
+the connection to that checked address. Private DNS labs must link using
+their private IP literal to opt into private artifact destinations.
 
 Only the operator manages links (`403 forbidden` for an agent). A link key
 calls none of these routes except `DELETE /api/links/self` (§36.4).

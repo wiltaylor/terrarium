@@ -26,6 +26,173 @@ async fn remote() -> TestDaemon {
 }
 
 #[tokio::test]
+async fn artifact_capability_serves_without_credentials_and_ends_on_logout() {
+    use base64::Engine;
+    let mut home = TestDaemon::start().await;
+    home.boot(Some("127.0.0.1:0"), Some("test-home-operator"))
+        .await;
+    let remote = remote().await;
+    link(&home, &remote, false).await;
+    let artifact = remote.post("/api/projects/terra/artifacts", json!({
+        "name":"report.html", "content_type":"text/html",
+        "data_base64":base64::engine::general_purpose::STANDARD.encode(b"<!doctype html><p>remote report</p>")
+    })).await.ok().clone();
+    let id = artifact["uid"].as_str().unwrap();
+    let base = format!("http://{}", home.daemon.as_ref().unwrap().tcp_addr.unwrap());
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mint = format!("{base}/api/remotes/lab/artifacts/{id}/url");
+    // A static operator token does not stand in for a session binding.
+    assert_eq!(
+        client
+            .post(&mint)
+            .bearer_auth("test-home-operator")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let login = client
+        .post(format!("{base}/api/session"))
+        .bearer_auth("test-home-operator")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::CREATED);
+    let cookie = login.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let login: Value = serde_json::from_slice(&login.bytes().await.unwrap()).unwrap();
+    let csrf = login["csrf"].as_str().unwrap();
+    let signed = client
+        .post(&mint)
+        .header(header::COOKIE, &cookie)
+        .header("x-csrf-token", csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        signed.status(),
+        StatusCode::OK,
+        "{}",
+        signed.text().await.unwrap()
+    );
+    let signed: Value = serde_json::from_slice(&signed.bytes().await.unwrap()).unwrap();
+    let url = signed["url"].as_str().unwrap();
+    let url = if url.starts_with('/') {
+        format!("{base}{url}")
+    } else {
+        url.to_owned()
+    };
+    // An unauthenticated browser on the artifact origin needs only this URL.
+    let response = client.get(&url).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(
+        response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("sandbox")
+    );
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    assert!(response.text().await.unwrap().contains("remote report"));
+    // Neither an invalid signature nor a suffix for another file is accepted.
+    let mut bad = url.clone();
+    let last = bad.len() - 2;
+    bad.replace_range(last..last + 1, "z");
+    assert_eq!(
+        client.get(&bad).send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        client
+            .get(format!("{url}other.txt"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let logout = client
+        .delete(format!("{base}/api/session"))
+        .header(header::COOKIE, cookie)
+        .header("x-csrf-token", csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        client.get(&url).send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn artifact_public_remote_cannot_fetch_loopback_even_with_a_signed_capability() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let mut home = TestDaemon::start().await;
+    home.boot(Some("127.0.0.1:0"), Some("test-home-operator"))
+        .await;
+    let remote = remote().await;
+    let row = link(&home, &remote, false).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let seen = connections.clone();
+    let probe = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            seen.fetch_add(1, Ordering::SeqCst);
+            drop(socket);
+        }
+    });
+    let db = rusqlite::Connection::open(home.state.join("terrarium.db")).unwrap();
+    db.execute(
+        "UPDATE remotes SET url='https://public.example/',pin_sha256=NULL WHERE name='lab'",
+        [],
+    )
+    .unwrap();
+    let ctx = terrariumd::store::artifacts::context(&home.state, &home.config).unwrap();
+    let base = format!("http://{}", home.daemon.as_ref().unwrap().tcp_addr.unwrap());
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    // Make a valid home capability as if a malicious public remote had returned
+    // this target. No-pin HTTP used to bypass the artifact TLS guard entirely.
+    for scheme in ["http", "https"] {
+        if scheme == "https" {
+            db.execute(
+                "UPDATE remotes SET pin_sha256=?1 WHERE name='lab'",
+                ["00".repeat(32)],
+            )
+            .unwrap();
+        }
+        let exp = chrono::Utc::now().timestamp() + 120;
+        let cap = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "remote":"lab", "remote_id":row["id"], "instance":row["instance_id"],
+                "target":format!("{scheme}://{addr}/a/probe"),
+                "artifact_origin":format!("{scheme}://{addr}/"),
+                "sid":"test-session", "jti":"test-token", "pv":0
+            }))
+            .unwrap(),
+        );
+        let sig = ctx.sign(&format!("remote-artifact.v1.{cap}"), exp);
+        let response = client
+            .get(format!("{base}/ra/{cap}/{exp}/{sig}/"))
+            .send()
+            .await
+            .unwrap();
+        assert!(!response.status().is_success(), "{scheme}");
+        assert_eq!(connections.load(Ordering::SeqCst), 0, "{scheme}");
+    }
+    probe.abort();
+}
+
+#[tokio::test]
 async fn browser_admission_is_retained_until_socket_close_and_has_retry_after() {
     let home = TestDaemon::start().await;
     let remote = remote().await;
