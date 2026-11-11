@@ -2600,19 +2600,32 @@ pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit() {
     let xml = marks.path().join("junit.xml");
     let recipe = format!(
         "echo $$ > '{}'; echo before-restart; printf '<testsuite tests=\"1\"><testcase name=\"kept\"/></testsuite>' > '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; echo after-restart; exit 7",
-        pid.display(), xml.display(), go.display()
+        pid.display(),
+        xml.display(),
+        go.display()
     );
-    lab.td.put("/api/projects/p/delivery", json!({"target": "p-box", "recipe": recipe, "slots": 1,
-        "next_repos": ["app"], "work_dir": lab._dirs.path().join("jobs").display().to_string()})).await.ok();
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": recipe, "slots": 1,
+        "next_repos": ["app"], "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
     lab.branch("ter-restart", "next", &[("OK", "yes\n")]);
     let card = lab.card("restart", "ter-restart").await;
-    let queued = lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({})).await;
+    let queued = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
     let jid = queued.ok()["job"]["id"].as_str().unwrap().to_owned();
     tokio::time::timeout(DEADLINE, async {
         while !xml.exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let original = lab.td.get(&format!("/api/jobs/{jid}")).await.body;
     let original_pid = std::fs::read_to_string(&pid).unwrap();
     let original_xml = std::fs::read_to_string(&xml).unwrap();
@@ -2622,7 +2635,9 @@ pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit() {
     // Keep the same host client alive. Only the daemon is replaced.
     lab.td.boot(None, None).await;
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
-    let (listener, _) = terrariumd::hosts::serve(state, &lab.hosts_addr.to_string()).await.unwrap();
+    let (listener, _) = terrariumd::hosts::serve(state, &lab.hosts_addr.to_string())
+        .await
+        .unwrap();
     lab.hosts_listener = Some(listener);
     lab.until_online(true).await;
     wait_admission(&lab.td, "lab1").await;
@@ -2641,7 +2656,13 @@ pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit() {
     assert!(tail.contains("after-restart"), "{tail}");
     assert_eq!(ended["attempt"], original["attempt"]);
     assert_eq!(std::fs::read_to_string(xml).unwrap(), original_xml);
-    let parsed = lab.td.post("/api/projects/p/test-runs", json!({"content": original_xml, "file_name": "junit.xml", "cards": [card]})).await;
+    let parsed = lab
+        .td
+        .post(
+            "/api/projects/p/test-runs",
+            json!({"content": original_xml, "file_name": "junit.xml", "cards": [card]}),
+        )
+        .await;
     assert_eq!(parsed.ok()["counts"]["passed"], 1);
 }
 

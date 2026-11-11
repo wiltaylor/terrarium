@@ -449,9 +449,14 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
     // an untracked recipe. Read outside the shared DB writer transaction.
     let journal = crate::hosts::resume::Journal::new(&state.state_dir);
     let checkpoints: HashSet<String> = match journal.scan::<serde_json::Value>("prepare/") {
-        Ok(rows) => rows.into_iter().filter_map(|(key, _)|
-            key.strip_prefix("prepare/").and_then(|rest| rest.split('/').next()).map(str::to_owned)
-        ).collect(),
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|(key, _)| {
+                key.strip_prefix("prepare/")
+                    .and_then(|rest| rest.split('/').next())
+                    .map(str::to_owned)
+            })
+            .collect(),
         Err(error) => {
             warn!(%error, "cannot read native job checkpoints");
             HashSet::new()
@@ -1285,7 +1290,11 @@ fn spawn_job(state: Shared, job: Job, def: DeliveryDef, live_run: LiveRun) {
         drop(live_run);
         kick(&state);
     });
-    let mut tasks = owner.job_queue.tasks.lock().unwrap_or_else(|p| p.into_inner());
+    let mut tasks = owner
+        .job_queue
+        .tasks
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     tasks.retain(|task| !task.is_finished());
     tasks.push(task);
 }
