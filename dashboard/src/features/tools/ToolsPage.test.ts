@@ -10,11 +10,11 @@ import type { Tool } from "../../api/types";
 const grant = vi.fn();
 const revoke = vi.fn();
 const remove = vi.fn();
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api: { tools: { grant, revoke, remove } },
   projects: { projects: () => [{ name: "p" }, { name: "q" }] },
   agents: { state: { agents: [{ id: "A1", project: "p", name: "w1" }, { id: "A2", project: "q", name: "x1" }] }, refresh: vi.fn() },
-}));
+})); });
 
 const { ToolCard } = await import("./ToolsPage");
 

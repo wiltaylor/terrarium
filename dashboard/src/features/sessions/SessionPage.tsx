@@ -1,18 +1,21 @@
+import { useInstance } from "../../instance";
 // One agent session, read-only (docs/api.md §6.6): the page that a card's
 // "View session" link opens. It works for a deleted agent too: the daemon
 // keeps the session and reads its transcript from the session archive.
 // The blocks render with the same TranscriptLog as the agent's Sessions tab;
 // there is no composer.
 
-import { A, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createMemo, createResource, Show } from "solid-js";
 import { ErrorBanner, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { api } from "../../stores";
+
 import { createTranscriptView, StreamChip, TranscriptLog } from "../agents/conversation/TranscriptLog";
 import { asSession, sessionChips, sessionRange } from "../board/sessions";
 
 export default function SessionPage() {
+  const { api } = useInstance();
   const params = useParams();
   const [detail] = createResource(
     () => params.id,

@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The skills of an agent or a template: a "Use default skills" toggle, a
 // checkbox for each skill of `GET /api/skills`, and one for `*` (all
 // skills). A default-on skill shows checked with a "default" badge; a clear
@@ -6,11 +7,12 @@
 // text.
 
 import { createResource, For, Show } from "solid-js";
-import { api } from "../../stores";
+
 import type { SkillSummary } from "../../api/types";
 import { ALL_SKILLS, byDefault, DEFAULT_NOTE, defaultOnNames, effectiveLabel, effectiveOf, NO_SKILLS_NOTE, noSkills, pickSkill, skillOn, skillOptions, toggleSkill, unknownSkills, type SkillSelection } from "./model";
 
 export function SkillsPicker(props: { value: SkillSelection; onChange: (v: SkillSelection) => void; disabled?: boolean; legend?: string }) {
+  const { api } = useInstance();
   const [list] = createResource(() => api.skills.list());
   const byName = () => new Map((list() ?? []).map((s) => [s.name, s] as [string, SkillSummary]));
   const defaultOn = () => defaultOnNames(list() ?? []);

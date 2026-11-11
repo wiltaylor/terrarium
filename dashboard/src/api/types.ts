@@ -2572,7 +2572,7 @@ export interface ApiKeyInput {
   provider: string;
   key: string;
   key_id?: string;
-  cloud?: { region?: string; models?: Record<string, string> };
+  cloud?: { region?: string; project_id?: string; models?: Record<string, string> };
   test_connection?: boolean;
   /**
    * `zai`: `coding` (GLM Coding Plan, the default) or `api` (pay as you go).

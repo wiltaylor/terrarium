@@ -1,3 +1,5 @@
+import { InstanceAnchor } from "../instance/navigation";
+import { useInstance } from "../instance";
 // Preview for one artifact (§15.2, docs/api.md §12). The viewer mints a
 // short-lived signed URL (`POST /api/artifacts/{id}/url`) and loads the
 // bytes from the artifact origin (docs/security-review.md F5). HTML, bundles,
@@ -12,7 +14,7 @@ import { artifactOriginKind, SAME_ORIGIN_WARNING } from "../lib/artifact-origin"
 import { renderMarkdown } from "../lib/markdown";
 import { SafeHtml } from "./SafeHtml";
 import { bytes } from "../lib/format";
-import { api } from "../stores";
+
 import { ErrorBanner } from "./ui";
 
 /** What the viewer needs. A full artifact fits, and so does a version's artifact entry. */
@@ -36,6 +38,7 @@ export function previewKind(a: Pick<Artifact, "content_type" | "kind" | "name"> 
 }
 
 export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolean }) {
+  const { api } = useInstance();
   const kind = () => previewKind(props.artifact);
   // The uid is unique across projects, so it is the safest key.
   const [signed] = createResource(() => props.artifact.uid || props.artifact.id, (key) => api.artifacts.url(key));
@@ -68,9 +71,9 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
               {(u) => (
                 <>
                   {" · "}
-                  <a href={u()} download={props.artifact.name} target="_blank" rel="noopener noreferrer">
+                  <InstanceAnchor href={u()} download={props.artifact.name} target="_blank" rel="noopener noreferrer">
                     {props.artifact.kind === "bundle" ? "Open" : "Download"}
-                  </a>
+                  </InstanceAnchor>
                 </>
               )}
             </Show>
@@ -102,9 +105,9 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
             <Match when={kind() === "pdf"}>
               {/* No <object>: the CSP has object-src 'none'. Some browsers do not draw a PDF in a sandboxed frame; the link opens it. */}
               <iframe class="artifact-frame" src={u()} sandbox="allow-scripts" referrerPolicy="no-referrer" title={props.artifact.name} style={{ "min-height": "420px" }} />
-              <a class="small" href={u()} target="_blank" rel="noopener noreferrer">
+              <InstanceAnchor class="small" href={u()} target="_blank" rel="noopener noreferrer">
                 Open {props.artifact.name} in a new tab
-              </a>
+              </InstanceAnchor>
             </Match>
             <Match when={kind() === "html"}>
               <iframe class="artifact-frame" src={u()} sandbox="allow-scripts" referrerPolicy="no-referrer" title={props.artifact.name} />
@@ -118,9 +121,9 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
             <Match when={kind() === "download"}>
               <div class="empty">
                 No preview for {props.artifact.content_type}.{" "}
-                <a href={u()} download={props.artifact.name}>
+                <InstanceAnchor href={u()} download={props.artifact.name}>
                   Download
-                </a>
+                </InstanceAnchor>
               </div>
             </Match>
           </Switch>

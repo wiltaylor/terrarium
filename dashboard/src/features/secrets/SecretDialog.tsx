@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // New secret and Replace value (docs/api.md §5.2): a form for each kind.
 // A `generic` secret has rows; each row is secret or plain. The values live
 // in this dialog only: a save clears them, and a close drops them.
@@ -6,7 +7,7 @@ import { createSignal, For, Index, Show } from "solid-js";
 import type { Secret, SecretKind } from "../../api/types";
 import { SECRET_KINDS } from "../../api/types";
 import { ErrorBanner, Modal } from "../../components/ui";
-import { api } from "../../stores";
+
 import { createBody, emptyForm, GLOBAL, KINDS, putBody, replaceForm, type SecretForm } from "./model";
 import { SecretInput } from "./SecretInput";
 
@@ -20,6 +21,7 @@ export function SecretDialog(props: {
   onClose: () => void;
   onSaved: (s: Secret) => void;
 }) {
+  const { api } = useInstance();
   const start = () => (props.secret ? replaceForm(props.secret) : emptyForm(props.scope));
   const [form, setForm] = createSignal<SecretForm>(start());
   const [busy, setBusy] = createSignal(false);

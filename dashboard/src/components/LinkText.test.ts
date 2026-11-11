@@ -10,10 +10,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCardPeekStore } from "../stores/cardPeek";
 
 const cardPeek = createCardPeekStore();
-vi.mock("../stores", () => ({
+vi.mock("../stores", async () => { const { instanceTestStores } = await import("../test/instance"); return instanceTestStores(({
   cardPeek,
   projects: { projects: () => [{ name: "terrarium", card_prefix: "TER" }, { name: "webshop", card_prefix: "WEB" }, { name: "plain", card_prefix: "" }] },
-}));
+})); });
 
 const { LinkText, openCardLink, readerCardKeys } = await import("./LinkText");
 

@@ -1,17 +1,19 @@
+import { useInstance } from "../../instance";
 // The Waits and Watches panels of the agent page. A wait holds the agent in
 // `waiting`; a watch sends mail when the watched agent changes status.
 // Process output is untrusted: it goes into the page as text nodes only.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { WATCH_ON, type Agent, type Wait, type WaitLog, type Watch, type WatchOn } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, useNow } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { actorLabel, countdown } from "../../lib/leases";
-import { agents, api, events } from "../../stores";
+
 import { isWaitEventFor, putWait, splitWaits, toggleOn, waitCommand, waitResultText, waitStateChip, watchBody, watchRole, watchText } from "./waits";
 
 const agentName = (id: string) => {
+  const { agents } = useInstance();
   const a = agents.byId(id);
   return a ? `${a.project}/${a.name}` : undefined;
 };
@@ -28,6 +30,7 @@ function useSoon(fn: () => void, ms = 300) {
 
 /** The output tail of a process wait (`GET /api/waits/{id}/log`), as plain text. */
 function WaitLogView(props: { wait: Wait; onClose: () => void }) {
+  const { api } = useInstance();
   const [log, setLog] = createSignal<WaitLog | null>(null);
   const [error, setError] = createSignal<unknown>(null);
   const [loading, setLoading] = createSignal(false);
@@ -73,6 +76,7 @@ function WaitLogView(props: { wait: Wait; onClose: () => void }) {
 
 /** One wait: a row, and its log below when open. */
 function WaitRow(props: { wait: Wait; now: number; closed?: boolean; onChange: (w: Wait) => void; onError: (e: unknown) => void }) {
+  const { api } = useInstance();
   const [logOpen, setLogOpen] = createSignal(false);
   const w = () => props.wait;
   const cancel = async (kill: boolean) => {
@@ -163,6 +167,7 @@ function WaitTable(props: { waits: Wait[]; closed?: boolean; now: number; onChan
 
 /** The agent's waits (`GET /api/agents/{id}/waits`), kept live from `wait` events. */
 export function WaitsPanel(props: { agent: Agent }) {
+  const { api, events } = useInstance();
   const now = useNow(1000);
   const [all, setAll] = createSignal(false);
   const [list, setList] = createSignal<Wait[]>([]);
@@ -220,6 +225,7 @@ export function WaitsPanel(props: { agent: Agent }) {
 
 /** The operator's form: "Notify me when <agent> is ...". */
 function WatchForm(props: { agent: Agent; onAdded: (w: Watch) => void }) {
+  const { api } = useInstance();
   const [on_, setOn] = createSignal<WatchOn[]>(["idle", "blocked", "error"]);
   const [once, setOnce] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
@@ -265,6 +271,7 @@ function WatchForm(props: { agent: Agent; onAdded: (w: Watch) => void }) {
 
 /** Watches on the agent and by it (`GET /api/agents/{id}/watches`), kept live from `watch` events. */
 export function WatchesPanel(props: { agent: Agent }) {
+  const { api, events } = useInstance();
   const now = useNow(30_000);
   const [list, setList] = createSignal<Watch[]>([]);
   const [loading, setLoading] = createSignal(false);

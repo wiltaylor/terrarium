@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The schema editor of the DB tab: make a type, or change the fields of one
 // (add, rename, remove, kind, required, default, enum values, list items,
 // ref target, unique). A removed field loses its data in every record, so
@@ -7,7 +8,7 @@
 import { createSignal, For, Index, Show } from "solid-js";
 import type { DbType } from "../../api/types";
 import { ErrorBanner, Modal } from "../../components/ui";
-import { api } from "../../stores";
+
 import { draftOf, emptyDraft, ITEM_KINDS, KINDS, schemaPatch, type FieldDraft } from "./model";
 
 interface Failure {
@@ -17,6 +18,7 @@ interface Failure {
 }
 
 export function SchemaEditor(props: { project: string; type?: DbType; typeNames: string[]; onClose: () => void; onSaved: (t: DbType) => void }) {
+  const { api } = useInstance();
   const [name, setName] = createSignal(props.type?.name ?? "");
   const [description, setDescription] = createSignal(props.type?.description ?? "");
   const [rows, setRows] = createSignal<FieldDraft[]>(props.type ? props.type.fields.map(draftOf) : [{ ...emptyDraft(), name: "title", required: true }]);

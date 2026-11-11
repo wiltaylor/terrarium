@@ -9,7 +9,7 @@ import type { Agent, AgentStatus } from "../../../api/types";
 import { ApiError } from "../../../api/http";
 
 const interrupt = vi.fn();
-vi.mock("../../../stores", () => ({ api: { agents: { interrupt, send: vi.fn(), attach: vi.fn() } } }));
+vi.mock("../../../stores", async () => { const { instanceTestStores } = await import("../../../test/instance"); return instanceTestStores(({ api: { agents: { interrupt, send: vi.fn(), attach: vi.fn() } } })); });
 
 const { Composer } = await import("./Conversation");
 

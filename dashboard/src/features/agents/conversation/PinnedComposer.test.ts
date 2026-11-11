@@ -12,7 +12,7 @@ const send = vi.fn();
 const sessions = vi.fn();
 const transcript = vi.fn();
 const transcriptStream = vi.fn();
-vi.mock("../../../stores", () => ({ api: { agents: { send, sessions, transcript, transcriptStream, attach: vi.fn(), interrupt: vi.fn() } } }));
+vi.mock("../../../stores", async () => { const { instanceTestStores } = await import("../../../test/instance"); return instanceTestStores(({ api: { agents: { send, sessions, transcript, transcriptStream, attach: vi.fn(), interrupt: vi.fn() } } })); });
 
 const { Conversation } = await import("./Conversation");
 

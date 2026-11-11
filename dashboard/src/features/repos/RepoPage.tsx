@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The browser of one repo (/p/:project/repos/:repo, docs/api.md §5.3): a
 // tree selector (main, and each agent checkout), then the tabs Files,
 // Changes, and Commits. The query keeps the tree, the tab, the path (a file
@@ -7,14 +8,15 @@
 // only. The Files tab (./FilesTab) has the one HTML render: a Markdown file
 // through the safe Markdown component (lib/sanitize).
 
-import { A, useParams, useSearchParams } from "@solidjs/router";
+import { useParams, useSearchParams } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createEffect, createMemo, createResource, createSignal, For, Match, on, Show, Switch } from "solid-js";
 import type { Repo, RepoCommit, RepoTree } from "../../api/types";
 import { DiffView } from "../../components/DiffView";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { projectBase } from "../../lib/url";
-import { api } from "../../stores";
+
 import { FilesTab } from "./FilesTab";
 
 type Tab = "files" | "changes" | "commits";
@@ -40,6 +42,7 @@ export function treeText(t: RepoTree): string {
 }
 
 export default function RepoPage() {
+  const { api } = useInstance();
   const params = useParams<{ project: string; repo: string }>();
   const [search, setSearch] = useSearchParams<Search>();
   const [repo] = createResource(
@@ -179,6 +182,7 @@ function TreeFacts(props: { tree: RepoTree }) {
 
 /** `onOpen` shows a file of the tree in the Files tab. */
 function ChangesTab(props: { repo: Repo; tree: RepoTree; reload: string; onOpen: (path: string) => void }) {
+  const { api } = useInstance();
   const [changes] = createResource(
     () => [props.repo.id, props.tree.id, props.reload] as const,
     ([id, tree]) => api.repos.diff(id, tree),
@@ -249,6 +253,7 @@ function ChangesTab(props: { repo: Repo; tree: RepoTree; reload: string; onOpen:
 // --- Commits -------------------------------------------------------------
 
 function CommitsTab(props: { repo: Repo; tree: RepoTree; reload: string; commit?: string; onCommit: (sha?: string) => void }) {
+  const { api } = useInstance();
   const [items, setItems] = createSignal<RepoCommit[]>([]);
   const [next, setNext] = createSignal<string | null>(null);
   const [error, setError] = createSignal<unknown>(null);
@@ -333,6 +338,7 @@ function CommitList(props: { items: RepoCommit[]; next: string | null; loading: 
 }
 
 function CommitDetail(props: { repo: Repo; tree: string; sha: string; onBack: () => void }) {
+  const { api } = useInstance();
   const [c] = createResource(
     () => [props.repo.id, props.tree, props.sha] as const,
     ([id, tree, sha]) => api.repos.commit(id, tree, sha),

@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The record dialog of the DB tab: a form made from the schema of the type,
 // for a new record or an edit. Each kind has its input (features/db/model.ts
 // converts the values). The errors of the daemon (`details.fields`) show
@@ -10,7 +11,7 @@ import { Markdown } from "../../components/Markdown";
 import { ConfirmButton, ErrorBanner, Modal } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api } from "../../stores";
+
 import { formData, newForm, patchData, quoteValue, recordForm, toInput, type FormState, type FormValue } from "./model";
 
 /** The field errors of a `422 invalid` answer (`details.fields`). */
@@ -20,6 +21,7 @@ function fieldErrors(e: unknown): Record<string, string> | null {
 }
 
 export function RecordModal(props: { project: string; type: DbType; record?: DbRecord; onClose: () => void; onSaved: (r: DbRecord) => void; onDeleted: () => void }) {
+  const { api } = useInstance();
   const [record, setRecord] = createSignal<DbRecord | undefined>(props.record);
   const [form, setForm] = createSignal<FormState>(props.record ? recordForm(props.type.fields, props.record.data) : newForm(props.type.fields));
   const [errors, setErrors] = createSignal<Record<string, string>>({});
@@ -289,6 +291,7 @@ function Chips(props: { value: string[]; kind: string; label: string; onChange: 
  * the label.
  */
 function RefPicker(props: { project: string; target: string; value: string; label: string; onChange: (v: string) => void }) {
+  const { api } = useInstance();
   const [search, setSearch] = createSignal("");
   const [open, setOpen] = createSignal(false);
   const [target] = createResource(

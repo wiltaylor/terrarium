@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Rules (docs/api.md §19.8, §19.9, §19.12, TER-171): the Rules tab of the
 // project (`/p/:project/rules`), beside Schedules. It shows who
 // runs the card flow (`board_flow`), the lint of the rules that run, the
@@ -9,11 +10,12 @@ import { useParams } from "@solidjs/router";
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
 import type { EffectiveRules, RuleRun, RulesMigration, RuleFinding } from "../../api/types";
-import { api } from "../../stores";
+
 import { ago } from "../../lib/format";
 import { changeText, findingText, flowText, offerMigration, ruleRows, runTone, stepsText, toggleText } from "./model";
 
 export default function RulesPage() {
+  const { api } = useInstance();
   const params = useParams<{ project: string }>();
   const project = () => params.project;
 

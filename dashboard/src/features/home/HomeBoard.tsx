@@ -1,9 +1,10 @@
-import { A } from "@solidjs/router";
+import { useInstance } from "../../instance";
+import { A } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { allHome, type HomeColumn, type HomeAttention, type HomeCard } from "../../api/home";
 import { Empty, ErrorBanner } from "../../components/ui";
 import { span } from "../../lib/eta";
-import { api, cardPeek, events, projects } from "../../stores";
+
 import { statusTone } from "./active";
 import "./home-board.css";
 
@@ -19,6 +20,7 @@ function stableRows<T extends { id: string; project: string }>(rows: T[], previo
 }
 
 export function HomeBoard(props: { now: number; children?: JSX.Element }) {
+  const { api, events, projects, cardPeek } = useInstance();
   const [project, setProject] = createSignal("");
   const [tick, setTick] = createSignal(0);
   const [attentionError, setAttentionError] = createSignal<unknown>();

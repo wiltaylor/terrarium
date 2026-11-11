@@ -3421,6 +3421,13 @@ Cards:
   updates too. A `PATCH` with the same card changes nothing.
 - The ask (`POST /api/agents/{id}/questions`) and a `PATCH` give `422
   invalid` for a card of another project, or an unknown card.
+- Changing the card in a `PATCH` gives `409 conflict` if another open
+  question or bundle of the asking agent shares the new card or Inbox
+  thread. The operator and sysadmins may relink despite this conflict.
+  Missing required work context gives `422 invalid`. Text-only edits and
+  unchanged cards do not recheck legacy context or duplicate questions.
+  A notice losing its card must be critical (`422 invalid` otherwise),
+  including when its priority changes.
 
 Bundles:
 
@@ -6346,6 +6353,23 @@ every agent whose `subscription` has `env_var`
 the adapter's env. The start log and `terrariumd sandbox-dry-run` show the
 value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
 `<redacted>`.
+
+For Vertex (`gcp`), `test_connection: true` exchanges a short-lived RSA-signed
+service-account assertion at Google's fixed OAuth endpoint, then makes a paid
+one-output-token Haiku request before writing anything. The wizard always
+requests this check. A failed check preserves the old key and settings. The
+check accepts only canonical regional, multi-region, or global Vertex hosts,
+refuses `cloud.base_url` without a network request, and never follows redirects.
+Use the API without `test_connection` to store a gateway configuration.
+Authentication errors name the service-account key, and access errors name the
+Vertex AI User role (`roles/aiplatform.user`), API enablement, and model access.
+Errors never contain upstream response bodies or credentials.
+
+The Vertex key save fills missing model tiers with `claude-opus-5-5`,
+`claude-sonnet-4-6`, and `claude-haiku-4-5@20251001`, and a missing region with
+`us-east5`. Explicit model mappings override those defaults. `cloud.project_id`
+is required. The sandbox receives the JSON as a 0600 file through credential
+env, with `GOOGLE_APPLICATION_CREDENTIALS` pointing to the file.
 
 For Bedrock, `test_connection: true` makes a paid one-output-token test of
 the haiku inference profile before any write. The wizard always requests

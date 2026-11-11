@@ -2827,8 +2827,9 @@ How an account becomes the default:
   default (audit reason `replaced`). When one account is left, it becomes
   the default. A harness has no default only when it has no account.
 
-**The refresh rule.** The daemon never refreshes an OAuth token, never calls
-an OAuth token endpoint, and never writes a token that it got itself. Each
+**The refresh rule (harness OAuth tokens).** The daemon never refreshes a
+harness OAuth token, never calls a harness OAuth token endpoint, and never
+writes a token that it got itself. Each
 harness refreshes its own token with its own code, under its own lock. The
 daemon may read a credential file (the probes read the access token for the
 usage endpoints), copy or move a credential file when the operator adds or
@@ -2837,6 +2838,17 @@ lock file to keep a swap atomic, and restart agents. The test
 `crates/terrariumd/tests/no_token_endpoint.rs` scans the Rust sources of
 every crate for the token endpoints and for `grant_type`, and fails
 `just ci::check` when it finds one.
+
+One exception (TER-632, lead decision 2026-11-11): only
+`crates/terrariumd/src/api/subscriptions/vertex.rs` may exchange a
+service-account assertion with the JWT bearer grant
+(`urn:ietf:params:oauth:grant-type:jwt-bearer`) at the fixed
+`https://oauth2.googleapis.com/token`, ignoring the JSON's `token_uri`.
+The access token stays in memory for one operator-requested Vertex save-test
+call, then is dropped. It is never written to disk, the DB, events, logs, or
+audit details. No refresh-token grant, other grant, endpoint, or module is
+exempt. The source guard checks this exact module, endpoint and grant and has
+negative cases for other modules and grants. No harness token is touched.
 
 **The layout.**
 

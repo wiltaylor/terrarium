@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // "New thread" (docs/api.md §6.13): the operator opens an Inbox thread with
 // a template, a scope, a topic, and a first message. Until the daemon spawns
 // the thread agent from the template (TER-92), the operator may attach an
@@ -6,10 +7,11 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 import type { Thread } from "../../api/types";
 import { ErrorBanner, Modal } from "../../components/ui";
-import { agents, api, projects } from "../../stores";
+
 import { newThreadBody, THREAD_TOPIC_MAX } from "./threads";
 
 export function NewThreadDialog(props: { scope?: string; onClose: () => void; onOpened: (t: Thread) => void }) {
+  const { api, agents, projects } = useInstance();
   const [template, setTemplate] = createSignal("");
   const [scope, setScope] = createSignal(props.scope || "global");
   const [topic, setTopic] = createSignal("");
