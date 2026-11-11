@@ -1530,7 +1530,8 @@ async fn queued(
 
 /// `DELETE /api/agents/{id}/queued/{turn}` (TER-54): drop one queued turn
 /// before the wake types it. The right of a turn: project_admin of the
-/// agent's project, sysadmin, or the operator. 404 when the turn does not
+/// agent's own project, or the operator (not a sysadmin alone, never a
+/// link key, TER-379). 404 when the turn does not
 /// wait (any more): the wake gave it to the agent, or it never was. The
 /// turns after it keep their order.
 async fn remove_queued(
