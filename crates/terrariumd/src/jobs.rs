@@ -226,6 +226,7 @@ const JOBS_DIR: &str = "jobs";
 /// The queue state of one daemon (`AppState::job_queue`).
 pub struct Runtime {
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    stopping: AtomicBool,
     /// True once [`spawn`] has taken up the jobs of the last daemon
     /// ([`recover_lost`]). A job that starts before that counts as lost and
     /// goes back to the queue (TER-211).
@@ -239,6 +240,7 @@ impl Default for Runtime {
     fn default() -> Self {
         Self {
             tasks: Mutex::new(Vec::new()),
+            stopping: AtomicBool::new(false),
             recovered: tokio::sync::watch::Sender::new(false),
             accepted_hold: std::sync::atomic::AtomicBool::new(false),
         }
@@ -247,7 +249,9 @@ impl Default for Runtime {
 
 impl Runtime {
     pub fn stop(&self) -> Vec<JoinHandle<()>> {
-        let tasks = std::mem::take(&mut *self.tasks.lock().unwrap_or_else(|p| p.into_inner()));
+        let mut owned = self.tasks.lock().unwrap_or_else(|p| p.into_inner());
+        self.stopping.store(true, Ordering::SeqCst);
+        let tasks = std::mem::take(&mut *owned);
         for task in &tasks {
             task.abort();
         }
@@ -1275,6 +1279,10 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
 
 fn spawn_job(state: Shared, job: Job, def: DeliveryDef, live_run: LiveRun) {
     let owner = state.clone();
+    let mut tasks = owner.job_queue.tasks.lock().unwrap_or_else(|p| p.into_inner());
+    if owner.job_queue.stopping.load(Ordering::SeqCst) {
+        return;
+    }
     let task = tokio::spawn(async move {
         let end = match run(&state, &job, &def).await {
             // A merge that failed before its tests (TER-614 R3): one
@@ -1312,11 +1320,6 @@ fn spawn_job(state: Shared, job: Job, def: DeliveryDef, live_run: LiveRun) {
         drop(live_run);
         kick(&state);
     });
-    let mut tasks = owner
-        .job_queue
-        .tasks
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
     tasks.retain(|task| !task.is_finished());
     tasks.push(task);
 }
