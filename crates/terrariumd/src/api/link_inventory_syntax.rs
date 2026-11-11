@@ -108,7 +108,9 @@ fn link_syntax_inventory(source: &str) -> (Vec<String>, Vec<String>) {
             syn::Expr::Call(call) => matches!(&*call.func, syn::Expr::Path(path)
                 if path.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(),
                     "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace" | "any" | "on"))),
-            syn::Expr::MethodCall(call) => inline_methods(&call.receiver),
+            syn::Expr::MethodCall(call) => matches!(call.method.to_string().as_str(),
+                "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace" | "on" | "layer" | "route_layer" | "with_state")
+                && inline_methods(&call.receiver),
             _ => false,
         }
     }
@@ -198,6 +200,7 @@ fn link_inventory_parser_regressions() {
         "fn routes() { r.nest_service(\"/x\", service); }",
         "fn routes() { r . route_service (\"/x\", service); }",
         "fn routes() { r.route(\"/x\", methods); methods = methods.post(write); }",
+        "fn routes() { r.route(\"/x\", get(read).merge(methods)); }",
         "fn routes() { Router::route(r, \"/x\", get(read)); }",
         "use crate::Actor::Operator as Root;",
         "fn routes() { register!(r.route(\"/x\", get(read))); }",
@@ -225,10 +228,18 @@ fn link_inventory_parser_regressions() {
         "Operator",
         "label == \"operator\"",
         "policy :: operator_only (actor)",
+        "label == r#\"operator\"#",
+        "label == \"\\x6fperator\"",
     ] {
         assert!(
             !link_gate_lines(&format!("fn gate() {{ let _ = {spelling}; }}")).is_empty(),
             "missed {spelling}"
         );
     }
+    let source = link_production_source("#[cfg(test)] mod tests {} fn routes() { r.route(\"/real\", get(read)); }");
+    assert_eq!(link_syntax_inventory(&source).0.len(), 1);
+    assert_ne!(
+        link_gate_lines("fn gate() { if x && actor == Self::Operator { approve(); } }"),
+        link_gate_lines("fn gate() { if x || actor == Self::Operator { approve(); } }")
+    );
 }
