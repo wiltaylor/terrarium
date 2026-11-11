@@ -53,22 +53,76 @@ async fn retained_log_cleanup_is_project_scoped_and_skips_active_or_missing_targ
         }
         Ok(())
     }).await.unwrap();
-    let response = lab.td.post_as(&lab.w1,"/api/projects/p/jobs/cleanup",json!({})).await;
-    assert_eq!(response.status,403,"{}",response.body);
-    let response = lab.td.post_as(&lab.lead,"/api/projects/p/jobs/cleanup",json!({})).await;
+    let response = lab
+        .td
+        .post_as(&lab.w1, "/api/projects/p/jobs/cleanup", json!({}))
+        .await;
+    assert_eq!(response.status, 403, "{}", response.body);
+    let response = lab
+        .td
+        .post_as(&lab.lead, "/api/projects/p/jobs/cleanup", json!({}))
+        .await;
     let body = response.ok();
-    assert_eq!(body["removed"],2,"{body}");
-    assert_eq!(body["skipped"],2,"{body}");
+    assert_eq!(body["removed"], 2, "{body}");
+    assert_eq!(body["skipped"], 2, "{body}");
     assert!(!root.join("done-1").exists());
     assert!(!root.join("done-2").exists());
-    for name in ["active","missing","legacy","other"] { assert!(root.join(name).exists(),"{name}"); }
+    for name in ["active", "missing", "legacy", "other"] {
+        assert!(root.join(name).exists(), "{name}");
+    }
     let shown = lab.td.get("/api/jobs/Ldone").await;
-    assert_eq!(shown.ok()["logs"].as_array().unwrap().len(),2);
-    assert!(shown.body["logs"].as_array().unwrap().iter().all(|l|l["expired"]==true));
-    let total = state.db.read(|c| Ok(c.query_row("SELECT bytes FROM job_log_budgets WHERE project='p'",[],|r|r.get::<_,i64>(0))?)).await.unwrap();
-    assert_eq!(total,30);
-    let again = lab.td.post("/api/projects/p/jobs/cleanup",json!({})).await;
-    assert_eq!(again.ok()["removed"],0);
+    assert_eq!(shown.ok()["logs"].as_array().unwrap().len(), 2);
+    assert!(
+        shown.body["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["expired"] == true)
+    );
+    let total = state
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT bytes FROM job_log_budgets WHERE project='p'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(total, 30);
+    let again = lab.td.post("/api/projects/p/jobs/cleanup", json!({})).await;
+    assert_eq!(again.ok()["removed"], 0);
+}
+
+#[tokio::test]
+async fn retained_log_recipe_records_size_and_budget_cleanup_expires_it() {
+    let lab = lab(1).await;
+    set_recipe(&lab,"printf hello").await;
+    let head = lab.branch("retained-log","next",&[("OK","yes\n")]);
+    let job = validate_card(&lab,"retained-log",&head).await;
+    assert_eq!(job["state"],"passed","{job}");
+    let path = format!("/api/jobs/{}",job["id"].as_str().unwrap());
+    let shown = lab.td.get(&path).await;
+    let log = &shown.ok()["logs"][0];
+    assert_eq!(log["bytes"],5,"{log}");
+    assert_eq!(log["expired"],false);
+    let file = PathBuf::from(log["path"].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(),"hello");
+    let keep = lab.td.post("/api/projects/p/jobs/cleanup",json!({})).await;
+    assert_eq!(keep.ok()["removed"],0);
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    state.db.write("system",|t| {
+        let mut def = terrariumd::store::jobs::delivery(t,"p")?;
+        def.log_retention_bytes=Some(0);
+        terrariumd::store::jobs::set_delivery(t,"p",&def)?;
+        Ok(())
+    }).await.unwrap();
+    let expired = lab.td.post("/api/projects/p/jobs/cleanup",json!({})).await;
+    assert_eq!(expired.ok()["removed"],1,"{}",expired.body);
+    assert!(!file.exists());
+    let shown = lab.td.get(&path).await;
+    assert_eq!(shown.ok()["logs"][0]["expired"],true);
 }
 
 #[tokio::test]

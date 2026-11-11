@@ -12903,6 +12903,30 @@ one key, the strictest applies until a cap write replaces them.
 
 ### 35.3 Results
 
+New daemon recipe logs have a per-attempt ownership ledger. Legacy logs and
+release-client logs are not adopted or deleted. Delivery config accepts
+`log_retention_secs` (default 604800, seven days, capped at ten years) and
+`log_retention_bytes` (default 1073741824, one GiB of completed logs per project).
+The CLI sets these with `project delivery set --log-retention-secs N
+--log-retention-bytes N`. Zero expires logs immediately or retains no completed
+bytes respectively. Age is fixed when an attempt is first recorded. Changing
+the byte budget affects the next cleanup pass.
+
+Automatic cleanup visits one indexed project/page per minute. Each page has
+at most 32 ledger rows. Oldest recorded attempts are removed when their age
+expires or the completed-log byte budget is exceeded. Queued/running jobs and
+locked log writers are never removed. Missing or unreachable targets are
+skipped and retried on later passes. Budgets are eventual, not a limit on an
+active recipe's output. Cleanup never scans log directories.
+
+`terrarium job cleanup [--after N]` (project admin) applies the same policy
+explicitly, via `POST /api/projects/{name}/jobs/cleanup` with `{"after": N}`.
+The response has `scanned`, `removed`, `skipped`, and `next`. A nonzero `next`
+continues the pass, and zero ends it. Concurrent cleanup returns a conflict.
+`GET /api/jobs/{id}` includes `logs`, with attempt, target, path, written_at,
+expires_at, bytes and expired. `job show` explicitly marks removed logs as
+expired while preserving the job's stored output tail.
+
 - Pass: the labels `validation:queued` and `validation:running` go away.
   A validate card moves to `review`, a merge card to `accepted`. The move
   comment gives the job, the commit, the tested head, the exit code, and

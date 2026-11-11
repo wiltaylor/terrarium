@@ -225,6 +225,7 @@ const JOBS_DIR: &str = "jobs";
 
 /// The queue state of one daemon (`AppState::job_queue`).
 pub struct Runtime {
+    pub(crate) log_cleanup: tokio::sync::Mutex<()>,
     /// True once [`spawn`] has taken up the jobs of the last daemon
     /// ([`recover_lost`]). A job that starts before that counts as lost and
     /// goes back to the queue (TER-211).
@@ -238,6 +239,7 @@ impl Default for Runtime {
     fn default() -> Self {
         Self {
             recovered: tokio::sync::watch::Sender::new(false),
+            log_cleanup: tokio::sync::Mutex::new(()),
             accepted_hold: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -365,7 +367,9 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             if let Err(e) = maintain_job_cache(&state.state_dir, &state.db, &mut cursor).await {
                 warn!("job cache maintenance failed: {e}");
             }
-            if let Err(e) = crate::job_logs::maintain(&state, &mut log_project, &mut log_cursor).await {
+            if let Err(e) =
+                crate::job_logs::maintain(&state, &mut log_project, &mut log_cursor).await
+            {
                 warn!("job log maintenance failed: {e}");
             }
         }
@@ -3258,14 +3262,21 @@ async fn steps(
     );
     if job.kind != JobKind::Release {
         let cmd = RemoteCmd {
-            argv: vec!["sh".into(), "-c".into(), format!("wc -c < {}", crate::executor::sh_quote(&log))],
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!("wc -c < {}", crate::executor::sh_quote(&log)),
+            ],
             timeout_secs: Some(10),
             holder: x.holder.clone(),
             ..RemoteCmd::default()
         };
         if let Ok(run) = crate::executor::start_cmd(x.state, x.def, &cmd) {
             let result = run.collect(128).await;
-            if let Ok(bytes) = String::from_utf8_lossy(&result.stdout).trim().parse::<i64>() {
+            if let Ok(bytes) = String::from_utf8_lossy(&result.stdout)
+                .trim()
+                .parse::<i64>()
+            {
                 if let Err(e) = crate::job_logs::completed(x.state, job, bytes).await {
                     warn!(job = %job.id, "cannot record log size: {e}");
                 }
@@ -5170,14 +5181,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("attempt.log");
         let path = log.to_str().unwrap();
-        let mut child = recipe_sh().args(["-c", &logged_recipe("printf ready; read stop".into(), path)])
-            .stdin(Stdio::piped()).spawn().unwrap();
+        let mut child = recipe_sh()
+            .args(["-c", &logged_recipe("printf ready; read stop".into(), path)])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
         let start = std::time::Instant::now();
         while std::fs::read_to_string(&log).unwrap_or_default() != "ready" {
             assert!(start.elapsed() < Duration::from_secs(10));
             std::thread::sleep(Duration::from_millis(10));
         }
-        let cleanup = || recipe_sh().args(["-c", &crate::job_logs::remove_script(path)]).output().unwrap();
+        let cleanup = || {
+            recipe_sh()
+                .args(["-c", &crate::job_logs::remove_script(path)])
+                .output()
+                .unwrap()
+        };
         assert!(!cleanup().status.success());
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "ready");
         child.stdin.take().unwrap().write_all(b"stop\n").unwrap();
