@@ -17,6 +17,7 @@ import { createStore, reconcile } from "solid-js/store";
 import { ApiError } from "../../api/http";
 import type { Question, Thread } from "../../api/types";
 import { SafeHtml } from "../../components/SafeHtml";
+import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
 import { Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
@@ -55,6 +56,7 @@ export default function ThreadPage() {
   // entry, and so the DOM and the local state of each question card that
   // stays (a chosen option, a typed answer, the focus).
   const [log, setLog] = createStore<{ entries: TimelineEntry[] }>({ entries: [] });
+  const read = useReadBoundary("thread", () => params.id, () => log.entries.map((e) => e.at));
   createEffect(() => {
     const t = thread();
     setLog("entries", reconcile(t ? timeline(t) : [], { key: "id", merge: true }));
@@ -117,6 +119,7 @@ export default function ThreadPage() {
         ← Threads
       </A>
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <ErrorBanner error={read.error()} />
       <Show when={thread()} fallback={<Empty>{loading() ? "Loading…" : "No such thread."}</Empty>}>
         {(t) => (
           <>
@@ -139,6 +142,8 @@ export default function ThreadPage() {
                     const label = () => entry.kind === "message" ? (entry.message.kind === "response" ? "Response" : "Message") : entry.kind === "question" ? (entry.question.kind === "bundle" ? "Question bundle" : "Question") : entry.kind === "proposal" ? "Close proposal" : entry.kind === "handoff" ? "Handoff" : "Response";
                     const text = () => entry.kind === "message" ? entry.message.text : entry.kind === "question" ? entry.question.text : entry.kind === "response" ? t().response?.text ?? "" : entry.kind === "proposal" ? t().close_proposal?.summary ?? "" : t().handoff?.summary ?? "";
                     return (
+                    <>
+                    <Show when={index() === read.first()}><ReadBoundary /></Show>
                     <article ref={post} id={`post-${index() + 1}`} class={`thread-post post-${label().toLowerCase().replaceAll(" ", "-")}`}>
                       <header class="thread-post-header">
                         <ThreadIcon icon={operator() ? "you" : "agent"} />
@@ -173,6 +178,7 @@ export default function ThreadPage() {
                     </Switch>
                       </div>
                     </article>
+                    </>
                   ); }}
                 </For>
               </Show>

@@ -29,6 +29,7 @@ mod preferences;
 mod project_folders;
 mod projects;
 mod questions;
+mod read_positions;
 mod records;
 mod remotes;
 pub(crate) mod repo_trees;
@@ -330,6 +331,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(pipelines::routes())
         .merge(calendar::routes())
         .merge(pins::routes())
+        .merge(read_positions::routes())
         .merge(preferences::routes())
         .merge(bookmarks::routes())
         .merge(subscriptions::routes())
