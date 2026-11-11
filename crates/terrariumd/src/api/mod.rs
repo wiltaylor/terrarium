@@ -3534,15 +3534,16 @@ mod tests {
         // still the operator's `leader` text.
         let (sys, _) = seed_sysadmin(&s).await;
         let launch = |s: Shared, sys: String| async move {
-            let agent = s
-                .db
-                .read(move |c| crate::store::agents::get(c, &sys))
-                .await
-                .unwrap()
-                .agent;
+            let agent =
+                s.db.read(move |c| crate::store::agents::get(c, &sys))
+                    .await
+                    .unwrap()
+                    .agent;
             let repo = s.config_repo.get().unwrap().dir.clone();
             let dirs = crate::prompt::prompt_dirs(Some(&repo), &s.config_dir.join("prompts"));
-            crate::prompt::base_prompt_in(&dirs, &agent).unwrap().unwrap_or_default()
+            crate::prompt::base_prompt_in(&dirs, &agent)
+                .unwrap()
+                .unwrap_or_default()
         };
         let base = launch(s.clone(), sys.clone()).await;
         assert!(base.contains("Lead the project."), "{base}");
@@ -3589,7 +3590,11 @@ mod tests {
     async fn question_status(s: &Shared, qid: &str) -> String {
         let q = qid.to_owned();
         s.db.read(move |c| {
-            Ok(c.query_row("SELECT status FROM questions WHERE id = ?1", [q], |r| r.get(0))?)
+            Ok(
+                c.query_row("SELECT status FROM questions WHERE id = ?1", [q], |r| {
+                    r.get(0)
+                })?,
+            )
         })
         .await
         .unwrap()
@@ -3663,9 +3668,11 @@ mod tests {
         let threads = || {
             let s = s.clone();
             async move {
-                s.db.read(|c| Ok(c.query_row("SELECT count(*) FROM threads", [], |r| r.get::<_, i64>(0))?))
-                    .await
-                    .unwrap()
+                s.db.read(|c| {
+                    Ok(c.query_row("SELECT count(*) FROM threads", [], |r| r.get::<_, i64>(0))?)
+                })
+                .await
+                .unwrap()
             }
         };
         let t0 = threads().await;
@@ -3674,9 +3681,15 @@ mod tests {
         assert_eq!(question_status(&s, &q).await, "open");
         let r = send_body(link_app(&s), "POST", &path, &op, &body).await;
         assert_eq!(r.status(), StatusCode::CREATED);
-        let tid = json_of(r).await["thread"]["id"].as_str().unwrap().to_owned();
+        let tid = json_of(r).await["thread"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let before = message_count(&s).await;
-        for p in [format!("/api/threads/{tid}/messages"), format!("/api/threads/{tid}/respond")] {
+        for p in [
+            format!("/api/threads/{tid}/messages"),
+            format!("/api/threads/{tid}/respond"),
+        ] {
             let body = serde_json::json!({"text": evil});
             refused(send_body(link_app(&s), "POST", &p, &h, &body).await).await;
             assert_eq!(message_count(&s).await, before, "{p}");
