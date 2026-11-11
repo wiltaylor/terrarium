@@ -3621,7 +3621,11 @@ mod tests {
                     "POST",
                     &format!("/api/agents/{sys}/questions"),
                     &[(crate::actor::AGENT_HEADER, sys.as_str())],
-                    &serde_json::json!({"kind": kind, "text": "Deploy?", "urgent": kind == "notice"}),
+                    &if kind == "notice" {
+                        serde_json::json!({"kind": kind, "text": "Deploy?", "priority": "urgent"})
+                    } else {
+                        serde_json::json!({"kind": kind, "text": "Deploy?"})
+                    },
                 )
                 .await;
                 let st = r.status();
