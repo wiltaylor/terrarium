@@ -3285,9 +3285,10 @@ The rules:
   operator mail or Inbox-thread message to the sender, or an answered
   question owned by the sender. Invalid references are `422 invalid`.
   The reply reference is recorded in the ask audit event.
-- A question or bundle is `409 conflict` while the same agent has an open
-  question or bundle on the same card or Inbox thread. `details.question`
-  names it and the error points to `terrarium question update <id>`.
+- Several independent questions and bundles may be open on the same card
+  or Inbox thread. Each answer wakes the agent, while the thread waits for
+  the operator until its last open block is settled. The Inbox groups the
+  open questions of a card.
 - An agent has at most 50 open questions (`429 rate_limited`). A question
   whose text is the same as an open question of the agent (case and
   spaces do not count) is `409 conflict`; `details.question` names the

@@ -20,7 +20,7 @@ import { cardHref, questionItemId } from "./questions";
 import { inboxItemDomId } from "./critical";
 import { BundleCard } from "./BundleCard";
 import { QuestionCard } from "./QuestionCard";
-import { byInboxOrder, groupCardQuestions } from "./model";
+import { byInboxOrder, groupCardQuestions, type InboxGroup } from "./model";
 
 const TAB_IDS = INBOX_TABS.map((t) => t.id) as string[];
 const PAGE_SIZE = 40;
@@ -55,7 +55,10 @@ function InboxScreen() {
   const [visibleCount, setVisibleCount] = createSignal(PAGE_SIZE);
   const [hasMore, setHasMore] = createSignal(false);
   let cursor: string | undefined;
-  const visible = createMemo(() => groupCardQuestions(list()).slice(0, visibleCount()));
+  // Stable group and item identities keep answer drafts mounted on reload.
+  const [groups, setGroups] = createStore<InboxGroup[]>([]);
+  createEffect(() => setGroups(reconcile(groupCardQuestions(list()), { key: "id", merge: true })));
+  const visible = createMemo(() => groups.slice(0, visibleCount()));
   const setList = (next: InboxItem[] | ((cur: InboxItem[]) => InboxItem[])) => {
     const rows = typeof next === "function" ? next(items.list) : next;
     // Keep every mounted card mounted when a new item is inserted above it.
