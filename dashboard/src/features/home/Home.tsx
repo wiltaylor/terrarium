@@ -8,8 +8,7 @@ import { api, events, projects, subscriptions } from "../../stores";
 import { usageLabel } from "./labels";
 import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
 import { HostCards } from "./HostCards";
-import { ActiveCards } from "./ActiveCards";
-import { BlockedCards } from "./BlockedCards";
+import { HomeBoard } from "./HomeBoard";
 import { AskDialog } from "../inbox/AskDialog";
 import { MessageDialog } from "../inbox/MessageDialog";
 import { NewThreadDialog } from "../inbox/NewThreadDialog";
@@ -90,9 +89,7 @@ export function Home() {
         </div>
       </section>
 
-      <BlockedCards now={now()} />
-
-      <ActiveCards now={now()} />
+      <HomeBoard now={now()} />
 
       <HostCards now={now()} />
 

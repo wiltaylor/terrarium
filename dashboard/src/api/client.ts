@@ -223,6 +223,7 @@ import type {
 } from "./types";
 
 export interface Api {
+  home: import("./home").HomeApi;
   health(): Promise<Health>;
   /** `GET /api/system/version`: the daemon's build (version, git ref, build time). */
   systemVersion(): Promise<SystemVersion>;
@@ -1265,6 +1266,11 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       update: (project, columns) => patch(`${p(project)}/board`, { columns }),
     },
 
+    home: {
+      cards: (q) => get("/home/cards", { ...q }),
+      monitors: (q) => get("/home/monitors", { ...q }),
+      pipelines: (q) => get("/home/pipelines", { ...q }),
+    },
     cards: {
       list: (project, q = {}) => page(`${p(project)}/cards`, { ...q }),
       create: (project, card) => post(`${p(project)}/cards`, card),
