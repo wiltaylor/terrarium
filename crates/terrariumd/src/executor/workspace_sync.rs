@@ -589,7 +589,11 @@ mod tests {
     #[tokio::test]
     async fn basis_refresh_reuses_files_and_removes_replaced_links() {
         use std::os::unix::fs::MetadataExt;
-        if std::process::Command::new("rsync").arg("--version").output().is_err() {
+        if std::process::Command::new("rsync")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return;
         }
         let local = tempfile::tempdir().unwrap();
@@ -609,15 +613,28 @@ mod tests {
             _lock: workspace_lock(local.path()).try_lock_owned().unwrap(),
         };
         sync.refresh_basis().await.unwrap();
-        let inode = std::fs::metadata(basis.path().join("unchanged")).unwrap().ino();
+        let inode = std::fs::metadata(basis.path().join("unchanged"))
+            .unwrap()
+            .ino();
         std::fs::remove_file(local.path().join("replaced/old")).unwrap();
         std::fs::remove_dir(local.path().join("replaced")).unwrap();
         symlink(outside.path(), local.path().join("replaced")).unwrap();
         let stats = sync.refresh_basis().await.unwrap();
-        assert!(stats.contains("Number of regular files transferred: 0"), "{stats}");
-        assert_eq!(std::fs::metadata(basis.path().join("unchanged")).unwrap().ino(), inode);
+        assert!(
+            stats.contains("Number of regular files transferred: 0"),
+            "{stats}"
+        );
+        assert_eq!(
+            std::fs::metadata(basis.path().join("unchanged"))
+                .unwrap()
+                .ino(),
+            inode
+        );
         assert!(!basis.path().join("replaced").exists());
-        assert_eq!(std::fs::read_to_string(outside.path().join("secret")).unwrap(), "private");
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret")).unwrap(),
+            "private"
+        );
     }
 
     #[tokio::test]
