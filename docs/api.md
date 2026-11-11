@@ -4244,6 +4244,11 @@ reference is hidden from readers who cannot read its project. Held monitor
 wakes are coalesced by reason in latest-transition order, so the last delivered
 monitor state is the latest one.
 
+An explicit empty monitor (`--monitor ''`, API `{"monitor":""}`) unlinks it.
+Renaming or deleting a linked monitor leaves its old reference unknown and
+not ready, posts a visible system note, and wakes the tracking agent (held
+until an outstanding operator question is answered).
+
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
 A thread opened with a `template` and no `agent` gets its agent at the
 open: an ephemeral agent (§6.10) spawned from the template, owned by the
