@@ -60,6 +60,10 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
             t.execute("UPDATE conflict_fixes SET done = 1 WHERE job = ?1 AND card = ?2", params![r.job, r.card])?;
             return Ok(Some(None));
         }
+        let role = board::role_of(t, &r.project, &card.column)?;
+        if !matches!(role.as_deref(), Some("ready" | "working")) {
+            return Err(ApiError::conflict("waiting for conflict return to ready"));
+        }
         if let Some(sp) = spawns::open_bound(t, &spawns::Bound::new(crate::bound::KIND_CARD, &r.card))? {
             let turn = terrarium_core::turn_tag::render(
                 &terrarium_core::turn_tag::TurnSource::System {
@@ -107,6 +111,9 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
             |row| row.get(0),
         )?;
         if !pending
+            || board::is_held(c, &request.card)?
+            || board::get_card(c, &request.card)?.archived
+            || board::role_of(c, &request.project, &board::get_card(c, &request.card)?.column)?.as_deref() != Some("ready")
             || spawns::open_bound(
                 c,
                 &spawns::Bound::new(crate::bound::KIND_CARD, &request.card),
@@ -161,7 +168,7 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
     Ok(())
 }
 
-/// The request is committed with the rule step. A lost effect or daemon
+/// The request is committed with the job verdict. A lost effect or daemon
 /// restart cannot lose it. Atomic bound checks arbitrate with dispatchers.
 pub async fn pass(state: &Shared) {
     let requests = state.db.read(|c| {
