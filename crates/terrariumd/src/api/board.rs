@@ -15,6 +15,7 @@ use crate::events::{self, EventFilter};
 use crate::policy;
 use crate::store::Page;
 use crate::store::accepted_heads;
+use crate::store::board::card_waits;
 use crate::store::board::{self, Board, Card, CardFilter, CardPatch, ColumnSpec, NewCard, NewLink};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
@@ -69,6 +70,24 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
                 (
                     axum::http::Method::DELETE,
                     super::link_registry::Access::Conditional,
+                ),
+            ],
+        )
+        .route(
+            "/cards/{id}/wait-on",
+            get(show_wait).put(set_wait).delete(clear_wait),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::PUT,
+                    super::link_registry::Access::OperatorOnly,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::OperatorOnly,
                 ),
             ],
         )
@@ -241,6 +260,48 @@ async fn active_cards(
     ))
 }
 
+async fn show_wait(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        state
+            .db
+            .read(move |c| card_waits::view(c, &actor, &id))
+            .await?,
+    ))
+}
+
+async fn set_wait(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(wait): ApiJson<card_waits::Wait>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        state
+            .db
+            .write(actor.label(), move |t| {
+                card_waits::set(t, &actor, &id, &wait)?;
+                card_waits::view(t, &actor, &id)
+            })
+            .await?,
+    ))
+}
+
+async fn clear_wait(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state
+        .db
+        .write(actor.label(), move |t| card_waits::clear(t, &actor, &id))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn create_card(
     State(state): State<Shared>,
     actor: Actor,
@@ -267,9 +328,11 @@ async fn show(
         .read(move |c| {
             let card = board::get_card(c, &id)?;
             crate::store::threads::read_card_project(c, &who, &card.project, None)?;
-            Ok(card)
+            let wait = card_waits::view(c, &who, &card.id)?;
+            Ok((card, wait))
         })
         .await?;
+    let (card, wait) = card;
     let id = card.id.clone();
     let mut questions = state
         .db
@@ -286,6 +349,7 @@ async fn show(
     questions.retain(|q| policy::read_questions(&actor, &q.agent, &q.project).is_ok());
     let mut result = serde_json::json!(card);
     result["questions"] = serde_json::json!(questions);
+    result["wait"] = wait;
     Ok(Json(result))
 }
 
