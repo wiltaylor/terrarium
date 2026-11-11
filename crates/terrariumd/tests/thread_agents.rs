@@ -686,39 +686,90 @@ async fn request_cross_project_card_rights_end_at_close() {
 #[tokio::test]
 async fn request_reads_only_own_linked_cards_across_projects() {
     let l = lab().await;
-    let th = l.open(json!({"scope": "global", "template": "global:helper", "topic": "Meta request"})).await;
+    let th = l
+        .open(json!({"scope": "global", "template": "global:helper", "topic": "Meta request"}))
+        .await;
     let tid = id(&th);
     let thread = tid.clone();
-    state(&l.td).db.write("operator", move |t| {
-        t.execute("UPDATE threads SET request = 1 WHERE id = ?1", [thread])?;
-        Ok(())
-    }).await.unwrap();
+    state(&l.td)
+        .db
+        .write("operator", move |t| {
+            t.execute("UPDATE threads SET request = 1, report_to = (SELECT id FROM agents WHERE project = 'meta' AND name = 'lead') WHERE id = ?1", [thread])?;
+            let sql = format!(
+                "EXPLAIN QUERY PLAN {}",
+                terrariumd::store::threads::REQUEST_CARDS_SQL
+            );
+            let mut st = t.prepare(&sql)?;
+            let plan = st.query_map(["agent", "p"], |r| r.get::<_, String>(3))?
+                .collect::<Result<Vec<_>, _>>()?.join("\n");
+            assert!(plan.contains("threads_agent"), "{plan}");
+            assert!(plan.contains("sqlite_autoindex_thread_cards_1"), "{plan}");
+            Ok(())
+        })
+        .await
+        .unwrap();
     let agent = th["agent"].as_str().unwrap();
     let mut cards = Vec::new();
     for title in ["Linked", "Unlinked", "Other thread"] {
-        let made = l.td.post("/api/projects/p/cards", json!({"title": title})).await;
+        let made =
+            l.td.post("/api/projects/p/cards", json!({"title": title}))
+                .await;
         cards.push(id(made.ok()));
     }
     let second = l.open(json!({"scope": "p", "topic": "Other thread"})).await;
     for (thread, card) in [(&tid, &cards[0]), (&id(&second), &cards[2])] {
-        l.td.post(&format!("/api/threads/{thread}/cards"), json!({"card": card})).await.ok();
+        l.td.post(
+            &format!("/api/threads/{thread}/cards"),
+            json!({"card": card}),
+        )
+        .await
+        .ok();
     }
     for (i, card) in cards.iter().enumerate() {
         let path = format!("/api/cards/{card}");
-        assert_eq!(l.td.get_as(agent, &path).await.status, if i == 0 { 200 } else { 403 });
-        assert_eq!(l.td.patch_as(agent, &path, json!({"title": "No"})).await.status, 403);
-        assert_eq!(l.td.post_as(agent, &format!("{path}/comments"), json!({"body": "No"})).await.status, 403);
+        assert_eq!(
+            l.td.get_as(agent, &path).await.status,
+            if i == 0 { 200 } else { 403 }
+        );
+        assert_eq!(
+            l.td.patch_as(agent, &path, json!({"title": "No"}))
+                .await
+                .status,
+            403
+        );
+        assert_eq!(
+            l.td.post_as(agent, &format!("{path}/comments"), json!({"body": "No"}))
+                .await
+                .status,
+            403
+        );
     }
     let listed = l.td.get_as(agent, "/api/projects/p/cards").await;
     assert_eq!(listed.status, 200, "{}", listed.body);
-    assert_eq!(listed.body["items"].as_array().unwrap().len(), 1);
-    assert_eq!(listed.body["items"][0]["id"], cards[0]);
+    assert_eq!(listed.body.as_array().unwrap().len(), 1);
+    assert_eq!(listed.body[0]["id"], cards[0]);
     let shown = l.td.get_as(agent, &format!("/api/threads/{tid}")).await;
     assert_eq!(shown.body["cards"].as_array().unwrap().len(), 1);
     assert_eq!(shown.body["cards"][0]["card"], cards[0]);
-    assert_eq!(l.td.post_as(agent, &format!("/api/threads/{tid}/cards"), json!({"card": cards[1]})).await.status, 404);
-    l.td.post(&format!("/api/threads/{tid}/close"), json!({})).await.ok();
-    assert_eq!(l.td.get_as(agent, &format!("/api/cards/{}", cards[0])).await.status, 403);
+    assert_eq!(
+        l.td.post_as(
+            agent,
+            &format!("/api/threads/{tid}/cards"),
+            json!({"card": cards[1]})
+        )
+        .await
+        .status,
+        404
+    );
+    l.td.post(&format!("/api/threads/{tid}/close"), json!({}))
+        .await
+        .ok();
+    assert_eq!(
+        l.td.get_as(agent, &format!("/api/cards/{}", cards[0]))
+            .await
+            .status,
+        403
+    );
 }
 
 #[tokio::test]

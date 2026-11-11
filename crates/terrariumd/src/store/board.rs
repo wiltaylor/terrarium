@@ -1065,8 +1065,18 @@ pub fn list_cards_for_request(
             .map(|k| k.name)
             .unwrap_or_else(|_| c.to_owned())
     });
-    let restriction = request_agent.map(|_| format!(" AND c.id IN ({})", super::threads::REQUEST_CARDS_SQL.replace("?1", "?11").replace("?2", "?1"))).unwrap_or_else(|| " AND ?11 IS NULL".to_owned());
-    let sql = format!("SELECT c.*, k.name AS column_name, k.role AS column_role,
+    let restriction = request_agent
+        .map(|_| {
+            format!(
+                " AND c.id IN ({})",
+                super::threads::REQUEST_CARDS_SQL
+                    .replace("?1", "?11")
+                    .replace("?2", "?1")
+            )
+        })
+        .unwrap_or_else(|| " AND ?11 IS NULL".to_owned());
+    let sql = format!(
+        "SELECT c.*, k.name AS column_name, k.role AS column_role,
                 k.position AS column_position
            FROM cards c JOIN board_columns k ON k.id = c.column_id
           WHERE c.project = ?1 AND c.kind = 'card'
@@ -1077,7 +1087,8 @@ pub fn list_cards_for_request(
            AND (?6 IS NULL OR EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?6))
            AND c.archived = ?7
          {restriction}
-         ORDER BY k.position, c.position, c.number LIMIT ?8");
+         ORDER BY k.position, c.position, c.number LIMIT ?8"
+    );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(

@@ -197,7 +197,8 @@ async fn list_cards(
                 Some("me") => Some(actor.address()),
                 Some(a) => Some(crate::store::mail::resolve_known(c, a, Some(&name))?.key()),
             };
-            let restricted = crate::store::threads::read_card_project(c, &actor, &name, None).is_err();
+            let restricted =
+                crate::store::threads::read_card_project(c, &actor, &name, None).is_err();
             let agent = match &actor {
                 Actor::Agent(a) if restricted => Some(a.id.as_str()),
                 _ => None,

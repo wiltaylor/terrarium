@@ -383,8 +383,8 @@ pub fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
 }
 
 /// Thread `th` with only the linked cards whose project `actor` may read
-/// (TER-146): a link never shows a card, or its project, to a reader of
-/// the thread who cannot read that project.
+/// (TER-146), or every linked card for its attached open request agent
+/// (TER-910). Other thread readers gain no project access from a link.
 pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
     let own_request = match actor {
         Actor::Agent(a)
@@ -403,10 +403,7 @@ pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
         th.monitor = None;
     }
     if let Some(cards) = th.cards.as_mut() {
-        cards.retain(|c| {
-            policy::read_project(actor, &c.project).is_ok()
-                || own_request
-        });
+        cards.retain(|c| policy::read_project(actor, &c.project).is_ok() || own_request);
     }
     th
 }
@@ -479,8 +476,11 @@ pub fn read_linked_card(
         Err(e) => e,
     };
     if let Actor::Agent(a) = actor {
-        let sql = format!("SELECT EXISTS(SELECT 1 FROM ({REQUEST_CARDS_SQL}) WHERE ?3 IS NULL OR card = ?3)");
-        let allowed: bool = conn.query_row(&sql, rusqlite::params![a.id, project, card], |r| r.get(0))?;
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM ({REQUEST_CARDS_SQL}) WHERE ?3 IS NULL OR card = ?3)"
+        );
+        let allowed: bool =
+            conn.query_row(&sql, rusqlite::params![a.id, project, card], |r| r.get(0))?;
         if allowed {
             return Ok(());
         }
