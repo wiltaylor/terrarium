@@ -465,12 +465,11 @@ mod tests {
 
     #[test]
     fn per_card_totals_search_the_card_time_index_after_analyze() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE usage_samples(id INTEGER PRIMARY KEY, card_id TEXT, at TEXT,
-            agent TEXT, input_tokens INTEGER, output_tokens INTEGER, cache_read INTEGER, cache_write INTEGER, turn_seq INTEGER);
-            CREATE INDEX usage_samples_card ON usage_samples(card_id, at);
-            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
-            INSERT INTO usage_samples SELECT x, 'P-'||(x%1000), '2026-11-08T00:00:00Z', 'worker', 1, 0, 0, 0, x FROM n;
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+            INSERT INTO usage_samples (id, card_id, at, agent, project, message_id, input_tokens, turn_seq)
+            SELECT x, 'P-'||(x%1000), '2026-11-08T00:00:00Z', 'worker', 'p', 'msg-'||x, 1, x FROM n;
             ANALYZE;").unwrap();
         for since in [None, Some("2026-11-01T00:00:00Z".to_owned())] {
             let filter = UsageFilter {
