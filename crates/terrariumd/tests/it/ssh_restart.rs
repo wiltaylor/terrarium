@@ -25,8 +25,20 @@ pub(crate) async fn start(td: &TestDaemon, target: &str, root: &str) -> (String,
         )
         .await;
     let sid = run.ok()["session_id"].as_str().unwrap();
-    td.post_as(&aid, &format!("/api/targets/{target}/sessions/{sid}/input"), json!({"data":"eA=="})).await.err(422,"invalid");
-    td.post_as(&aid, &format!("/api/targets/{target}/exec"), json!({"cmd":["true"],"durable":true,"pty":true})).await.err(422,"invalid");
+    td.post_as(
+        &aid,
+        &format!("/api/targets/{target}/sessions/{sid}/input"),
+        json!({"data":"eA=="}),
+    )
+    .await
+    .err(422, "invalid");
+    td.post_as(
+        &aid,
+        &format!("/api/targets/{target}/exec"),
+        json!({"cmd":["true"],"durable":true,"pty":true}),
+    )
+    .await
+    .err(422, "invalid");
     (aid, run.ok()["wait"]["id"].as_str().unwrap().to_owned())
 }
 
@@ -145,7 +157,7 @@ async fn durable_ssh_finishes_offline_once_with_real_exit() {
     assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "23\n");
     td.boot(None, None).await;
     completed(&td, &aid, &wid, &root).await;
-    td.boot(None,None).await;
+    td.boot(None, None).await;
     completed(&td, &aid, &wid, &root).await;
     cleanup(&root);
     ssh.server.kill().await.unwrap();
