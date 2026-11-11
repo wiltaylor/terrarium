@@ -338,8 +338,10 @@ impl HostRegistry {
         let saved = journal.scan::<SavedHost>("host/")?;
         let mut entries = self.lock();
         for (key, saved) in saved {
-            let host = key.strip_prefix("host/")
-                .ok_or_else(|| ApiError::internal("invalid host journal key"))?.to_owned();
+            let host = key
+                .strip_prefix("host/")
+                .ok_or_else(|| ApiError::internal("invalid host journal key"))?
+                .to_owned();
             let mut entry = Entry {
                 resume_token: saved.token,
                 next_id: saved.next_id,
@@ -1062,7 +1064,9 @@ impl HostRegistry {
             s.output_events.push_back((s.events, bytes.len()));
         }
         if self.persist(host, entry, Some((id, &event))).is_err() {
-            let Some(s) = entry.sessions.get_mut(&id) else { return false };
+            let Some(s) = entry.sessions.get_mut(&id) else {
+                return false;
+            };
             (s.received, s.held, s.events, s.terminal, s.ended_at) = old;
             if output {
                 s.output_events.pop_back();
@@ -1077,7 +1081,9 @@ impl HostRegistry {
             );
             return false;
         }
-        let Some(s) = entry.sessions.get_mut(&id) else { return false };
+        let Some(s) = entry.sessions.get_mut(&id) else {
+            return false;
+        };
         let prune = s.prune_count();
         s.output_events.drain(..prune);
         let _ = entry.sessions[&id].tx.send(event);
@@ -1159,9 +1165,10 @@ impl HostRegistry {
                 SessionEvent::Lost {
                     message: "the session consumer abandoned the run".into(),
                 },
-            ) && let Some(c) = &e.conn
-            {
-                let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
+            )
+            && let Some(c) = &e.conn
+        {
+            let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
         }
     }
 }

@@ -1,4 +1,5 @@
 //! A live host process, not a synthetic event, crosses a daemon restart.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use crate::common::TestDaemon;
 use serde_json::json;
 use std::time::Duration;
