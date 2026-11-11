@@ -361,11 +361,22 @@ impl Limits {
     }
 }
 
-#[derive(Default)]
-pub struct Runtime(Mutex<HashMap<String, Arc<Limits>>>);
+pub struct Runtime {
+    remotes: Mutex<HashMap<String, Arc<Limits>>>,
+    browsers: Arc<Semaphore>,
+}
+impl Default for Runtime {
+    fn default() -> Self {
+        Self { remotes: Mutex::default(), browsers: Arc::new(Semaphore::new(32)) }
+    }
+}
 impl Runtime {
+    pub fn acquire_browser(&self) -> ApiResult<OwnedSemaphorePermit> {
+        self.browsers.clone().try_acquire_owned()
+            .map_err(|_| ApiError::new(Code::RateLimited, "home remote browser limit is 32 sockets"))
+    }
     pub fn get(&self, id: &str) -> Arc<Limits> {
-        self.0
+        self.remotes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(id.to_owned())
@@ -376,7 +387,7 @@ impl Runtime {
         self.get(id).closed.send_replace(true);
     }
     pub fn reset(&self, id: &str) {
-        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.remotes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(l) = map.insert(id.to_owned(), Arc::default()) {
             l.closed.send_replace(true);
         }

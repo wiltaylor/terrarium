@@ -23,6 +23,8 @@ pub struct Remote {
 }
 
 const COLUMNS: &str = "id,name,url,instance_id,pin_sha256,ca_pem,label,read_only,created_at,last_ok_at,last_error,status,CASE WHEN calls_day=date('now') THEN calls_today ELSE 0 END";
+pub const MAX_REMOTES: usize = 64;
+pub const EXISTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM remotes WHERE name=?1)";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Remote> {
     Ok(Remote {
@@ -43,11 +45,24 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Remote> {
 }
 
 pub fn list(c: &Connection) -> ApiResult<Vec<Remote>> {
+    list_page(c,None,MAX_REMOTES)
+}
+
+pub fn list_page(c: &Connection, after: Option<&str>, limit: usize) -> ApiResult<Vec<Remote>> {
     Ok(
-        c.prepare(&format!("SELECT {COLUMNS} FROM remotes ORDER BY name"))?
-            .query_map([], row)?
+        c.prepare(&format!("SELECT {COLUMNS} FROM remotes WHERE name>?1 ORDER BY name LIMIT ?2"))?
+            .query_map(params![after.unwrap_or(""),limit.min(MAX_REMOTES)], row)?
             .collect::<rusqlite::Result<_>>()?,
     )
+}
+
+pub fn check_add(c: &Connection,name: &str) -> ApiResult<()> {
+    if c.query_row(EXISTS_SQL,[name],|r| r.get::<_,bool>(0))? {
+        return Err(ApiError::conflict("remote name is already used"));
+    }
+    let count: usize = c.query_row("SELECT count(*) FROM (SELECT 1 FROM remotes LIMIT ?1)",[MAX_REMOTES],|r| r.get(0))?;
+    if count >= MAX_REMOTES { return Err(ApiError::conflict("home supports at most 64 remotes, remove one before adding another")); }
+    Ok(())
 }
 
 pub fn get(c: &Connection, name: &str) -> ApiResult<Remote> {
@@ -65,9 +80,7 @@ pub fn sealed(c: &Connection, id: &str) -> ApiResult<Vec<u8>> {
 }
 
 pub fn insert(t: &Tx<'_>, r: &Remote, sealed: &[u8]) -> ApiResult<()> {
-    if list(t)?.iter().any(|old| old.name == r.name) {
-        return Err(ApiError::conflict("remote name is already used"));
-    }
+    check_add(t,&r.name)?;
     t.execute("INSERT INTO remotes (id,name,url,instance_id,pin_sha256,ca_pem,label,sealed,read_only,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![r.id,r.name,r.url,r.instance_id,r.pin_sha256,r.ca_pem,r.label,sealed,r.read_only,r.created_at])?;
     Ok(())

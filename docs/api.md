@@ -13351,6 +13351,12 @@ Removing one therefore returns `revoke_on_remote: true` and leaves revocation
 to the remote operator. The home does not widen that policy.
 
 Limits per remote are 64 upstream requests and 8 upstream streams, a 30 s
+connect timeout. Each home admits at most 32 remote browser WebSockets,
+with admission retained for the entire socket lifetime. A 33rd receives 429
+with Retry-After. Historical event page reads take upstream request permits.
+The home stores at most 64 remotes. Listings use bounded, name-cursor pages
+with `limit` and `cursor`, and duplicate names use an indexed existence check.
+Other proxy limits are a 30 s
 connect timeout, 60 s ordinary request timeout, 5 min stream idle timeout,
 16 MiB JSON responses and 256 MiB uploads or binary downloads. SSE streams
 incrementally. Event WebSockets share one upstream firehose across browser

@@ -104,11 +104,11 @@ async fn open(s: &Shared, r: &Remote, since: &str) -> ApiResult<Connection> {
     ))
 }
 
-pub(super) async fn connect(s: &Shared, r: &Remote, req: Request) -> ApiResult<Response> {
+pub(super) async fn connect(s: &Shared, r: &Remote, req: Request, browser_permit: OwnedSemaphorePermit) -> ApiResult<Response> {
     let limits = s.remotes.get(&r.id);
     let _request = limits.acquire(false)?;
     let query = net::query(req.uri().query());
-    let pairs: Vec<(String, String)> =
+    let mut pairs: Vec<(String, String)> =
         url::form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes())
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
@@ -119,6 +119,23 @@ pub(super) async fn connect(s: &Shared, r: &Remote, req: Request) -> ApiResult<R
         ) {
             return Err(ApiError::bad_request("unsupported event stream query"));
         }
+    }
+    if let Some((_,agent)) = pairs.iter_mut().find(|(k,_)| k=="agent")
+        && agent.parse::<terrarium_core::AgentId>().is_err() {
+        let c = net::client(r,&own_ports(s)).await?;
+        let h = net::request_headers(&HeaderMap::new(),&key(s,r).await?,&s.links.instance_id(&s.state_dir)?)?;
+        net::instance(&c,r,&h).await?;
+        let mut u = url::Url::parse(&r.url).map_err(|_| net::unreachable())?;
+        u.path_segments_mut().map_err(|_| net::unreachable())?.pop_if_empty().extend(["api","agents",agent.as_str()]);
+        let response = c.get(u).headers(h).timeout(net::PLAIN).send().await.map_err(net::connection_error)?;
+        match response.status() {
+            StatusCode::OK => {},
+            StatusCode::NOT_FOUND => return Err(ApiError::not_found("remote agent not found")),
+            StatusCode::CONFLICT => return Err(ApiError::conflict("remote agent name is ambiguous")),
+            _ => return Err(net::unreachable()),
+        }
+        let shown: Value = serde_json::from_slice(&net::limited(response,net::JSON_MAX,net::PLAIN).await?).map_err(|_| net::unreachable())?;
+        *agent = shown["id"].as_str().filter(|id| id.parse::<terrarium_core::AgentId>().is_ok()).ok_or_else(net::unreachable)?.to_owned();
     }
     let (mut parts, _) = req.into_parts();
     let ws = WebSocketUpgrade::from_request_parts(&mut parts, &())
@@ -149,7 +166,7 @@ pub(super) async fn connect(s: &Shared, r: &Remote, req: Request) -> ApiResult<R
     let mut response = ws
         .max_message_size(net::JSON_MAX)
         .max_frame_size(net::JSON_MAX)
-        .on_upgrade(move |socket| browser(socket, s, remote, limits, rx, pairs));
+        .on_upgrade(move |socket| browser(socket, s, remote, limits, rx, pairs,browser_permit));
     response.headers_mut().insert(
         "x-terrarium-remote",
         r.name.parse().map_err(|_| net::unreachable())?,
@@ -265,6 +282,7 @@ async fn browser(
     limits: Arc<Limits>,
     mut rx: broadcast::Receiver<Arc<String>>,
     pairs: Vec<(String, String)>,
+    _browser_permit: OwnedSemaphorePermit,
 ) {
     let mut closed = limits.closed.subscribe();
     let mut last = 0i64;
@@ -280,9 +298,13 @@ async fn browser(
                 &key(&s, &r).await?,
                 &s.links.instance_id(&s.state_dir)?,
             )?;
-            net::instance(&c, &r, &h).await?;
+            {
+                let _request = limits.acquire(false)?;
+                net::instance(&c, &r, &h).await?;
+            }
             let mut since = option(&pairs, "since").unwrap_or("0").to_owned();
             loop {
+                let request = limits.acquire(false)?;
                 let mut u = url::Url::parse(&format!("{}api/events", r.url))
                     .map_err(|_| net::unreachable())?;
                 for (k, v) in &pairs {
@@ -312,6 +334,7 @@ async fn browser(
                     &net::limited(response, net::JSON_MAX, net::PLAIN).await?,
                 )
                 .map_err(|_| net::unreachable())?;
+                drop(request);
                 for frame in page {
                     last = last.max(frame["seq"].as_i64().unwrap_or(0));
                     let text = serde_json::to_string(&frame)?;
