@@ -2365,7 +2365,7 @@ async fn a_pass_on_rerun_is_green_and_files_one_flaky_card() {
     let lab = lab(1).await;
     let test = "hosts::a_flaky_one";
     let label = terrariumd::jobs::flaky_label(test);
-    let job = merge_with_recipe(&lab, "ter-flaky-1", &rerun_recipe(test, "ok", 0)).await;
+    let job = merge_with_files(&lab, "ter-flaky-1", &rerun_recipe(test, "ok", 0), &[("ter-flaky-1", "yes\n")]).await;
     assert_eq!(job["state"], "passed", "{job:#}");
     let shown = lab
         .td
@@ -2403,7 +2403,7 @@ async fn a_pass_on_rerun_is_green_and_files_one_flaky_card() {
     );
 
     // The same flake in a second job: a comment on the open card.
-    let second = merge_with_recipe(&lab, "ter-flaky-2", &rerun_recipe(test, "ok", 0)).await;
+    let second = merge_with_files(&lab, "ter-flaky-2", &rerun_recipe(test, "ok", 0), &[("ter-flaky-2", "yes\n")]).await;
     assert_eq!(second["state"], "passed", "{second:#}");
     assert_eq!(cards_with_label(&lab, &label).await.len(), 1);
     let card = lab.card_of(flaky[0]["id"].as_str().unwrap()).await;
@@ -2412,7 +2412,7 @@ async fn a_pass_on_rerun_is_green_and_files_one_flaky_card() {
 
     // A second failure: red as before, and no card for that test.
     let other = "hosts::a_broken_one";
-    let red = merge_with_recipe(&lab, "ter-flaky-3", &rerun_recipe(other, "failed", 101)).await;
+    let red = merge_with_files(&lab, "ter-flaky-3", &rerun_recipe(other, "failed", 101), &[("ter-flaky-3", "yes\n")]).await;
     assert_eq!(red["state"], "failed", "{red:#}");
     assert_eq!(red["outcome"], "red");
     let shown = lab
@@ -2429,6 +2429,11 @@ async fn a_pass_on_rerun_is_green_and_files_one_flaky_card() {
 /// Queue a merge of a new card on `branch` with `recipe`, wait for the
 /// end, and return the job.
 async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
+    merge_with_files(lab, branch, recipe, &[("OK", "yes\n")]).await
+}
+
+/// [`merge_with_recipe`] with the files of the card branch.
+async fn merge_with_files(lab: &Lab, branch: &str, recipe: &str, files: &[(&str, &str)]) -> Value {
     lab.td
         .put(
             "/api/projects/p/delivery",
@@ -2437,8 +2442,7 @@ async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
         )
         .await
         .ok();
-    // A file of its own too, so a second merge in one lab is no empty commit.
-    lab.branch(branch, "next", &[("OK", "yes\n"), (branch, "yes\n")]);
+    lab.branch(branch, "next", files);
     let id = lab.card(branch, branch).await;
     let r = lab
         .td
