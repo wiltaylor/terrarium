@@ -389,13 +389,24 @@ fn state(td: &TestDaemon) -> terrariumd::api::Shared {
 
 #[tokio::test]
 async fn workspace_sync_uses_exedev_work_root_and_pulls_output() {
+    workspace_sync_roundtrip(true).await;
+}
+
+#[tokio::test]
+async fn workspace_sync_uses_exedev_home_without_work_root() {
+    workspace_sync_roundtrip(false).await;
+}
+
+async fn workspace_sync_roundtrip(work_root: bool) {
     let (td, _, _, _, ssh) = daemon().await;
-    // ssh_plan sends one shell command, whereas rsync sends a server argv.
-    std::fs::write(&ssh, "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nshift\nif [ \"$#\" = 1 ]; then exec sh -c \"$1\"; else exec \"$@\"; fi\n").unwrap();
     let base = td.dir.path().join("remote-work");
+    // ssh_plan sends one shell command, whereas rsync sends a server argv.
+    std::fs::write(&ssh, format!("#!/bin/sh\nexport HOME='{}'\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nshift\nif [ \"$#\" = 1 ]; then exec sh -c \"$1\"; else exec \"$@\"; fi\n", base.display())).unwrap();
     let mut definition = target("sync", 3600);
     definition["sync_workspace"] = json!(true);
-    definition["work_root"] = json!(base);
+    if work_root {
+        definition["work_root"] = json!(base);
+    }
     td.post("/api/targets", definition).await.ok();
     td.post_empty("/api/targets/sync/up").await.ok();
     td.project("p").await;
