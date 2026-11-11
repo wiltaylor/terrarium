@@ -2027,6 +2027,8 @@ impl RunnerSupervisor {
         }
         // A commit in the sandbox needs an identity: the home has no
         // `.gitconfig`, and the host name gives no mail domain.
+        // The instance bot identity deliberately overrides GIT_AUTHOR_* and
+        // GIT_COMMITTER_* supplied by the harness or secret environment.
         crate::git_identity::Identity::from_env().env(&mut spec.env);
         spec.env.insert(
             "TERRARIUM_GIT_TRAILERS_FILE".into(),
