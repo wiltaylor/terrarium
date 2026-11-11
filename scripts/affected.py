@@ -45,8 +45,10 @@ The rules, first match per path:
    - All targets when the module is shared by every test (`lib.rs`,
      `main.rs`, `db`, `error`, `policy`, `api/mod.rs`, `store/mod.rs`, and
      each module that `tests/common` names), or when no target matches.
-   - Explicit #[path] modules of a consolidated target are indexed by
-     filename and daemon references. Edits select the containing target.
+   - Consolidated target modules (explicit #[path] or direct main.rs
+     declarations) are indexed by filename and daemon references. Matches
+     run with libtest module filters. Entry point, shared, and unknown
+     helper changes keep the conservative whole-target fallback.
    - `tests/<t>.rs`: only its containing target. `tests/common/`, `tests/fixtures/`,
      or another file of the crate: all targets.
    - Guard (TER-179): any changed `crates/<crate>/src/**/*.rs`, in any crate,
