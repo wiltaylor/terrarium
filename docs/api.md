@@ -3421,6 +3421,13 @@ Cards:
   updates too. A `PATCH` with the same card changes nothing.
 - The ask (`POST /api/agents/{id}/questions`) and a `PATCH` give `422
   invalid` for a card of another project, or an unknown card.
+- Changing the card in a `PATCH` gives `409 conflict` if another open
+  question or bundle of the asking agent shares the new card or Inbox
+  thread. The operator and sysadmins may relink despite this conflict.
+  Missing required work context gives `422 invalid`. Text-only edits and
+  unchanged cards do not recheck legacy context or duplicate questions.
+  A notice losing its card must be critical (`422 invalid` otherwise),
+  including when its priority changes.
 
 Bundles:
 
@@ -6173,8 +6180,7 @@ cloud settings object (`region`, `models`, `budget_usd`, and the other
 provider fields), not a `{cloud: ...}` wrapper. Omitted optional fields are
 cleared. The operator-only endpoint checks the settings and returns the
 subscription without reading or changing its key file. File-managed and
-non-cloud subscriptions return `422 invalid`. Raising or removing the budget
-ends a cloud-budget hold at the next budget check.
+non-cloud subscriptions return `422 invalid`. Budgets send mail only.
 
 `POST /api/subscriptions/{name}/api-key` stores the key in
 `<state>/credentials/subscriptions/<name>.json`, mode `0600` (the
@@ -6348,6 +6354,23 @@ the adapter's env. The start log and `terrariumd sandbox-dry-run` show the
 value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
 `<redacted>`.
 
+For Vertex (`gcp`), `test_connection: true` exchanges a short-lived RSA-signed
+service-account assertion at Google's fixed OAuth endpoint, then makes a paid
+one-output-token Haiku request before writing anything. The wizard always
+requests this check. A failed check preserves the old key and settings. The
+check accepts only canonical regional, multi-region, or global Vertex hosts,
+refuses `cloud.base_url` without a network request, and never follows redirects.
+Use the API without `test_connection` to store a gateway configuration.
+Authentication errors name the service-account key, and access errors name the
+Vertex AI User role (`roles/aiplatform.user`), API enablement, and model access.
+Errors never contain upstream response bodies or credentials.
+
+The Vertex key save fills missing model tiers with `claude-opus-5-5`,
+`claude-sonnet-4-6`, and `claude-haiku-4-5@20251001`, and a missing region with
+`us-east5`. Explicit model mappings override those defaults. `cloud.project_id`
+is required. The sandbox receives the JSON as a 0600 file through credential
+env, with `GOOGLE_APPLICATION_CREDENTIALS` pointing to the file.
+
 For Bedrock, `test_connection: true` makes a paid one-output-token test of
 the haiku inference profile before any write. The wizard always requests
 this. On failure the endpoint returns a safe diagnostic and saves nothing.
@@ -6431,11 +6454,10 @@ price of the tokens, not the cloud bill). The subscription shows a
 `budget` window with `used_pct`, `resets_at` (the start of the next month),
 and `balance` (`total` the budget, `used`, `remaining`, `currency` `USD`).
 The quota notices of §16.6 mail the operator at `alert_at` (default 80),
-90, and 100 percent. At 100 percent, new turns of the agents on the
-subscription wait: a hold with the cause `cloud-budget:<name>` until the
-start of the next month (`quota.blocked`). A raised or removed budget ends
-the hold at the next check (after each new session total, and on each
-policy tick).
+90, and 100 percent. Budgets send mail only, even at 100 percent. Agents
+keep their turns. Checks run after each new session total and on each
+policy tick. Existing cloud-budget holds end at daemon startup with a
+`quota.resumed` event.
 
 ### 16.6 The quota policy
 
@@ -6506,9 +6528,10 @@ policy tick).
   ```
 
   A budget has two lines: its `alert_at` and 100. Each line sends one mail
-  to the operator and one `quota.alert` in a UTC day. The hold applies,
-  with the cause `budget:project:<p>[/<sub>]` and the next UTC midnight as
-  the reset.
+  to the operator and one `quota.alert` in a UTC day. No turns are held.
+  Existing holds with cause `budget:project:<p>[/<sub>]` end at daemon
+  startup with a `quota.resumed` event. Vendor-refusal holds
+  (`limit:<subscription>`) and auto-swap are unchanged.
 
 `POST /api/agents/{id}/status` (`terrarium status set`) is the agent's own
 word: `status` is `idle`, `working`, or `blocked`; `note` is up to 500
@@ -6826,6 +6849,7 @@ recreation pending. Use normal `up` to create it with the holder workspaces.
 `recreate` refuses an absent container with `no container yet; up creates it`.
 For a legacy container without a saved baseline, the first edit reads its
 actual image and limits from Docker inspect rather than the definition.
+If the host is offline, that edit refuses until the baseline can be read.
 Run `terrarium admin target verb NAME recreate` (`POST
 /api/targets/{name}/recreate`) explicitly to apply the settings. This requires
 the rights to define the target (project admin or global sysadmin), refuses
@@ -6836,6 +6860,29 @@ binds recorded for the container and verified against the host's work root.
 Foreign binds and named or anonymous volumes refuse recreation. Older host
 agents that cannot verify mounts also refuse mounted containers. Existing-container targets (`container`)
 cannot be recreated. Ephemeral targets keep their existing behavior.
+
+`targets ls` marks `RECREATE` as `pending` when settings need recreation,
+and `targets show` prints the pending state and writable-layer warning.
+Only the operator may override recreation safeguards:
+
+- `--force` (`{"force":true}`) permits removal of a running container, including
+  other holders' live exec sessions. Those processes are stopped by Docker.
+- Repeat `--discard-volumes NAME` (`{"discard_volumes":["NAME",...]}`) for each
+  volume attachment that may be lost. The names must equal the full set of
+  volume mounts not named by the definition, without missing, extra or duplicate
+  names. Currently the definition declares workspace binds, not volumes, so this
+  covers every volume mount. A refusal lists volume names and mount points.
+
+Neither override authorizes a foreign bind, unknown mount metadata, or a mount
+source in the request. Agents, including project admins, receive 403 for either
+override. Recreation rechecks the inspected identity and mounts before removal,
+and audits removal with the discarded volume names before starting the
+replacement. A second audit records the replacement's success or failure,
+so failed image pulls do not hide a completed discard. Link keys cannot use
+either override, even though they otherwise act on behalf of the operator.
+**Discard means detach, not delete**:
+no volume contents are inspected and no volumes are deleted. Old volume data
+remains on the host, but the replacement container does not attach it.
 
 An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values
 that go onto a command line (`host`, `address`, `image`, `container`,
@@ -12930,6 +12977,17 @@ A batch merge:
   is the same: the tree is reset, and the card's note says why. The card
   gets `outcome: conflict` in `batch` and fails at once, as above. When
   no card merges, the job ends as a `conflict`.
+- A merge conflict onto `next` also queues one durable repair request per
+  card and job. After the existing conflict-return flow, an open bound
+  card worker receives a turn with the conflict details. Otherwise the
+  daemon spawns a bound worker using the card type's template (default
+  `card-impl`) under a non-ephemeral project admin. Normal spawn rights,
+  template grants and WIP checks apply, with no additional grants or targets.
+  The task starts from the card's branch: merge `origin/next` with a merge
+  commit, keep both sides' intended changes, run the card check and return
+  to review. No rebase or force push. Duplicate verdicts do not duplicate
+  workers. Requests survive daemon restarts and retry refusals after a minute.
+  Release and e2e jobs, and merges onto release branches, do not queue repairs.
 - Pass: each merged card moves to `accepted`.
 - Red with two or more merged cards: the batch splits into two halves (a
   half of one card is a job of one card). Both are queued at the front,
@@ -13403,4 +13461,77 @@ audited. External effects and the answer journal are not one transaction:
 this policy prevents duplicate execution, but cannot promise a successful
 answer for an interrupted external write. Journal records have no automatic
 expiry, so an old request ID cannot silently become executable again.
+
+## 37. Linked instances: home remotes
+
+Only the local operator may manage or use `/api/remotes`. Agents, including
+sysadmin agents, and incoming link actors are refused before body parsing.
+
+| Method | Route | Body or result |
+|---|---|---|
+| GET | `/api/remotes` | Remote rows, without keys or ciphertext |
+| POST | `/api/remotes` | `{name,url,instance_id,code,pin_sha256?,ca_pem?,label?}` |
+| GET | `/api/remotes/{name}` | One remote row |
+| DELETE | `/api/remotes/{name}` | Best-effort upstream revoke, then local deletion. `{revoked,revoke_on_remote}` tells the operator whether to revoke manually |
+| POST | `/api/remotes/{name}/pair` | `{code}` replaces a rotated link key |
+| POST | `/api/remotes/{name}/repin` | `{pin_sha256?,ca_pem?}` replaces TLS trust settings after an instance check |
+| GET/HEAD/POST/PUT/PATCH/DELETE | `/api/remotes/{name}/proxy/api/{rest}` | Forward an allowed remote API call |
+
+The name matches `[a-z][a-z0-9-]{0,31}`. The URL is an origin, with no
+userinfo, path, query or fragment. HTTPS uses system roots, supplied PEM
+roots, or a SHA-256 leaf pin. A pin without a CA overrides certificate name
+and expiry, as for host links. HTTP is restricted to loopback, including the
+resolved address. Each operation resolves once, fixes that address, and
+disables redirects and environment proxies. `TERRARIUM_WEBHOOK_PRIVATE=deny`
+also refuses private addresses and the daemon's own listener ports.
+
+Before pairing, compare the remote's instance ID and leaf fingerprint on
+its Links screen and supply the confirmed values. Pairing consumes the
+one-time code on the remote. A mismatched returned ID is refused, with no
+subsequent calls. Keys are sealed with `secrets.key` and AAD `remote:<id>` in
+the separate `remotes` table. They cannot be listed, revealed or granted as
+normal secrets. Master-key rotation and interrupted-rotation recovery cover
+these rows, including a database containing only remote keys.
+
+The proxy applies the link deny list in §36 before forwarding. Encoded
+separators, nested percent escapes, dot segments and ambiguous paths are
+refused. It forwards only `Accept`, `Content-Type`, `Last-Event-ID` and
+`If-None-Match`, adding the link bearer and `X-Terrarium-Link`. Home cookies,
+tokens, CSRF, Origin and forwarding headers do not pass. WebSocket query
+tokens are removed. The remote still enforces its link actor, read-only
+scope, sysadmin restrictions and delivery guard.
+
+Response headers are restricted to Content-Type, X-Next-Cursor, Retry-After,
+ETag, Cache-Control and attachment-only Content-Disposition. Only JSON, SSE
+and octet-stream bodies pass. Cookies, redirects and active content such as
+HTML are refused or discarded. Responses carry `X-Terrarium-Remote`, the
+home API CSP and `nosniff`. Connection errors use fixed text, with
+`502 remote_unreachable` or `502 remote_mismatch`. Revoked keys give 401 and
+set `auth_failed`. No upstream error containing credentials is logged.
+Read-only links cannot call `DELETE /api/links/self` under the P1 policy.
+Removing one therefore returns `revoke_on_remote: true` and leaves revocation
+to the remote operator. The home does not widen that policy.
+
+Limits per remote are 64 upstream requests and 8 upstream streams.
+Each home admits at most 32 remote browser WebSockets,
+with admission retained for the entire socket lifetime. A 33rd receives 429
+with Retry-After. Historical event page reads take upstream request permits.
+The home stores at most 64 remotes. Listings use bounded, name-cursor pages
+with `limit` and `cursor`, and duplicate names use an indexed existence check.
+Other proxy limits are a 30 s
+connect timeout, 60 s ordinary request timeout, 5 min stream idle timeout,
+16 MiB JSON responses and 256 MiB uploads or binary downloads. SSE streams
+incrementally. Event WebSockets share one upstream firehose across browser
+tabs, with independent historical cursors and filters. Reconnects resume at
+the last upstream sequence with bounded backoff. Lagged browser queues
+close so the browser reconnects using its own cursor. PTY sockets and scoped
+agent event streams remain independent. Removing, re-pairing or re-pinning
+closes existing home streams. Remote frames never enter the home event log.
+
+Instance IDs are checked before upstream operations and every new stream,
+and on a 10 min background interval. Remote rows include `status`,
+`last_ok_at`, `last_error` and UTC `calls_today`. Status changes emit a local
+`remote` event. Status values are `offline`, `online`, `version_skew`,
+`auth_failed`, `pin_mismatch` and `mismatch`. Writes produce `remote.call`
+audit rows with method, path, status and duration, never bodies or keys.
 

@@ -8,11 +8,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Message } from "../api/types";
 import { sessionLinkOf, sessionPage } from "./sessionLink";
 
-vi.mock("../stores", () => ({
+vi.mock("../stores", async () => { const { instanceTestStores } = await import("../test/instance"); return instanceTestStores(({
   agents: { state: { agents: [] }, byId: () => undefined },
   projects: { projects: () => [] },
   api: {},
-}));
+})); });
 
 const { EventList } = await import("./EventList");
 const { MessageView } = await import("../features/mail/parts");

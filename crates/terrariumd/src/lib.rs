@@ -17,6 +17,7 @@ pub mod card_dispatcher;
 pub mod card_reminder;
 pub mod cloud_budget;
 pub mod config_repo;
+pub mod conflict_fixes;
 pub mod conflict_hints;
 pub mod db;
 pub mod defaults;
@@ -54,6 +55,7 @@ pub mod prompt;
 pub mod question_guard;
 pub mod quota_notices;
 pub mod quota_policy;
+pub mod remotes;
 pub mod repo_browse;
 pub mod research_helpers;
 pub mod reservations;
@@ -336,6 +338,7 @@ async fn start_with_usage_and_executor(
         git_proxy: Arc::default(),
         job_queue: Arc::default(),
         links: Arc::default(),
+        remotes: Arc::default(),
     });
     // The instance ID of the links (TER-61): made at the first start.
     match state.links.instance_id(&state.state_dir) {
@@ -527,6 +530,7 @@ async fn activate(
     // The webhook deliveries (docs/api.md §19.5): the pending rows of the
     // old daemon are due again.
     tasks.push(webhooks::spawn(state.clone()));
+    tasks.push(api::spawn_remote_checks(state.clone()));
     tasks.extend(waits::spawn(&state));
     // The job queue (TER-71): fails the runs that the last daemon lost.
     tasks.push(jobs::spawn(&state));

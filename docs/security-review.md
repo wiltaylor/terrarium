@@ -1007,8 +1007,8 @@ pi, by a restart with resume for Codex and Copilot. The code is
 
 ### The refresh rule
 
-The daemon never refreshes an OAuth token, never calls an OAuth token
-endpoint, and never writes a token that it got itself. Each harness
+For harness OAuth tokens, the daemon never refreshes a token, never calls a
+token endpoint, and never writes a token that it got itself. Each harness
 refreshes its own token with its own code, under its own lock. The daemon
 may:
 
@@ -1027,6 +1027,18 @@ every crate for `oauth/token`, `auth.openai.com/oauth`,
 `login/oauth/access_token`, `copilot_internal/v2/token`, and `grant_type`.
 `just ci::check` fails when it finds one. A probe that finds an expired
 token reports it, and waits for the harness of an agent to refresh it.
+
+**Vertex service-account exception (TER-632, lead decision 2026-11-11).**
+Only `crates/terrariumd/src/api/subscriptions/vertex.rs` may exchange the
+JWT bearer grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`) at the fixed
+`https://oauth2.googleapis.com/token`, ignoring `token_uri` in the key JSON.
+This is a one-call, operator-requested save check, not harness token refresh.
+The access token exists only in memory for the Vertex test request, then is
+dropped. It is never persisted to disk or the DB, or included in logs, events,
+or audit details. The guard allows only the exact endpoint and grant lines in
+that module. The same grant in another module, any refresh-token or other
+grant, and other token endpoints still fail the guard. Tests exercise these
+negative cases. No plan-login token or harness lock is involved.
 
 ### Threats and controls
 
@@ -1874,3 +1886,29 @@ code; the lead's security review is still to do.
   of the key could send the header too.
 - **The pairing route takes no bearer.** It is reachable by any peer of the
   TCP port; it writes nothing unless the code matches.
+
+### The home proxy (TER-62)
+
+Only the home operator may manage or call a remote. Incoming links cannot
+chain through it, and sysadmin agents cannot obtain its sealed keys. Pairing
+requires a confirmed instance ID and accepts an explicitly confirmed leaf
+SHA-256 pin. The host TLS verifier checks that pin before transmitting any
+HTTP bytes, including event and PTY WebSocket handshakes. DNS is resolved
+once per operation, the address is fixed, and environment proxies and
+redirects are disabled. Plain HTTP requires a loopback host and resolved IP.
+
+The home applies the remote link deny list and read-only scope before
+forwarding, without replacing the remote's own checks or delivery guard.
+Request and response header allowlists keep home credentials and remote
+cookies apart. Active-content responses are refused on the home origin.
+Keys are kept outside the normal secret registry, with row-bound AAD, and
+are included in master-key rotation and crash recovery. Shared event feeds
+keep remote frames out of local stores, bound their queues and reconnect
+from the last sequence. Removal, re-pair and re-pin cancel live streams.
+
+Residuals: the home still holds near-operator credentials for every paired
+remote, and a remote may lie about its JSON data. An instance check is a
+separate upstream request, not an atomic binding to the business response.
+TLS pins bind every connection to a certificate, not to a particular backend
+behind a reverse proxy sharing that certificate. A certificate renewal needs
+an explicit re-pin unless system or custom roots were selected.

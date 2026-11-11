@@ -13,13 +13,13 @@ import type { InboxItem } from "../../api/types";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const inboxRefresh = vi.fn();
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api,
   events: { on: () => () => {} },
   inbox: { refresh: inboxRefresh },
   projects: { projects: () => [] },
   agents: { state: { agents: [] } },
-}));
+})); });
 
 const { default: InboxPage } = await import("./InboxPage");
 
@@ -103,6 +103,13 @@ describe("Inbox load (TER-302)", () => {
           await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBeGreaterThan(before));
         }
         expect(spy.mock.calls.some(([q]) => !!q?.cursor)).toBe(true);
+        const callsBeforeRefresh = spy.mock.calls.length;
+        [...el.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click();
+        await waitFor(() => expect(spy).toHaveBeenCalledTimes(callsBeforeRefresh + 1));
+        await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBeGreaterThanOrEqual(240));
+        expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: undefined }));
+        expect(new Set([...el.querySelectorAll(".stack > div[id^='inbox-item']")].map((n) => n.id)).size)
+          .toBe(el.querySelectorAll(".stack > div[id^='inbox-item']").length);
         // Deep links intentionally bypass the render bound. Check that behavior
         // on the 1x fixture only, not by mounting 2570 rich cards in jsdom.
         if (scale === 1) {

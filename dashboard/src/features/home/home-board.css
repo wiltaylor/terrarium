@@ -4,5 +4,6 @@
 .home-card strong, .home-card span { overflow-wrap: anywhere; }
 .home-card .row { flex-wrap: wrap; }
 .home-attention { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.home-status-area { min-height: 136px; }
 .home-status { display: flex; flex-direction: column; align-items: start; gap: 8px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; }
 .nominal { font-size: 1.6rem; padding: 16px 0; }

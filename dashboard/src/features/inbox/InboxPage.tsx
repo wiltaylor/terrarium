@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Inbox: everything that waits for the operator (`GET /api/inbox`).
 // Questions, bundles of questions, and notices of the leaders, mail to `operator`, and threads that
 // the loop guard paused. Tabs pick the kind and Open or Done; the project
@@ -5,12 +6,13 @@
 // The Inbox threads (docs/api.md §6.13) have their own Threads screen (TER-466): an old
 // `?tab=thread` link redirects there.
 
-import { A, Navigate, useLocation, useSearchParams, useNavigate } from "@solidjs/router";
+import { useSearchParams } from "@solidjs/router";
+import { A, Navigate, useLocation, useNavigate } from "../../instance/navigation";
 import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
-import { api, events, inbox, projects } from "../../stores";
+
 import { MailItemCard, PausedThreadCard, WatchCard } from "./cards";
 import { AskDialog } from "./AskDialog";
 import { MessageDialog } from "./MessageDialog";
@@ -38,6 +40,7 @@ export default function InboxPage() {
 }
 
 function InboxScreen() {
+  const { api, events, inbox, projects } = useInstance();
   const now = useNow(30_000);
   const [params, setParams] = useSearchParams<{ tab?: string; status?: string; project?: string; item?: string }>();
   // `?tab=watch` (the Asked kind tab of 0.1.0) opens the Asked status tab, or Done with the asks.
@@ -88,8 +91,8 @@ function InboxScreen() {
     const mine = ++gen;
     setLoading(true);
     try {
-      const boundary = append ? undefined : list().at(-1);
-      const target = params.item;
+      const refreshing = !append && list().length > 0;
+      const target = refreshing ? undefined : params.item;
       let nextCursor = append ? cursor : undefined;
       const rows: InboxItem[] = [];
       let more = false;
@@ -103,13 +106,25 @@ function InboxScreen() {
         nextCursor = next;
         if (!more) break;
         if (target && !rows.some((i) => i.id === target)) continue;
-        if (boundary && !rows.some((i) => byInboxOrder(i, boundary) >= 0)) continue;
+        if (refreshing) break;
         if (rows.filter(keep).length >= PAGE_SIZE) break;
       } while (more);
-      cursor = nextCursor;
-      setHasMore(more);
+      if (!refreshing) {
+        cursor = nextCursor;
+        setHasMore(more);
+      }
       // The daemon's `open` has the waiting asks too: they show under Asked only.
-      setList(sortItems((append ? [...list(), ...rows] : rows).filter(keep)));
+      // Refresh only the head, keeping the loaded tail and its paging cursor.
+      // Replace matching IDs on both paths, including rows moved by urgency.
+      const merged = new Map((append || refreshing ? list() : []).map((i) => [i.id, i]));
+      if (refreshing) {
+        const boundary = rows.at(-1);
+        for (const item of list()) {
+          if (!boundary || byInboxOrder(item, boundary) <= 0) merged.delete(item.id);
+        }
+      }
+      for (const item of rows) merged.set(item.id, item);
+      setList(sortItems([...merged.values()].filter(keep)));
       if (append) setVisibleCount((n) => n + PAGE_SIZE);
       setError(null);
     } catch (e) {

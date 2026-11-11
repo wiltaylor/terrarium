@@ -2,19 +2,8 @@
 // Feature code imports from here; tests build their own with the factories.
 
 import { createApi } from "../api";
-import { createAgentsStore } from "./agents";
-import { createBookmarksStore } from "./bookmarks";
-import { createCardPeekStore } from "./cardPeek";
+import { createInstance } from "../instance/create";
 import { changePassword, createAuthStore, restoreSession, signIn, signInWithPassword, signOut, signOutEverywhere } from "./auth";
-import { createEventsStore } from "./events";
-import { createInboxStore } from "./inbox";
-import { createLeasesStore } from "./leases";
-import { createPinsStore } from "./pins";
-import { createProjectFoldersStore } from "./projectFolders";
-import { createProjectsStore } from "./projects";
-import { createQuotaStore } from "./quota";
-import { createReposStore } from "./repos";
-import { createSubscriptionsStore } from "./subscriptions";
 import { createThemeStore } from "./theme";
 
 const storage = (() => {
@@ -34,19 +23,8 @@ const session = (() => {
 })();
 
 export const auth = createAuthStore({ session, local: storage });
-export const api = createApi(auth);
-export const bookmarks = createBookmarksStore(storage, window.location.origin, api.bookmarks);
-export const events = createEventsStore(api, { ready: () => auth.mode() === "session" || auth.mode() === "bearer" });
-export const projects = createProjectsStore(api, storage);
-export const projectFolders = createProjectFoldersStore(api);
-export const agents = createAgentsStore(api, events);
-export const repos = createReposStore(api);
-export const subscriptions = createSubscriptionsStore(api, events);
-export const quota = createQuotaStore(events);
-export const leases = createLeasesStore(api, events);
-export const inbox = createInboxStore(api, events);
-export const pins = createPinsStore(api, events, storage);
-export const cardPeek = createCardPeekStore();
+export const localInstance = createInstance({ auth, api: createApi(auth), storage, session });
+export const { api, bookmarks, events, projects, projectFolders, agents, repos, subscriptions, quota, leases, inbox, pins, cardPeek } = localInstance;
 
 // At load: the cookie is the cache. `GET /api/session` says whether it is a
 // session, and gives the CSRF value. A token from an older build (bearer

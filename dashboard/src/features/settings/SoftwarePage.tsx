@@ -1,3 +1,5 @@
+import { InstanceAnchor } from "../../instance/navigation";
+import { useInstance } from "../../instance";
 // Settings, Software tab: the build of the running daemon
 // (`GET /api/system/version`, docs/api.md §4): the version, the git ref,
 // the build time, and the host agents built from another ref
@@ -7,19 +9,20 @@
 // page), the policy and the channel, the updater, and the update log.
 
 import { createResource, createSignal, For, onCleanup, Show } from "solid-js";
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { ConfirmButton, ErrorBanner, PageHead } from "../../components/ui";
 import { SafeHtml } from "../../components/SafeHtml";
 import { staleHosts } from "../../lib/build-version";
 import { renderMarkdown } from "../../lib/markdown";
 import { blockedReason, canRollback, imageText, outcomeChip, runningRun, updateTarget } from "../../lib/self-update";
-import { api } from "../../stores";
+
 import type { UpdateRun } from "../../api/types";
 
 /** How often the page reads the state while a run runs. */
 const POLL_MS = 3000;
 
 export default function SoftwarePage() {
+  const { api } = useInstance();
   const [version, { refetch }] = createResource(() => api.systemVersion());
   // A caller that cannot list the hosts sees no host line.
   const [hosts] = createResource(() => api.hosts.list().catch(() => null));
@@ -139,9 +142,9 @@ export default function SoftwarePage() {
                   <Show when={r().latest} fallback={<span class="muted">unknown{r().check_error ? ` (${r().check_error})` : ""}</span>}>
                     {(l) => (
                       <>
-                        <a class="mono" href={l().url} target="_blank" rel="noreferrer">
+                        <InstanceAnchor class="mono" href={l().url} target="_blank" rel="noreferrer">
                           {l().version}
-                        </a>{" "}
+                        </InstanceAnchor>{" "}
                         <Show when={l().prerelease}>
                           <span class="chip info">pre-release</span>{" "}
                         </Show>

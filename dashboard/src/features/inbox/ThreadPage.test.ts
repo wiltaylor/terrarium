@@ -11,13 +11,13 @@ import { createMockApi } from "../../api/mock";
 import { waitFor } from "../../test/wait";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api,
   events: { on: () => () => {} },
   inbox: { refresh: async () => {} },
   projects: { projects: () => api.world.projects },
   agents: { state: { agents: api.world.agents } },
-}));
+})); });
 
 const { default: InboxPage } = await import("./InboxPage");
 const { default: ThreadPage } = await import("./ThreadPage");

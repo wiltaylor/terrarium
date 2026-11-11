@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Settings, Links tab (docs/api.md §36, TER-61): the link keys with which
 // another Terrarium daemon (the home) shows and runs this one. "New link"
 // makes a one-time pairing code (10 minutes) that the operator types on
@@ -9,10 +10,11 @@ import { createResource, createSignal, For, Show } from "solid-js";
 import { ConfirmButton, CopyButton, Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
 import type { NewLinkCode } from "../../api/types";
 import { ago } from "../../lib/format";
-import { api } from "../../stores";
+
 import { linkChip } from "./model";
 
 export default function LinksPage() {
+  const { api } = useInstance();
   const now = useNow(30_000);
   const [showRevoked, setShowRevoked] = createSignal(false);
   // The source is an object, never falsy: Solid skips the fetcher for a
@@ -141,6 +143,7 @@ export default function LinksPage() {
 }
 
 function NewLinkDialog(props: { onClose: () => void }) {
+  const { api } = useInstance();
   const [label, setLabel] = createSignal("");
   const [readOnly, setReadOnly] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);

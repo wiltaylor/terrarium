@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Compact and New session dialogs of the agent page. Each asks for an
 // optional "then" prompt, which the daemon sends as the next turn after the
 // reset. The New session dialog also has "Include recap" (default on).
@@ -5,7 +6,7 @@
 import { createSignal, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Agent, ResetKind, ResetResult } from "../../api/types";
-import { api } from "../../stores";
+
 import { resetBody, resetThenProblem } from "../../lib/lifecycle";
 
 const PLACEHOLDER: Record<ResetKind, string> = {
@@ -17,6 +18,7 @@ const PLACEHOLDER: Record<ResetKind, string> = {
 
 /** The dialog of a reset. `onDone` gets the 202 answer; the dialog then closes. */
 export function ResetDialog(props: { agent: Agent; kind: ResetKind; title: string; onClose: () => void; onDone: (r: ResetResult) => void }) {
+  const { api } = useInstance();
   const [then, setThen] = createSignal("");
   const [recap, setRecap] = createSignal(true);
   const [busy, setBusy] = createSignal(false);

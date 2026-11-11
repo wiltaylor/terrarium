@@ -8,7 +8,7 @@ import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Question } from "../../api/types";
 
-vi.mock("../../stores", () => ({ api: { questions: {} }, projects: { projects: () => [] } }));
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({ api: { questions: {} }, projects: { projects: () => [] } })); });
 const { QuestionCard } = await import("./QuestionCard");
 const { BundleCard } = await import("./BundleCard");
 const { api } = await import("../../stores");

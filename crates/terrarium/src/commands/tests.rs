@@ -17,6 +17,36 @@ use crate::transport::{ApiRequest, Method};
 const ME: &str = "01AGENTAGENTAGENTAGENTAGEN";
 
 #[tokio::test]
+async fn remote_management_uses_only_home_api_routes() {
+    let run = exec(false, &["remote", "ls"], vec![(200, json!([]))], None).await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].path, "/api/remotes");
+    let run = exec(
+        false,
+        &["remote", "rm", "lab"],
+        vec![(200, json!({"revoke_on_remote":false}))],
+        None,
+    )
+    .await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].path, "/api/remotes/lab");
+    assert_eq!(run.reqs[0].method, Method::Delete);
+    let run = exec(
+        false,
+        &["remote", "repin", "lab", "--pin-sha256", "00"],
+        vec![(204, Value::Null)],
+        None,
+    )
+    .await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].path, "/api/remotes/lab/repin");
+    assert_eq!(
+        run.reqs[0].body,
+        Some(json!({"pin_sha256":"00","ca_pem":null}))
+    );
+}
+
+#[tokio::test]
 async fn issue_import_uses_the_daemon_endpoint() {
     let run = exec(
         true,
@@ -2365,6 +2395,22 @@ async fn a_stale_wiki_edit_prints_the_diff() {
 }
 
 #[tokio::test]
+async fn artifact_url_uses_explicit_project() {
+    for args in [
+        vec!["-p", "other", "artifact", "url", "ART-1"],
+        vec!["artifact", "url", "ART-1", "-p", "other"],
+    ] {
+        ok(
+            true,
+            &args,
+            vec![(200, json!({"url": "http://a/other", "exp": 1}))],
+            vec![req(Post, "/api/artifacts/other%2FART-1/url")],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn artifacts_and_labels() {
     let dir = std::env::temp_dir().join(format!("terrarium-push-{}", ulid::Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -4198,6 +4244,63 @@ async fn target_edit_patches_only_the_flags_given() {
     ] {
         assert!(Cli::try_parse_from(std::iter::once("terrarium").chain(bad)).is_err());
     }
+}
+
+#[tokio::test]
+async fn target_recreate_overrides_and_pending_output() {
+    let out = ok(
+        false,
+        &["targets", "ls"],
+        vec![(
+            200,
+            json!([{"name":"dbox", "runtime":{"recreate_required":true}}]),
+        )],
+        vec![req(Get, "/api/targets")],
+    )
+    .await;
+    assert!(out.contains("RECREATE") && out.contains("pending"), "{out}");
+    let out = ok(
+        false,
+        &["targets", "show", "dbox"],
+        vec![(200, json!({"name":"dbox", "runtime":{"recreate_required":true}, "recreate_note":"writable layer is lost"}))],
+        vec![req(Get, "/api/targets/dbox")],
+    ).await;
+    assert!(
+        out.contains("pending") && out.contains("writable layer is lost"),
+        "{out}"
+    );
+    ok(
+        false,
+        &[
+            "admin",
+            "target",
+            "verb",
+            "dbox",
+            "recreate",
+            "--force",
+            "--discard-volumes",
+            "data",
+            "--discard-volumes",
+            "cache",
+        ],
+        vec![(200, json!({"state":"running"}))],
+        vec![(
+            Post,
+            "/api/targets/dbox/recreate",
+            vec![],
+            Some(json!({"force":true,"discard_volumes":["data","cache"]})),
+        )],
+    )
+    .await;
+    let r = exec(
+        false,
+        &["admin", "target", "verb", "dbox", "up", "--force"],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    assert!(r.reqs.is_empty());
 }
 
 #[tokio::test]

@@ -1,20 +1,22 @@
+import { useInstance } from "../instance";
 // The right-hand side bar of pinned conversations (docs/api.md §6.11): one
 // tab for each pinned agent, and the open tab's Conversation (the same view
 // and composer as the agent page). It stays while the operator browses other
 // pages. On a wide screen it collapses to a rail; on a phone it is an
 // overlay that the top bar opens.
 
-import { A, useNavigate } from "@solidjs/router";
+import { A, useNavigate } from "../instance/navigation";
 import { createResource, For, Show } from "solid-js";
 import type { Agent, Pin } from "../api/types";
 import { ErrorBanner } from "../components/ui";
 import { Conversation } from "../features/agents/conversation/Conversation";
 import { tabKeyTarget } from "../features/pins/model";
 import { lifecycleBadge } from "../lib/lifecycle";
-import { agents, api, pins } from "../stores";
+
 
 /** The agent of a pin: from the live list, else one read (an agent the list does not have yet). */
 function usePinAgent(id: () => string | null) {
+  const { agents, api } = useInstance();
   const [fetched] = createResource(
     () => {
       const v = id();
@@ -31,15 +33,18 @@ function usePinAgent(id: () => string | null) {
 
 /** The status class of a pin's dot, from the live agent list. */
 const dotClass = (p: Pin) => {
+  const { agents } = useInstance();
   const a = agents.byId(p.agent);
   return `pin-dot-host st-${a?.status ?? "stopped"}${a?.paused ? " paused" : ""}`;
 };
 const pinTitle = (p: Pin) => {
+  const { agents } = useInstance();
   const a = agents.byId(p.agent);
   return `${p.project}/${p.name}${a ? `\n${lifecycleBadge(a).title}` : ""}`;
 };
 
 export function PinnedBar() {
+  const { pins, agents } = useInstance();
   const navigate = useNavigate();
   const active = () => pins.active();
   const agent = usePinAgent(active);
@@ -172,6 +177,7 @@ export function PinnedBar() {
 
 /** The pin toggle of an agent: on the agent page. */
 export function PinButton(props: { agent: Pick<Agent, "id" | "project" | "name">; onError?: (e: unknown) => void; class?: string }) {
+  const { pins } = useInstance();
   const pinned = () => pins.isPinned(props.agent.id);
   return (
     <button

@@ -399,11 +399,6 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
     list_with_limit(conn, f, LIST_MAX as i64)
 }
 
-/// Inbox pagination applies its limit after merging all kinds by urgency.
-pub fn list_inbox(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
-    list_with_limit(conn, f, -1)
-}
-
 fn list_with_limit(conn: &Connection, f: &Filter, limit: i64) -> ApiResult<Vec<Question>> {
     let (sql, args) = list_query(f, limit);
     let mut st = conn.prepare(&sql)?;
@@ -936,7 +931,9 @@ pub fn update(t: &mut Tx<'_>, id: &str, p: QuestionPatch) -> ApiResult<Question>
         None => q.card.clone(),
     };
     let priority = p.priority.unwrap_or(q.priority);
-    check_update_context(t, &q, card.as_deref(), priority)?;
+    if card != q.card || (q.kind == QuestionKind::Notice && priority != q.priority) {
+        check_update_context(t, &q, card.as_deref(), priority)?;
+    }
     let (text, options, context) = redact_fields(t, text, options, context);
     let mut changed: Vec<&str> = Vec::new();
     if text != q.text {
@@ -1007,12 +1004,12 @@ pub fn set_card(
         return Err(not_open(&q, "a change of the card"));
     }
     let card = check_card(t, &q.project, card)?;
-    check_work_context(q.kind, card.as_deref(), q.thread.as_deref())?;
-    if q.status == QuestionStatus::Open {
-        check_update_context(t, &q, card.as_deref(), q.priority)?;
-    }
     if card == q.card {
         return Ok(q);
+    }
+    check_work_context(q.kind, card.as_deref(), q.thread.as_deref())?;
+    if q.status == QuestionStatus::Open && !any_status {
+        check_update_context(t, &q, card.as_deref(), q.priority)?;
     }
     t.execute(
         "UPDATE questions SET card = ?2, updated_at = ?3 WHERE id = ?1",

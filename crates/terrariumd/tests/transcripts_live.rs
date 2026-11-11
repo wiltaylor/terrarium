@@ -132,6 +132,7 @@ async fn live_transcripts() {
         git_proxy: Arc::default(),
         job_queue: Arc::default(),
         links: Arc::default(),
+        remotes: Arc::default(),
     });
     let agents = std::env::var("TERRARIUM_LIVE_AGENTS").unwrap_or_default();
     for key in agents.split(',').filter(|k| !k.is_empty()) {

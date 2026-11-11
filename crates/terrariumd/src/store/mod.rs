@@ -31,6 +31,7 @@ pub mod project_folders;
 pub mod projects;
 pub mod questions;
 pub mod records;
+pub mod remotes;
 pub mod repos;
 pub mod reservations;
 pub mod rules;
